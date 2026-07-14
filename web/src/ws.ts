@@ -339,6 +339,24 @@ export class RelayWs {
     return queued ? requestId : null;
   }
 
+  sendSaveMarkdown(path: string, content: string, expectedSize: number,
+                   expectedMtimeNs: string, expectedRevision: string,
+                   requestId = uuid()): string | null {
+    const queued = this.send({
+      v: PROTOCOL_VERSION,
+      type: "save_markdown",
+      path,
+      content,
+      expected_size: expectedSize,
+      expected_mtime_ns: expectedMtimeNs,
+      expected_revision: expectedRevision,
+      request_id: requestId,
+      ts: nowTs(),
+      ...this.sidObj(),
+    });
+    return queued ? requestId : null;
+  }
+
   sendGetPreviewAsset(path: string, previewId: string,
                       requestId = uuid()): string | null {
     const queued = this.send({

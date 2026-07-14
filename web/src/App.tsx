@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useRef, useState, type TouchEvent } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState, type TouchEvent } from "react";
 import { RelayWs } from "./ws";
 import { reduce, initialState, createRuntime, type Turn } from "./reducer";
 import { uuid } from "./util";
@@ -85,6 +85,16 @@ export default function App() {
   const touchStartX = useRef(0);
   const touchStartY = useRef(0);
   const touchSwipeLocked = useRef(false);
+  const artifactDirtyRef = useRef(false);
+  const setArtifactDirty = useCallback((dirty: boolean) => {
+    artifactDirtyRef.current = dirty;
+  }, []);
+  const confirmArtifactDiscard = useCallback(() => {
+    if (!artifactDirtyRef.current) return true;
+    if (!window.confirm("Markdown 有未保存的修改，确定放弃吗？")) return false;
+    artifactDirtyRef.current = false;
+    return true;
+  }, []);
   // guards the once-per-connection "land on the latest session" auto-focus below
   const didInitFocusRef = useRef(false);
   const shortcutRef = useRef<{
@@ -701,12 +711,14 @@ export default function App() {
     setForkWorktreeError(null);
   };
   const getDiff = (file: string) => {
+    if (!confirmArtifactDiscard()) return;
     setRightView("diff");
     dispatch({ type: "open_artifact_loading", file, sid: focusedSid });
     wsRef.current?.sendGetDiff(file, theme);
   };
   const previewFile = (file: string, line?: number) => {
     if (!focusedSid) return;
+    if (!confirmArtifactDiscard()) return;
     const requestId = wsRef.current?.sendGetFilePreview(file) ?? null;
     if (!requestId) return;
     setRightView("diff");
@@ -722,9 +734,17 @@ export default function App() {
   const previewMarkdown = (file: string) => previewFile(file);
   const loadPreviewAsset = (file: string, previewId: string): boolean =>
     !!wsRef.current?.sendGetPreviewAsset(file, previewId);
+  const saveMarkdown = (file: string, content: string, expectedSize: number,
+                        expectedMtimeNs: string, expectedRevision: string): string | null => {
+    const requestId = wsRef.current?.sendSaveMarkdown(
+      file, content, expectedSize, expectedMtimeNs, expectedRevision) ?? null;
+    if (requestId) dispatch({ type: "start_file_save", requestId, content });
+    return requestId;
+  };
   // /btw: fork the focused session into an ephemeral side panel (wrapper replies
   // BtwOpened → reducer opens the panel). Send/close target the fork by its sid.
   const openBtw = () => {
+    if (!confirmArtifactDiscard()) return;
     setRightView("btw");
     if (!focusedSid || state.btwSid || pendingBtwRef.current) return;
     const requestId = wsRef.current?.sendOpenBtw(focusedSid) ?? null;
@@ -794,9 +814,9 @@ export default function App() {
         sessions={state.sessions}
         liveStates={Object.fromEntries(Object.entries(state.runtimes).map(([sid, r]) => [sid, r.state]))}
         activeSessionId={focusedSid}
-        onSelect={(id) => { pendingCreateRef.current = null; setCreateError(null); dispatch({ type: "exit_new_chat" }); dispatch({ type: "focus_session", sid: id }); wsRef.current?.setFocusedSid(id); wsRef.current?.sendSwitchSession(id, (state.sessions.find((s) => s.session_id === id)?.engine as "claude" | "codex") || engine); if (isMobile()) setSidebarOpen(false); }}
-        onNew={() => { pendingCreateRef.current = null; setCreateError(null); dispatch({ type: "enter_new_chat", cwd: "~" }); if (isMobile()) setSidebarOpen(false); }}
-        onNewInDir={(cwd) => { pendingCreateRef.current = null; setCreateError(null); dispatch({ type: "enter_new_chat", cwd }); if (isMobile()) setSidebarOpen(false); }}
+        onSelect={(id) => { if (!confirmArtifactDiscard()) return; pendingCreateRef.current = null; setCreateError(null); dispatch({ type: "exit_new_chat" }); dispatch({ type: "focus_session", sid: id }); wsRef.current?.setFocusedSid(id); wsRef.current?.sendSwitchSession(id, (state.sessions.find((s) => s.session_id === id)?.engine as "claude" | "codex") || engine); if (isMobile()) setSidebarOpen(false); }}
+        onNew={() => { if (!confirmArtifactDiscard()) return; pendingCreateRef.current = null; setCreateError(null); dispatch({ type: "enter_new_chat", cwd: "~" }); if (isMobile()) setSidebarOpen(false); }}
+        onNewInDir={(cwd) => { if (!confirmArtifactDiscard()) return; pendingCreateRef.current = null; setCreateError(null); dispatch({ type: "enter_new_chat", cwd }); if (isMobile()) setSidebarOpen(false); }}
         onClose={() => setSidebarOpen(false)}
         onRename={(id, title) => wsRef.current?.sendRenameSession(id, title)}
         onArchive={(id, archived) => { wsRef.current?.sendArchiveSession(id, archived); }}
@@ -929,6 +949,7 @@ export default function App() {
           return <ArtifactPanel artifact={state.artifact} active="diff" hasBtw={!!state.btwSid}
             onTab={switchRight} onRefresh={previewFile}
             onOpenFile={previewFile} onLoadPreviewAsset={loadPreviewAsset}
+            onSaveMarkdown={saveMarkdown} onDirtyChange={setArtifactDirty}
             onClose={() => dispatch({ type: "clear_artifact" })} />;
         return null;
       })()}

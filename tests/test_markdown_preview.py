@@ -2,17 +2,21 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
+import stat
 
 import pytest
 
 from cc_remote.protocol import (
+    FileSaveResult,
     FilePreview,
     GetFilePreview,
     GetPreviewAsset,
     FILE_PREVIEW_MAX_BYTES,
     PREVIEW_ASSET_MAX_BYTES,
     PreviewAsset,
+    SaveMarkdown,
 )
 from tests.test_multisession import _mk_ctx, _mk_machine
 
@@ -44,6 +48,68 @@ def test_source_preview_reads_utf8_and_reports_text_format(tmp_path):
     assert result[0] == "module.py"
     assert result[1] == "def answer():\n    return 42\n"
     assert result[5] == "text"
+    assert result[6] == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+def test_markdown_save_is_atomic_and_preserves_bom_crlf_and_mode(tmp_path):
+    path = tmp_path / "README.md"
+    path.write_bytes(b"\xef\xbb\xbf# old\r\nline\r\n")
+    path.chmod(0o640)
+    before = path.stat()
+    revision = hashlib.sha256(path.read_bytes()).hexdigest()
+    machine, _ = _mk_machine()
+
+    result = machine._write_markdown_file(
+        str(tmp_path), "README.md", "# new\nline\n",
+        before.st_size, before.st_mtime_ns, revision,
+    )
+
+    assert result[0] == "README.md"
+    assert path.read_bytes() == b"\xef\xbb\xbf# new\r\nline\r\n"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+    assert result[1] == path.stat().st_size
+    assert result[2] == path.stat().st_mtime_ns
+    assert result[3] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_markdown_save_conflict_never_overwrites_newer_content(tmp_path):
+    path = tmp_path / "README.md"
+    path.write_text("old", encoding="utf-8")
+    before = path.stat()
+    revision = hashlib.sha256(path.read_bytes()).hexdigest()
+    path.write_text("newer external content", encoding="utf-8")
+    machine, _ = _mk_machine()
+
+    with pytest.raises(RuntimeError, match="修改"):
+        machine._write_markdown_file(
+            str(tmp_path), "README.md", "editor draft",
+            before.st_size, before.st_mtime_ns, revision,
+        )
+
+    assert path.read_text(encoding="utf-8") == "newer external content"
+
+
+def test_markdown_save_rejects_non_markdown_and_symlink(tmp_path):
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside", encoding="utf-8")
+    root = tmp_path / "root"
+    root.mkdir()
+    source = root / "note.txt"
+    source.write_text("text", encoding="utf-8")
+    link = root / "link.md"
+    link.symlink_to(outside)
+    machine, _ = _mk_machine()
+    source_stat = source.stat()
+    link_stat = outside.stat()
+
+    with pytest.raises(ValueError, match="Markdown"):
+        machine._write_markdown_file(
+            str(root), "note.txt", "draft", source_stat.st_size,
+            source_stat.st_mtime_ns, hashlib.sha256(source.read_bytes()).hexdigest())
+    with pytest.raises(ValueError, match="符号链接"):
+        machine._write_markdown_file(
+            str(root), "link.md", "draft", link_stat.st_size,
+            link_stat.st_mtime_ns, hashlib.sha256(outside.read_bytes()).hexdigest())
 
 
 def test_source_preview_rejects_binary_content(tmp_path):
@@ -154,10 +220,52 @@ def test_preview_responses_are_requester_routed_and_correlated(tmp_path):
         assert preview.to == "client-1" and preview.sid == "session-1"
         assert preview.request_id == "preview-1" and preview.content == "# hello"
         assert preview.format == "markdown"
+        assert preview.revision == hashlib.sha256(b"# hello").hexdigest()
         assert isinstance(asset, PreviewAsset)
         assert asset.to == "client-1" and asset.sid == "session-1"
         assert asset.preview_id == "preview-1" and asset.request_id == "asset-1"
         assert transport.sent[-2:] == [preview, asset]
+
+    asyncio.run(run())
+
+
+def test_markdown_save_response_is_correlated_and_duplicate_is_not_reexecuted(tmp_path):
+    path = tmp_path / "README.md"
+    path.write_text("# old", encoding="utf-8")
+
+    async def run():
+        machine, transport = _mk_machine()
+        ctx = _mk_ctx("session-1", session_id="session-1")
+        ctx.cwd = str(tmp_path)
+        machine.sessions[ctx.key] = ctx
+        machine.focused_sid = ctx.key
+        before = path.stat()
+        command = SaveMarkdown(
+            sid=ctx.key,
+            client_id="client-1",
+            cmd_id="save-command-1",
+            path="README.md",
+            request_id="save-1",
+            content="# saved",
+            expected_size=before.st_size,
+            expected_mtime_ns=str(before.st_mtime_ns),
+            expected_revision=hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+
+        await machine._process_command(command)
+        saved_stat = path.stat()
+        await machine._process_command(command)
+
+        results = [message for message in transport.sent
+                   if isinstance(message, FileSaveResult)]
+        assert len(results) == 2
+        assert all(result.status == "saved" for result in results)
+        assert all(result.to == "client-1" for result in results)
+        assert path.read_text(encoding="utf-8") == "# saved"
+        assert path.stat().st_mtime_ns == saved_stat.st_mtime_ns
+        assert [message.type for message in transport.sent[-2:]] == [
+            "file_save_result", "command_ack",
+        ]
 
     asyncio.run(run())
 

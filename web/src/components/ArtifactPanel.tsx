@@ -101,7 +101,7 @@ function PreviewImage({ markdownPath, src, alt, title, asset, requestAsset }: {
 }
 
 export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
-  onRefresh, onOpenFile, onLoadPreviewAsset }: {
+  onRefresh, onOpenFile, onLoadPreviewAsset, onSaveMarkdown, onDirtyChange }: {
   artifact: Artifact;
   active: "diff" | "btw";
   hasBtw: boolean;
@@ -110,8 +110,12 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
   onRefresh?: (path: string, line?: number) => void;
   onOpenFile?: (path: string, line?: number) => void;
   onLoadPreviewAsset?: (path: string, previewId: string) => boolean;
+  onSaveMarkdown?: (path: string, content: string, expectedSize: number,
+    expectedMtimeNs: string, expectedRevision: string) => string | null;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<HTMLTextAreaElement>(null);
   const resizeRef = useRef<{
     pointerId: number;
     startX: number;
@@ -121,6 +125,11 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
   const [pageState, setPageState] = useState({ key: artifactKey, page: 0 });
   const [modeState, setModeState] = useState<{ key: string; mode: "preview" | "source" }>({
     key: artifactKey, mode: "preview",
+  });
+  const [editorState, setEditorState] = useState({
+    key: artifactKey,
+    draft: artifact.content || "",
+    baseline: artifact.content || "",
   });
   const requestedAssets = useRef<{
     key: string;
@@ -138,12 +147,92 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
 
   const requestedPage = pageState.key === artifactKey ? pageState.page : 0;
   const mode = modeState.key === artifactKey ? modeState.mode : "preview";
+  const editor = editorState.key === artifactKey ? editorState : {
+    key: artifactKey,
+    draft: artifact.content || "",
+    baseline: artifact.content || "",
+  };
+  const dirty = artifact.kind === "md" && editor.draft !== editor.baseline;
   const sections = artifact.kind === "gitdiff"
     ? (artifact.sections || EMPTY_GIT_DIFF_SECTIONS) : EMPTY_GIT_DIFF_SECTIONS;
   const page = useMemo(() => pageGitDiff(sections, requestedPage), [sections, requestedPage]);
   const showPage = (nextPage: number) => setPageState({ key: artifactKey, page: nextPage });
   const loading = !!artifact.loading;
   const empty = artifact.kind === "gitdiff" && !loading && sections.length === 0;
+
+  useEffect(() => {
+    const incoming = artifact.content || "";
+    setEditorState((current) => {
+      if (current.key !== artifactKey) {
+        return { key: artifactKey, draft: incoming, baseline: incoming };
+      }
+      if (artifact.saveStatus === "saved" || current.draft === current.baseline) {
+        if (current.draft === incoming && current.baseline === incoming) return current;
+        return { key: artifactKey, draft: incoming, baseline: incoming };
+      }
+      return current;
+    });
+  }, [artifact.content, artifact.saveStatus, artifactKey]);
+
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+    return () => onDirtyChange?.(false);
+  }, [dirty, onDirtyChange]);
+
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+
+  useEffect(() => {
+    if (artifact.kind !== "md" || mode !== "source" || loading) return;
+    const frame = window.requestAnimationFrame(() => editorRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [artifact.kind, loading, mode]);
+
+  const canSave = artifact.kind === "md" && !loading && !artifact.error
+    && !artifact.truncated && typeof artifact.size === "number"
+    && typeof artifact.mtimeNs === "string" && !!artifact.revision
+    && !!onSaveMarkdown;
+  const saveDraft = useCallback(() => {
+    if (!canSave || !dirty || artifact.saving || !artifact.revision) return;
+    onSaveMarkdown?.(
+      artifact.file,
+      editor.draft,
+      artifact.size!,
+      artifact.mtimeNs!,
+      artifact.revision,
+    );
+  }, [artifact.file, artifact.mtimeNs, artifact.revision, artifact.size,
+    artifact.saving, canSave, dirty, editor.draft, onSaveMarkdown]);
+
+  const confirmDiscard = useCallback(() => (
+    !dirty || window.confirm("Markdown 有未保存的修改，确定放弃吗？")
+  ), [dirty]);
+
+  const leavePanel = useCallback(() => {
+    if (!confirmDiscard()) return;
+    onDirtyChange?.(false);
+    onClose();
+  }, [confirmDiscard, onClose, onDirtyChange]);
+
+  const switchPanelTab = useCallback((next: "diff" | "btw") => {
+    if (next !== active && !confirmDiscard()) return;
+    if (next !== active) onDirtyChange?.(false);
+    onTab(next);
+  }, [active, confirmDiscard, onDirtyChange, onTab]);
+
+  const handlePanelKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (artifact.kind !== "md" || !(event.metaKey || event.ctrlKey)
+        || event.key.toLowerCase() !== "s") return;
+    event.preventDefault();
+    saveDraft();
+  };
 
   const applyPanelWidth = useCallback((requestedWidth: number, persist = false) => {
     const width = clampPanelWidth(requestedWidth, window.innerWidth);
@@ -268,14 +357,15 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
     || (["md", "file"].includes(artifact.kind) ? "文件预览" : "改动");
 
   return (
-    <div className="artifact-panel" ref={panelRef} data-lock-horizontal-swipe="true">
+    <div className="artifact-panel" ref={panelRef} data-lock-horizontal-swipe="true"
+      onKeyDown={handlePanelKeyDown}>
       <button type="button" className="panel-resizer"
         aria-label="调整文件面板宽度" title="左右拖动调整面板宽度"
         onPointerDown={startResize} onPointerMove={moveResize}
         onPointerUp={finishResize} onPointerCancel={finishResize}
         onKeyDown={resizeWithKeyboard} />
       <div className="artifact-head">
-        {hasBtw ? <PanelTabs active={active} artifactKind={artifact.kind} onTab={onTab} />
+        {hasBtw ? <PanelTabs active={active} artifactKind={artifact.kind} onTab={switchPanelTab} />
           : <span className="artifact-title">{title}</span>}
         <span className="artifact-path" title={artifact.file}>{artifact.file || "所有改动"}</span>
         {artifact.kind === "md" && !loading && !artifact.error && <div className="preview-modes" role="group" aria-label="Markdown 显示模式">
@@ -284,10 +374,20 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
           <button className={mode === "source" ? "on" : ""}
             onClick={() => setModeState({ key: artifactKey, mode: "source" })}>源码</button>
         </div>}
+        {artifact.kind === "md" && !loading && !artifact.error && <button
+          type="button" className="markdown-save"
+          disabled={!dirty || artifact.saving || !canSave}
+          onClick={saveDraft}
+          title={artifact.truncated ? "截断的文件不可编辑" : "保存 Markdown（Ctrl/⌘+S）"}>
+          <Icon name={artifact.saving ? "refresh" : "check"} size={15} />
+          {artifact.saving ? "保存中" : "保存"}
+        </button>}
+        {artifact.kind === "md" && artifact.saveStatus === "saved" && !dirty
+          && <span className="markdown-save-state ok">已保存</span>}
         {["md", "file"].includes(artifact.kind) && <button className="iconbtn"
           onClick={() => onRefresh?.(artifact.file, artifact.line)}
           aria-label="刷新文件" title="重新读取文件"><Icon name="refresh" size={17} /></button>}
-        <button className="iconbtn" onClick={onClose} aria-label="收起"><Icon name="chevrons-right" /></button>
+        <button className="iconbtn" onClick={leavePanel} aria-label="收起"><Icon name="chevrons-right" /></button>
       </div>
       <div className="artifact-body">
         {loading ? (
@@ -347,10 +447,21 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
         ) : artifact.kind === "md" ? (
           <>
             {artifact.truncated && <div className="preview-truncated">文件共 {artifact.size?.toLocaleString()} 字节，仅预览前 512 KiB。</div>}
+            {artifact.saveError && <div className={"markdown-save-error " + (artifact.saveStatus || "error")}>
+              {artifact.saveError}
+            </div>}
             {mode === "source"
-              ? <pre className="markdown-source">{artifact.content || ""}</pre>
+              ? <textarea ref={editorRef} className="markdown-editor"
+                  aria-label="Markdown 源码编辑器" value={editor.draft}
+                  readOnly={!canSave}
+                  spellCheck={false}
+                  onChange={(event) => setEditorState({
+                    key: artifactKey,
+                    draft: event.currentTarget.value,
+                    baseline: editor.baseline,
+                  })} />
               : <div className="prose markdown-preview"><ReactMarkdown
-                  remarkPlugins={[remarkGfm]} components={markdownComponents}>{artifact.content || ""}</ReactMarkdown></div>}
+                  remarkPlugins={[remarkGfm]} components={markdownComponents}>{editor.draft}</ReactMarkdown></div>}
           </>
         ) : null}
       </div>

@@ -221,6 +221,15 @@ for (const filename of [
   assert.match(source, /nativeEvent\.keyCode/);
 }
 
+// Desktop sidebar motion must not regress to the old discrete grid-track swap.
+// Chromium could strand an animated 0px/1fr grid, so the safe implementation
+// slides the fixed sidebar and offsets the pane using ordinary CSS lengths.
+const layoutCss = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8");
+assert.doesNotMatch(layoutCss, /transition\s*:\s*grid-template-columns/);
+assert.match(layoutCss, /\.shell\.sidebar-open \.pane\s*\{[^}]*margin-left\s*:\s*352px/s);
+assert.match(layoutCss, /\.pane\s*\{[^}]*transition\s*:[^}]*margin-left[^}]*width/s);
+assert.match(layoutCss, /\.sessions\s*\{[^}]*position\s*:\s*fixed[^}]*width\s*:\s*352px/s);
+
 let requested = "";
 const authenticated = await probeSession(async (input, init) => {
   requested = input;
@@ -502,7 +511,7 @@ try {
     OMITTED_PROCESS_ITEM_ID,
   } = await reducerHarness.ssrLoadModule("/src/reducer.ts");
   const event = (body: Record<string, unknown>): ServerEvent => ({
-    v: 9, ts: 10, ...body,
+    v: 10, ts: 10, ...body,
   } as ServerEvent);
   const unannounced = createRuntime();
   assert.equal(unannounced.model, "");
@@ -1279,7 +1288,7 @@ class FakeWebSocket {
   }
 
   receive(frame: Record<string, unknown>): void {
-    this.onmessage?.({ data: JSON.stringify({ v: 9, ts: 1, ...frame }) });
+    this.onmessage?.({ data: JSON.stringify({ v: 10, ts: 1, ...frame }) });
   }
 }
 

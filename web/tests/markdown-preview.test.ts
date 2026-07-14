@@ -60,7 +60,7 @@ try {
   const loading = state;
 
   state = reduce(state, { type: "event", event: {
-    v: 9,
+    v: 10,
     type: "file_preview",
     ts: 1,
     sid: "session-1",
@@ -70,13 +70,13 @@ try {
     content: "stale",
     size: 5,
     truncated: false,
-    mtime_ns: 1,
+    mtime_ns: "1",
   } as ServerEvent });
   assert.equal(state, loading,
     "a stale preview response must not replace the open request");
 
   state = reduce(state, { type: "event", event: {
-    v: 9,
+    v: 10,
     type: "file_preview",
     ts: 2,
     sid: "session-1",
@@ -86,15 +86,17 @@ try {
     content: "# current",
     size: 9,
     truncated: false,
-    mtime_ns: 2,
+    mtime_ns: "2",
+    revision: "a".repeat(64),
   } as ServerEvent });
   assert.equal(state.artifact?.file, "docs/README.md");
   assert.equal(state.artifact?.content, "# current");
+  assert.equal(state.artifact?.revision, "a".repeat(64));
   assert.equal(state.artifact?.loading, undefined);
 
   const rendered = state;
   state = reduce(state, { type: "event", event: {
-    v: 9,
+    v: 10,
     type: "preview_asset",
     ts: 3,
     sid: "other-session",
@@ -107,7 +109,7 @@ try {
   assert.equal(state, rendered, "assets from another session must be ignored");
 
   state = reduce(state, { type: "event", event: {
-    v: 9,
+    v: 10,
     type: "preview_asset",
     ts: 4,
     sid: "session-1",
@@ -122,6 +124,64 @@ try {
   });
 
   state = reduce(state, {
+    type: "start_file_save",
+    requestId: "save-1",
+    content: "# edited",
+  });
+  const saving = state;
+  state = reduce(state, { type: "event", event: {
+    v: 10,
+    type: "file_save_result",
+    ts: 5,
+    sid: "session-1",
+    path: "docs/README.md",
+    request_id: "stale-save",
+    status: "saved",
+    size: 8,
+    mtime_ns: "3",
+    revision: "b".repeat(64),
+  } as ServerEvent });
+  assert.equal(state, saving, "a stale save response must be ignored");
+
+  state = reduce(state, { type: "event", event: {
+    v: 10,
+    type: "file_save_result",
+    ts: 6,
+    sid: "session-1",
+    path: "docs/README.md",
+    request_id: "save-1",
+    status: "conflict",
+    size: 12,
+    mtime_ns: "4",
+    revision: "c".repeat(64),
+    error: "文件已修改",
+  } as ServerEvent });
+  assert.equal(state.artifact?.content, "# current");
+  assert.equal(state.artifact?.saveStatus, "conflict");
+  assert.equal(state.artifact?.saveError, "文件已修改");
+
+  state = reduce(state, {
+    type: "start_file_save",
+    requestId: "save-2",
+    content: "# edited",
+  });
+  state = reduce(state, { type: "event", event: {
+    v: 10,
+    type: "file_save_result",
+    ts: 7,
+    sid: "session-1",
+    path: "docs/README.md",
+    request_id: "save-2",
+    status: "saved",
+    size: 8,
+    mtime_ns: "5",
+    revision: "d".repeat(64),
+  } as ServerEvent });
+  assert.equal(state.artifact?.content, "# edited");
+  assert.equal(state.artifact?.saveStatus, "saved");
+  assert.equal(state.artifact?.revision, "d".repeat(64));
+
+  state = reduce(state, {
     type: "open_file_loading",
     file: "/home/nancy/project/codex_stream.py",
     sid: "session-1",
@@ -130,7 +190,7 @@ try {
     line: 731,
   });
   state = reduce(state, { type: "event", event: {
-    v: 9,
+    v: 10,
     type: "file_preview",
     ts: 5,
     sid: "session-1",
@@ -140,7 +200,7 @@ try {
     content: "source",
     size: 6,
     truncated: false,
-    mtime_ns: 3,
+    mtime_ns: "3",
   } as ServerEvent });
   assert.equal(state.artifact?.kind, "file");
   assert.equal(state.artifact?.line, 731);
@@ -153,6 +213,9 @@ try {
       requestId: "preview-new",
       kind: "md",
       content: "# Preview\n\n<script>alert(1)</script>",
+      size: 42,
+      mtimeNs: "2",
+      revision: "a".repeat(64),
       assets: {},
     },
     active: "diff",
@@ -165,6 +228,7 @@ try {
   assert.match(markup, /data-lock-horizontal-swipe="true"/);
   assert.match(markup, />预览</);
   assert.match(markup, />源码</);
+  assert.match(markup, />保存</);
   assert.match(markup, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.doesNotMatch(markup, /<script>/);
 
