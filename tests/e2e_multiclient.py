@@ -14,15 +14,14 @@ import uuid
 
 import cc_remote.config  # noqa: F401
 from cc_remote.protocol import Hello, Query, deserialize, serialize
-from websockets.asyncio.client import connect
+from tests.e2e_auth import client_connection
 
 URL = os.environ.get("RELAY_URL", "ws://127.0.0.1:8765/ws")
-TOKEN = os.environ.get("CLIENT_TOKEN", "change-me-client")
+PASSWORD = os.environ.get("LOGIN_PASSWORD", "")
 
 
 async def client(cid: str, send: bool, res: dict, ready: asyncio.Event, go: asyncio.Event):
-    headers = {"Authorization": f"Bearer {TOKEN}"}
-    async with connect(URL, additional_headers=headers) as ws:
+    async with await client_connection(URL, PASSWORD) as ws:
         await ws.send(serialize(Hello(role="client", client_id=cid, last_seq=None)))
         while True:
             m = deserialize(await asyncio.wait_for(ws.recv(), timeout=10))

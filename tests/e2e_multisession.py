@@ -18,7 +18,7 @@ local proxy. Run against an ISOLATED stack (own relay + wrapper with a temp
 CC_CWD) so it never touches a live phone wrapper:
 
   MAX_CONCURRENT_SESSIONS=2 CC_CWD=/tmp/ccrm-e2e RELAY_URL=ws://127.0.0.1:8765/ws \
-  CLIENT_TOKEN=t WRAPPER_TOKEN=t  python -m tests.e2e_multisession
+  LOGIN_PASSWORD=strong-password WRAPPER_TOKEN=<random>  python -m tests.e2e_multisession
 """
 from __future__ import annotations
 
@@ -29,10 +29,10 @@ import uuid
 
 import cc_remote.config  # noqa: F401  (triggers .env load)
 from cc_remote.protocol import Hello, Query, NewSession, SwitchSession, deserialize, serialize
-from websockets.asyncio.client import connect
+from tests.e2e_auth import client_connection
 
 URL = os.environ.get("RELAY_URL", "ws://127.0.0.1:8765/ws")
-TOKEN = os.environ.get("CLIENT_TOKEN", "change-me-client")
+PASSWORD = os.environ.get("LOGIN_PASSWORD", "")
 
 
 async def recv_until(ws, want_types, timeout=120):
@@ -73,7 +73,7 @@ async def new_session_and_capture(ws, label):
 
 async def main():
     cid = uuid.uuid4().hex
-    async with connect(URL, additional_headers={"Authorization": f"Bearer {TOKEN}"}) as ws:
+    async with await client_connection(URL, PASSWORD) as ws:
         await ws.send(serialize(Hello(role="client", client_id=cid, last_seq=None)))
         await recv_until(ws, {"snapshot"}, timeout=15)
         print("connected -> snapshot")

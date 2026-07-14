@@ -5,6 +5,7 @@
 import { useEffect, useState } from "react";
 import type { DirEntry } from "../protocol";
 import { Icon } from "../icons";
+import { useImeSubmit } from "../use-ime-submit";
 
 interface Props {
   open: boolean;
@@ -18,6 +19,10 @@ interface Props {
 
 export function DirPicker({ open, path, parent, dirs, onBrowse, onConfirm, onClose }: Props) {
   const [manual, setManual] = useState("");
+  const imeSubmit = useImeSubmit<HTMLInputElement>((value) => {
+    const cwd = value.trim() || path;
+    if (cwd) onConfirm(cwd);
+  });
   // Each open starts fresh from $HOME so stale state from a previous pick
   // doesn't leak in. `open` is the only dependency on purpose.
   useEffect(() => {
@@ -29,11 +34,6 @@ export function DirPicker({ open, path, parent, dirs, onBrowse, onConfirm, onClo
   if (!open) return null;
 
   const browse = (p: string) => { setManual(""); onBrowse(p); };
-  const confirm = () => {
-    const cwd = manual.trim() || path;
-    if (cwd) onConfirm(cwd);
-  };
-
   return (
     <div className="dp-overlay" onClick={onClose}>
       <div className="dp" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="选择本地工作区">
@@ -57,10 +57,26 @@ export function DirPicker({ open, path, parent, dirs, onBrowse, onConfirm, onClo
           ))}
         </div>
         <div className="dp-foot">
-          <input className="dp-input" placeholder="或粘贴绝对路径…"
+          <input ref={imeSubmit.inputRef} className="dp-input" placeholder="或粘贴绝对路径…"
             value={manual} onChange={(e) => setManual(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") confirm(); }} />
-          <button className="dp-confirm" onClick={confirm} disabled={!(manual.trim() || path)}>
+            onCompositionStart={imeSubmit.startComposition}
+            onCompositionEnd={(e) => {
+              imeSubmit.endComposition();
+              setManual(e.currentTarget.value);
+            }}
+            onKeyDown={(e) => {
+              if (!imeSubmit.shouldSubmitKey({
+                key: e.key,
+                shiftKey: e.shiftKey,
+                isComposing: e.nativeEvent.isComposing,
+                keyCode: e.nativeEvent.keyCode,
+              })) return;
+              e.preventDefault();
+              imeSubmit.requestSubmit();
+            }} />
+          <button className="dp-confirm"
+            onPointerDown={imeSubmit.commitCompositionBeforePointerSubmit}
+            onClick={imeSubmit.requestSubmit} disabled={!(manual.trim() || path)}>
             <Icon name="plus" size={15} />在此创建
           </button>
         </div>

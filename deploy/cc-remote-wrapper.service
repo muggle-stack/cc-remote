@@ -5,16 +5,23 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Change User + the three paths below to match the account that runs Claude Code.
+# Change User + the repository/home paths below to match the account that runs Claude Code.
 User=youruser
 WorkingDirectory=/path/to/cc-remote
-EnvironmentFile=/path/to/cc-remote/.env
-# systemd's minimal PATH won't include ~/.local/bin where the claude CLI may
-# live — add it so the SDK can spawn cc.
+# systemd reads this as root before dropping privileges. Keep it root:root 0600;
+# the service and all model/tool descendants are then denied the source file.
+EnvironmentFile=/etc/cc-remote/wrapper.env
+Environment=PYTHON_DOTENV_DISABLED=1
+InaccessiblePaths=/etc/cc-remote -/path/to/cc-remote/.env
+# Prefer an absolute CLAUDE_BIN in the EnvironmentFile. PATH remains the
+# backwards-compatible fallback and is also inherited by Claude's child tools.
 Environment="PATH=/home/youruser/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ExecStart=/path/to/cc-remote/.venv/bin/python -m cc_remote.wrapper
 Restart=on-failure
 RestartSec=5
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target

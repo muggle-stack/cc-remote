@@ -17,10 +17,10 @@ import uuid
 
 import cc_remote.config  # noqa: F401  (triggers .env load)
 from cc_remote.protocol import Hello, Interrupt, Query, deserialize, serialize
-from websockets.asyncio.client import connect
+from tests.e2e_auth import client_connection
 
 URL = os.environ.get("RELAY_URL", "ws://127.0.0.1:8765/ws")
-TOKEN = os.environ.get("CLIENT_TOKEN", "change-me-client")
+PASSWORD = os.environ.get("LOGIN_PASSWORD", "")
 
 
 async def recv_until(ws, want_types, timeout=90):
@@ -44,7 +44,7 @@ async def interrupt_after(ws, delay):
 
 async def main():
     cid = uuid.uuid4().hex
-    async with connect(URL, additional_headers={"Authorization": f"Bearer {TOKEN}"}) as ws:
+    async with await client_connection(URL, PASSWORD) as ws:
         await ws.send(serialize(Hello(role="client", client_id=cid, last_seq=None)))
         ev, _ = await recv_until(ws, {"snapshot"}, timeout=10)
         print(f"hello -> snapshot: {'yes' if ev else 'no'}")

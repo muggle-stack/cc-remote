@@ -12,8 +12,8 @@ export function ReconnectBanner({ banner, replaying, truncated }: Props) {
   const text = parts.join(" · ");
   if (!text) return null;
   return (
-    <div className="banner show">
-      <span className="sp" />
+    <div className="banner show" role="status" aria-live="polite">
+      <span className="sp" aria-hidden="true" />
       <span>{text}</span>
     </div>
   );

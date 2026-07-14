@@ -1,9 +1,8 @@
-"""History sync test: a new client (last_seq=null) must see the FULL
-conversation that happened before it connected — including the user's prompts
-(user_msg) and the assistant replies — not just a tail snapshot.
+"""History sync test: a new client must fetch the FULL conversation that
+happened before it connected — including user prompts and assistant replies.
 
-Flow: client A sends a query; client B then connects fresh and must replay
-A's user_msg + assistant deltas + turn_end.
+Flow: client A sends a query; client B connects fresh, receives a lightweight
+Snapshot, then uses GetHistory for A's session and gets one bulk History frame.
 """
 from __future__ import annotations
 
@@ -13,11 +12,11 @@ import sys
 import uuid
 
 import cc_remote.config  # noqa: F401
-from cc_remote.protocol import Hello, Query, deserialize, serialize
-from websockets.asyncio.client import connect
+from cc_remote.protocol import GetHistory, Hello, Query, deserialize, serialize
+from tests.e2e_auth import client_connection
 
 URL = os.environ.get("RELAY_URL", "ws://127.0.0.1:8765/ws")
-TOKEN = os.environ.get("CLIENT_TOKEN", "change-me-client")
+PASSWORD = os.environ.get("LOGIN_PASSWORD", "")
 
 
 async def recv_until(ws, want, timeout=90):
@@ -34,8 +33,7 @@ async def recv_until(ws, want, timeout=90):
 
 
 async def client_collect(cid, prompt, want, results):
-    headers = {"Authorization": f"Bearer {TOKEN}"}
-    async with connect(URL, additional_headers=headers) as ws:
+    async with await client_connection(URL, PASSWORD) as ws:
         await ws.send(serialize(Hello(role="client", client_id=cid, last_seq=None)))
         if prompt:
             # drain the initial (empty-buffer) snapshot/replay before sending
@@ -55,21 +53,27 @@ async def main():
     assert a_user, "A should see its own broadcast user_msg"
     assert "同步测试OK" in a_text, f"A missing assistant text: {a_text!r}"
 
-    rb: dict = {}
-    await client_collect("B", None, {"replay_end"}, rb)
-    b = rb["B"]
-    b_replay = [e for e in b if e.type == "replay_start"]
-    b_user = [e for e in b if e.type == "user_msg"]
-    b_text = "".join(e.text for e in b if e.type == "delta")
-    b_turn_end = [e for e in b if e.type == "turn_end"]
-    print(f"B: replay_start={len(b_replay)} user_msgs={len(b_user)} "
-          f"turn_end={len(b_turn_end)} text={b_text!r}")
-    assert b_replay, "B (fresh client) should get replay_start with full history"
-    assert b_user, "B should see A's user_msg (the prompt) in replay"
-    assert b_user[0].prompt == "只说：同步测试OK", f"wrong prompt: {b_user[0].prompt!r}"
-    assert b_turn_end, "B should see A's turn_end in replay"
+    target_sid = a_user[-1].sid
+    assert target_sid, "A's user_msg must carry a session id"
+    async with await client_connection(URL, PASSWORD) as ws:
+        await ws.send(serialize(Hello(role="client", client_id="B")))
+        await recv_until(ws, {"snapshot"}, 10)
+        await ws.send(serialize(GetHistory(
+            session_id=target_sid, client_id="B", limit=60)))
+        b, history = await recv_until(ws, {"history"}, 30)
+
+    assert history is not None, "B should receive a History frame"
+    payload = history.events
+    b_user = [row for row in payload if row.get("type") == "user_msg"]
+    b_text = "".join(row.get("text", "") for row in payload if row.get("type") == "delta")
+    b_turn_end = [row for row in payload if row.get("type") == "turn_end"]
+    print(f"B: history_frames={len([e for e in b if e.type == 'history'])} "
+          f"user_msgs={len(b_user)} turn_end={len(b_turn_end)} text={b_text!r}")
+    assert b_user, "B should see A's user_msg in History"
+    assert b_user[-1]["prompt"] == "只说：同步测试OK", f"wrong prompt: {b_user[-1]['prompt']!r}"
+    assert b_turn_end, "B should see A's turn_end in History"
     assert "同步测试OK" in b_text, f"B missing A's assistant text: {b_text!r}"
-    print("HISTORY SYNC OK — new client sees full conversation incl. prompts")
+    print("HISTORY SYNC OK — fresh client fetches full conversation incl. prompts")
 
 
 if __name__ == "__main__":

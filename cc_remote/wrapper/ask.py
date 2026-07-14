@@ -18,6 +18,14 @@ from typing import Any, Awaitable, Callable
 from mcp import types
 from mcp.server import Server
 
+from cc_remote.protocol import (
+    ASK_OPTION_DESCRIPTION_MAX_CHARS,
+    ASK_OPTION_LABEL_MAX_CHARS,
+    ASK_OPTION_MAX_COUNT,
+    ASK_OPTION_MIN_COUNT,
+    ASK_QUESTION_MAX_CHARS,
+)
+
 ASK_USER_TOOL = "ask_user"
 SET_MODE_TOOL = "set_mode"
 MODES = ["default", "acceptEdits", "plan", "auto", "bypassPermissions"]
@@ -26,6 +34,42 @@ MODES = ["default", "acceptEdits", "plan", "auto", "bypassPermissions"]
 AskCallback = Callable[[str, list[dict[str, str]]], Awaitable[str]]
 # async (mode) -> None  (machine: sdk.set_permission_mode + emit Perm)
 SetModeCallback = Callable[[str], Awaitable[None]]
+
+
+def _normalize_ask_arguments(
+    arguments: dict[str, Any],
+) -> tuple[str | None, list[dict[str, str]] | None, str | None]:
+    """Validate model-originated ask payloads before they reach the wire."""
+    question = arguments.get("question")
+    opts = arguments.get("options")
+    if not isinstance(question, str) or not (
+        1 <= len(question) <= ASK_QUESTION_MAX_CHARS
+    ):
+        return None, None, "ask_user rejected: question is missing or too long"
+    if not isinstance(opts, list) or not (
+        ASK_OPTION_MIN_COUNT <= len(opts) <= ASK_OPTION_MAX_COUNT
+    ):
+        return None, None, "ask_user rejected: expected 2-5 options"
+    options: list[dict[str, str]] = []
+    for option in opts:
+        if not isinstance(option, dict) or not set(option) <= {"label", "ds"}:
+            return None, None, "ask_user rejected: invalid option"
+        label = option.get("label")
+        description = option.get("ds")
+        if not isinstance(label, str) or not (
+            1 <= len(label) <= ASK_OPTION_LABEL_MAX_CHARS
+        ):
+            return None, None, "ask_user rejected: invalid option label"
+        if description is not None and (
+            not isinstance(description, str)
+            or len(description) > ASK_OPTION_DESCRIPTION_MAX_CHARS
+        ):
+            return None, None, "ask_user rejected: option detail is too long"
+        normalized = {"label": label}
+        if description:
+            normalized["ds"] = description
+        options.append(normalized)
+    return question, options, None
 
 
 def make_ask_server(ask: AskCallback, set_mode: SetModeCallback) -> Server:
@@ -47,19 +91,34 @@ def make_ask_server(ask: AskCallback, set_mode: SetModeCallback) -> Server:
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "question": {"type": "string", "description": "The question to ask the user."},
+                        "question": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": ASK_QUESTION_MAX_CHARS,
+                            "description": "The question to ask the user.",
+                        },
                         "options": {
                             "type": "array",
                             "description": "2-5 selectable options.",
-                            "minItems": 2,
-                            "maxItems": 5,
+                            "minItems": ASK_OPTION_MIN_COUNT,
+                            "maxItems": ASK_OPTION_MAX_COUNT,
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "label": {"type": "string", "description": "Short option label."},
-                                    "ds": {"type": "string", "description": "Optional one-line detail."},
+                                    "label": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": ASK_OPTION_LABEL_MAX_CHARS,
+                                        "description": "Short option label.",
+                                    },
+                                    "ds": {
+                                        "type": "string",
+                                        "maxLength": ASK_OPTION_DESCRIPTION_MAX_CHARS,
+                                        "description": "Optional one-line detail.",
+                                    },
                                 },
                                 "required": ["label"],
+                                "additionalProperties": False,
                             },
                         },
                     },
@@ -87,12 +146,10 @@ def make_ask_server(ask: AskCallback, set_mode: SetModeCallback) -> Server:
     @server.call_tool()
     async def _call_tool(name: str, arguments: dict[str, Any]):
         if name == ASK_USER_TOOL:
-            question = str(arguments.get("question", ""))
-            opts = arguments.get("options") or []
-            options = [
-                {"label": str(o.get("label", "")), **({"ds": str(o["ds"])} if o.get("ds") else {})}
-                for o in opts if isinstance(o, dict) and o.get("label")
-            ]
+            question, options, error = _normalize_ask_arguments(arguments)
+            if error is not None:
+                return [types.TextContent(type="text", text=error)]
+            assert question is not None and options is not None
             answer = await ask(question, options)
             return [types.TextContent(type="text", text=answer or "(no answer)")]
         if name == SET_MODE_TOOL:

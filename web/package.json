@@ -9,6 +9,11 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
+    "test:compile": "tsc -p tsconfig.tests.json",
+    "test:outbox": "npm run test:compile --silent && node node_modules/.tmp/cc-remote-tests/tests/outbox.test.js",
+    "test:scroll": "npm run test:compile --silent && node node_modules/.tmp/cc-remote-tests/tests/scroll-follow.test.js",
+    "test:diff": "npm run test:compile --silent && node --expose-gc node_modules/.tmp/cc-remote-tests/tests/diff-performance.test.js",
+    "test:reliability": "npm run test:compile --silent && node node_modules/.tmp/cc-remote-tests/tests/outbox.test.js && node node_modules/.tmp/cc-remote-tests/tests/reliability.test.js && node --expose-gc node_modules/.tmp/cc-remote-tests/tests/diff-performance.test.js && node node_modules/.tmp/cc-remote-tests/tests/goal-command.test.js && node node_modules/.tmp/cc-remote-tests/tests/status-capabilities.test.js && node node_modules/.tmp/cc-remote-tests/tests/notices-rate-limits.test.js && node node_modules/.tmp/cc-remote-tests/tests/session-worktree.test.js && node node_modules/.tmp/cc-remote-tests/tests/scroll-follow.test.js",
     "preview": "vite preview"
   },
   "dependencies": {

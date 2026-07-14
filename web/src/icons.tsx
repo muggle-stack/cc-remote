@@ -36,6 +36,7 @@ const PATHS: Record<string, string> = {
   cpu: '<rect x="6.5" y="6.5" width="11" height="11" rx="2"/><path d="M9.5 2.5v2M14.5 2.5v2M9.5 19.5v2M14.5 19.5v2M2.5 9.5h2M2.5 14.5h2M19.5 9.5h2M19.5 14.5h2"/>',
   check: '<path d="M5 12.5l4.5 4.5L19 7"/>',
   archive: '<rect x="3" y="4" width="18" height="4" rx="1.5"/><path d="M5 8v9a2 2 0 002 2h10a2 2 0 002-2V8"/><path d="M10 12h4"/>',
+  branch: '<circle cx="6" cy="5" r="2"/><circle cx="18" cy="7" r="2"/><circle cx="6" cy="19" r="2"/><path d="M6 7v10M8 8.5c4.5 0 5.5-1.5 8-1.5"/>',
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/>',
   // model-tier glyphs (one per model, so the picker rows are distinct)
   // reasoning-effort gauges: same dial, needle sweeps left(低)->right(最大)

@@ -4,8 +4,24 @@
 # renews the Let's Encrypt TLS certificate (needs ports 80 + 443 open on the
 # vps, and the domain's A record pointing at the vps).
 # reverse_proxy upgrades WebSocket automatically: wss://domain/ws -> 127.0.0.1:8765/ws
+# setup-vps.sh also merges bounded HTTP server read/write/header limits into
+# the shared Caddyfile's global options block.
 
 cc-remote.example.com {
+	@entry path / /index.html
+	@login path /api/login
+	request_body @login {
+		max_size 4KB
+	}
+	header @entry Cache-Control "no-store"
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' wss://cc-remote.example.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	}
 	reverse_proxy 127.0.0.1:8765
 	encode zstd gzip
 }

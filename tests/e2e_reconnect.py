@@ -1,7 +1,7 @@
 """End-to-end reconnect + replay test.
 
-Connects, starts a long streaming query, drops mid-stream (tracking last_seq),
-reconnects with hello(last_seq), and verifies:
+Connects, starts a long streaming query, drops mid-stream (tracking its cursor),
+reconnects with hello(cursors={sid: last_seq}), and verifies:
   - replay_start / replay_end markers arrive
   - all replayed/live seqs are strictly > last_seq
   - no duplicate seq, strictly increasing
@@ -15,24 +15,27 @@ import uuid
 
 import cc_remote.config  # noqa: F401
 from cc_remote.protocol import Hello, Query, deserialize, serialize
-from websockets.asyncio.client import connect
+from tests.e2e_auth import client_connection
 
 URL = os.environ.get("RELAY_URL", "ws://127.0.0.1:8765/ws")
-TOKEN = os.environ.get("CLIENT_TOKEN", "change-me-client")
+PASSWORD = os.environ.get("LOGIN_PASSWORD", "")
 
 
 async def main():
     cid = uuid.uuid4().hex
-    headers = {"Authorization": f"Bearer {TOKEN}"}
-
     # --- phase 1: connect, start a long query, collect ~2.5s, drop ---
-    async with connect(URL, additional_headers=headers) as ws:
+    async with await client_connection(URL, PASSWORD) as ws:
         await ws.send(serialize(Hello(role="client", client_id=cid, last_seq=None)))
         # drain snapshot
+        session_id = None
+        generation = None
         while True:
             m = deserialize(await asyncio.wait_for(ws.recv(), timeout=10))
             if m.type == "snapshot":
+                session_id = m.sid or m.cc_session_id
+                generation = m.generation
                 break
+        assert session_id and generation, "snapshot did not identify session generation"
         await ws.send(serialize(Query(
             prompt="写一篇800字关于海洋的科普短文，要详细，分多段",
             msg_id=uuid.uuid4().hex)))
@@ -58,8 +61,10 @@ async def main():
     saw_start = saw_end = False
     live_deltas = 0
     seqs: list[int] = []
-    async with connect(URL, additional_headers=headers) as ws:
-        await ws.send(serialize(Hello(role="client", client_id=cid, last_seq=last_seq)))
+    async with await client_connection(URL, PASSWORD) as ws:
+        await ws.send(serialize(Hello(
+            role="client", client_id=cid, cursors={session_id: last_seq},
+            generations={session_id: generation})))
         loop = asyncio.get_event_loop()
         deadline = loop.time() + 45
         while loop.time() < deadline:

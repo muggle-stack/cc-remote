@@ -1,8 +1,7 @@
-"""Verifies the browser WebSocket auth path: ?token= query param, NO header.
+"""Verifies the browser WebSocket cookie-auth path.
 
-Browsers can't set Authorization on a WebSocket, so the web client puts the
-token in the query string. This connects the same way and runs one streaming
-query to confirm that path works end-to-end through the relay.
+The client first posts LOGIN_PASSWORD to /api/login, then connects with the
+HttpOnly session cookie and an exact Origin header.  No secret enters the URL.
 """
 from __future__ import annotations
 
@@ -13,16 +12,15 @@ import uuid
 
 import cc_remote.config  # noqa: F401
 from cc_remote.protocol import Hello, Query, deserialize, serialize
-from websockets.asyncio.client import connect
+from tests.e2e_auth import client_connection
 
 URL = os.environ.get("RELAY_URL", "ws://127.0.0.1:8765/ws")
-TOKEN = os.environ.get("CLIENT_TOKEN", "change-me-client")
+PASSWORD = os.environ.get("LOGIN_PASSWORD", "")
 
 
 async def main():
     cid = uuid.uuid4().hex
-    url = f"{URL}?token={TOKEN}"  # browser path: token in query, no header
-    async with connect(url) as ws:
+    async with await client_connection(URL, PASSWORD) as ws:
         await ws.send(serialize(Hello(role="client", client_id=cid, last_seq=None)))
         while True:
             m = deserialize(await asyncio.wait_for(ws.recv(), timeout=10))
@@ -40,7 +38,7 @@ async def main():
                 assert m.result.subtype == "success", f"expected success, got {m.result.subtype}"
                 break
         assert deltas > 0, "no streaming deltas"
-        print(f"WEB-AUTH (?token=) OK: {deltas} deltas, text={text!r}")
+        print(f"WEB-AUTH (HttpOnly cookie) OK: {deltas} deltas, text={text!r}")
 
 
 if __name__ == "__main__":

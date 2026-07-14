@@ -4,11 +4,11 @@ Connects to the relay as a client, streams events, and lets you type prompts.
 Commands (each on its own line):
   <text>      send as a query
   /stop       interrupt the running turn
-  /reconnect  drop and reconnect (tests replay from last_seq)
+  /reconnect  drop and reconnect (tests replay from per-session cursors)
   /ping       liveness check
   /quit       exit
 
-Env: RELAY_URL (default ws://127.0.0.1:8765/ws), CLIENT_TOKEN.
+Env: RELAY_URL (default ws://127.0.0.1:8765/ws), LOGIN_PASSWORD.
 """
 from __future__ import annotations
 
@@ -24,21 +24,22 @@ from cc_remote.protocol import (
     Hello, Interrupt, Ping, Query, ProtocolError,
     deserialize, serialize,
 )
-from websockets.asyncio.client import connect
+from tests.e2e_auth import client_connection
 
 setup("cc_remote.cli", os.environ.get("LOG_LEVEL", "WARNING"))
 log = logger("cc_remote.cli")
 
 RELAY_URL = os.environ.get("RELAY_URL", "ws://127.0.0.1:8765/ws")
-CLIENT_TOKEN = os.environ.get("CLIENT_TOKEN", "change-me-client")
+LOGIN_PASSWORD = os.environ.get("LOGIN_PASSWORD", "")
 
 
 class CliClient:
-    def __init__(self, url: str, token: str):
+    def __init__(self, url: str, password: str):
         self.url = url
-        self.token = token
+        self.password = password
         self.client_id = uuid.uuid4().hex
-        self.last_seq = 0
+        self.cursors: dict[str, int] = {}
+        self.generations: dict[str, str] = {}
         self.ws = None
         self._quitting = False
         self._cmd_q: asyncio.Queue = asyncio.Queue()
@@ -73,11 +74,12 @@ class CliClient:
         backoff = 1.0
         while not self._quitting:
             try:
-                async with connect(self.url, additional_headers={"Authorization": f"Bearer {self.token}"}) as ws:
+                async with await client_connection(self.url, self.password) as ws:
                     self.ws = ws
                     await self._send(ws, Hello(role="client", client_id=self.client_id,
-                                               last_seq=(self.last_seq or None)))
-                    print(f"\n[connected last_seq={self.last_seq}]")
+                                               cursors=(self.cursors or None),
+                                               generations=(self.generations or None)))
+                    print(f"\n[connected cursors={self.cursors}]")
                     backoff = 1.0
                     await self._session(ws)
             except Exception as e:
@@ -135,6 +137,18 @@ class CliClient:
 
     def _handle_event(self, msg) -> None:
         t = msg.type
+        sid = getattr(msg, "sid", None)
+        generation = getattr(msg, "generation", None)
+        if sid and generation:
+            self.generations[sid] = generation
+        if t == "session_rekey":
+            old, new = msg.old_key, msg.session_id
+            if old in self.cursors and new not in self.cursors:
+                self.cursors[new] = self.cursors[old]
+            self.cursors.pop(old, None)
+            if old in self.generations and new not in self.generations:
+                self.generations[new] = self.generations[old]
+            self.generations.pop(old, None)
         if t == "delta":
             sys.stdout.write(msg.text)
             sys.stdout.flush()
@@ -175,8 +189,8 @@ class CliClient:
             print(f"\n[{t}]")
 
         seq = getattr(msg, "seq", None)
-        if seq is not None and seq > self.last_seq:
-            self.last_seq = seq
+        if sid and seq is not None and seq > self.cursors.get(sid, 0):
+            self.cursors[sid] = seq
 
     async def _send(self, ws, msg) -> None:
         try:
@@ -186,7 +200,7 @@ class CliClient:
 
 
 def main() -> None:
-    client = CliClient(RELAY_URL, CLIENT_TOKEN)
+    client = CliClient(RELAY_URL, LOGIN_PASSWORD)
     try:
         asyncio.run(client.run())
     except KeyboardInterrupt:

@@ -1,25 +1,40 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { Turn, Block, TextBlock, ToolBlock } from "../reducer";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type TouchEvent,
+  type WheelEvent,
+} from "react";
+import type { Turn } from "../reducer";
 import { MessageBlock } from "./MessageBlock";
-import { ToolGroup } from "./ToolGroup";
 import { Icon, ClaudeMark, ClaudeWorking, ClaudeSpark } from "../icons";
+import { canForkTurn } from "../session-worktree";
+import { ProcessTimeline } from "./ProcessTimeline";
+import { finalTextBlocks, processBlocks } from "../process-blocks";
+import {
+  anchoredScrollTop,
+  createFrameCoalescer,
+  ScrollFollowController,
+  type FrameCoalescer,
+  type ScrollFollowSnapshot,
+  type ScrollMetrics,
+} from "../scroll-follow";
 
-type Segment = { kind: "text"; block: TextBlock } | { kind: "tools"; tools: ToolBlock[] };
+interface HistoryAnchor {
+  sid: string | null;
+  firstTurnId: string | null;
+  scrollHeight: number;
+  scrollTop: number;
+}
 
-/** Group a turn's blocks into text segments + consecutive-tool segments so the
- * tool calls render as one collapsible group instead of a busy stack. */
-function groupBlocks(blocks: Block[]): Segment[] {
-  const segs: Segment[] = [];
-  for (let i = 0; i < blocks.length;) {
-    const b = blocks[i];
-    if (b.kind === "text") { segs.push({ kind: "text", block: b }); i++; }
-    else {
-      const tools: ToolBlock[] = [];
-      while (i < blocks.length && blocks[i].kind === "tool") { tools.push(blocks[i] as ToolBlock); i++; }
-      segs.push({ kind: "tools", tools });
-    }
-  }
-  return segs;
+function readScrollMetrics(el: HTMLDivElement): ScrollMetrics {
+  return {
+    scrollHeight: el.scrollHeight,
+    scrollTop: el.scrollTop,
+    clientHeight: el.clientHeight,
+  };
 }
 
 function formatTime(ts: number): string {
@@ -28,53 +43,173 @@ function formatTime(ts: number): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-export function ChatView({ sid, turns, loading, hasMore, onLoadMore, onEdit, onGetDiff }: { sid: string | null; turns: Turn[]; loading?: boolean; hasMore?: boolean; onLoadMore?: () => void; onEdit: (prompt: string) => void; onGetDiff: (file: string) => void }) {
-  const endRef = useRef<HTMLDivElement>(null);
+export function ChatView({ sid, turns, engine = "claude", loading, hasMore,
+  onLoadMore, onEdit, onGetDiff, onFork, forkingPointId }: {
+  sid: string | null;
+  turns: Turn[];
+  engine?: "claude" | "codex";
+  loading?: boolean;
+  hasMore?: boolean;
+  onLoadMore?: () => void;
+  onEdit: (prompt: string) => void;
+  onGetDiff: (file: string) => void;
+  onFork?: (forkPointId: string) => void;
+  forkingPointId?: string | null;
+}) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [atBottom, setAtBottom] = useState(true);
-  // scroll anchoring for "load more": capture scrollHeight before older turns
-  // prepend, then restore position after so the view doesn't jump.
-  const anchorRef = useRef<number | null>(null);
+  const threadInRef = useRef<HTMLDivElement>(null);
+  const controllerRef = useRef<ScrollFollowController | null>(null);
+  if (!controllerRef.current) controllerRef.current = new ScrollFollowController();
+  const frameRef = useRef<FrameCoalescer | null>(null);
+  if (!frameRef.current) {
+    frameRef.current = createFrameCoalescer(
+      (callback) => window.requestAnimationFrame(callback),
+      (id) => window.cancelAnimationFrame(id),
+    );
+  }
+  const [scrollState, setScrollState] = useState<ScrollFollowSnapshot>(() =>
+    controllerRef.current!.snapshot());
+  const [zoom, setZoom] = useState<string | null>(null);   // lightbox image src
+  const [zoomBig, setZoomBig] = useState(false);           // fit-to-screen vs actual size
+  const anchorRef = useRef<HistoryAnchor | null>(null);
+  const renderedSidRef = useRef<string | null | undefined>(undefined);
+  const touchYRef = useRef<number | null>(null);
+
+  const syncScrollState = useCallback((next: ScrollFollowSnapshot) => {
+    setScrollState((previous) =>
+      previous.followOutput === next.followOutput && previous.nearBottom === next.nearBottom
+        ? previous
+        : next);
+  }, []);
+
+  const requestOutputFollow = useCallback(() => {
+    frameRef.current?.schedule(() => {
+      const el = scrollRef.current;
+      const controller = controllerRef.current;
+      if (!el || !controller) return;
+      if (!controller.isFollowing()) {
+        syncScrollState(controller.observeLayout(readScrollMetrics(el)));
+        return;
+      }
+      // Streaming writes are immediate and coalesced once per frame. Smooth
+      // scrolling is reserved for the user's explicit "bottom" button.
+      el.scrollTop = el.scrollHeight;
+      syncScrollState(controller.recordProgrammaticScroll(readScrollMetrics(el)));
+    });
+  }, [syncScrollState]);
+
+  const pauseOutputFollow = useCallback(() => {
+    const el = scrollRef.current;
+    const controller = controllerRef.current;
+    if (!el || !controller) return;
+    syncScrollState(controller.pause(readScrollMetrics(el)));
+  }, [syncScrollState]);
+
+  // Capture both dimensions and the first id. A streaming delta can arrive
+  // while history is in flight; only an actual prepend should consume this
+  // anchor and shift the viewport.
   const doLoadMore = () => {
-    anchorRef.current = scrollRef.current?.scrollHeight ?? null;
+    const el = scrollRef.current;
+    if (el) {
+      anchorRef.current = {
+        sid,
+        firstTurnId: turns[0]?.id ?? null,
+        scrollHeight: el.scrollHeight,
+        scrollTop: el.scrollTop,
+      };
+      pauseOutputFollow();
+    }
     onLoadMore?.();
   };
+
   useLayoutEffect(() => {
     const el = scrollRef.current;
-    if (el && anchorRef.current != null) {
-      el.scrollTop = el.scrollTop + el.scrollHeight - anchorRef.current;  // shift down by the prepended height
+    const controller = controllerRef.current;
+    if (!el || !controller) return;
+
+    // Initial mount and every session switch are anchored synchronously before
+    // paint, so the newly focused session opens at its latest content.
+    if (renderedSidRef.current !== sid) {
+      renderedSidRef.current = sid;
       anchorRef.current = null;
+      touchYRef.current = null;
+      frameRef.current?.cancel();
+      el.scrollTop = el.scrollHeight;
+      syncScrollState(controller.reset(readScrollMetrics(el)));
+      return;
     }
-  }, [turns]);
+
+    const anchor = anchorRef.current;
+    const prepended = anchor
+      && anchor.sid === sid
+      && anchor.firstTurnId !== (turns[0]?.id ?? null);
+    if (prepended) {
+      el.scrollTop = anchoredScrollTop(
+        anchor.scrollTop,
+        anchor.scrollHeight,
+        el.scrollHeight,
+      );
+      anchorRef.current = null;
+      syncScrollState(controller.recordProgrammaticScroll(readScrollMetrics(el)));
+    } else if (!controller.isFollowing()) {
+      syncScrollState(controller.observeLayout(readScrollMetrics(el)));
+    }
+
+    if (controller.isFollowing()) requestOutputFollow();
+  }, [requestOutputFollow, sid, syncScrollState, turns]);
+
+  useLayoutEffect(() => {
+    const content = threadInRef.current;
+    if (!content || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      const el = scrollRef.current;
+      const controller = controllerRef.current;
+      if (!el || !controller) return;
+      if (controller.isFollowing()) requestOutputFollow();
+      else syncScrollState(controller.observeLayout(readScrollMetrics(el)));
+    });
+    observer.observe(content);
+    const viewport = scrollRef.current;
+    if (viewport) observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [requestOutputFollow, syncScrollState]);
+
+  useEffect(() => {
+    return () => frameRef.current?.cancel();
+  }, []);
 
   const onScroll = () => {
     const el = scrollRef.current;
-    if (!el) return;
-    // "at bottom" = within 80px of the bottom edge
-    const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-    setAtBottom(dist < 80);
+    const controller = controllerRef.current;
+    if (!el || !controller) return;
+    syncScrollState(controller.observeScroll(readScrollMetrics(el)));
   };
 
-  // On session switch (sid change): jump to the bottom INSTANTLY, before paint,
-  // so a session with history opens already at the latest turn — no visible
-  // scroll-from-top animation. useLayoutEffect runs before the browser paints.
-  useLayoutEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-    setAtBottom(true);
-  }, [sid]);
+  const onWheel = (event: WheelEvent<HTMLDivElement>) => {
+    if (event.deltaY < 0) pauseOutputFollow();
+  };
 
-  // Auto-scroll to bottom on new turns only if the user is already there
-  // (so reading older history isn't yanked away by streaming deltas). Streaming
-  // within the focused session keeps the smooth behavior; the switch case above
-  // already put us at the bottom, so this is a no-op right after a switch.
-  useEffect(() => {
-    if (atBottom) endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [turns, atBottom]);
+  const onTouchStart = (event: TouchEvent<HTMLDivElement>) => {
+    touchYRef.current = event.touches[0]?.clientY ?? null;
+  };
+
+  const onTouchMove = (event: TouchEvent<HTMLDivElement>) => {
+    const currentY = event.touches[0]?.clientY;
+    const previousY = touchYRef.current;
+    if (currentY == null || previousY == null) return;
+    // A finger moving down scrolls the viewport toward earlier messages.
+    if (currentY > previousY) pauseOutputFollow();
+    touchYRef.current = currentY;
+  };
+
+  const clearTouch = () => { touchYRef.current = null; };
 
   const scrollToBottom = () => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-    setAtBottom(true);
+    const el = scrollRef.current;
+    const controller = controllerRef.current;
+    if (!el || !controller) return;
+    syncScrollState(controller.resume(readScrollMetrics(el)));
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   };
 
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -83,8 +218,7 @@ export function ChatView({ sid, turns, loading, hasMore, onLoadMore, onEdit, onG
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 1500);
   };
-  const aiText = (t: Turn) =>
-    t.blocks.filter((b) => b.kind === "text").map((b) => (b as { text: string }).text).join("\n\n");
+  const aiText = (t: Turn) => finalTextBlocks(t.blocks).map((block) => block.text).join("\n\n");
 
   // collect the file_paths this turn mutated (Edit/Write) — a summary button +
   // a list of file chips. Click summary => all diffs; click a file => that file.
@@ -133,23 +267,28 @@ export function ChatView({ sid, turns, loading, hasMore, onLoadMore, onEdit, onG
   }
 
   return (
-    <div className="thread" ref={scrollRef} onScroll={onScroll}>
-      <div className="thread-in">
-        {hasMore && (
-          <div className="load-more-wrap">
-            <button className="load-more-btn" onClick={doLoadMore}>加载更早的历史</button>
-          </div>
-        )}
-        {turns.map((t, ti) => (
-          <div className="turn" key={t.id}>
+    <div className="thread-shell">
+      <div className="thread" ref={scrollRef} onScroll={onScroll} onWheel={onWheel}
+        onTouchStart={onTouchStart} onTouchMove={onTouchMove}
+        onTouchEnd={clearTouch} onTouchCancel={clearTouch}>
+        <div className="thread-in" ref={threadInRef}>
+          {hasMore && (
+            <div className="load-more-wrap">
+              <button className="load-more-btn" onClick={doLoadMore}>加载更早的历史</button>
+            </div>
+          )}
+          {turns.map((t, ti) => (
+            <div className="turn" key={t.id}>
             {(t.prompt || (t.images && t.images.length) || (t.files && t.files.length)) && (
               <div className="ubub-wrap">
                 {t.prompt && <div className="ubub">{t.prompt}</div>}
                 {t.images && t.images.length > 0 && (
                   <div className="ubub-imgs">
-                    {t.images.map((img, i) => (
-                      <img key={i} src={`data:${img.media_type};base64,${img.data}`} className="ubub-img" alt="" />
-                    ))}
+                    {t.images.map((img, i) => {
+                      const src = `data:${img.media_type};base64,${img.data}`;
+                      return <img key={i} src={src} className="ubub-img" alt="" title="点击放大"
+                        onClick={() => setZoom(src)} />;
+                    })}
                   </div>
                 )}
                 {t.files && t.files.length > 0 && (
@@ -168,41 +307,57 @@ export function ChatView({ sid, turns, loading, hasMore, onLoadMore, onEdit, onG
             )}
             {t.blocks.length > 0 ? (
               <>
-                {groupBlocks(t.blocks).map((seg, si) =>
-                  seg.kind === "text" ? (
-                    <MessageBlock key={`t${si}`} text={seg.block.text} done={seg.block.done} />
-                  ) : (
-                    <ToolGroup key={`g${si}`} tools={seg.tools} />
-                  )
-                )}
-                {!t.done && (
-                  <div className="turn-working"><ClaudeWorking size={24} /><span className="turn-working-tx">思考中</span></div>
+                <ProcessTimeline blocks={t.blocks} done={t.done}
+                  durationMs={t.durationMs} startTs={t.ts} />
+                {finalTextBlocks(t.blocks).map((block) => (
+                  <MessageBlock key={block.message_id} text={block.text} done={block.done} />
+                ))}
+                {!t.done && processBlocks(t.blocks).length === 0
+                  && finalTextBlocks(t.blocks).length === 0 && (
+                  <div className="turn-working"><ClaudeWorking size={24} /><span className="turn-working-tx">{t.progress ?? "思考中"}</span></div>
                 )}
                 {t.done && (
                   <>
                     <div className="ubub-meta ai-meta">
                       {t.doneTs && <span className="ubub-time">{formatTime(t.doneTs)}</span>}
                       <button className={"ubub-act" + (copiedId === t.id + "-ai" ? " copied" : "")} onClick={() => copyText(t.id + "-ai", aiText(t))} aria-label="复制"><Icon name="check" size={13} /></button>
+                      {onFork && canForkTurn(engine, t) && (
+                        <button className="ubub-act" aria-label="派生"
+                          data-tooltip="从此回复派生新会话"
+                          aria-busy={forkingPointId === t.forkPointId}
+                          disabled={!!forkingPointId}
+                          onClick={() => onFork(t.forkPointId)}>
+                          <Icon name="branch" size={13} />
+                        </button>
+                      )}
                     </div>
                     {ti === turns.length - 1 && <div className="turn-done-mark"><ClaudeSpark size={22} /></div>}
                   </>
                 )}
               </>
             ) : (!t.done && t.prompt) ? (
-              <div className="turn-working"><ClaudeWorking size={24} /><span className="turn-working-tx">思考中</span></div>
+              <div className="turn-working"><ClaudeWorking size={24} /><span className="turn-working-tx">{t.progress ?? "思考中"}</span></div>
             ) : null}
-            {fileChips(t)}
-            {t.interrupted && <div className="note interrupted">— 已打断 —</div>}
-            {t.error && <div className="note interrupted">{t.error}</div>}
-          </div>
-        ))}
-        <div ref={endRef} />
+              {fileChips(t)}
+              {t.interrupted && <div className="note interrupted">— 已打断 —</div>}
+              {t.error && <div className="note interrupted">{t.error}</div>}
+            </div>
+          ))}
+        </div>
       </div>
-      {!atBottom && (
+      {(!scrollState.followOutput || !scrollState.nearBottom) && (
         <div className="scroll-bottom-wrap">
           <button className="scroll-bottom-btn" onClick={scrollToBottom} aria-label="滚动到底部">
             <Icon name="chev" size={20} />
           </button>
+        </div>
+      )}
+      {zoom && (
+        <div className="lightbox" onClick={() => { setZoom(null); setZoomBig(false); }} role="dialog" aria-label="图片预览">
+          <img src={zoom} className={"lightbox-img" + (zoomBig ? " big" : "")} alt=""
+            title={zoomBig ? "点击缩小 · 点背景关闭" : "点击放大 · 点背景关闭"}
+            onClick={(e) => { e.stopPropagation(); setZoomBig((b) => !b); }} />
+          <button className="lightbox-close" onClick={() => { setZoom(null); setZoomBig(false); }} aria-label="关闭"><Icon name="close" size={22} /></button>
         </div>
       )}
     </div>

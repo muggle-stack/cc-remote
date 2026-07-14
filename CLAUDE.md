@@ -3,12 +3,12 @@
 Guidance for Claude Code (and human contributors) working in this repo. User-facing setup/run docs live in [README.md](README.md) / [README_en.md](README_en.md).
 
 ## What this is
-Self-hosted remote control for Claude Code: a phone/browser drives a `claude`
-session on some machine via a WebSocket relay. Two independent links:
-- **model link** — `claude` → whatever `~/.claude/settings.json` points at
-  (Anthropic API, or an Anthropic-compatible endpoint / proxy). cc-remote never
-  touches it.
-- **control link** (this repo) — client ⇄ relay ⇄ wrapper ⇄ `ClaudeSDKClient` ⇄ `claude`.
+Self-hosted remote control for Claude Code and Codex: a phone/browser drives a
+local `claude` or `codex` session through a WebSocket relay. Two independent links:
+- **model link** — the local CLI → whatever its own settings/authentication point
+  at. cc-remote never touches model credentials or the model API.
+- **control link** (this repo) — client ⇄ relay ⇄ wrapper ⇄ Claude SDK / Codex
+  app-server ⇄ local CLI.
 
 ## Critical constraints / traps
 - **Drain footgun**: after `ClaudeSDKClient.interrupt()`, the SDK does NOT kill
@@ -35,16 +35,16 @@ session on some machine via a WebSocket relay. Two independent links:
 - **tool_use is batched, not streamed**: emit one `tool_use` event from the
   assembled `AssistantMessage` (full `input`), never as JSON-fragment deltas.
   Text deltas still stream live via `StreamEvent`.
-- **Don't set `setting_sources=[]`**: we WANT `~/.claude/settings.json` loaded so
+- **Claude only — don't set `setting_sources=[]`**: we WANT `~/.claude/settings.json` loaded so
   `claude` inherits the model link (`ANTHROPIC_BASE_URL`), model id, and
   `bypassPermissions`. Note: settings.json's `env` block overrides the process
   env, so redirecting the model backend from cc-remote is not possible — it's
   the user's `settings.json` that decides.
-- **Auth is header-only**: `Authorization: Bearer <token>` at WS upgrade for the
-  wrapper; web clients use a short-lived HMAC session token in `?token=` obtained
-  by POSTing `LOGIN_PASSWORD` to `/api/login`. Never put tokens in message
-  bodies; the logger redacts token-named fields. (`CLIENT_TOKEN` is legacy/unused
-  by the web client.)
+- **Auth is URL-secret-free**: the wrapper uses `Authorization: Bearer <token>`
+  at WS upgrade. Web clients POST `LOGIN_PASSWORD` to `/api/login` and receive a
+  short-lived HttpOnly/SameSite cookie; `/ws` also enforces exact
+  `PUBLIC_ORIGIN`. Never put tokens in URLs or protocol message bodies; logging
+  redacts token/password fields.
 - **Protocol version gate**: `PROTOCOL_VERSION` in both `protocol.py` and
   `web/src/protocol.ts`. `deserialize` hard-rejects a version mismatch, and
   `_Base` is `extra="forbid"`, so ANY protocol change must be deployed to all
@@ -63,14 +63,17 @@ session on some machine via a WebSocket relay. Two independent links:
   (rename tmp-key→sid), which moves focus ONLY if the client was already viewing
   the temp key. Emitting SessionFocus on id-capture = focus-steal by background
   sessions.
-- **History = on-demand bulk read, NOT ring-buffer replay** (protocol v3; aligns
+- **History = on-demand bulk read; reconnect recovery = bounded ring replay**
+  (protocol v8; aligns
   with cc-on-web / web chats): the client fetches a session's history via
   `GetHistory` → the wrapper reads the transcript (`get_session_messages` +
   `translate_history`, in a thread) and returns it as ONE `History` frame
   (paginated by turn via `before`/`limit`), routed to the requester — no spawn,
-  no ring buffer. hello sends only a lightweight `Snapshot` per resident session
-  (state dot); it does NOT replay buffers (that multi-thousand-frame flood is
-  what made refreshes slow and serialized). History and the live stream are the
+  no ring buffer. A fresh hello sends one lightweight `Snapshot` per resident
+  session (state dot); a reconnecting client supplies per-session cursors and
+  gets only the missing bounded live tail. It never replays every resident ring
+  wholesale (that multi-thousand-frame flood made refreshes slow and serialized).
+  History and the live stream are the
   SAME event types, deduped client-side by msg_id/message_id, so a completed turn
   from the transcript never doubles a live one; an in-flight (`!done`) turn is
   preserved across a refetch. History timestamps come from the transcript
@@ -94,20 +97,24 @@ session on some machine via a WebSocket relay. Two independent links:
   `translate_history`/`transcript_timestamps`), ringbuffer.py (seq + live-tail),
   transport.py (WS client to relay), session.py (session id persistence).
 - `cc_remote/relay/` — server.py (FastAPI `/ws` + `/api/login` + static), auth.py
-  (bearer + HMAC session token), pairing.py (single wrapper slot + `to=`/broadcast
-  fan-out), forward.py (per-client queues + soft delta shedding).
+  (wrapper bearer + HMAC cookie session), pairing.py (single wrapper slot +
+  `to=`/broadcast fan-out), forward.py (bounded per-client queues; slow clients
+  are disconnected without silently shedding deltas).
 - `web/src/` — reducer.ts (per-session runtimes + `history` reducer), ws.ts (WS
   client + `sendGetHistory`), protocol.ts (mirror of protocol.py — keep in sync),
   components/.
 
 ## Run / test
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements-dev.txt
 python -m cc_remote.relay        # terminal 1 (set WEB_STATIC_DIR=web/dist to serve the UI)
 python -m cc_remote.wrapper      # terminal 2 (on the machine where claude runs)
 pytest                           # zero-token unit tests
-npm --prefix web run build       # build the web client
+npm --prefix web run test:reliability
+npm --prefix web run lint
+npm --prefix web run build
 ```
-`tests/test_multisession.py` + `tests/test_history.py` are zero-token unit tests
-(stub transport, no model). The `e2e_*.py` scripts drive a real relay+wrapper and
-may spend model tokens — keep prompts trivial ("hi") and prefer the unit tests.
+`pytest.ini` restricts collection to `tests/test_*.py`; these are zero-token
+unit/regression tests (stub transport, no model). Real relay/wrapper/model probes
+live under `scripts/live/` and may spend model tokens — run them explicitly,
+keep prompts trivial ("hi"), and prefer the unit tests.
