@@ -349,7 +349,8 @@ export function Composer(p: Props) {
     <div className="composer">
       <div className="composer-in">
         {cmdOpen && (
-          <div className="cmd-pop" role="listbox" aria-label="命令">
+          <div className="cmd-pop" role="listbox" aria-label="命令"
+            data-lock-horizontal-swipe="true">
             {cmdMatches.map((c) => (
               <button key={c.slash} type="button" className="cmd" onClick={() => pickCommand(c.slash)}>
                 <span className="cmd-ic"><Icon name={c.ic} size={17} /></span>

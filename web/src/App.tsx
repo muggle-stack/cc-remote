@@ -32,6 +32,7 @@ import { classifyBtwOpened, consumeDiscardedBtwSnapshot, matchesBtwRequest,
   type CodexServiceTier, type CollaborationModeName,
   type DiffTheme, type Engine } from "./protocol";
 import { isMarkdownPath } from "./preview-path";
+import { resolveSidebarSwipe } from "./responsive-layout";
 
 const THEME_KEY = "cc_remote_theme";
 const ENGINE_KEY = "cc_remote_engine";  // which backend the NEXT new session uses
@@ -82,6 +83,8 @@ export default function App() {
   const btwRequestIdsRef = useRef<Set<string>>(new Set());
   const discardedBtwSidsRef = useRef<Set<string>>(new Set());
   const touchStartX = useRef(0);
+  const touchStartY = useRef(0);
+  const touchSwipeLocked = useRef(false);
   // guards the once-per-connection "land on the latest session" auto-focus below
   const didInitFocusRef = useRef(false);
   const shortcutRef = useRef<{
@@ -141,12 +144,27 @@ export default function App() {
     };
   }, []);
 
-  // swipe right -> open sidebar, swipe left -> close (mobile)
-  const onTouchStart = (e: TouchEvent) => { touchStartX.current = e.touches[0].clientX; };
+  // Swipe right -> open sidebar, swipe left -> close (mobile). Interactive
+  // vertical scrollers opt out so a diagonal scroll never becomes navigation.
+  const onTouchStart = (e: TouchEvent) => {
+    const touch = e.touches[0];
+    touchStartX.current = touch.clientX;
+    touchStartY.current = touch.clientY;
+    touchSwipeLocked.current = e.target instanceof Element
+      && !!e.target.closest("[data-lock-horizontal-swipe]");
+  };
   const onTouchEnd = (e: TouchEvent) => {
-    const dx = e.changedTouches[0].clientX - touchStartX.current;
-    if (dx > 50 && touchStartX.current < window.innerWidth / 3) setSidebarOpen(true);
-    else if (dx < -50) setSidebarOpen(false);
+    const touch = e.changedTouches[0];
+    const action = resolveSidebarSwipe(
+      touchStartX.current,
+      touchStartY.current,
+      touch.clientX,
+      touch.clientY,
+      window.innerWidth,
+      touchSwipeLocked.current,
+    );
+    if (action === "open") setSidebarOpen(true);
+    else if (action === "close") setSidebarOpen(false);
   };
 
   useEffect(() => {

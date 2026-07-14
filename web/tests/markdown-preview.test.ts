@@ -161,6 +161,8 @@ try {
     onClose: () => {},
   }));
   assert.match(markup, /markdown-preview/);
+  assert.match(markup, /panel-resizer/);
+  assert.match(markup, /data-lock-horizontal-swipe="true"/);
   assert.match(markup, />预览</);
   assert.match(markup, />源码</);
   assert.match(markup, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);

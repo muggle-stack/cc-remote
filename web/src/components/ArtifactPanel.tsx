@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Artifact, PreviewAssetState } from "../reducer";
@@ -7,10 +9,12 @@ import { PanelTabs } from "./PanelTabs";
 import { GIT_DIFF_PAGE_LINES, pageGitDiff, type GitDiffSection } from "../diff";
 import { classifyPreviewTarget } from "../preview-path";
 import { parseLocalFileTarget } from "../file-link";
+import { clampPanelWidth } from "../responsive-layout";
 
 const EMPTY_GIT_DIFF_SECTIONS: GitDiffSection[] = [];
 const MAX_PREVIEW_ASSETS = 12;
 const SOURCE_PAGE_LINES = 500;
+const PANEL_WIDTH_KEY = "cc_remote_artifact_panel_width";
 
 function SourceFile({ content, targetLine, artifactKey }: {
   content: string;
@@ -107,6 +111,12 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
   onOpenFile?: (path: string, line?: number) => void;
   onLoadPreviewAsset?: (path: string, previewId: string) => boolean;
 }) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const resizeRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startWidth: number;
+  } | null>(null);
   const artifactKey = `${artifact.sid || ""}:${artifact.file}:${artifact.requestId || ""}`;
   const [pageState, setPageState] = useState({ key: artifactKey, page: 0 });
   const [modeState, setModeState] = useState<{ key: string; mode: "preview" | "source" }>({
@@ -134,6 +144,64 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
   const showPage = (nextPage: number) => setPageState({ key: artifactKey, page: nextPage });
   const loading = !!artifact.loading;
   const empty = artifact.kind === "gitdiff" && !loading && sections.length === 0;
+
+  const applyPanelWidth = useCallback((requestedWidth: number, persist = false) => {
+    const width = clampPanelWidth(requestedWidth, window.innerWidth);
+    document.documentElement.style.setProperty("--panel-w", `${width}px`);
+    if (persist) localStorage.setItem(PANEL_WIDTH_KEY, String(width));
+    return width;
+  }, []);
+
+  useEffect(() => {
+    if (!window.matchMedia("(min-width: 981px)").matches) return;
+    const saved = Number.parseFloat(localStorage.getItem(PANEL_WIDTH_KEY) || "");
+    if (Number.isFinite(saved)) applyPanelWidth(saved);
+    const fitPanel = () => {
+      if (!window.matchMedia("(min-width: 981px)").matches) return;
+      const current = panelRef.current?.getBoundingClientRect().width;
+      if (current) applyPanelWidth(current);
+    };
+    window.addEventListener("resize", fitPanel);
+    return () => {
+      window.removeEventListener("resize", fitPanel);
+      document.documentElement.classList.remove("panel-resizing");
+    };
+  }, [applyPanelWidth]);
+
+  const startResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (!window.matchMedia("(min-width: 981px)").matches || !panelRef.current) return;
+    resizeRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: panelRef.current.getBoundingClientRect().width,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    document.documentElement.classList.add("panel-resizing");
+    event.preventDefault();
+  };
+  const moveResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const resize = resizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    applyPanelWidth(resize.startWidth + resize.startX - event.clientX);
+  };
+  const finishResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const resize = resizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    resizeRef.current = null;
+    document.documentElement.classList.remove("panel-resizing");
+    const width = panelRef.current?.getBoundingClientRect().width;
+    if (width) applyPanelWidth(width, true);
+  };
+  const resizeWithKeyboard = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    const width = panelRef.current?.getBoundingClientRect().width;
+    if (!width) return;
+    applyPanelWidth(width + (event.key === "ArrowLeft" ? 24 : -24), true);
+    event.preventDefault();
+  };
 
   const sendNextAsset = useCallback(() => {
     const current = requestedAssets.current;
@@ -200,7 +268,12 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
     || (["md", "file"].includes(artifact.kind) ? "文件预览" : "改动");
 
   return (
-    <div className="artifact-panel">
+    <div className="artifact-panel" ref={panelRef} data-lock-horizontal-swipe="true">
+      <button type="button" className="panel-resizer"
+        aria-label="调整文件面板宽度" title="左右拖动调整面板宽度"
+        onPointerDown={startResize} onPointerMove={moveResize}
+        onPointerUp={finishResize} onPointerCancel={finishResize}
+        onKeyDown={resizeWithKeyboard} />
       <div className="artifact-head">
         {hasBtw ? <PanelTabs active={active} artifactKind={artifact.kind} onTab={onTab} />
           : <span className="artifact-title">{title}</span>}

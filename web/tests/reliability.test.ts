@@ -44,6 +44,17 @@ import {
   type ViewportReading,
 } from "../src/use-mobile-viewport.ts";
 import type { ServerEvent } from "../src/protocol.ts";
+import { clampPanelWidth, resolveSidebarSwipe } from "../src/responsive-layout.ts";
+
+assert.equal(resolveSidebarSwipe(12, 200, 84, 205, 390, false), "open");
+assert.equal(resolveSidebarSwipe(300, 200, 230, 205, 390, false), "close");
+assert.equal(resolveSidebarSwipe(12, 100, 78, 240, 390, false), null,
+  "a mostly vertical gesture must not navigate");
+assert.equal(resolveSidebarSwipe(12, 200, 84, 205, 390, true), null,
+  "an interactive vertical scroller must own its gesture");
+assert.equal(clampPanelWidth(200, 1440), 360);
+assert.equal(clampPanelWidth(2_000, 1440), 1_020);
+assert.equal(clampPanelWidth(600, 1_000), 580);
 
 const viewportListeners = new Map<MobileViewportEvent, Set<() => void>>();
 const viewportCss = new Map<string, string>();
@@ -1353,6 +1364,7 @@ for (const optimisticAction of ["set_model", "set_effort", "set_perm", "set_coll
   assert.doesNotMatch(appSource, new RegExp(`dispatch\\(\\{ type: ["']${optimisticAction}["']`));
 }
 assert.match(appSource, /const \{ cwd, model, effort \} = state\.newChat/);
+assert.match(appSource, /data-lock-horizontal-swipe/);
 
 assert.equal(relay.sendTakeover("codex-model-session"), true);
 const takeoverFrame = JSON.parse(socket.sent.at(-1) ?? "{}");
