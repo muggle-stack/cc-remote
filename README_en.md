@@ -1,25 +1,31 @@
 # cc-remote
 
-Drive **Claude Code or Codex** running on your machine from a phone or any browser — self-hosted, open source.
+<p align="center"><strong>Bring Claude Code / Codex on your machine to your phone and any browser.</strong></p>
+<p align="center">Self-hosted · Dual-engine · Multi-session · Live process · Responsive Web</p>
+<p align="center">
+  <a href="README.md">中文</a> ·
+  <a href="#quick-start-local-one-machine-5-min">5-minute quick start</a> ·
+  <a href="#production-deploy-public-vps-relay--wrapper-on-your-machine">Production deploy</a> ·
+  <a href="#security-please-read">Security</a>
+</p>
 
-A `claude` or `codex` session on one machine, remote-controlled in real time from a phone or browser through a WebSocket relay on a VPS: **live streaming, interrupt anytime, multi-device sync, multi-session switching, instant on-demand history**.
-
-> Inspired by Claude Code's official Remote Control, but fully self-hosted. The **local CLI chooses the model backend**: Claude can use Anthropic or a compatible endpoint, while Codex keeps the machine's Codex configuration. cc-remote **never touches the model API**; it only builds the *control* link.
-
-**中文:** [README.md](README.md)
+cc-remote is an open-source remote control plane. A local `wrapper` drives the
+already installed and authenticated `claude` / `codex` CLI, while browsers view
+and control its sessions through your self-hosted WebSocket relay. Models,
+authentication, and tool execution remain under the local CLI; cc-remote does
+not proxy model APIs or bake API keys into the web client.
 
 <p align="center">
-  <img src="assets/01-cc-remote-UI.png" alt="cc-remote browser UI" width="600">
-  &nbsp;
-  <img src="assets/02-cc-remote-iphone.png" alt="cc-remote on a phone browser" width="175">
+  <img src="assets/readme-claude-multisession.jpg" alt="cc-remote Claude sessions and multi-session workspace" width="960">
 </p>
 
 ---
 
 ## Table of contents
 
-- [What it does](#what-it-does)
+- [Core capabilities](#core-capabilities)
 - [Architecture](#architecture)
+- [Real interface and practical features](#real-interface-and-practical-features)
 - [Quick start (local, one machine, 5 min)](#quick-start-local-one-machine-5-min)
 - [Production deploy (public VPS relay + wrapper on your machine)](#production-deploy-public-vps-relay--wrapper-on-your-machine)
 - [Environment variables](#environment-variables)
@@ -33,15 +39,20 @@ A `claude` or `codex` session on one machine, remote-controlled in real time fro
 
 ---
 
-## What it does
+## Core capabilities
 
-- 📱 **Real-time remote control from a phone/browser** — drive Claude Code or Codex on your home/office machine from anywhere; watch it stream tokens and run tools.
-- 🧭 **Complete process timeline** — each turn can reveal reasoning summaries, commentary, plans, command output, file diffs, MCP calls, collaboration, and Hook lifecycles while keeping the final answer separate.
-- ⏹️ **Interrupt anytime** — cancel the current turn (handles SDK/app-server termination semantics correctly, no cross-talk).
-- 🔀 **Multi-session** — a resident session pool with a sidebar; background sessions keep running with live status dots.
-- 🕘 **Instant history** — history is paged on demand from the transcript/rollout (like web chats); refresh is fast, no replay flood.
-- 🔗 **Multi-device sync** — several devices on the same relay see the same conversation.
-- 🔒 **Self-hosted** — the relay is a pure WebSocket forwarder that never touches the model; your code and keys stay on your machine.
+| Scenario | What you can do |
+|---|---|
+| **Two engines** | Use Claude Code and Codex in the same web UI. Every session keeps its own model, reasoning effort, permissions, and runtime state. |
+| **Remote operation** | Watch streaming replies from a phone, tablet, or desktop browser; send attachments, queue the next message, and interrupt the current turn at any time. |
+| **Complete process** | Expand the reasoning summaries, plans, command output, file diffs, MCP calls, collaboration agents, Hooks, and terminal interaction events exposed by each engine. |
+| **Human approval** | Return Claude `can_use_tool` decisions and Codex command, file-change, user-input, general-permission, and MCP elicitation responses. Mirror a terminal-owned session read-only or take it over explicitly. |
+| **Session management** | Search, switch, rename, archive, and fork from individual messages. Codex sessions can also fork into an isolated Git worktree. |
+| **Runtime controls** | Change the model, reasoning effort, service tier, permissions, and Plan mode. Use `/goal` for long-running goals and Codex `/status` for app-server status, usage, and rate limits. |
+| **Continuity** | Let background sessions keep running and synchronize them across clients. Restore paged history from Claude transcripts or Codex rollouts and resume from a cursor after reconnecting. |
+| **Self-hosted** | The wrapper only makes outbound connections. The VPS needs no model SDK, web auth uses an HttpOnly cookie, and CLI credentials or API keys never enter the frontend. |
+
+> Available models, service tiers, and runtime controls depend on the local CLI and the capabilities exposed by its SDK or app-server.
 
 ## Architecture
 
@@ -58,6 +69,77 @@ CONTROL LINK (this repo):              browser ⇄ relay(WebSocket) ⇄ wrapper 
 | **wrapper** | the machine where `claude` / `codex` runs | Holds a session pool, translates SDK/app-server events to the wire protocol, handles interrupt/drain, and reads transcript/rollout history on demand. **Outbound-only to the relay — no inbound ports needed.** |
 | **relay** | public VPS (or local) | Pure WebSocket forwarder (FastAPI). The wrapper uses a Bearer token and browsers use an HttpOnly session cookie; single wrapper slot, multi-client fan-out. **Never imports `claude-agent-sdk`, never touches the model API.** |
 | **web** | the browser | React client; the relay serves its static files (`web/dist`) from the same origin. |
+
+## Real interface and practical features
+
+The screenshots below come from a running cc-remote installation, not design mockups.
+
+### Multi-session management: keep work running in the background
+
+The session pool groups conversations by working directory and lets you search,
+switch, rename, and archive them. You can move to another session while one is
+still working in the background, then return to its complete live progress.
+Claude Code and Codex share the same workspace while retaining independent
+context, models, permissions, and runtime state.
+
+<p align="center">
+  <img src="assets/readme-multi-session.jpg" alt="Multi-session workspace grouped by project with search and switching" width="960">
+</p>
+
+### Claude Code: see reasoning, tool calls, and Hooks
+
+A Claude session is more than a simplified chat showing only the final text.
+cc-remote receives the reasoning, command calls, tool results, and Hook lifecycle
+events exposed by the Claude Code SDK and presents them as a collapsible timeline.
+The composer also shows the session's current model, reasoning effort, permission
+mode, and context usage.
+
+<p align="center">
+  <img src="assets/readme-claude-session.jpg" alt="Claude Code reasoning, command calls, and Hook events" width="960">
+</p>
+
+### New sessions: choose the engine and working directory first
+
+Create either a Claude Code or Codex session from one entry point, browse for its
+working directory, and attach images or files to the first message. Once the
+session exists, adjust its model, permissions, or Plan mode only when needed
+instead of filling in a row of defaults up front.
+
+<p align="center">
+  <img src="assets/readme-new-session.jpg" alt="Create a new session by choosing its engine and working directory" width="960">
+</p>
+
+### Codex: preserve plans and the complete process
+
+Codex sessions organize the reasoning summaries, plans, commands, diffs, MCP
+calls, collaboration agents, and Hooks reported by app-server into a collapsible
+timeline. Expand it while a turn is running to follow the details, then collapse
+the completed work into a concise summary; the final response always remains
+separate.
+
+<p align="center">
+  <img src="assets/readme-process-timeline.jpg" alt="Collapsible Codex plan, Hook, and tool-call timeline" width="960">
+</p>
+
+### Per-session Codex controls: model, reasoning, permissions, and status
+
+The model, reasoning effort, service tier, and permissions belong to the current
+session, so you can change the next turn without editing the machine's global
+configuration. The composer also provides attachments, queue/interrupt controls,
+context usage, and command entry points such as `/goal` and `/status`.
+
+<p align="center">
+  <img src="assets/readme-model-controls.jpg" alt="Codex model selection and per-session controls" width="960">
+</p>
+
+### Common operations at a glance
+
+- **Sessions:** create, search, run in the background, rename, archive, fork, and create a Codex worktree.
+- **Turns:** stream, queue, interrupt, copy, edit and resend, or fork from a specific message.
+- **Tools:** inspect command output, file changes and diffs, MCP, collaboration agents, Hooks, approvals, and user-input requests.
+- **Terminal coordination:** detect a native CLI owner and mirror new messages in real time while preserving the remote user's explicit takeover control.
+- **Status:** inspect the model, reasoning effort, permissions, Plan mode, context, goals, usage, rate limits, and runtime warnings.
+- **Devices:** use a responsive mobile UI, light or dark themes, multi-browser synchronization, and reconnect recovery.
 
 ## Quick start (local, one machine, 5 min)
 
