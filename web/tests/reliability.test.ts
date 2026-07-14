@@ -491,7 +491,7 @@ try {
     OMITTED_PROCESS_ITEM_ID,
   } = await reducerHarness.ssrLoadModule("/src/reducer.ts");
   const event = (body: Record<string, unknown>): ServerEvent => ({
-    v: 8, ts: 10, ...body,
+    v: 9, ts: 10, ...body,
   } as ServerEvent);
   const unannounced = createRuntime();
   assert.equal(unannounced.model, "");
@@ -1268,7 +1268,7 @@ class FakeWebSocket {
   }
 
   receive(frame: Record<string, unknown>): void {
-    this.onmessage?.({ data: JSON.stringify({ v: 8, ts: 1, ...frame }) });
+    this.onmessage?.({ data: JSON.stringify({ v: 9, ts: 1, ...frame }) });
   }
 }
 

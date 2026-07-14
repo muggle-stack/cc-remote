@@ -5,9 +5,9 @@ import { shouldAcceptSessionList } from "../src/session-list.ts";
 
 const outbox = new CommandOutbox(2, 4096);
 const first = outbox.enqueue(
-  { v: 8, type: "query", prompt: "one", ts: 1 }, "client-1", "cmd-1");
+  { v: 9, type: "query", prompt: "one", ts: 1 }, "client-1", "cmd-1");
 const second = outbox.enqueue(
-  { v: 8, type: "interrupt", ts: 2 }, "client-1", "cmd-2");
+  { v: 9, type: "interrupt", ts: 2 }, "client-1", "cmd-2");
 assert.equal(first.ok, true);
 assert.equal(second.ok, true);
 assert.equal(outbox.size, 2);
@@ -17,7 +17,7 @@ assert.deepEqual(
 );
 
 const full = outbox.enqueue(
-  { v: 8, type: "set_model", model: "x", ts: 3 }, "client-1", "cmd-3");
+  { v: 9, type: "set_model", model: "x", ts: 3 }, "client-1", "cmd-3");
 assert.equal(full.ok, false);
 assert.equal(outbox.size, 2); // never evict an unacknowledged older command
 
@@ -33,16 +33,16 @@ assert.deepEqual(
 
 const byteBounded = new CommandOutbox(10, 8);
 assert.equal(byteBounded.enqueue(
-  { v: 8, type: "query", prompt: "too large", ts: 1 }, "c", "x").ok, false);
+  { v: 9, type: "query", prompt: "too large", ts: 1 }, "c", "x").ok, false);
 assert.equal(byteBounded.size, 0);
 assert.equal(byteBounded.byteSize, 0);
 
 const frameBounded = new CommandOutbox(10, 4096, 160);
 const smallFrame = frameBounded.enqueue(
-  { v: 8, type: "query", prompt: "small", ts: 1 }, "client", "small");
+  { v: 9, type: "query", prompt: "small", ts: 1 }, "client", "small");
 assert.equal(smallFrame.ok, true);
 const oversizedFrame = frameBounded.enqueue(
-  { v: 8, type: "query", prompt: "x".repeat(200), ts: 1 }, "client", "oversized");
+  { v: 9, type: "query", prompt: "x".repeat(200), ts: 1 }, "client", "oversized");
 assert.equal(oversizedFrame.ok, false);
 assert.match(oversizedFrame.ok ? "" : oversizedFrame.reason, /command too large/);
 assert.equal(frameBounded.size, 1); // reject before mutating aggregate accounting
@@ -50,7 +50,7 @@ assert.equal(frameBounded.byteSize, smallFrame.ok ? new TextEncoder().encode(sma
 
 const rekeyed = new CommandOutbox(10, 4096);
 assert.equal(rekeyed.enqueue(
-  { v: 8, type: "query", sid: "tmp-old", prompt: "x", msg_id: "m", ts: 1 },
+  { v: 9, type: "query", sid: "tmp-old", prompt: "x", msg_id: "m", ts: 1 },
   "c", "rekey-cmd").ok, true);
 assert.deepEqual(rekeyed.pendingSessionIds(), ["tmp-old"]);
 assert.deepEqual(rekeyed.pendingFramesWithSessionIds().map((item) => ({
@@ -64,10 +64,10 @@ assert.equal(JSON.parse(rekeyed.pendingFrames()[0]).sid, "real-id");
 
 const protectedTargets = new CommandOutbox(10, 4096);
 assert.equal(protectedTargets.enqueue(
-  { v: 8, type: "query", sid: "query-target", prompt: "x", msg_id: "m", ts: 1 },
+  { v: 9, type: "query", sid: "query-target", prompt: "x", msg_id: "m", ts: 1 },
   "c", "query-cmd").ok, true);
 assert.equal(protectedTargets.enqueue(
-  { v: 8, type: "switch_session", session_id: "switch-target", ts: 1 },
+  { v: 9, type: "switch_session", session_id: "switch-target", ts: 1 },
   "c", "switch-cmd").ok, true);
 assert.deepEqual(protectedTargets.pendingSessionIds(), ["query-target", "switch-target"]);
 
@@ -87,10 +87,10 @@ assert.deepEqual(planRecoveryReplay([
 ]);
 
 assert.equal(shouldAcceptSessionList("claude", {
-  v: 8, type: "session_list", ts: 1, engine: "claude", sessions: [],
+  v: 9, type: "session_list", ts: 1, engine: "claude", sessions: [],
 }), true);
 assert.equal(shouldAcceptSessionList("codex", {
-  v: 8, type: "session_list", ts: 1, engine: "claude", sessions: [],
+  v: 9, type: "session_list", ts: 1, engine: "claude", sessions: [],
 }), false);
 
 console.log("command outbox tests passed");

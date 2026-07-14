@@ -13,6 +13,7 @@ import { Icon, ClaudeMark, ClaudeWorking, ClaudeSpark } from "../icons";
 import { canForkTurn } from "../session-worktree";
 import { ProcessTimeline } from "./ProcessTimeline";
 import { finalTextBlocks, processBlocks } from "../process-blocks";
+import { isMarkdownPath } from "../preview-path";
 import {
   anchoredScrollTop,
   createFrameCoalescer,
@@ -44,7 +45,8 @@ function formatTime(ts: number): string {
 }
 
 export function ChatView({ sid, turns, engine = "claude", loading, hasMore,
-  onLoadMore, onEdit, onGetDiff, onFork, forkingPointId }: {
+  onLoadMore, onEdit, onGetDiff, onPreviewMarkdown, onOpenFile,
+  onFork, forkingPointId }: {
   sid: string | null;
   turns: Turn[];
   engine?: "claude" | "codex";
@@ -53,6 +55,8 @@ export function ChatView({ sid, turns, engine = "claude", loading, hasMore,
   onLoadMore?: () => void;
   onEdit: (prompt: string) => void;
   onGetDiff: (file: string) => void;
+  onPreviewMarkdown?: (file: string) => void;
+  onOpenFile?: (file: string, line?: number) => void;
   onFork?: (forkPointId: string) => void;
   forkingPointId?: string | null;
 }) {
@@ -238,11 +242,16 @@ export function ChatView({ sid, turns, engine = "claude", loading, hasMore,
           <Icon name="edit" size={13} />改动 {arr.length} 个文件
         </button>
         <div className="turn-files-list">
-          {arr.map((f) => (
-            <button key={f} className="turn-file-chip" onClick={() => onGetDiff(f)} title={f}>
+          {arr.map((f) => {
+            const markdown = isMarkdownPath(f) && !!onPreviewMarkdown;
+            return <button key={f} className={"turn-file-chip" + (markdown ? " markdown" : "")}
+              onClick={() => markdown ? onPreviewMarkdown(f) : onGetDiff(f)}
+              title={markdown ? `预览 ${f}` : f}>
+              <Icon name={markdown ? "read" : "edit"} size={12} />
               {f.split("/").pop()}
-            </button>
-          ))}
+              {markdown && <span className="turn-file-action">预览</span>}
+            </button>;
+          })}
         </div>
       </div>
     );
@@ -308,9 +317,11 @@ export function ChatView({ sid, turns, engine = "claude", loading, hasMore,
             {t.blocks.length > 0 ? (
               <>
                 <ProcessTimeline blocks={t.blocks} done={t.done}
-                  durationMs={t.durationMs} startTs={t.ts} />
+                  durationMs={t.durationMs} startTs={t.ts}
+                  onOpenFile={onOpenFile} />
                 {finalTextBlocks(t.blocks).map((block) => (
-                  <MessageBlock key={block.message_id} text={block.text} done={block.done} />
+                  <MessageBlock key={block.message_id} text={block.text}
+                    done={block.done} onOpenFile={onOpenFile} />
                 ))}
                 {!t.done && processBlocks(t.blocks).length === 0
                   && finalTextBlocks(t.blocks).length === 0 && (

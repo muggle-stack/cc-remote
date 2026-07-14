@@ -15,7 +15,9 @@ from cc_remote.protocol import (
     CollaborationMode,
     ForkSessionWorktree,
     GetDiff,
+    GetFilePreview,
     GetModels,
+    GetPreviewAsset,
     NewSession,
     PROTOCOL_VERSION,
     ProtocolError,
@@ -107,6 +109,9 @@ def test_surrogate_filename_is_a_clean_validation_error():
         lambda: SwitchSession(session_id="sid-1", engine="bogus"),
         lambda: GetModels(engine="bogus"),
         lambda: GetDiff(file="x", theme="bogus"),
+        lambda: GetFilePreview(path="x" * 4097, request_id="preview-1"),
+        lambda: GetPreviewAsset(
+            path="image.png", preview_id="preview-1", request_id="x" * 129),
         lambda: AnswerQuestion(
             ask_id="ask-1", answer="x" * (ASK_ANSWER_MAX_CHARS + 1)),
         lambda: ForkSessionWorktree(

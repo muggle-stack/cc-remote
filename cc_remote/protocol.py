@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 8
+PROTOCOL_VERSION = 9
 
 State = Literal["idle", "running", "interrupting", "draining"]
 Engine = Literal["claude", "codex"]
@@ -73,6 +73,9 @@ ASK_OPTION_DESCRIPTION_MAX_CHARS = 2 * 1024
 ASK_ANSWER_MAX_CHARS = 4 * 1024
 ASK_OPTION_MIN_COUNT = 2
 ASK_OPTION_MAX_COUNT = 5
+FILE_PREVIEW_MAX_BYTES = 512 * 1024
+PREVIEW_ASSET_MAX_BYTES = 4 * 1024 * 1024
+MAX_ENCODED_PREVIEW_ASSET_CHARS = ((PREVIEW_ASSET_MAX_BYTES + 2) // 3) * 4
 
 
 def _valid_attachment_filename(value: str) -> str:
@@ -106,6 +109,15 @@ AskOptionDescription = Annotated[
 ]
 AskAnswerText = Annotated[
     str, StringConstraints(min_length=1, max_length=ASK_ANSWER_MAX_CHARS),
+]
+PreviewPath = Annotated[
+    str, StringConstraints(min_length=1, max_length=4096),
+]
+PreviewContent = Annotated[
+    str, StringConstraints(max_length=FILE_PREVIEW_MAX_BYTES),
+]
+PreviewAssetData = Annotated[
+    str, StringConstraints(min_length=1, max_length=MAX_ENCODED_PREVIEW_ASSET_CHARS),
 ]
 StatusErrorText = Annotated[
     str, StringConstraints(min_length=1, max_length=384),
@@ -1013,6 +1025,47 @@ class DiffReport(_Base):
     diff: str
 
 
+class GetFilePreview(_Command):
+    """client -> wrapper: read one UTF-8 text file below the session cwd."""
+    type: Literal["get_file_preview"] = "get_file_preview"
+    path: PreviewPath
+    request_id: WireId
+
+
+class FilePreview(_Base):
+    """wrapper -> requesting client: bounded text source or a safe error."""
+    type: Literal["file_preview"] = "file_preview"
+    path: PreviewPath
+    request_id: WireId
+    format: Literal["markdown", "text"] = "text"
+    content: PreviewContent = ""
+    size: int = Field(default=0, ge=0)
+    truncated: bool = False
+    mtime_ns: int = Field(default=0, ge=0)
+    error: Optional[str] = Field(default=None, max_length=512)
+
+
+class GetPreviewAsset(_Command):
+    """client -> wrapper: load one image referenced by an open Markdown preview."""
+    type: Literal["get_preview_asset"] = "get_preview_asset"
+    path: PreviewPath
+    preview_id: WireId
+    request_id: WireId
+
+
+class PreviewAsset(_Base):
+    """wrapper -> requesting client: bounded base64 image for one preview."""
+    type: Literal["preview_asset"] = "preview_asset"
+    path: PreviewPath
+    preview_id: WireId
+    request_id: WireId
+    media_type: Optional[Literal[
+        "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
+    ]] = None
+    data: Optional[PreviewAssetData] = None
+    error: Optional[str] = Field(default=None, max_length=512)
+
+
 class GetHistory(_Command):
     """client -> wrapper: request a session's history, read ON-DEMAND from its
     transcript (NOT the ring buffer, NOT requiring the session to be resident).
@@ -1144,8 +1197,8 @@ class GoalState(_Base):
 
 
 AnyMessage = Union[
-    Hello, Query, Interrupt, Takeover, TakeoverState, SetModel, SetEffort, SetServiceTier, SetCollaborationMode, SetPerm, Fast, CollaborationMode, OpenBtw, CloseBtw, BtwOpened, GetContext, GetStatus, GetDiff, GetHistory, GetModels, ListSessions, SwitchSession, NewSession, ListDir, Ping, Pong, CommandAck,
-    ReplayStart, ReplayEnd, Snapshot, StateEvent, Model, Effort, Perm, ContextReport, StatusReport, Notice, RateLimitUpdate, DiffReport, History, Models, AskUser, AnswerQuestion,
+    Hello, Query, Interrupt, Takeover, TakeoverState, SetModel, SetEffort, SetServiceTier, SetCollaborationMode, SetPerm, Fast, CollaborationMode, OpenBtw, CloseBtw, BtwOpened, GetContext, GetStatus, GetDiff, GetFilePreview, GetPreviewAsset, GetHistory, GetModels, ListSessions, SwitchSession, NewSession, ListDir, Ping, Pong, CommandAck,
+    ReplayStart, ReplayEnd, Snapshot, StateEvent, Model, Effort, Perm, ContextReport, StatusReport, Notice, RateLimitUpdate, DiffReport, FilePreview, PreviewAsset, History, Models, AskUser, AnswerQuestion,
     SessionList, SessionFocus, SessionRekey, RenameSession, ArchiveSession,
     ForkSession, ForkSessionWorktree, SessionForked, DirList,
     GetGoal, SetGoal, ClearGoal, GoalState,
@@ -1182,6 +1235,8 @@ _TYPE_MAP: dict[str, type[BaseModel]] = {
     "get_context": GetContext,
     "get_status": GetStatus,
     "get_diff": GetDiff,
+    "get_file_preview": GetFilePreview,
+    "get_preview_asset": GetPreviewAsset,
     "get_history": GetHistory,
     "get_models": GetModels,
     "models": Models,
@@ -1212,6 +1267,8 @@ _TYPE_MAP: dict[str, type[BaseModel]] = {
     "notice": Notice,
     "rate_limit_update": RateLimitUpdate,
     "diff_report": DiffReport,
+    "file_preview": FilePreview,
+    "preview_asset": PreviewAsset,
     "history": History,
     "ask_user": AskUser,
     "answer_question": AnswerQuestion,

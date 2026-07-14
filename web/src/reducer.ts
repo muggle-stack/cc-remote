@@ -123,7 +123,28 @@ export interface PendingQuery {
   files?: QueryFile[];
 }
 
-export interface Artifact { file: string; kind: "diff" | "md" | "gitdiff"; sid?: string | null; diff?: DiffLine[]; content?: string; sections?: GitDiffSection[]; loading?: boolean; }
+export interface PreviewAssetState {
+  mediaType?: string;
+  data?: string;
+  error?: string;
+}
+
+export interface Artifact {
+  file: string;
+  kind: "diff" | "md" | "file" | "gitdiff";
+  sid?: string | null;
+  requestId?: string;
+  diff?: DiffLine[];
+  content?: string;
+  sections?: GitDiffSection[];
+  loading?: boolean;
+  size?: number;
+  truncated?: boolean;
+  mtimeNs?: number;
+  line?: number;
+  error?: string;
+  assets?: Record<string, PreviewAssetState>;
+}
 
 export interface SessionRuntime {
   turns: Turn[];
@@ -229,6 +250,7 @@ export type Action =
   | { type: "set_turns"; sid: string; turns: Turn[] }
   | { type: "set_artifact"; artifact: Artifact }
   | { type: "open_artifact_loading"; file: string; sid: string | null }
+  | { type: "open_file_loading"; file: string; sid: string | null; requestId: string; kind: "md" | "file"; line?: number }
   | { type: "clear_artifact" }
   | { type: "clear_btw" }
   | { type: "focus_session"; sid: string }
@@ -685,6 +707,11 @@ export function reduce(state: AppState, action: Action): AppState {
       // optimistic: show the diff panel (with a spinner) instantly on click; the
       // diff_report event replaces it with the real sections when it arrives.
       return { ...state, artifact: { file: action.file, sid: action.sid, kind: "gitdiff", sections: [], loading: true } };
+    case "open_file_loading":
+      return { ...state, artifact: {
+        file: action.file, sid: action.sid, requestId: action.requestId,
+        kind: action.kind, line: action.line, content: "", assets: {}, loading: true,
+      } };
     case "clear_artifact":
       return { ...state, artifact: null };
     case "clear_btw": {
@@ -964,6 +991,38 @@ function reduceEvent(
           || state.artifact.sid !== (e.sid ?? state.focusedSid)) return state;
       return { ...state, artifact: {
         file: e.file, sid: state.artifact.sid, kind: "gitdiff", sections: parseGitDiff(e.diff),
+      } };
+    case "file_preview":
+      if (!state.artifact || !["md", "file"].includes(state.artifact.kind)
+          || state.artifact.requestId !== e.request_id
+          || state.artifact.sid !== (e.sid ?? state.focusedSid)) return state;
+      return { ...state, artifact: {
+        file: e.path,
+        sid: state.artifact.sid,
+        requestId: e.request_id,
+        kind: e.format === "markdown" ? "md" : "file",
+        content: e.content,
+        size: e.size,
+        truncated: e.truncated,
+        mtimeNs: e.mtime_ns,
+        line: state.artifact.line,
+        error: e.error ?? undefined,
+        assets: {},
+      } };
+    case "preview_asset":
+      if (!state.artifact || state.artifact.kind !== "md"
+          || state.artifact.requestId !== e.preview_id
+          || state.artifact.sid !== (e.sid ?? state.focusedSid)) return state;
+      return { ...state, artifact: {
+        ...state.artifact,
+        assets: {
+          ...state.artifact.assets,
+          [e.path]: {
+            mediaType: e.media_type ?? undefined,
+            data: e.data ?? undefined,
+            error: e.error ?? undefined,
+          },
+        },
       } };
     case "state":
       return patch(state, e.sid, (rt) => {

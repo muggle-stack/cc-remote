@@ -3,21 +3,24 @@ import { ChatView } from "./ChatView";
 import { Icon } from "../icons";
 import { PanelTabs } from "./PanelTabs";
 import { NoticeStack } from "./NoticeStack";
-import type { SessionRuntime } from "../reducer";
+import type { Artifact, SessionRuntime } from "../reducer";
 import { ImeSubmitGuard } from "../ime-submit";
 
 /** /btw side panel: a mini chat over an ephemeral fork of the current session.
  * Reuses ChatView for the transcript; a minimal textarea for input. Closing
  * discards the fork (the main thread never sees any of this). */
-export function BtwPanel({ sid, rt, engine, opening, active, hasDiff, onTab, onSend, onClose, onDismissNotice }: {
+export function BtwPanel({ sid, rt, engine, opening, active, hasArtifact,
+  artifactKind, onTab, onSend, onOpenFile, onClose, onDismissNotice }: {
   sid?: string;
   rt: SessionRuntime | undefined;
   engine?: string;
   opening?: boolean;   // fork still spawning (no sid yet) — show a spinner
   active: "diff" | "btw";
-  hasDiff: boolean;
+  hasArtifact: boolean;
+  artifactKind?: Artifact["kind"];
   onTab: (v: "diff" | "btw") => void;
   onSend: (prompt: string) => void;
+  onOpenFile?: (path: string, line?: number) => void;
   onClose: () => void;
   onDismissNotice: (noticeId: string) => void;
 }) {
@@ -53,8 +56,8 @@ export function BtwPanel({ sid, rt, engine, opening, active, hasDiff, onTab, onS
   return (
     <div className="btw-panel">
       <div className="btw-head">
-        {hasDiff
-          ? <PanelTabs active={active} onTab={onTab} />
+        {hasArtifact
+          ? <PanelTabs active={active} artifactKind={artifactKind} onTab={onTab} />
           : <div className="btw-titles">
               <span className="btw-title">btw · 侧边对话{engine === "codex" ? " · Codex" : ""}</span>
               <span className="btw-sub">基于当前会话上下文,不写回主线</span>
@@ -69,7 +72,8 @@ export function BtwPanel({ sid, rt, engine, opening, active, hasDiff, onTab, onS
           ? <div className="btw-empty"><span className="thinking"><span/><span/><span/></span> 正在打开侧边对话…</div>
           : turns.length === 0
             ? <div className="btw-empty">问一个基于当前会话的侧边问题 —— 回答不会写进主线,关闭即丢弃。</div>
-            : <ChatView sid={sid ?? null} turns={turns} onEdit={() => {}} onGetDiff={() => {}} />}
+            : <ChatView sid={sid ?? null} turns={turns} onEdit={() => {}}
+                onGetDiff={() => {}} onOpenFile={onOpenFile} />}
       </div>
       <div className="btw-input">
         <textarea

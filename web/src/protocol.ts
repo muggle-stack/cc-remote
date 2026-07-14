@@ -217,6 +217,10 @@ export interface Perm extends Base { type: "perm"; mode: string }
 export interface GetContext extends Base { type: "get_context" }
 export interface GetDiff extends Base { type: "get_diff"; file: string; theme?: DiffTheme }
 export interface DiffReport extends Base { type: "diff_report"; file: string; diff: string }
+export interface GetFilePreview extends Base { type: "get_file_preview"; path: string; request_id: string }
+export interface FilePreview extends Base { type: "file_preview"; path: string; request_id: string; format: "markdown" | "text"; content: string; size: number; truncated: boolean; mtime_ns: number; error?: string | null }
+export interface GetPreviewAsset extends Base { type: "get_preview_asset"; path: string; preview_id: string; request_id: string }
+export interface PreviewAsset extends Base { type: "preview_asset"; path: string; preview_id: string; request_id: string; media_type?: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | null; data?: string | null; error?: string | null }
 // On-demand bulk history: fetched once when a session is opened (like a web
 // chat's GET /conversation) instead of replaying the ring buffer on every hello.
 export interface GetHistory extends Base { type: "get_history"; session_id: string; client_id?: string | null; cwd?: string | null; before?: string | null; limit?: number | null }
@@ -338,7 +342,7 @@ export interface ContextReport extends Base {
 }
 
 export type ServerEvent =
-  | Pong | CommandAck | ReplayStart | ReplayEnd | Snapshot | StateEvent | Model | Effort | Fast | CollaborationMode | BtwOpened | Perm | ContextReport | DiffReport | History | Models | TakeoverState
+  | Pong | CommandAck | ReplayStart | ReplayEnd | Snapshot | StateEvent | Model | Effort | Fast | CollaborationMode | BtwOpened | Perm | ContextReport | DiffReport | FilePreview | PreviewAsset | History | Models | TakeoverState
   | AskUser | GoalState | StatusReport | Notice | RateLimitUpdate
   | SessionList | SessionFocus | SessionRekey | SessionForked
   | DirList
@@ -346,7 +350,7 @@ export type ServerEvent =
   | ProcessEvent | TurnPlan | TurnDiff
   | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 8;
+export const PROTOCOL_VERSION = 9;
 
 /** Local storage is user-controlled and may contain stale values from older
  * builds. Normalize before a value reaches a strict Pydantic command frame. */

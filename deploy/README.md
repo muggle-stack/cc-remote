@@ -29,12 +29,12 @@ machine). The **full step-by-step guide is in the main [README](../README.md#生
 - `env.relay.example` / `env.wrapper.example` — environment templates for each
   side. Install the wrapper template as root:root mode 0600 at the path above.
 
-Protocol v8 is a coordinated upgrade: publish the Python package and freshly
+Protocol v9 is a coordinated upgrade: publish the Python package and freshly
 built `web/dist` together in the documented stop window, then restart relay and
 wrapper. The strict protocol gate is intentional and mixed protocol versions will
 not communicate. `setup-vps.sh` also rejects a missing/old web build manifest.
-For a manual upgrade, stop the wrapper before stopping the relay; start the v8
-relay first and the v8 wrapper last.
+For a manual upgrade, stop the wrapper before stopping the relay; start the v9
+relay first and the v9 wrapper last.
 
 ## Security (short version)
 

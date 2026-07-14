@@ -47,6 +47,7 @@ interface Props {
   onClear: () => void;
   onContext: () => void;
   onOpenBtw?: () => void;
+  onPreview?: (path: string) => void;
   onGoal?: (args: string) => void;
   onStatus?: () => void;
   contextReport: ContextReport | null;
@@ -243,6 +244,14 @@ export function Composer(p: Props) {
       case "goal": p.onGoal?.(args); break;
       // /btw: open an ephemeral side-fork panel (both engines).
       case "btw": p.onOpenBtw?.(); break;
+      case "preview":
+        if (!args) {
+          setInput("/preview ");
+          focusTa();
+          return;
+        }
+        p.onPreview?.(args);
+        break;
       // Codex /fast flips only this thread's persisted service tier. The UI
       // waits for the wrapper's authoritative Fast event before changing state.
       case "fast": {

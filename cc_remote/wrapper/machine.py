@@ -38,6 +38,8 @@ Multi-session model:
 from __future__ import annotations
 
 import asyncio
+import base64
+import codecs
 import json
 import os
 import re
@@ -64,7 +66,12 @@ from cc_remote.attachments import decode_attachment, validate_attachments
 from cc_remote.config import WrapperConfig
 from cc_remote.log import logger
 from cc_remote.protocol import (
-    ASK_OPTION_MAX_COUNT, Error, Hello, Query, Interrupt, CommandAck, Model, Models, Effort, Fast, CollaborationMode, Perm, BtwOpened, ContextReport, StatusReport, Notice, RateLimitUpdate, DiffReport, History, AskUser, GoalState, Pong, Snapshot, StateEvent, State, TakeoverState, UserMsg, TurnEnd, TurnResult, is_downstream, is_reliable_command,
+    ASK_OPTION_MAX_COUNT, FILE_PREVIEW_MAX_BYTES, PREVIEW_ASSET_MAX_BYTES,
+    Error, Hello, Query, Interrupt, CommandAck, Model, Models, Effort, Fast,
+    CollaborationMode, Perm, BtwOpened, ContextReport, StatusReport, Notice,
+    RateLimitUpdate, DiffReport, FilePreview, PreviewAsset, History, AskUser,
+    GoalState, Pong, Snapshot, StateEvent, State, TakeoverState, UserMsg,
+    TurnEnd, TurnResult, is_downstream, is_reliable_command,
     SessionInfo, SessionList, SessionFocus, SessionRekey, SessionForked, DirList,
     ERR_BUSY, ERR_NOT_RUNNING, ERR_BAD_PROMPT, ERR_DRAIN_TIMEOUT,
     ERR_CC_CRASH, ERR_INTERNAL, ERR_AUTH, ERR_PROTOCOL,
@@ -188,9 +195,19 @@ class WrapperMachine:
     FORK_RECONCILE_DELAY = 0.1
     FORK_BACKGROUND_ATTEMPTS = 100
     UNCERTAIN_FORK_CAP = 4096
+    MARKDOWN_PREVIEW_SUFFIXES = frozenset({".md", ".markdown"})
+    PREVIEW_ASSET_MEDIA_TYPES = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".avif": "image/avif",
+    }
     SAFE_RETRY_COMMANDS = frozenset({
         "list_sessions", "get_history", "get_models",
-        "get_context", "get_status", "get_diff", "get_goal", "list_dir",
+        "get_context", "get_status", "get_diff", "get_file_preview",
+        "get_preview_asset", "get_goal", "list_dir",
     })
     # Commands whose target is a runtime ``sid``.  A /btw runtime is private to
     # the client that created it, so every operation against that sid must pass
@@ -198,7 +215,8 @@ class WrapperMachine:
     BTW_SID_COMMANDS = frozenset({
         "query", "interrupt", "takeover", "set_model", "set_effort",
         "set_service_tier", "set_collaboration_mode", "open_btw", "close_btw", "set_perm",
-        "get_context", "get_status", "get_diff", "answer_question", "get_goal", "set_goal", "clear_goal",
+        "get_context", "get_status", "get_diff", "get_file_preview",
+        "get_preview_asset", "answer_question", "get_goal", "set_goal", "clear_goal",
     })
     # These commands address a session through ``session_id`` instead.
     BTW_SESSION_COMMANDS = frozenset({
@@ -835,12 +853,19 @@ class WrapperMachine:
         result = await self._handle(cmd)
 
         if reliable:
-            candidates = result if isinstance(result, (tuple, list)) else (result,)
-            responses = tuple(
-                response.model_copy(deep=True)
-                for response in candidates
-                if getattr(response, "type", None)
-            )
+            # Safe reads are recreated on retry, so retaining their potentially
+            # large History/file/image payloads in the command-id LRU buys
+            # nothing and can multiply memory by clients × commands.
+            if cmd.type in self.SAFE_RETRY_COMMANDS:
+                responses = ()
+            else:
+                candidates = (
+                    result if isinstance(result, (tuple, list)) else (result,))
+                responses = tuple(
+                    response.model_copy(deep=True)
+                    for response in candidates
+                    if getattr(response, "type", None)
+                )
             self._remember_command(client_id, cmd_id, responses)
             await self._send_command_ack(client_id, cmd_id)
 
@@ -877,6 +902,10 @@ class WrapperMachine:
             return await self._handle_get_status(cmd)
         elif t == "get_diff":
             await self._handle_get_diff(cmd)
+        elif t == "get_file_preview":
+            return await self._handle_get_file_preview(cmd)
+        elif t == "get_preview_asset":
+            return await self._handle_get_preview_asset(cmd)
         elif t == "get_history":
             await self._handle_get_history(cmd)
         elif t == "get_models":
@@ -3200,6 +3229,101 @@ class WrapperMachine:
             log.exception("get_diff failed", error=str(e))
             await self._emit(ctx, Error(code=ERR_INTERNAL, message=f"get_diff failed: {e}"))
 
+    async def _handle_get_file_preview(self, cmd):
+        sid = getattr(cmd, "sid", None)
+        client_id = getattr(cmd, "client_id", None)
+        ctx = self._ctx_for(sid)
+        if ctx is None:
+            response = FilePreview(
+                path=cmd.path,
+                request_id=cmd.request_id,
+                format=self._preview_format(cmd.path),
+                error="该会话未启动，无法读取文件",
+                to=client_id,
+            )
+            await self._emit_to_sid(sid, response)
+            return response
+
+        try:
+            path, content, size, truncated, mtime_ns, file_format = (
+                await asyncio.to_thread(
+                    self._read_text_preview, ctx.cwd, cmd.path))
+            response = FilePreview(
+                path=path,
+                request_id=cmd.request_id,
+                format=file_format,
+                content=content,
+                size=size,
+                truncated=truncated,
+                mtime_ns=mtime_ns,
+                to=client_id,
+            )
+        except (UnicodeDecodeError, ValueError) as exc:
+            response = FilePreview(
+                path=cmd.path,
+                request_id=cmd.request_id,
+                format=self._preview_format(cmd.path),
+                error=str(exc),
+                to=client_id,
+            )
+        except Exception as exc:
+            log.exception("file preview failed", error_type=type(exc).__name__)
+            response = FilePreview(
+                path=cmd.path,
+                request_id=cmd.request_id,
+                format=self._preview_format(cmd.path),
+                error="读取文件失败",
+                to=client_id,
+            )
+        await self._emit(ctx, response)
+        return response
+
+    async def _handle_get_preview_asset(self, cmd):
+        sid = getattr(cmd, "sid", None)
+        client_id = getattr(cmd, "client_id", None)
+        ctx = self._ctx_for(sid)
+        if ctx is None:
+            response = PreviewAsset(
+                path=cmd.path,
+                preview_id=cmd.preview_id,
+                request_id=cmd.request_id,
+                error="该会话未启动，无法读取预览图片",
+                to=client_id,
+            )
+            await self._emit_to_sid(sid, response)
+            return response
+
+        try:
+            _, media_type, data = await asyncio.to_thread(
+                self._read_preview_asset, ctx.cwd, cmd.path)
+            response = PreviewAsset(
+                path=cmd.path,
+                preview_id=cmd.preview_id,
+                request_id=cmd.request_id,
+                media_type=media_type,
+                data=base64.b64encode(data).decode("ascii"),
+                to=client_id,
+            )
+        except ValueError as exc:
+            response = PreviewAsset(
+                path=cmd.path,
+                preview_id=cmd.preview_id,
+                request_id=cmd.request_id,
+                error=str(exc),
+                to=client_id,
+            )
+        except Exception as exc:
+            log.exception("preview asset failed", error_type=type(exc).__name__)
+            response = PreviewAsset(
+                path=cmd.path,
+                preview_id=cmd.preview_id,
+                request_id=cmd.request_id,
+                error="读取预览图片失败",
+                to=client_id,
+            )
+        await self._emit(ctx, response)
+        return response
+
     # ---- ask_user MCP tool (agent asks the user a multiple-choice question) ----
 
     async def _on_ask(self, ctx: SessionContext, question: str,
@@ -3438,6 +3562,161 @@ class WrapperMachine:
             log.info("ask_user answered", ask_id=cmd.ask_id)
         else:
             log.warning("answer for already-done ask_id", ask_id=cmd.ask_id)
+
+    @staticmethod
+    def _read_session_file(
+        cwd: str,
+        path: str,
+        *,
+        allowed_suffixes: Optional[frozenset[str]],
+        max_bytes: int,
+        allow_truncate: bool,
+    ) -> tuple[str, bytes, os.stat_result, bool]:
+        """Read a bounded regular file below cwd without following an escape.
+
+        ``realpath`` contains relative or tool-reported absolute paths inside
+        the session root while rejecting symlinks that escape it. ``O_NONBLOCK``
+        prevents a malicious FIFO from hanging the wrapper before ``fstat`` can
+        reject the special file.
+        """
+        if path.startswith("~"):
+            raise ValueError("预览路径必须位于当前工作目录")
+
+        root = os.path.realpath(cwd)
+        candidate = os.path.realpath(
+            path if os.path.isabs(path) else os.path.join(root, path))
+        try:
+            if os.path.commonpath((root, candidate)) != root:
+                raise ValueError("预览路径超出当前工作目录")
+        except ValueError as exc:
+            raise ValueError("预览路径超出当前工作目录") from exc
+
+        suffix = os.path.splitext(candidate)[1].lower()
+        if allowed_suffixes is not None and suffix not in allowed_suffixes:
+            raise ValueError("不支持预览该文件类型")
+
+        relative = os.path.relpath(candidate, root)
+        parts = relative.split(os.sep)
+        file_flags = os.O_RDONLY
+        file_flags |= getattr(os, "O_CLOEXEC", 0)
+        file_flags |= getattr(os, "O_NONBLOCK", 0)
+        file_flags |= getattr(os, "O_NOFOLLOW", 0)
+        dir_flags = os.O_RDONLY
+        dir_flags |= getattr(os, "O_CLOEXEC", 0)
+        dir_flags |= getattr(os, "O_DIRECTORY", 0)
+        dir_flags |= getattr(os, "O_NOFOLLOW", 0)
+        dir_fd: Optional[int] = None
+        try:
+            # Walk from an already-open cwd and refuse symlinks at every hop.
+            # This closes the realpath/open race where a parent directory could
+            # otherwise be replaced by an escaping symlink between both calls.
+            dir_fd = os.open(root, dir_flags)
+            for part in parts[:-1]:
+                next_fd = os.open(part, dir_flags, dir_fd=dir_fd)
+                os.close(dir_fd)
+                dir_fd = next_fd
+            fd = os.open(parts[-1], file_flags, dir_fd=dir_fd)
+        except FileNotFoundError as exc:
+            raise ValueError("文件不存在") from exc
+        except PermissionError as exc:
+            raise ValueError("没有权限读取该文件") from exc
+        except OSError as exc:
+            raise ValueError("无法打开该文件") from exc
+        finally:
+            if dir_fd is not None:
+                os.close(dir_fd)
+
+        try:
+            file_stat = os.fstat(fd)
+            if not stat.S_ISREG(file_stat.st_mode):
+                raise ValueError("预览目标必须是普通文件")
+            if not allow_truncate and file_stat.st_size > max_bytes:
+                raise ValueError("预览图片超过 4 MiB 限制")
+            with os.fdopen(fd, "rb", closefd=False) as handle:
+                data = handle.read(max_bytes + 1)
+        finally:
+            os.close(fd)
+
+        truncated = len(data) > max_bytes or file_stat.st_size > max_bytes
+        if truncated and not allow_truncate:
+            raise ValueError("预览图片超过 4 MiB 限制")
+        return relative.replace(os.sep, "/"), data[:max_bytes], file_stat, truncated
+
+    @classmethod
+    def _read_text_preview(
+        cls, cwd: str, path: str,
+    ) -> tuple[str, str, int, bool, int, str]:
+        relative, data, file_stat, truncated = cls._read_session_file(
+            cwd,
+            path,
+            allowed_suffixes=None,
+            max_bytes=FILE_PREVIEW_MAX_BYTES,
+            allow_truncate=True,
+        )
+        if b"\0" in data:
+            raise ValueError("文件不是可预览的 UTF-8 文本")
+        decoder = codecs.getincrementaldecoder("utf-8-sig")("strict")
+        try:
+            content = decoder.decode(data, final=not truncated)
+        except UnicodeDecodeError as exc:
+            raise ValueError("文件不是有效的 UTF-8 文本") from exc
+        return (
+            relative,
+            content,
+            file_stat.st_size,
+            truncated,
+            file_stat.st_mtime_ns,
+            cls._preview_format(relative),
+        )
+
+    @classmethod
+    def _read_markdown_preview(
+        cls, cwd: str, path: str,
+    ) -> tuple[str, str, int, bool, int]:
+        relative, data, file_stat, truncated = cls._read_session_file(
+            cwd,
+            path,
+            allowed_suffixes=cls.MARKDOWN_PREVIEW_SUFFIXES,
+            max_bytes=FILE_PREVIEW_MAX_BYTES,
+            allow_truncate=True,
+        )
+        decoder = codecs.getincrementaldecoder("utf-8-sig")("strict")
+        try:
+            content = decoder.decode(data, final=not truncated)
+        except UnicodeDecodeError as exc:
+            raise UnicodeDecodeError(
+                exc.encoding,
+                exc.object,
+                exc.start,
+                exc.end,
+                "Markdown 文件不是有效的 UTF-8",
+            ) from exc
+        return relative, content, file_stat.st_size, truncated, file_stat.st_mtime_ns
+
+    @classmethod
+    def _preview_format(cls, path: str) -> str:
+        return (
+            "markdown"
+            if os.path.splitext(path)[1].lower() in cls.MARKDOWN_PREVIEW_SUFFIXES
+            else "text"
+        )
+
+    @classmethod
+    def _read_preview_asset(
+        cls, cwd: str, path: str,
+    ) -> tuple[str, str, bytes]:
+        suffix = os.path.splitext(path)[1].lower()
+        media_type = cls.PREVIEW_ASSET_MEDIA_TYPES.get(suffix)
+        if media_type is None:
+            raise ValueError("Markdown 预览只加载 PNG、JPEG、GIF、WebP 或 AVIF 图片")
+        relative, data, _, _ = cls._read_session_file(
+            cwd,
+            path,
+            allowed_suffixes=frozenset(cls.PREVIEW_ASSET_MEDIA_TYPES),
+            max_bytes=PREVIEW_ASSET_MAX_BYTES,
+            allow_truncate=False,
+        )
+        return relative, media_type, data
 
     async def _git_diff(self, cwd: str, file: str) -> str:
         """Raw `git diff` (vs HEAD) text for a cwd. Empty file => all files; a
