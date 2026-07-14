@@ -44,6 +44,17 @@ import {
   type ViewportReading,
 } from "../src/use-mobile-viewport.ts";
 import type { ServerEvent } from "../src/protocol.ts";
+import { clampPanelWidth, resolveSidebarSwipe } from "../src/responsive-layout.ts";
+
+assert.equal(resolveSidebarSwipe(12, 200, 84, 205, 390, false), "open");
+assert.equal(resolveSidebarSwipe(300, 200, 230, 205, 390, false), "close");
+assert.equal(resolveSidebarSwipe(12, 100, 78, 240, 390, false), null,
+  "a mostly vertical gesture must not navigate");
+assert.equal(resolveSidebarSwipe(12, 200, 84, 205, 390, true), null,
+  "an interactive vertical scroller must own its gesture");
+assert.equal(clampPanelWidth(200, 1440), 360);
+assert.equal(clampPanelWidth(2_000, 1440), 1_020);
+assert.equal(clampPanelWidth(600, 1_000), 580);
 
 const viewportListeners = new Map<MobileViewportEvent, Set<() => void>>();
 const viewportCss = new Map<string, string>();
@@ -209,6 +220,15 @@ for (const filename of [
   assert.match(source, /nativeEvent\.isComposing/);
   assert.match(source, /nativeEvent\.keyCode/);
 }
+
+// Desktop sidebar motion must not regress to the old discrete grid-track swap.
+// Chromium could strand an animated 0px/1fr grid, so the safe implementation
+// slides the fixed sidebar and offsets the pane using ordinary CSS lengths.
+const layoutCss = readFileSync(resolve(process.cwd(), "src/index.css"), "utf8");
+assert.doesNotMatch(layoutCss, /transition\s*:\s*grid-template-columns/);
+assert.match(layoutCss, /\.shell\.sidebar-open \.pane\s*\{[^}]*margin-left\s*:\s*352px/s);
+assert.match(layoutCss, /\.pane\s*\{[^}]*transition\s*:[^}]*margin-left[^}]*width/s);
+assert.match(layoutCss, /\.sessions\s*\{[^}]*position\s*:\s*fixed[^}]*width\s*:\s*352px/s);
 
 let requested = "";
 const authenticated = await probeSession(async (input, init) => {
@@ -491,7 +511,7 @@ try {
     OMITTED_PROCESS_ITEM_ID,
   } = await reducerHarness.ssrLoadModule("/src/reducer.ts");
   const event = (body: Record<string, unknown>): ServerEvent => ({
-    v: 8, ts: 10, ...body,
+    v: 10, ts: 10, ...body,
   } as ServerEvent);
   const unannounced = createRuntime();
   assert.equal(unannounced.model, "");
@@ -1268,7 +1288,7 @@ class FakeWebSocket {
   }
 
   receive(frame: Record<string, unknown>): void {
-    this.onmessage?.({ data: JSON.stringify({ v: 8, ts: 1, ...frame }) });
+    this.onmessage?.({ data: JSON.stringify({ v: 10, ts: 1, ...frame }) });
   }
 }
 
@@ -1353,6 +1373,7 @@ for (const optimisticAction of ["set_model", "set_effort", "set_perm", "set_coll
   assert.doesNotMatch(appSource, new RegExp(`dispatch\\(\\{ type: ["']${optimisticAction}["']`));
 }
 assert.match(appSource, /const \{ cwd, model, effort \} = state\.newChat/);
+assert.match(appSource, /data-lock-horizontal-swipe/);
 
 assert.equal(relay.sendTakeover("codex-model-session"), true);
 const takeoverFrame = JSON.parse(socket.sent.at(-1) ?? "{}");

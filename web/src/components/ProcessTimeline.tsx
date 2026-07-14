@@ -102,18 +102,23 @@ function ProcessActivity({ block }: { block: ProcessBlock }) {
   );
 }
 
-function TimelineItem({ block }: { block: Block }) {
+function TimelineItem({ block, onOpenFile }: {
+  block: Block;
+  onOpenFile?: (path: string, line?: number) => void;
+}) {
   if (block.kind === "process") return <ProcessActivity block={block as ProcessBlock} />;
   const text = block as TextBlock;
   if (text.channel === "thinking") {
     return (
       <details className="process-reasoning">
         <summary><Icon name="spark" size={14} /><span>思考</span><Icon name="chev" size={13} /></summary>
-        <div className="process-reasoning-body"><MessageBlock text={text.text} done={text.done} /></div>
+        <div className="process-reasoning-body"><MessageBlock text={text.text}
+          done={text.done} onOpenFile={onOpenFile} /></div>
       </details>
     );
   }
-  return <div className="process-commentary"><MessageBlock text={text.text} done={text.done} /></div>;
+  return <div className="process-commentary"><MessageBlock text={text.text}
+    done={text.done} onOpenFile={onOpenFile} /></div>;
 }
 
 type TimelineRow =
@@ -134,11 +139,12 @@ function groupTimelineRows(items: Block[]): TimelineRow[] {
   return rows;
 }
 
-export function ProcessTimeline({ blocks, done, durationMs, startTs }: {
+export function ProcessTimeline({ blocks, done, durationMs, startTs, onOpenFile }: {
   blocks: Block[];
   done: boolean;
   durationMs?: number;
   startTs?: number;
+  onOpenFile?: (path: string, line?: number) => void;
 }) {
   const items = processBlocks(blocks);
   const complete = done && !hasActiveProcess(items);
@@ -174,7 +180,7 @@ export function ProcessTimeline({ blocks, done, durationMs, startTs }: {
           ? <ToolGroup key={`tools-${row.tools[0].tool_use_id}`} tools={row.tools} />
           : <TimelineItem key={row.block.kind === "text"
               ? `text-${row.block.message_id}` : `process-${row.block.item_id}`}
-              block={row.block} />
+              block={row.block} onOpenFile={onOpenFile} />
       ))}</div>}
     </section>
   );

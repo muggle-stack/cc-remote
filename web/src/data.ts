@@ -28,6 +28,7 @@ export const COMMANDS: Command[] = [
   { g: "会话" },
   { slash: "goal", name: "目标", ds: "/goal 查看 · /goal <目标> 设置 · /goal clear 清除", ic: "verify" },
   { slash: "btw", name: "侧边对话 (btw)", ds: "基于当前会话开一个临时 fork 侧聊,不影响主线", ic: "spark" },
+  { slash: "preview", name: "预览文件", ds: "/preview <路径> 打开 Markdown 或 UTF-8 源文件", ic: "read" },
   { slash: "clear", name: "清空会话", ds: "开新会话，清空上下文", ic: "close" },
   { slash: "context", name: "上下文用量", ds: "查看 token 占用", ic: "cpu" },
 ];
@@ -177,7 +178,7 @@ const CMD_LIST: Cmd[] = COMMANDS.filter(isCmd) as Cmd[];
 // Slashes handled locally by the web client (never forwarded to cc as a prompt).
 // Everything else (code-review, verify, run, deep-research, …) is a cc skill and
 // is forwarded verbatim so cc's own slash-command layer runs it.
-export const CLIENT_SLASHES = new Set(["model", "plan", "normal", "permissions", "clear", "context", "goal", "btw"]);
+export const CLIENT_SLASHES = new Set(["model", "plan", "normal", "permissions", "clear", "context", "goal", "btw", "preview"]);
 
 // Codex engine command palette — its REAL slash commands (verified against the
 // codex binary's own "get started" hint: /init /status /permissions /model /review).
@@ -202,12 +203,13 @@ export const CODEX_COMMANDS: Command[] = [
   { g: "会话" },
   { slash: "goal", name: "目标", ds: "/goal 查看 · /goal <目标> 设置 · /goal clear 清除", ic: "verify" },
   { slash: "btw", name: "侧边对话 (btw)", ds: "基于当前会话开一个临时 fork 侧聊,不影响主线", ic: "spark" },
+  { slash: "preview", name: "预览文件", ds: "/preview <路径> 打开 Markdown 或 UTF-8 源文件", ic: "read" },
   { slash: "status", name: "完整状态", ds: "线程 · 配置 · 账户 · 限额 · token", ic: "cpu" },
   { slash: "context", name: "上下文用量", ds: "查看 token 占用与容量", ic: "cpu" },
   { slash: "clear", name: "新会话", ds: "开新 codex 会话", ic: "close" },
 ];
 const CODEX_CMD_LIST: Cmd[] = CODEX_COMMANDS.filter(isCmd) as Cmd[];
-export const CODEX_CLIENT_SLASHES = new Set(["model", "plan", "normal", "clear", "context", "status", "permissions", "fast", "goal", "btw"]);
+export const CODEX_CLIENT_SLASHES = new Set(["model", "plan", "normal", "clear", "context", "status", "permissions", "fast", "goal", "btw", "preview"]);
 export const commandsFor = (engine?: string): Command[] => (engine === "codex" ? CODEX_COMMANDS : COMMANDS);
 export const clientSlashesFor = (engine?: string): Set<string> => (engine === "codex" ? CODEX_CLIENT_SLASHES : CLIENT_SLASHES);
 // codex slash -> the prompt actually sent to codex (agentic; no TUI slash layer).

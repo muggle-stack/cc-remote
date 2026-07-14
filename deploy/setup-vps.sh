@@ -107,8 +107,8 @@ python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1
 [ -d "$APPDIR/web/dist" ] || die "$APPDIR/web/dist missing (run 'npm --prefix web run build' on your dev machine, then rsync web/dist here)"
 [ -s "$APPDIR/web/dist/index.html" ] || die "$APPDIR/web/dist/index.html missing or empty"
 [ -s "$APPDIR/web/dist/cc-remote-build.json" ] || die "$APPDIR/web/dist/cc-remote-build.json missing"
-grep -Eq '"protocol"[[:space:]]*:[[:space:]]*8' \
-  "$APPDIR/web/dist/cc-remote-build.json" || die "web build protocol is not v8"
+grep -Eq '"protocol"[[:space:]]*:[[:space:]]*10' \
+  "$APPDIR/web/dist/cc-remote-build.json" || die "web build protocol is not v10"
 [ -f "$APPDIR/requirements.lock" ] || die "$APPDIR/requirements.lock missing"
 [ -f "$APPDIR/deploy/Caddyfile" ] || die "$APPDIR/deploy/Caddyfile missing"
 [ -f "$APPDIR/deploy/caddy_managed_block.py" ] || die "$APPDIR/deploy/caddy_managed_block.py missing"

@@ -64,7 +64,7 @@ local `claude` or `codex` session through a WebSocket relay. Two independent lin
   the temp key. Emitting SessionFocus on id-capture = focus-steal by background
   sessions.
 - **History = on-demand bulk read; reconnect recovery = bounded ring replay**
-  (protocol v8; aligns
+  (protocol v10; aligns
   with cc-on-web / web chats): the client fetches a session's history via
   `GetHistory` → the wrapper reads the transcript (`get_session_messages` +
   `translate_history`, in a thread) and returns it as ONE `History` frame

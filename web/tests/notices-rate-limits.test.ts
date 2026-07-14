@@ -22,7 +22,7 @@ try {
     "/src/components/NoticeStack.tsx");
   const sid = "notice-session";
   const event = (body: Record<string, unknown>): ServerEvent => ({
-    v: 8, ts: 10, sid, ...body,
+    v: 10, ts: 10, sid, ...body,
   } as ServerEvent);
   let state = {
     ...initialState,

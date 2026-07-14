@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useRef, useState, type TouchEvent } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState, type TouchEvent } from "react";
 import { RelayWs } from "./ws";
 import { reduce, initialState, createRuntime, type Turn } from "./reducer";
 import { uuid } from "./util";
@@ -31,6 +31,8 @@ import { classifyBtwOpened, consumeDiscardedBtwSnapshot, matchesBtwRequest,
   type QueryFile, type SessionInfo, type CodexPermissionMode,
   type CodexServiceTier, type CollaborationModeName,
   type DiffTheme, type Engine } from "./protocol";
+import { isMarkdownPath } from "./preview-path";
+import { resolveSidebarSwipe } from "./responsive-layout";
 
 const THEME_KEY = "cc_remote_theme";
 const ENGINE_KEY = "cc_remote_engine";  // which backend the NEXT new session uses
@@ -81,6 +83,18 @@ export default function App() {
   const btwRequestIdsRef = useRef<Set<string>>(new Set());
   const discardedBtwSidsRef = useRef<Set<string>>(new Set());
   const touchStartX = useRef(0);
+  const touchStartY = useRef(0);
+  const touchSwipeLocked = useRef(false);
+  const artifactDirtyRef = useRef(false);
+  const setArtifactDirty = useCallback((dirty: boolean) => {
+    artifactDirtyRef.current = dirty;
+  }, []);
+  const confirmArtifactDiscard = useCallback(() => {
+    if (!artifactDirtyRef.current) return true;
+    if (!window.confirm("Markdown 有未保存的修改，确定放弃吗？")) return false;
+    artifactDirtyRef.current = false;
+    return true;
+  }, []);
   // guards the once-per-connection "land on the latest session" auto-focus below
   const didInitFocusRef = useRef(false);
   const shortcutRef = useRef<{
@@ -140,12 +154,27 @@ export default function App() {
     };
   }, []);
 
-  // swipe right -> open sidebar, swipe left -> close (mobile)
-  const onTouchStart = (e: TouchEvent) => { touchStartX.current = e.touches[0].clientX; };
+  // Swipe right -> open sidebar, swipe left -> close (mobile). Interactive
+  // vertical scrollers opt out so a diagonal scroll never becomes navigation.
+  const onTouchStart = (e: TouchEvent) => {
+    const touch = e.touches[0];
+    touchStartX.current = touch.clientX;
+    touchStartY.current = touch.clientY;
+    touchSwipeLocked.current = e.target instanceof Element
+      && !!e.target.closest("[data-lock-horizontal-swipe]");
+  };
   const onTouchEnd = (e: TouchEvent) => {
-    const dx = e.changedTouches[0].clientX - touchStartX.current;
-    if (dx > 50 && touchStartX.current < window.innerWidth / 3) setSidebarOpen(true);
-    else if (dx < -50) setSidebarOpen(false);
+    const touch = e.changedTouches[0];
+    const action = resolveSidebarSwipe(
+      touchStartX.current,
+      touchStartY.current,
+      touch.clientX,
+      touch.clientY,
+      window.innerWidth,
+      touchSwipeLocked.current,
+    );
+    if (action === "open") setSidebarOpen(true);
+    else if (action === "close") setSidebarOpen(false);
   };
 
   useEffect(() => {
@@ -497,7 +526,7 @@ export default function App() {
       if (k === "b" && e.shiftKey) {           // diff (shared right slot)
         e.preventDefault();
         const latest = shortcutRef.current;
-        if (latest.artifact && latest.rightView === "diff") dispatch({ type: "clear_artifact" });
+        if (latest.artifact?.kind === "gitdiff" && latest.rightView === "diff") dispatch({ type: "clear_artifact" });
         else latest.getDiff("");
       } else if (k === "b") {                    // toggle sidebar
         e.preventDefault();
@@ -682,13 +711,40 @@ export default function App() {
     setForkWorktreeError(null);
   };
   const getDiff = (file: string) => {
+    if (!confirmArtifactDiscard()) return;
     setRightView("diff");
     dispatch({ type: "open_artifact_loading", file, sid: focusedSid });
     wsRef.current?.sendGetDiff(file, theme);
   };
+  const previewFile = (file: string, line?: number) => {
+    if (!focusedSid) return;
+    if (!confirmArtifactDiscard()) return;
+    const requestId = wsRef.current?.sendGetFilePreview(file) ?? null;
+    if (!requestId) return;
+    setRightView("diff");
+    dispatch({
+      type: "open_file_loading",
+      file,
+      sid: focusedSid,
+      requestId,
+      kind: isMarkdownPath(file) ? "md" : "file",
+      line,
+    });
+  };
+  const previewMarkdown = (file: string) => previewFile(file);
+  const loadPreviewAsset = (file: string, previewId: string): boolean =>
+    !!wsRef.current?.sendGetPreviewAsset(file, previewId);
+  const saveMarkdown = (file: string, content: string, expectedSize: number,
+                        expectedMtimeNs: string, expectedRevision: string): string | null => {
+    const requestId = wsRef.current?.sendSaveMarkdown(
+      file, content, expectedSize, expectedMtimeNs, expectedRevision) ?? null;
+    if (requestId) dispatch({ type: "start_file_save", requestId, content });
+    return requestId;
+  };
   // /btw: fork the focused session into an ephemeral side panel (wrapper replies
   // BtwOpened → reducer opens the panel). Send/close target the fork by its sid.
   const openBtw = () => {
+    if (!confirmArtifactDiscard()) return;
     setRightView("btw");
     if (!focusedSid || state.btwSid || pendingBtwRef.current) return;
     const requestId = wsRef.current?.sendOpenBtw(focusedSid) ?? null;
@@ -714,7 +770,12 @@ export default function App() {
     }
   };
   // Header tab switch between the two right-slot views (opening the target lazily).
-  const switchRight = (v: "diff" | "btw") => { if (v === "diff") getDiff(""); else openBtw(); };
+  const switchRight = (v: "diff" | "btw") => {
+    if (v === "diff") {
+      setRightView("diff");
+      if (!state.artifact) getDiff("");
+    } else openBtw();
+  };
   shortcutRef.current = {
     artifact: state.artifact, btwSid: state.btwSid, rightView,
     getDiff, openBtw, closeBtw,
@@ -753,9 +814,9 @@ export default function App() {
         sessions={state.sessions}
         liveStates={Object.fromEntries(Object.entries(state.runtimes).map(([sid, r]) => [sid, r.state]))}
         activeSessionId={focusedSid}
-        onSelect={(id) => { pendingCreateRef.current = null; setCreateError(null); dispatch({ type: "exit_new_chat" }); dispatch({ type: "focus_session", sid: id }); wsRef.current?.setFocusedSid(id); wsRef.current?.sendSwitchSession(id, (state.sessions.find((s) => s.session_id === id)?.engine as "claude" | "codex") || engine); if (isMobile()) setSidebarOpen(false); }}
-        onNew={() => { pendingCreateRef.current = null; setCreateError(null); dispatch({ type: "enter_new_chat", cwd: "~" }); if (isMobile()) setSidebarOpen(false); }}
-        onNewInDir={(cwd) => { pendingCreateRef.current = null; setCreateError(null); dispatch({ type: "enter_new_chat", cwd }); if (isMobile()) setSidebarOpen(false); }}
+        onSelect={(id) => { if (!confirmArtifactDiscard()) return; pendingCreateRef.current = null; setCreateError(null); dispatch({ type: "exit_new_chat" }); dispatch({ type: "focus_session", sid: id }); wsRef.current?.setFocusedSid(id); wsRef.current?.sendSwitchSession(id, (state.sessions.find((s) => s.session_id === id)?.engine as "claude" | "codex") || engine); if (isMobile()) setSidebarOpen(false); }}
+        onNew={() => { if (!confirmArtifactDiscard()) return; pendingCreateRef.current = null; setCreateError(null); dispatch({ type: "enter_new_chat", cwd: "~" }); if (isMobile()) setSidebarOpen(false); }}
+        onNewInDir={(cwd) => { if (!confirmArtifactDiscard()) return; pendingCreateRef.current = null; setCreateError(null); dispatch({ type: "enter_new_chat", cwd }); if (isMobile()) setSidebarOpen(false); }}
         onClose={() => setSidebarOpen(false)}
         onRename={(id, title) => wsRef.current?.sendRenameSession(id, title)}
         onArchive={(id, archived) => { wsRef.current?.sendArchiveSession(id, archived); }}
@@ -809,6 +870,8 @@ export default function App() {
               hasMore={!!rt.hasMore}
               onLoadMore={() => { if (focusedSid) wsRef.current?.sendGetHistory(focusedSid, rt.oldestId, HISTORY_PAGE); }}
               onEdit={(prompt) => setEditPrompt(prompt)} onGetDiff={getDiff}
+              onPreviewMarkdown={previewMarkdown}
+              onOpenFile={previewFile}
               onFork={forkFromTurn} />
 
             <GoalPanel engine={engine} goal={rt.goal}
@@ -860,6 +923,7 @@ export default function App() {
           onClear={() => dispatch({ type: "enter_new_chat", cwd: state.currentCwd })}
           onContext={() => wsRef.current?.sendGetContext()}
           onOpenBtw={openBtw}
+          onPreview={previewMarkdown}
           onGoal={runGoal}
           onStatus={openStatus}
           contextReport={rt.contextReport}
@@ -876,14 +940,17 @@ export default function App() {
         if (view === "btw")
           return <BtwPanel sid={state.btwSid ?? undefined} rt={state.btwSid ? state.runtimes[state.btwSid] : undefined}
             engine={state.btwEngine} opening={btwOpening && !state.btwSid}
-            active="btw" hasDiff={!!state.artifact} onTab={switchRight}
-            onSend={sendBtw} onClose={closeBtw}
+            active="btw" hasArtifact={!!state.artifact} artifactKind={state.artifact?.kind} onTab={switchRight}
+            onSend={sendBtw} onOpenFile={previewFile} onClose={closeBtw}
             onDismissNotice={(noticeId) => {
               if (state.btwSid) dispatch({ type: "dismiss_notice", sid: state.btwSid, noticeId });
             }} />;
         if (view === "diff" && state.artifact)
           return <ArtifactPanel artifact={state.artifact} active="diff" hasBtw={!!state.btwSid}
-            onTab={switchRight} onClose={() => dispatch({ type: "clear_artifact" })} />;
+            onTab={switchRight} onRefresh={previewFile}
+            onOpenFile={previewFile} onLoadPreviewAsset={loadPreviewAsset}
+            onSaveMarkdown={saveMarkdown} onDirtyChange={setArtifactDirty}
+            onClose={() => dispatch({ type: "clear_artifact" })} />;
         return null;
       })()}
       {rt.pendingQuestion && (

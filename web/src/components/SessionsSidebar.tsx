@@ -250,8 +250,8 @@ export function SessionsSidebar({ open, sessions, liveStates, activeSessionId, o
     <>
       <div className={"scrim-side" + (open ? " show" : "")} onClick={onClose} />
       <aside className={"sessions" + (open ? " show" : "")}>
-        {/* fixed-width inner so the desktop column can animate its width (0→352)
-            as a slide-reveal without the content reflowing/squishing. */}
+        {/* Keep sidebar contents stable while the desktop shell and panel slide
+            in tandem; mobile uses the same panel transform as an overlay. */}
         <div className="s-inner">
           <div className="s-head">
             <div className="brand" onClick={onClose}>

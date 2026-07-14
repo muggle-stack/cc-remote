@@ -46,6 +46,7 @@ not proxy model APIs or bake API keys into the web client.
 | **Two engines** | Use Claude Code and Codex in the same web UI. Every session keeps its own model, reasoning effort, permissions, and runtime state. |
 | **Remote operation** | Watch streaming replies from a phone, tablet, or desktop browser; send attachments, queue the next message, and interrupt the current turn at any time. |
 | **Complete process** | Expand the reasoning summaries, plans, command output, file diffs, MCP calls, collaboration agents, Hooks, and terminal interaction events exposed by each engine. |
+| **File preview and Markdown editing** | Open local file links from a reply directly in a source viewer at the referenced line. Changed-file chips and `/preview path` also open Markdown with live rendered/source modes, bounded local images, and conflict-safe atomic saves via Ctrl/Cmd+S or the Save button. |
 | **Human approval** | Return Claude `can_use_tool` decisions and Codex command, file-change, user-input, general-permission, and MCP elicitation responses. Mirror a terminal-owned session read-only or take it over explicitly. |
 | **Session management** | Search, switch, rename, archive, and fork from individual messages. Codex sessions can also fork into an isolated Git worktree. |
 | **Runtime controls** | Change the model, reasoning effort, service tier, permissions, and Plan mode. Use `/goal` for long-running goals and Codex `/status` for app-server status, usage, and rate limits. |
@@ -240,14 +241,14 @@ npm --prefix web run build   # produces web/dist/
 
 > The web client no longer bakes any token into the JS: login POSTs the password to the relay for a short-lived session token. So the build needs no `VITE_*` variables.
 
-> **Upgrading to protocol v8:** the wire gate rejects mixed versions. Deploy
+> **Upgrading to protocol v10:** the wire gate rejects mixed versions. Deploy
 > `cc_remote/` and the new `web/dist/` in one maintenance window, then restart the
 > relay and wrapper; do not run a rolling mixture. Existing sockets reconnect
 > briefly, and a relay restart intentionally requires browsers to log in again.
 > Any already-open older page also needs one **hard refresh** to load the new hashed
 > assets; logging in again inside the old JavaScript bundle isn't sufficient.
 > For a manual release, stop the local wrapper first, stop and update relay + web,
-> then start the v8 relay and v8 wrapper so the old wrapper cannot occupy the
+> then start the v10 relay and v10 wrapper so the old wrapper cannot occupy the
 > relay's single wrapper slot.
 
 ### 3) Publish from staging during a maintenance stop
@@ -258,7 +259,7 @@ rsync -av --delete --exclude='.git' --exclude='.venv' \
   --exclude='web/node_modules' --exclude='.env' \
   ./ <vps-user>@<vps>:~/cc-remote-upload/
 
-# VPS: publish protocol-v8 Python + web/dist together while relay is stopped
+# VPS: publish protocol-v10 Python + web/dist together while relay is stopped
 ssh <vps-user>@<vps>
 sudo systemctl stop cc-remote-relay 2>/dev/null || true
 sudo mkdir -p /opt/cc-remote

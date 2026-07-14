@@ -38,6 +38,9 @@ Multi-session model:
 from __future__ import annotations
 
 import asyncio
+import base64
+import codecs
+import hashlib
 import json
 import os
 import re
@@ -64,7 +67,12 @@ from cc_remote.attachments import decode_attachment, validate_attachments
 from cc_remote.config import WrapperConfig
 from cc_remote.log import logger
 from cc_remote.protocol import (
-    ASK_OPTION_MAX_COUNT, Error, Hello, Query, Interrupt, CommandAck, Model, Models, Effort, Fast, CollaborationMode, Perm, BtwOpened, ContextReport, StatusReport, Notice, RateLimitUpdate, DiffReport, History, AskUser, GoalState, Pong, Snapshot, StateEvent, State, TakeoverState, UserMsg, TurnEnd, TurnResult, is_downstream, is_reliable_command,
+    ASK_OPTION_MAX_COUNT, FILE_PREVIEW_MAX_BYTES, PREVIEW_ASSET_MAX_BYTES,
+    Error, Hello, Query, Interrupt, CommandAck, Model, Models, Effort, Fast,
+    CollaborationMode, Perm, BtwOpened, ContextReport, StatusReport, Notice,
+    RateLimitUpdate, DiffReport, FilePreview, FileSaveResult, PreviewAsset, History, AskUser,
+    GoalState, Pong, Snapshot, StateEvent, State, TakeoverState, UserMsg,
+    TurnEnd, TurnResult, is_downstream, is_reliable_command,
     SessionInfo, SessionList, SessionFocus, SessionRekey, SessionForked, DirList,
     ERR_BUSY, ERR_NOT_RUNNING, ERR_BAD_PROMPT, ERR_DRAIN_TIMEOUT,
     ERR_CC_CRASH, ERR_INTERNAL, ERR_AUTH, ERR_PROTOCOL,
@@ -167,6 +175,17 @@ class _ForkOutcomeUncertain(RuntimeError):
     """A persistent fork may have committed and must not be ACKed/replayed."""
 
 
+class _FileRevisionConflict(RuntimeError):
+    """The Markdown file changed after the editor loaded it."""
+
+    def __init__(self, message: str, *, size: int = 0, mtime_ns: int = 0,
+                 revision: Optional[str] = None):
+        super().__init__(message)
+        self.size = size
+        self.mtime_ns = mtime_ns
+        self.revision = revision
+
+
 class WrapperMachine:
     # Browser/TUI outboxes hold at most 256 commands. Keep a 2x retry window per
     # client and at most the relay's configured maximum of 64 client identities;
@@ -188,9 +207,19 @@ class WrapperMachine:
     FORK_RECONCILE_DELAY = 0.1
     FORK_BACKGROUND_ATTEMPTS = 100
     UNCERTAIN_FORK_CAP = 4096
+    MARKDOWN_PREVIEW_SUFFIXES = frozenset({".md", ".markdown"})
+    PREVIEW_ASSET_MEDIA_TYPES = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".avif": "image/avif",
+    }
     SAFE_RETRY_COMMANDS = frozenset({
         "list_sessions", "get_history", "get_models",
-        "get_context", "get_status", "get_diff", "get_goal", "list_dir",
+        "get_context", "get_status", "get_diff", "get_file_preview",
+        "get_preview_asset", "get_goal", "list_dir",
     })
     # Commands whose target is a runtime ``sid``.  A /btw runtime is private to
     # the client that created it, so every operation against that sid must pass
@@ -198,7 +227,8 @@ class WrapperMachine:
     BTW_SID_COMMANDS = frozenset({
         "query", "interrupt", "takeover", "set_model", "set_effort",
         "set_service_tier", "set_collaboration_mode", "open_btw", "close_btw", "set_perm",
-        "get_context", "get_status", "get_diff", "answer_question", "get_goal", "set_goal", "clear_goal",
+        "get_context", "get_status", "get_diff", "get_file_preview", "save_markdown",
+        "get_preview_asset", "answer_question", "get_goal", "set_goal", "clear_goal",
     })
     # These commands address a session through ``session_id`` instead.
     BTW_SESSION_COMMANDS = frozenset({
@@ -835,12 +865,19 @@ class WrapperMachine:
         result = await self._handle(cmd)
 
         if reliable:
-            candidates = result if isinstance(result, (tuple, list)) else (result,)
-            responses = tuple(
-                response.model_copy(deep=True)
-                for response in candidates
-                if getattr(response, "type", None)
-            )
+            # Safe reads are recreated on retry, so retaining their potentially
+            # large History/file/image payloads in the command-id LRU buys
+            # nothing and can multiply memory by clients × commands.
+            if cmd.type in self.SAFE_RETRY_COMMANDS:
+                responses = ()
+            else:
+                candidates = (
+                    result if isinstance(result, (tuple, list)) else (result,))
+                responses = tuple(
+                    response.model_copy(deep=True)
+                    for response in candidates
+                    if getattr(response, "type", None)
+                )
             self._remember_command(client_id, cmd_id, responses)
             await self._send_command_ack(client_id, cmd_id)
 
@@ -877,6 +914,12 @@ class WrapperMachine:
             return await self._handle_get_status(cmd)
         elif t == "get_diff":
             await self._handle_get_diff(cmd)
+        elif t == "get_file_preview":
+            return await self._handle_get_file_preview(cmd)
+        elif t == "save_markdown":
+            return await self._handle_save_markdown(cmd)
+        elif t == "get_preview_asset":
+            return await self._handle_get_preview_asset(cmd)
         elif t == "get_history":
             await self._handle_get_history(cmd)
         elif t == "get_models":
@@ -3200,6 +3243,167 @@ class WrapperMachine:
             log.exception("get_diff failed", error=str(e))
             await self._emit(ctx, Error(code=ERR_INTERNAL, message=f"get_diff failed: {e}"))
 
+    async def _handle_get_file_preview(self, cmd):
+        sid = getattr(cmd, "sid", None)
+        client_id = getattr(cmd, "client_id", None)
+        ctx = self._ctx_for(sid)
+        if ctx is None:
+            response = FilePreview(
+                path=cmd.path,
+                request_id=cmd.request_id,
+                format=self._preview_format(cmd.path),
+                error="该会话未启动，无法读取文件",
+                to=client_id,
+            )
+            await self._emit_to_sid(sid, response)
+            return response
+
+        try:
+            path, content, size, truncated, mtime_ns, file_format, revision = (
+                await asyncio.to_thread(
+                    self._read_text_preview, ctx.cwd, cmd.path))
+            response = FilePreview(
+                path=path,
+                request_id=cmd.request_id,
+                format=file_format,
+                content=content,
+                size=size,
+                truncated=truncated,
+                mtime_ns=str(mtime_ns),
+                revision=revision,
+                to=client_id,
+            )
+        except (UnicodeDecodeError, ValueError) as exc:
+            response = FilePreview(
+                path=cmd.path,
+                request_id=cmd.request_id,
+                format=self._preview_format(cmd.path),
+                error=str(exc),
+                to=client_id,
+            )
+        except Exception as exc:
+            log.exception("file preview failed", error_type=type(exc).__name__)
+            response = FilePreview(
+                path=cmd.path,
+                request_id=cmd.request_id,
+                format=self._preview_format(cmd.path),
+                error="读取文件失败",
+                to=client_id,
+            )
+        await self._emit(ctx, response)
+        return response
+
+    async def _handle_save_markdown(self, cmd):
+        sid = getattr(cmd, "sid", None)
+        client_id = getattr(cmd, "client_id", None)
+        ctx = self._ctx_for(sid)
+        if ctx is None:
+            response = FileSaveResult(
+                path=cmd.path,
+                request_id=cmd.request_id,
+                status="error",
+                error="该会话未启动，无法保存文件",
+                to=client_id,
+            )
+            await self._emit_to_sid(sid, response)
+            return response
+
+        try:
+            path, size, mtime_ns, revision = await asyncio.to_thread(
+                self._write_markdown_file,
+                ctx.cwd,
+                cmd.path,
+                cmd.content,
+                cmd.expected_size,
+                int(cmd.expected_mtime_ns),
+                cmd.expected_revision,
+            )
+            response = FileSaveResult(
+                path=path,
+                request_id=cmd.request_id,
+                status="saved",
+                size=size,
+                mtime_ns=str(mtime_ns),
+                revision=revision,
+                to=client_id,
+            )
+        except _FileRevisionConflict as exc:
+            response = FileSaveResult(
+                path=cmd.path,
+                request_id=cmd.request_id,
+                status="conflict",
+                size=exc.size,
+                mtime_ns=str(exc.mtime_ns),
+                revision=exc.revision,
+                error=str(exc),
+                to=client_id,
+            )
+        except (UnicodeDecodeError, ValueError) as exc:
+            response = FileSaveResult(
+                path=cmd.path,
+                request_id=cmd.request_id,
+                status="error",
+                error=str(exc),
+                to=client_id,
+            )
+        except Exception as exc:
+            log.exception("Markdown save failed", error_type=type(exc).__name__)
+            response = FileSaveResult(
+                path=cmd.path,
+                request_id=cmd.request_id,
+                status="error",
+                error="保存文件失败",
+                to=client_id,
+            )
+        await self._emit(ctx, response)
+        return response
+
+    async def _handle_get_preview_asset(self, cmd):
+        sid = getattr(cmd, "sid", None)
+        client_id = getattr(cmd, "client_id", None)
+        ctx = self._ctx_for(sid)
+        if ctx is None:
+            response = PreviewAsset(
+                path=cmd.path,
+                preview_id=cmd.preview_id,
+                request_id=cmd.request_id,
+                error="该会话未启动，无法读取预览图片",
+                to=client_id,
+            )
+            await self._emit_to_sid(sid, response)
+            return response
+
+        try:
+            _, media_type, data = await asyncio.to_thread(
+                self._read_preview_asset, ctx.cwd, cmd.path)
+            response = PreviewAsset(
+                path=cmd.path,
+                preview_id=cmd.preview_id,
+                request_id=cmd.request_id,
+                media_type=media_type,
+                data=base64.b64encode(data).decode("ascii"),
+                to=client_id,
+            )
+        except ValueError as exc:
+            response = PreviewAsset(
+                path=cmd.path,
+                preview_id=cmd.preview_id,
+                request_id=cmd.request_id,
+                error=str(exc),
+                to=client_id,
+            )
+        except Exception as exc:
+            log.exception("preview asset failed", error_type=type(exc).__name__)
+            response = PreviewAsset(
+                path=cmd.path,
+                preview_id=cmd.preview_id,
+                request_id=cmd.request_id,
+                error="读取预览图片失败",
+                to=client_id,
+            )
+        await self._emit(ctx, response)
+        return response
+
     # ---- ask_user MCP tool (agent asks the user a multiple-choice question) ----
 
     async def _on_ask(self, ctx: SessionContext, question: str,
@@ -3438,6 +3642,329 @@ class WrapperMachine:
             log.info("ask_user answered", ask_id=cmd.ask_id)
         else:
             log.warning("answer for already-done ask_id", ask_id=cmd.ask_id)
+
+    @staticmethod
+    def _read_session_file(
+        cwd: str,
+        path: str,
+        *,
+        allowed_suffixes: Optional[frozenset[str]],
+        max_bytes: int,
+        allow_truncate: bool,
+    ) -> tuple[str, bytes, os.stat_result, bool]:
+        """Read a bounded regular file below cwd without following an escape.
+
+        ``realpath`` contains relative or tool-reported absolute paths inside
+        the session root while rejecting symlinks that escape it. ``O_NONBLOCK``
+        prevents a malicious FIFO from hanging the wrapper before ``fstat`` can
+        reject the special file.
+        """
+        if path.startswith("~"):
+            raise ValueError("预览路径必须位于当前工作目录")
+
+        root = os.path.realpath(cwd)
+        candidate = os.path.realpath(
+            path if os.path.isabs(path) else os.path.join(root, path))
+        try:
+            if os.path.commonpath((root, candidate)) != root:
+                raise ValueError("预览路径超出当前工作目录")
+        except ValueError as exc:
+            raise ValueError("预览路径超出当前工作目录") from exc
+
+        suffix = os.path.splitext(candidate)[1].lower()
+        if allowed_suffixes is not None and suffix not in allowed_suffixes:
+            raise ValueError("不支持预览该文件类型")
+
+        relative = os.path.relpath(candidate, root)
+        parts = relative.split(os.sep)
+        file_flags = os.O_RDONLY
+        file_flags |= getattr(os, "O_CLOEXEC", 0)
+        file_flags |= getattr(os, "O_NONBLOCK", 0)
+        file_flags |= getattr(os, "O_NOFOLLOW", 0)
+        dir_flags = os.O_RDONLY
+        dir_flags |= getattr(os, "O_CLOEXEC", 0)
+        dir_flags |= getattr(os, "O_DIRECTORY", 0)
+        dir_flags |= getattr(os, "O_NOFOLLOW", 0)
+        dir_fd: Optional[int] = None
+        try:
+            # Walk from an already-open cwd and refuse symlinks at every hop.
+            # This closes the realpath/open race where a parent directory could
+            # otherwise be replaced by an escaping symlink between both calls.
+            dir_fd = os.open(root, dir_flags)
+            for part in parts[:-1]:
+                next_fd = os.open(part, dir_flags, dir_fd=dir_fd)
+                os.close(dir_fd)
+                dir_fd = next_fd
+            fd = os.open(parts[-1], file_flags, dir_fd=dir_fd)
+        except FileNotFoundError as exc:
+            raise ValueError("文件不存在") from exc
+        except PermissionError as exc:
+            raise ValueError("没有权限读取该文件") from exc
+        except OSError as exc:
+            raise ValueError("无法打开该文件") from exc
+        finally:
+            if dir_fd is not None:
+                os.close(dir_fd)
+
+        try:
+            file_stat = os.fstat(fd)
+            if not stat.S_ISREG(file_stat.st_mode):
+                raise ValueError("预览目标必须是普通文件")
+            if not allow_truncate and file_stat.st_size > max_bytes:
+                raise ValueError("预览图片超过 4 MiB 限制")
+            with os.fdopen(fd, "rb", closefd=False) as handle:
+                data = handle.read(max_bytes + 1)
+        finally:
+            os.close(fd)
+
+        truncated = len(data) > max_bytes or file_stat.st_size > max_bytes
+        if truncated and not allow_truncate:
+            raise ValueError("预览图片超过 4 MiB 限制")
+        return relative.replace(os.sep, "/"), data[:max_bytes], file_stat, truncated
+
+    @classmethod
+    def _read_text_preview(
+        cls, cwd: str, path: str,
+    ) -> tuple[str, str, int, bool, int, str, Optional[str]]:
+        relative, data, file_stat, truncated = cls._read_session_file(
+            cwd,
+            path,
+            allowed_suffixes=None,
+            max_bytes=FILE_PREVIEW_MAX_BYTES,
+            allow_truncate=True,
+        )
+        if b"\0" in data:
+            raise ValueError("文件不是可预览的 UTF-8 文本")
+        decoder = codecs.getincrementaldecoder("utf-8-sig")("strict")
+        try:
+            content = decoder.decode(data, final=not truncated)
+        except UnicodeDecodeError as exc:
+            raise ValueError("文件不是有效的 UTF-8 文本") from exc
+        return (
+            relative,
+            content,
+            file_stat.st_size,
+            truncated,
+            file_stat.st_mtime_ns,
+            cls._preview_format(relative),
+            None if truncated else hashlib.sha256(data).hexdigest(),
+        )
+
+    @classmethod
+    def _write_markdown_file(
+        cls,
+        cwd: str,
+        path: str,
+        content: str,
+        expected_size: int,
+        expected_mtime_ns: int,
+        expected_revision: str,
+    ) -> tuple[str, int, int, str]:
+        """CAS-style atomic save for one existing Markdown regular file.
+
+        Every path component is opened relative to an already-open cwd with
+        ``O_NOFOLLOW``. The replacement is written and fsynced in the same
+        directory, then renamed over the file only after a second revision
+        check. Existing UTF-8 BOM, dominant LF/CRLF style, and mode bits are
+        preserved.
+        """
+        if path.startswith("~"):
+            raise ValueError("保存路径必须位于当前工作目录")
+
+        root = os.path.realpath(cwd)
+        candidate = os.path.abspath(
+            path if os.path.isabs(path) else os.path.join(root, path))
+        try:
+            if os.path.commonpath((root, candidate)) != root:
+                raise ValueError("保存路径超出当前工作目录")
+        except ValueError as exc:
+            raise ValueError("保存路径超出当前工作目录") from exc
+
+        if os.path.splitext(candidate)[1].lower() not in cls.MARKDOWN_PREVIEW_SUFFIXES:
+            raise ValueError("只允许保存 Markdown 文件")
+        relative = os.path.relpath(candidate, root)
+        parts = relative.split(os.sep)
+        if relative in ("", ".") or any(part in ("", ".", "..") for part in parts):
+            raise ValueError("保存路径无效")
+
+        dir_flags = os.O_RDONLY
+        dir_flags |= getattr(os, "O_CLOEXEC", 0)
+        dir_flags |= getattr(os, "O_DIRECTORY", 0)
+        dir_flags |= getattr(os, "O_NOFOLLOW", 0)
+        file_flags = os.O_RDONLY
+        file_flags |= getattr(os, "O_CLOEXEC", 0)
+        file_flags |= getattr(os, "O_NONBLOCK", 0)
+        file_flags |= getattr(os, "O_NOFOLLOW", 0)
+        dir_fd: Optional[int] = None
+        temp_name: Optional[str] = None
+
+        def read_current() -> tuple[bytes, os.stat_result, str]:
+            try:
+                fd = os.open(parts[-1], file_flags, dir_fd=dir_fd)
+            except FileNotFoundError as exc:
+                raise ValueError("文件不存在") from exc
+            except PermissionError as exc:
+                raise ValueError("没有权限保存该文件") from exc
+            except OSError as exc:
+                raise ValueError("保存目标不能是符号链接或特殊文件") from exc
+            try:
+                file_stat = os.fstat(fd)
+                if not stat.S_ISREG(file_stat.st_mode):
+                    raise ValueError("保存目标必须是普通文件")
+                if file_stat.st_size > FILE_PREVIEW_MAX_BYTES:
+                    raise ValueError("超过 512 KiB 的 Markdown 文件不可编辑")
+                chunks = []
+                remaining = FILE_PREVIEW_MAX_BYTES + 1
+                while remaining > 0:
+                    chunk = os.read(fd, min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                data = b"".join(chunks)
+                final_stat = os.fstat(fd)
+                if (final_stat.st_size != file_stat.st_size
+                        or final_stat.st_mtime_ns != file_stat.st_mtime_ns):
+                    revision = hashlib.sha256(data).hexdigest()
+                    raise _FileRevisionConflict(
+                        "文件正在被其他程序修改，请重新读取后再保存",
+                        size=final_stat.st_size,
+                        mtime_ns=final_stat.st_mtime_ns,
+                        revision=revision,
+                    )
+                return data, final_stat, hashlib.sha256(data).hexdigest()
+            finally:
+                os.close(fd)
+
+        def require_expected(file_stat: os.stat_result, revision: str) -> None:
+            if (file_stat.st_size != expected_size
+                    or file_stat.st_mtime_ns != expected_mtime_ns
+                    or revision != expected_revision):
+                raise _FileRevisionConflict(
+                    "文件已在别处修改，请重新读取并合并后再保存",
+                    size=file_stat.st_size,
+                    mtime_ns=file_stat.st_mtime_ns,
+                    revision=revision,
+                )
+
+        try:
+            dir_fd = os.open(root, dir_flags)
+            for part in parts[:-1]:
+                try:
+                    next_fd = os.open(part, dir_flags, dir_fd=dir_fd)
+                except OSError as exc:
+                    raise ValueError("保存路径不能包含符号链接") from exc
+                os.close(dir_fd)
+                dir_fd = next_fd
+
+            original, original_stat, original_revision = read_current()
+            require_expected(original_stat, original_revision)
+            if b"\0" in original:
+                raise ValueError("Markdown 文件不是有效的 UTF-8 文本")
+            try:
+                original.decode("utf-8-sig")
+            except UnicodeDecodeError as exc:
+                raise ValueError("Markdown 文件不是有效的 UTF-8 文本") from exc
+
+            normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+            crlf_count = original.count(b"\r\n")
+            lf_only_count = original.count(b"\n") - crlf_count
+            newline = "\r\n" if crlf_count > lf_only_count else "\n"
+            payload = normalized.replace("\n", newline).encode("utf-8")
+            if original.startswith(codecs.BOM_UTF8):
+                payload = codecs.BOM_UTF8 + payload
+            if len(payload) > FILE_PREVIEW_MAX_BYTES:
+                raise ValueError("保存内容超过 512 KiB 限制")
+
+            temp_name = f".cc-remote-{uuid4().hex}.tmp"
+            temp_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            temp_flags |= getattr(os, "O_CLOEXEC", 0)
+            temp_flags |= getattr(os, "O_NOFOLLOW", 0)
+            temp_fd = os.open(temp_name, temp_flags, 0o600, dir_fd=dir_fd)
+            try:
+                view = memoryview(payload)
+                written = 0
+                while written < len(view):
+                    written += os.write(temp_fd, view[written:])
+                os.fchmod(temp_fd, stat.S_IMODE(original_stat.st_mode))
+                os.fsync(temp_fd)
+            finally:
+                os.close(temp_fd)
+
+            _, latest_stat, latest_revision = read_current()
+            require_expected(latest_stat, latest_revision)
+            os.replace(
+                temp_name,
+                parts[-1],
+                src_dir_fd=dir_fd,
+                dst_dir_fd=dir_fd,
+            )
+            temp_name = None
+            os.fsync(dir_fd)
+            saved_stat = os.stat(parts[-1], dir_fd=dir_fd, follow_symlinks=False)
+            return (
+                relative.replace(os.sep, "/"),
+                saved_stat.st_size,
+                saved_stat.st_mtime_ns,
+                hashlib.sha256(payload).hexdigest(),
+            )
+        finally:
+            if temp_name is not None and dir_fd is not None:
+                try:
+                    os.unlink(temp_name, dir_fd=dir_fd)
+                except FileNotFoundError:
+                    pass
+            if dir_fd is not None:
+                os.close(dir_fd)
+
+    @classmethod
+    def _read_markdown_preview(
+        cls, cwd: str, path: str,
+    ) -> tuple[str, str, int, bool, int]:
+        relative, data, file_stat, truncated = cls._read_session_file(
+            cwd,
+            path,
+            allowed_suffixes=cls.MARKDOWN_PREVIEW_SUFFIXES,
+            max_bytes=FILE_PREVIEW_MAX_BYTES,
+            allow_truncate=True,
+        )
+        decoder = codecs.getincrementaldecoder("utf-8-sig")("strict")
+        try:
+            content = decoder.decode(data, final=not truncated)
+        except UnicodeDecodeError as exc:
+            raise UnicodeDecodeError(
+                exc.encoding,
+                exc.object,
+                exc.start,
+                exc.end,
+                "Markdown 文件不是有效的 UTF-8",
+            ) from exc
+        return relative, content, file_stat.st_size, truncated, file_stat.st_mtime_ns
+
+    @classmethod
+    def _preview_format(cls, path: str) -> str:
+        return (
+            "markdown"
+            if os.path.splitext(path)[1].lower() in cls.MARKDOWN_PREVIEW_SUFFIXES
+            else "text"
+        )
+
+    @classmethod
+    def _read_preview_asset(
+        cls, cwd: str, path: str,
+    ) -> tuple[str, str, bytes]:
+        suffix = os.path.splitext(path)[1].lower()
+        media_type = cls.PREVIEW_ASSET_MEDIA_TYPES.get(suffix)
+        if media_type is None:
+            raise ValueError("Markdown 预览只加载 PNG、JPEG、GIF、WebP 或 AVIF 图片")
+        relative, data, _, _ = cls._read_session_file(
+            cwd,
+            path,
+            allowed_suffixes=frozenset(cls.PREVIEW_ASSET_MEDIA_TYPES),
+            max_bytes=PREVIEW_ASSET_MAX_BYTES,
+            allow_truncate=False,
+        )
+        return relative, media_type, data
 
     async def _git_diff(self, cwd: str, file: str) -> str:
         """Raw `git diff` (vs HEAD) text for a cwd. Empty file => all files; a

@@ -38,6 +38,7 @@ const PATHS: Record<string, string> = {
   archive: '<rect x="3" y="4" width="18" height="4" rx="1.5"/><path d="M5 8v9a2 2 0 002 2h10a2 2 0 002-2V8"/><path d="M10 12h4"/>',
   branch: '<circle cx="6" cy="5" r="2"/><circle cx="18" cy="7" r="2"/><circle cx="6" cy="19" r="2"/><path d="M6 7v10M8 8.5c4.5 0 5.5-1.5 8-1.5"/>',
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/>',
+  refresh: '<path d="M20 7v5h-5"/><path d="M19 12a7.5 7.5 0 10.4 4.7"/>',
   // model-tier glyphs (one per model, so the picker rows are distinct)
   // reasoning-effort gauges: same dial, needle sweeps left(低)->right(最大)
   gauge1: '<path d="M4 16a8 8 0 0116 0"/><path d="M12 16L7.5 12.6"/><circle cx="12" cy="16" r="1.3"/>',

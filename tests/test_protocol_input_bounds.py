@@ -15,11 +15,15 @@ from cc_remote.protocol import (
     CollaborationMode,
     ForkSessionWorktree,
     GetDiff,
+    GetFilePreview,
     GetModels,
+    GetPreviewAsset,
+    FILE_PREVIEW_MAX_BYTES,
     NewSession,
     PROTOCOL_VERSION,
     ProtocolError,
     Query,
+    SaveMarkdown,
     SetEffort,
     SetCollaborationMode,
     SetModel,
@@ -107,6 +111,9 @@ def test_surrogate_filename_is_a_clean_validation_error():
         lambda: SwitchSession(session_id="sid-1", engine="bogus"),
         lambda: GetModels(engine="bogus"),
         lambda: GetDiff(file="x", theme="bogus"),
+        lambda: GetFilePreview(path="x" * 4097, request_id="preview-1"),
+        lambda: GetPreviewAsset(
+            path="image.png", preview_id="preview-1", request_id="x" * 129),
         lambda: AnswerQuestion(
             ask_id="ask-1", answer="x" * (ASK_ANSWER_MAX_CHARS + 1)),
         lambda: ForkSessionWorktree(
@@ -128,6 +135,19 @@ def test_known_dynamic_control_values_remain_supported():
     assert ForkSessionWorktree(
         session_id="sid-1", request_id="request-1", name="feature",
     ).name == "feature"
+
+
+def test_markdown_save_content_is_bounded_by_utf8_bytes():
+    common = {
+        "path": "README.md",
+        "request_id": "save-1",
+        "expected_size": 0,
+        "expected_mtime_ns": "0",
+        "expected_revision": "0" * 64,
+    }
+    assert SaveMarkdown(content="界" * (FILE_PREVIEW_MAX_BYTES // 3), **common)
+    with pytest.raises(ValidationError, match="UTF-8 bytes"):
+        SaveMarkdown(content="界" * (FILE_PREVIEW_MAX_BYTES // 3 + 1), **common)
 
 
 def test_collaboration_mode_state_roundtrips_as_downstream():

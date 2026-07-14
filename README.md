@@ -45,6 +45,7 @@ API key 烤进网页。
 | **双引擎** | 在同一个 Web UI 中使用 Claude Code 和 Codex；每个会话保持自己的模型、思考强度、权限与运行状态。 |
 | **远程操作** | 手机、平板或桌面浏览器实时看流式回复，发送附件，排队下一条消息，随时打断当前回合。 |
 | **完整过程** | 折叠展示引擎公开提供的 reasoning 摘要、计划、命令输出、文件 diff、MCP、协作代理、Hook 和终端交互事件。 |
+| **文件预览与 Markdown 编辑** | 点击回复中的本机文件链接可直接打开源码并定位行号；也可从变更卡片或 `/preview 路径` 打开 Markdown，在实时预览和源码编辑间切换，通过 Ctrl/⌘+S 或保存按钮执行带冲突检测的原子保存。 |
 | **人工确认** | 回传 Claude `can_use_tool`，以及 Codex 命令、文件修改、用户输入、通用权限和 MCP elicitation；终端占用时可只读镜像，也可由用户主动接管。 |
 | **会话管理** | 搜索、切换、重命名、归档和消息级派生；Codex 还可在 Git 仓库中派生到独立 worktree。 |
 | **运行控制** | 切换模型、思考强度、服务档位、权限和 Plan 模式；`/goal` 管理长目标，Codex `/status` 读取 app-server 状态、用量与限额。 |
@@ -220,12 +221,12 @@ npm --prefix web run build   # 产出 web/dist/
 
 > 现在网页**不再把 token 烤进 JS**：登录改为向中继 POST 口令换取短期会话 token。所以构建不需要任何 `VITE_*` 变量。
 
-> **升级到协议 v8**：线协议会严格拒绝版本不一致。请在同一次维护窗口部署
+> **升级到协议 v10**：线协议会严格拒绝版本不一致。请在同一次维护窗口部署
 > `cc_remote/` 和新的 `web/dist/`，然后依次重启 relay、wrapper；不要新旧版本滚动混跑。
 > 升级期间已有 WebSocket 会短暂重连，relay 重启也会要求浏览器重新登录。已打开的
 > 旧版页面必须做一次**硬刷新**（重新加载新的带 hash 静态资源），仅重新登录不够。
-> 手工发布时先停本机 wrapper，再停服更新 relay + web，最后启动 v8 relay 和
-> v8 wrapper；这样旧 wrapper 不会占住 relay 的单连接槽。
+> 手工发布时先停本机 wrapper，再停服更新 relay + web，最后启动 v10 relay 和
+> v10 wrapper；这样旧 wrapper 不会占住 relay 的单连接槽。
 
 ### 3）停服维护窗口内，从 staging 发布到 VPS
 
@@ -235,7 +236,7 @@ rsync -av --delete --exclude='.git' --exclude='.venv' \
   --exclude='web/node_modules' --exclude='.env' \
   ./ <vps-user>@<vps>:~/cc-remote-upload/
 
-# VPS：协议 v8 的 Python + web/dist 在停服窗口一起发布，避免混跑
+# VPS：协议 v10 的 Python + web/dist 在停服窗口一起发布，避免混跑
 ssh <vps-user>@<vps>
 sudo systemctl stop cc-remote-relay 2>/dev/null || true
 sudo mkdir -p /opt/cc-remote

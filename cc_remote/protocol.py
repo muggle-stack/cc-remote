@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 8
+PROTOCOL_VERSION = 10
 
 State = Literal["idle", "running", "interrupting", "draining"]
 Engine = Literal["claude", "codex"]
@@ -73,6 +73,9 @@ ASK_OPTION_DESCRIPTION_MAX_CHARS = 2 * 1024
 ASK_ANSWER_MAX_CHARS = 4 * 1024
 ASK_OPTION_MIN_COUNT = 2
 ASK_OPTION_MAX_COUNT = 5
+FILE_PREVIEW_MAX_BYTES = 512 * 1024
+PREVIEW_ASSET_MAX_BYTES = 4 * 1024 * 1024
+MAX_ENCODED_PREVIEW_ASSET_CHARS = ((PREVIEW_ASSET_MAX_BYTES + 2) // 3) * 4
 
 
 def _valid_attachment_filename(value: str) -> str:
@@ -83,6 +86,17 @@ def _valid_attachment_filename(value: str) -> str:
     if len(encoded) > MAX_FILENAME_BYTES:
         raise ValueError(
             f"attachment filename exceeds {MAX_FILENAME_BYTES} UTF-8 bytes")
+    return value
+
+
+def _valid_preview_content(value: str) -> str:
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("file content must be valid UTF-8") from exc
+    if len(encoded) > FILE_PREVIEW_MAX_BYTES:
+        raise ValueError(
+            f"file content exceeds {FILE_PREVIEW_MAX_BYTES} UTF-8 bytes")
     return value
 
 
@@ -106,6 +120,23 @@ AskOptionDescription = Annotated[
 ]
 AskAnswerText = Annotated[
     str, StringConstraints(min_length=1, max_length=ASK_ANSWER_MAX_CHARS),
+]
+PreviewPath = Annotated[
+    str, StringConstraints(min_length=1, max_length=4096),
+]
+PreviewContent = Annotated[
+    str,
+    StringConstraints(max_length=FILE_PREVIEW_MAX_BYTES),
+    AfterValidator(_valid_preview_content),
+]
+FileRevision = Annotated[
+    str, StringConstraints(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"),
+]
+FileMtimeNs = Annotated[
+    str, StringConstraints(min_length=1, max_length=20, pattern=r"^[0-9]+$"),
+]
+PreviewAssetData = Annotated[
+    str, StringConstraints(min_length=1, max_length=MAX_ENCODED_PREVIEW_ASSET_CHARS),
 ]
 StatusErrorText = Annotated[
     str, StringConstraints(min_length=1, max_length=384),
@@ -1013,6 +1044,75 @@ class DiffReport(_Base):
     diff: str
 
 
+class GetFilePreview(_Command):
+    """client -> wrapper: read one UTF-8 text file below the session cwd."""
+    type: Literal["get_file_preview"] = "get_file_preview"
+    path: PreviewPath
+    request_id: WireId
+
+
+class FilePreview(_Base):
+    """wrapper -> requesting client: bounded text source or a safe error."""
+    type: Literal["file_preview"] = "file_preview"
+    path: PreviewPath
+    request_id: WireId
+    format: Literal["markdown", "text"] = "text"
+    content: PreviewContent = ""
+    size: int = Field(default=0, ge=0)
+    truncated: bool = False
+    mtime_ns: FileMtimeNs = "0"
+    revision: Optional[FileRevision] = None
+    error: Optional[str] = Field(default=None, max_length=512)
+
+
+class SaveMarkdown(_Command):
+    """client -> wrapper: atomically replace one existing Markdown file.
+
+    The three expected fields form an optimistic concurrency guard. A stale
+    editor receives ``conflict`` and never overwrites the newer file.
+    """
+    type: Literal["save_markdown"] = "save_markdown"
+    path: PreviewPath
+    request_id: WireId
+    content: PreviewContent
+    expected_size: int = Field(ge=0, le=FILE_PREVIEW_MAX_BYTES)
+    expected_mtime_ns: FileMtimeNs
+    expected_revision: FileRevision
+
+
+class FileSaveResult(_Base):
+    """wrapper -> requesting client: correlated Markdown save outcome."""
+    type: Literal["file_save_result"] = "file_save_result"
+    path: PreviewPath
+    request_id: WireId
+    status: Literal["saved", "conflict", "error"]
+    size: int = Field(default=0, ge=0)
+    mtime_ns: FileMtimeNs = "0"
+    revision: Optional[FileRevision] = None
+    error: Optional[str] = Field(default=None, max_length=512)
+
+
+class GetPreviewAsset(_Command):
+    """client -> wrapper: load one image referenced by an open Markdown preview."""
+    type: Literal["get_preview_asset"] = "get_preview_asset"
+    path: PreviewPath
+    preview_id: WireId
+    request_id: WireId
+
+
+class PreviewAsset(_Base):
+    """wrapper -> requesting client: bounded base64 image for one preview."""
+    type: Literal["preview_asset"] = "preview_asset"
+    path: PreviewPath
+    preview_id: WireId
+    request_id: WireId
+    media_type: Optional[Literal[
+        "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
+    ]] = None
+    data: Optional[PreviewAssetData] = None
+    error: Optional[str] = Field(default=None, max_length=512)
+
+
 class GetHistory(_Command):
     """client -> wrapper: request a session's history, read ON-DEMAND from its
     transcript (NOT the ring buffer, NOT requiring the session to be resident).
@@ -1144,8 +1244,8 @@ class GoalState(_Base):
 
 
 AnyMessage = Union[
-    Hello, Query, Interrupt, Takeover, TakeoverState, SetModel, SetEffort, SetServiceTier, SetCollaborationMode, SetPerm, Fast, CollaborationMode, OpenBtw, CloseBtw, BtwOpened, GetContext, GetStatus, GetDiff, GetHistory, GetModels, ListSessions, SwitchSession, NewSession, ListDir, Ping, Pong, CommandAck,
-    ReplayStart, ReplayEnd, Snapshot, StateEvent, Model, Effort, Perm, ContextReport, StatusReport, Notice, RateLimitUpdate, DiffReport, History, Models, AskUser, AnswerQuestion,
+    Hello, Query, Interrupt, Takeover, TakeoverState, SetModel, SetEffort, SetServiceTier, SetCollaborationMode, SetPerm, Fast, CollaborationMode, OpenBtw, CloseBtw, BtwOpened, GetContext, GetStatus, GetDiff, GetFilePreview, SaveMarkdown, GetPreviewAsset, GetHistory, GetModels, ListSessions, SwitchSession, NewSession, ListDir, Ping, Pong, CommandAck,
+    ReplayStart, ReplayEnd, Snapshot, StateEvent, Model, Effort, Perm, ContextReport, StatusReport, Notice, RateLimitUpdate, DiffReport, FilePreview, FileSaveResult, PreviewAsset, History, Models, AskUser, AnswerQuestion,
     SessionList, SessionFocus, SessionRekey, RenameSession, ArchiveSession,
     ForkSession, ForkSessionWorktree, SessionForked, DirList,
     GetGoal, SetGoal, ClearGoal, GoalState,
@@ -1182,6 +1282,9 @@ _TYPE_MAP: dict[str, type[BaseModel]] = {
     "get_context": GetContext,
     "get_status": GetStatus,
     "get_diff": GetDiff,
+    "get_file_preview": GetFilePreview,
+    "save_markdown": SaveMarkdown,
+    "get_preview_asset": GetPreviewAsset,
     "get_history": GetHistory,
     "get_models": GetModels,
     "models": Models,
@@ -1212,6 +1315,9 @@ _TYPE_MAP: dict[str, type[BaseModel]] = {
     "notice": Notice,
     "rate_limit_update": RateLimitUpdate,
     "diff_report": DiffReport,
+    "file_preview": FilePreview,
+    "file_save_result": FileSaveResult,
+    "preview_asset": PreviewAsset,
     "history": History,
     "ask_user": AskUser,
     "answer_question": AnswerQuestion,

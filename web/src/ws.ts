@@ -331,6 +331,42 @@ export class RelayWs {
     this.send({ v: PROTOCOL_VERSION, type: "get_diff", file, theme, ts: nowTs(), ...this.sidObj() });
   }
 
+  sendGetFilePreview(path: string, requestId = uuid()): string | null {
+    const queued = this.send({
+      v: PROTOCOL_VERSION, type: "get_file_preview", path, request_id: requestId,
+      ts: nowTs(), ...this.sidObj(),
+    });
+    return queued ? requestId : null;
+  }
+
+  sendSaveMarkdown(path: string, content: string, expectedSize: number,
+                   expectedMtimeNs: string, expectedRevision: string,
+                   requestId = uuid()): string | null {
+    const queued = this.send({
+      v: PROTOCOL_VERSION,
+      type: "save_markdown",
+      path,
+      content,
+      expected_size: expectedSize,
+      expected_mtime_ns: expectedMtimeNs,
+      expected_revision: expectedRevision,
+      request_id: requestId,
+      ts: nowTs(),
+      ...this.sidObj(),
+    });
+    return queued ? requestId : null;
+  }
+
+  sendGetPreviewAsset(path: string, previewId: string,
+                      requestId = uuid()): string | null {
+    const queued = this.send({
+      v: PROTOCOL_VERSION, type: "get_preview_asset", path,
+      preview_id: previewId, request_id: requestId,
+      ts: nowTs(), ...this.sidObj(),
+    });
+    return queued ? requestId : null;
+  }
+
   /** Fetch a session's history as ONE bulk frame, read on-demand from its
    *  transcript (like a web chat's GET /conversation). client_id lets the wrapper
    *  route the History reply to=this client. Replaces per-hello buffer replay. */
