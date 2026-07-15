@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # vps setup (Ubuntu/Debian). Run as root/sudo:
 #   sudo bash deploy/setup-vps.sh your-domain.com
+#   sudo bash deploy/setup-vps.sh your-public-ip  # ALLOW_INSECURE_HTTP=1
 #
 # Assumes /opt/cc-remote already contains: the code, web/dist (from
 # `npm --prefix web run build`), requirements.lock, and a filled-in .env (from
@@ -8,10 +9,10 @@
 # WRAPPER_TOKEN).
 set -euo pipefail
 
-DOMAIN_INPUT="${1:?usage: sudo bash setup-vps.sh your-domain.com}"
-# Browser Origin serialization lower-cases DNS hostnames.  Use that canonical
+TARGET_INPUT="${1:?usage: sudo bash setup-vps.sh domain-or-public-ip}"
+# Browser Origin serialization lower-cases DNS hostnames. Use that canonical
 # spelling in Caddy and require the same spelling in PUBLIC_ORIGIN.
-DOMAIN="${DOMAIN_INPUT,,}"
+TARGET="${TARGET_INPUT,,}"
 APPDIR=/opt/cc-remote
 ENV_FILE="$APPDIR/.env"
 VENV_STAGE=""
@@ -31,6 +32,9 @@ UNIT_CHANGED=0
 UNIT_HAD_FILE=0
 RELAY_SERVICE_TOUCHED=0
 ROLLBACK_DONE=0
+INSECURE_HTTP=0
+PUBLIC_SCHEME=https
+CADDY_TEMPLATE=""
 
 [ -r "$APPDIR/deploy/setup_transaction.sh" ] || {
   echo "ERROR: $APPDIR/deploy/setup_transaction.sh is missing" >&2
@@ -98,19 +102,44 @@ require_secret() {
 command -v python3 >/dev/null 2>&1 || die "python3 is required (3.10 or newer)"
 python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' || \
   die "Python 3.10 or newer is required (use Ubuntu 22.04+ or Debian 12+)"
-[[ "$DOMAIN" == *.* && "$DOMAIN" != *..* &&
-   "$DOMAIN" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])$ ]] ||
-  die "domain must be a hostname such as cc.example.com (without a scheme or path)"
 
 [ -f "$ENV_FILE" ] || die "$ENV_FILE missing (copy deploy/env.relay.example, fill tokens)"
 [ ! -L "$ENV_FILE" ] || die "$ENV_FILE must be a regular file, not a symlink"
+ALLOW_INSECURE_VALUE="$(read_env_value ALLOW_INSECURE_HTTP 2>/dev/null || printf '0')"
+case "${ALLOW_INSECURE_VALUE,,}" in
+  1|true|yes|on)
+    INSECURE_HTTP=1
+    PUBLIC_SCHEME=http
+    CADDY_TEMPLATE="$APPDIR/deploy/Caddyfile.insecure"
+    python3 - "$TARGET" <<'PY' || \
+      die "ALLOW_INSECURE_HTTP=1 requires a public IPv4 address as the setup target"
+import ipaddress
+import sys
+
+address = ipaddress.ip_address(sys.argv[1])
+raise SystemExit(not (
+    address.version == 4 and address.is_global and not address.is_multicast
+))
+PY
+    ;;
+  0|false|no|off|"")
+    [[ "$TARGET" == *.* && "$TARGET" != *..* &&
+       "$TARGET" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])$ &&
+       ! "$TARGET" =~ ^[0-9.]+$ ]] ||
+      die "TLS mode requires a hostname such as cc.example.com (without a scheme or path)"
+    CADDY_TEMPLATE="$APPDIR/deploy/Caddyfile"
+    ;;
+  *)
+    die "ALLOW_INSECURE_HTTP must be one of 1/true/yes/on or 0/false/no/off"
+    ;;
+esac
 [ -d "$APPDIR/web/dist" ] || die "$APPDIR/web/dist missing (run 'npm --prefix web run build' on your dev machine, then rsync web/dist here)"
 [ -s "$APPDIR/web/dist/index.html" ] || die "$APPDIR/web/dist/index.html missing or empty"
 [ -s "$APPDIR/web/dist/cc-remote-build.json" ] || die "$APPDIR/web/dist/cc-remote-build.json missing"
 grep -Eq '"protocol"[[:space:]]*:[[:space:]]*10' \
   "$APPDIR/web/dist/cc-remote-build.json" || die "web build protocol is not v10"
 [ -f "$APPDIR/requirements.lock" ] || die "$APPDIR/requirements.lock missing"
-[ -f "$APPDIR/deploy/Caddyfile" ] || die "$APPDIR/deploy/Caddyfile missing"
+[ -f "$CADDY_TEMPLATE" ] || die "$CADDY_TEMPLATE missing"
 [ -f "$APPDIR/deploy/caddy_managed_block.py" ] || die "$APPDIR/deploy/caddy_managed_block.py missing"
 [ -f "$APPDIR/deploy/setup_transaction.sh" ] || die "$APPDIR/deploy/setup_transaction.sh missing"
 [ -f "$APPDIR/deploy/cc-remote-relay.service" ] || die "$APPDIR/deploy/cc-remote-relay.service missing"
@@ -120,8 +149,8 @@ require_secret SESSION_SECRET 32
 require_secret WRAPPER_TOKEN 32
 CONFIGURED_ORIGIN="$(read_env_value PUBLIC_ORIGIN)" || \
   die "PUBLIC_ORIGIN is missing from $ENV_FILE"
-[[ "$CONFIGURED_ORIGIN" == "https://$DOMAIN" ]] || \
-  die "PUBLIC_ORIGIN must be exactly https://$DOMAIN"
+[[ "$CONFIGURED_ORIGIN" == "$PUBLIC_SCHEME://$TARGET" ]] || \
+  die "PUBLIC_ORIGIN must be exactly $PUBLIC_SCHEME://$TARGET"
 CONFIGURED_RELAY_HOST="$(read_env_value RELAY_HOST)" || \
   die "RELAY_HOST is missing from $ENV_FILE"
 CONFIGURED_RELAY_PORT="$(read_env_value RELAY_PORT)" || \
@@ -180,15 +209,15 @@ mv "$VENV_STAGE" "$APPDIR/.venv"
 VENV_STAGE=""
 VENV_SWAPPED=1
 
-echo "==> Caddy config (domain: $DOMAIN)"
+echo "==> Caddy config ($PUBLIC_SCHEME://$TARGET)"
 CADDY_SITE="$(mktemp /etc/caddy/cc-remote-site.XXXXXX)"
 CADDY_CANDIDATE="$(mktemp /etc/caddy/Caddyfile.cc-remote.XXXXXX)"
-sed "s/cc-remote\.example\.com/$DOMAIN/g" "$APPDIR/deploy/Caddyfile" > "$CADDY_SITE"
+sed "s/cc-remote\.example\.com/$TARGET/g" "$CADDY_TEMPLATE" > "$CADDY_SITE"
 python3 "$APPDIR/deploy/caddy_managed_block.py" \
   --current "$CADDYFILE" \
   --site "$CADDY_SITE" \
   --output "$CADDY_CANDIDATE" \
-  --domain "$DOMAIN"
+  --domain "$TARGET"
 chmod 0644 "$CADDY_CANDIDATE"
 caddy validate --config "$CADDY_CANDIDATE" --adapter caddyfile
 
@@ -248,7 +277,10 @@ rm -rf "$VENV_BACKUP"
 
 echo
 echo "Done. Check:"
-echo "  https://$DOMAIN/healthz   (should show {\"ok\":true,...})"
-echo "  https://$DOMAIN/          (web client)"
+echo "  $PUBLIC_SCHEME://$TARGET/healthz   (should show {\"ok\":true,...})"
+echo "  $PUBLIC_SCHEME://$TARGET/          (web client)"
+if (( INSECURE_HTTP )); then
+  echo "  WARNING: login credentials, cookies, and session traffic are unencrypted"
+fi
 echo "  journalctl -u cc-remote-relay -f"
 echo "  journalctl -u caddy -f"

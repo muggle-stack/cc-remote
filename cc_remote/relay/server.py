@@ -181,12 +181,15 @@ class _BodyTooLarge(ValueError):
 
 
 def _cookie_secure(cfg: RelayConfig) -> bool:
-    """Allow an insecure cookie only for the explicit loopback quick-start."""
+    """Allow an insecure cookie for the loopback quick-start, or when the
+    operator has explicitly opted into ALLOW_INSECURE_HTTP for a plain-http
+    public origin."""
     origin = urlsplit(cfg.public_origin.strip().rstrip("/"))
-    return not (
-        origin.scheme == "http"
-        and origin.hostname in {"127.0.0.1", "::1", "localhost"}
-    )
+    if origin.scheme != "http":
+        return True
+    if origin.hostname in {"127.0.0.1", "::1", "localhost"}:
+        return False
+    return not cfg.allow_insecure_http
 
 
 def _rate_limited(ip: str) -> bool:

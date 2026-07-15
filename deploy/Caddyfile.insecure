@@ -1,0 +1,24 @@
+# /etc/caddy/Caddyfile — explicit plain-HTTP public-IP escape hatch.
+#
+# setup-vps.sh selects this template only when ALLOW_INSECURE_HTTP=1 and its
+# argument is a public IPv4 address. The explicit http:// address prevents
+# Caddy from enabling automatic HTTPS. Relay traffic remains behind Caddy so
+# the normal request limits still apply.
+
+http://cc-remote.example.com {
+	@entry path / /index.html
+	@login path /api/login
+	request_body @login {
+		max_size 4KB
+	}
+	header @entry Cache-Control "no-store"
+	header {
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws://cc-remote.example.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	}
+	reverse_proxy 127.0.0.1:8765
+	encode zstd gzip
+}

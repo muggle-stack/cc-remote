@@ -92,7 +92,12 @@ def test_setup_script_is_valid_shell_and_keeps_safe_install_order():
     assert "require_secret LOGIN_PASSWORD 16" in source
     assert "require_secret SESSION_SECRET 32" in source
     assert "require_secret WRAPPER_TOKEN 32" in source
-    assert 'DOMAIN="${DOMAIN_INPUT,,}"' in source
+    assert 'TARGET="${TARGET_INPUT,,}"' in source
+    assert 'PUBLIC_SCHEME=http' in source
+    assert 'CADDY_TEMPLATE="$APPDIR/deploy/Caddyfile.insecure"' in source
+    assert "address.version == 4 and address.is_global" in source
+    assert "not address.is_multicast" in source
+    assert '"$CONFIGURED_ORIGIN" == "$PUBLIC_SCHEME://$TARGET"' in source
     assert '[[ "$CONFIGURED_RELAY_HOST" == "127.0.0.1" ]]' in source
     assert '[[ "$CONFIGURED_RELAY_PORT" == "8765" ]]' in source
     assert '[[ "$CONFIGURED_STATIC_DIR" == "$APPDIR/web/dist" ]]' in source
@@ -103,6 +108,22 @@ def test_setup_script_is_valid_shell_and_keeps_safe_install_order():
     assert "UNIT_BACKUP=" in source
     assert 'cp -a "$RELAY_UNIT_FILE" "$UNIT_BACKUP"' in source
     assert "RELAY_SERVICE_TOUCHED=1" in source
+
+
+def test_insecure_caddy_template_is_explicit_http_without_tls_headers():
+    source = (ROOT / "deploy" / "Caddyfile.insecure").read_text()
+    assert "http://cc-remote.example.com {" in source
+    assert "ws://cc-remote.example.com" in source
+    assert "reverse_proxy 127.0.0.1:8765" in source
+    assert "Strict-Transport-Security" not in source
+    assert "https://" not in source
+
+
+def test_deploy_examples_configure_insecure_flag_on_both_sides():
+    relay = (ROOT / "deploy" / "env.relay.example").read_text()
+    wrapper = (ROOT / "deploy" / "env.wrapper.example").read_text()
+    assert "ALLOW_INSECURE_HTTP=0" in relay
+    assert "ALLOW_INSECURE_HTTP=0" in wrapper
 
 
 def test_setup_does_not_make_network_service_owner_of_root_executed_code():

@@ -36,6 +36,13 @@ def _float(key: str, default: float) -> float:
     return float(v) if v and v.strip() else default
 
 
+def _bool(key: str, default: bool = False) -> bool:
+    v = os.environ.get(key)
+    if v is None or not v.strip():
+        return default
+    return v.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass
 class RelayConfig:
     host: str = field(default_factory=lambda: _env("RELAY_HOST", "127.0.0.1"))
@@ -74,6 +81,12 @@ class RelayConfig:
     # Exact browser Origin accepted for cookie-authenticated WebSockets, for
     # example https://remote.example.com (no path or trailing slash).
     public_origin: str = field(default_factory=lambda: _env("PUBLIC_ORIGIN", ""))
+    # Opt-in escape hatch: allow a non-loopback PUBLIC_ORIGIN/RELAY_URL to stay
+    # on plain http(s)/ws(s) instead of requiring TLS. Off by default; turning
+    # it on trades transport confidentiality (password, cookie, tokens, and all
+    # traffic travel in cleartext) for being reachable over a bare public IP
+    # without a TLS terminator in front.
+    allow_insecure_http: bool = field(default_factory=lambda: _bool("ALLOW_INSECURE_HTTP"))
 
 
 @dataclass
@@ -82,6 +95,10 @@ class WrapperConfig:
     # Token the wrapper presents to the relay at WS upgrade (must match the
     # relay's WRAPPER_TOKEN). Same env name as the relay for convenience.
     wrapper_token: str = field(default_factory=lambda: _env("WRAPPER_TOKEN", "change-me-wrapper"))
+    # Same opt-in escape hatch as the relay's ALLOW_INSECURE_HTTP: lets
+    # RELAY_URL stay ws:// against a non-loopback host instead of requiring
+    # wss://. Off by default.
+    allow_insecure_http: bool = field(default_factory=lambda: _bool("ALLOW_INSECURE_HTTP"))
     # Optional explicit Claude Code executable. Blank preserves the existing
     # SDK/PATH discovery behavior.
     claude_bin: str = field(default_factory=lambda: _env("CLAUDE_BIN", "").strip())
@@ -214,9 +231,11 @@ def validate_relay_config(cfg: RelayConfig) -> None:
             # Store exactly the serialization browsers use for Origin headers,
             # including lower-case host and omitted default port.
             cfg.public_origin = canonical_origin
-            if scheme != "https" and canonical_host not in {
-                "127.0.0.1", "::1", "localhost"
-            }:
+            if (
+                scheme != "https"
+                and canonical_host not in {"127.0.0.1", "::1", "localhost"}
+                and not cfg.allow_insecure_http
+            ):
                 errors.append("PUBLIC_ORIGIN must use https except on loopback")
 
     if errors:
@@ -245,7 +264,11 @@ def validate_wrapper_config(cfg: WrapperConfig) -> None:
         errors.append("RELAY_URL must be a ws(s) URL without credentials, query, or fragment")
     else:
         loopback = parsed.hostname in {"127.0.0.1", "::1", "localhost"}
-        if parsed.scheme != "wss" and not loopback:
+        if (
+            parsed.scheme != "wss"
+            and not loopback
+            and not cfg.allow_insecure_http
+        ):
             errors.append("RELAY_URL must use wss except on loopback")
     if parsed.path != "/ws":
         errors.append("RELAY_URL path must be /ws")

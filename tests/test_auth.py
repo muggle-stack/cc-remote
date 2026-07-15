@@ -611,6 +611,32 @@ def test_relay_config_rejects_non_tls_public_origin():
         validate_relay_config(_cfg(public_origin="http://remote.example"))
 
 
+def test_allow_insecure_http_permits_a_plain_http_public_ip_origin():
+    # Explicit opt-in escape hatch: a bare public IP without a TLS terminator.
+    cfg = _cfg(public_origin="http://198.51.100.10:8765", allow_insecure_http=True)
+    validate_relay_config(cfg)  # must not raise
+    assert cfg.public_origin == "http://198.51.100.10:8765"
+
+
+def test_allow_insecure_http_off_still_rejects_non_tls_public_origin():
+    with pytest.raises(ValueError, match="PUBLIC_ORIGIN must use https"):
+        validate_relay_config(
+            _cfg(public_origin="http://remote.example", allow_insecure_http=False)
+        )
+
+
+def test_allow_insecure_http_cookie_is_not_secure_for_plain_http_public_origin():
+    cfg = _cfg(
+        public_origin="http://198.51.100.10:8765", allow_insecure_http=True
+    )
+    with TestClient(create_app(cfg), base_url=cfg.public_origin) as client:
+        response = _login(client, cfg)
+    cookie = response.headers["set-cookie"].lower()
+    assert "secure" not in cookie
+    assert "httponly" in cookie
+    assert "samesite=strict" in cookie
+
+
 @pytest.mark.parametrize(
     ("configured", "canonical"),
     [

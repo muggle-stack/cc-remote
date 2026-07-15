@@ -414,3 +414,15 @@ def test_tui_rejects_unsafe_relay_url_before_login(url):
 ])
 def test_tui_accepts_tls_or_loopback_relay_url(url):
     assert _validate_relay_url(url) == url
+
+
+def test_tui_rejects_plain_ws_public_ip_unless_allow_insecure_http(monkeypatch):
+    import cc_remote.tui as tui_module
+
+    url = "ws://198.51.100.10:8765/ws"
+    monkeypatch.setattr(tui_module, "ALLOW_INSECURE_HTTP", False)
+    with pytest.raises(ValueError):
+        _validate_relay_url(url)
+
+    monkeypatch.setattr(tui_module, "ALLOW_INSECURE_HTTP", True)
+    assert _validate_relay_url(url) == url

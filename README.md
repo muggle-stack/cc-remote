@@ -204,6 +204,11 @@ python -m cc_remote.wrapper
 - **域名**：A 记录指向 VPS 公网 IP（Caddy 自动签 + 续 Let's Encrypt 证书）。
 - **你的机器**：Linux（下面用 systemd 常驻 wrapper），出站 443 到公网放行。
 
+没有域名时也支持公网 IPv4 + 明文 HTTP/WS 的临时逃生路径：VPS 只需放行
+80，wrapper 需能出站访问 80。该模式仍由 Caddy 反代到 loopback relay，保留
+请求限制和服务加固，但**没有任何传输加密**；登录口令、cookie、wrapper token
+和全部会话内容都可能被链路上的人读取或篡改。
+
 ### 1）生成 token / 口令
 
 ```bash
@@ -258,6 +263,21 @@ sudoedit /opt/cc-remote/.env     # 填 LOGIN_PASSWORD / SESSION_SECRET / WRAPPER
 sudo bash /opt/cc-remote/deploy/setup-vps.sh your-domain.com
 ```
 
+若暂时只有公网 IPv4，则改成下面这一组严格匹配的配置和参数：
+
+```ini
+# /opt/cc-remote/.env
+PUBLIC_ORIGIN=http://your-public-ip
+ALLOW_INSECURE_HTTP=1
+```
+
+```bash
+sudo bash /opt/cc-remote/deploy/setup-vps.sh your-public-ip
+```
+
+脚本只会在开关明确开启、参数是公网 IPv4 且 `PUBLIC_ORIGIN` 精确匹配时选择
+明文 Caddy 配置；私网、loopback、保留地址和错误拼写都会拒绝启动。
+
 脚本会：装 `python3-venv` + Caddy、建 `ccremote` 系统用户、建 venv + `pip install`、把带标记的 cc-remote 站点块和全局 HTTP 超时/头大小上限合并进 Caddyfile（保留其他全局项和站点），再启动 `cc-remote-relay` + `caddy`。若新 relay 重启或健康检查失败，venv、Caddyfile、systemd unit 会作为一个事务全部恢复，并验证旧 relay 的 `/healthz`。
 
 验证：
@@ -266,6 +286,8 @@ sudo bash /opt/cc-remote/deploy/setup-vps.sh your-domain.com
 curl https://your-domain.com/healthz
 # 期望：{"ok":true,"wrapper_connected":false,"clients":0}
 ```
+
+明文模式改用 `curl http://your-public-ip/healthz`。
 
 ### 5）你的机器：配 root-only wrapper 环境 + systemd
 
@@ -286,11 +308,20 @@ sudo systemctl daemon-reload && sudo systemctl enable --now cc-remote-wrapper
 journalctl -u cc-remote-wrapper -f     # 期望：connected to relay / wrapper running
 ```
 
-回 VPS 再看 `curl https://your-domain.com/healthz` → 应 `wrapper_connected:true`。
+明文模式下 wrapper 侧还必须同时设置：
+
+```ini
+RELAY_URL=ws://your-public-ip/ws
+ALLOW_INSECURE_HTTP=1
+```
+
+回 VPS 再看对应模式的 `/healthz` → 应 `wrapper_connected:true`。
 
 ### 6）手机验证
 
-手机浏览器（任意网络）开 `https://your-domain.com/` → 用 `LOGIN_PASSWORD` 登录 → 发消息，应看到流式回复 + 可打断 + 多端同步。
+手机浏览器（任意网络）打开对应的 `https://your-domain.com/` 或
+`http://your-public-ip/` → 用 `LOGIN_PASSWORD` 登录 → 发消息，应看到流式回复 +
+可打断 + 多端同步。
 
 ### 公司/内网走 HTTP 代理出网？
 
@@ -315,7 +346,8 @@ HTTPS_PROXY=http://your-proxy:port      # SOCKS 用 ALL_PROXY=socks5://...
 | `SESSION_TTL_SECONDS` | `604800` | 会话 token 有效期（默认 7 天）。 |
 | `LOGIN_BODY_MAX_BYTES` / `LOGIN_READ_TIMEOUT` / `LOGIN_INFLIGHT_CAP` | `4096` / `10` / `32` | 登录请求体字节数、总读取秒数和并发读取数的硬上限。 |
 | `SESSION_REGISTRY_CAP` | `1024` | 进程内可撤销浏览器会话注册表的硬上限。 |
-| `PUBLIC_ORIGIN` | 空 | 浏览器允许连接 WS 的精确来源，如 `https://remote.example.com`；**必须设**，非 loopback 必须 HTTPS。 |
+| `PUBLIC_ORIGIN` | 空 | 浏览器允许连接 WS 的精确来源，如 `https://remote.example.com`；**必须设**，非 loopback 必须 HTTPS（除非开了 `ALLOW_INSECURE_HTTP`）。 |
+| `ALLOW_INSECURE_HTTP` | `0` | 逃生开关：设为 `1` 允许 `PUBLIC_ORIGIN` / `RELAY_URL` 在非 loopback 时仍用明文 `http://`/`ws://`（例如直接暴露一个没有 TLS 终端的公网 IP）。默认关闭；开启后登录口令、会话 cookie 和全部流量都走明文，链路上任何人都能窃取或劫持会话，务必优先用 TLS（见下文部署一节的 Caddy）。 |
 | `WRAPPER_TOKEN` | 占位值 | wrapper 连中继时的 Bearer token，两边必须一致；启动会拒绝占位值和短值。 |
 | `WEB_STATIC_DIR` | 空 | 指向 `web/dist` 则同源托管网页；留空则只做 API/WS。 |
 | `CLIENT_QUEUE_CAP` / `CLIENT_QUEUE_BYTES` | `4096` / `16777216` | 单客户端待发帧数/字节硬上限；超限断开慢客户端，不静默丢帧。 |
@@ -326,7 +358,8 @@ HTTPS_PROXY=http://your-proxy:port      # SOCKS 用 ALL_PROXY=socks5://...
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `RELAY_URL` | `ws://127.0.0.1:8765/ws` | 中继的 WebSocket 地址（公网用 `wss://域名/ws`）。 |
+| `RELAY_URL` | `ws://127.0.0.1:8765/ws` | 中继的 WebSocket 地址（公网用 `wss://域名/ws`，除非开了 `ALLOW_INSECURE_HTTP`）。 |
+| `ALLOW_INSECURE_HTTP` | `0` | 同中继的逃生开关；wrapper 也读这个变量，开启后 `RELAY_URL` 可以在非 loopback 时仍用 `ws://`。 |
 | `WRAPPER_TOKEN` | `change-me-wrapper` | 同中继。 |
 | `CLAUDE_BIN` | 空 | 可选的 Claude CLI 绝对路径；systemd/PATH 找不到 `claude` 时设置。 |
 | `CC_CWD` | 当前目录 | 新会话默认工作目录。Claude `--resume` 靠它定位 `~/.claude/projects/` 下的会话文件，**必须对**；Codex 恢复时会优先从 rollout 取原 cwd。 |
@@ -360,7 +393,7 @@ HTTPS_PROXY=http://your-proxy:port      # SOCKS 用 ALL_PROXY=socks5://...
 
 - Claude 会话默认使用 `permissionMode: bypassPermissions`；Codex 默认审批策略是 `never` 并继承本机 Codex sandbox 配置，也可切到 `on-request` / `untrusted`，审批请求会转到网页。无论当前界面显示什么策略，已登录客户端都能创建/切换会话和修改可用控制项。**能连到中继且通过登录的人，应等同于拿到了这台机器的远程 agent/shell 权限。**
 - `LOGIN_PASSWORD` / `WRAPPER_TOKEN` / `SESSION_SECRET` 是唯一的门：用强随机值、别提交 git、别贴到聊天里、定期轮换。仓库 `.env` 只适合本机开发；生产 wrapper 必须使用上述 root-only `/etc/cc-remote/wrapper.env`。systemd 模板会禁止服务及模型子进程读取这个源文件和遗留仓库 `.env`；Linux wrapper 还会关闭 dumpability，避免子进程从 `/proc/<pid>/environ` 或进程内存取回已经捕获的 token。
-- 公网必须上 TLS（`wss://`，本仓库用 Caddy 自动签证书）。别用明文 `ws://` 暴露公网。
+- 公网必须上 TLS（`wss://`，本仓库用 Caddy 自动签证书）。别用明文 `ws://` 暴露公网。只有明确需要临时用公网 IP + 明文 HTTP/WS（例如还没配好域名和 TLS）时才设 `ALLOW_INSECURE_HTTP=1`；开启后登录口令、会话 cookie 和全部流量都不加密，任何能看到这段网络流量的人都能窃取或劫持会话，条件允许应尽快切回 TLS。
 - 建议：给中继加 IP 白名单 / 只在需要时开、给登录加失败限速（已内置每 IP 每分钟 5 次）。
 
 ## 模型后端（可选）

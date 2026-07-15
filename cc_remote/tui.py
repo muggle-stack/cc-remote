@@ -15,6 +15,9 @@ Env:
   LOGIN_PASSWORD  optional; if omitted the TUI prompts without echo
   PUBLIC_ORIGIN   optional WebSocket Origin override (normally derived from URL)
   ENGINE          claude | codex   (which store to list / which backend for /new)
+  ALLOW_INSECURE_HTTP  1/true to allow a non-loopback RELAY_URL to stay ws://
+                        instead of requiring wss:// (default off; traffic
+                        including the login password travels in cleartext)
 
 Usage:
   python -m cc_remote.tui [session_id]     # attach to session_id, or pick from a list
@@ -66,6 +69,11 @@ RELAY_URL = os.environ.get("RELAY_URL", "ws://127.0.0.1:8765/ws")
 LOGIN_PASSWORD = os.environ.get("LOGIN_PASSWORD", "")
 PUBLIC_ORIGIN = os.environ.get("PUBLIC_ORIGIN", "")
 ENGINE = os.environ.get("ENGINE", "claude")
+# Same opt-in escape hatch as the relay/wrapper: lets RELAY_URL stay ws://
+# against a non-loopback host instead of requiring wss://. Off by default.
+ALLOW_INSECURE_HTTP = os.environ.get("ALLOW_INSECURE_HTTP", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}
 TUI_OUTBOX_CAP = 256
 TUI_OUTBOX_BYTES = 32 * 1024 * 1024
 TUI_MAX_FRAME_BYTES = 16 * 1024 * 1024
@@ -163,7 +171,7 @@ def _validate_relay_url(ws_url: str) -> str:
         loopback = ipaddress.ip_address(host).is_loopback
     except ValueError:
         loopback = host.lower() == "localhost"
-    if parsed.scheme != "wss" and not loopback:
+    if parsed.scheme != "wss" and not loopback and not ALLOW_INSECURE_HTTP:
         raise ValueError("RELAY_URL must use wss:// outside loopback")
     return ws_url
 

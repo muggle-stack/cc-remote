@@ -224,6 +224,13 @@ your machine wrapper ──wss:443──▶ Caddy(VPS, auto HTTPS) ──▶ rel
 - **Domain**: an A record pointing at the VPS IP (Caddy auto-provisions + renews the TLS cert).
 - **Your machine**: Linux (systemd runs the wrapper below), outbound 443 allowed.
 
+If you do not have a domain yet, a temporary public-IPv4 + plain-HTTP/WS
+escape hatch is also supported: open port 80 on the VPS and allow outbound 80
+from the wrapper machine. Caddy still proxies to the loopback-only relay, so
+request limits and service hardening remain in place, but there is **no
+transport encryption**: the login password, cookie, wrapper token, and all
+session content can be read or modified on the network path.
+
 ### 1) Generate tokens / password
 
 ```bash
@@ -281,6 +288,22 @@ sudoedit /opt/cc-remote/.env     # set LOGIN_PASSWORD / SESSION_SECRET / WRAPPER
 sudo bash /opt/cc-remote/deploy/setup-vps.sh your-domain.com
 ```
 
+For a public-IPv4-only deployment, use this matching configuration and target:
+
+```ini
+# /opt/cc-remote/.env
+PUBLIC_ORIGIN=http://your-public-ip
+ALLOW_INSECURE_HTTP=1
+```
+
+```bash
+sudo bash /opt/cc-remote/deploy/setup-vps.sh your-public-ip
+```
+
+The installer selects the plain-HTTP Caddy template only when the opt-in is
+enabled, the argument is a public IPv4 address, and `PUBLIC_ORIGIN` matches it
+exactly. Private, loopback, reserved, and malformed addresses fail closed.
+
 The script installs `python3-venv` + Caddy, creates a `ccremote` system user, builds a venv + `pip install`, merges both a marked cc-remote site and global HTTP timeout/header limits into the Caddyfile while preserving other global options and sites, then starts `cc-remote-relay` + `caddy`. If the new relay restart or readiness check fails, the venv, Caddyfile, and systemd unit are restored as one transaction and the previous relay's `/healthz` is verified.
 
 Verify:
@@ -289,6 +312,8 @@ Verify:
 curl https://your-domain.com/healthz
 # expect: {"ok":true,"wrapper_connected":false,"clients":0}
 ```
+
+In insecure mode, use `curl http://your-public-ip/healthz` instead.
 
 ### 5) Your machine: root-only wrapper environment + systemd
 
@@ -310,11 +335,20 @@ sudo systemctl daemon-reload && sudo systemctl enable --now cc-remote-wrapper
 journalctl -u cc-remote-wrapper -f     # expect: connected to relay / wrapper running
 ```
 
-Back on the VPS, `curl https://your-domain.com/healthz` should now show `wrapper_connected:true`.
+In insecure mode, also set both wrapper-side values:
+
+```ini
+RELAY_URL=ws://your-public-ip/ws
+ALLOW_INSECURE_HTTP=1
+```
+
+Back on the VPS, the matching mode's `/healthz` should now show `wrapper_connected:true`.
 
 ### 6) Verify from a phone
 
-Open `https://your-domain.com/` on your phone (any network) → log in with `LOGIN_PASSWORD` → send a message. You should get streaming replies, interrupt, and multi-device sync.
+Open the matching `https://your-domain.com/` or `http://your-public-ip/` on
+your phone (any network) → log in with `LOGIN_PASSWORD` → send a message. You
+should get streaming replies, interrupt, and multi-device sync.
 
 ### Behind a corporate HTTP proxy?
 
@@ -339,7 +373,8 @@ HTTPS_PROXY=http://your-proxy:port      # for SOCKS use ALL_PROXY=socks5://...
 | `SESSION_TTL_SECONDS` | `604800` | Session token lifetime (default 7 days). |
 | `LOGIN_BODY_MAX_BYTES` / `LOGIN_READ_TIMEOUT` / `LOGIN_INFLIGHT_CAP` | `4096` / `10` / `32` | Hard limits for login body bytes, total read seconds, and concurrent body reads. |
 | `SESSION_REGISTRY_CAP` | `1024` | Hard limit for process-local revocable browser sessions. |
-| `PUBLIC_ORIGIN` | empty | Exact browser origin allowed to connect, e.g. `https://remote.example.com`; **required**, and non-loopback origins must use HTTPS. |
+| `PUBLIC_ORIGIN` | empty | Exact browser origin allowed to connect, e.g. `https://remote.example.com`; **required**, and non-loopback origins must use HTTPS (unless `ALLOW_INSECURE_HTTP` is set). |
+| `ALLOW_INSECURE_HTTP` | `0` | Escape hatch: set to `1` to let a non-loopback `PUBLIC_ORIGIN`/`RELAY_URL` stay plain `http://`/`ws://` instead of requiring HTTPS/WSS — e.g. reaching the relay over a bare public IP with no TLS terminator in front. Off by default; enabling it sends the login password, session cookie, and all traffic in cleartext, so anyone on the network path can read or hijack the session. Prefer TLS (Caddy/nginx, see the deploy section) whenever possible. |
 | `WRAPPER_TOKEN` | placeholder | Bearer token the wrapper presents; must match on both sides. Startup rejects placeholders and short values. |
 | `WEB_STATIC_DIR` | empty | Point at `web/dist` to serve the web client same-origin; empty = API/WS only. |
 | `CLIENT_QUEUE_CAP` / `CLIENT_QUEUE_BYTES` | `4096` / `16777216` | Hard per-client pending-frame/byte limits; a slow client is disconnected instead of silently losing frames. |
@@ -350,7 +385,8 @@ HTTPS_PROXY=http://your-proxy:port      # for SOCKS use ALL_PROXY=socks5://...
 
 | Var | Default | Notes |
 |---|---|---|
-| `RELAY_URL` | `ws://127.0.0.1:8765/ws` | Relay WebSocket URL (`wss://domain/ws` in prod). |
+| `RELAY_URL` | `ws://127.0.0.1:8765/ws` | Relay WebSocket URL (`wss://domain/ws` in prod, unless `ALLOW_INSECURE_HTTP` is set). |
+| `ALLOW_INSECURE_HTTP` | `0` | Same escape hatch as the relay; the wrapper reads it too so `RELAY_URL` can stay `ws://` against a non-loopback host. |
 | `WRAPPER_TOKEN` | `change-me-wrapper` | Same as relay. |
 | `CLAUDE_BIN` | empty | Optional absolute Claude CLI path; set it when systemd/PATH cannot find `claude`. |
 | `CC_CWD` | cwd | Default working directory for new sessions. Claude `--resume` needs it to locate `~/.claude/projects/` — **it must be correct**; Codex resume first recovers the original cwd from its rollout. |
@@ -384,7 +420,7 @@ Each message accepts at most 8 attachments, at most 6 MiB each and 8 MiB decoded
 
 - Claude sessions default to `permissionMode: bypassPermissions`. Codex defaults to approval policy `never` while inheriting the machine's Codex sandbox configuration; it can also use `on-request` / `untrusted`, with approval requests bridged to the web client. Regardless of the policy currently displayed, authenticated clients can create/switch sessions and change available controls. **Treat anyone authenticated to the relay as holding remote agent/shell authority on the wrapper machine.**
 - `LOGIN_PASSWORD` / `WRAPPER_TOKEN` / `SESSION_SECRET` are the only gate: use strong random values, never commit or paste them into chats, and rotate them. A repository `.env` is for local development only; production wrappers must use the root-only `/etc/cc-remote/wrapper.env` above. The systemd template prevents the service and model descendants from reading that source file or a legacy repository `.env`; on Linux the wrapper also disables dumpability so children cannot recover the captured token through `/proc/<pid>/environ` or process memory.
-- Always use TLS (`wss://`) in production (this repo uses Caddy for automatic certs). Do not expose plain `ws://` publicly.
+- Always use TLS (`wss://`) in production (this repo uses Caddy for automatic certs). Do not expose plain `ws://` publicly. Only set `ALLOW_INSECURE_HTTP=1` when you genuinely need to run temporarily over a bare public IP with plain HTTP/WS (e.g. before a domain and TLS are set up); with it on, the login password, session cookie, and all traffic are unencrypted and can be read or hijacked by anyone on the network path — switch back to TLS as soon as you can.
 - Recommended: restrict the relay by IP / only run it when needed; login is rate-limited (5/min per IP) out of the box.
 
 ## Model backend (optional)

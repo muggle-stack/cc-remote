@@ -4,7 +4,9 @@ Reference files for the production deploy (public VPS relay + wrapper on your
 machine). The **full step-by-step guide is in the main [README](../README.md#生产部署公网-vps-中继--你机器上的-wrapper)**
 ([English](../README_en.md#production-deploy-public-vps-relay--wrapper-on-your-machine)).
 
-- `setup-vps.sh` — idempotent VPS setup: validates required secrets, installs
+- `setup-vps.sh` — idempotent VPS setup for either the normal domain + TLS
+  path or the explicit `ALLOW_INSECURE_HTTP=1` public-IPv4 + plain-HTTP escape
+  hatch: validates required secrets, installs
   Caddy + a hardened `ccremote` systemd service, keeps the app/venv root-owned
   and read-only to that service account, updates a marked cc-remote
   site block without overwriting unrelated Caddy sites, manages bounded global
@@ -12,7 +14,11 @@ machine). The **full step-by-step guide is in the main [README](../README.md#生
   restarts both services. If the new relay fails to restart or become ready,
   the venv, Caddyfile, and relay unit are restored as one transaction and the
   previous relay is health-checked.
-  Run as `sudo bash deploy/setup-vps.sh your-domain.com` after following the
+  Run as `sudo bash deploy/setup-vps.sh your-domain.com` for TLS, or set
+  `PUBLIC_ORIGIN=http://your-public-ip` and `ALLOW_INSECURE_HTTP=1` before
+  running `sudo bash deploy/setup-vps.sh your-public-ip`. The insecure mode
+  still keeps the relay on loopback behind Caddy, but Caddy listens on port 80
+  without TLS. Run the script after following the
   main README's maintenance-window publish flow: upload to a user-owned staging
   directory, stop the relay, then `sudo rsync --delete` into the root-owned
   `/opt/cc-remote`. Keep the existing `.env` and `.venv` excluded from that
@@ -21,6 +27,8 @@ machine). The **full step-by-step guide is in the main [README](../README.md#生
 - `Caddyfile` — reverse proxy + auto Let's Encrypt TLS (`wss://domain/ws` →
   `127.0.0.1:8765`) plus an early 4 KiB login-body limit. Replace
   `cc-remote.example.com` with your domain.
+- `Caddyfile.insecure` — explicit plain-HTTP public-IP template selected only
+  when `ALLOW_INSECURE_HTTP=1`; it omits HSTS and permits `ws://` in CSP.
 - `cc-remote-relay.service` — systemd unit for the relay on the VPS.
 - `cc-remote-wrapper.service` — systemd unit for the wrapper on your machine
   (edit `User` + paths first). It reads root-only
@@ -44,7 +52,8 @@ The relay is exposed publicly; `LOGIN_PASSWORD`, `SESSION_SECRET`, and
 policy `never`. Treat every logged-in client as holding remote agent/shell
 authority on the wrapper machine. Use strong secrets, keep relay `.env` out of
 git, never store the production wrapper token in a model-readable repository
-file, and always terminate TLS at Caddy.
+file. Always prefer TLS at Caddy; the public-IP escape hatch sends the login
+password, browser cookie, wrapper token, and session traffic unencrypted.
 See the [security section](../README.md#安全须知务必读) of the main README.
 
 The relay itself limits unfinished login bodies to 32 concurrent reads and 10

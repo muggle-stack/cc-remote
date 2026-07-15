@@ -26,6 +26,11 @@ def test_wrapper_startup_config_fails_closed():
         validate_wrapper_config(WrapperConfig(wrapper_token="change-me-wrapper"))
     with pytest.raises(ValueError, match="must use wss"):
         validate_wrapper_config(_wrapper_cfg(relay_url="ws://relay.example/ws"))
+    # ALLOW_INSECURE_HTTP is an explicit opt-in escape hatch for a bare public
+    # IP without TLS in front; it must not affect the default (off) path above.
+    validate_wrapper_config(
+        _wrapper_cfg(relay_url="ws://relay.example/ws", allow_insecure_http=True)
+    )
     with pytest.raises(ValueError, match="path must be /ws"):
         validate_wrapper_config(_wrapper_cfg(relay_url="wss://relay.example/other"))
     with pytest.raises(ValueError, match="WRAPPER_INBOX_BYTES"):
