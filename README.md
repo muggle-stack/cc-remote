@@ -4,7 +4,7 @@
 
 自托管 · 双引擎 · 多会话 · 实时过程 · 响应式 Web
 
-**当前版本：v3.0.0** · Wire protocol v26
+**当前版本：v3.0.0** · Wire protocol v27
 
 [English](README_en.md) ·
 [5 分钟上手](#本地快速开始一台机器5-分钟) ·
@@ -58,7 +58,7 @@ v3 把 cc-remote 从“能在网页控制 CLI”推进为一个本地优先、�
 | **原生 App / CLI 协同** | Claude CLI/Desktop/Agent View 与 Codex shared daemon/App/CLI 使用各自的所有权模型。v3 对齐 running、只读、打断、steer、compact、turn binding 和终止状态，避免兄弟会话误锁、历史回合串到尾部或留下“假思考中”。 |
 | **多设备隔离** | Device Center 提供一次性配对、独立可撤销的机器凭据和在线状态；relay 按用户允许的 `machine_id` 路由。设备、Code / Work、引擎、连接 generation 和会话归属分别隔离，延迟帧不能污染当前视图。 |
 | **移动端与文件体验** | 历史到顶继续拉取时保留滚动锚点；图片按需加载，支持灯箱、再次点击收起和双指缩放；Markdown、源码、HTML、PDF 与 Office 预览仍在本机安全边界内完成。PWA 图标、窄屏弹层、错误提示和过程时间线也统一收敛。 |
-| **可回滚发布** | 产品版本统一为 v3.0.0，wire protocol 为 v26。构建和部署同时校验产品版本与协议版本；VPS 使用不可变 release、独立 venv、原子 `current` 切换和失败回滚，避免直接覆盖正在运行的目录。 |
+| **可回滚发布** | 产品版本统一为 v3.0.0，wire protocol 为 v27。构建和部署同时校验产品版本与协议版本；VPS 使用不可变 release、独立 venv、原子 `current` 切换和失败回滚，避免直接覆盖正在运行的目录。 |
 
 > **信任边界没有改变：**模型账号、API key、会话源文件和工具执行仍留在
 > wrapper 所在机器；VPS relay 不保存对话或 Artifact。浏览历史只读取本地
@@ -79,7 +79,7 @@ v3 把 cc-remote 从“能在网页控制 CLI”推进为一个本地优先、�
 | **完整过程** | 折叠展示引擎公开提供的 reasoning 摘要、计划、命令输出、文件 diff、MCP、协作代理、Hook 和终端交互事件。 |
 | **Artifacts 与文件预览** | Work 自动列出当前工作产生的文件；源码可定位行号，Markdown 可预览和冲突安全编辑，HTML 在隔离 iframe 中渲染，图片/PDF 可直接查看，DOCX/XLSX/PPTX 由 wrapper 本机沙箱临时转换后预览。 |
 | **人工确认** | 回传 Claude `can_use_tool`，以及 Codex 命令、文件修改、用户输入、通用权限和 MCP elicitation；终端占用时可只读镜像，也可由用户主动接管。 |
-| **会话管理** | 搜索、切换、重命名、归档、删除和消息级派生；Codex 支持主动 compact、原生 Review，以及在 Git 仓库中派生到独立 worktree。 |
+| **会话管理** | 搜索、切换、重命名、归档、删除和消息级派生；Codex 支持主动 compact、原生 Review、派生到独立 worktree，以及把空闲对话迁移到另一工作目录。 |
 | **运行控制** | 切换模型、思考强度、服务档位、权限和 Plan 模式；Codex Code 的 `/permissions` 在同一紧凑面板中分别控制审批策略、官方执行环境 profile 和 Cached/Live 网页搜索；`/goal` 管理长目标，`/status` 只读展示 app-server 状态、用量与限额。 |
 | **真实扩展目录** | 通过 `/extensions`、`/skills`、`/plugins`、`/apps`、`/mcp`、`/hooks` 按需读取当前引擎目录。Code 中可按引擎能力管理 Skills、插件和 Claude Hooks；Codex Hooks 受官方接口限制为只读。Work 为避免改变私有工作环境，只读展示全部扩展。 |
 | **连续性** | 后台会话继续运行，多端实时同步；浏览器本地投影先绘制，wrapper 从 Claude transcript / Codex rollout 的物化摘要索引分页校验，断线后只按游标补实时尾巴。 |
@@ -192,7 +192,7 @@ Codex 会话把 app-server 提供的 reasoning 摘要、计划、命令、diff�
 
 ### 常用操作速查
 
-- **会话**：新建、搜索、后台运行、重命名、归档、删除、派生、Codex compact、Review 和独立 worktree。
+- **会话**：新建、搜索、后台运行、重命名、归档、删除、派生、Codex compact、Review 和独立 worktree；每个未归档 Codex Code 会话的三点菜单还可在不改变 thread ID 的情况下，把空闲对话迁移到另一目录继续。
 - **回合**：流式输出、Codex 原生引导、排队、停止/打断、复制、编辑重发、从指定消息派生。
 - **工具**：命令输出、文件修改与 diff、MCP、协作代理、Hook、审批和用户输入回传。
 - **终端协同**：Codex Code 共享官方 daemon 并支持双向控制；Claude 原生 CLI、Desktop
@@ -401,12 +401,12 @@ npm --prefix web run build   # 产出 web/dist/
 
 > 现在网页**不再把 token 烤进 JS**：登录改为向中继 POST 口令换取短期会话 token。所以构建不需要任何 `VITE_*` 变量。
 
-> **升级到协议 v26**：线协议会严格拒绝版本不一致。请在同一次维护窗口部署
+> **升级到协议 v27**：线协议会严格拒绝版本不一致。请在同一次维护窗口部署
 > `cc_remote/` 和新的 `web/dist/`，然后依次重启 relay、wrapper；不要新旧版本滚动混跑。
 > 升级期间已有 WebSocket 会短暂重连，relay 重启也会要求浏览器重新登录。已打开的
 > 旧版页面必须做一次**硬刷新**（重新加载新的带 hash 静态资源），仅重新登录不够。
-> 手工发布时先停本机 wrapper，再停服更新 relay + web，最后启动 v26 relay 和
-> v26 wrapper；这样旧 wrapper 不会占住同一 `machine_id` 的连接槽。
+> 手工发布时先停本机 wrapper，再停服更新 relay + web，最后启动 v27 relay 和
+> v27 wrapper；这样旧 wrapper 不会占住同一 `machine_id` 的连接槽。
 
 ### 3）上传 staging，由原子 release 安装器发布
 
@@ -460,7 +460,7 @@ sudo bash ~/cc-remote-upload/deploy/setup-vps.sh \
 脚本会：装 `python3-venv` + Caddy、建 `ccremote` 系统用户、创建不可变 release
 和 release-local venv、合并 Caddy 配置、原子切换 `current`，再重启 relay。若新
 relay 重启或健康检查失败，`current`、Caddyfile、systemd unit 会作为一个事务全部
-恢复，并验证旧 release 的 `/healthz`。成功后再启动 v26 wrapper。
+恢复，并验证旧 release 的 `/healthz`。成功后再启动 v27 wrapper。
 
 验证：
 

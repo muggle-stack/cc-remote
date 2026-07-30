@@ -10,7 +10,15 @@
 import type {
   DiffTheme, GoalStatus, QueryFile, QueryImg, ServerEvent, SessionControl, Space,
 } from "./protocol.ts";
-import { compareSessionControl, makeForkSessionCommand, makeForkSessionWorktreeCommand, makeOpenBtwCommand, PROTOCOL_VERSION, sessionControlTargetsSid } from "./protocol.ts";
+import {
+  compareSessionControl,
+  makeForkSessionCommand,
+  makeForkSessionWorktreeCommand,
+  makeMigrateSessionCommand,
+  makeOpenBtwCommand,
+  PROTOCOL_VERSION,
+  sessionControlTargetsSid,
+} from "./protocol.ts";
 import {
   CommandOutbox,
   QueryAcceptanceLatch,
@@ -500,6 +508,14 @@ export class RelayWs {
                   requestId = uuid()): string | null {
     const queued = this.send({
       ...makeForkSessionCommand(parentSessionId, forkPointId, requestId, nowTs()),
+    });
+    return queued ? requestId : null;
+  }
+
+  sendMigrateSession(sessionId: string, cwd: string,
+                     requestId = uuid()): string | null {
+    const queued = this.send({
+      ...makeMigrateSessionCommand(sessionId, cwd, requestId, nowTs()),
     });
     return queued ? requestId : null;
   }
@@ -1132,10 +1148,10 @@ export class RelayWs {
       schedule_id: scheduleId, ts: nowTs() });
   }
 
-  sendListDir(path?: string | null): void {
+  sendListDir(path?: string | null): string | null {
     const obj: Record<string, unknown> = { v: PROTOCOL_VERSION, type: "list_dir", ts: nowTs() };
     if (path) obj.path = path;
-    this.send(obj);
+    return this.sendTracked(obj);
   }
 
   /** Send hello with the per-session cursor map (multi-session catch-up). */
@@ -1413,6 +1429,12 @@ export class RelayWs {
         }
         if (msg.type === "history_invalidated") {
           delete this.historyHeadBySession[msg.session_id];
+        }
+        if (msg.type === "session_migrated") {
+          const ownership = this.ownershipBySession[msg.session_id];
+          if (this.acceptsOwnership(ownership, socketGeneration)) {
+            eventOwnership = ownership;
+          }
         }
         if (msg.type === "replay_start" && msg.sid && msg.generation) {
           this.noteGeneration(msg.sid, msg.generation);

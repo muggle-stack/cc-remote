@@ -64,6 +64,7 @@ COMMAND_HANDLER_NAMES = MappingProxyType({
     "get_work_artifacts": "_handle_get_work_artifacts",
     "fork_session": "_handle_fork_session",
     "fork_session_worktree": "_handle_fork_session_worktree",
+    "migrate_session": "_handle_migrate_session",
 })
 
 WORK_MUTATION_COMMANDS = frozenset({

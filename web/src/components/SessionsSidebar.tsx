@@ -7,7 +7,11 @@ import {
   orderCodeDirectoryGroups,
   visibleDirectorySessions,
 } from "../session-order";
-import { isWorktreeForkBlockedByState, sessionMenuCapabilities } from "../session-worktree";
+import {
+  isSessionMigrationBlockedByState,
+  isWorktreeForkBlockedByState,
+  sessionMenuCapabilities,
+} from "../session-worktree";
 import { useImeSubmit } from "../use-ime-submit";
 
 interface Props {
@@ -29,6 +33,7 @@ interface Props {
   onPin: (session: SessionInfo, pinned: boolean) => void;
   onDelete: (id: string) => void;
   onForkWorktree: (session: SessionInfo) => void;
+  onMigrate: (session: SessionInfo) => void;
 }
 
 function basename(cwd?: string | null): string {
@@ -55,7 +60,7 @@ function sessionDateGroup(value?: string | null): { key: string; label: string }
 
 export function SessionsSidebar({ open, space, onSpaceChange, sessions, liveStates,
   completionBadges, activeSessionId, onSelect, onNew, onNewInDir, onClose,
-  onRename, onArchive, onPin, onDelete, onForkWorktree }: Props) {
+  onRename, onArchive, onPin, onDelete, onForkWorktree, onMigrate }: Props) {
   const [q, setQ] = useState("");
   const [menuCardId, setMenuCardId] = useState<string | null>(null);
   const [lifting, setLifting] = useState(false);
@@ -112,6 +117,10 @@ export function SessionsSidebar({ open, space, onSpaceChange, sessions, liveStat
   };
   const doForkWorktree = (s: SessionInfo) => {
     onForkWorktree(s);
+    setMenuCardId(null); setLifting(false);
+  };
+  const doMigrate = (s: SessionInfo) => {
+    onMigrate(s);
     setMenuCardId(null); setLifting(false);
   };
   const doCopyId = (s: SessionInfo) => {
@@ -217,6 +226,7 @@ export function SessionsSidebar({ open, space, onSpaceChange, sessions, liveStat
       : completion === "both" ? "2 项完成"
       : completion ? "已完成" : null;
     const forkBlocked = isWorktreeForkBlockedByState(st);
+    const migrationBlocked = isSessionMigrationBlockedByState(st);
     return (
       <div
         key={s.session_id}
@@ -263,6 +273,14 @@ export function SessionsSidebar({ open, space, onSpaceChange, sessions, liveStat
               <button onClick={() => doForkWorktree(s)} disabled={forkBlocked}
                 title={forkBlocked ? "请等待当前任务结束" : "从当前 Git HEAD 创建新工作树"}>
                 <Icon name="branch" size={15} />派生到新工作树…
+              </button>
+            )}
+            {space === "code" && capabilities.migrate && (
+              <button onClick={() => doMigrate(s)} disabled={migrationBlocked}
+                title={migrationBlocked
+                  ? "请等待当前任务结束"
+                  : "保留对话历史并在另一目录继续"}>
+                <Icon name="folder-open" size={15} />迁移到目录…
               </button>
             )}
             <button onClick={() => doCopyId(s)}><Icon name={copiedId === s.session_id ? "check" : "copy"} size={15} />{copiedId === s.session_id ? "已复制" : "复制 session ID"}</button>

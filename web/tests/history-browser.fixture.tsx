@@ -21,6 +21,7 @@ import {
   QueuedQueryDialog,
   type QueuedQueryEditor,
 } from "../src/components/QueuedQueryDialog";
+import { DirPicker } from "../src/components/DirPicker";
 
 const LONG_PERMISSION_PROFILE_ID =
   `custom-profile-${"authorization-boundary-".repeat(12)}`.slice(0, 256);
@@ -409,6 +410,9 @@ export function HistoryBrowserFixture() {
   const composerResize = params.has("composer-resize");
   const quotaComposer = params.has("quota-composer");
   const queuedQueryFixture = params.has("queued-query-editor");
+  const migrationPickerFixture = params.has("migration-picker")
+    || params.has("migration-picker-null");
+  const migrationPickerNullInitial = params.has("migration-picker-null");
   const newChatControls = params.has("newchat-controls");
   const longProfile = params.has("long-profile");
   const recoveryReplacement = params.has("recovery-replace");
@@ -550,6 +554,22 @@ export function HistoryBrowserFixture() {
       media_type: "image/png",
       data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WlK4h8AAAAASUVORK5CYII=",
     }] : []);
+  const [migrationPickerPath, setMigrationPickerPath] =
+    useState("/repo/stale");
+  const [migrationPickerInitialPath, setMigrationPickerInitialPath] =
+    useState<string | null>(
+      migrationPickerNullInitial ? null : "/repo/current",
+    );
+  const [migrationPickerOpen, setMigrationPickerOpen] = useState(false);
+  const [migrationPickerRequest, setMigrationPickerRequest] =
+    useState<string | null>(null);
+  const [migrationPickerRequestId, setMigrationPickerRequestId] =
+    useState<string | null>(null);
+  const [migrationPickerResponseId, setMigrationPickerResponseId] =
+    useState<string | null>("migration-picker-stale");
+  const migrationPickerRequestSeq = useRef(0);
+  const [migrationPickerConfirmed, setMigrationPickerConfirmed] =
+    useState<string | null>(null);
   const active = sessions[sid];
   const growOlderRow = useCallback((targetSid: string) => {
     setSessions((current) => ({
@@ -866,6 +886,35 @@ export function HistoryBrowserFixture() {
           onClick={replaceHistoryRevision}>
           replace revision
         </button>
+        {migrationPickerFixture && (
+          <>
+            <button data-testid="open-migration-picker" type="button"
+              onClick={() => setMigrationPickerOpen(true)}>
+              open migration picker
+            </button>
+            <button data-testid="resolve-migration-picker" type="button"
+              onClick={() => {
+                if (!migrationPickerRequestId) return;
+                setMigrationPickerPath(
+                  migrationPickerRequest ?? "/home/fixture");
+                setMigrationPickerResponseId(migrationPickerRequestId);
+              }}>
+              resolve migration picker
+            </button>
+            <button data-testid="externally-migrate-picker" type="button"
+              onClick={() => setMigrationPickerInitialPath("/repo/external")}>
+              externally migrate picker
+            </button>
+            <output data-testid="migration-picker-request">
+              {migrationPickerRequestId
+                ? migrationPickerRequest ?? "<home>"
+                : ""}
+            </output>
+            <output data-testid="migration-picker-confirmed">
+              {migrationPickerConfirmed}
+            </output>
+          </>
+        )}
         {newChatControls && (
           <>
             <button data-testid="switch-newchat-device" type="button"
@@ -1078,6 +1127,29 @@ export function HistoryBrowserFixture() {
           return true;
         }}
         onRetry={() => true} />
+      {migrationPickerFixture && (
+        <DirPicker
+          key={`migration-picker-${migrationPickerOpen ? "thread" : "closed"}-${migrationPickerInitialPath ?? "home"}`}
+          open={migrationPickerOpen}
+          path={migrationPickerPath}
+          parent="/repo"
+          dirs={[{ name: "stale-child", path: "/repo/stale-child" }]}
+          responseRequestId={migrationPickerResponseId}
+          initialPath={migrationPickerInitialPath}
+          title="迁移 Codex 会话"
+          confirmLabel="迁移到此目录"
+          waitForInitialBrowse
+          onBrowse={(path) => {
+            const requestId =
+              `migration-picker-${++migrationPickerRequestSeq.current}`;
+            setMigrationPickerRequest(path);
+            setMigrationPickerRequestId(requestId);
+            return requestId;
+          }}
+          onConfirm={(path) => setMigrationPickerConfirmed(path)}
+          onClose={() => {}}
+        />
+      )}
     </main>
   );
 }

@@ -99,7 +99,8 @@ from cc_remote.protocol import (
     ToolUse, ToolResult, TurnBinding, TurnEnd, TurnNotificationContext,
     TurnResult, is_downstream,
     is_reliable_command,
-    SessionInfo, SessionList, SessionActivity, ListSessions, SessionFocus, SessionRekey, SessionForked, DirList,
+    SessionInfo, SessionList, SessionActivity, ListSessions, SessionFocus,
+    SessionRekey, SessionForked, SessionMigrated, DirList,
     WorkDashboard, WorkArtifacts, RollbackResult,
     ERR_BUSY, ERR_NOT_RUNNING, ERR_BAD_PROMPT, ERR_DRAIN_TIMEOUT,
     ERR_CC_CRASH, ERR_INTERNAL, ERR_INVALID_CWD, ERR_AUTH, ERR_PROTOCOL,
@@ -826,7 +827,7 @@ class WrapperMachine:
         "rename_session", "archive_session", "pin_session",
         "delete_work_session", "delete_session", "rollback_session",
         "compact_session", "start_review",
-        "fork_session", "fork_session_worktree",
+        "fork_session", "fork_session_worktree", "migrate_session",
     })
 
     def __init__(self, cfg: WrapperConfig, transport: WrapperTransport):
@@ -1954,6 +1955,35 @@ class WrapperMachine:
                 error_type=type(exc).__name__,
             )
             return CodexControls()
+
+    async def _reconcile_codex_cwd_override(
+        self,
+        session_id: str,
+        controls: CodexControls,
+    ) -> CodexControls:
+        """Return a live override, atomically discarding a missing target."""
+        for _attempt in range(4):
+            cwd = controls.cwd_override
+            if cwd is None or await asyncio.to_thread(os.path.isdir, cwd):
+                return controls
+            if self._codex_controls is None:
+                raise CodexControlStoreError(
+                    "Codex cwd override store is unavailable"
+                )
+            controls = await asyncio.to_thread(
+                self._codex_controls.clear_cwd_override_if_matches,
+                session_id,
+                cwd,
+            )
+            self._invalidate_codex_session_catalog()
+            log.warning(
+                "discarded missing Codex cwd override",
+                session_id=session_id,
+                cwd=cwd,
+            )
+        raise CodexControlStoreError(
+            "Codex cwd override changed repeatedly during validation"
+        )
 
     async def _read_claude_handoff_controls(
         self, ctx: SessionContext,
@@ -7916,6 +7946,8 @@ class WrapperMachine:
 
     async def _runtime_control_preflight(
         self, ctx: SessionContext, *, action: str,
+        request_id: Optional[str] = None,
+        client_id: Optional[str] = None,
     ) -> Optional[Error]:
         """Bind a control to the session's real writer before changing state.
 
@@ -7935,6 +7967,8 @@ class WrapperMachine:
             error = Error(
                 code=ERR_BUSY,
                 message=f"Claude TUI 正在处理回合，完成或打断后再{action}",
+                request_id=request_id,
+                to=client_id,
             )
             await self._emit(ctx, error)
             return error
@@ -7951,6 +7985,8 @@ class WrapperMachine:
             error = Error(
                 code=ERR_NOT_RUNNING,
                 message=f"Codex 共享通道重连失败，无法{action}；请重试",
+                request_id=request_id,
+                to=client_id,
             )
             await self._emit(ctx, error)
             return error
@@ -7976,6 +8012,8 @@ class WrapperMachine:
             code=ERR_BUSY,
             message=(f"该会话正由本机原生 {engine_name} CLI 控制，{action}未生效；"
                      f"{guidance}"),
+            request_id=request_id,
+            to=client_id,
         )
         await self._emit(ctx, error)
         return error
@@ -11724,7 +11762,40 @@ class WrapperMachine:
             self._prime_codex_sidebar_watches(raw)
             resident_state = {c.session_id: c.state for c in self.sessions.values()
                               if c.session_id and c.engine == "codex"}
+            resident_cwd = {c.session_id: c.cwd for c in self.sessions.values()
+                            if c.session_id and c.engine == "codex"}
             space = getattr(cmd, "space", "code")
+            cwd_overrides = (
+                self._codex_controls.cwd_overrides()
+                if space == "code" and self._codex_controls is not None
+                else {}
+            )
+            if cwd_overrides:
+                listed_ids = {
+                    row.get("session_id")
+                    for row in raw
+                    if isinstance(row.get("session_id"), str)
+                }
+                valid_overrides: dict[str, str] = {}
+                for session_id in listed_ids:
+                    override = cwd_overrides.get(session_id)
+                    if override is None:
+                        continue
+                    try:
+                        controls = await self._reconcile_codex_cwd_override(
+                            session_id,
+                            CodexControls(cwd_override=override),
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "Codex sidebar cwd override could not be reconciled",
+                            session_id=session_id,
+                            error_type=type(exc).__name__,
+                        )
+                        continue
+                    if controls.cwd_override is not None:
+                        valid_overrides[session_id] = controls.cwd_override
+                cwd_overrides = valid_overrides
             store = self._work.for_engine("codex")
             work_records = await asyncio.to_thread(store.records_by_session)
             pinned_ids = (self._session_pins.ids("codex")
@@ -11772,7 +11843,11 @@ class WrapperMachine:
                     summary=(record.title if record and record.title
                              else row.get("summary")),
                     first_prompt=row.get("first_prompt"),
-                    cwd=row.get("cwd"),
+                    cwd=(
+                        resident_cwd.get(row["session_id"])
+                        or cwd_overrides.get(row["session_id"])
+                        or row.get("cwd")
+                    ),
                     last_modified=row.get("last_modified"),
                     git_branch=row.get("git_branch"),
                     tag=("archived" if record and record.archived
@@ -12623,6 +12698,12 @@ class WrapperMachine:
                 log.warning(
                     "Codex checkpoint cleanup after delete failed", session_id=sid
                 )
+        if engine == "codex" and self._codex_controls is not None:
+            try:
+                await asyncio.to_thread(self._codex_controls.delete, sid)
+            except CodexControlStoreError:
+                log.warning(
+                    "stale Codex controls cleanup failed", session_id=sid)
         if self._session_pins is not None:
             try:
                 await asyncio.to_thread(
@@ -14728,6 +14809,329 @@ class WrapperMachine:
                  recovered=existing is not None)
         return event
 
+    async def _send_session_migration_error(
+        self, cmd, code: str, message: str, *, sid: Optional[str] = None,
+    ) -> Error:
+        error = Error(
+            code=code,
+            message=message,
+            request_id=getattr(cmd, "request_id", None),
+            sid=sid or getattr(cmd, "session_id", None),
+            to=getattr(cmd, "client_id", None),
+        )
+        ctx = self._ctx_by_sid(sid or getattr(cmd, "session_id", ""))
+        if ctx is not None:
+            await self._emit(ctx, error)
+        else:
+            await self.transport.send(error)
+        return error
+
+    async def _handle_migrate_session(self, cmd):
+        """Continue one idle Codex Code thread in another cwd."""
+        sid = self._resolve_session_alias(cmd.session_id) or cmd.session_id
+        requested = os.path.expanduser(cmd.cwd.strip())
+        if not os.path.isabs(requested):
+            return await self._send_session_migration_error(
+                cmd,
+                ERR_INVALID_CWD,
+                "迁移目录必须是绝对路径",
+                sid=sid,
+            )
+        target_cwd = os.path.realpath(requested)
+        if not await asyncio.to_thread(os.path.isdir, target_cwd):
+            return await self._send_session_migration_error(
+                cmd,
+                ERR_INVALID_CWD,
+                "迁移目录不存在或不是目录",
+                sid=sid,
+            )
+
+        ctx = self._ctx_by_sid(sid)
+        if ctx is None:
+            if not await self._is_codex_session(sid):
+                return await self._send_session_migration_error(
+                    cmd,
+                    ERR_AUTH,
+                    "目前仅支持迁移 Codex Code 会话",
+                    sid=sid,
+                )
+            work_record = await asyncio.to_thread(
+                self._work.for_engine("codex").get_by_session,
+                sid,
+            )
+            if work_record is not None:
+                return await self._send_session_migration_error(
+                    cmd,
+                    ERR_AUTH,
+                    "Codex Work 的隔离目录不能迁移",
+                    sid=sid,
+                )
+            try:
+                ctx = await self._spawn(
+                    resume_id=sid,
+                    engine="codex",
+                    space="code",
+                    raise_on_failure=True,
+                )
+            except _SpawnFailure as exc:
+                return await self._send_session_migration_error(
+                    cmd, exc.code, exc.message, sid=sid)
+            except Exception as exc:
+                log.exception(
+                    "cold Codex session spawn for migration failed",
+                    session_id=sid,
+                    error_type=type(exc).__name__,
+                )
+                return await self._send_session_migration_error(
+                    cmd,
+                    ERR_CC_CRASH,
+                    "会话暂时无法加载，迁移未开始",
+                    sid=sid,
+                )
+            if ctx is None:
+                return await self._send_session_migration_error(
+                    cmd,
+                    ERR_NOT_RUNNING,
+                    "会话暂时无法加载，迁移未开始",
+                    sid=sid,
+                )
+        if ctx.engine != "codex" or ctx.space != "code" or ctx.btw:
+            return await self._send_session_migration_error(
+                cmd,
+                ERR_AUTH,
+                "目前仅支持迁移普通 Codex Code 会话",
+                sid=sid,
+            )
+
+        async with ctx.query_lock:
+            active = any(
+                task is not None and not task.done()
+                for task in (ctx.turn_task, ctx.codex_spontaneous_task)
+            )
+            if ctx.state != "idle" or active:
+                return await self._send_session_migration_error(
+                    cmd,
+                    ERR_BUSY,
+                    "会话仍在运行，请等待当前回合结束后再迁移",
+                    sid=sid,
+                )
+            control_error = await self._runtime_control_preflight(
+                ctx,
+                action="迁移工作目录",
+                request_id=cmd.request_id,
+                client_id=getattr(cmd, "client_id", None),
+            )
+            if control_error is not None:
+                return control_error
+            # Shared CLI turns are coordinated by the common app-server and do
+            # not block Remote controls, so the generic preflight above only
+            # verifies that daemon generation. A private Codex App uses a
+            # separate app-server, though, and may be running this same thread
+            # while the Remote-owned context remains idle. Refresh that
+            # ownership boundary before retargeting the loaded thread.
+            if (
+                self._codex_shared_affinity(ctx)
+                and await self._prime_codex_ownership(sid)
+            ):
+                return await self._send_session_migration_error(
+                    cmd,
+                    ERR_BUSY,
+                    "会话正由 Codex App 使用，无法迁移工作目录",
+                    sid=sid,
+                )
+            active = any(
+                task is not None and not task.done()
+                for task in (ctx.turn_task, ctx.codex_spontaneous_task)
+            )
+            if ctx.state != "idle" or active:
+                return await self._send_session_migration_error(
+                    cmd,
+                    ERR_BUSY,
+                    "会话状态已变化，请等待当前回合结束后再迁移",
+                    sid=sid,
+                )
+
+            previous_cwd = ctx.cwd
+            previous_cwd_real = os.path.realpath(previous_cwd)
+            if target_cwd != previous_cwd_real or target_cwd != previous_cwd:
+                if self._codex_controls is None:
+                    return await self._send_session_migration_error(
+                        cmd,
+                        ERR_INTERNAL,
+                        "会话目录迁移状态暂时无法保存，请修复本地状态文件后重试",
+                        sid=sid,
+                    )
+                previous_cwd_override = (
+                    self._codex_controls.get(sid).cwd_override
+                )
+                permission_profile = getattr(
+                    ctx.sdk, "permission_profile", None)
+                if isinstance(permission_profile, str) and permission_profile:
+                    try:
+                        profiles = await codex_permission_profiles(target_cwd)
+                    except Exception as exc:
+                        log.warning(
+                            "migration permission profile lookup failed",
+                            session_id=sid,
+                            error_type=type(exc).__name__,
+                        )
+                        return await self._send_session_migration_error(
+                            cmd,
+                            ERR_INTERNAL,
+                            "目标目录的执行环境状态无法确认，迁移未开始",
+                            sid=sid,
+                        )
+                    if not any(
+                        profile["id"] == permission_profile
+                        and profile["allowed"]
+                        for profile in profiles
+                    ):
+                        return await self._send_session_migration_error(
+                            cmd,
+                            ERR_AUTH,
+                            "当前执行环境不允许访问目标目录，请先切换执行环境",
+                            sid=sid,
+                        )
+                try:
+                    await ctx.sdk.set_cwd(
+                        target_cwd,
+                        reason="session cwd migration",
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "Codex session cwd migration failed",
+                        session_id=sid,
+                        target_cwd=target_cwd,
+                        error_type=type(exc).__name__,
+                    )
+                    rollback_ok = False
+                    try:
+                        await ctx.sdk.set_cwd(
+                            previous_cwd,
+                            reason="session cwd migration rollback",
+                        )
+                        rollback_ok = True
+                    except Exception as rollback_exc:
+                        ctx.needs_reload = True
+                        log.warning(
+                            "Codex session cwd migration rollback failed",
+                            session_id=sid,
+                            error_type=type(rollback_exc).__name__,
+                        )
+                    return await self._send_session_migration_error(
+                        cmd,
+                        ERR_INTERNAL,
+                        (
+                            "迁移失败，会话仍保留原工作目录；请稍后重试"
+                            if rollback_ok else
+                            "迁移失败且原目录连接未恢复，请重新打开会话"
+                        ),
+                        sid=sid,
+                    )
+
+                try:
+                    await asyncio.to_thread(
+                        self._codex_controls.set_cwd_override,
+                        sid,
+                        target_cwd,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "Codex session cwd migration persistence failed",
+                        session_id=sid,
+                        error_type=type(exc).__name__,
+                    )
+                    persistence_rollback_ok = False
+                    try:
+                        restored = await asyncio.to_thread(
+                            self._codex_controls
+                            .restore_cwd_override_after_failed_set,
+                            sid,
+                            target_cwd,
+                            previous_cwd_override,
+                        )
+                        persistence_rollback_ok = (
+                            restored.cwd_override
+                            == previous_cwd_override
+                        )
+                    except Exception as restore_exc:
+                        log.warning(
+                            "Codex migration persistence cleanup failed",
+                            session_id=sid,
+                            error_type=type(restore_exc).__name__,
+                        )
+                    runtime_rollback_ok = False
+                    try:
+                        await ctx.sdk.set_cwd(
+                            previous_cwd,
+                            reason="session cwd migration persistence rollback",
+                        )
+                        runtime_rollback_ok = True
+                    except Exception as rollback_exc:
+                        ctx.needs_reload = True
+                        log.warning(
+                            "Codex migration persistence rollback failed",
+                            session_id=sid,
+                            error_type=type(rollback_exc).__name__,
+                        )
+                    rollback_ok = (
+                        persistence_rollback_ok and runtime_rollback_ok
+                    )
+                    if not rollback_ok:
+                        ctx.needs_reload = True
+                    return await self._send_session_migration_error(
+                        cmd,
+                        ERR_INTERNAL,
+                        (
+                            "迁移状态无法保存，会话已恢复原工作目录；请稍后重试"
+                            if rollback_ok else
+                            "迁移状态无法保存且原目录状态未完全恢复，请重新打开会话"
+                        ),
+                        sid=sid,
+                    )
+
+                previous_checkpoint = ctx.codex_checkpoint
+                await self._retire_codex_checkpoint(
+                    ctx,
+                    reason="session cwd migration",
+                    allow_restart=True,
+                )
+                if previous_checkpoint in (None, False):
+                    # A different cwd may cross the Git/non-Git boundary, so
+                    # re-evaluate checkpoint support on its first managed turn.
+                    ctx.codex_checkpoint = None
+                ctx.cwd = target_cwd
+                # Updating loaded-thread settings does not consume rollout
+                # growth written by a separate native app-server. Preserve a
+                # pending reload so the queued/next Remote turn resumes the
+                # latest native state in this newly confirmed cwd first.
+                ctx.preview_write_candidates.clear()
+                ctx.preview_external_paths.clear()
+                await self._cleanup_codex_steer_attachments(ctx)
+                self._invalidate_codex_session_catalog()
+                await self._emit(ctx, ArtifactInvalidated(
+                    session_id=sid,
+                    reason="session_migration",
+                ))
+
+            event = SessionMigrated(
+                session_id=sid,
+                previous_cwd=previous_cwd,
+                cwd=target_cwd,
+                request_id=cmd.request_id,
+            )
+            await self._emit(ctx, event)
+            await self._list_codex_sessions(cmd)
+            ctx.queued_query_wakeup.set()
+            self._schedule_query_queue_drain(ctx)
+            log.info(
+                "Codex session cwd migrated",
+                session_id=sid,
+                previous_cwd=previous_cwd,
+                cwd=target_cwd,
+            )
+            return event
+
     # ---- directory picker (arbitrary-cwd session creation) ----
 
     async def _handle_list_dir(self, cmd) -> None:
@@ -14735,6 +15139,7 @@ class WrapperMachine:
             path, parent, dirs = await asyncio.to_thread(self._scan_dir, cmd.path)
             event = DirList(
                 path=path, parent=parent, dirs=dirs,
+                request_id=getattr(cmd, "cmd_id", None),
                 to=getattr(cmd, "client_id", None))
             await self.transport.send(event)
             return event
@@ -14838,6 +15243,10 @@ class WrapperMachine:
         resolves from current settings, then falls back to the curated default;
         omitted Codex controls retain native defaults."""
         explicit_claude_model = engine == "claude" and model is not None
+        saved_codex_controls = CodexControls()
+        if resume_id and engine == "codex" and space == "code":
+            saved_codex_controls = await self._load_codex_session_controls(
+                resume_id)
 
         async def reject(
             code: str,
@@ -14854,6 +15263,28 @@ class WrapperMachine:
                 await self._emit_to_sid(sid, error)
             else:
                 await self._emit_focused(error)
+
+        if saved_codex_controls.cwd_override is not None:
+            try:
+                saved_codex_controls = (
+                    await self._reconcile_codex_cwd_override(
+                        resume_id,
+                        saved_codex_controls,
+                    )
+                )
+            except Exception as exc:
+                log.warning(
+                    "missing Codex cwd override could not be reconciled",
+                    session_id=resume_id,
+                    error_type=type(exc).__name__,
+                )
+                await reject(
+                    ERR_INTERNAL,
+                    "保存的 Codex 迁移目录已失效，且本地状态无法修复",
+                    route="sid",
+                    sid=resume_id,
+                )
+                return None
 
         if resume_id and resume_id in self._private_btw_sessions:
             log.warning("refusing cold resume of private btw transcript",
@@ -14917,11 +15348,28 @@ class WrapperMachine:
         # Resolve the target cwd.
         if resume_id and engine == "codex":
             # Codex sessions live in ~/.codex/sessions (not the Claude SDK's store),
-            # so resolve cwd from the rollout meta, not get_session_info.
+            # so resolve cwd from the rollout meta, not get_session_info. An
+            # explicit Remote migration wins because thread/resume's cwd is a
+            # runtime default and does not rewrite thread/list metadata until a
+            # later turn materializes the new context.
             cwd_hint = await asyncio.to_thread(codex_session_cwd, resume_id)
-            target_cwd = cwd_hint or self.cfg.cc_cwd
-            if not os.path.isdir(target_cwd):
-                target_cwd = self.cfg.cc_cwd
+            target_cwd = saved_codex_controls.cwd_override
+            if target_cwd is None:
+                target_cwd = next((
+                    candidate
+                    for candidate in (cwd_hint, self.cfg.cc_cwd)
+                    if isinstance(candidate, str)
+                    and os.path.isdir(candidate)
+                ), None)
+            if target_cwd is None:
+                await reject(
+                    ERR_INVALID_CWD,
+                    "Codex 会话和默认工作目录均已不存在，未连接该会话",
+                    route="sid",
+                    sid=resume_id,
+                )
+                return None
+            target_cwd = os.path.realpath(target_cwd)
         elif resume_id and broker_handle is not None:
             # A freshly launched broker session has a durable, preassigned
             # Claude session id before Claude writes its first JSONL row.  Its
@@ -15128,8 +15576,7 @@ class WrapperMachine:
             # the rollout remains required for collaboration mode, which 0.144.1's
             # resume response does not expose.
             if resume_id:
-                controls = await self._load_codex_session_controls(
-                    resume_id)
+                controls = saved_codex_controls
                 restored_control_profile = False
                 if (space != "work" and permission_mode is None
                         and controls.approval_policy
@@ -15288,6 +15735,27 @@ class WrapperMachine:
                 await ctx.sdk.connect(
                     **codex_connect_options,
                 )
+                if (
+                    resume_id
+                    and space == "code"
+                    and (
+                        not isinstance(getattr(ctx.sdk, "cwd", None), str)
+                        or os.path.realpath(ctx.sdk.cwd) != target_cwd
+                    )
+                ):
+                    await ctx.sdk.set_cwd(
+                        target_cwd,
+                        reason="resume cwd reconciliation",
+                    )
+                effective_cwd = getattr(ctx.sdk, "cwd", None)
+                if isinstance(effective_cwd, str):
+                    effective_cwd = os.path.realpath(effective_cwd)
+                    if not os.path.isdir(effective_cwd):
+                        raise RuntimeError(
+                            "Codex app-server reported a missing cwd"
+                        )
+                    ctx.cwd = effective_cwd
+                    target_cwd = effective_cwd
             else:
                 await ctx.sdk.connect(
                     resume_id=resume_id, cwd=target_cwd)

@@ -147,6 +147,19 @@ export interface SessionForked extends Base {
   last_turn_id?: string | null;
   target: "same_cwd" | "worktree";
 }
+export interface MigrateSession extends Base {
+  type: "migrate_session";
+  session_id: string;
+  cwd: string;
+  request_id: string;
+}
+export interface SessionMigrated extends Base {
+  type: "session_migrated";
+  session_id: string;
+  previous_cwd: string;
+  cwd: string;
+  request_id: string;
+}
 export interface UserMsg extends Base { type: "user_msg"; msg_id: string; client_msg_id?: string | null; prompt: string; images?: QueryImg[] | null; files?: { filename: string }[] | null }
 export interface TurnSteered extends Base { type: "turn_steered"; msg_id: string; turn_id: string; prompt: string; images?: QueryImg[] | null; files?: { filename: string }[] | null }
 export interface AssistantMsgStart extends Base { type: "assistant_msg_start"; message_id: string; channel?: AssistantChannel }
@@ -315,7 +328,7 @@ export interface WorkScheduleInfo { schedule_id: string; project_id?: string | n
 export interface WorkDashboard extends Base { type: "work_dashboard"; engine: Engine; projects: WorkProjectInfo[]; sources: WorkSourceInfo[]; plugins: WorkPluginInfo[]; schedules: WorkScheduleInfo[] }
 export interface DirEntry { name: string; path: string }
 export interface ListDir extends Base { type: "list_dir"; path?: string | null }
-export interface DirList extends Base { type: "dir_list"; path: string; parent?: string | null; dirs: DirEntry[] }
+export interface DirList extends Base { type: "dir_list"; path: string; parent?: string | null; dirs: DirEntry[]; request_id?: string | null }
 export interface SetPerm extends Base { type: "set_perm"; mode: PermissionMode }
 export interface Perm extends Base { type: "perm"; mode: string }
 export interface PermissionProfileInfo {
@@ -376,9 +389,9 @@ export interface HistoryImage extends Base { type: "history_image"; session_id: 
 // replacement is one-shot and may exceed the ring byte budget; this small frame
 // guarantees that reconnecting clients never retain turns removed by rollback.
 export interface HistoryInvalidated extends Base { type: "history_invalidated"; session_id: string; revision: string; reason: "rollback" }
-// File/diff previews contain bytes that rollback may have replaced. This small
-// replayable marker closes them on every client, including after reconnect.
-export interface ArtifactInvalidated extends Base { type: "artifact_invalidated"; session_id: string; reason: "rollback" }
+// File/diff previews contain bytes that a workspace mutation may have replaced.
+// This small replayable marker closes them on every client, including reconnects.
+export interface ArtifactInvalidated extends Base { type: "artifact_invalidated"; session_id: string; reason: "rollback" | "session_migration" }
 // The engine's own model catalog. codex's app-server reports, per model, exactly
 // which reasoning levels it accepts — and `turn/start` does NOT validate the level
 // (it accepts `bogus-zzz`), so one we invent client-side only fails later inside the
@@ -515,13 +528,13 @@ export interface ContextReport extends Base {
 export type ServerEvent =
   | Pong | CommandAck | ReplayStart | ReplayEnd | Snapshot | StateEvent | QueryQueueState | QueuedQueryDetail | QueuedQueryUpdated | Model | Effort | Fast | CollaborationMode | BtwOpened | Perm | PermissionProfiles | PermissionProfile | WebSearch | ContextReport | DiffReport | FilePreview | FileSaveResult | PreviewAsset | History | TurnDetail | HistoryImage | HistoryInvalidated | ArtifactInvalidated | Models | EngineCapabilities | TakeoverState | SessionControl
   | AskUser | AskUserClosed | GoalState | StatusReport | Notice | RateLimitUpdate | RollbackResult
-  | SessionList | SessionActivity | SessionFocus | SessionRekey | SessionForked | WorkDashboard | WorkArtifacts
+  | SessionList | SessionActivity | SessionFocus | SessionRekey | SessionForked | SessionMigrated | WorkDashboard | WorkArtifacts
   | DirList
   | UserMsg | TurnSteered | AssistantMsgStart | Delta | ToolUse | ToolDelta | ToolResult | AssistantMsgEnd
   | ProcessEvent | TurnPlan | TurnDiff | TurnBinding
   | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 26;
+export const PROTOCOL_VERSION = 27;
 
 const CONTROL_MODES = new Set<ControlMode>([
   "remote", "codex_shared", "claude_broker", "external_cli", "agent_view", "desktop",
@@ -639,6 +652,20 @@ export function makeForkSessionWorktreeCommand(
   };
   if (lastTurnId) command.last_turn_id = lastTurnId;
   return command;
+}
+
+/** Continue one existing Codex thread in another working directory. */
+export function makeMigrateSessionCommand(
+  sessionId: string, cwd: string, requestId: string, ts: number,
+): MigrateSession {
+  return {
+    v: PROTOCOL_VERSION,
+    type: "migrate_session",
+    session_id: sessionId,
+    cwd,
+    request_id: requestId,
+    ts,
+  };
 }
 
 /** Exact guard for accepting a one-shot /btw response in the UI. */

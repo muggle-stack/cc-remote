@@ -6,6 +6,7 @@ export interface SessionMenuCapabilities {
   rename: boolean;
   archive: boolean;
   forkWorktree: boolean;
+  migrate: boolean;
   delete: boolean;
 }
 
@@ -19,17 +20,30 @@ export interface PendingSessionFork extends PendingWorktreeFork {
   engine: "claude" | "codex";
 }
 
+export interface PendingSessionMigration {
+  requestId: string;
+  sessionId: string;
+}
+
 export function sessionMenuCapabilities(session: SessionInfo): SessionMenuCapabilities {
   return {
     rename: true,
     archive: true,
     forkWorktree: session.engine === "codex" && session.tag !== "archived",
+    migrate: session.engine === "codex" && session.space !== "work"
+      && session.tag !== "archived",
     delete: true,
   };
 }
 
 export function isWorktreeForkBlockedByState(state?: State | null): boolean {
   return state === "running" || state === "interrupting";
+}
+
+export function isSessionMigrationBlockedByState(state?: State | null): boolean {
+  return state === "running"
+    || state === "interrupting"
+    || state === "draining";
 }
 
 export function normalizeWorktreeForkName(value: string): string {
@@ -59,6 +73,33 @@ export function matchesSessionForkRequest(
 ): boolean {
   return matchesWorktreeForkRequest(pending, requestId, parentSessionId)
     && (forkPointId == null || forkPointId === pending!.forkPointId);
+}
+
+export function matchesSessionMigrationRequest(
+  pending: PendingSessionMigration | null,
+  requestId: string | null | undefined,
+  sessionId?: string | null,
+): boolean {
+  return pending !== null
+    && requestId === pending.requestId
+    && (sessionId == null || sessionId === pending.sessionId);
+}
+
+export function reconcileOpenMigrationSession(
+  openSession: SessionInfo | null,
+  sessions: SessionInfo[],
+  requestPending: boolean,
+): SessionInfo | null {
+  if (openSession === null || requestPending) return openSession;
+  const current = sessions.find(
+    (session) => session.session_id === openSession.session_id,
+  );
+  if (!current || current.cwd === openSession.cwd) return openSession;
+  return current;
+}
+
+export function isTerminalSessionMigrationError(code: string): boolean {
+  return code !== "wrapper_offline";
 }
 
 export function canForkTurn<T extends { done: boolean; forkPointId?: string }>(

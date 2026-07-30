@@ -265,7 +265,12 @@ export interface AppState {
   wrapperOnline: boolean;
   banner?: string;
   artifact: Artifact | null;
-  dirPicker: { path: string; parent: string | null; dirs: DirEntry[] } | null;
+  dirPicker: {
+    path: string;
+    parent: string | null;
+    dirs: DirEntry[];
+    requestId: string | null;
+  } | null;
   cwdByScope: Record<string, string>;
   // new-chat welcome page (global; only one new-chat flow at a time). model/effort
   // are the pre-selected values (null = use the wrapper's engine default).
@@ -1849,13 +1854,45 @@ function reduceEvent(
         cwdByScope,
       };
     }
+    case "session_migrated": {
+      let changed = false;
+      const sessions = state.sessions.map((session) => {
+        if (session.session_id !== e.session_id || session.cwd === e.cwd) {
+          return session;
+        }
+        changed = true;
+        return { ...session, cwd: e.cwd };
+      });
+      const updateFocusedScope = state.focusedSid === e.session_id
+        && ownership !== undefined;
+      const cwdByScope = updateFocusedScope
+        ? { ...state.cwdByScope, [ownership.scopeKey]: e.cwd }
+        : state.cwdByScope;
+      const artifact = state.artifact?.sid === e.session_id
+        ? null : state.artifact;
+      if (!changed && cwdByScope === state.cwdByScope
+          && artifact === state.artifact) return state;
+      return { ...state, sessions, cwdByScope, artifact };
+    }
     case "session_list": {
       const focusedMissing = !!state.focusedSid
         && !state.focusedSid.startsWith("tmp-")
         && !e.sessions.some((session) => session.session_id === state.focusedSid);
+      const focusedSession = ownership && state.focusedSid
+        ? e.sessions.find(
+          (session) => session.session_id === state.focusedSid)
+        : undefined;
+      // Another client may migrate the focused session while this tab is
+      // offline. The live SessionMigrated frame is then unavailable, so repair
+      // the scope default from the authoritative reconnect catalog as well.
+      const cwdByScope = ownership && focusedSession?.cwd
+          && state.cwdByScope[ownership.scopeKey] !== focusedSession.cwd
+        ? { ...state.cwdByScope, [ownership.scopeKey]: focusedSession.cwd }
+        : state.cwdByScope;
       return {
         ...state,
         sessions: e.sessions,
+        cwdByScope,
         focusedSid: focusedMissing ? null : state.focusedSid,
         historyRecovery: focusedMissing ? null : state.historyRecovery,
         historyBrowse: focusedMissing ? null : state.historyBrowse,
@@ -2411,7 +2448,15 @@ function reduceEvent(
       });
     }
     case "dir_list":
-      return { ...state, dirPicker: { path: e.path, parent: e.parent ?? null, dirs: e.dirs } };
+      return {
+        ...state,
+        dirPicker: {
+          path: e.path,
+          parent: e.parent ?? null,
+          dirs: e.dirs,
+          requestId: e.request_id ?? null,
+        },
+      };
     // The engine's real model catalog. Empty => the wrapper couldn't read it; keep
     // what we have (data.ts's static table) rather than blanking the pickers.
     case "models": {

@@ -56,9 +56,17 @@ import {
 } from "./runtime-drain";
 import type { SendMode } from "./composer-submit";
 import { MAX_RUNTIME_SESSIONS } from "./runtime-bounds";
-import { isTerminalWorktreeForkError, matchesSessionForkRequest,
-  matchesWorktreeForkRequest, type PendingSessionFork,
-  type PendingWorktreeFork } from "./session-worktree";
+import {
+  isTerminalSessionMigrationError,
+  isTerminalWorktreeForkError,
+  matchesSessionForkRequest,
+  matchesSessionMigrationRequest,
+  matchesWorktreeForkRequest,
+  reconcileOpenMigrationSession,
+  type PendingSessionFork,
+  type PendingSessionMigration,
+  type PendingWorktreeFork,
+} from "./session-worktree";
 import { classifyBtwOpened, consumeDiscardedBtwSnapshot, matchesBtwRequest,
   normalizeDiffTheme, normalizeEngine, type Snapshot, type QueryImg,
   type QueryFile, type SessionInfo, type CodexPermissionMode,
@@ -212,6 +220,9 @@ export default function App() {
   const [forkWorktreeSession, setForkWorktreeSession] = useState<SessionInfo | null>(null);
   const [forkWorktreeCreating, setForkWorktreeCreating] = useState(false);
   const [forkWorktreeError, setForkWorktreeError] = useState<string | null>(null);
+  const [migrateSession, setMigrateSession] = useState<SessionInfo | null>(null);
+  const [migrateCreating, setMigrateCreating] = useState(false);
+  const [migrateError, setMigrateError] = useState<string | null>(null);
   const [forkingPointId, setForkingPointId] = useState<string | null>(null);
   const [workManagerOpen, setWorkManagerOpen] = useState(false);
   const [workArtifactsOpen, setWorkArtifactsOpen] = useState(false);
@@ -340,6 +351,8 @@ export default function App() {
   const pendingBtwByParentRef = useRef<Map<string, string>>(new Map());
   const pendingSessionForkRef = useRef<PendingSessionFork | null>(null);
   const pendingWorktreeForkRef = useRef<PendingWorktreeFork | null>(null);
+  const pendingSessionMigrationRef =
+    useRef<PendingSessionMigration | null>(null);
   const sessionListsBySurfaceRef = useRef<Record<string, SessionInfo[]>>({});
   const historySessionListsRef = useRef<Record<string, SessionInfo[]>>({});
   // Cached lists are paint-only during a surface switch. A surface may choose
@@ -437,12 +450,27 @@ export default function App() {
     getDiff: () => {}, openBtw: () => {}, closeBtw: () => {} });
 
   useEffect(() => {
+    const current = reconcileOpenMigrationSession(
+      migrateSession,
+      state.sessions,
+      migrateCreating,
+    );
+    if (current === migrateSession) return;
+    setMigrateSession(current);
+    setMigrateError(null);
+  }, [migrateCreating, migrateSession, state.sessions]);
+
+  useEffect(() => {
     const previous = previousMachineRef.current;
     if (previous === machineId) return;
     previousMachineRef.current = machineId;
     localStorage.setItem(MACHINE_KEY, machineId);
     pendingCreateRef.current = null;
     createRequestsRef.current.clear();
+    pendingSessionMigrationRef.current = null;
+    setMigrateSession(null);
+    setMigrateCreating(false);
+    setMigrateError(null);
     pendingBtwByParentRef.current.clear();
     activeBtwByParentRef.current.clear();
     btwRequestParentsRef.current.clear();
@@ -1703,6 +1731,28 @@ export default function App() {
             if (isMobile()) setSidebarOpen(false);
             return;
           }
+          if (msg.type === "session_migrated"
+              && matchesSessionMigrationRequest(
+                pendingSessionMigrationRef.current,
+                msg.request_id,
+                msg.session_id,
+              )) {
+            pendingSessionMigrationRef.current = null;
+            setMigrateCreating(false);
+            setMigrateError(null);
+            setMigrateSession(null);
+          }
+          if (msg.type === "error"
+              && isTerminalSessionMigrationError(msg.code)
+              && matchesSessionMigrationRequest(
+                pendingSessionMigrationRef.current,
+                msg.request_id,
+              )) {
+            pendingSessionMigrationRef.current = null;
+            setMigrateCreating(false);
+            setMigrateError(presentCommandProblem(msg));
+            return;
+          }
           if (msg.type === "error" && isTerminalWorktreeForkError(msg.code)
               && matchesSessionForkRequest(
                 pendingSessionForkRef.current, msg.request_id)) {
@@ -2052,6 +2102,10 @@ export default function App() {
           pendingBtwByParentRef.current.clear();
           pendingSessionForkRef.current = null;
           pendingWorktreeForkRef.current = null;
+          pendingSessionMigrationRef.current = null;
+          setMigrateSession(null);
+          setMigrateCreating(false);
+          setMigrateError(null);
           activeBtwByParentRef.current.clear();
           btwRequestParentsRef.current.clear();
           discardedBtwSidsRef.current.clear();
@@ -3088,6 +3142,32 @@ export default function App() {
     setForkWorktreeSession(null);
     setForkWorktreeError(null);
   };
+  const openSessionMigration = (session: SessionInfo) => {
+    if (pendingSessionMigrationRef.current || !confirmArtifactDiscard()) return;
+    setMigrateError(null);
+    setMigrateSession(session);
+  };
+  const submitSessionMigration = (cwd: string) => {
+    const source = migrateSession;
+    if (!source || pendingSessionMigrationRef.current) return;
+    setMigrateError(null);
+    const requestId = wsRef.current?.sendMigrateSession(
+      source.session_id, cwd) ?? null;
+    if (!requestId) {
+      setMigrateError("请求未发送，请等待连接恢复后重试。");
+      return;
+    }
+    pendingSessionMigrationRef.current = {
+      requestId,
+      sessionId: source.session_id,
+    };
+    setMigrateCreating(true);
+  };
+  const closeSessionMigration = () => {
+    if (pendingSessionMigrationRef.current) return;
+    setMigrateSession(null);
+    setMigrateError(null);
+  };
   const getDiff = (file: string) => {
     if (!confirmArtifactDiscard()) return;
     const requestId = wsRef.current?.sendGetDiff(file, theme) ?? null;
@@ -3276,6 +3356,10 @@ export default function App() {
       pendingBtwByParentRef.current.clear();
       pendingSessionForkRef.current = null;
       pendingWorktreeForkRef.current = null;
+      pendingSessionMigrationRef.current = null;
+      setMigrateSession(null);
+      setMigrateCreating(false);
+      setMigrateError(null);
       sessionActivityPendingRef.current.clear();
       activeBtwByParentRef.current.clear();
       btwRequestParentsRef.current.clear();
@@ -3391,15 +3475,34 @@ export default function App() {
           wsRef.current?.sendDeleteSession(id, engine, space);
         }}
         onForkWorktree={openForkWorktree}
+        onMigrate={openSessionMigration}
       />
       <DirPicker
         open={dirPickerOpen}
         path={state.dirPicker?.path ?? null}
         parent={state.dirPicker?.parent ?? null}
         dirs={state.dirPicker?.dirs ?? []}
-        onBrowse={(p) => wsRef.current?.sendListDir(p)}
+        responseRequestId={state.dirPicker?.requestId ?? null}
+        onBrowse={(p) => wsRef.current?.sendListDir(p) ?? null}
         onConfirm={(cwd) => { if (state.newChat) dispatch({ type: "set_new_chat_cwd", cwd, cwdSource: "explicit" }); setDirPickerOpen(false); }}
         onClose={() => setDirPickerOpen(false)}
+      />
+      <DirPicker
+        key={`migration-${migrateSession?.session_id ?? "closed"}-${migrateSession?.cwd ?? "unset"}`}
+        open={migrateSession !== null}
+        path={state.dirPicker?.path ?? null}
+        parent={state.dirPicker?.parent ?? null}
+        dirs={state.dirPicker?.dirs ?? []}
+        responseRequestId={state.dirPicker?.requestId ?? null}
+        initialPath={migrateSession?.cwd ?? null}
+        title="迁移 Codex 会话"
+        confirmLabel="迁移到此目录"
+        busy={migrateCreating}
+        error={migrateError}
+        waitForInitialBrowse
+        onBrowse={(p) => wsRef.current?.sendListDir(p) ?? null}
+        onConfirm={submitSessionMigration}
+        onClose={closeSessionMigration}
       />
       <section className={`pane ${space}-pane`}>
         <header className={`c-head ${space}-head`}>

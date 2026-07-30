@@ -66,7 +66,7 @@ local `claude` or `codex` session through a WebSocket relay. Two independent lin
   `useLayoutEffect` is deliberately dependency-free — late virtualizer/image
   measurements settle without a React render, and constraining it to its read
   set reintroduces a full-viewport jump on touch release.
-- **Protocol version gate**: current wire protocol v26 is declared by
+- **Protocol version gate**: current wire protocol v27 is declared by
   `PROTOCOL_VERSION` in both `protocol.py` and `web/src/protocol.ts`.
   `deserialize` hard-rejects a version mismatch, and
   `_Base` is `extra="forbid"`, so ANY protocol change must be deployed to all
@@ -90,6 +90,15 @@ local `claude` or `codex` session through a WebSocket relay. Two independent lin
   (rename tmp-key→sid), which moves focus ONLY if the client was already viewing
   the temp key. Emitting SessionFocus on id-capture = focus-steal by background
   sessions.
+- **Session cwd migration is in-place** (protocol v27): only an idle Codex Code
+  session may move. A cold session is first resumed without changing focus;
+  then resume the same native thread id under `SessionContext.query_lock`,
+  preserve its wrapper-owned deferred queue, and emit `SessionMigrated` without
+  changing focus. The target must already be an absolute directory; reconnect
+  the old cwd before reporting a failed move. Persist the accepted cwd in the
+  private Codex control store and overlay it on cold resumes/session listings:
+  `thread/resume.cwd` is live state and does not rewrite the native catalog
+  metadata until a later turn materializes that context.
 - **Deferred queries are wrapper-owned** (protocol v25): queue/replace submits
   transfer the complete bounded `Query` to the resident `SessionContext`
   immediately. The wrapper waits for the active managed/spontaneous task's real

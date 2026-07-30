@@ -2075,6 +2075,86 @@ test("queued messages expand to full editable prompts", async ({ page }) => {
   ))).toBe(true);
 });
 
+test("migration picker cannot confirm a stale directory", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?migration-picker=1");
+  await page.getByTestId("open-migration-picker").click();
+
+  const dialog = page.getByRole("dialog", { name: "迁移 Codex 会话" });
+  const confirm = dialog.getByRole(
+    "button", { name: "迁移到此目录" },
+  );
+  await expect(dialog.locator(".dp-crumbs")).toHaveText("/repo/current");
+  await expect(dialog).toContainText("正在读取目录");
+  await expect(dialog).not.toContainText("stale-child");
+  await expect(confirm).toBeDisabled();
+  await expect(page.getByTestId("migration-picker-request"))
+    .toHaveText("/repo/current");
+  await expect(page.getByTestId("migration-picker-confirmed")).toBeEmpty();
+
+  await page.getByTestId("resolve-migration-picker")
+    .evaluate((button) => (button as HTMLButtonElement).click());
+  await expect(dialog).not.toContainText("正在读取目录");
+  await expect(confirm).toBeEnabled();
+  await confirm.click();
+  await expect(page.getByTestId("migration-picker-confirmed"))
+    .toHaveText("/repo/current");
+});
+
+test("migration picker waits for its null-path response", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?migration-picker-null=1");
+  await page.getByTestId("open-migration-picker").click();
+
+  const dialog = page.getByRole("dialog", { name: "迁移 Codex 会话" });
+  const confirm = dialog.getByRole(
+    "button", { name: "迁移到此目录" },
+  );
+  await expect(dialog.locator(".dp-crumbs")).toHaveText("…");
+  await expect(dialog).toContainText("正在读取目录");
+  await expect(dialog).not.toContainText("stale-child");
+  await expect(confirm).toBeDisabled();
+  await expect(page.getByTestId("migration-picker-request"))
+    .toHaveText("<home>");
+
+  await page.getByTestId("resolve-migration-picker")
+    .evaluate((button) => (button as HTMLButtonElement).click());
+  await expect(dialog.locator(".dp-crumbs")).toHaveText("/home/fixture");
+  await expect(dialog).not.toContainText("正在读取目录");
+  await expect(confirm).toBeEnabled();
+  await confirm.click();
+  await expect(page.getByTestId("migration-picker-confirmed"))
+    .toHaveText("/home/fixture");
+});
+
+test("migration picker follows an external session move", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?migration-picker=1");
+  await page.getByTestId("open-migration-picker").click();
+
+  const dialog = page.getByRole("dialog", { name: "迁移 Codex 会话" });
+  const confirm = dialog.getByRole(
+    "button", { name: "迁移到此目录" },
+  );
+  await page.getByTestId("resolve-migration-picker")
+    .evaluate((button) => (button as HTMLButtonElement).click());
+  await expect(confirm).toBeEnabled();
+
+  await page.getByTestId("externally-migrate-picker")
+    .evaluate((button) => (button as HTMLButtonElement).click());
+  await expect(dialog.locator(".dp-crumbs")).toHaveText("/repo/external");
+  await expect(dialog).toContainText("正在读取目录");
+  await expect(confirm).toBeDisabled();
+  await expect(page.getByTestId("migration-picker-request"))
+    .toHaveText("/repo/external");
+  await expect(page.getByTestId("migration-picker-confirmed")).toBeEmpty();
+
+  await page.getByTestId("resolve-migration-picker")
+    .evaluate((button) => (button as HTMLButtonElement).click());
+  await expect(dialog).not.toContainText("正在读取目录");
+  await expect(confirm).toBeEnabled();
+  await confirm.click();
+  await expect(page.getByTestId("migration-picker-confirmed"))
+    .toHaveText("/repo/external");
+});
+
 async function chooseDangerousNewChatControls(
   page: import("@playwright/test").Page,
 ): Promise<void> {

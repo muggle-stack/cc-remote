@@ -1626,6 +1626,116 @@ try {
   } as ServerEvent);
   assert.equal(createRuntime().sendMode, "steer",
     "Codex running input uses steer mode by default");
+  const migrationOwner = {
+    scopeKey: "machine:code:codex",
+    machineId: "machine",
+    engine: "codex" as const,
+    space: "code" as const,
+    surfaceEpoch: 1,
+    connectionGeneration: 1,
+  };
+  let migrationState = {
+    ...initialState,
+    focusedSid: "migrated-session",
+    sessions: [{
+      session_id: "migrated-session",
+      cwd: "/repo/old",
+      engine: "codex" as const,
+      space: "code" as const,
+    }],
+    cwdByScope: { [migrationOwner.scopeKey]: "/repo/old" },
+  };
+  migrationState = reduce(migrationState, {
+    type: "event",
+    ownership: migrationOwner,
+    event: event({
+      type: "session_migrated",
+      sid: "migrated-session",
+      session_id: "migrated-session",
+      previous_cwd: "/repo/old",
+      cwd: "/repo/new",
+      request_id: "migration-1",
+    }),
+  });
+  assert.equal(migrationState.sessions[0].cwd, "/repo/new");
+  assert.equal(
+    migrationState.cwdByScope[migrationOwner.scopeKey],
+    "/repo/new",
+    "a focused migration updates the cwd-scoped composer defaults",
+  );
+  const backgroundMigration = reduce({
+    ...migrationState,
+    focusedSid: "other-session",
+  }, {
+    type: "event",
+    ownership: migrationOwner,
+    event: event({
+      type: "session_migrated",
+      sid: "migrated-session",
+      session_id: "migrated-session",
+      previous_cwd: "/repo/new",
+      cwd: "/repo/background",
+      request_id: "migration-2",
+    }),
+  });
+  assert.equal(backgroundMigration.sessions[0].cwd, "/repo/background");
+  assert.equal(
+    backgroundMigration.cwdByScope[migrationOwner.scopeKey],
+    "/repo/new",
+    "a background migration must not replace the focused surface cwd",
+  );
+  const reconnectAfterOfflineMigration = reduce({
+    ...migrationState,
+    sessions: [{
+      ...migrationState.sessions[0],
+      cwd: "/repo/old",
+    }],
+    cwdByScope: { [migrationOwner.scopeKey]: "/repo/old" },
+  }, {
+    type: "event",
+    ownership: migrationOwner,
+    event: event({
+      type: "session_list",
+      engine: "codex",
+      space: "code",
+      sessions: [
+        {
+          session_id: "background-session",
+          cwd: "/repo/background",
+          engine: "codex",
+          space: "code",
+        },
+        {
+          session_id: "migrated-session",
+          cwd: "/repo/new",
+          engine: "codex",
+          space: "code",
+        },
+      ],
+    }),
+  });
+  assert.equal(
+    reconnectAfterOfflineMigration.cwdByScope[migrationOwner.scopeKey],
+    "/repo/new",
+    "a reconnect catalog repairs the focused scope after an offline migration",
+  );
+  const unownedReconnect = reduce({
+    ...reconnectAfterOfflineMigration,
+    cwdByScope: { [migrationOwner.scopeKey]: "/repo/old" },
+  }, {
+    type: "event",
+    event: event({
+      type: "session_list",
+      engine: "codex",
+      space: "code",
+      sessions: reconnectAfterOfflineMigration.sessions,
+    }),
+  });
+  assert.equal(
+    unownedReconnect.cwdByScope[migrationOwner.scopeKey],
+    "/repo/old",
+    "an unowned reconnect list must not update scoped cwd",
+  );
   const sendModeA = "send-mode-a";
   const sendModeB = "send-mode-b";
   const isolatedSendModes = reduce({

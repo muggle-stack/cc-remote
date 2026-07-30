@@ -45,7 +45,7 @@ def test_release_docs_distinguish_product_and_wire_protocol_versions():
     assert "## What changed in v3" in readme_en
     for document in (readme, readme_en, changelog):
         assert "v3.0.0" in document
-        assert "protocol v26" in document.lower()
+        assert "protocol v27" in document.lower()
 
 
 def test_readmes_use_safe_markdown_for_navigation_and_images():

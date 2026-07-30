@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 26
+PROTOCOL_VERSION = 27
 
 State = Literal["idle", "running", "interrupting", "draining"]
 Engine = Literal["claude", "codex"]
@@ -1325,6 +1325,23 @@ class SessionForked(_Base):
     request_id: WireId
 
 
+class MigrateSession(_Command):
+    """client -> wrapper: continue a Codex thread in another cwd."""
+    type: Literal["migrate_session"] = "migrate_session"
+    session_id: WireId
+    cwd: str = Field(min_length=1, max_length=4096)
+    request_id: WireId
+
+
+class SessionMigrated(_Base):
+    """wrapper -> clients: the same session now uses a different cwd."""
+    type: Literal["session_migrated"] = "session_migrated"
+    session_id: WireId
+    previous_cwd: str = Field(min_length=1, max_length=4096)
+    cwd: str = Field(min_length=1, max_length=4096)
+    request_id: WireId
+
+
 # ---- directory picker (for creating a session in an arbitrary cwd) ----
 
 class ListDir(_Command):
@@ -1343,6 +1360,7 @@ class DirList(_Base):
     path: str
     parent: Optional[str] = None
     dirs: list[dict[str, str]] = []  # each: {name, path}
+    request_id: Optional[WireId] = None
 
 
 # ---- model catalog (the engine is the source of truth, not the client) ----
@@ -1977,11 +1995,11 @@ class HistoryInvalidated(_Base):
 
 
 class ArtifactInvalidated(_Base):
-    """Replayable barrier for previews made stale by file rollback."""
+    """Replayable barrier for previews made stale by workspace mutations."""
 
     type: Literal["artifact_invalidated"] = "artifact_invalidated"
     session_id: WireId
-    reason: Literal["rollback"] = "rollback"
+    reason: Literal["rollback", "session_migration"] = "rollback"
 
 
 class AskUser(_Base):
@@ -2083,7 +2101,7 @@ AnyMessage = Union[
     Hello, Query, CancelQueuedQuery, GetQueuedQuery, QueuedQueryDetail, UpdateQueuedQuery, QueuedQueryUpdated, QueryQueueState, Steer, Interrupt, Takeover, TakeoverState, SessionControl, SetModel, SetEffort, SetServiceTier, SetCollaborationMode, SetPerm, GetPermissionProfiles, SetPermissionProfile, SetWebSearch, Fast, CollaborationMode, OpenBtw, CloseBtw, BtwOpened, GetContext, GetStatus, GetDiff, GetFilePreview, SaveMarkdown, GetPreviewAsset, GetHistory, GetTurnDetail, GetHistoryImage, GetModels, GetEngineCapabilities, ManageEnginePlugin, ManageEngineSkill, ManageEngineHook, ListSessions, SwitchSession, NewSession, DeleteWorkSession, DeleteSession, RollbackSession, RollbackResult, CompactSession, StartReview, GetWorkDashboard, CreateWorkProject, DeleteWorkProject, AddWorkSource, DeleteWorkSource, CreateWorkPlugin, DeleteWorkPlugin, CreateWorkSchedule, DeleteWorkSchedule, GetWorkArtifacts, ListDir, Ping, Pong, CommandAck,
     ReplayStart, ReplayEnd, Snapshot, StateEvent, Model, Effort, Perm, PermissionProfiles, PermissionProfile, WebSearch, ContextReport, StatusReport, Notice, RateLimitUpdate, DiffReport, FilePreview, FileSaveResult, PreviewAsset, History, TurnDetail, HistoryImage, HistoryInvalidated, ArtifactInvalidated, Models, EngineCapabilities, AskUser, AskUserClosed, AnswerQuestion,
     SessionList, SessionActivity, SessionFocus, SessionRekey, RenameSession, ArchiveSession, PinSession, WorkDashboard, WorkArtifacts,
-    ForkSession, ForkSessionWorktree, SessionForked, DirList,
+    ForkSession, ForkSessionWorktree, SessionForked, MigrateSession, SessionMigrated, DirList,
     GetGoal, SetGoal, ClearGoal, GoalState,
     UserMsg, TurnSteered, AssistantMsgStart, Delta, ToolUse, ToolDelta, ToolResult,
     AssistantMsgEnd, ProcessEvent, TurnPlan, TurnDiff, TurnBinding,
@@ -2172,6 +2190,8 @@ _TYPE_MAP: dict[str, type[BaseModel]] = {
     "fork_session": ForkSession,
     "fork_session_worktree": ForkSessionWorktree,
     "session_forked": SessionForked,
+    "migrate_session": MigrateSession,
+    "session_migrated": SessionMigrated,
     "list_dir": ListDir,
     "dir_list": DirList,
     "ping": Ping,

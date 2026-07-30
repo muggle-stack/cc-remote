@@ -5342,7 +5342,7 @@ def test_empty_pool_accepts_codex_session_after_claude_bootstrap_failure(
     None,
     {"id": ":removed-profile", "allowed": False},
 ])
-def test_codex_resume_discards_unavailable_persisted_profile(
+def test_codex_resume_restores_migrated_cwd_and_discards_unavailable_profile(
         monkeypatch, tmp_path, stale_catalog_entry):
     class FakeCodexHandle:
         def __init__(self, _cfg, cwd=None, daemon_mode=None,
@@ -5386,6 +5386,8 @@ def test_codex_resume_discards_unavailable_persisted_profile(
 
     async def run():
         thread_id = "persisted-profile-thread"
+        migrated_cwd = tmp_path / "migrated"
+        migrated_cwd.mkdir()
         machine, _ = _mk_machine()
         machine.cfg.cc_cwd = str(tmp_path)
         machine._codex_controls.update(
@@ -5394,6 +5396,8 @@ def test_codex_resume_discards_unavailable_persisted_profile(
             permission_profile=":removed-profile",
             web_search="live",
         )
+        machine._codex_controls.set_cwd_override(
+            thread_id, str(migrated_cwd))
         catalog_calls = []
 
         async def catalog(cwd):
@@ -5411,7 +5415,7 @@ def test_codex_resume_discards_unavailable_persisted_profile(
         monkeypatch.setattr(machine_module, "codex_permission_profiles", catalog)
         monkeypatch.setattr(
             machine_module, "codex_session_cwd",
-            lambda _thread_id: str(tmp_path),
+            lambda _thread_id: str(tmp_path / "native-original"),
         )
         monkeypatch.setattr(
             machine_module, "codex_session_settings",
@@ -5434,18 +5438,19 @@ def test_codex_resume_discards_unavailable_persisted_profile(
         assert ctx is not None
         assert ctx.sdk.connect_calls == [{
             "resume_id": thread_id,
-            "cwd": str(tmp_path),
+            "cwd": str(migrated_cwd),
             "preserve_controls": True,
             "preserve_permission_profile": False,
         }]
         assert ctx.sdk.approval == "on-request"
         assert ctx.sdk.permission_profile == ":workspace"
         assert ctx.sdk.web_search == "live"
-        assert catalog_calls == [str(tmp_path)]
+        assert catalog_calls == [str(migrated_cwd)]
         persisted = machine._codex_controls.get(thread_id)
         assert persisted.approval_policy == "on-request"
         assert persisted.permission_profile == ":workspace"
         assert persisted.web_search == "live"
+        assert persisted.cwd_override == str(migrated_cwd)
 
     asyncio.run(run())
 

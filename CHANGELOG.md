@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+- Add protocol v27 session-directory migration for idle Codex Code threads.
+  The wrapper resumes the same native thread ID in the selected existing
+  directory, preserves its deferred-query queue, and rolls back to the original
+  cwd if the new resume fails. The selected cwd survives wrapper restarts;
+  migration never forks or steals browser focus.
 - Move busy-session follow-up queues from browser memory to the always-on
   wrapper. Protocol v25 lets queued and interrupt-replacement messages continue
   as soon as the active turn ends even when every Web/PWA client is asleep or

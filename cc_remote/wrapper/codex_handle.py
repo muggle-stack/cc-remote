@@ -2318,6 +2318,11 @@ class CodexHandle:
 
     # --- live controls (persisted for this thread by app-server 0.144.1) ---
     @property
+    def cwd(self) -> Optional[str]:
+        """The effective cwd last confirmed by app-server."""
+        return self._cwd
+
+    @property
     def approval(self) -> str:
         return self._approval
 
@@ -2379,6 +2384,11 @@ class CodexHandle:
         Granular approval objects are preserved in ``approval_policy`` while the
         current UI receives their lossless-compatible ``on-request`` projection.
         """
+        cwd = settings.get("cwd")
+        if (isinstance(cwd, str) and os.path.isabs(cwd)
+                and 0 < len(cwd) <= 4096):
+            self._cwd = os.path.realpath(cwd)
+
         model = settings.get("model")
         if isinstance(model, str) and model:
             self.model = model[:256]
@@ -2448,6 +2458,38 @@ class CodexHandle:
         if not authoritative:
             self.model = model
         log.info("codex thread model set", requested=model, applied=self.model)
+
+    async def set_cwd(
+        self, cwd: str, *, reason: str = "thread cwd update",
+    ) -> str:
+        """Retarget subsequent turns and require an authoritative snapshot."""
+        if not isinstance(cwd, str) or not cwd:
+            raise ValueError("Codex cwd must be non-empty")
+        target = os.path.realpath(os.path.expanduser(cwd))
+        if not os.path.isabs(target) or not await asyncio.to_thread(
+            os.path.isdir, target
+        ):
+            raise ValueError("Codex cwd must be an existing absolute directory")
+        authoritative = await self._update_thread_settings(
+            cwd=target,
+            wait_for_notification=True,
+        )
+        effective = self._cwd
+        if (
+            not authoritative
+            or not isinstance(effective, str)
+            or os.path.realpath(effective) != target
+        ):
+            raise RuntimeError(
+                "Codex app-server did not confirm the requested cwd"
+            )
+        log.info(
+            "codex thread cwd set",
+            requested=target,
+            applied=effective,
+            reason=reason,
+        )
+        return effective
 
     async def set_effort(self, effort: str) -> None:
         if not isinstance(effort, str) or not effort:

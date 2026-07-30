@@ -28,6 +28,7 @@ class CodexControls:
     approval_policy: str | None = None
     permission_profile: str | None = None
     web_search: str | None = None
+    cwd_override: str | None = None
 
     def as_dict(self) -> dict[str, str]:
         result = {}
@@ -37,6 +38,8 @@ class CodexControls:
             result["permission_profile"] = self.permission_profile
         if self.web_search in CODEX_WEB_SEARCH_MODES:
             result["web_search"] = self.web_search
+        if _cwd_override(self.cwd_override) is not None:
+            result["cwd_override"] = self.cwd_override
         return result
 
 
@@ -48,6 +51,32 @@ def _session_id(value: object) -> str:
 
 def _permission_profile(value: object) -> str | None:
     return value if isinstance(value, str) and 0 < len(value) <= 256 else None
+
+
+def _cwd_override(value: object) -> str | None:
+    if (not isinstance(value, str) or not os.path.isabs(value)
+            or not 0 < len(value) <= 4096):
+        return None
+    return value
+
+
+def _controls(values: object) -> CodexControls:
+    raw = values if isinstance(values, dict) else {}
+    return CodexControls(
+        approval_policy=(
+            raw.get("approval_policy")
+            if raw.get("approval_policy") in CODEX_APPROVAL_POLICIES
+            else None
+        ),
+        permission_profile=_permission_profile(
+            raw.get("permission_profile")),
+        web_search=(
+            raw.get("web_search")
+            if raw.get("web_search") in CODEX_WEB_SEARCH_MODES
+            else None
+        ),
+        cwd_override=_cwd_override(raw.get("cwd_override")),
+    )
 
 
 class CodexControlStore:
@@ -62,20 +91,16 @@ class CodexControlStore:
         session_id = _session_id(session_id)
         with self._lock:
             raw = dict(self._sessions.get(session_id, {}))
-        return CodexControls(
-            approval_policy=(
-                raw.get("approval_policy")
-                if raw.get("approval_policy") in CODEX_APPROVAL_POLICIES
-                else None
-            ),
-            permission_profile=_permission_profile(
-                raw.get("permission_profile")),
-            web_search=(
-                raw.get("web_search")
-                if raw.get("web_search") in CODEX_WEB_SEARCH_MODES
-                else None
-            ),
-        )
+        return _controls(raw)
+
+    def cwd_overrides(self) -> dict[str, str]:
+        """Return a stable in-memory projection for sidebar catalog overlay."""
+        with self._lock:
+            return {
+                session_id: cwd
+                for session_id, values in self._sessions.items()
+                if (cwd := _controls(values).cwd_override) is not None
+            }
 
     def update(
         self,
@@ -86,18 +111,22 @@ class CodexControlStore:
         web_search: str | None,
     ) -> CodexControls:
         session_id = _session_id(session_id)
-        controls = CodexControls(
-            approval_policy=(
-                approval_policy
-                if approval_policy in CODEX_APPROVAL_POLICIES else None
-            ),
-            permission_profile=_permission_profile(permission_profile),
-            web_search=(
-                web_search if web_search in CODEX_WEB_SEARCH_MODES else None
-            ),
-        )
-        payload = controls.as_dict()
         with self._lock:
+            existing = _controls(self._sessions.get(session_id))
+            controls = CodexControls(
+                approval_policy=(
+                    approval_policy
+                    if approval_policy in CODEX_APPROVAL_POLICIES else None
+                ),
+                permission_profile=_permission_profile(permission_profile),
+                web_search=(
+                    web_search if web_search in CODEX_WEB_SEARCH_MODES else None
+                ),
+                # Runtime control changes must not clear an explicit cwd
+                # migration that is waiting for its next durable native turn.
+                cwd_override=existing.cwd_override,
+            )
+            payload = controls.as_dict()
             updated = dict(self._sessions)
             updated.pop(session_id, None)
             if payload:
@@ -105,6 +134,116 @@ class CodexControlStore:
             while len(updated) > _MAX_ENTRIES:
                 updated.pop(next(iter(updated)))
             self._persist(updated)
+            self._sessions = updated
+        return controls
+
+    def delete(self, session_id: str) -> None:
+        session_id = _session_id(session_id)
+        with self._lock:
+            if session_id not in self._sessions:
+                return
+            updated = dict(self._sessions)
+            updated.pop(session_id, None)
+            self._persist(updated)
+            self._sessions = updated
+
+    def set_cwd_override(
+        self, session_id: str, cwd_override: str | None,
+    ) -> CodexControls:
+        """Persist only the Remote-owned cwd while preserving other controls."""
+        session_id = _session_id(session_id)
+        if cwd_override is not None and _cwd_override(cwd_override) is None:
+            raise CodexControlStoreError("Codex cwd override is invalid")
+        with self._lock:
+            existing = _controls(self._sessions.get(session_id))
+            controls = CodexControls(
+                approval_policy=existing.approval_policy,
+                permission_profile=existing.permission_profile,
+                web_search=existing.web_search,
+                cwd_override=cwd_override,
+            )
+            payload = controls.as_dict()
+            updated = dict(self._sessions)
+            updated.pop(session_id, None)
+            if payload:
+                updated[session_id] = payload
+            while len(updated) > _MAX_ENTRIES:
+                updated.pop(next(iter(updated)))
+            self._persist(updated)
+            self._sessions = updated
+        return controls
+
+    def clear_cwd_override_if_matches(
+        self, session_id: str, expected: str,
+    ) -> CodexControls:
+        """Clear one stale cwd without overwriting a concurrent migration."""
+        session_id = _session_id(session_id)
+        if _cwd_override(expected) is None:
+            raise CodexControlStoreError("expected Codex cwd override is invalid")
+        with self._lock:
+            existing = _controls(self._sessions.get(session_id))
+            if existing.cwd_override != expected:
+                return existing
+            controls = CodexControls(
+                approval_policy=existing.approval_policy,
+                permission_profile=existing.permission_profile,
+                web_search=existing.web_search,
+                cwd_override=None,
+            )
+            payload = controls.as_dict()
+            updated = dict(self._sessions)
+            updated.pop(session_id, None)
+            if payload:
+                updated[session_id] = payload
+            self._persist(updated)
+            self._sessions = updated
+        return controls
+
+    def restore_cwd_override_after_failed_set(
+        self,
+        session_id: str,
+        attempted: str,
+        previous: str | None,
+    ) -> CodexControls:
+        """Undo an uncertain write only when disk still has its attempted cwd."""
+        session_id = _session_id(session_id)
+        if _cwd_override(attempted) is None:
+            raise CodexControlStoreError(
+                "attempted Codex cwd override is invalid")
+        if previous is not None and _cwd_override(previous) is None:
+            raise CodexControlStoreError(
+                "previous Codex cwd override is invalid")
+        with self._lock:
+            # _persist() can raise after os.replace() committed the new file.
+            # Re-read disk instead of trusting the deliberately not-yet-updated
+            # in-memory projection, then compare before restoring.
+            durable = self._load()
+            self._sessions = durable
+            existing = _controls(durable.get(session_id))
+            if existing.cwd_override != attempted:
+                return existing
+            controls = CodexControls(
+                approval_policy=existing.approval_policy,
+                permission_profile=existing.permission_profile,
+                web_search=existing.web_search,
+                cwd_override=previous,
+            )
+            payload = controls.as_dict()
+            updated = dict(durable)
+            updated.pop(session_id, None)
+            if payload:
+                updated[session_id] = payload
+            try:
+                self._persist(updated)
+            except Exception:
+                # A second post-replace failure is uncertain for the same
+                # reason. Keep catalog overlays aligned with what is currently
+                # readable on disk before propagating the failure.
+                try:
+                    self._sessions = self._load()
+                except Exception:
+                    pass
+                raise
             self._sessions = updated
         return controls
 
@@ -138,20 +277,7 @@ class CodexControlStore:
                 session_id = _session_id(raw_id)
             except CodexControlStoreError:
                 continue
-            controls = CodexControls(
-                approval_policy=(
-                    values.get("approval_policy")
-                    if values.get("approval_policy")
-                    in CODEX_APPROVAL_POLICIES else None
-                ),
-                permission_profile=_permission_profile(
-                    values.get("permission_profile")),
-                web_search=(
-                    values.get("web_search")
-                    if values.get("web_search")
-                    in CODEX_WEB_SEARCH_MODES else None
-                ),
-            )
+            controls = _controls(values)
             if controls.as_dict():
                 loaded[session_id] = controls.as_dict()
         return loaded

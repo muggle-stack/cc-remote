@@ -68,6 +68,7 @@ EXPECTED_COMMAND_HANDLERS = {
     "get_work_artifacts": "_handle_get_work_artifacts",
     "fork_session": "_handle_fork_session",
     "fork_session_worktree": "_handle_fork_session_worktree",
+    "migrate_session": "_handle_migrate_session",
 }
 
 EXPECTED_WORK_MUTATIONS = {
