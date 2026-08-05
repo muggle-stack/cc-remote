@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 
 import pytest
 
@@ -237,7 +238,8 @@ def test_history_index_is_bounded_and_invalidatable(tmp_path):
     store.invalidate_session("session-2")
     assert store.get_page(
         "session-2", "claude", source, before=None, limit=4) is None
-    assert oct(os.stat(store.path).st_mode & 0o777) == "0o600"
+    if sys.platform != "win32":
+        assert oct(os.stat(store.path).st_mode & 0o777) == "0o600"
 
 
 @pytest.mark.parametrize("old_version", [6, 7, 8, 9])

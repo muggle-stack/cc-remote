@@ -19,13 +19,12 @@ checkpoint boundary.  Empty directories are not representable in Git trees.
 from __future__ import annotations
 
 import copy
-import fcntl
 import hashlib
 import json
 import os
-import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -35,6 +34,8 @@ from pathlib import Path
 from typing import Any, Iterator, Optional
 
 from cc_remote.wrapper.child_env import sanitized_child_env
+from cc_remote.wrapper.file_lock_compat import flock, LOCK_EX, LOCK_UN
+from cc_remote.wrapper.os_compat import force_rmtree
 
 
 _FORMAT_VERSION = 2
@@ -276,10 +277,10 @@ class CodexCheckpointJournal:
         self.session_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            flock(fd, LOCK_EX)
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            flock(fd, LOCK_UN)
             os.close(fd)
 
     def _load_manifest(self) -> dict[str, Any]:
@@ -483,7 +484,7 @@ class CodexCheckpointJournal:
         try:
             os.replace(self.objects_dir, retired)
             self._initialize_object_store()
-            shutil.rmtree(retired, ignore_errors=False)
+            force_rmtree(retired)
         except OSError as exc:
             raise CheckpointError("Unable to compact checkpoint object store") from exc
 
@@ -1404,6 +1405,10 @@ class CodexCheckpointJournal:
     def cleanup(self, *, force: bool = False) -> None:
         """Remove the manifest and private object database for this session."""
         tombstone: Optional[Path] = None
+        # Windows cannot rename a directory while a file inside it (the
+        # journal lock we are about to release) is still held open, so the
+        # rename is deferred until after the lock's own finally closes it.
+        defer_rename = sys.platform == "win32"
         with self._locked():
             if not force:
                 manifest = self._load_manifest()
@@ -1414,7 +1419,10 @@ class CodexCheckpointJournal:
             tombstone = self.session_dir.with_name(
                 f".{self.session_dir.name}.delete-{uuid.uuid4().hex}"
             )
-            os.replace(self.session_dir, tombstone)
+            if not defer_rename:
+                os.replace(self.session_dir, tombstone)
             self._closed = True
+        if defer_rename:
+            os.replace(self.session_dir, tombstone)
         if tombstone is not None:
-            shutil.rmtree(tombstone, ignore_errors=False)
+            force_rmtree(tombstone)

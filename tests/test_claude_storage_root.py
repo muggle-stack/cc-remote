@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 from claude_agent_sdk import (
@@ -104,6 +105,10 @@ def test_settings_only_provider_switch_keeps_one_claude_catalog(
 
 def test_default_claude_root_remains_home_scoped(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
+    if sys.platform == "win32":
+        # Path.home()/os.path.expanduser resolve "~" from USERPROFILE (or
+        # HOMEDRIVE+HOMEPATH) on Windows, not from HOME.
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
 
     assert claude_config_dir() == (tmp_path / ".claude").resolve()

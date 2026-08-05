@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import os
 import stat
+import sys
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -39,7 +40,7 @@ def test_markdown_preview_reads_utf8_and_normalizes_paths(tmp_path):
     docs = tmp_path / "docs"
     docs.mkdir()
     readme = docs / "README.md"
-    readme.write_text("\ufeff# 标题\n\n正文", encoding="utf-8")
+    readme.write_text("\ufeff# 标题\n\n正文", encoding="utf-8", newline="")
     machine, _ = _mk_machine()
 
     relative = machine._read_markdown_preview(str(tmp_path), "docs/README.md")
@@ -54,7 +55,8 @@ def test_markdown_preview_reads_utf8_and_normalizes_paths(tmp_path):
 
 def test_source_preview_reads_utf8_and_reports_text_format(tmp_path):
     source = tmp_path / "module.py"
-    source.write_text("def answer():\n    return 42\n", encoding="utf-8")
+    source.write_text(
+        "def answer():\n    return 42\n", encoding="utf-8", newline="")
     machine, _ = _mk_machine()
 
     result = machine._read_text_preview(str(tmp_path), "module.py")
@@ -80,7 +82,8 @@ def test_markdown_save_is_atomic_and_preserves_bom_crlf_and_mode(tmp_path):
 
     assert result[0] == "README.md"
     assert path.read_bytes() == b"\xef\xbb\xbf# new\r\nline\r\n"
-    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+    if sys.platform != "win32":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o640
     assert result[1] == path.stat().st_size
     assert result[2] == path.stat().st_mtime_ns
     assert result[3] == hashlib.sha256(path.read_bytes()).hexdigest()
@@ -110,16 +113,22 @@ def test_markdown_save_rejects_non_markdown_and_symlink(tmp_path):
     root.mkdir()
     source = root / "note.txt"
     source.write_text("text", encoding="utf-8")
-    link = root / "link.md"
-    link.symlink_to(outside)
     machine, _ = _mk_machine()
     source_stat = source.stat()
-    link_stat = outside.stat()
 
     with pytest.raises(ValueError, match="Markdown"):
         machine._write_markdown_file(
             str(root), "note.txt", "draft", source_stat.st_size,
             source_stat.st_mtime_ns, hashlib.sha256(source.read_bytes()).hexdigest())
+
+    link = root / "link.md"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        if sys.platform == "win32":
+            pytest.skip(f"Windows symlink privilege is unavailable: {exc}")
+        raise
+    link_stat = outside.stat()
     with pytest.raises(ValueError, match="符号链接"):
         machine._write_markdown_file(
             str(root), "link.md", "draft", link_stat.st_size,
@@ -267,12 +276,18 @@ def test_markdown_preview_rejects_absolute_and_symlink_escape(tmp_path):
     root.mkdir()
     outside = tmp_path / "outside.md"
     outside.write_text("secret", encoding="utf-8")
-    (root / "escape.md").symlink_to(outside)
     machine, _ = _mk_machine()
 
     with pytest.raises(ValueError, match="确认"):
         machine._read_markdown_preview(str(root), str(outside))
-    with pytest.raises(ValueError, match="确认"):
+
+    try:
+        (root / "escape.md").symlink_to(outside)
+    except OSError as exc:
+        if sys.platform == "win32":
+            pytest.skip(f"Windows symlink privilege is unavailable: {exc}")
+        raise
+    with pytest.raises(ValueError, match="超出"):
         machine._read_markdown_preview(str(root), "escape.md")
 
 
@@ -1283,8 +1298,8 @@ def test_successful_codex_patch_grants_multiple_exact_cross_cwd_paths(tmp_path):
     root.mkdir()
     first = tmp_path / "one.txt"
     second = tmp_path / "two.md"
-    first.write_text("1\n", encoding="utf-8")
-    second.write_text("# two\n", encoding="utf-8")
+    first.write_text("1\n", encoding="utf-8", newline="")
+    second.write_text("# two\n", encoding="utf-8", newline="")
     machine, _ = _mk_machine()
     ctx = _mk_ctx("session-1", session_id="session-1")
     ctx.cwd = str(root)
@@ -1442,6 +1457,8 @@ def test_external_binary_diff_never_decodes_capability_snapshot(tmp_path):
 
 
 def test_markdown_preview_rejects_special_files_without_blocking(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("Windows has no FIFO special files")
     fifo = tmp_path / "pipe.md"
     os.mkfifo(fifo)
     machine, _ = _mk_machine()

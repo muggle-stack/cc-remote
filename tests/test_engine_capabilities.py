@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -489,7 +490,12 @@ def test_project_hook_rejects_symlinked_config_directory(monkeypatch, tmp_path):
         home.mkdir()
         project.mkdir()
         outside.mkdir()
-        (project / ".claude").symlink_to(outside, target_is_directory=True)
+        try:
+            (project / ".claude").symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            if sys.platform == "win32":
+                pytest.skip(f"Windows symlink privilege is unavailable: {exc}")
+            raise
         monkeypatch.setattr(
             capabilities_module.Path, "home", classmethod(lambda _cls: home)
         )

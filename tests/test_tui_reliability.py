@@ -476,7 +476,10 @@ def test_tui_keeps_and_answers_ask_user_per_session():
     "wss://relay.example.com/not-ws",
     "wss://relay.example.com/ws?token=secret",
 ])
-def test_tui_rejects_unsafe_relay_url_before_login(url):
+def test_tui_rejects_unsafe_relay_url_before_login(url, monkeypatch):
+    import cc_remote.tui as tui_module
+
+    monkeypatch.setattr(tui_module, "ALLOW_INSECURE_HTTP", False)
     with pytest.raises(ValueError):
         _validate_relay_url(url)
 

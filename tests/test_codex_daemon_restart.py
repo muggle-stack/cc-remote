@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 
 import pytest
 
@@ -41,7 +42,8 @@ def test_restart_state_round_trip_is_private_and_rejects_malformed(tmp_path):
 
     assert state.epoch == "a" * 32
     assert read_restart_state(path) == state
-    assert os.stat(path).st_mode & 0o777 == 0o600
+    if sys.platform != "win32":
+        assert os.stat(path).st_mode & 0o777 == 0o600
     assert state.deadline_at > state.updated_at
 
     path.write_text(json.dumps({
@@ -101,8 +103,12 @@ def test_restart_command_publishes_barrier_then_ready(tmp_path, monkeypatch):
 
     assert result.returncode == 0
     argv, kwargs, during = observed[0]
+    expected_bin = (
+        os.path.realpath("/opt/codex") if sys.platform == "win32"
+        else "/opt/codex"
+    )
     assert argv == [
-        "/opt/codex", "app-server", "daemon", "restart"]
+        expected_bin, "app-server", "daemon", "restart"]
     assert kwargs["timeout"] == 12
     assert during is not None and during.phase == "restarting"
     final = read_restart_state(path)

@@ -12,11 +12,14 @@ import json
 import os
 import re
 import stat
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from cc_remote.claude_broker.paths import default_socket_path
+if sys.platform != "win32":
+    from cc_remote.claude_broker.paths import default_socket_path
+
 
 try:
     from dotenv import load_dotenv
@@ -203,7 +206,11 @@ class WrapperConfig:
     # experiment. It is intentionally disabled in the supported product path:
     # direct native Claude owners are mirrored read-only and explicitly taken
     # over by the SDK instead of sharing a PTY input state machine.
-    claude_broker_socket: str = field(default_factory=default_socket_path)
+    claude_broker_socket: str = field(
+        default_factory=(
+            default_socket_path if sys.platform != "win32" else lambda: ""
+        )
+    )
     experimental_claude_broker: bool = field(
         default_factory=lambda: _bool(
             "CC_REMOTE_EXPERIMENTAL_CLAUDE_BROKER", False))
@@ -531,10 +538,14 @@ def validate_wrapper_config(cfg: WrapperConfig) -> None:
                 "CC_REMOTE_CODEX_PROXY must be an http(s) or socks5 URL "
                 "without credentials, path, query, or fragment")
     if cfg.experimental_claude_broker:
-        if (not cfg.claude_broker_socket
-                or "\x00" in cfg.claude_broker_socket
-                or len(cfg.claude_broker_socket.encode(
-                    "utf-8", errors="surrogatepass")) > 4096):
+        if sys.platform == "win32":
+            errors.append(
+                "CC_REMOTE_EXPERIMENTAL_CLAUDE_BROKER is not supported on "
+                "Windows")
+        elif (not cfg.claude_broker_socket
+              or "\x00" in cfg.claude_broker_socket
+              or len(cfg.claude_broker_socket.encode(
+                  "utf-8", errors="surrogatepass")) > 4096):
             errors.append(
                 "CC_REMOTE_CLAUDE_BROKER_SOCKET must be a non-empty path of at "
                 "most 4096 UTF-8 bytes")

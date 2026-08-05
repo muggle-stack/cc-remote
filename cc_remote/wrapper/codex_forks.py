@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
 
+from cc_remote.wrapper.os_compat import fchmod, fsync_directory
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$")
 _MAX_ENTRIES = 4096
@@ -437,16 +438,12 @@ class CodexForkJournal:
             if len(payload.encode("utf-8")) > _MAX_FILE_BYTES:
                 raise ValueError("fork journal exceeds size limit")
             with tmp.open("w") as stream:
-                os.fchmod(stream.fileno(), 0o600)
+                fchmod(stream.fileno(), tmp, 0o600)
                 stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(tmp, self.path)
-            directory_fd = os.open(self.path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            fsync_directory(self.path.parent)
         except Exception as exc:
             try:
                 tmp.unlink()

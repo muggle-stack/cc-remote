@@ -28,6 +28,8 @@ import sqlite3
 import stat
 from typing import Any, Iterable, Optional
 
+from cc_remote.wrapper.os_compat import fsync_directory, pread, pwrite
+
 
 CANONICAL_OPENAI_PROVIDER_ID = "openai"
 HTTP_COMPAT_PROVIDER_ID = "cc_remote_openai_http"
@@ -423,7 +425,7 @@ def _replacement_first_line(original: bytes) -> bytes:
 def _pwrite_all(descriptor: int, payload: bytes, offset: int = 0) -> None:
     written = 0
     while written < len(payload):
-        count = os.pwrite(descriptor, payload[written:], offset + written)
+        count = pwrite(descriptor, payload[written:], offset + written)
         if count <= 0:
             raise OSError("short pwrite while repairing rollout metadata")
         written += count
@@ -463,7 +465,7 @@ def _write_journal(
         f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
     descriptor = os.open(
         temp,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
         0o600,
     )
     try:
@@ -472,11 +474,7 @@ def _write_journal(
     finally:
         os.close(descriptor)
     os.replace(temp, path)
-    directory = os.open(journal_dir, os.O_RDONLY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+    fsync_directory(journal_dir)
     return path
 
 
@@ -497,7 +495,7 @@ def _patch_rollout(
     journal = _write_journal(
         journal_dir, candidate, original, replacement,
     )
-    flags = os.O_RDWR
+    flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor = os.open(path, flags)
@@ -505,14 +503,14 @@ def _patch_rollout(
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or before.st_size < len(original):
             raise CodexProviderRepairError("rollout identity changed")
-        current = os.pread(descriptor, len(original), 0)
+        current = pread(descriptor, len(original), 0)
         if current != original:
             raise CodexProviderRepairError(
                 "rollout metadata changed before write",
             )
         _pwrite_all(descriptor, replacement)
         os.fsync(descriptor)
-        if os.pread(descriptor, len(replacement), 0) != replacement:
+        if pread(descriptor, len(replacement), 0) != replacement:
             raise CodexProviderRepairError(
                 "rollout metadata verification failed",
             )
@@ -597,7 +595,7 @@ def _recover_journals(
             raise CodexProviderRepairError(
                 "provider repair journal preimage does not match thread",
             )
-        flags = os.O_RDWR
+        flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         descriptor = os.open(rollout, flags)
@@ -607,7 +605,7 @@ def _recover_journals(
                 raise CodexProviderRepairError(
                     "journal rollout is not a regular file",
                 )
-            current = os.pread(descriptor, len(original), 0)
+            current = pread(descriptor, len(original), 0)
             if current not in {original, replacement}:
                 _pwrite_all(descriptor, original)
                 os.fsync(descriptor)
@@ -782,12 +780,12 @@ def repair_http_provider_records(
                 connection.rollback()
             for original, replacement, _journal, path in reversed(patched):
                 try:
-                    flags = os.O_RDWR
+                    flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
                     if hasattr(os, "O_NOFOLLOW"):
                         flags |= os.O_NOFOLLOW
                     descriptor = os.open(path, flags)
                     try:
-                        current = os.pread(descriptor, len(replacement), 0)
+                        current = pread(descriptor, len(replacement), 0)
                         if current == replacement:
                             _pwrite_all(descriptor, original)
                             os.fsync(descriptor)

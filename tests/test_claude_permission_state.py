@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -182,6 +183,10 @@ def test_claude_new_session_defaults_use_settings_without_sdk_probe(
     (project / ".claude" / "settings.local.json").write_text(
         '{"model":"claude-mythos-5[1m]"}')
     monkeypatch.setenv("HOME", str(home))
+    if sys.platform == "win32":
+        # Path.home()/os.path.expanduser resolve "~" from USERPROFILE (or
+        # HOMEDRIVE+HOMEPATH) on Windows, not from HOME.
+        monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
     monkeypatch.setattr(
@@ -264,8 +269,17 @@ def test_fresh_claude_spawn_applies_the_resolved_default_model(
     project = tmp_path / "project"
     (home / ".claude").mkdir(parents=True)
     project.mkdir()
+    # Stop _claude_project_root's upward walk at `project`: without a `.git`
+    # marker it keeps climbing past tmp_path, which on Windows lives under
+    # the real USERPROFILE tree and would otherwise pick up the real user's
+    # ~/.claude/settings.json.
+    (project / ".git").mkdir()
     (home / ".claude" / "settings.json").write_text("{}")
     monkeypatch.setenv("HOME", str(home))
+    if sys.platform == "win32":
+        # Path.home()/os.path.expanduser resolve "~" from USERPROFILE (or
+        # HOMEDRIVE+HOMEPATH) on Windows, not from HOME.
+        monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
     monkeypatch.setattr(
@@ -387,6 +401,15 @@ def test_implicit_claude_default_failure_reports_probed_provider_model(
         monkeypatch.setattr(
             SdkHandle, "preflight", staticmethod(lambda _path: None))
         monkeypatch.setenv("HOME", str(tmp_path))
+        if sys.platform == "win32":
+            # Path.home()/os.path.expanduser resolve "~" from USERPROFILE
+            # (or HOMEDRIVE+HOMEPATH) on Windows, not from HOME.
+            monkeypatch.setenv("USERPROFILE", str(tmp_path))
+            # Stop _claude_project_root's upward walk at tmp_path: without a
+            # `.git` marker it keeps climbing past tmp_path, which on Windows
+            # lives under the real USERPROFILE tree and would otherwise pick
+            # up the real user's ~/.claude/settings.json.
+            (tmp_path / ".git").mkdir(exist_ok=True)
         monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
         machine, transport = _mk_machine()
         machine._load_history = lambda *_args: asyncio.sleep(0)

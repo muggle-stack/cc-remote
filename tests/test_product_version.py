@@ -16,10 +16,11 @@ def test_v3_product_version_is_consistent_across_runtime_and_web_metadata():
     assert __version__ == "3.0.0"
     assert re.fullmatch(r"[1-9]\d*\.\d+\.\d+", __version__)
 
-    package = json.loads((ROOT / "web/package.json").read_text())
-    package_lock = json.loads((ROOT / "web/package-lock.json").read_text())
+    package = json.loads((ROOT / "web/package.json").read_text(encoding="utf-8"))
+    package_lock = json.loads(
+        (ROOT / "web/package-lock.json").read_text(encoding="utf-8"))
     build_manifest = json.loads(
-        (ROOT / "web/public/cc-remote-build.json").read_text()
+        (ROOT / "web/public/cc-remote-build.json").read_text(encoding="utf-8")
     )
 
     assert package["version"] == __version__
@@ -30,14 +31,14 @@ def test_v3_product_version_is_consistent_across_runtime_and_web_metadata():
         "protocol": PROTOCOL_VERSION,
     }
     assert _initialize_params()["clientInfo"]["version"] == __version__
-    installer = (ROOT / "deploy/install.sh").read_text()
+    installer = (ROOT / "deploy/install.sh").read_text(encoding="utf-8")
     assert f'VERSION="${{CC_REMOTE_VERSION:-{__version__}}}"' in installer
 
 
 def test_release_docs_distinguish_product_and_wire_protocol_versions():
-    readme = (ROOT / "README.md").read_text()
-    readme_en = (ROOT / "README_en.md").read_text()
-    changelog = (ROOT / "CHANGELOG.md").read_text()
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme_en = (ROOT / "README_en.md").read_text(encoding="utf-8")
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
     assert "当前版本：v3.0.0" in readme
     assert "## v3 架构升级" in readme
@@ -49,8 +50,8 @@ def test_release_docs_distinguish_product_and_wire_protocol_versions():
 
 
 def test_readmes_use_safe_markdown_for_navigation_and_images():
-    readme = (ROOT / "README.md").read_text()
-    readme_en = (ROOT / "README_en.md").read_text()
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme_en = (ROOT / "README_en.md").read_text(encoding="utf-8")
 
     for document in (readme, readme_en):
         assert '<p align="center">' not in document

@@ -49,6 +49,7 @@ import signal
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import unicodedata
@@ -126,12 +127,13 @@ from cc_remote.wrapper.codex_controls import (
     CodexControlStoreError,
 )
 from cc_remote.wrapper.codex_daemon import CodexDaemonManager
-from cc_remote.claude_broker import BrokerClient, BrokerClientError
-from cc_remote.wrapper.claude_broker_handle import ClaudeBrokerHandle
-from cc_remote.wrapper.claude_broker_history import (
-    claude_broker_tail_state,
-    parse_claude_broker_lifecycle,
-)
+if sys.platform != "win32":
+    from cc_remote.claude_broker import BrokerClient, BrokerClientError
+    from cc_remote.wrapper.claude_broker_handle import ClaudeBrokerHandle
+    from cc_remote.wrapper.claude_broker_history import (
+        claude_broker_tail_state,
+        parse_claude_broker_lifecycle,
+    )
 from cc_remote.wrapper.ask import make_ask_server
 from cc_remote.wrapper.claude_questions import (
     AskCancelled,
@@ -248,9 +250,11 @@ from cc_remote.wrapper.preview_capabilities import (
     PreviewCapabilityError,
     PreviewCapabilityStore,
 )
+from cc_remote.wrapper.os_compat import current_uid, fchmod, fsync_directory
 from cc_remote.wrapper.transport import WrapperTransport
 
 log = logger("cc_remote.wrapper.machine")
+
 
 CLAUDE_PERMISSION_MODES = frozenset({
     "default", "acceptEdits", "plan", "auto", "bypassPermissions",
@@ -1090,13 +1094,22 @@ class WrapperMachine:
             getattr(cfg, "codex_daemon_mode", "auto"))
         self._codex_daemon_restart_path = restart_state_path(cfg.state_dir)
         self._codex_turn_leases = CodexTurnLeaseStore(cfg.state_dir)
-        self._claude_broker = BrokerClient(
-            getattr(cfg, "claude_broker_socket", None))
         # Claude's official SDK/CLI does not expose a supported multi-writer
         # control plane. Keep the PTY broker code available for development,
         # but never discover or adopt it in the customer path by default.
-        self._claude_broker_enabled = bool(getattr(
+        requested_broker = bool(getattr(
             cfg, "experimental_claude_broker", False))
+        self._claude_broker_enabled = (
+            requested_broker and sys.platform != "win32"
+        )
+        if sys.platform != "win32":
+            self._claude_broker = BrokerClient(
+                getattr(cfg, "claude_broker_socket", None))
+        else:
+            self._claude_broker = None
+            if requested_broker:
+                log.warning(
+                    "Claude broker is not supported on Windows; ignoring opt-in")
         # A History token changes for every wrapper process and every local
         # destructive conversation mutation.  Browsers persist this token with
         # IndexedDB turns, so a fresh wrapper can never merge a pre-crash cache
@@ -3019,17 +3032,13 @@ class WrapperMachine:
             if len(payload.encode("utf-8")) > self.PRIVATE_BTW_FILE_MAX_BYTES:
                 raise ValueError("private btw state exceeds size limit")
             with tmp.open("w") as stream:
-                os.fchmod(stream.fileno(), 0o600)
+                fchmod(stream.fileno(), tmp, 0o600)
                 stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(tmp, path)
             # Make the rename durable, not merely atomic in the page cache.
-            directory_fd = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            fsync_directory(path.parent)
         except Exception as exc:
             try:
                 tmp.unlink()
@@ -5206,7 +5215,7 @@ class WrapperMachine:
                 if process_identity(identity.pid) == identity:
                     remaining.add(identity)
                 continue
-            if owner_uid != os.getuid():
+            if owner_uid != current_uid():
                 log.warning(
                     "refusing to migrate Claude process owned by another uid",
                     pid=identity.pid,
@@ -12666,32 +12675,45 @@ class WrapperMachine:
         parts = relative.split(os.sep)
         file_flags = os.O_RDONLY
         file_flags |= getattr(os, "O_CLOEXEC", 0)
-        file_flags |= getattr(os, "O_NONBLOCK", 0)
-        file_flags |= getattr(os, "O_NOFOLLOW", 0)
+        file_flags |= getattr(os, "O_BINARY", 0)  # no-op on Linux; prevents CRLF on Windows
         dir_flags = os.O_RDONLY
         dir_flags |= getattr(os, "O_CLOEXEC", 0)
         dir_flags |= getattr(os, "O_DIRECTORY", 0)
-        dir_flags |= getattr(os, "O_NOFOLLOW", 0)
-        dir_fd: Optional[int] = None
-        try:
-            # Walk from an already-open cwd and refuse symlinks at every hop.
-            # This closes the realpath/open race where a parent directory could
-            # otherwise be replaced by an escaping symlink between both calls.
-            dir_fd = os.open(access_root, dir_flags)
-            for part in parts[:-1]:
-                next_fd = os.open(part, dir_flags, dir_fd=dir_fd)
-                os.close(dir_fd)
-                dir_fd = next_fd
-            fd = os.open(parts[-1], file_flags, dir_fd=dir_fd)
-        except FileNotFoundError as exc:
-            raise ValueError("文件不存在") from exc
-        except PermissionError as exc:
-            raise ValueError("没有权限读取该文件") from exc
-        except OSError as exc:
-            raise ValueError("无法打开该文件") from exc
-        finally:
-            if dir_fd is not None:
-                os.close(dir_fd)
+        if sys.platform == "win32":
+            # Windows: os.open on a directory raises PermissionError and dir_fd= is
+            # unsupported on all fs calls. Use the already-resolved absolute path.
+            abs_file = os.path.join(access_root, *parts)
+            try:
+                fd = os.open(abs_file, file_flags)
+            except FileNotFoundError as exc:
+                raise ValueError("文件不存在") from exc
+            except PermissionError as exc:
+                raise ValueError("没有权限读取该文件") from exc
+            except OSError as exc:
+                raise ValueError("无法打开该文件") from exc
+        else:
+            unix_file_flags = file_flags | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+            unix_dir_flags = dir_flags | getattr(os, "O_NOFOLLOW", 0)
+            dir_fd: Optional[int] = None
+            try:
+                # Walk from an already-open cwd and refuse symlinks at every hop.
+                # This closes the realpath/open race where a parent directory could
+                # otherwise be replaced by an escaping symlink between both calls.
+                dir_fd = os.open(access_root, unix_dir_flags)
+                for part in parts[:-1]:
+                    next_fd = os.open(part, unix_dir_flags, dir_fd=dir_fd)
+                    os.close(dir_fd)
+                    dir_fd = next_fd
+                fd = os.open(parts[-1], unix_file_flags, dir_fd=dir_fd)
+            except FileNotFoundError as exc:
+                raise ValueError("文件不存在") from exc
+            except PermissionError as exc:
+                raise ValueError("没有权限读取该文件") from exc
+            except OSError as exc:
+                raise ValueError("无法打开该文件") from exc
+            finally:
+                if dir_fd is not None:
+                    os.close(dir_fd)
 
         try:
             file_stat = os.fstat(fd)
@@ -12978,7 +13000,10 @@ class WrapperMachine:
             return_code = process.wait(timeout=cls.OFFICE_PREVIEW_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired as exc:
             try:
-                os.killpg(process.pid, signal.SIGKILL)
+                if sys.platform == "win32":
+                    process.kill()
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
             finally:
                 process.wait()
             raise ValueError("Office 预览转换超时") from exc
@@ -13038,20 +13063,33 @@ class WrapperMachine:
         if relative in ("", ".") or any(part in ("", ".", "..") for part in parts):
             raise ValueError("保存路径无效")
 
+        is_windows = sys.platform == "win32"
         dir_flags = os.O_RDONLY
         dir_flags |= getattr(os, "O_CLOEXEC", 0)
         dir_flags |= getattr(os, "O_DIRECTORY", 0)
-        dir_flags |= getattr(os, "O_NOFOLLOW", 0)
         file_flags = os.O_RDONLY
         file_flags |= getattr(os, "O_CLOEXEC", 0)
-        file_flags |= getattr(os, "O_NONBLOCK", 0)
-        file_flags |= getattr(os, "O_NOFOLLOW", 0)
+        file_flags |= getattr(os, "O_BINARY", 0)  # no-op on Linux; prevents CRLF on Windows
+        if not is_windows:
+            dir_flags |= getattr(os, "O_NOFOLLOW", 0)
+            file_flags |= getattr(os, "O_NONBLOCK", 0)
+            file_flags |= getattr(os, "O_NOFOLLOW", 0)
         dir_fd: Optional[int] = None
         temp_name: Optional[str] = None
+        # Windows has no dir_fd support (os.supports_dir_fd is empty there), so
+        # every dir_fd-relative call below falls back to this absolute base dir.
+        base_dir = os.path.join(root, *parts[:-1])
+
+        def _open_relative(name: str, flags: int, mode: int = 0) -> int:
+            if is_windows:
+                args = (os.path.join(base_dir, name), flags)
+                return os.open(*args, mode) if mode else os.open(*args)
+            return (os.open(name, flags, mode, dir_fd=dir_fd) if mode
+                    else os.open(name, flags, dir_fd=dir_fd))
 
         def read_current() -> tuple[bytes, os.stat_result, str]:
             try:
-                fd = os.open(parts[-1], file_flags, dir_fd=dir_fd)
+                fd = _open_relative(parts[-1], file_flags)
             except FileNotFoundError as exc:
                 raise ValueError("文件不存在") from exc
             except PermissionError as exc:
@@ -13099,14 +13137,15 @@ class WrapperMachine:
                 )
 
         try:
-            dir_fd = os.open(root, dir_flags)
-            for part in parts[:-1]:
-                try:
-                    next_fd = os.open(part, dir_flags, dir_fd=dir_fd)
-                except OSError as exc:
-                    raise ValueError("保存路径不能包含符号链接") from exc
-                os.close(dir_fd)
-                dir_fd = next_fd
+            if not is_windows:
+                dir_fd = os.open(root, dir_flags)
+                for part in parts[:-1]:
+                    try:
+                        next_fd = os.open(part, dir_flags, dir_fd=dir_fd)
+                    except OSError as exc:
+                        raise ValueError("保存路径不能包含符号链接") from exc
+                    os.close(dir_fd)
+                    dir_fd = next_fd
 
             original, original_stat, original_revision = read_current()
             if (
@@ -13136,29 +13175,45 @@ class WrapperMachine:
             temp_name = f".cc-remote-{uuid4().hex}.tmp"
             temp_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
             temp_flags |= getattr(os, "O_CLOEXEC", 0)
-            temp_flags |= getattr(os, "O_NOFOLLOW", 0)
-            temp_fd = os.open(temp_name, temp_flags, 0o600, dir_fd=dir_fd)
+            temp_flags |= getattr(os, "O_BINARY", 0)  # no-op on Linux; prevents CRLF on Windows
+            if not is_windows:
+                temp_flags |= getattr(os, "O_NOFOLLOW", 0)
+            temp_fd = _open_relative(temp_name, temp_flags, 0o600)
             try:
                 view = memoryview(payload)
                 written = 0
                 while written < len(view):
                     written += os.write(temp_fd, view[written:])
-                os.fchmod(temp_fd, stat.S_IMODE(original_stat.st_mode))
+                fchmod(
+                    temp_fd,
+                    Path(base_dir) / temp_name,
+                    stat.S_IMODE(original_stat.st_mode),
+                )
                 os.fsync(temp_fd)
             finally:
                 os.close(temp_fd)
 
             _, latest_stat, latest_revision = read_current()
             require_expected(latest_stat, latest_revision)
-            os.replace(
-                temp_name,
-                parts[-1],
-                src_dir_fd=dir_fd,
-                dst_dir_fd=dir_fd,
-            )
+            if is_windows:
+                os.replace(
+                    os.path.join(base_dir, temp_name),
+                    os.path.join(base_dir, parts[-1]),
+                )
+            else:
+                os.replace(
+                    temp_name,
+                    parts[-1],
+                    src_dir_fd=dir_fd,
+                    dst_dir_fd=dir_fd,
+                )
             temp_name = None
-            os.fsync(dir_fd)
-            saved_stat = os.stat(parts[-1], dir_fd=dir_fd, follow_symlinks=False)
+            if is_windows:
+                saved_stat = os.stat(
+                    os.path.join(base_dir, parts[-1]), follow_symlinks=False)
+            else:
+                os.fsync(dir_fd)
+                saved_stat = os.stat(parts[-1], dir_fd=dir_fd, follow_symlinks=False)
             return (
                 display_path,
                 saved_stat.st_size,
@@ -13166,9 +13221,12 @@ class WrapperMachine:
                 hashlib.sha256(payload).hexdigest(),
             )
         finally:
-            if temp_name is not None and dir_fd is not None:
+            if temp_name is not None:
                 try:
-                    os.unlink(temp_name, dir_fd=dir_fd)
+                    if is_windows:
+                        os.unlink(os.path.join(base_dir, temp_name))
+                    elif dir_fd is not None:
+                        os.unlink(temp_name, dir_fd=dir_fd)
                 except FileNotFoundError:
                     pass
             if dir_fd is not None:
@@ -18535,7 +18593,8 @@ class WrapperMachine:
                         if entry.is_symlink():
                             continue
                         info = entry.stat(follow_symlinks=False)
-                        if info.st_uid != os.getuid() or info.st_mtime >= cutoff:
+                        if (info.st_uid != current_uid()
+                                or info.st_mtime >= cutoff):
                             continue
                         if turn_dir.fullmatch(entry.name) and entry.is_dir(
                                 follow_symlinks=False):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -35,7 +36,10 @@ def test_remote_control_store_is_private_bounded_and_roundtrips(tmp_path):
     assert saved.model == "claude-opus-4-6[1m]"
     assert saved.effort == "max"
     assert saved.permission_mode == "bypassPermissions"
-    assert (tmp_path / "claude-session-controls.json").stat().st_mode & 0o777 == 0o600
+    if sys.platform != "win32":
+        assert (
+            tmp_path / "claude-session-controls.json"
+        ).stat().st_mode & 0o777 == 0o600
     assert ClaudeControlStore(tmp_path).get(SESSION_ID) == saved
 
 
@@ -56,13 +60,19 @@ def test_remote_control_store_rejects_public_or_symlink_state(tmp_path):
     path = tmp_path / "claude-session-controls.json"
     path.write_text(json.dumps({"version": 1, "sessions": {}}))
     os.chmod(path, 0o644)
-    with pytest.raises(ClaudeControlStoreError, match="private bounded"):
-        ClaudeControlStore(tmp_path)
+    if sys.platform != "win32":
+        with pytest.raises(ClaudeControlStoreError, match="private bounded"):
+            ClaudeControlStore(tmp_path)
 
     path.unlink()
     target = tmp_path / "target.json"
     target.write_text(json.dumps({"version": 1, "sessions": {}}))
-    path.symlink_to(target)
+    try:
+        path.symlink_to(target)
+    except OSError as exc:
+        if sys.platform == "win32":
+            pytest.skip(f"Windows symlink privilege is unavailable: {exc}")
+        raise
     with pytest.raises(ClaudeControlStoreError, match="private bounded"):
         ClaudeControlStore(tmp_path)
 

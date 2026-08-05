@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -65,8 +66,19 @@ def test_rollback_journal_survives_restart_without_reclaiming_submission(
         "num_turns": 1,
         "checkpoint_id": None,
     }
-    assert stat.S_IMODE((tmp_path / "rollback-commands.json").stat().st_mode) == 0o600
-    assert stat.S_IMODE((tmp_path / "rollback-commands.lock").stat().st_mode) == 0o600
+    if sys.platform != "win32":
+        assert (
+            stat.S_IMODE(
+                (tmp_path / "rollback-commands.json").stat().st_mode
+            )
+            == 0o600
+        )
+        assert (
+            stat.S_IMODE(
+                (tmp_path / "rollback-commands.lock").stat().st_mode
+            )
+            == 0o600
+        )
     assert journal.mark_submitted("browser-1", "cmd-1") is True
 
     reloaded = RollbackCommandJournal(tmp_path)
@@ -301,7 +313,12 @@ def test_rollback_journal_corruption_fails_closed(tmp_path, mutate):
 def test_rollback_journal_rejects_symlink_state_file(tmp_path):
     target = tmp_path / "foreign.json"
     target.write_text("{}")
-    os.symlink(target, tmp_path / "rollback-commands.json")
+    try:
+        os.symlink(target, tmp_path / "rollback-commands.json")
+    except OSError as exc:
+        if sys.platform == "win32":
+            pytest.skip(f"Windows symlink privilege is unavailable: {exc}")
+        raise
 
     with pytest.raises(RollbackJournalError, match="unreadable"):
         RollbackCommandJournal(tmp_path)

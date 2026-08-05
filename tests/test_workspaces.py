@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -95,8 +96,9 @@ class WorkRegistryTests(unittest.TestCase):
         self.assertIn("结论先行", context)
         self.assertEqual((workspace / "资料库" / "report.csv").read_bytes(),
                          b"name,value\nA,1\n")
-        self.assertEqual(workspace.stat().st_mode & 0o777, 0o700)
-        self.assertEqual((workspace / "WORK.md").stat().st_mode & 0o777, 0o600)
+        if sys.platform != "win32":
+            self.assertEqual(workspace.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((workspace / "WORK.md").stat().st_mode & 0o777, 0o600)
 
     def test_existing_work_session_tracks_later_project_context_changes(self):
         project_id = self.store.create_project("持续项目", "初始说明")
@@ -284,9 +286,6 @@ class WorkRegistryTests(unittest.TestCase):
         (workspace / ".private.txt").write_text("hidden", encoding="utf-8")
         (workspace / "资料库").mkdir(exist_ok=True)
         (workspace / "资料库" / "source.csv").write_text("input", encoding="utf-8")
-        outside = Path(self.tmp.name) / "outside.txt"
-        outside.write_text("outside", encoding="utf-8")
-        (workspace / "linked.txt").symlink_to(outside)
 
         artifacts = self.store.artifacts("session-1")
 
@@ -298,6 +297,20 @@ class WorkRegistryTests(unittest.TestCase):
         self.assertEqual(by_path["report.md"]["kind"], "document")
         self.assertTrue(by_path["output/deck.pptx"]["previewable"])
         self.assertEqual(by_path["output/deck.pptx"]["kind"], "presentation")
+
+        outside = Path(self.tmp.name) / "outside.txt"
+        outside.write_text("outside", encoding="utf-8")
+        try:
+            (workspace / "linked.txt").symlink_to(outside)
+        except OSError as exc:
+            if sys.platform == "win32":
+                self.skipTest(f"Windows symlink privilege is unavailable: {exc}")
+            raise
+
+        artifacts_with_symlink = self.store.artifacts("session-1")
+        self.assertEqual({item["path"] for item in artifacts_with_symlink}, {
+            "report.md", "output/deck.pptx",
+        })
 
     def test_claude_policy_copies_only_runtime_provider_settings(self):
         config_dir = Path(self.tmp.name) / "claude-config"
@@ -336,7 +349,8 @@ class WorkRegistryTests(unittest.TestCase):
                          [record.cwd])
         self.assertEqual(payload["sandbox"]["filesystem"]["allowWrite"],
                          [record.cwd])
-        self.assertEqual(policy.stat().st_mode & 0o777, 0o600)
+        if sys.platform != "win32":
+            self.assertEqual(policy.stat().st_mode & 0o777, 0o600)
 
     def test_claude_policy_ignores_invalid_or_oversized_user_settings(self):
         config_dir = Path(self.tmp.name) / "claude-config"
@@ -379,7 +393,8 @@ class WorkRegistryTests(unittest.TestCase):
             payload["env"]["CLAUDE_CODE_OAUTH_TOKEN"],
             "rotated-token",
         )
-        self.assertEqual(policy.stat().st_mode & 0o777, 0o600)
+        if sys.platform != "win32":
+            self.assertEqual(policy.stat().st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import asyncio
 import os
 import signal
 import stat
+import sys
 from collections.abc import Awaitable, Callable
 
 from cc_remote.wrapper.preview_capabilities import PreviewCapability
@@ -332,6 +333,13 @@ async def bounded_process_output(
     timed_out = False
 
     def stop_group(sig: signal.Signals) -> None:
+        if sys.platform == "win32":
+            try:
+                if proc.returncode is None:
+                    proc.kill()
+            except OSError:
+                pass
+            return
         try:
             os.killpg(proc.pid, sig)
         except ProcessLookupError:
@@ -343,19 +351,20 @@ async def bounded_process_output(
             await asyncio.wait_for(read_stdout(), timeout=timeout)
         except asyncio.TimeoutError:
             timed_out = True
+        _SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
         if timed_out:
-            stop_group(signal.SIGKILL)
+            stop_group(_SIGKILL)
         elif truncated:
             stop_group(signal.SIGTERM)
         try:
             await asyncio.wait_for(discard_stdout_and_wait(), timeout=2.0)
         except asyncio.TimeoutError:
-            stop_group(signal.SIGKILL)
+            stop_group(_SIGKILL)
             await discard_stdout_and_wait()
         reaped = True
     finally:
         if not reaped:
-            stop_group(signal.SIGKILL)
+            stop_group(_SIGKILL)
             await discard_stdout_and_wait()
     if timed_out:
         raise asyncio.TimeoutError("diff command exceeded its time limit")

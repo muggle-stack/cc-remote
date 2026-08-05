@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import time
 from argparse import Namespace
 
@@ -89,7 +90,8 @@ def test_pairing_code_is_single_use_and_plaintext_credential_is_not_stored(tmp_p
         return enrolled.token
 
     token = asyncio.run(scenario())
-    assert os.stat(path).st_mode & 0o777 == 0o600
+    if sys.platform != "win32":
+        assert os.stat(path).st_mode & 0o777 == 0o600
     assert token.encode() not in path.read_bytes()
 
 
@@ -213,6 +215,10 @@ def test_paired_device_expands_multi_user_machine_authority(tmp_path):
 
 
 def test_wrapper_config_reads_private_paired_device_file(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        pytest.skip(
+            "Windows os.chmod cannot clear group/other bits, so "
+            "_load_device_config's 0o077 check always rejects the file")
     path = tmp_path / "device.json"
     path.write_text(json.dumps({
         "relay_url": "wss://remote.example/ws",
@@ -276,7 +282,8 @@ def test_pairing_cli_writes_private_config_without_printing_token(
         replace=False,
     )
     assert device_cli.pair(args) == 0
-    assert os.stat(target).st_mode & 0o777 == 0o600
+    if sys.platform != "win32":
+        assert os.stat(target).st_mode & 0o777 == 0o600
     payload = json.loads(target.read_text(encoding="utf-8"))
     assert payload["wrapper_token"] == token
     assert token not in capsys.readouterr().out

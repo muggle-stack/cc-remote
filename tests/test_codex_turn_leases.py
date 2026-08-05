@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 from cc_remote.wrapper.codex_turn_leases import CodexTurnLeaseStore
 
@@ -22,7 +23,8 @@ def test_codex_turn_lease_round_trip_and_matched_release(tmp_path):
     assert lease.daemon_epoch == "a" * 32
     assert lease.automatic is True
     assert store.list() == (lease,)
-    assert os.stat(store.path).st_mode & 0o777 == 0o600
+    if sys.platform != "win32":
+        assert os.stat(store.path).st_mode & 0o777 == 0o600
 
     assert store.release("session", turn_id="turn-b") is False
     assert store.get("session") == lease

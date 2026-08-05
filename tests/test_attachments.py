@@ -7,6 +7,7 @@ import binascii
 import os
 import re
 import struct
+import sys
 import time
 import zlib
 
@@ -131,7 +132,8 @@ def test_stashed_files_are_private_unique_and_path_safe(tmp_path):
     assert len(paths) == 2 and len(set(paths)) == 2
     assert all(os.path.dirname(path) == str(turn_dir) for path in paths)
     assert [open(path, "rb").read() for path in paths] == [b"x" * 3, b"x" * 4]
-    assert all((os.stat(path).st_mode & 0o777) == 0o600 for path in paths)
+    if sys.platform != "win32":
+        assert all((os.stat(path).st_mode & 0o777) == 0o600 for path in paths)
 
 
 def test_turn_temp_directory_is_removed_when_query_fails():

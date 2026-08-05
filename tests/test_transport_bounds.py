@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 
 import pytest
 
@@ -14,6 +15,10 @@ def _wrapper_cfg(**overrides):
     values = {
         "relay_url": "ws://127.0.0.1:8765/ws",
         "wrapper_token": "w" * 48,
+        # Pin this explicitly so a dev-machine .env with ALLOW_INSECURE_HTTP=1
+        # (its default_factory otherwise reads the ambient env) cannot flip
+        # the "must use wss" assertions below into false passes.
+        "allow_insecure_http": False,
     }
     values.update(overrides)
     return WrapperConfig(**values)
@@ -58,7 +63,12 @@ def test_wrapper_startup_config_fails_closed():
     # the supported native-CLI mirror path. Its socket is validated only after
     # an explicit opt-in.
     validate_wrapper_config(_wrapper_cfg(claude_broker_socket="relative.sock"))
-    with pytest.raises(ValueError, match="CC_REMOTE_CLAUDE_BROKER_SOCKET"):
+    broker_error = (
+        "CC_REMOTE_EXPERIMENTAL_CLAUDE_BROKER"
+        if sys.platform == "win32"
+        else "CC_REMOTE_CLAUDE_BROKER_SOCKET"
+    )
+    with pytest.raises(ValueError, match=broker_error):
         validate_wrapper_config(_wrapper_cfg(
             claude_broker_socket="relative.sock",
             experimental_claude_broker=True,

@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import subprocess
+import sys
 import time
 from types import SimpleNamespace
 
@@ -231,14 +232,15 @@ def test_all_files_diff_includes_untracked_regular_files(tmp_path):
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     tracked = repo / "tracked.txt"
-    tracked.write_text("before\n")
+    tracked.write_text("before\n", encoding="utf-8", newline="")
     subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
     subprocess.run([
         "git", "-C", str(repo), "-c", "user.name=Test",
         "-c", "user.email=test@example.com", "commit", "-qm", "initial",
     ], check=True)
-    tracked.write_text("after\n")
-    (repo / "chat.html").write_text("<h1>交付物</h1>\n")
+    tracked.write_text("after\n", encoding="utf-8", newline="")
+    (repo / "chat.html").write_text(
+        "<h1>交付物</h1>\n", encoding="utf-8", newline="")
 
     async def run():
         machine, _ = _mk_machine()
@@ -304,6 +306,8 @@ def test_get_diff_with_explicit_unknown_sid_never_reads_focused_repo():
 
 
 def test_diff_rejects_untracked_fifo_without_opening_it(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("Windows has no FIFO special files")
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
@@ -330,6 +334,10 @@ def test_bounded_subprocess_output_has_wall_clock_timeout():
 
 
 def test_bounded_subprocess_discards_residual_output_without_communicate(monkeypatch):
+    if sys.platform == "win32":
+        pytest.skip(
+            "os.killpg does not exist on Windows; bounded_process_output "
+            "uses proc.kill() there instead of process-group signaling")
     class FakeStdout:
         def __init__(self):
             self.data = bytearray(b"x" * 100)
@@ -381,6 +389,10 @@ def test_background_job_scan_caps_entries_and_state_file_size(
     jobs = tmp_path / ".claude" / "jobs"
     jobs.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(tmp_path))
+    if sys.platform == "win32":
+        # Path.home()/os.path.expanduser resolve "~" from USERPROFILE (or
+        # HOMEDRIVE+HOMEPATH) on Windows, not from HOME.
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
 
     valid = jobs / "valid"
     valid.mkdir()
@@ -997,7 +1009,8 @@ def test_codex_session_settings_reads_bounded_tail_of_oversized_source(
             "collaboration_mode": {"mode": "plan"},
         },
     }) + "\n"
-    rollout.write_text(old + ("x" * 4096) + "\n" + latest)
+    rollout.write_text(
+        old + ("x" * 4096) + "\n" + latest, encoding="utf-8", newline="")
     monkeypatch.setattr(
         codex_sessions_module, "_rollout_path", lambda _sid: str(rollout))
 

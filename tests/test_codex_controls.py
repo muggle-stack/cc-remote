@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import time
 from types import SimpleNamespace
 
@@ -2152,7 +2153,12 @@ def test_codex_binary_resolution_reprobes_after_symlink_upgrade(
     old.chmod(0o755)
     new.chmod(0o755)
     current = tmp_path / "codex"
-    current.symlink_to(old)
+    try:
+        current.symlink_to(old)
+    except OSError as exc:
+        if sys.platform == "win32":
+            pytest.skip(f"Windows symlink privilege is unavailable: {exc}")
+        raise
 
     monkeypatch.setattr(codex_runtime_module, "_BIN_CACHE", None)
     monkeypatch.setattr(codex_runtime_module, "_BIN_CACHE_INVENTORY", None)
@@ -2573,8 +2579,11 @@ def test_codex_work_profile_grants_runtime_helper_binary_and_registered_cwd(
             if value.startswith("permissions.cc_remote_work.filesystem="))
         assert '":minimal" = "read"' in filesystem
         assert '"~"' not in filesystem
-        assert '"/home/test/.codex-custom/tmp" = "read"' in filesystem
-        assert '"/usr/bin/codex" = "read"' in filesystem
+        expected_tmp = os.path.abspath(
+            os.path.join("/home/test/.codex-custom", "tmp"))
+        expected_bin = os.path.realpath("/usr/bin/codex")
+        assert f'{json.dumps(expected_tmp)} = "read"' in filesystem
+        assert f'{json.dumps(expected_bin)} = "read"' in filesystem
         assert f'"{cwd}" = "write"' in filesystem
         assert "permissions.cc_remote_work.network.enabled=false" in overrides
 
@@ -2667,7 +2676,8 @@ def test_codex_resume_adopts_native_settings_unless_controls_are_preserved(
             "canonical_thread_provider_is_restored",
             lambda _sid: True,
         )
-        monkeypatch.setattr(codex_handle_module.os, "killpg", lambda *_args: None)
+        monkeypatch.setattr(
+            codex_handle_module.os, "killpg", lambda *_args: None, raising=False)
         handle = CodexHandle(_Cfg(), work_mode=work_mode)
         if preserve_controls:
             handle.approval = "never"
@@ -2869,7 +2879,8 @@ def test_codex_legacy_resume_rejects_oversized_rollout_before_request(
         monkeypatch.setattr(
             codex_handle_module.asyncio, "create_subprocess_exec",
             lambda *_args, **_kwargs: asyncio.sleep(0, result=process))
-        monkeypatch.setattr(codex_handle_module.os, "killpg", lambda *_args: None)
+        monkeypatch.setattr(
+            codex_handle_module.os, "killpg", lambda *_args: None, raising=False)
 
         handle = CodexHandle(_Cfg())
         calls = []
@@ -2924,7 +2935,8 @@ def test_codex_fresh_thread_persists_all_first_turn_settings_before_return(
         monkeypatch.setattr(
             codex_handle_module.asyncio, "create_subprocess_exec",
             lambda *_args, **_kwargs: asyncio.sleep(0, result=process))
-        monkeypatch.setattr(codex_handle_module.os, "killpg", lambda *_args: None)
+        monkeypatch.setattr(
+            codex_handle_module.os, "killpg", lambda *_args: None, raising=False)
 
         handle = CodexHandle(_Cfg(), work_mode=work_mode)
         handle.model = "first-model"
@@ -3086,7 +3098,8 @@ def test_codex_ephemeral_fork_replaces_coding_prompt_only_for_work(
         monkeypatch.setattr(
             codex_handle_module.asyncio, "create_subprocess_exec",
             lambda *_args, **_kwargs: asyncio.sleep(0, result=process))
-        monkeypatch.setattr(codex_handle_module.os, "killpg", lambda *_args: None)
+        monkeypatch.setattr(
+            codex_handle_module.os, "killpg", lambda *_args: None, raising=False)
 
         handle = CodexHandle(_Cfg(), work_mode=work_mode)
         if web_override:

@@ -16,6 +16,8 @@ import tempfile
 import time
 from typing import Optional
 
+from cc_remote.wrapper.os_compat import fchmod
+
 
 _SCHEMA_VERSION = 1
 _FILENAME = "codex-turn-leases.json"
@@ -110,7 +112,7 @@ class CodexTurnLeaseStore:
         fd, temporary = tempfile.mkstemp(
             prefix=f".{self.path.name}.", dir=self.path.parent)
         try:
-            os.fchmod(fd, 0o600)
+            fchmod(fd, temporary, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 fd = -1
                 stream.write(payload)

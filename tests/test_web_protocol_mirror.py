@@ -37,9 +37,9 @@ from cc_remote.protocol import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TS_PROTOCOL = (ROOT / "web/src/protocol.ts").read_text()
-TS_REDUCER = (ROOT / "web/src/reducer.ts").read_text()
-TS_PROCESS_TIMELINE = (ROOT / "web/src/components/ProcessTimeline.tsx").read_text()
+TS_PROTOCOL = (ROOT / "web/src/protocol.ts").read_text(encoding="utf-8")
+TS_REDUCER = (ROOT / "web/src/reducer.ts").read_text(encoding="utf-8")
+TS_PROCESS_TIMELINE = (ROOT / "web/src/components/ProcessTimeline.tsx").read_text(encoding="utf-8")
 
 
 def _without_typescript_comments(source: str) -> str:
@@ -230,7 +230,7 @@ def test_protocol_version_and_web_build_manifest_match_backend():
     match = re.search(r"PROTOCOL_VERSION\s*=\s*(\d+)", TS_PROTOCOL)
     assert match, "TypeScript protocol version is missing"
     manifest = json.loads(
-        (ROOT / "web/public/cc-remote-build.json").read_text()
+        (ROOT / "web/public/cc-remote-build.json").read_text(encoding="utf-8")
     )
     assert int(match.group(1)) == PROTOCOL_VERSION
     assert manifest["protocol"] == PROTOCOL_VERSION

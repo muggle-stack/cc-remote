@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,7 +29,9 @@ def test_journal_persists_claim_uncertain_and_complete(tmp_path):
 
     assert intent["status"] == "intent"
     assert intent["marker"] == "cc-remote-fork:request-1"
-    assert stat.S_IMODE((tmp_path / "claude-forks.json").stat().st_mode) == 0o600
+    if sys.platform != "win32":
+        assert stat.S_IMODE(
+            (tmp_path / "claude-forks.json").stat().st_mode) == 0o600
     assert journal.claim_submission("request-1") is True
     assert journal.claim_submission("request-1") is False
     assert journal.mark_uncertain("request-1")["status"] == "uncertain"
@@ -242,25 +246,28 @@ def _install_recovery_fakes(monkeypatch, infos, paths):
 def test_find_claude_fork_requires_exact_marker_and_raw_boundary(
     tmp_path, monkeypatch,
 ):
+    # find_claude_fork canonicalizes cwd with os.path.realpath, which rewrites
+    # "/repo" to a drive-rooted backslash path on Windows.
+    repo = os.path.realpath("/repo")
     marker = claude_fork_marker("request-1")
     child_path = tmp_path / "child.jsonl"
     _write_fork(child_path, child="child", marker=marker)
     infos = [
         SimpleNamespace(
-            session_id="substring", custom_title=marker + "-extra", cwd="/repo"),
-        SimpleNamespace(session_id="child", custom_title=marker, cwd="/repo"),
+            session_id="substring", custom_title=marker + "-extra", cwd=repo),
+        SimpleNamespace(session_id="child", custom_title=marker, cwd=repo),
     ]
     _install_recovery_fakes(
         monkeypatch, infos, {"child": child_path})
 
     found = find_claude_fork(
-        marker, "parent", "message-cutoff", "/repo")
+        marker, "parent", "message-cutoff", repo)
 
     assert found == {
-        "session_id": "child", "cwd": "/repo", "marker": marker,
+        "session_id": "child", "cwd": repo, "marker": marker,
     }
-    assert find_claude_fork(marker, "parent", "wrong-cutoff", "/repo") is None
-    assert find_claude_fork(marker, "wrong-parent", "message-cutoff", "/repo") is None
+    assert find_claude_fork(marker, "parent", "wrong-cutoff", repo) is None
+    assert find_claude_fork(marker, "wrong-parent", "message-cutoff", repo) is None
 
 
 def test_find_claude_fork_fails_closed_on_ambiguous_marker(

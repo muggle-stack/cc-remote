@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from dataclasses import dataclass
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -21,6 +20,9 @@ import tempfile
 import time
 from typing import Literal, Optional
 from uuid import uuid4
+
+from cc_remote.wrapper.file_lock_compat import LOCK_EX, LOCK_UN, flock
+from cc_remote.wrapper.os_compat import fchmod
 
 
 _SCHEMA_VERSION = 2
@@ -153,7 +155,7 @@ def write_restart_state(
     fd, temporary = tempfile.mkstemp(
         prefix=f".{target.name}.", dir=target.parent)
     try:
-        os.fchmod(fd, 0o600)
+        fchmod(fd, temporary, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             fd = -1
             stream.write(payload)
@@ -175,11 +177,11 @@ def _exclusive_lock(path: Path):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        os.fchmod(fd, 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        fchmod(fd, path, 0o600)
+        flock(fd, LOCK_EX)
         yield
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        flock(fd, LOCK_UN)
         os.close(fd)
 
 
@@ -411,7 +413,7 @@ def schedule_managed_daemon_restart(
         0o600,
     )
     try:
-        os.fchmod(log_fd, 0o600)
+        fchmod(log_fd, log_path, 0o600)
         subprocess.Popen(
             argv,
             stdin=subprocess.DEVNULL,

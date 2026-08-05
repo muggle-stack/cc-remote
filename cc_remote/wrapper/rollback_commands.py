@@ -9,7 +9,6 @@ never makes a submitted or uncertain command eligible for another mutation.
 from __future__ import annotations
 
 import copy
-import fcntl
 import json
 import math
 import os
@@ -23,6 +22,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Optional
 from uuid import uuid4
+
+from cc_remote.wrapper.file_lock_compat import flock, LOCK_EX, LOCK_UN
+from cc_remote.wrapper.os_compat import fchmod, fsync_directory
 
 
 _VERSION = 1
@@ -274,8 +276,9 @@ class RollbackCommandJournal:
             if (not stat.S_ISREG(st.st_mode)
                     or st.st_size > len(_LOCK_MAGIC)):
                 raise OSError("rollback lock is not a regular file")
-            os.fchmod(fd, 0o600)
-            fcntl.flock(fd, fcntl.LOCK_EX)
+<<<<<<< HEAD
+            fchmod(fd, self.lock_path, 0o600)
+            flock(fd, LOCK_EX)
             os.lseek(fd, 0, os.SEEK_SET)
             marker = os.read(fd, len(_LOCK_MAGIC) + 1)
             if marker == _LOCK_MAGIC:
@@ -297,7 +300,7 @@ class RollbackCommandJournal:
             yield fd, created, initialized
         finally:
             try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                flock(fd, LOCK_UN)
             finally:
                 os.close(fd)
 
@@ -558,11 +561,7 @@ class RollbackCommandJournal:
                     pass
                 raise
             os.replace(tmp, self.path)
-            directory_fd = os.open(self.path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            fsync_directory(self.path.parent)
         except Exception as exc:
             try:
                 tmp.unlink()

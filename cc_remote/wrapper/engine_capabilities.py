@@ -7,7 +7,6 @@ and deliberately avoids importing settings, credentials, schemas or plugin code.
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import hashlib
 import json
 import os
@@ -29,6 +28,8 @@ from cc_remote.wrapper.codex_rpc import (
     codex_rpc,
     codex_rpc_batch,
 )
+from cc_remote.wrapper.file_lock_compat import flock, LOCK_EX, LOCK_UN
+from cc_remote.wrapper.os_compat import fchmod, fsync_directory
 
 _COMPONENT_TIMEOUT = 8.0
 _MAX_ITEMS = 500
@@ -721,7 +722,7 @@ def _atomic_update_json(path: Path, mutate) -> None:
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     lock_fd = os.open(lock_path, flags, 0o600)
     try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        flock(lock_fd, LOCK_EX)
         current = _read_json_object(path)
         updated = mutate(current)
         if not isinstance(updated, dict):
@@ -736,24 +737,20 @@ def _atomic_update_json(path: Path, mutate) -> None:
             pass
         fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
         try:
-            os.fchmod(fd, mode)
+            fchmod(fd, temp_name, mode)
             with os.fdopen(fd, "wb") as handle:
                 handle.write(encoded)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temp_name, path)
-            dir_fd = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+            fsync_directory(path.parent)
         finally:
             try:
                 os.unlink(temp_name)
             except FileNotFoundError:
                 pass
     finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        flock(lock_fd, LOCK_UN)
         os.close(lock_fd)
 
 

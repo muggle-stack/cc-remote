@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 import pytest
 
@@ -29,7 +30,8 @@ def test_codex_control_store_round_trips_and_clears_override(tmp_path):
         "web_search": "live",
     }
     assert CodexControlStore(tmp_path).get(thread_id) == controls
-    assert (os.stat(store.path).st_mode & 0o077) == 0
+    if sys.platform != "win32":
+        assert (os.stat(store.path).st_mode & 0o077) == 0
 
     store.update(
         thread_id,
@@ -150,6 +152,8 @@ def test_codex_control_store_loads_legacy_search_only_entry(tmp_path):
 
 
 def test_codex_control_store_rejects_unsafe_file(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("Windows has no Unix permission bits to violate")
     path = tmp_path / "codex-session-controls.json"
     path.write_text('{"version":1,"sessions":{}}')
     path.chmod(0o644)

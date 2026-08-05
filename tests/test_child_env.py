@@ -226,6 +226,10 @@ def test_claude_bin_defaults_to_daily_local_cli_and_can_be_configured(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    if sys.platform == "win32":
+        # Path.home()/os.path.expanduser resolve "~" from USERPROFILE (or
+        # HOMEDRIVE+HOMEPATH) on Windows, not from HOME.
+        monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.delenv("CLAUDE_BIN", raising=False)
     assert WrapperConfig().claude_bin == str(home / ".local/bin/claude")
 
@@ -242,7 +246,12 @@ def test_claude_bin_defaults_to_daily_local_cli_and_can_be_configured(
 
 def test_claude_pty_broker_is_hidden_and_opt_in(monkeypatch):
     monkeypatch.delenv("CC_REMOTE_EXPERIMENTAL_CLAUDE_BROKER", raising=False)
-    assert WrapperConfig().experimental_claude_broker is False
+    cfg = WrapperConfig()
+    assert cfg.experimental_claude_broker is False
+    if sys.platform == "win32":
+        assert cfg.claude_broker_socket == ""
+    else:
+        assert os.path.isabs(cfg.claude_broker_socket)
 
     monkeypatch.setenv("CC_REMOTE_EXPERIMENTAL_CLAUDE_BROKER", "true")
     assert WrapperConfig().experimental_claude_broker is True

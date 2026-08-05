@@ -3105,7 +3105,10 @@ def test_scoped_empty_claude_history_retries_global_lookup(
 
         assert [row["prompt"] for row in history.events
                 if row["type"] == "user_msg"] == ["recovered"]
-        assert calls == ["/stale/browser", None]
+        # _build_history resolves the hint with os.path.realpath, which on
+        # Windows also rewrites a POSIX-style absolute path to the current
+        # drive (e.g. "/stale/browser" -> "D:\\stale\\browser").
+        assert calls == [os.path.realpath("/stale/browser"), None]
 
     asyncio.run(go())
 
@@ -3139,7 +3142,8 @@ def test_truly_empty_claude_history_is_authoritative_after_global_retry(
 
         assert history.authoritative is True
         assert history.events == []
-        assert calls == ["/listed/project", None]
+        # See the realpath note in test_scoped_empty_claude_history_retries_global_lookup.
+        assert calls == [os.path.realpath("/listed/project"), None]
         cached = machine._history_index.get_page(
             "claude-empty", "claude", source, before=None, limit=4)
         assert cached is not None and cached.turns == ()
@@ -4272,7 +4276,9 @@ def test_unpaired_history_agent_message_is_not_lost_at_snapshot_eof(tmp_path):
                     }]},
     }
     encoded_prefix = "".join(json.dumps(row) + "\n" for row in prefix)
-    source.write_text(encoded_prefix + json.dumps(suffix) + "\n")
+    # end_offset below is a byte offset into this exact \n-only content, so
+    # write it verbatim rather than letting Windows expand \n to \r\n.
+    source.write_text(encoded_prefix + json.dumps(suffix) + "\n", newline="")
 
     events, _ = codex_translate_history(
         str(source), tool_result_max=4096,

@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from claude_agent_sdk.types import ResultMessage, SystemMessage
 
@@ -12,6 +15,7 @@ from cc_remote.wrapper import claude_external as claude_external_module
 from cc_remote.wrapper import machine as machine_module
 from cc_remote.protocol import Query, Takeover
 from cc_remote.wrapper.claude_controls import ClaudeControls
+from cc_remote.wrapper.os_compat import current_uid
 from cc_remote.wrapper.claude_external import (
     claude_session_holders,
     classify_claude_growth,
@@ -53,7 +57,12 @@ def _fake_process(
     (proc / "cmdline").write_bytes(
         b"\0".join(arg.encode() for arg in cmdline) + (b"\0" if cmdline else b""))
     if cwd is not None:
-        (proc / "cwd").symlink_to(cwd)
+        try:
+            (proc / "cwd").symlink_to(cwd)
+        except OSError as exc:
+            if sys.platform == "win32":
+                pytest.skip(f"Windows symlink privilege is unavailable: {exc}")
+            raise
     return proc
 
 
@@ -560,7 +569,7 @@ def test_claude_takeover_signals_only_same_identity_and_uid(monkeypatch):
         signals = []
         monkeypatch.setattr(machine_module, "process_identity", current)
         monkeypatch.setattr(
-            machine_module, "process_owner_uid", lambda _pid: machine_module.os.getuid())
+            machine_module, "process_owner_uid", lambda _pid: current_uid())
         monkeypatch.setattr(
             machine_module.os, "kill", lambda pid, sig: signals.append((pid, sig)))
 

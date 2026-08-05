@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -18,7 +19,9 @@ from tests.test_multisession import _mk_ctx, _mk_machine
 PARENT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 CUTOFF = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 CHILD = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
-CWD = "/repo/component"
+# The wrapper canonicalizes every fork cwd with os.path.realpath, which
+# rewrites "/repo/component" to a drive-rooted backslash path on Windows.
+CWD = os.path.realpath("/repo/component")
 
 
 def _info(
@@ -549,11 +552,13 @@ def test_cold_claude_source_uses_session_info_cwd_without_spawning(monkeypatch):
         source_lookups: list[tuple] = []
         fork_calls: list[tuple] = []
 
+        cold_cwd = os.path.realpath("/cold/repository")
+
         def get_info(session_id, directory=None):
             source_lookups.append((session_id, directory))
             return _info(
                 session_id,
-                cwd="/cold/repository",
+                cwd=cold_cwd,
                 title=("Cold source" if session_id == PARENT
                        else "Cold source (fork)"),
             )
@@ -571,10 +576,10 @@ def test_cold_claude_source_uses_session_info_cwd_without_spawning(monkeypatch):
 
         assert source_lookups[0] == (PARENT, None)
         assert fork_calls == [(
-            PARENT, "/cold/repository", CUTOFF,
+            PARENT, cold_cwd, CUTOFF,
             claude_fork_marker("request-1"),
         )]
-        assert result.cwd == "/cold/repository"
+        assert result.cwd == cold_cwd
         assert result.session_id == CHILD
         assert machine.sessions == {}
         assert "request-1" not in machine._claude_fork_locks

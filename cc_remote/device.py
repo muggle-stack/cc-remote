@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from cc_remote.config import device_config_path
+from cc_remote.wrapper.os_compat import fchmod
 
 
 def _origin(value: str) -> str:
@@ -53,7 +54,7 @@ def _write_private_text(path: Path, content: str, *, replace: bool) -> None:
     fd, staged_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     staged = Path(staged_name)
     try:
-        os.fchmod(fd, 0o600)
+        fchmod(fd, staged, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(content)
             handle.flush()

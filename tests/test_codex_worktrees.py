@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+
 from cc_remote.wrapper.codex_worktrees import (
     WorktreeError,
     prepare_worktree,
@@ -20,6 +21,20 @@ def _git(cwd: Path, *args: str) -> str:
         text=True,
     )
     return result.stdout.strip()
+
+
+def _worktree_list_paths(cwd: Path) -> list[str]:
+    """Return each ``worktree`` path from ``git worktree list --porcelain``.
+
+    Git always reports paths with forward slashes, even on Windows, so
+    callers must compare via :class:`Path` rather than a raw string.
+    """
+    output = _git(cwd, "worktree", "list", "--porcelain")
+    return [
+        line[len("worktree "):]
+        for line in output.splitlines()
+        if line.startswith("worktree ")
+    ]
 
 
 def _repo(tmp_path: Path) -> Path:
@@ -55,8 +70,10 @@ def test_prepare_worktree_preserves_session_subdirectory_and_is_idempotent(tmp_p
     assert replay.worktree_root == first.worktree_root
     assert replay.cwd == first.cwd
     assert replay.branch == first.branch
-    assert _git(root, "worktree", "list", "--porcelain").count(
-        f"worktree {first.worktree_root}") == 1
+    listed = _worktree_list_paths(root)
+    assert sum(
+        1 for path in listed if Path(path) == Path(first.worktree_root)
+    ) == 1
 
     rollback_worktree(first)
     assert not Path(first.worktree_root).exists()
