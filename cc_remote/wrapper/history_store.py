@@ -54,10 +54,9 @@ from cc_remote.protocol import ConversationTurn
 # without phase metadata. Source-complete details and binary assets remain valid.
 # v30 rebuilds Codex narrative rows with bounded generated-image references.
 # Binary assets and other engines' projections remain source-valid.
-# v31 rebuilds Codex failures previously cached as successful task_complete.
-# v32 restores reviewed policy-refusal copy previously reduced to a generic
-# failure. Only Codex narrative projections need to be rebuilt.
-_SCHEMA_VERSION = 32
+# v31 retains native model fallback notes and durable per-turn file summaries.
+# v32 repairs missing file summaries on the full-page cache population path.
+_SCHEMA_VERSION = 34
 _FINGERPRINT_SAMPLE_BYTES = 64 * 1024
 _DEFAULT_MAX_ENTRIES = 128
 _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
@@ -573,6 +572,7 @@ def materialize_history_turns(
         live_tools: dict[str, dict[str, Any]] = {}
         live_processes: dict[str, dict[str, Any]] = {}
         generated_images: dict[str, dict[str, Any]] = {}
+        model_notices: dict[str, dict[str, Any]] = {}
 
         def short(value: Any) -> str | None:
             if not isinstance(value, str) or not value:
@@ -630,6 +630,21 @@ def materialize_history_turns(
 
         for event in group:
             event_type = event.get("type")
+            if (event_type == "process" and event.get("kind") == "model"
+                    and event.get("tool") == "model_refusal_fallback"
+                    and isinstance(event.get("item_id"), str)):
+                model_notices[event["item_id"]] = {
+                    "kind": "process", "item_id": event["item_id"],
+                    "processKind": "model", "phase": "snapshot",
+                    "status": "succeeded", "done": True,
+                    "title": "模型已回退", "tool": "model_refusal_fallback",
+                    "summary": short(event.get("summary")),
+                }
+                while len(model_notices) > 4:
+                    model_notices.pop(next(iter(model_notices)))
+                # This note is fully included in the visible summary. It must
+                # not create an empty deferred process disclosure on reload.
+                continue
             if (event_type == "process" and event.get("tool") == "image_generation"
                     and event.get("phase") == "end"
                     and event.get("status") == "succeeded"
@@ -995,17 +1010,21 @@ def materialize_history_turns(
             bool("".join(texts.get(message_id, ())))
             for message_id in final_ids
         )
-        image_limit = max(0, _SUMMARY_BLOCK_MAX - final_block_count)
+        notice_limit = max(0, _SUMMARY_BLOCK_MAX - final_block_count)
+        notices = list(model_notices.values())[-notice_limit:] if notice_limit else []
+        image_limit = max(0, _SUMMARY_BLOCK_MAX - final_block_count - len(notices))
         image_summaries = list(generated_images.values())[-image_limit:] if image_limit else []
         if include_live_detail:
             final_id_set = set(final_ids)
             live_block_limit = max(
                 0,
                 min(_SUMMARY_LIVE_BLOCK_MAX,
-                    _SUMMARY_BLOCK_MAX - final_block_count - len(image_summaries)),
+                    _SUMMARY_BLOCK_MAX - final_block_count - len(image_summaries) - len(notices)),
             )
             candidates: list[dict[str, Any]] = []
             for block in live_blocks:
+                if block.get("tool") == "model_refusal_fallback":
+                    continue
                 if (block.get("tool") == "image_generation"
                         and block.get("status") == "succeeded"):
                     continue
@@ -1073,6 +1092,7 @@ def materialize_history_turns(
                 block["text"] = text[:keep]
                 remaining_live_chars -= keep
             blocks.extend(candidates)
+        blocks.extend(notices)
         blocks.extend(image_summaries)
         remaining_summary_chars = _SUMMARY_TEXT_MAX_CHARS
         summary_truncated = False
@@ -1251,7 +1271,29 @@ class HistoryIndexStore:
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
             current = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if current in range(10, 32):
+            if current in range(10, 34):
+                # v34 separates 64-row wire pages from the full native file
+                # index. Rebuild derived summaries, not transcripts or archives.
+                connection.execute("DELETE FROM history_pages")
+                connection.execute("DELETE FROM history_turn_details WHERE engine='codex'")
+            if current in range(10, 33):
+                # v33 carries Codex per-tool diff/file-count truncation into
+                # the archive. Old source fingerprints cannot reveal that
+                # translator fix. Rebuild only derived Codex pages/details;
+                # native rollouts, immutable archives and images stay intact.
+                for table in ("history_pages", "history_turn_details"):
+                    connection.execute(f"DELETE FROM {table} WHERE engine='codex'")
+            if current == 31:
+                # v32 rebuilt page presentation only; v33 separately rebuilds
+                # Codex details above. Native transcripts, archives and images
+                # are independent of both projection migrations.
+                connection.execute("DELETE FROM history_pages")
+            if current in range(10, 31):
+                # v31 retains model fallback notes and per-turn file summaries.
+                # Binary assets and native graph indexes are unaffected.
+                connection.execute("DELETE FROM history_pages")
+                connection.execute("DELETE FROM history_turn_details")
+            if current in range(10, 30):
                 for table in ("history_pages", "history_turn_details"):
                     connection.execute(
                         f"DELETE FROM {table} WHERE engine='codex'")
@@ -1332,8 +1374,8 @@ class HistoryIndexStore:
                 for table in ("history_pages", "history_turn_details"):
                     connection.execute(
                         f"DELETE FROM {table} WHERE engine='codex'")
-            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31):
-                # The independent v22-v32 invalidations above suffice.
+            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33):
+                # The independent v22-v34 invalidations above suffice.
                 pass
             elif current not in (0, _SCHEMA_VERSION):
                 # v9 changes the invariant of history_turn_details: those rows

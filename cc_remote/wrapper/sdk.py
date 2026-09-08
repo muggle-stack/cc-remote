@@ -47,6 +47,7 @@ from cc_remote.wrapper.claude_rewind import (
     validate_rewind_target,
 )
 from cc_remote.wrapper.claude_runtime import inspect_claude_runtime
+from cc_remote.wrapper.claude_model_fallback import model_fallback_event
 from cc_remote.wrapper.claude_controls import (
     CLAUDE_DEFAULT_AUTO_COMPACT_MODE,
     claude_auto_compact_cli_value,
@@ -1191,6 +1192,7 @@ class SdkHandle:
         query = getattr(self.client, "_query", None)
         if query is None or not hasattr(query, "receive_messages"):
             async for message in self.client.receive_response():
+                self._observe_model_fallback(message)
                 yield message
             return
         async for data in query.receive_messages():
@@ -1199,6 +1201,7 @@ class SdkHandle:
                 continue
             self._observe_recent_context_usage(message)
             self._observe_context_boundary(message)
+            self._observe_model_fallback(message)
             if (isinstance(message, ResultMessage)
                     and not bool(getattr(message, "is_error", False))):
                 # A complete successful turn proves that a no-probe replacement
@@ -1208,6 +1211,14 @@ class SdkHandle:
             yield message
             if isinstance(message, ResultMessage):
                 return
+
+    def _observe_model_fallback(self, message) -> None:
+        if isinstance(message, SystemMessage):
+            fallback = model_fallback_event(message.data)
+            if (fallback is not None and fallback.input
+                    and fallback.input.get("scope") == "session"):
+                self.model = fallback.input["fallback_model"]
+                self.invalidate_context_usage_cache()
 
     def _start_message_pump(self) -> None:
         """Start the sole consumer of the SDK Query message stream."""
@@ -1254,6 +1265,7 @@ class SdkHandle:
                     continue
                 self._observe_recent_context_usage(message)
                 self._observe_context_boundary(message)
+                self._observe_model_fallback(message)
                 if (isinstance(message, ResultMessage)
                         and not bool(getattr(message, "is_error", False))):
                     self.context_probe_suppressed = False

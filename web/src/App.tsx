@@ -27,6 +27,7 @@ import {
 } from "./reducer";
 import type { Turn } from "./domain/conversation";
 import { uuid } from "./util";
+import { TurnFilePageRequests, type LoadTurnFilePage } from "./turn-file-pages";
 import { Icon } from "./icons";
 import { ChatView } from "./components/ChatView";
 import { Composer } from "./components/Composer";
@@ -531,6 +532,7 @@ export default function App() {
     codexProfileId?: string | null;
   } | null>(null);
   const historyRequestsRef = useRef(new HistoryRequestCoordinator());
+  const turnFileRequestsRef = useRef(new TurnFilePageRequests());
   const terminalHistoryRepairRef = useRef<Map<
     string, TerminalHistoryRepairAttempt
   >>(new Map());
@@ -2080,6 +2082,7 @@ export default function App() {
   useEffect(() => {
     if (!authed) return;
     const historyRequests = historyRequestsRef.current;
+    const turnFileRequests = turnFileRequestsRef.current;
     const contextRequestLaunches = contextRequestLaunchesRef.current;
     const contextDeferredRetryAttempts =
       contextDeferredRetryAttemptsRef.current;
@@ -2159,6 +2162,7 @@ export default function App() {
       const ws = new RelayWs({
         onEvent: (msg, ownership) => {
           if (!acceptsLifecycle()) return;
+          if (turnFileRequestsRef.current.accept(msg)) return;
           const settlesContextRequest = !!(
             (msg.type === "context_report"
                 || (msg.type === "error" && msg.code !== "wrapper_offline"))
@@ -2686,7 +2690,13 @@ export default function App() {
               recoverableReads.complete(retryKey);
             }
             if (msg.before) {
-              if (completedHistory.stale.length > 0
+              if (completedHistory.stale.some((waiter) => {
+                const browse = stateRef.current.historyBrowse;
+                return browse?.sid === msg.session_id
+                  && browse.scopeKey === waiter.scopeKey
+                  && browse.viewId === waiter.viewId
+                  && browse.windowEpoch === waiter.windowEpoch;
+              })
                   && stateRef.current.focusedSid === msg.session_id) {
                 // The cursor came from an obsolete revision/generation. Exit
                 // that read-only browse lifetime and refresh the canonical head
@@ -3606,6 +3616,7 @@ export default function App() {
           if (!acceptsLifecycle()) return;
           dispatch({ type: "conn", connState: s, detail });
           if (s !== "connected") {
+            turnFileRequestsRef.current.clear();
             skillCatalogRequestsRef.current?.resetReads();
             // The fork result is authoritative only for this live connection.
             // A reconnect will obtain a fresh native SessionList, so do not
@@ -3644,6 +3655,7 @@ export default function App() {
         },
         onAuthFail: () => {
           if (!acceptsLifecycle()) return;
+          turnFileRequestsRef.current.clear();
           setAuthReady(false);
           clearLegacyAuthMarkers(localStorage);
           pendingCreateRef.current = null;
@@ -3705,6 +3717,7 @@ export default function App() {
         },
         onWrapperGenerationChanged: () => {
           if (!acceptsLifecycle()) return;
+          turnFileRequestsRef.current.clear();
           setAgentPanel(null);
           agentDetailListenerRef.current = null;
           clearHistoryDetailRequests();
@@ -3755,6 +3768,7 @@ export default function App() {
       if (wsRef.current === effectWs) wsRef.current = null;
       historyRequests.clear();
       clearHistoryDetailRequests();
+      turnFileRequests.clear();
       recoverableReads.clear();
       contextRequestLaunches.clear();
       contextDeferredRetryAttempts.clear();
@@ -4557,9 +4571,6 @@ export default function App() {
       files,
       ts: Date.now(),
     });
-    if (stateRef.current.historyBrowse?.sid === focusedSid) {
-      dispatch({ type: "return_to_latest", sid: focusedSid });
-    }
     return true;
   };
   const replyAsyncQuestion = (
@@ -5052,8 +5063,23 @@ export default function App() {
       file: files.length === 1 ? files[0] : `本轮改动 · ${files.length} 个文件`,
       sid: focusedSid,
       kind: "gitdiff",
-      sections: parseGitDiff(diff),
+      sections: parseGitDiff(diff).filter((section) => files.includes(section.file)),
     } });
+  };
+  const openArchivedDiff = (turnId: string, revision: string, file: string) => {
+    if (!confirmArtifactDiscard()) return;
+    const requestId = wsRef.current?.sendGetDiff(file, theme, turnId, revision, focusedEngine) ?? null;
+    if (!requestId) return;
+    closeViewer();
+    setRightView("diff");
+    dispatch({ type: "open_artifact_loading", file, sid: focusedSid, requestId });
+  };
+  const loadTurnFilePage: LoadTurnFilePage = (turnId, revision, offset, signal) => {
+    if (!focusedSid) return Promise.reject(new Error("请先选择会话。"));
+    return turnFileRequestsRef.current.request({
+      sid: focusedSid, engine: focusedEngine, turnId, revision, offset,
+    }, () => wsRef.current?.sendGetTurnFileChanges(
+      focusedSid, focusedEngine, turnId, revision, offset) ?? null, signal);
   };
   const previewFileForSid = (
     targetSid: string | null,
@@ -5666,6 +5692,8 @@ export default function App() {
               onGetDiff={historyView.recovering ? undefined : getDiff}
               onOpenTurnDiff={historyView.recovering
                 ? undefined : openTurnDiff}
+              onOpenArchivedDiff={historyView.recovering ? undefined : openArchivedDiff}
+              onLoadFilePage={historyView.recovering ? undefined : loadTurnFilePage}
               onPreviewMarkdown={historyView.recovering
                 ? undefined : previewMarkdown}
               onOpenFile={historyView.recovering ? undefined : previewFile}

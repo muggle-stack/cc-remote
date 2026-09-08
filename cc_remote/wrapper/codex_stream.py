@@ -42,6 +42,9 @@ from cc_remote.wrapper.codex_external import (
     visible_codex_user_message,
 )
 from cc_remote.wrapper.sanitize import bounded_text, bounded_tool_input
+from cc_remote.wrapper.turn_changes import (
+    MAX_FILES, MAX_DIFF, MAX_TURN_DIFF, turn_change_event_data,
+)
 
 _TOOL_TYPES = {
     "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall",
@@ -53,6 +56,7 @@ _PROCESS_ITEM_TYPES = {
     "enteredReviewMode", "exitedReviewMode",
 }
 _MAX_HISTORY_RECORD_CHARS = 16 * 1024 * 1024
+_MAX_FILE_CHANGE_ITEMS = 64
 _SAFE_WIRE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$")
 _CREDENTIAL_EXACT_KEYS = frozenset({"env", "environment"})
 _CREDENTIAL_KEY_FRAGMENTS = (
@@ -278,6 +282,9 @@ class CodexHistoryProcessWitness:
     started_ms: int | None = None
     done_ms: int | None = None
     generated_images: bool = False
+    # Only byte offsets, never patch bodies, live in the process/page LRU.
+    file_change_offsets: tuple[int, ...] = ()
+    file_changes_truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -382,6 +389,27 @@ class _HistoryProcessAccumulator:
     started_ms: int | None = None
     done_ms: int | None = None
     generated_images: bool = False
+    file_change_offsets: set[int] = field(default_factory=set)
+    file_changes_truncated: bool = False
+
+    def observe_file_change(self, offset: int, line: bytes) -> None:
+        # Match the native envelope, not a type string inside arbitrary tool
+        # output/reasoning. Only offsets enter the cache; bodies are read later.
+        header = line[:4096]
+        envelope = re.search(rb'"payload"\s*:\s*\{\s*"type"\s*:\s*"(patch_apply_end|fileChange|item_completed)"', header, re.I)
+        if envelope is None or not re.search(
+            rb'"type"\s*:\s*"(?:event_msg|response_item)"', header[:envelope.start()],
+        ):
+            return
+        if envelope[1] == b"item_completed" and not re.search(
+            rb'"item"\s*:\s*\{[^{}]*"type"\s*:\s*"fileChange"', header[envelope.end():], re.I,
+        ):
+            return
+        self.present = True
+        if len(self.file_change_offsets) < 512:
+            self.file_change_offsets.add(offset)
+        else:
+            self.file_changes_truncated = True
 
     def observe(self, stamp_ms: int | None) -> None:
         self.present = True
@@ -401,6 +429,9 @@ class _HistoryProcessAccumulator:
             return
         self.present = True
         self.generated_images |= witness.generated_images
+        offsets = self.file_change_offsets.union(witness.file_change_offsets)
+        self.file_changes_truncated |= witness.file_changes_truncated or len(offsets) > 512
+        self.file_change_offsets = set(sorted(offsets)[:512])
         for stamp_ms in (witness.started_ms, witness.done_ms):
             if stamp_ms is not None:
                 self.observe(stamp_ms)
@@ -411,6 +442,8 @@ class _HistoryProcessAccumulator:
         self.started_ms = None
         self.done_ms = None
         self.generated_images = False
+        self.file_change_offsets.clear()
+        self.file_changes_truncated = False
         return witness
 
     def snapshot(self) -> CodexHistoryProcessWitness | None:
@@ -420,6 +453,8 @@ class _HistoryProcessAccumulator:
             started_ms=self.started_ms,
             done_ms=self.done_ms,
             generated_images=self.generated_images,
+            file_change_offsets=tuple(sorted(self.file_change_offsets)),
+            file_changes_truncated=self.file_changes_truncated,
         )
 
 
@@ -841,6 +876,7 @@ def _history_visible_process_stamp(line: bytes) -> tuple[bool, int | None]:
                 isinstance(item, dict)
                 and (
                     item.get("type") in _TOOL_TYPES
+                    or item.get("type") == "FileChange"
                     or item.get("type") in (
                         _PROCESS_ITEM_TYPES - {"reasoning"}
                     )
@@ -1201,6 +1237,7 @@ def _history_boundary_records(
                           else _MAX_HISTORY_REVERSE_RECORD_BYTES),
     ):
         if include_process:
+            process.observe_file_change(offset, line)
             if _history_generated_image_record(line):
                 process.observe(None)
                 process.generated_images = True
@@ -1580,7 +1617,7 @@ def codex_history_process_append(
             return None
     process = _HistoryProcessAccumulator()
     process.merge(previous.process_by_native_segment.get(segment))
-    for _offset, line in _reverse_jsonl_records(
+    for offset, line in _reverse_jsonl_records(
         # Include the preceding newline so the reverse reader can emit the
         # first appended record rather than dropping it as a partial carry.
         path, max_scan_bytes=end_offset - start_offset + 1,
@@ -1594,6 +1631,7 @@ def codex_history_process_append(
         if _history_generated_image_record(line):
             process.observe(None)
             process.generated_images = True
+        process.observe_file_change(offset, line)
         visible, stamp = _history_visible_process_stamp(line)
         if visible:
             process.observe(stamp)
@@ -1608,6 +1646,70 @@ def codex_history_process_append(
             visible[cursor] = updated
     return replace(previous, process_by_native_segment=native,
                    process_by_visible_id=visible)
+
+
+def codex_history_file_changes(
+    path: str, offsets_by_turn: dict[str, tuple[int, ...]], *, end_offset: int,
+) -> tuple[dict[str, list[dict]], set[str]]:
+    """Read only witnessed mutation records on the requested history page.
+
+    No full turn hydration, command output or worktree reads. The caller binds
+    offsets to a validated source fingerprint and exact native steer segment.
+    A bounded/incomplete read may expose paths, never a misleading partial diff.
+    """
+    sources: dict[str, list[dict]] = {}
+    incomplete: set[str] = set()
+    remaining = 16 * 1024 * 1024
+    with open(path, "rb") as source:
+        for turn_id, offsets in offsets_by_turn.items():
+            events = sources[turn_id] = []
+            for offset in sorted(set(offsets)):
+                if not 0 <= offset < end_offset or remaining <= 0:
+                    incomplete.add(turn_id)
+                    continue
+                source.seek(offset)
+                limit = min(8 * 1024 * 1024, remaining, end_offset - offset)
+                raw = source.readline(limit)
+                remaining -= len(raw)
+                if not raw.endswith(b"\n"):
+                    incomplete.add(turn_id)
+                    continue
+                try:
+                    record = json.loads(raw)
+                except (ValueError, UnicodeDecodeError):
+                    incomplete.add(turn_id)
+                    continue
+                payload = record.get("payload") if isinstance(record, dict) else None
+                if not isinstance(payload, dict):
+                    incomplete.add(turn_id)
+                    continue
+                if record.get("type") == "event_msg" and payload.get("type") == "patch_apply_end":
+                    item = {"type": "fileChange", "id": payload.get("call_id"),
+                            "changes": payload.get("changes"),
+                            "status": "failed" if payload.get("success") is False else "completed"}
+                elif record.get("type") == "response_item" and str(payload.get("type")).lower() == "filechange":
+                    item = payload
+                elif record.get("type") == "event_msg" and payload.get("type") == "item_completed":
+                    item = payload.get("item")
+                    if not isinstance(item, dict) or str(item.get("type")).lower() != "filechange":
+                        continue
+                else:
+                    continue
+                if not isinstance(item.get("id"), str) or not item["id"]:
+                    incomplete.add(turn_id)
+                    continue
+                # Rollouts use PascalCase / path->change maps; app-server v2
+                # notifications use camelCase / change arrays. Both describe
+                # the same native edit and share the existing safe translator.
+                item = {**item, "type": "fileChange"}
+                translator = CodexStreamTranslator(64 * 1024)
+                use = turn_change_event_data(translator._tool_update(item))
+                if item.get("status") not in {"completed", "failed", "declined", "cancelled", "interrupted"}:
+                    events.append(use)
+                    continue
+                result = turn_change_event_data(translator._tool_result(item))
+                events.extend((use, result))
+    return sources, incomplete
 
 
 def codex_history_window_info(
@@ -2962,13 +3064,15 @@ class CodexStreamTranslator:
             title=title,
             server=server,
         ))
+        if item_type == "fileChange":
+            _attach_change_source(out[-1], item.get("changes"))
         return out
 
     def _tool_update(self, item: dict) -> ToolUse:
         item_type = str(item.get("type") or "tool")
         iid = _live_id(item.get("id"), f"{item_type}-tool")
         tool, category, title, server = _tool_presentation(item)
-        return ToolUse(
+        event = ToolUse(
             message_id=self._tool_message_ids.get(iid, iid),
             tool_use_id=iid,
             tool=tool,
@@ -2978,17 +3082,20 @@ class CodexStreamTranslator:
             title=title,
             server=server,
         )
+        if item_type == "fileChange":
+            _attach_change_source(event, item.get("changes"))
+        return event
 
     def _tool_result(self, item: dict) -> ToolResult:
         item_type = item.get("type")
         status = _process_status(item.get("status"))
         code = _nonnegative_or_signed_int(item.get("exitCode"))
         diff = None
+        diff_truncated = None
         summary = None
         raw_content = item.get("aggregatedOutput") or item.get("output") or ""
         if item_type == "fileChange":
-            diff, diff_truncated = bounded_text(
-                _changes_diff(item.get("changes")), 2 * 1024 * 1024)
+            diff, diff_truncated = _bounded_changes_diff(item.get("changes"))
             paths = _change_paths(item.get("changes"))
             summary = _file_summary(paths, status)
             raw_content = summary
@@ -3019,7 +3126,7 @@ class CodexStreamTranslator:
             status in {"failed", "declined", "cancelled", "interrupted"}
             or (code is not None and code != 0)
         )
-        return ToolResult(
+        event = ToolResult(
             tool_use_id=_live_id(item.get("id"), f"{item_type}-tool"),
             content=text,
             is_error=is_error,
@@ -3027,9 +3134,14 @@ class CodexStreamTranslator:
             status=status,
             summary=summary or None,
             diff=diff or None,
+            diff_source="native" if item_type == "fileChange" else None,
+            diff_truncated=diff_truncated,
             exit_code=code,
             duration_ms=_duration_ms(item.get("durationMs")),
         )
+        if item_type == "fileChange":
+            _attach_change_source(event, item.get("changes"))
+        return event
 
     def _ensure_reasoning(self, iid: str, params: dict):
         if iid in self._reasoning_started:
@@ -3549,7 +3661,7 @@ def _tool_presentation(item: dict) -> tuple[str, str, str | None, str | None]:
 def _change_descriptors(changes) -> list[dict]:
     descriptors: list[dict] = []
     if isinstance(changes, list):
-        iterable = changes[:64]
+        iterable = changes[:_MAX_FILE_CHANGE_ITEMS]
         for entry in iterable:
             if not isinstance(entry, dict):
                 continue
@@ -3564,7 +3676,7 @@ def _change_descriptors(changes) -> list[dict]:
                 descriptor["move_path"] = move_path[:16 * 1024]
             descriptors.append(descriptor)
     elif isinstance(changes, dict):
-        for path, change in list(changes.items())[:64]:
+        for path, change in islice(changes.items(), _MAX_FILE_CHANGE_ITEMS):
             kind = change.get("type") if isinstance(change, dict) else "update"
             descriptor = {
                 "path": str(path)[:16 * 1024],
@@ -3576,6 +3688,44 @@ def _change_descriptors(changes) -> list[dict]:
                 descriptor["move_path"] = move_path[:16 * 1024]
             descriptors.append(descriptor)
     return descriptors
+
+
+def _attach_change_source(event: ToolUse | ToolResult, changes) -> None:
+    """Keep archive evidence separate from the small, serialized tool card.
+
+    Index every admitted file even when its patch is too large. A missing patch
+    is represented by None, never by a clipped but syntactically valid hunk.
+    """
+    entries = (islice(changes.items(), MAX_FILES) if isinstance(changes, dict)
+               else ((entry.get("path") if isinstance(entry, dict) else None, entry)
+                     for entry in islice(changes, MAX_FILES))
+               if isinstance(changes, list) else ())
+    files, paths = [], []
+    remaining = MAX_TURN_DIFF
+    omitted = isinstance(changes, (dict, list)) and len(changes) > MAX_FILES
+    for path, entry in entries:
+        if not isinstance(entry, dict):
+            entry = {}
+        names = [name for name in (path, _change_move_path(entry))
+                 if isinstance(name, str) and name and len(name) <= 4096
+                 and not any(char in name for char in "\x00\r\n")]
+        if not names or path not in names:
+            omitted = True
+            continue
+        paths.extend(names)
+        if isinstance(event, ToolResult):
+            raw_size = sum(len(entry[key]) for key in (
+                "diff", "unified_diff", "old_content", "content")
+                if isinstance(entry.get(key), str))
+            diff = _change_diff(path, entry) if raw_size <= min(MAX_DIFF, remaining) else None
+            if not diff or len(diff) > min(MAX_DIFF, remaining):
+                diff = None
+            remaining -= len(diff or "")
+            files.append({"file_paths": names, "diff": diff})
+    event._turn_change_source = (
+        {"input": {"file_paths": list(dict.fromkeys(paths))}}
+        if isinstance(event, ToolUse) else
+        {"_file_diffs": files, "_files_truncated": omitted})
 
 
 def _change_paths(changes) -> list[str]:
@@ -3598,20 +3748,31 @@ def _changes_diff(changes) -> str:
     """Normalize v2 FileUpdateChange arrays and legacy path->change maps."""
     parts: list[str] = []
     if isinstance(changes, list):
-        for entry in changes[:64]:
+        for entry in changes[:_MAX_FILE_CHANGE_ITEMS]:
             if not isinstance(entry, dict):
                 continue
             diff = _change_diff(str(entry.get("path") or "file"), entry)
             if isinstance(diff, str) and diff:
                 parts.append(diff)
     elif isinstance(changes, dict):
-        for path, entry in list(changes.items())[:64]:
+        for path, entry in islice(changes.items(), _MAX_FILE_CHANGE_ITEMS):
             if not isinstance(entry, dict):
                 continue
             diff = _change_diff(str(path), entry)
             if isinstance(diff, str) and diff:
                 parts.append(diff)
     return "\n".join(parts)
+
+
+def _bounded_changes_diff(changes) -> tuple[str, bool]:
+    """Keep text clipping and omitted native file entries explicit.
+
+    A clipped final line (or a subset of complete file patches) can still parse
+    as valid unified diff. Syntax alone cannot prove this evidence is complete.
+    """
+    diff, truncated = bounded_text(_changes_diff(changes), 2 * 1024 * 1024)
+    omitted = isinstance(changes, (dict, list)) and len(changes) > _MAX_FILE_CHANGE_ITEMS
+    return diff, truncated or omitted
 
 
 def _change_move_path(entry: dict) -> str | None:
@@ -4732,6 +4893,34 @@ def codex_translate_history(
                         image_event.ts = ts if ts is not None else 0
                         events.append(image_event)
                         turn_visible = True
+            elif (
+                (t == "response_item" and str(payload_type).lower() == "filechange")
+                or (t == "event_msg" and payload_type == "item_completed"
+                    and isinstance(p.get("item"), dict)
+                    and str(p["item"].get("type")).lower() == "filechange")
+            ):
+                # The rollout fallback must expose the same native edits as
+                # official paged history, including newer PascalCase items.
+                native_turn = active_turn_id or pending_turn_id
+                if p.get("turn_id") is not None and p["turn_id"] != native_turn:
+                    continue
+                item = p["item"] if payload_type == "item_completed" else p
+                tool_id = _history_id(item.get("id"), "tool", line_no, raw_ts)
+                item = {**item, "type": "fileChange", "id": tool_id}
+                open_assistant_only_turn()
+                translator = CodexStreamTranslator(tool_result_max)
+                use = translator._tool_update(item)
+                upsert_tool_use(
+                    tool_id, use.tool, use.category, use.title, use.server,
+                    use.input, line_no, raw_ts,
+                )
+                if item.get("status") in {"completed", "failed", "declined", "cancelled", "interrupted"}:
+                    result = translator._tool_result(item)
+                    if (isinstance(item.get("changes"), (dict, list))
+                            and len(item["changes"]) > 64):
+                        result.truncated = True
+                        result.diff = None
+                    upsert_tool_result(result)
             elif t == "event_msg" and payload_type == "item_completed":
                 item = p.get("item") if isinstance(p.get("item"), dict) else {}
                 if str(item.get("type") or "").lower() == "plan":
@@ -4816,12 +5005,12 @@ def codex_translate_history(
                         category="file",
                         title=_file_summary(paths, "running"),
                     ))
+                    _attach_change_source(events[-1], p.get("changes"))
                 if tool_id not in seen_tool_results:
                     seen_tool_results.add(tool_id)
                     turn_visible = True
                     success = p.get("success") is not False
-                    diff, diff_truncated = bounded_text(
-                        _changes_diff(p.get("changes")), 2 * 1024 * 1024)
+                    diff, diff_truncated = _bounded_changes_diff(p.get("changes"))
                     output, output_truncated = bounded_text(
                         p.get("stdout") or p.get("stderr") or "",
                         tool_result_max)
@@ -4835,7 +5024,10 @@ def codex_translate_history(
                         summary=_file_summary(
                             paths, "succeeded" if success else "failed"),
                         diff=diff or None,
+                        diff_source="native",
+                        diff_truncated=diff_truncated,
                     ))
+                    _attach_change_source(events[-1], p.get("changes"))
             elif t == "event_msg" and payload_type == "web_search_end":
                 open_assistant_only_turn()
                 ensure_assistant(line_no, raw_ts)

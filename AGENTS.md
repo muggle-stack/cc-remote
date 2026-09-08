@@ -81,7 +81,7 @@ CLI to satisfy deployment checks.
   transport, never the caller's Origin. Uvicorn trusts forwarded transport
   metadata only from loopback Caddy. Never put tokens in URLs or protocol
   message bodies; logging redacts token/password fields.
-- **Protocol version gate**: current wire protocol v55 is declared by
+- **Protocol version gate**: current wire protocol v57 is declared by
   `PROTOCOL_VERSION` in both `protocol.py` and `web/src/protocol.ts`.
   `deserialize` hard-rejects a version mismatch, and
   `_Base` is `extra="forbid"`, so ANY protocol change must be deployed to all

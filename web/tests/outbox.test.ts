@@ -118,6 +118,16 @@ assert.deepEqual(planRecoveryReplay(
   { type: "switch", sid: "session-b" },
 ]);
 assert.equal(acceptance.pendingMessageId("offline-session"), "offline-message");
+const archiveReads = new CommandOutbox(10, 4096);
+for (const type of ["get_turn_file_changes", "get_diff"]) {
+  assert.equal(archiveReads.enqueue({ v: 57, type, sid: "cold-background", ts: 2,
+    turn_id: "historical", revision: "immutable", engine: "codex", file: "src/code.py", offset: 64,
+  }, "client", type).ok, true);
+}
+assert.deepEqual(planRecoveryReplay(archiveReads.pendingFramesWithSessionIds(), "foreground"), [
+  ...archiveReads.pendingFrames().map((raw) => ({ type: "command", raw })),
+  { type: "switch", sid: "foreground" },
+], "archive file pagination and historical diffs must not resume a cold engine on replay");
 assert.equal(acceptance.accept({
   type: "user_msg", sid: "offline-session", msg_id: "offline-message",
 }), true);

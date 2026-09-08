@@ -20,6 +20,7 @@ import type {
   Block, ProcessBlock, TextBlock, Turn,
 } from "../domain/conversation";
 import type { Space } from "../protocol";
+import type { LoadTurnFilePage } from "../turn-file-pages";
 import { MessageBlock } from "./MessageBlock";
 import { Icon, ClaudeMark, ClaudeWorking, ClaudeSpark } from "../icons";
 import { canForkTurn } from "../session-worktree";
@@ -32,11 +33,11 @@ import {
   finalTextBlocks,
   generatedImageIdentity,
   generatedOutputImages,
+  modelFallbackNotices,
   hasActiveProcess,
   presentableProcessBlocks,
 } from "../process-blocks";
-import { isMarkdownPath } from "../preview-path";
-import { collectTurnFileChanges } from "../file-changes";
+import { TurnChangesPanel } from "./TurnChangesPanel";
 import type { InlineImageAsset } from "../inline-image-assets";
 import type { PreviewAuthorizationState } from "../reducer";
 import {
@@ -354,7 +355,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
   historyCursor: incomingHistoryCursor = null,
   browseMode: incomingBrowseMode = false, hasNewer: incomingHasNewer = false,
   onLoadMore, onLoadNewer, onReturnLatest,
-  onLoadDetail, onEdit, onReplyAsyncQuestion, asyncReplyMode, onOpenTurnDiff, onPreviewMarkdown, onOpenFile,
+  onLoadDetail, onEdit, onReplyAsyncQuestion, asyncReplyMode, onOpenTurnDiff, onOpenArchivedDiff, onLoadFilePage, onPreviewMarkdown, onOpenFile,
   onOpenArtifacts, onFork, forkingPointId, imageAssets, onLoadImage,
   onAuthorizeImage,
   historyImageAssets, onLoadHistoryImage,
@@ -397,6 +398,8 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
   asyncReplyMode?: "query" | "steer";
   onGetDiff?: (file: string) => void;
   onOpenTurnDiff?: (files: string[], diff: string) => void;
+  onOpenArchivedDiff?: (turnId: string, revision: string, path: string) => void;
+  onLoadFilePage?: LoadTurnFilePage;
   onPreviewMarkdown?: (file: string) => void;
   onOpenFile?: (file: string, line?: number) => void;
   onOpenArtifacts?: () => void;
@@ -506,7 +509,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
   const resolvedHistoryViewId = historyViewId ?? historyViewRevision ?? "";
   const incomingScrollScope = historyViewId == null
     ? `${historyScopeKey ?? ""}\u0000${sid ?? ""}\u0000${resolvedHistoryViewId}`
-    : `${historyScopeKey ?? ""}\u0000${sid ?? ""}\u0000${historyRevision ?? ""}\u0000${resolvedHistoryViewId}`;
+    : `${historyScopeKey ?? ""}\u0000${sid ?? ""}\u0000${historyViewRevision ?? historyRevision ?? ""}\u0000${resolvedHistoryViewId}`;
   const incomingHistoryPresentation: HistoryViewportPresentation = {
     sid,
     scope: incomingScrollScope,
@@ -1340,7 +1343,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
       ? [
           requestScopeKey,
           sid ?? "",
-          historyRevision ?? "",
+          historyViewRevision ?? historyRevision ?? "",
           requestViewId,
         ].join("\u0000")
       : scrollScope;
@@ -2512,58 +2515,16 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
   };
   const aiText = (t: Turn) => finalTextBlocks(t.blocks).map((block) => block.text).join("\n\n");
 
-  // Collect engine-neutral file mutations. The helper also understands old
-  // Claude file_path and Codex changes payloads already stored in browser cache.
-  const fileChips = (t: Turn) => {
-    const changes = collectTurnFileChanges([
-      ...t.blocks,
-      ...(t.liveSpillBlocks ?? []),
-      ...(t.detailProjection?.blocks ?? []),
-    ]);
-    if (!changes.paths.length) return null;
-    const arr = changes.paths;
-    const canOpenSummary = surface !== "work"
-      ? !!changes.diff && !!onOpenTurnDiff
-      : (arr.length === 1 && !!onOpenFile) || !!onOpenArtifacts;
-    const openSummary = () => {
-      if (surface !== "work") {
-        if (changes.diff && onOpenTurnDiff) onOpenTurnDiff(arr, changes.diff);
-        return;
-      }
-      if (arr.length === 1 && onOpenFile) {
-        onOpenFile(arr[0]);
-        return;
-      }
-      onOpenArtifacts?.();
-    };
-    return (
-      <div className="turn-files">
-        <button className="turn-files-summary" onClick={openSummary}
-          disabled={!canOpenSummary}
-          title={surface === "work" ? "预览 Artifacts" : "查看本轮改动"}>
-          <Icon name={surface === "work" ? "folder" : "edit"} size={13} />{
-            surface === "work" ? `Artifacts · ${arr.length} 个文件` : `改动 ${arr.length} 个文件`
-          }
-        </button>
-        <div className="turn-files-list">
-          {arr.map((f) => {
-            const markdown = surface !== "work" && isMarkdownPath(f) && !!onPreviewMarkdown;
-            const canOpenFile = markdown || (!!changes.diff && !!onOpenTurnDiff);
-            return <button key={f} className={"turn-file-chip" + (markdown ? " markdown" : "")}
-              disabled={!canOpenFile}
-              onClick={() => markdown
-                ? onPreviewMarkdown(f)
-                : onOpenTurnDiff?.(arr, changes.diff)}
-              title={markdown ? `预览 ${f}`
-                : changes.diff ? "查看本轮原生 diff" : "本轮没有可用的原生 diff"}>
-              <Icon name={markdown ? "read" : "edit"} size={12} />
-              {f.split("/").pop()}
-              {markdown && <span className="turn-file-action">预览</span>}
-            </button>;
-          })}
-        </div>
-      </div>
-    );
+  const renderTurnChanges = (t: Turn) => {
+    const key = `${scrollScope}\u0000changes:${t.clientMsgId ?? t.id}`;
+    return <TurnChangesPanel key={key} turn={t} open={processDisclosureOpen[key] ?? false}
+      onToggle={() => {
+        pauseOutputFollow();
+        rememberProcessDisclosure(key, !(processDisclosureOpen[key] ?? false));
+      }} onOpenDiff={onOpenArchivedDiff} onOpenLegacyDiff={onOpenTurnDiff}
+      onLoadFilePage={onLoadFilePage} onBeforeLoad={pauseOutputFollow}
+      onPreviewMarkdown={onPreviewMarkdown} work={surface === "work"}
+      onOpenFile={onOpenFile} onOpenArtifacts={onOpenArtifacts} />;
   };
 
   const measuredVirtualItems = virtualizer.getVirtualItems();
@@ -2736,6 +2697,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
               || foregroundProcessItems.some((block) => !block.done);
             const finalBlocks = finalTextBlocks(t.blocks);
             const generatedImages = generatedOutputImages(timelineBlocks);
+            const modelNotices = modelFallbackNotices(timelineBlocks);
             const followupBoundaries = backgroundFollowupBoundaries(
               finalBlocks, timelineBlocks);
             const enclosingTaskActive = activeTurnId === t.id;
@@ -2998,6 +2960,10 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                 )}
                 onPreviewImage={(src, alt) => setZoom({ kind: "data", src, alt })} />
             )}
+            {modelNotices.map((notice) => <div className="turn-model-notice" key={notice.item_id} role="note">
+              <Icon name="notify" size={15} />
+              <span>{notice.summary}</span>
+            </div>)}
             {generatedImages.length > 0 && <div className="generated-image-gallery">
               {generatedImages.map((block) => <GeneratedImagePreview key={generatedImageIdentity(block)}
                 block={block} imageAssets={imageAssets} onLoadImage={onLoadImage}
@@ -3047,9 +3013,10 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                       onPreviewImage={(src, alt) => setZoom({ kind: "data", src, alt })} />}
                   </div>
                 ))}
-                {/* Late page metadata shares a stable slot; completion metadata
-                    still requires a real terminal, including after compaction. */}
-                <div className={`ubub-meta ${showCompletionFooter ? "ai-meta" : "page-meta"}`}>
+                {/* Final metadata already has a stable row. While running,
+                    page discovery shares the existing working indicator below
+                    instead of reserving an empty 22px metadata row. */}
+                {showCompletionFooter && <div className="ubub-meta ai-meta">
                   {showCompletionFooter && t.doneTs && <span className="ubub-time">{formatTime(t.doneTs)}</span>}
                   {showCompletionFooter && finalBlocks.length > 0 && <button
                     className={"ubub-act" + (copiedId === t.id + "-ai" ? " copied" : "")}
@@ -3067,7 +3034,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                     </button>
                   )}
                   <Suspense fallback={null}><PagePreviewLinks turn={t} sid={sid} /></Suspense>
-                </div>
+                </div>}
                 {showCompletionFooter && ti === turns.length - 1
                   && <div className="turn-done-mark"><ClaudeSpark size={22} /></div>}
               </>
@@ -3100,9 +3067,12 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                 <div className="turn-working" role="status" aria-live="polite">
                   <ClaudeWorking size={24} />
                   <span className="turn-working-tx">{workingLabel}</span>
+                  {!showCompletionFooter && <Suspense fallback={null}>
+                    <PagePreviewLinks turn={t} sid={sid} />
+                  </Suspense>}
                 </div>
               )}
-              {fileChips(t)}
+              {renderTurnChanges(t)}
               {t.done && t.interrupted && !t.error
                 && <div className="note interrupted">— 已打断 —</div>}
               {t.error && <div className="note interrupted turn-failure">{

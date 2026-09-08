@@ -6555,6 +6555,7 @@ def test_codex_history_refresh_coalesces_cwd_hints_and_rate_limits_rescan(
         ctx.engine = "codex"
         ctx.state = "running"
         machine.sessions[ctx.key] = ctx
+        machine._activate_codex_rollout_history(ctx.key, advance_revision=False)
         entered = asyncio.Event()
         release = asyncio.Event()
         starts = []
@@ -6767,6 +6768,7 @@ def test_history_refresh_skips_backoff_for_final_idle_rebuild(monkeypatch):
         ctx.engine = "codex"
         ctx.state = "running"
         machine.sessions[ctx.key] = ctx
+        machine._activate_codex_rollout_history(ctx.key, advance_revision=False)
         entered = asyncio.Event()
         release = asyncio.Event()
         builds = 0
@@ -6813,6 +6815,7 @@ def test_history_refresh_retries_provisional_source_drift_without_dirty_signal(
         ctx.engine = "codex"
         ctx.state = "idle"
         machine.sessions[ctx.key] = ctx
+        machine._activate_codex_rollout_history(ctx.key, advance_revision=False)
         builds = 0
 
         async def build(sid, **_kwargs):

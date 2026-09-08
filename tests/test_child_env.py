@@ -612,6 +612,19 @@ def test_claude_code_keeps_official_prompt_preset_and_runtime_surface():
     }
 
 
+@pytest.mark.parametrize(("mode", "threshold"), [
+    ("inherit", None), ("auto", None), ("custom", 400_000),
+])
+def test_autocompact_does_not_replace_or_empty_native_system_prompt(mode, threshold):
+    handle = SdkHandle(WrapperConfig())
+    original = handle._options(None, "/tmp/code").system_prompt
+    handle.set_auto_compact(mode, threshold)
+    resumed = handle._options("native-session", "/tmp/code")
+    assert resumed.system_prompt == original
+    assert original["preset"] == "claude_code"
+    assert original["append"].strip()
+
+
 def test_scrub_removes_live_environment_mapping(monkeypatch):
     # Do not apply PR_SET_DUMPABLE to the pytest worker itself on Linux; exercise
     # the portable mapping behavior with the platform branch disabled.

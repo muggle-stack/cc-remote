@@ -229,6 +229,7 @@ export interface SessionRuntime {
   // Revision attached to the last authoritative non-pagination History and,
   // while a rollback barrier is pending, the exact revision allowed to clear it.
   historyRevision: string | null;
+  historyContinuityRevision?: string | null;
   pendingHistoryRevision: string | null;
   // Ordering watermark for newest-page History builds within one wrapper
   // generation. Pagination never advances it.
@@ -468,6 +469,7 @@ export function createRuntime(): SessionRuntime {
     replaying: false, syncReady: false, truncated: false,
     historyInvalidated: false,
     historyRevision: null, pendingHistoryRevision: null,
+    historyContinuityRevision: null,
     historyGeneration: null, pendingHistoryGeneration: null,
     pendingHistoryCandidateBuildSeq: null,
     historyBuildSeq: 0, historyLiveSeq: 0,
@@ -2368,19 +2370,12 @@ export function reduce(state: AppState, action: Action): AppState {
         };
       }
       const sessions = bumpSessionActivity(state.sessions, action.sid, action.ts);
-      const historyBrowse = state.historyBrowse?.sid === action.sid
-        ? null : state.historyBrowse;
-      const retainedHistoryBrowse =
-        state.retainedHistoryBrowse?.sid === action.sid
-          ? null : state.retainedHistoryBrowse;
-      if (runtimes === state.runtimes && sessions === state.sessions
-          && historyBrowse === state.historyBrowse
-          && retainedHistoryBrowse === state.retainedHistoryBrowse) {
+      // Sending changes the live runtime, not the user's reading viewport.
+      // Only an explicit return-to-latest/navigation action leaves history.
+      if (runtimes === state.runtimes && sessions === state.sessions) {
         return state;
       }
-      return {
-        ...state, runtimes, sessions, historyBrowse, retainedHistoryBrowse,
-      };
+      return { ...state, runtimes, sessions };
     }
     case "enqueue": {
       const targetSid = action.sid ?? state.focusedSid;
@@ -2393,20 +2388,9 @@ export function reduce(state: AppState, action: Action): AppState {
         queueKind: "queue",
         queueState: action.query.queueState ?? "submitting",
       };
-      const next = patch(state, targetSid, (rt) => {
+      return patch(state, targetSid, (rt) => {
         rt.queue = [...rt.queue, optimistic];
       });
-      if (!targetSid) return next;
-      const closesBrowse = next.historyBrowse?.sid === targetSid;
-      const dropsRetained = next.retainedHistoryBrowse?.sid === targetSid;
-      return closesBrowse || dropsRetained
-        ? {
-            ...next,
-            historyBrowse: closesBrowse ? null : next.historyBrowse,
-            retainedHistoryBrowse: dropsRetained
-              ? null : next.retainedHistoryBrowse,
-          }
-        : next;
     }
     case "dequeue_at": {
       const runtimes = reduceTargetedRuntime(
@@ -2438,19 +2422,8 @@ export function reduce(state: AppState, action: Action): AppState {
         replacesRetainedBytes:
           action.query.replacesRetainedBytes ?? replacesRetainedBytes,
       };
-      const next = patch(
+      return patch(
         state, targetSid, (rt) => { rt.pendingSend = optimistic; });
-      if (!targetSid) return next;
-      const closesBrowse = next.historyBrowse?.sid === targetSid;
-      const dropsRetained = next.retainedHistoryBrowse?.sid === targetSid;
-      return closesBrowse || dropsRetained
-        ? {
-            ...next,
-            historyBrowse: closesBrowse ? null : next.historyBrowse,
-            retainedHistoryBrowse: dropsRetained
-              ? null : next.retainedHistoryBrowse,
-          }
-        : next;
     }
     case "clear_pending": {
       const runtimes = reduceTargetedRuntime(
@@ -3564,6 +3537,7 @@ function reduceEvent(
             historyInvalidated: mergedHistoryInvalidated,
             historyRevision:
               source.historyRevision ?? mergeTarget.historyRevision,
+            historyContinuityRevision: mergedHistoryRuntime.historyContinuityRevision,
             pendingHistoryRevision:
               source.pendingHistoryRevision ?? mergeTarget.pendingHistoryRevision,
             historyBuildSeq: source.historyRevision == null
@@ -3964,6 +3938,7 @@ function reduceEvent(
         rt.oldestId = null;
         rt.truncated = false;
         rt.historyInvalidated = true;
+        rt.historyContinuityRevision = null;
         rt.pendingHistoryRevision = e.revision;
         rt.historyNewestId = null;
         rt.historyHeadKnown = false;
@@ -4121,6 +4096,7 @@ function reduceEvent(
       if (e.detail === "summary" && Array.isArray(e.turns)) {
         built.turns = e.turns.map((turn) => ({
           ...turn,
+          fileChangesTurnId: turn.fileChanges ? turn.id : undefined,
           clientMsgId: turn.clientMsgId ?? undefined,
           blocks: turn.blocks as Turn["blocks"],
           forkPointId: turn.forkPointId ?? undefined,
@@ -4269,10 +4245,15 @@ function reduceEvent(
         && !acceptanceConfirmed;
       const acceptanceRuntime = { ...base };
       if (acceptanceConfirmed) clearAcceptance(acceptanceRuntime);
+      const aliasRevisionChanged = base.historyRevision !== e.revision
+        && !base.historyInvalidated && !e.reset
+        && e.generation != null && base.historyGeneration === e.generation
+        && e.continuity_revision != null
+        && e.continuity_revision === (base.historyContinuityRevision ?? base.historyRevision);
       const preserveStableHeadHistory = base.turns.length > 0
         && (base.hasLoadedOlderHistory || e.has_more === true)
         && !base.historyInvalidated
-        && base.historyRevision === e.revision
+        && (base.historyRevision === e.revision || aliasRevisionChanged)
         && (e.generation != null
           ? base.historyGeneration === e.generation
           : base.historyGeneration == null);
@@ -4382,7 +4363,7 @@ function reduceEvent(
         }
       }
       if (e.detail === "summary" && !base.historyInvalidated
-          && base.historyRevision === e.revision) {
+          && (base.historyRevision === e.revision || aliasRevisionChanged)) {
         const loadedDetail = new Map<string, Turn>();
         for (const turn of base.turns) {
           if (!turn.detailLoaded
@@ -4428,7 +4409,7 @@ function reduceEvent(
       const liveDetailScopeMatches = e.detail === "summary"
         && !base.historyInvalidated
         && (base.historyRevision == null
-          || base.historyRevision === e.revision)
+          || base.historyRevision === e.revision || aliasRevisionChanged)
         && (e.generation != null
           ? base.historyGeneration == null
             || base.historyGeneration === e.generation
@@ -4657,6 +4638,16 @@ function reduceEvent(
       }
       let historyBrowse = state.historyBrowse;
       let retainedHistoryBrowse = state.retainedHistoryBrowse;
+      if (aliasRevisionChanged && historyBrowse?.sid === sid
+          && historyBrowse.revision === base.historyRevision
+          && historyBrowse.generation === e.generation) {
+        // Only additive aliases changed. Keep rows and the reading lifetime,
+        // but revoke old in-flight page/detail work and use the new revision.
+        historyBrowse = {
+          ...historyBrowse, revision: e.revision,
+          windowEpoch: historyBrowse.windowEpoch + 1, latestDirty: true,
+        };
+      }
       if (historyBrowse?.sid === sid) {
         if (historyBrowse.revision !== e.revision
             || (e.generation != null
@@ -4710,6 +4701,8 @@ function reduceEvent(
               ? false : base.historyInvalidated,
             historyRevision: acceptsControlState
               ? e.revision : base.historyRevision,
+            historyContinuityRevision: acceptsControlState
+              ? e.continuity_revision ?? e.revision : base.historyContinuityRevision,
             pendingHistoryRevision: acceptsControlState
               ? null : base.pendingHistoryRevision,
             historyGeneration: nextHistoryGeneration,
@@ -4922,6 +4915,7 @@ function reduceEvent(
         reconcileAuthoritativeBackgroundProcessLevel(rt);
       });
     }
+    case "turn_file_changes_page":
     case "agent_detail":
       // Agent detail is a requester-correlated side panel projection. App owns
       // it separately so it can never mutate the parent conversation runtime.
@@ -6408,6 +6402,16 @@ function reduceEvent(
         }
         t.progress = undefined;
         if (boundCompletedTurns) limitTurnBlocks(t);
+        rt.turns = turns;
+      });
+    case "turn_file_changes":
+      return patch(state, e.sid, (rt) => {
+        const turns = cloneTurns(rt.turns);
+        const turn = findBoundLiveTaskOwner(rt, turns, e.turn_id, e.seq, true)
+          ?? findTurnByEngineId(turns, e.turn_id);
+        if (!turn) return;
+        turn.fileChanges = e.changes;
+        turn.fileChangesTurnId = e.turn_id;
         rt.turns = turns;
       });
     case "turn_diff":

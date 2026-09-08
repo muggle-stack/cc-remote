@@ -27,6 +27,19 @@ _REQUEST_TOO_LARGE_MARKERS = (
 )
 
 
+def is_empty_system_content_error(message: str, status_code: int | None = None) -> bool:
+    text = message.casefold()
+    return (status_code == 400 or "400" in text) and (
+        "system content must contain at least one block" in text)
+
+
+EMPTY_SYSTEM_CONTENT_MESSAGE = (
+    "Claude 的请求被上游以 400 拒绝：系统消息内容为空。"
+    "这不是上下文达到上限的证明；会话历史已保留，未自动重试或切换模型。"
+    "需要核对 Claude 原生请求与网关兼容性。"
+)
+
+
 def classify_provider_request_too_large(
     error: BaseException | str,
     *,

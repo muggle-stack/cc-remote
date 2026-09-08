@@ -7,6 +7,174 @@ import {
   MARKDOWN_HTML_HEADER_SVG, MARKDOWN_HTML_LOCAL_README,
 } from "./fixtures/markdown-html";
 
+async function scrollRegressionToMiddle(page: import("@playwright/test").Page, projectName: string) {
+  await scrollThreadToEdge(page, "start", projectName);
+  if (isMobileWebKitProject(projectName)) await dispatchTouchGesture(page, -60);
+  else await page.locator(".thread").dispatchEvent("wheel", { deltaY: 500 });
+  await page.locator(".thread").evaluate((node) => {
+    node.scrollTop = 500;
+    node.dispatchEvent(new Event("scroll"));
+  });
+  await waitForScrollIdle(page);
+}
+
+test("turn regressions preserve history on send and stream, but follow at bottom", async ({ page }, testInfo) => {
+  await page.goto("/tests/history-browser.html?turn-regressions=1");
+  const scroll = page.locator(".thread");
+  await expect(page.getByTestId("regression-send")).toBeVisible();
+  await scrollRegressionToMiddle(page, testInfo.project.name);
+  await page.waitForTimeout(150);
+  const before = await scroll.evaluate((node) => node.scrollTop);
+  await page.getByTestId("regression-send").click();
+  await page.getByTestId("regression-stream").click();
+  await page.waitForTimeout(200);
+  expect(Math.abs(await scroll.evaluate((node) => node.scrollTop) - before)).toBeLessThan(3);
+  await page.getByRole("button", { name: "滚动到底部", exact: true }).click();
+  await expect.poll(() => scroll.evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop)).toBeLessThan(3);
+  await page.getByTestId("regression-stream").click();
+  await expect.poll(() => scroll.evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop)).toBeLessThan(3);
+});
+
+test("turn regressions copy action follows visible block and copies its entire content", async ({ page }, testInfo) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+      writeText: (value: string) => { (window as unknown as { copiedText: string }).copiedText = value; return Promise.resolve(); },
+    } });
+  });
+  await page.goto("/tests/history-browser.html?turn-regressions=1");
+  const scroll = page.locator(".thread");
+  const first = page.locator(".message-code-block").first();
+  await expect(first).toBeAttached();
+  await scrollRegressionToMiddle(page, testInfo.project.name);
+  await page.waitForTimeout(150);
+  const blockRect = await first.boundingBox();
+  const button = first.getByRole("button", { name: "复制代码" });
+  const buttonRect = await button.boundingBox();
+  const scrollRect = await scroll.boundingBox();
+  expect(blockRect!.y).toBeLessThan(scrollRect!.y);
+  expect(blockRect!.y + blockRect!.height).toBeGreaterThan(scrollRect!.y + 100);
+  expect(buttonRect!.y).toBeGreaterThanOrEqual(scrollRect!.y);
+  expect(buttonRect!.y + buttonRect!.height).toBeLessThan(blockRect!.y + blockRect!.height);
+  await button.click();
+  const copied = await page.evaluate(() => (window as unknown as { copiedText: string }).copiedText);
+  expect(copied).toContain("Copy entire block line 0");
+  expect(copied).toContain("Copy entire block line 89");
+  expect(copied).not.toContain("Second block");
+});
+
+test("turn regressions keep changes collapsed per turn and remove the empty spark gap", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?turn-regressions=1");
+  await expect(page.locator(".turn-changes-toggle")).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator(".turn-changes-files")).toHaveCount(0);
+  await expect(page.locator(".page-meta")).toHaveCount(0);
+  const gap = await page.locator(".turn-working").last().evaluate((node) =>
+    node.getBoundingClientRect().top - node.previousElementSibling!.getBoundingClientRect().bottom);
+  expect(gap).toBeLessThan(24);
+  await page.locator(".turn-changes-toggle").click();
+  await page.getByRole("button", { name: "src/code.py", exact: true }).click();
+  await expect(page.getByTestId("regression-opened")).toHaveText("history-one:immutable-one:src/code.py");
+  await page.getByTestId("regression-send").click();
+  await expect(page.locator(".turn-changes-toggle")).toHaveAttribute("aria-expanded", "true");
+});
+
+test("turn regressions show typed historical files after refresh and session switch", async ({ page }, testInfo) => {
+  await page.goto("/tests/history-browser.html?historical-files=1");
+  const toggles = page.locator(".turn-changes-toggle");
+  await expect(toggles).toHaveCount(2);
+  await expect(toggles.first()).toHaveAttribute("aria-expanded", "false");
+  await toggles.first().click();
+  const list = page.locator(".turn-changes-files").first();
+  await expect(list.locator(".turn-change-file")).toHaveCount(7);
+  await expect(list.getByRole("img", { name: "Python", exact: true })).toHaveCount(2);
+  await expect(list.getByRole("img", { name: "JSON", exact: true })).toBeVisible();
+  await expect(list.getByRole("img", { name: "Docker", exact: true })).toBeVisible();
+  await expect(list.getByRole("button", { name: "预览当前文件" })).toBeEnabled();
+  const oldPath = "/workspace/robot-viewer/src/perception/camera.py";
+  await list.getByRole("button", { name: oldPath, exact: true }).click();
+  await expect(page.getByTestId("historical-file-opened")).toHaveText(`history-1:revision-1:${oldPath}`);
+  await page.getByRole("button", { name: "刷新历史", exact: true }).click();
+  await expect(toggles).toHaveCount(2);
+  await page.getByRole("button", { name: "切换会话", exact: true }).click();
+  await expect(toggles).toHaveCount(0);
+  await page.getByRole("button", { name: "切换会话", exact: true }).click();
+  await expect(toggles).toHaveCount(2);
+  if (await toggles.first().getAttribute("aria-expanded") === "false") await toggles.first().click();
+  await list.getByRole("button", { name: oldPath, exact: true }).click();
+  await expect(page.getByTestId("historical-file-opened")).toHaveText(`history-1:revision-1:${oldPath}`);
+  expect(await list.evaluate((node) => node.scrollWidth - node.clientWidth)).toBeLessThan(2);
+  await page.screenshot({ path: testInfo.outputPath("historical-files-light.png") });
+  await page.getByRole("button", { name: "切换主题", exact: true }).click();
+  await page.screenshot({ path: testInfo.outputPath("historical-files-dark.png") });
+});
+
+test("turn regressions page all files and retry without losing the loaded list", async ({ page }) => {
+  let calls = 0;
+  await page.route("**/fixture-turn-files?**", async (route) => {
+    calls += 1;
+    if (calls === 1) { await route.fulfill({ status: 503, body: "unavailable" }); return; }
+    const params = new URL(route.request().url()).searchParams;
+    const offset = Number(params.get("offset"));
+    const files = Array.from({ length: Math.min(64, 130 - offset) }, (_, index) => ({
+      path: `/workspace/robot-viewer/src/file-${offset + index}.py`, state: "available", additions: 1, deletions: 1,
+    }));
+    await route.fulfill({ json: { type: "turn_file_changes_page", engine: "codex",
+      turn_id: params.get("turn"), revision: params.get("revision"), offset, files,
+      total_files: 130, next_offset: offset + files.length < 130 ? offset + files.length : null } });
+  });
+  await page.goto("/tests/history-browser.html?historical-files=1&many-files=1");
+  const toggle = page.locator(".turn-changes-toggle").first();
+  await expect(toggle).toContainText("130 个文件");
+  await expect(toggle).not.toContainText("部分记录");
+  await toggle.click();
+  const list = page.locator(".turn-changes-files").first();
+  await expect(list.locator(".turn-change-file")).toHaveCount(64);
+  await list.getByRole("button", { name: "加载更多", exact: true }).click();
+  await expect(list.getByRole("alert")).toBeVisible();
+  await expect(list.locator(".turn-change-file")).toHaveCount(64);
+  await list.getByRole("button", { name: "重试加载", exact: true }).click();
+  await expect(list.locator(".turn-change-file")).toHaveCount(128);
+  await list.getByRole("button", { name: "加载更多", exact: true }).click();
+  await expect(list.locator(".turn-change-file")).toHaveCount(130);
+  await expect(list.locator(".turn-changes-more")).toHaveCount(0);
+  const path = "/workspace/robot-viewer/src/file-129.py";
+  await list.getByRole("button", { name: path, exact: true }).click();
+  await expect(page.getByTestId("historical-file-opened")).toHaveText(`history-1:revision-1-0:${path}`);
+  await toggle.click();
+  await toggle.click();
+  await expect(list.locator(".turn-change-file")).toHaveCount(130);
+  expect(calls).toBe(3);
+});
+
+test("turn regressions discard pending file pages after revision and session changes", async ({ page }) => {
+  const pending: Array<() => Promise<void>> = [];
+  await page.route("**/fixture-turn-files?**", (route) => {
+    const params = new URL(route.request().url()).searchParams;
+    pending.push(() => route.fulfill({ json: {
+      type: "turn_file_changes_page", engine: "codex", turn_id: params.get("turn"),
+      revision: params.get("revision"), offset: 64, total_files: 130, next_offset: 128,
+      files: Array.from({ length: 64 }, (_, i) => ({
+        path: `/workspace/robot-viewer/src/file-${64 + i}.py`, state: "available", additions: 1, deletions: 1,
+      })),
+    } }).catch(() => {}));
+  });
+  await page.goto("/tests/history-browser.html?historical-files=1&many-files=1");
+  const toggle = page.locator(".turn-changes-toggle").first();
+  await toggle.click();
+  await page.getByRole("button", { name: "加载更多", exact: true }).click();
+  await expect.poll(() => pending.length).toBe(1);
+  await page.getByRole("button", { name: "刷新历史", exact: true }).click();
+  await pending.shift()!();
+  await expect(page.locator(".turn-change-file")).toHaveCount(64);
+  await page.getByRole("button", { name: "加载更多", exact: true }).click();
+  await expect.poll(() => pending.length).toBe(1);
+  await page.getByRole("button", { name: "切换会话", exact: true }).click();
+  await pending.shift()!();
+  await expect(page.locator(".turn-change-file")).toHaveCount(0);
+  await page.getByRole("button", { name: "切换会话", exact: true }).click();
+  if (await toggle.getAttribute("aria-expanded") === "false") await toggle.click();
+  await expect(page.locator(".turn-change-file")).toHaveCount(64);
+});
+
 type PanelRelayEvent<T = ServerEvent> = T extends ServerEvent
   ? Omit<T, "v" | "ts"> : never;
 
@@ -15,7 +183,7 @@ type PanelRelayEvent<T = ServerEvent> = T extends ServerEvent
 async function mockRightPanelRelay(
   page: import("@playwright/test").Page,
   { visible = false, retained = true, engine = "codex", seedTurns = [],
-    secondParent = false, btwReadOnly = false, imageAssets = false, imageData, externalPreview }: {
+    secondParent = false, btwReadOnly = false, imageAssets = false, imageData, externalPreview, historyReply }: {
     visible?: boolean;
     retained?: boolean;
     engine?: "codex" | "claude";
@@ -25,6 +193,7 @@ async function mockRightPanelRelay(
     imageAssets?: boolean;
     imageData?: { data: string; width: number; height: number };
     externalPreview?: "allow" | "replace";
+    historyReply?: (command: Record<string, unknown>) => PanelRelayEvent<Extract<ServerEvent, { type: "history" }>> | null;
   } = {},
 ) {
   const parentSid = "layout-parent";
@@ -91,10 +260,11 @@ async function mockRightPanelRelay(
         emit({ type: "session_focus", session_id: String(command.session_id) });
         snapshot(String(command.session_id));
       } else if (command.type === "get_history") {
-        emit({ type: "history", session_id: String(command.session_id),
+        const response = historyReply ? historyReply(command) : { type: "history" as const, session_id: String(command.session_id),
           sid: String(command.session_id),
           revision: "layout-history", generation: "layout-generation",
-          detail: "summary", events: [], turns: seedTurns, has_more: false });
+          detail: "summary" as const, events: [], turns: seedTurns, has_more: false };
+        if (response) emit(response);
       } else if (externalPreview && (command.type === "get_file_preview" || command.type === "get_preview_asset")) {
         const requestId = String(command.request_id);
         const path = String(command.path);
@@ -152,6 +322,127 @@ async function mockRightPanelRelay(
   });
   return { commands, emit: (message: PanelRelayEvent) => emit(message) };
 }
+
+for (const browsing of [false, true]) {
+  test(`turn regressions App keeps painted history on post-send alias revision (${browsing ? "browsing" : "live"})`, async ({ page }, testInfo) => {
+    const sid = "layout-parent";
+    const oldTurns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = Array.from({ length: 4 }, (_, i) => ({
+      id: `old-${i}`, prompt: `old question ${i}`, done: true, durationMs: 71_000,
+      ts: 1000 + i * 2000, doneTs: 2000 + i * 2000,
+      blocks: [{ kind: "text", message_id: `answer-${i}`, done: true, channel: "final",
+        text: `Retained answer ${i}\n\n${"Content already shown must not disappear. ".repeat(18)}` }],
+    }));
+    let head: PanelRelayEvent<Extract<ServerEvent, { type: "history" }>> = {
+      type: "history", sid, session_id: sid, revision: "layout-history",
+      continuity_revision: "layout-history", generation: "layout-generation",
+      build_seq: 1, live_seq: 0, detail: "summary", events: [], turns: oldTurns,
+      has_more: true, oldest_id: "old-0", newest_id: "old-3", in_progress: false,
+    };
+    let olderReads = 0;
+    const relay = await mockRightPanelRelay(page, { retained: false, historyReply: (command) => {
+      if (!command.before) return { ...head, request_id: String(command.cmd_id) };
+      olderReads++;
+      if (olderReads === 2) return null; // hold a stale in-flight pagination request
+      const turnId = olderReads === 1 ? "older-page" : "earlier-page";
+      return { ...head, before: String(command.before), request_id: String(command.cmd_id),
+        turns: [{ ...oldTurns[0], id: turnId, prompt: `${turnId} question` }],
+        oldest_id: turnId, newest_id: turnId, has_more: olderReads === 1 };
+    } });
+    await page.goto("/");
+    const thread = page.locator(".thread");
+    await expect(page.locator('[data-turn-id="old-3"]')).toBeAttached();
+    if (browsing) {
+      await scrollThreadToEdge(page, "start", testInfo.project.name);
+      await expect(page.locator('[data-turn-id="older-page"]')).toBeAttached();
+      // The prepend keeps the original row anchored, so the header can be
+      // above the viewport again. Start a fresh scroll gesture for page two.
+      if (olderReads < 2) await scrollThreadToEdge(page, "start", testInfo.project.name);
+      await expect.poll(() => olderReads).toBe(2);
+    }
+    // Read mid-history, safely away from the top-trigger and the live edge.
+    if (isMobileWebKitProject(testInfo.project.name)) await dispatchTouchGesture(page, browsing ? -60 : 60);
+    else await thread.dispatchEvent("wheel", { deltaY: browsing ? 100 : -100 });
+    await thread.evaluate((node) => {
+      node.scrollTop = 500;
+      node.dispatchEvent(new Event("scroll"));
+    });
+    await waitForScrollIdle(page);
+    const anchorId = browsing ? "older-page" : "old-0";
+    const anchor = page.locator(`[data-turn-id="${anchorId}"]`);
+    await expect(anchor).toBeAttached();
+    await page.locator(".composer textarea").fill("new question after history");
+    const beforeSend = await thread.evaluate((node) => node.scrollTop);
+    await page.locator(".composer").getByRole("button", { name: "发送", exact: true }).click();
+    await expect.poll(() => relay.commands.some((c) => c.type === "query")).toBe(true);
+    const query = relay.commands.find((c) => c.type === "query")!;
+    relay.emit({ type: "user_msg", sid, seq: 1, msg_id: "native-new",
+      client_msg_id: String(query.msg_id), prompt: "new question after history" });
+    relay.emit({ type: "state", sid, seq: 2, state: "running", msg_id: "native-new" });
+    head = { ...head, revision: "layout-alias-1", build_seq: 2, live_seq: 2, in_progress: true,
+      turns: [{ id: "native-new", clientMsgId: String(query.msg_id), prompt: "new question after history",
+        blocks: [], done: false, ts: Date.now() }], has_more: true, oldest_id: "native-new", newest_id: "native-new" };
+    relay.emit(head);
+    await expect(anchor).toBeAttached();
+    await page.waitForTimeout(250);
+    expect(Math.abs(await thread.evaluate((node) => node.scrollTop) - beforeSend)).toBeLessThan(4);
+    await expect(thread).toContainText("Retained answer");
+
+    const pending = relay.commands.filter((command) => command.type === "get_history" && command.before).at(-1);
+    if (browsing) {
+      expect(pending).toBeDefined();
+      // A late old-version response must not exit the preserved browse window.
+      relay.emit({ ...head, revision: "layout-history", request_id: String(pending!.cmd_id),
+        before: String(pending!.before), turns: [], authoritative: false, error: "stale read" });
+      await page.waitForTimeout(100);
+      await expect(anchor).toBeAttached();
+      expect(Math.abs(await thread.evaluate((node) => node.scrollTop) - beforeSend)).toBeLessThan(4);
+      await scrollThreadToEdge(page, "start", testInfo.project.name);
+      await expect(page.locator('[data-turn-id="earlier-page"]')).toBeAttached();
+      const latestRead = relay.commands.filter((command) => command.type === "get_history" && command.before).at(-1)!;
+      expect(latestRead.before).toBe("older-page");
+    }
+    if (!browsing) {
+      await page.getByRole("button", { name: "滚动到底部", exact: true }).click();
+      await expect(page.getByText("new question after history", { exact: true })).toBeVisible();
+      await expect.poll(() => thread.evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop)).toBeLessThan(4);
+    }
+  });
+}
+
+test("turn regressions App routes file pages by exact request and opens the archived diff", async ({ page }) => {
+  const files = Array.from({ length: 65 }, (_, i) => ({
+    path: `/tmp/layout/file-${i}.py`, state: "available" as const, additions: 1, deletions: 1,
+  }));
+  const relay = await mockRightPanelRelay(page, { retained: false, seedTurns: [{
+    id: "archived-turn", prompt: "many files", done: true, blocks: [],
+    fileChanges: { revision: "immutable", files: files.slice(0, 64), total_files: 65,
+      total_additions: 65, total_deletions: 65, next_offset: 64 },
+  }] });
+  await page.goto("/");
+  await page.locator(".turn-changes-toggle").click();
+  await page.getByRole("button", { name: "加载更多", exact: true }).click();
+  await expect.poll(() => relay.commands.some((command) => command.type === "get_turn_file_changes")).toBe(true);
+  const read = relay.commands.find((command) => command.type === "get_turn_file_changes")!;
+  expect([read.sid, read.engine, read.turn_id, read.revision, read.offset, read.limit]).toEqual([
+    "layout-parent", "codex", "archived-turn", "immutable", 64, 64,
+  ]);
+  const response: PanelRelayEvent<Extract<ServerEvent, { type: "turn_file_changes_page" }>> = {
+    type: "turn_file_changes_page", sid: String(read.sid), engine: "codex", turn_id: "archived-turn",
+    revision: "immutable", request_id: String(read.cmd_id), offset: 64, files: files.slice(64),
+    total_files: 65, next_offset: null,
+  };
+  relay.emit({ ...response, revision: "other-version" });
+  await expect(page.locator(".turn-change-file")).toHaveCount(64);
+  relay.emit(response);
+  await expect(page.locator(".turn-change-file")).toHaveCount(65);
+  await page.getByRole("button", { name: files[64].path, exact: true }).click();
+  await expect.poll(() => relay.commands.some((command) => command.type === "get_diff")).toBe(true);
+  const diff = relay.commands.find((command) => command.type === "get_diff")!;
+  expect([diff.sid, diff.engine, diff.turn_id, diff.revision, diff.file]).toEqual([
+    "layout-parent", "codex", "archived-turn", "immutable", files[64].path,
+  ]);
+  expect(relay.commands.some((command) => ["query", "steer", "new_session"].includes(String(command.type)))).toBe(false);
+});
 
 test("policy refusal remains specific through live delivery and history reload", async ({ page }, testInfo) => {
   const message = "上游模型因安全策略拒绝了本次请求（cyber_policy）。"
@@ -465,7 +756,7 @@ test("generated image canonical summary survives refresh and loads original with
   expect(relay.commands.filter(c => c.type === "get_history_image")).toHaveLength(reads.length);
 });
 
-test("generated image stays loaded when a new message renames the historical turn", async ({ page }) => {
+test("generated image stays loaded when a new message renames the historical turn and alias revision", async ({ page }) => {
   const turns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = [{
     id: "msg-old", forkPointId: "native-task", prompt: "画图", done: true, detailLoaded: true,
     blocks: [{ kind: "process", item_id: "image-old", processKind: "server_tool",
@@ -490,7 +781,7 @@ test("generated image stays loaded when a new message renames the historical tur
     client_msg_id: String(query.msg_id), prompt: "继续" });
   relay.emit({ type: "state", sid: "layout-parent", state: "running", msg_id: "next-message" });
   relay.emit({ type: "history", sid: "layout-parent", session_id: "layout-parent",
-    revision: "layout-history", generation: "layout-generation",
+    revision: "layout-alias-1", continuity_revision: "layout-history", generation: "layout-generation",
     detail: "summary", events: [], turns, has_more: false });
   await expect(page.getByText("继续", { exact: true })).toBeVisible();
   await expect(image).toHaveCount(1);

@@ -4,6 +4,35 @@
 
 ## Unreleased
 
+- Keep already-painted Codex history and reading position when a send/steer
+  learns message-ID aliases. Separate additive projection continuity from
+  rollback/restart invalidation, revoke stale page requests without closing the
+  reading view, and route background summary refreshes through the same page
+  provider as explicit history reads so older-page cursors remain usable.
+- Restore per-turn changed-file summaries for idle and historical sessions across
+  official Codex pagination, native rollout fallback and cached full-history
+  reads. Recover both legacy patch records and current `FileChange` items without
+  reading the worktree or expanding tool details. Distinguish file types with
+  quiet badges, prominent filenames and shortened directory labels.
+- Page each turn's changed files in batches of 64 with scoped load-more/retry
+  actions and exact totals. Capture the native file index before tool-card
+  clipping, store per-file patches separately and read only the requested diff.
+  Session/version changes discard stale pages; later edits cannot alter a
+  completed turn's revision. Resource limits remain explicit (4096 indexed files
+  and bounded per-file/per-turn evidence), never fake load-more links.
+- Preserve Codex patch truncation through live and historical diff archives.
+  Never present clipped patches as complete; retain
+  valid native diffs when only tool output was clipped. Rebuild affected derived
+  caches and revalidate older per-tool captures without deleting native history,
+  images or immutable archive rows.
+- Add immutable, session-scoped per-turn file-diff revisions (protocol v57)
+  in a private Wrapper archive independent of the history cache. Fold each
+  turn's file list, compose repeated edits when native evidence is complete,
+  and label missing/truncated history without substituting the current worktree.
+  Preserve reading position on send, keep code-copy controls in the visible
+  block, and remove the empty working-footer gap. Correct Claude task-terminal
+  ownership and expose native model fallback notices in live and cached history.
+  Clarify empty-system-content 400 errors without changing transcripts or retrying.
 - Fix home-directory page discovery (protocol v55): explicitly referenced HTML
   and verified, user-owned Python static-server links become private session
   previews without per-project registration. Preserve manual publications,

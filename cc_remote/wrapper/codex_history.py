@@ -95,6 +95,8 @@ class CodexHistoryPage:
     native_segment_by_visible_id: dict[
         str, tuple[str, int]
     ] = field(default_factory=dict)
+    file_change_offsets_by_visible_id: dict[str, tuple[int, ...]] = field(default_factory=dict)
+    file_changes_truncated: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)

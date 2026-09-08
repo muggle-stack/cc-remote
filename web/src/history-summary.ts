@@ -19,6 +19,7 @@ export function summaryHistoryTurns(history: History): Turn[] | null {
   }
   return history.turns.map((turn) => ({
     ...turn,
+    fileChangesTurnId: turn.fileChanges ? turn.id : undefined,
     blocks: turn.blocks as Turn["blocks"],
     clientMsgId: turn.clientMsgId ?? undefined,
     forkPointId: turn.forkPointId ?? undefined,

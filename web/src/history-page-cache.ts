@@ -21,7 +21,9 @@ const DEFAULT_HISTORY_PAGE_CACHE_BYTES = 64 * 1024 * 1024;
 // process presence from a generic deferred-event count and is unsafe to paint.
 // v6 restores async question metadata. v7 rebuilds pages where those questions
 // suppressed an ordinary unphased reply; the source revision alone cannot tell.
-const RECORD_VERSION = 7;
+// v8 preserves native model-fallback notices and immutable turn-change metadata.
+// v9 discards old official-summary pages which omitted their file lists.
+const RECORD_VERSION = 9;
 
 export interface HistoryPageCacheSessionScope {
   machineId: string;
@@ -120,9 +122,10 @@ function sanitizeTurn(turn: Turn): Turn {
     }
     // Context compaction is lightweight narrative metadata, and its native
     // turn id is the proof used to repair the historical standalone-row bug.
-    // Preserve a payload-free shell across page eviction/cache reload; ordinary
-    // command/tool/reasoning bodies still remain detail-only.
-    if (block.kind === "process" && block.processKind === "compaction") {
+    // Preserve a payload-free shell across page eviction/cache reload, along
+    // with native model-fallback notices; heavy process bodies stay detail-only.
+    if (block.kind === "process" && (block.processKind === "compaction"
+        || (block.processKind === "model" && block.tool === "model_refusal_fallback"))) {
       return [{
         kind: "process" as const,
         item_id: block.item_id,
@@ -132,6 +135,7 @@ function sanitizeTurn(turn: Turn): Turn {
         turn_id: block.turn_id,
         parent_id: block.parent_id,
         title: block.title,
+        tool: block.tool,
         summary: block.summary,
         duration_ms: block.duration_ms,
         truncated: block.truncated,

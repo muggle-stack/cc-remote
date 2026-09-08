@@ -985,6 +985,10 @@ function mergeTurn(
     images: historyImageRefs ? undefined : live.images ?? history.images,
     imageRefs: historyImageRefs ?? live.imageRefs ?? history.imageRefs,
     files: live.files ?? history.files,
+    fileChanges: liveOwnsLifecycle ? live.fileChanges ?? history.fileChanges : history.fileChanges ?? live.fileChanges,
+    fileChangesTurnId: liveOwnsLifecycle
+      ? live.fileChangesTurnId ?? history.fileChangesTurnId
+      : history.fileChangesTurnId ?? live.fileChangesTurnId,
     ts: Math.min(history.ts ?? Number.MAX_SAFE_INTEGER,
       live.ts ?? Number.MAX_SAFE_INTEGER) === Number.MAX_SAFE_INTEGER
       ? undefined

@@ -40,6 +40,7 @@ EXPECTED_COMMAND_HANDLERS = {
     "get_status": "_handle_get_status",
     "consume_rate_limit_reset_credit": "_handle_consume_rate_limit_reset_credit",
     "get_diff": "_handle_get_diff",
+    "get_turn_file_changes": "_handle_get_turn_file_changes",
     "get_file_preview": "_handle_get_file_preview",
     "save_markdown": "_handle_save_markdown",
     "get_preview_asset": "_handle_get_preview_asset",

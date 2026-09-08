@@ -8,7 +8,7 @@
 // no cursor reset, no re-hello (background turns keep streaming). All outbound
 // commands that target a session stamp `sid: focusedSid`.
 import type {
-  AutoCompactMode, DiffTheme, GoalStatus, QueryFile,
+  AutoCompactMode, DiffTheme, Engine, GoalStatus, QueryFile,
   QueryImg, ServerEvent, SessionControl, Space,
 } from "./protocol.ts";
 import {
@@ -874,10 +874,18 @@ export class RelayWs {
     });
   }
 
-  sendGetDiff(file: string, theme: DiffTheme): string | null {
+  sendGetDiff(file: string, theme: DiffTheme, turnId?: string, revision?: string, engine?: Engine): string | null {
     return this.sendTracked({
       v: PROTOCOL_VERSION, type: "get_diff", file, theme,
+      ...(turnId ? { turn_id: turnId, revision, engine } : {}),
       ts: nowTs(), ...this.sidObj(),
+    });
+  }
+
+  sendGetTurnFileChanges(sid: string, engine: Engine, turnId: string, revision: string, offset: number): string | null {
+    return this.sendTracked({
+      v: PROTOCOL_VERSION, type: "get_turn_file_changes", sid, engine,
+      turn_id: turnId, revision, offset, limit: 64, ts: nowTs(),
     });
   }
 

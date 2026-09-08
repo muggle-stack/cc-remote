@@ -9,6 +9,7 @@ import type {
   QueryImg,
   ServerEvent,
   ToolCategory,
+  TurnChangeSummary,
 } from "../protocol";
 
 /** Browser-only fallback used when an authoritative idle History snapshot
@@ -127,6 +128,8 @@ export interface TurnDetailProjection {
 
 export interface Turn {
   id: string;
+  fileChanges?: TurnChangeSummary | null;
+  fileChangesTurnId?: string;
   /** Codex turn/steer's browser id persisted beside a distinct history cursor. */
   clientMsgId?: string;
   /** Native history user id when it differs from the optimistic browser id. */

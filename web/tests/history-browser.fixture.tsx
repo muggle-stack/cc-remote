@@ -59,6 +59,7 @@ import { DirPicker } from "../src/components/DirPicker";
 import { HeaderMenu } from "../src/components/HeaderMenu";
 import { UsageActivitySheet } from "../src/components/UsageActivitySheet";
 import { displayHistoryProjection } from "../src/history-recovery";
+import { summaryHistoryTurns } from "../src/history-summary";
 import { Composer } from "../src/components/Composer";
 import { ComposerDraftStore } from "../src/composer-drafts";
 import { GoalPanel } from "../src/components/GoalPanel";
@@ -2710,6 +2711,89 @@ function ArtifactPreviewFixture({ kind }: {
   </main>;
 }
 
+function HistoricalFilesFixture() {
+  const manyFiles = new URLSearchParams(location.search).has("many-files");
+  const [other, setOther] = useState(false);
+  const [opened, setOpened] = useState("");
+  const [refresh, setRefresh] = useState(0);
+  const [dark, setDark] = useState(false);
+  useEffect(() => {
+    document.documentElement.dataset.engine = "codex";
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+  }, [dark]);
+  const paths = manyFiles ? Array.from({ length: 130 }, (_, index) => `src/file-${index}.py`)
+    : ["src/perception/camera.py", "tests/camera.py", "config/rig.json", "deploy/Dockerfile", "deploy/compose.yaml", "scripts/check.sh", "README.md"];
+  const wireTurns = [1, 2].map((number) => ({
+    id: `history-${number}`, prompt: number === 1 ? "完成相机预览相关修改" : "再调整一下相机配置",
+    done: true, ts: number, blocks: [{ kind: "text", done: true, message_id: `answer-${number}`,
+      channel: "final", text: number === 1 ? "已完成代码、配置和使用说明的调整。" : "相机配置已更新，上一轮的改动记录保持不变。" }],
+    fileChanges: { revision: manyFiles ? `revision-${number}-${refresh}` : `revision-${number}`,
+      ...(manyFiles && number === 1 ? { total_files: 130, total_additions: 130, total_deletions: 130, next_offset: 64 } : {}),
+      files: (number === 1 ? paths.slice(0, 64) : paths.slice(0, 1)).map((path, index) => ({
+      path: `/workspace/robot-viewer/${path}`,
+      state: index === 6 ? "unavailable" as const : "available" as const,
+      ...(index === 6 ? {} : { additions: 12 + index, deletions: index + 1 }),
+    })) },
+  }));
+  const turns = summaryHistoryTurns({ v: PROTOCOL_VERSION, ts: refresh, type: "history",
+    session_id: "historical-files", detail: "summary", turns: wireTurns, events: [], has_more: false }) ?? [];
+  return <main style={{ display: "flex", flexDirection: "column", height: "100dvh" }}>
+    <header style={{ padding: "12px 20px", flex: "none" }}>Code · 历史改动</header>
+    <ChatView sid={other ? "other-history" : "historical-files"} engine="codex"
+      turns={other ? [] : turns} activeTurnId={null}
+      onOpenArchivedDiff={(turn, revision, path) => setOpened(`${turn}:${revision}:${path}`)}
+      onLoadFilePage={async (turn, revision, offset, signal) => {
+        const response = await fetch(`/fixture-turn-files?turn=${turn}&revision=${revision}&offset=${offset}`, { signal });
+        if (!response.ok) throw new Error("文件清单加载失败，请重试。");
+        return response.json();
+      }}
+      onPreviewMarkdown={(path) => setOpened(`preview:${path}`)} />
+    <footer style={{ display: "flex", gap: 12, flexWrap: "wrap", padding: 12, flex: "none" }}>
+      <button onClick={() => setOther((value) => !value)}>切换会话</button>
+      <button onClick={() => setRefresh((value) => value + 1)}>刷新历史</button>
+      <button onClick={() => setDark((value) => !value)}>切换主题</button>
+      <output data-testid="historical-file-opened" style={{ overflowWrap: "anywhere", fontSize: 10 }}>{opened}</output>
+    </footer>
+  </main>;
+}
+
+function TurnRegressionFixture() {
+  const sid = "turn-regressions";
+  const [state, dispatch] = useReducer(reduce, {
+    ...initialState, focusedSid: sid, runtimes: { [sid]: {
+      ...createRuntime(), historyRevision: "stable", turns: [
+        { id: "history-one", prompt: "long copyable answer", done: true,
+          ts: 1, doneTs: 2, fileChanges: { revision: "immutable-one", files: [
+            { path: "src/code.py", state: "available", additions: 1, deletions: 1 },
+          ] }, blocks: [{ kind: "text", message_id: "long-answer", done: true, channel: "final",
+            text: "```text\n" + Array.from({ length: 90 }, (_, i) => `Copy entire block line ${i}`).join("\n") + "\n```\n\n"
+              + "```text\n" + Array.from({ length: 60 }, (_, i) => `Second block line ${i}`).join("\n") + "\n```" }] },
+        { id: "working", prompt: "continue work", done: false, blocks: [
+          { kind: "tool", tool_use_id: "command", message_id: "m", tool: "Bash", input: { command: "true" },
+            done: true, result: { content: "ok", is_error: false } },
+        ] },
+      ] as Turn[],
+    } },
+  });
+  const [opened, setOpened] = useState("");
+  const runtime = state.runtimes[sid];
+  return <main style={{ display: "flex", flexDirection: "column", height: "100dvh" }}>
+    <header style={{ height: 54, flex: "none" }}>Thread header</header>
+    <ChatView sid={sid} engine="codex" turns={runtime.turns} historyRevision="stable"
+      activeTurnId={runtime.acceptancePending ?? "working"}
+      onOpenArchivedDiff={(turn, revision, path) => setOpened(`${turn}:${revision}:${path}`)} />
+    <footer style={{ height: 60, flex: "none" }}>
+      <button data-testid="regression-send" onClick={() => dispatch({ type: "query_sent", sid,
+        msg_id: "new-question", prompt: "sent without scrolling", ts: 3 })}>Send</button>
+      <button data-testid="regression-stream" onClick={() => dispatch({ type: "event", event: {
+        v: PROTOCOL_VERSION, ts: 4, type: "delta", sid, turn_id: "new-question", message_id: "new-answer",
+        text: "streamed text\n".repeat(50), channel: "final",
+      } })}>Stream</button>
+      <output data-testid="regression-opened">{opened}</output>
+    </footer>
+  </main>;
+}
+
 function CodeCopyThemeFixture({ theme }: { theme: "light" | "dark" }) {
   useEffect(() => {
     const root = document.documentElement;
@@ -2826,6 +2910,10 @@ createRoot(document.getElementById("root")!).render(
     ? <ArtifactPreviewFixture kind="markdown-github-html" />
     : rootParams.has("artifact-markdown-html")
     ? <ArtifactPreviewFixture kind="markdown-html" />
+    : rootParams.has("historical-files")
+    ? <HistoricalFilesFixture />
+    : rootParams.has("turn-regressions")
+    ? <TurnRegressionFixture />
     : rootParams.has("code-copy-theme")
     ? <CodeCopyThemeFixture
         theme={rootParams.get("theme") === "light" ? "light" : "dark"} />

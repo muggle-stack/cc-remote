@@ -312,10 +312,16 @@ export class CommandOutbox {
   pendingFramesWithSessionIds(): Array<{ raw: string; sid?: string }> {
     return [...this.pending.values()].map((item) => {
       try {
-        const frame = JSON.parse(item.raw) as { sid?: unknown };
+        const frame = JSON.parse(item.raw) as {
+          type?: unknown; sid?: unknown; turn_id?: unknown; revision?: unknown;
+        };
+        // Archived files are private disk reads, not engine operations. A
+        // reconnect must replay the read without resuming its background sid.
+        const archiveRead = frame.type === "get_turn_file_changes"
+          || (frame.type === "get_diff" && !!frame.turn_id && !!frame.revision);
         return {
           raw: item.raw,
-          ...(typeof frame.sid === "string" && frame.sid ? { sid: frame.sid } : {}),
+          ...(!archiveRead && typeof frame.sid === "string" && frame.sid ? { sid: frame.sid } : {}),
         };
       } catch {
         return { raw: item.raw }; // enqueue always generated valid JSON

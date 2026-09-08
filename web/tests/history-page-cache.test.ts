@@ -223,6 +223,26 @@ assert.equal(cachedCompaction.kind === "process"
 assert.equal(cachedCompaction.kind === "process"
   ? cachedCompaction.turn_id : null, "native-compaction-turn");
 
+const fallbackPage = sanitizeHistoryPageForCache({ ...heavyPage, turns: [turn("fallback", {
+  fileChangesTurnId: "native-file-turn",
+  fileChanges: { revision: "immutable-revision", files: [{
+    path: "/repo/file.ts", state: "available", additions: 1, deletions: 1,
+  }] },
+  blocks: [{ kind: "process", item_id: "fallback", processKind: "model",
+    tool: "model_refusal_fallback", phase: "snapshot", status: "succeeded", done: true,
+    title: "模型已回退", summary: "claude-one → claude-two · 原模型拒绝响应",
+    input: { raw: "PROVIDER_SECRET" }, detail: "REFUSAL_SECRET",
+  }],
+})] });
+assert.equal(fallbackPage.turns[0].blocks.length, 1);
+const cachedFallback = fallbackPage.turns[0].blocks[0];
+assert.equal(cachedFallback.kind === "process" ? cachedFallback.tool : null, "model_refusal_fallback");
+assert.equal(fallbackPage.turns[0].detailEventCount, 0,
+  "a lightweight fallback notice must not manufacture a process-details entry");
+assert.equal(fallbackPage.turns[0].fileChanges?.revision, "immutable-revision");
+assert.equal(fallbackPage.turns[0].fileChangesTurnId, "native-file-turn");
+assert.doesNotMatch(JSON.stringify(fallbackPage), /PROVIDER_SECRET|REFUSAL_SECRET/);
+
 const storage = new MemoryStorage();
 let now = 100;
 const cache = new HistoryPageCache({
