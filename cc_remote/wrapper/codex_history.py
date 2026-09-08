@@ -17,6 +17,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable
 
 from cc_remote.protocol import TurnEnd, TurnResult, UserMsg
+from cc_remote.wrapper.codex_history_prefetch import CodexHistoryPrefetch
 from cc_remote.wrapper.codex_rpc import (
     CodexRpcRejected,
     CodexRpcResponseTooLarge,
@@ -26,7 +27,7 @@ from cc_remote.wrapper.codex_stream import (
     CodexStreamTranslator,
     MIN_PROCESS_DURATION_MS,
 )
-from cc_remote.wrapper.history_store import materialize_history_turns
+from cc_remote.wrapper.history_store import HistorySourceFingerprint, materialize_history_turns
 
 
 _Rpc = Callable[
@@ -60,6 +61,8 @@ _MAX_DETAIL_CACHE_ENTRIES = 64
 _MAX_DETAIL_CACHE_BYTES = 64 * 1024 * 1024
 _MAX_ACTIVE_TURN_CACHE_ENTRIES = 4
 _MAX_TERMINAL_REFRESH_FALLBACKS = 64
+# Match the browser's ordinary older-page request, without changing wire pages.
+_READ_AHEAD_TURNS = 12
 
 
 class CodexHistoryError(RuntimeError):
@@ -542,6 +545,36 @@ class CodexOfficialHistory:
         ] = OrderedDict()
         self._detail_event_bytes: dict[tuple[str, str], int] = {}
         self._detail_cache_bytes = 0
+        self._read_sources: OrderedDict[str, HistorySourceFingerprint] = OrderedDict()
+        self._prefetch = CodexHistoryPrefetch(
+            self._fetch_summary, self._cacheable_summary)
+
+    async def _fetch_summary(self, thread_id: str, cursor: str | None, limit: int) -> Any:
+        return await self._call("thread/turns/list", {
+            "threadId": thread_id, "cursor": cursor, "limit": limit,
+            "sortDirection": "desc", "itemsView": "summary",
+        })
+
+    @staticmethod
+    def _cacheable_summary(response: Any, limit: int) -> bool:
+        try:
+            rows, cursor = _response_page(response)
+            if len(rows) > limit or (not rows and cursor is not None):
+                return False
+            turns = [_validated_turn(row, expected_view="summary") for row in rows]
+            return (all(turn["status"] != "inProgress" for turn in turns)
+                    and len({turn["id"] for turn in turns}) == len(turns))
+        except CodexHistoryInvalidResponse:
+            return False
+
+    def prefetch_summary_page(self, thread_id: str, before: str) -> None:
+        """Read only one next page, after the requested History was delivered."""
+        cursor = self._before_cursors.get((thread_id, before))
+        self._prefetch.prefetch(
+            thread_id, cursor, _READ_AHEAD_TURNS, self._read_sources.get(thread_id))
+
+    async def close(self) -> None:
+        await self._prefetch.close()
 
     def remember_automatic_user(
         self,
@@ -641,6 +674,7 @@ class CodexOfficialHistory:
         segment_client_message_ids: (
             dict[tuple[str, int], str] | None
         ) = None,
+        source: HistorySourceFingerprint | None = None,
     ) -> CodexHistoryPage:
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
             raise ValueError("Codex history limit must be between 1 and 200")
@@ -663,14 +697,15 @@ class CodexOfficialHistory:
                 raise CodexHistoryCursorError(
                     "Codex history has no older page")
 
+        if source is not None:
+            self._read_sources[thread_id] = source
+            self._read_sources.move_to_end(thread_id)
+            while len(self._read_sources) > 64:
+                self._read_sources.popitem(last=False)
+        else:
+            self._read_sources.pop(thread_id, None)
         try:
-            response = await self._call("thread/turns/list", {
-                "threadId": thread_id,
-                "cursor": page_cursor,
-                "limit": limit,
-                "sortDirection": "desc",
-                "itemsView": "summary",
-            })
+            response = await self._prefetch.read(thread_id, page_cursor, limit, source)
         except CodexRpcRejected as exc:
             if _unsupported(exc):
                 raise CodexHistoryUnsupported(
@@ -1264,23 +1299,35 @@ class CodexOfficialHistory:
         locator: _TurnLocator,
     ) -> dict[str, Any]:
         cursor = locator.page_cursor
-        for _index in range(locator.native_index):
+        remaining = locator.native_index
+        skipped_ids: set[str] = set()
+        seen_cursors: set[str] = set()
+        while remaining:
             response = await self._call("thread/turns/list", {
                 "threadId": thread_id,
                 "cursor": cursor,
-                "limit": 1,
+                "limit": remaining,
                 "sortDirection": "desc",
                 "itemsView": "notLoaded",
             })
             rows, next_cursor = _response_page(response)
-            if len(rows) != 1:
+            if not rows or len(rows) > remaining:
                 raise CodexHistoryInvalidResponse(
                     "Codex detail locator no longer resolves")
-            _validated_turn(rows[0], expected_view="notLoaded")
-            if next_cursor is None:
+            for row in rows:
+                skipped = _validated_turn(row, expected_view="notLoaded")
+                native_id = _wire_id(skipped["id"], "turn")
+                if native_id in skipped_ids or native_id == locator.native_turn_id:
+                    raise CodexHistoryInvalidResponse("Codex detail locator changed identity")
+                skipped_ids.add(native_id)
+            if next_cursor is None or next_cursor in seen_cursors:
                 raise CodexHistoryInvalidResponse(
                     "Codex detail locator ended early")
             cursor = next_cursor
+            seen_cursors.add(cursor)
+            # Older official builds may cap pages below the requested limit.
+            # Preserve their ordinary cursor walk while batching when supported.
+            remaining -= len(rows)
 
         response = await self._call("thread/turns/list", {
             "threadId": thread_id,
@@ -1415,6 +1462,8 @@ class CodexOfficialHistory:
 
     def invalidate_thread(self, thread_id: str) -> None:
         """Drop every generation-local cursor/cache entry for one thread."""
+        self._prefetch.invalidate(thread_id)
+        self._read_sources.pop(thread_id, None)
         for mapping in (
             self._before_cursors,
             self._locators,

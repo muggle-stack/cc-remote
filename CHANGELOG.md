@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+- Speed up Codex history reads without changing wire/UI behavior: prefetch one
+  older summary page after an explicit idle-session read, reuse bounded pages
+  only while the exact rollout fingerprint is unchanged, and batch native
+  detail-cursor skips. Keep live heads fresh, discard changed/invalidated
+  snapshots, isolate accounts, and preserve normal errors on cache misses.
 - Keep already-painted Codex history and reading position when a send/steer
   learns message-ID aliases. Separate additive projection continuity from
   rollback/restart invalidation, revoke stale page requests without closing the

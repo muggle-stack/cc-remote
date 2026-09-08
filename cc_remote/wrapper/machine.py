@@ -1817,6 +1817,12 @@ class _CodexHistoryProfiles:
     async def summary_page(self, thread_id: str, **kwargs):
         return await self._reader(thread_id).summary_page(thread_id, **kwargs)
 
+    def prefetch_summary_page(self, thread_id: str, before: str) -> None:
+        self._reader(thread_id).prefetch_summary_page(thread_id, before)
+
+    async def close(self) -> None:
+        await asyncio.gather(*(reader.close() for reader in self._readers.values()))
+
     def take_client_message_identities(self, thread_id: str):
         return self._reader(thread_id).take_client_message_identities(
             thread_id)
@@ -9003,6 +9009,9 @@ class WrapperMachine:
                 await asyncio.gather(*refresh_tasks, return_exceptions=True)
             self._history_refresh_tasks.clear()
             self._history_refresh_dirty.clear()
+            close_history = getattr(self._codex_history, "close", None)
+            if callable(close_history):
+                await close_history()
             if self._codex_session_list_refresh_task is not None:
                 self._codex_session_list_refresh_task.cancel()
                 await asyncio.gather(
@@ -15393,6 +15402,7 @@ class WrapperMachine:
                 # reconciled. Hydrate both once; later mirrors reuse the
                 # generation-local bounded cache.
                 hydrate_recent=2 if before is None else 0,
+                source=source_before,
                 **alias_kwargs,
             )
         finally:
@@ -16000,6 +16010,20 @@ class WrapperMachine:
                  has_more=hist.has_more, before=bool(hist.before),
                  external=hist.external, client_id=client_id,
                  elapsed_ms=round((time.perf_counter() - started_at) * 1000))
+        history_ctx = self._ctx_by_sid(sid)
+        codex_history = ((history_ctx is not None and history_ctx.engine == "codex")
+                         or (self._watch.get(sid) or {}).get("engine") == "codex")
+        if (codex_history and hist.detail == "summary" and hist.authoritative is not False
+                and hist.error is None and hist.has_more and hist.oldest_id
+                and not hist.in_progress
+                and not self._codex_rollout_history_active(sid)):
+            # Speculation never paints a page, learns aliases, opens an engine,
+            # or changes the cursor family. Only explicit browser reads schedule
+            # it; moving turns and watcher/terminal refreshes must not create
+            # repeated speculative scans competing with the live model stream.
+            prefetch = getattr(self._codex_history, "prefetch_summary_page", None)
+            if callable(prefetch):
+                prefetch(sid, hist.oldest_id)
         return hist
 
     async def _supplement_codex_history_image_views(

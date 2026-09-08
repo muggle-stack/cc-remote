@@ -1791,7 +1791,7 @@ def test_requested_codex_summary_uses_official_turns_without_rollout_parse(
     class Official:
         async def summary_page(
             self, sid, *, before, limit, include_live_detail=False,
-            active_turn_ids=frozenset(), hydrate_recent=0,
+            active_turn_ids=frozenset(), hydrate_recent=0, source=None,
         ):
             assert (
                 sid, before, limit, include_live_detail, active_turn_ids,
@@ -2251,6 +2251,7 @@ def test_requested_codex_summary_binds_exact_active_native_turn_ids(
             "include_live_detail": True,
             "active_turn_ids": {"desktop-turn"},
             "hydrate_recent": 2,
+            "source": HistorySourceFingerprint.capture(rollout),
         })]
         seen.clear()
         machine._watch["active-summary"]["active_external_turns"] = {}
@@ -2268,6 +2269,7 @@ def test_requested_codex_summary_binds_exact_active_native_turn_ids(
             "include_live_detail": True,
             "active_turn_ids": {"owned-turn"},
             "hydrate_recent": 2,
+            "source": HistorySourceFingerprint.capture(rollout),
         })]
         assert settled_history.compaction_continuation_turn_ids == []
 
@@ -2322,6 +2324,7 @@ def test_requested_codex_summary_passes_source_bound_client_aliases(
             "include_live_detail": False,
             "active_turn_ids": set(),
             "hydrate_recent": 2,
+            "source": HistorySourceFingerprint.capture(rollout),
             "client_message_ids": {},
             "segment_client_message_ids": {
                 ("native-turn", 0): "browser-message",
