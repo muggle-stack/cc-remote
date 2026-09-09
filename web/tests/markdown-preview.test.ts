@@ -25,7 +25,7 @@ import {
 } from "../src/mermaid.ts";
 import type { ServerEvent } from "../src/protocol.ts";
 import type { Turn } from "../src/domain/conversation.ts";
-import { asyncQuestionKey, presentAsyncQuestionReplies, supplementalAnswerPrompt } from "../src/async-question-presentation.ts";
+import { presentAsyncQuestionReplies, supplementalAnswerPrompt } from "../src/async-question-presentation.ts";
 import { MARKDOWN_HTML_README } from "./fixtures/markdown-html.ts";
 import { previewImageDimension } from "../src/markdown-preview-html.ts";
 
@@ -45,10 +45,24 @@ const nativeReply: Turn = { id: "reply-turn", done: false, blocks: [],
   prompt: supplementalAnswerPrompt([{ question: "用的什么手势？", answer: "三指拖拽\n第二行也要保留" }]) };
 const presentation = presentAsyncQuestionReplies([nativeQuestion, nativeReply]);
 assert.deepEqual(presentation.replies.get(nativeReply.id), [{ question: "用的什么手势？", answer: "三指拖拽\n第二行也要保留" }]);
-assert.equal(presentation.answered.has(asyncQuestionKey(nativeQuestion.id, "question-message")), true);
+assert.equal(presentation.answered.has("question-message"), true);
 assert.equal(presentAsyncQuestionReplies([nativeReply]).replies.size, 0, "never guess from a prefix without the native question");
 assert.equal(presentAsyncQuestionReplies([nativeReply, nativeQuestion]).replies.size, 0, "a future question cannot own this reply");
-assert.equal(presentAsyncQuestionReplies([nativeQuestion, { ...nativeQuestion, id: "ambiguous" }, nativeReply]).replies.size, 0);
+const repeatedQuestion = { ...nativeQuestion, id: "after-compaction" };
+for (const turns of [
+  [nativeQuestion, repeatedQuestion, nativeReply],
+  [nativeQuestion, nativeReply, repeatedQuestion],
+]) {
+  const restored = presentAsyncQuestionReplies(turns);
+  assert.equal(restored.replies.size, 1, "native question replay is not an ambiguous second question");
+  assert.equal(restored.questionOwners.get("question-message"), nativeQuestion.id);
+  assert.equal(restored.answered.has("question-message"), true,
+    "all row aliases agree that the same native question was answered");
+}
+const independentQuestion: Turn = { ...nativeQuestion, id: "independent-question",
+  blocks: nativeQuestion.blocks.map(block => ({ ...block, message_id: "other-question-message" })) };
+assert.equal(presentAsyncQuestionReplies([nativeQuestion, independentQuestion, nativeReply]).replies.size, 0,
+  "distinct native questions with equal titles remain ambiguous");
 assert.equal(presentAsyncQuestionReplies([nativeQuestion, { ...nativeReply, error: "rejected" }]).answered.size, 0);
 assert.equal(presentAsyncQuestionReplies([nativeQuestion, { ...nativeReply, prompt: "补充回答：\n\n问题：其他问题\n回答：保留原文" }]).replies.size, 0);
 const multiReply = { ...nativeReply, prompt: supplementalAnswerPrompt([

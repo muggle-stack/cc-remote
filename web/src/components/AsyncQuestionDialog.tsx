@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import type { AsyncQuestionSpec } from "../protocol";
 import type { TextBlock, Turn } from "../domain/conversation";
 import { Icon } from "../icons";
-import { asyncQuestionKey, supplementalAnswerPrompt } from "../async-question-presentation";
+import { supplementalAnswerPrompt } from "../async-question-presentation";
 
 export interface AsyncQuestionDraft {
   choices: (string | null)[];
@@ -185,11 +185,11 @@ function AsyncQuestionDialog({ questions, initialDraft,
 
 /** Keep the editor and a bounded draft cache outside virtualized history rows.
  * The host is lazy-loaded on the first click and keyed by device/session scope. */
-export default function AsyncQuestionHost({ messageId, turns, answeredKeys,
+export default function AsyncQuestionHost({ messageId, turns, answeredMessageIds,
   onReply, onClose, replyMode }: {
   messageId: string | null;
   turns: readonly Turn[];
-  answeredKeys: ReadonlySet<string>;
+  answeredMessageIds: ReadonlySet<string>;
   onReply?: (prompt: string) => boolean;
   onClose: () => void;
   replyMode?: "query" | "steer";
@@ -210,7 +210,7 @@ export default function AsyncQuestionHost({ messageId, turns, answeredKeys,
   return <AsyncQuestionDialog key={`${block.message_id}:${signature}`}
     questions={block.questions}
     initialDraft={stored?.signature === signature ? stored.draft : undefined}
-    answered={answeredKeys.has(asyncQuestionKey(turn.id, block.message_id))}
+    answered={answeredMessageIds.has(block.message_id)}
     replyMode={replyMode} onReply={onReply} onClose={onClose}
     onDraftChange={(draft) => {
       drafts.current.delete(block.message_id);

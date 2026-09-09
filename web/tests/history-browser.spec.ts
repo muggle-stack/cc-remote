@@ -908,6 +908,38 @@ test("async question answered presentation survives refresh without rewriting or
   expect(relay.commands.filter(c => ["query", "steer", "interrupt", "get_turn_detail"].includes(String(c.type)))).toHaveLength(0);
 });
 
+test("async question replay after compaction keeps one answered card in its original row", async ({ page }) => {
+  const prompt = "补充回答：\n\n问题：用的是什么手势？\n回答：已经退出";
+  const turns = [ASYNC_HISTORY_TURN, {
+    id: "answered-steer", prompt, done: false, blocks: [],
+  }, {
+    ...ASYNC_HISTORY_TURN, id: "compacted-continuation", prompt: "", done: false,
+    blocks: [...ASYNC_HISTORY_TURN.blocks, {
+      kind: "text", message_id: "after-compaction-answer", channel: "final",
+      text: "收到，继续执行。", done: true,
+    }],
+  }];
+  const relay = await mockRightPanelRelay(page, { seedTurns: turns });
+  await page.goto("/");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt) await page.reload();
+    const cards = page.locator(".async-question-card");
+    await expect(cards).toHaveCount(1);
+    await expect(cards).toContainText("已回答");
+    await expect(page.locator('[data-turn-id="async-user"] .async-question-card'))
+      .toHaveCount(1);
+    await expect(page.locator('[data-turn-id="compacted-continuation"] .async-question-card'))
+      .toHaveCount(0);
+    await expect(page.locator(".supplemental-answer")).toContainText("已经退出");
+    await expect(page.getByText("收到，继续执行。", { exact: true })).toBeVisible();
+    const dialog = await openAsyncQuestion(page);
+    await expect(dialog.locator(".async-question-answered")).toHaveText("已回答");
+    await dialog.getByRole("button", { name: "关闭助手询问" }).click();
+  }
+  expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type))))
+    .toHaveLength(0);
+});
+
 test("async question unanswered draft and choices survive repeated collapse without sending", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
   await page.goto("/");

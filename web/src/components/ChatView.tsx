@@ -82,7 +82,7 @@ import {
   HISTORY_REQUEST_TIMEOUT_MS,
 } from "../history-requests";
 import { mergeDetailWithLiveTail } from "../history-merge";
-import { asyncQuestionKey, presentAsyncQuestionReplies } from "../async-question-presentation";
+import { presentAsyncQuestionReplies } from "../async-question-presentation";
 
 const AsyncQuestionCard = lazy(() => import("./AsyncQuestionCard"));
 const AsyncQuestionHost = lazy(() => import("./AsyncQuestionDialog"));
@@ -2696,7 +2696,9 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
             const activeProcess = hasActiveProcess(foregroundProcessItems);
             const activeTimeline = activeProcess
               || foregroundProcessItems.some((block) => !block.done);
-            const finalBlocks = finalTextBlocks(t.blocks);
+            const finalBlocks = finalTextBlocks(t.blocks).filter(block =>
+              block.delivery !== "async" || !block.questions?.length
+                || supplemental.questionOwners.get(block.message_id) === t.id);
             const generatedImages = generatedOutputImages(timelineBlocks);
             const modelNotices = modelFallbackNotices(timelineBlocks);
             const followupBoundaries = backgroundFollowupBoundaries(
@@ -3004,7 +3006,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                     {block.delivery === "async" && block.questions?.length
                       ? <Suspense fallback={<span className="async-question-hint">助手询问…</span>}>
                           <AsyncQuestionCard questions={block.questions}
-                            answered={supplemental.answered.has(asyncQuestionKey(t.id, block.message_id))}
+                            answered={supplemental.answered.has(block.message_id)}
                             onOpen={() => {
                               pauseOutputFollow();
                               setOpenAsyncQuestion({ scope: asyncQuestionScope, messageId: block.message_id });
@@ -3106,7 +3108,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
       {openAsyncQuestion?.scope === asyncQuestionScope && <Suspense fallback={null}>
         <AsyncQuestionHost key={asyncQuestionScope}
           messageId={openAsyncQuestion.messageId}
-          turns={turns} answeredKeys={supplemental.answered}
+          turns={turns} answeredMessageIds={supplemental.answered}
           replyMode={asyncReplyMode} onReply={onReplyAsyncQuestion}
           onClose={() => setOpenAsyncQuestion(q => q ? { ...q, messageId: null } : null)} />
       </Suspense>}
