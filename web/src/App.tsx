@@ -71,6 +71,7 @@ import {
   goalUiScopeKey,
   readGoalUiPreferences,
   reconcileGoalUiPreference,
+  shouldRecoverGoalUi,
   rekeyGoalUiPreference,
   rememberGoalUi,
   resetGoalDismissMigrationTracking,
@@ -1160,7 +1161,7 @@ export default function App() {
       ? {
           revealed: rt.goalDismissed ? false : storedGoalPreference.hiddenGoal
             ? !!rt.goal && storedGoalPreference.hiddenGoal !== storedGoalIdentity
-            : true,
+            : !!rt.goal || shouldRecoverGoalUi(storedGoalPreference),
           open: false,
           loading: !rt.goal,
         }
@@ -1204,6 +1205,8 @@ export default function App() {
     setGoalUiByScope((current) => {
       if (current[focusedGoalScopeKey]?.open) return current;
       const preference = goalUiPreferencesRef.current[focusedGoalScopeKey];
+      const runtime = stateRef.current.runtimes[focusedSid];
+      const goal = runtime?.goal;
       return {
         ...current,
         [focusedGoalScopeKey]: {
@@ -1211,9 +1214,12 @@ export default function App() {
           // authoritative non-null response reveals it unless the wrapper says
           // this exact generation was dismissed. Legacy local dismissals are
           // migrated when that response arrives.
-          revealed: !!preference?.known && !preference.hiddenGoal,
+          revealed: goal
+            ? !runtime.goalDismissed
+              && preference?.hiddenGoal !== goalStableIdentity(goal)
+            : shouldRecoverGoalUi(preference),
           open: false,
-          loading: true,
+          loading: !goal,
         },
       };
     });

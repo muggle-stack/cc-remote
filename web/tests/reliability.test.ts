@@ -111,6 +111,7 @@ import {
   reconcileGoalUiPreference,
   rekeyGoalUiPreference,
   rememberGoalUi,
+  shouldRecoverGoalUi,
   writeGoalUiPreferences,
 } from "../src/scoped-goal-ui.ts";
 import {
@@ -395,6 +396,26 @@ assert.doesNotMatch(
   "Goal objective text must never be persisted in UI preferences",
 );
 assert.deepEqual(readGoalUiPreferences(goalStorage), goalPreferences);
+function verifyGoalRecoveryPreferences() {
+  const absentGoal = reconcileGoalUiPreference(
+    discoveredGoal.preferences, goalScopeA, null, 30);
+  assert.equal(shouldRecoverGoalUi(absentGoal.preferences[goalScopeA]), false,
+    "authoritative absence survives refocus without a recovery flash");
+  writeGoalUiPreferences(goalStorage, absentGoal.preferences);
+  assert.equal(shouldRecoverGoalUi(readGoalUiPreferences(goalStorage)[goalScopeA]), false,
+    "authoritative absence also survives a browser reload");
+  assert.equal(shouldRecoverGoalUi({ known: true, seenAt: 1 }), false,
+    "legacy visit markers are refreshed silently instead of reviving old Goals");
+  assert.equal(shouldRecoverGoalUi(discoveredGoal.preferences[goalScopeA]), true);
+  assert.equal(shouldRecoverGoalUi(reconcileGoalUiPreference(
+    discoveredGoal.preferences, goalScopeA, { ...persistedGoal, status: "complete" },
+  ).preferences[goalScopeA]), false,
+  "a completed Goal cannot reappear as an active recovery after reload");
+  assert.equal(reconcileGoalUiPreference(absentGoal.preferences, goalScopeA,
+    { ...persistedGoal, createdAt: 102 }).revealed, true,
+  "a new Goal still reveals itself after an authoritative absent response");
+}
+verifyGoalRecoveryPreferences();
 const rekeyedGoalPreferences = rekeyGoalUiPreference(
   goalPreferences,
   goalScopeA,

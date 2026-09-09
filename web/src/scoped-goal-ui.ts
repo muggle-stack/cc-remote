@@ -5,6 +5,8 @@ const MAX_GOAL_UI_PREFERENCES = 256;
 
 export interface GoalUiPreference {
   known: true;
+  state?: "present" | "none";
+  complete?: boolean;
   hiddenGoal?: string;
   seenAt: number;
 }
@@ -108,6 +110,9 @@ export function readGoalUiPreferences(
       preferences[key] = {
         known: true,
         seenAt: value.seenAt,
+        ...(value.state === "present" || value.state === "none"
+          ? { state: value.state } : {}),
+        ...(value.complete === true ? { complete: true } : {}),
         ...(typeof value.hiddenGoal === "string" && value.hiddenGoal
           ? { hiddenGoal: value.hiddenGoal } : {}),
       };
@@ -137,9 +142,13 @@ export function rememberGoalUi(
   key: string,
   now = Date.now(),
 ): GoalUiPreferences {
+  const preference: GoalUiPreference = {
+    ...preferences[key], known: true, seenAt: now,
+  };
+  delete preference.hiddenGoal;
   return boundPreferences({
     ...preferences,
-    [key]: { known: true, seenAt: now },
+    [key]: preference,
   });
 }
 
@@ -155,6 +164,8 @@ export function dismissGoalUi(
     [key]: {
       known: true,
       seenAt: now,
+      state: goal ? "present" : "none",
+      ...(goal?.status === "complete" ? { complete: true } : {}),
       ...(hiddenGoal ? { hiddenGoal } : {}),
     },
   });
@@ -168,27 +179,27 @@ export function reconcileGoalUiPreference(
   authoritativeDismissed = false,
 ): { preferences: GoalUiPreferences; revealed: boolean } {
   const current = preferences[key];
-  if (!current?.known) {
-    if (!goal) return { preferences, revealed: false };
-    return {
-      preferences: authoritativeDismissed
-        ? dismissGoalUi(preferences, key, goal, now)
-        : rememberGoalUi(preferences, key, now),
-      revealed: !authoritativeDismissed,
-    };
-  }
   const identity = goalStableIdentity(goal);
   const hidden = authoritativeDismissed
-    || (!!identity && current.hiddenGoal === identity);
+    || (!!identity && current?.hiddenGoal === identity);
   const next = boundPreferences({
     ...preferences,
     [key]: {
       known: true,
       seenAt: now,
+      state: goal ? "present" : "none",
+      ...(goal?.status === "complete" ? { complete: true } : {}),
       ...(hidden && identity ? { hiddenGoal: identity } : {}),
     },
   });
   return { preferences: next, revealed: !!goal && !hidden };
+}
+
+/** Legacy `known` only records a past visit, not a currently recoverable Goal.
+ * Refresh unknown/absent/completed Goals silently until native state arrives. */
+export function shouldRecoverGoalUi(preference?: GoalUiPreference): boolean {
+  return preference?.state === "present"
+    && !preference.complete && !preference.hiddenGoal;
 }
 
 export function rekeyGoalUiPreference(
