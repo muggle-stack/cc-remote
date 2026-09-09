@@ -2,7 +2,7 @@ import type { QueryImg, QueryFile } from "./protocol";
 import {
   IMG_MAX_EDGE, MAX_ATTACHMENT_COUNT, MAX_SINGLE_ATTACHMENT_BYTES,
   MAX_TOTAL_ATTACHMENT_BYTES, MAX_IMAGE_SOURCE_BYTES, MAX_IMAGE_DIMENSION,
-  MAX_IMAGE_PIXELS, MAX_FILENAME_BYTES, decodedSize, imageDimensions,
+  MAX_IMAGE_PIXELS, MAX_FILENAME_BYTES, decodedSize, inspectImageHeader,
   rememberQueryImageDimensions,
 } from "./img";
 
@@ -21,8 +21,18 @@ export async function downscaleImage(file: File): Promise<QueryImg> {
   if (!ALLOWED_IMAGES.has(file.type)) throw new Error(`${file.name || "图片"} 格式不支持`);
   if (file.size > MAX_IMAGE_SOURCE_BYTES) throw new Error(`${file.name || "图片"} 原图超过 20 MiB`);
   const bytes = new Uint8Array(await file.arrayBuffer());
-  const dimensions = imageDimensions(bytes, file.type);
-  if (!dimensions) throw new Error(`${file.name || "图片"} 格式、动画或头信息不安全`);
+  const header = inspectImageHeader(bytes, file.type);
+  if (!Array.isArray(header)) {
+    // Import fails before a server request exists. Keep a local diagnostic
+    // without logging the filename, clipboard text, or image payload.
+    console.warn("cc-remote image import rejected", {
+      reason: header || "invalid_header", mediaType: file.type, bytes: bytes.byteLength,
+    });
+    throw new Error(header === "animated"
+      ? `${file.name || "图片"} 是动画图片，暂不支持；请保存为静态图片后上传`
+      : `${file.name || "图片"} 图片格式无法识别，或内容与文件类型不符`);
+  }
+  const dimensions = header;
   const [sourceWidth, sourceHeight] = dimensions;
   if (sourceWidth <= 0 || sourceHeight <= 0 || sourceWidth > MAX_IMAGE_DIMENSION
       || sourceHeight > MAX_IMAGE_DIMENSION || sourceWidth * sourceHeight > MAX_IMAGE_PIXELS) {

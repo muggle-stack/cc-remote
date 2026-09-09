@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { pngChunk, staticPng } from "./fixtures/png";
 import { PROTOCOL_VERSION, type ServerEvent } from "../src/protocol";
 import {
   GITHUB_README_ATTACHMENT_URL, GITHUB_README_IMAGE_URL,
@@ -7321,6 +7322,62 @@ for (const target of ["composer", "new-chat controls"]) {
     }
   });
 }
+
+test("long paste static PNG pixels and metadata survive preview and send", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?codex-live-burst=1&composer-live=1&composer-paste=1");
+  const input = page.locator("textarea").first();
+  const image = staticPng(400, 1600, [pngChunk("tEXt", Buffer.from("Comment\0static acTL"))]);
+  await input.evaluate((node, base64) => {
+    const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+    const data = new DataTransfer();
+    data.setData("text/plain", "截图测试文字");
+    data.items.add(new File([bytes], "image.png", { type: "image/png" }));
+    node.dispatchEvent(new ClipboardEvent("paste", {
+      bubbles: true, cancelable: true, clipboardData: data,
+    }));
+  }, image.toString("base64"));
+  await expect(input).toHaveValue("截图测试文字");
+  await expect(page.locator(".attach-image-preview")).toHaveCount(1);
+  const preview = page.locator(".attach-image-preview img");
+  await expect.poll(() => preview.evaluate((node) =>
+    [(node as HTMLImageElement).naturalWidth, (node as HTMLImageElement).naturalHeight],
+  )).toEqual([392, 1568]);
+  await input.press("Enter");
+  await expect(page.getByTestId("composer-paste-output")).toHaveText("截图测试文字");
+  await expect(page.getByTestId("composer-image-count")).toHaveText("1");
+});
+
+test("long paste rejected image headers explain the reason and retain text", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?codex-live-burst=1&composer-live=1&composer-paste=1");
+  const input = page.locator("textarea").first();
+  const warnings: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "warning") warnings.push(message.text());
+  });
+  const animation = Buffer.alloc(8);
+  animation.writeUInt32BE(1, 0);
+  for (const [image, expected, reason] of [
+    [staticPng(2, 1, [pngChunk("acTL", animation)]), "是动画图片，暂不支持", "animated"],
+    [Buffer.from("invalid header"), "图片格式无法识别", "invalid_header"],
+  ] as const) {
+    await input.fill("");
+    await input.evaluate((node, base64) => {
+      const data = new DataTransfer();
+      const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+      data.setData("text/plain", "保留这段文字");
+      data.items.add(new File([bytes], "private-name.png", { type: "image/png" }));
+      node.dispatchEvent(new ClipboardEvent("paste", {
+        bubbles: true, cancelable: true, clipboardData: data,
+      }));
+    }, image.toString("base64"));
+    await expect(page.getByText(expected, { exact: false })).toBeVisible();
+    await expect(input).toHaveValue("保留这段文字");
+    await expect(page.locator(".attach-image-preview")).toHaveCount(0);
+    expect(warnings.at(-1)).toContain(reason);
+    expect(warnings.at(-1)).not.toContain("private-name");
+    expect(warnings.at(-1)).not.toContain("保留这段文字");
+  }
+});
 
 test("long paste Feishu private image references report missing images without losing text", async ({ page }) => {
   await page.goto("/tests/history-browser.html?codex-live-burst=1&composer-live=1&composer-paste=1");

@@ -32,19 +32,26 @@ function asciiAt(bytes: Uint8Array, offset: number, text: string): boolean {
   return true;
 }
 
-function containsAscii(bytes: Uint8Array, text: string): boolean {
-  for (let i = 0; i + text.length <= bytes.length; i++) {
-    if (asciiAt(bytes, i, text)) return true;
-  }
-  return false;
-}
+/** Intrinsic dimensions, an explicit animation marker, or an invalid header. */
+export type ImageHeaderResult = [number, number] | "animated" | null;
 
-export function imageDimensions(bytes: Uint8Array, mediaType: string): [number, number] | null {
+export function inspectImageHeader(bytes: Uint8Array, mediaType: string): ImageHeaderResult {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const type = mediaType === "image/jpg" ? "image/jpeg" : mediaType;
   if (type === "image/png") {
     if (bytes.length < 24 || bytes[0] !== 0x89 || !asciiAt(bytes, 1, "PNG\r\n\x1a\n")
-        || !asciiAt(bytes, 12, "IHDR") || containsAscii(bytes, "acTL")) return null;
+        || !asciiAt(bytes, 12, "IHDR")) return null;
+    // Match cc_remote.attachments: only an actual acTL chunk marks an APNG.
+    // Compressed pixels and metadata may contain the same four bytes. Stop at
+    // incomplete chunks so bounded history/header-only reads keep working.
+    let pos = 8;
+    while (pos + 8 <= bytes.length) {
+      const chunkEnd = pos + 12 + view.getUint32(pos);
+      if (chunkEnd > bytes.length) break;
+      if (asciiAt(bytes, pos + 4, "acTL")) return "animated";
+      if (asciiAt(bytes, pos + 4, "IEND")) break;
+      pos = chunkEnd;
+    }
     return [view.getUint32(16), view.getUint32(20)];
   }
   if (type === "image/jpeg") {
@@ -71,7 +78,7 @@ export function imageDimensions(bytes: Uint8Array, mediaType: string): [number, 
   if (type === "image/webp") {
     if (bytes.length < 30 || !asciiAt(bytes, 0, "RIFF") || !asciiAt(bytes, 8, "WEBP")) return null;
     if (asciiAt(bytes, 12, "VP8X")) {
-      if (bytes[20] & 0x02) return null; // animation
+      if (bytes[20] & 0x02) return "animated";
       const width = bytes[24] | (bytes[25] << 8) | (bytes[26] << 16);
       const height = bytes[27] | (bytes[28] << 8) | (bytes[29] << 16);
       return [width + 1, height + 1];
@@ -86,6 +93,11 @@ export function imageDimensions(bytes: Uint8Array, mediaType: string): [number, 
     }
   }
   return null;
+}
+
+export function imageDimensions(bytes: Uint8Array, mediaType: string): [number, number] | null {
+  const header = inspectImageHeader(bytes, mediaType);
+  return Array.isArray(header) ? header : null;
 }
 
 /** Read enough decoded bytes to determine the intrinsic size without creating
@@ -108,8 +120,8 @@ export function imageDimensionsFromBase64(
     for (let index = 0; index < decoded.length; index++) {
       bytes[index] = decoded.charCodeAt(index);
     }
-    const dimensions = imageDimensions(bytes, mediaType);
-    if (!dimensions) return null;
+    const dimensions = inspectImageHeader(bytes, mediaType);
+    if (!Array.isArray(dimensions)) return null;
     const [width, height] = dimensions;
     if (width <= 0 || height <= 0 || width > MAX_IMAGE_DIMENSION
         || height > MAX_IMAGE_DIMENSION || width * height > MAX_IMAGE_PIXELS) {
