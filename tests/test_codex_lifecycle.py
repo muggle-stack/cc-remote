@@ -42,6 +42,26 @@ def test_persistent_terminal_survives_restart_and_append(tmp_path):
     ) == (_fence("turn-1", duration_ms=42),)
 
 
+def test_legacy_completion_fences_are_rebuilt_without_losing_failures(tmp_path):
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_bytes(b"source remains untouched\n")
+    ledger = CodexTerminalLedger(tmp_path)
+    for turn_id, status in (("unknown-success", "completed"), ("failed", "failed"), ("stopped", "interrupted")):
+        ledger.persist("session", _fence(turn_id, status), rollout)
+    raw = json.loads(ledger.path.read_text())
+    raw["version"] = 1
+    raw["profile_revision"] = 7
+    ledger.path.write_text(json.dumps(raw))
+    reopened = CodexTerminalLedger(tmp_path)
+    assert reopened.snapshot("session", rollout, revision="a" * 32 + "-0") == (
+        _fence("failed", "failed"), _fence("stopped", "interrupted"),
+    )
+    reopened.persist("session", _fence("new-success"), rollout)
+    updated = json.loads(ledger.path.read_text())
+    assert updated["version"] == 2 and updated["profile_revision"] == 7
+    assert rollout.read_bytes() == b"source remains untouched\n"
+
+
 def test_legacy_success_fences_are_rebuilt_after_error_semantics_change(tmp_path):
     rollout = tmp_path / "rollout.jsonl"
     rollout.write_bytes(b'{"type":"task_complete","error":{}}\n')

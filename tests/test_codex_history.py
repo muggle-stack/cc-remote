@@ -2739,6 +2739,70 @@ def test_summary_failed_status_is_not_silently_presented_as_success():
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("visible_partial", [False, True])
+@pytest.mark.parametrize("with_prompt", [False, True])
+def test_rollout_capacity_failure_and_followup_keep_separate_outcomes(tmp_path, visible_partial, with_prompt):
+    from cc_remote.protocol import Error, TurnEnd
+    from cc_remote.wrapper.history_store import materialize_history_turns
+
+    path = tmp_path / "rollout.jsonl"
+    payloads = [
+        {"type": "task_started", "turn_id": "failed-native"},
+    ]
+    if with_prompt:
+        payloads.append({"type": "user_message", "message": "deploy"})
+    if visible_partial:
+        payloads.append({"type": "agent_message", "message": "Checking build.", "phase": "commentary"})
+    payloads.extend([
+        {"type": "task_complete", "turn_id": "failed-native", "last_agent_message": None,
+         "duration_ms": 337204, "error": {"message": "Selected model is at capacity.",
+                                         "codex_error_info": "server_overloaded"}},
+        {"type": "task_started", "turn_id": "followup-native"},
+        {"type": "agent_message", "message": "Continuing checks.", "phase": "commentary"},
+    ])
+
+    def translated():
+        path.write_text("".join(json.dumps({
+            "type": "event_msg", "payload": payload,
+            "timestamp": f"2026-09-09T14:04:{index:02d}Z",
+        }) + "\n" for index, payload in enumerate(payloads)))
+        events, _ = codex_translate_history(str(path), 8000)
+        turns = materialize_history_turns([event.model_dump(mode="json") for event in events])
+        return events, turns
+
+    events, turns = translated()
+    assert len(turns) == 2
+    assert turns[0]["forkPointId"] == "failed-native"
+    assert turns[0]["error"] == "当前模型繁忙，请稍后重试或切换模型。"
+    assert turns[0]["done"] is True
+    assert turns[1]["forkPointId"] == "followup-native"
+    assert turns[1]["id"] == "followup-native"
+    assert turns[1]["done"] is False
+    assert not turns[1].get("error")
+    assert len([event for event in events if isinstance(event, Error)]) == 1
+    terminal = next(event for event in events if isinstance(event, TurnEnd))
+    assert terminal.result.is_error and terminal.result.subtype == "error"
+    payloads.append({"type": "task_complete", "turn_id": "followup-native", "last_agent_message": "Done."})
+    _, completed = translated()
+    assert completed[1]["id"] == turns[1]["id"]
+    assert completed[0]["error"] == turns[0]["error"]
+    assert completed[1]["done"] and not completed[1].get("error")
+
+
+def test_official_capacity_summary_retains_reason_without_provider_details():
+    async def rpc(_method, _params, cwd=None):
+        return {"data": [_turn("failed-native", [_user("user", "deploy")], status="failed",
+                              error={"codexErrorInfo": "serverOverloaded", "message": "SECRET"})],
+                "nextCursor": None}
+
+    async def run():
+        page = await CodexOfficialHistory(64 * 1024, rpc=rpc).summary_page("session", before=None, limit=1)
+        assert page.turns[0]["error"] == "当前模型繁忙，请稍后重试或切换模型。"
+        assert "SECRET" not in json.dumps(page.turns)
+
+    asyncio.run(run())
+
+
 def test_summary_cursor_is_session_bound_and_unknown_cursor_is_rejected():
     responses = [
         {

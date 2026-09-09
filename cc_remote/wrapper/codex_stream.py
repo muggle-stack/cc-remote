@@ -32,7 +32,7 @@ from cc_remote.attachments import (
 from cc_remote.protocol import (
     AssistantMsgStart, Delta, ToolUse, ToolDelta, ToolResult, AssistantMsgEnd,
     AsyncQuestionSpec,
-    ProcessEvent, TurnPlan, TurnDiff, TurnEnd, TurnResult, UserMsg, Error,
+    ProcessEvent, TurnPlan, TurnDiff, TurnEnd, TurnResult, TurnBinding, UserMsg, Error,
     StateEvent, ERR_CC_CRASH,
 )
 from cc_remote.wrapper.codex_external import (
@@ -3316,7 +3316,9 @@ def _retry_detail(error: dict) -> str:
     status_match = re.search(r"\b([45]\d\d)\b", combined)
     status = status_match.group(1) if status_match else _structured_http_status(error)
     attempt = re.search(r"\b(\d+\s*/\s*\d+)\b", combined)
-    if status:
+    if _is_model_capacity_error(error):
+        text = "当前模型繁忙，Codex 正在重试"
+    elif status:
         text = f"上游服务返回 HTTP {status}，Codex 正在重试"
     else:
         text = "Codex 上游请求暂时失败，正在重试"
@@ -3339,6 +3341,24 @@ _POLICY_TURN_FAILURE = (
     "这不是本地权限或网络错误；请核实并说明任务背景与授权范围，"
     "若属误判请向服务提供方反馈。"
 )
+
+_CAPACITY_TURN_FAILURE = "当前模型繁忙，请稍后重试或切换模型。"
+
+
+def _is_model_capacity_error(error: dict) -> bool:
+    # Live app-server errors use camelCase; durable rollout errors use snake_case.
+    for key in ("codexErrorInfo", "codex_error_info"):
+        info = error.get(key)
+        if isinstance(info, str) and info in {"serverOverloaded", "server_overloaded"}:
+            return True
+        if isinstance(info, dict) and any(
+            tag in info for tag in ("serverOverloaded", "server_overloaded")
+        ):
+            return True
+    message = error.get("message")
+    return isinstance(message, str) and (
+        "selected model is at capacity" in message[:8192].lower()
+    )
 
 
 def _provider_failure_message(error: object) -> str:
@@ -3368,6 +3388,8 @@ def _provider_failure_message(error: object) -> str:
         return _RATE_LIMIT_TURN_FAILURE
     if status == "408":
         return _TIMEOUT_TURN_FAILURE
+    if _is_model_capacity_error(error):
+        return _CAPACITY_TURN_FAILURE
     if status is not None:
         if status.startswith("5"):
             return _UPSTREAM_TURN_FAILURE
@@ -3415,14 +3437,14 @@ def _bounded_model_list(value) -> list[str]:
 
 def _structured_http_status(error: dict) -> str | None:
     """Find a bounded codexErrorInfo.httpStatusCode without exposing details."""
-    stack = [error.get("codexErrorInfo")]
+    stack = [error.get("codexErrorInfo"), error.get("codex_error_info")]
     seen = 0
     while stack and seen < 32:
         value = stack.pop()
         seen += 1
         if not isinstance(value, dict):
             continue
-        status = value.get("httpStatusCode")
+        status = value.get("httpStatusCode", value.get("http_status_code"))
         if isinstance(status, int) and 400 <= status <= 599:
             return str(status)
         stack.extend(list(value.values())[:16])
@@ -4263,6 +4285,17 @@ def codex_translate_history(
         turn_open = True
         active_turn_id = turn_id or pending_owner or pending_turn_id
         active_msg_id = None
+        if (pending_task_started is not None
+                and active_turn_id == pending_task_started[0]
+                and _history_optional_turn_id(active_turn_id) is not None):
+            # A real task_started plus visible output proves a new native
+            # continuation. Bind it before its terminal arrives so history
+            # cannot invent a message id or a parser-time start timestamp.
+            active_msg_id = str(active_turn_id)
+            events.append(TurnBinding(
+                msg_id=active_msg_id, turn_id=active_msg_id,
+                ts=pending_task_started[1] or 0,
+            ))
         turn_visible = False
         turn_text_visible = False
         turn_final_visible = False
@@ -5089,7 +5122,9 @@ def codex_translate_history(
             elif t == "event_msg" and payload_type == "task_complete":
                 materialize_pending_terminal(p.get("turn_id"))
                 last = p.get("last_agent_message")
-                if (not turn_open and isinstance(last, str) and last):
+                if not turn_open and (
+                    (isinstance(last, str) and last) or p.get("error") is not None
+                ):
                     open_assistant_only_turn()
                 if turn_open:
                     turn_key = str(active_turn_id or pending_turn_id or "")

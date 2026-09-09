@@ -25,8 +25,10 @@ const DIST = resolve(import.meta.dirname, "../dist");
 // Steer item ownership, explicit Goal recovery and shared clipboard/UI state
 // add <2 KiB at startup. Attachment decoding and clipboard byte imports load
 // on demand; retain the compressed-size and initial request-count limits.
-const MAX_ENTRY_BYTES = 536 * 1024;
-const MAX_INITIAL_BYTES = 935 * 1024;
+// Provider-capacity copy and terminal outcome labels add <1 KiB of startup JS.
+// The card has no new dependencies; gzip and initial request caps stay unchanged.
+const MAX_ENTRY_BYTES = 537 * 1024;
+const MAX_INITIAL_BYTES = 936 * 1024;
 const MAX_INITIAL_GZIP_BYTES = 280 * 1024;
 const MAX_INITIAL_JS_FILES = 4;
 

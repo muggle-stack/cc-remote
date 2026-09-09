@@ -689,7 +689,7 @@ function isPayloadFreeUnfinishedCommandShell(block: Block): boolean {
   return !hasPayload;
 }
 
-export function ProcessTimeline({ blocks, done, active, durationMs, startTs, doneTs, onOpenFile,
+export function ProcessTimeline({ blocks, done, active, outcome, durationMs, startTs, doneTs, onOpenFile,
   deferredCount = 0, detailLoading = false, detailError, onLoadDetail,
   onRetryDetail,
   canLoadEarlier = false, canLoadNewer = false,
@@ -704,6 +704,8 @@ export function ProcessTimeline({ blocks, done, active, durationMs, startTs, don
   done: boolean;
   /** Whether this process shell describes the turn's active live phase. */
   active?: boolean;
+  /** An enclosing terminal failure is separate from individual tool results. */
+  outcome?: "failed" | "interrupted";
   durationMs?: number;
   startTs?: number;
   doneTs?: number;
@@ -784,8 +786,9 @@ export function ProcessTimeline({ blocks, done, active, durationMs, startTs, don
     block.kind === "process" && block.background === true
   )) : projectedItems;
   const terminalComplete = done && !processActive
-    && !hasActiveProcess(foregroundItems);
+    && (!!outcome || !hasActiveProcess(foregroundItems));
   const processSettled = !processActive;
+  const terminalOutcome = processSettled && done ? outcome : undefined;
   const [uncontrolledOpen, setUncontrolledOpen] = useState(!terminalComplete);
   const open = openOverride ?? uncontrolledOpen;
   const [localDetailError, setLocalDetailError] = useState<string | null>(null);
@@ -961,12 +964,15 @@ export function ProcessTimeline({ blocks, done, active, durationMs, startTs, don
             }
             toggle();
           }}>
-          <span className={`turn-process-state${processSettled ? " done" : " running"}`}>
+          <span className={`turn-process-state ${terminalOutcome ?? (processSettled ? "done" : "running")}`}>
             {detailLoading && !processActive
               ? <span className="process-spin" />
-              : <Icon name={processActive ? "spark" : "verify"} size={14} />}
+              : <Icon name={processActive ? "spark" : terminalOutcome === "failed"
+                ? "info" : terminalOutcome === "interrupted" ? "stop" : "verify"} size={14} />}
           </span>
-          <span>{processSettled ? "已处理" : "正在处理"}
+          <span>{terminalOutcome === "failed" ? "回复未完成"
+            : terminalOutcome === "interrupted" ? "已打断"
+            : processSettled ? "已处理" : "正在处理"}
             {elapsed == null ? null : ` ${durationLabel(elapsed)}`}</span>
           <span className="turn-process-count">{countLabel}</span>
           <Icon name="chev" size={15} />

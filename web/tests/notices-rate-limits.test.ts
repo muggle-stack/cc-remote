@@ -360,6 +360,7 @@ try {
     "请求过于频繁或当前额度受限，请稍后重试。",
     "请求超时，请重新尝试。",
     "Codex 上游服务暂时不可用，请稍后重试。",
+    "当前模型繁忙，请稍后重试或切换模型。",
   ]) {
     assert.equal(
       presentTurnProblem({ code: "cc_crash", message: safeMessage }),
@@ -372,6 +373,8 @@ try {
     presentCommandProblem({ code: "protocol", message: hiddenDiagnostic }),
     /crash|wrapper|private|protocol/i);
   assert.equal(presentHistoricalTurnProblem("error"), "该轮未正常结束");
+  assert.equal(presentHistoricalTurnProblem(
+    "当前模型繁忙，请稍后重试或切换模型。", true), "当前模型繁忙，这次请求未完成。");
   assert.equal(
     presentHistoricalTurnProblem(
       "provider crash at /private/token; Authorization: Bearer secret",

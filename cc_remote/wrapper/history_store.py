@@ -56,7 +56,8 @@ from cc_remote.protocol import ConversationTurn
 # Binary assets and other engines' projections remain source-valid.
 # v31 retains native model fallback notes and durable per-turn file summaries.
 # v32 repairs missing file summaries on the full-page cache population path.
-_SCHEMA_VERSION = 34
+# v35 preserves task_complete.error and binds assistant-only native turns.
+_SCHEMA_VERSION = 35
 _FINGERPRINT_SAMPLE_BYTES = 64 * 1024
 _DEFAULT_MAX_ENTRIES = 128
 _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
@@ -126,6 +127,7 @@ _SAFE_HISTORY_TURN_FAILURES = frozenset({
     "请求过于频繁或当前额度受限，请稍后重试。",
     "请求超时，请重新尝试。",
     "Codex 上游服务暂时不可用，请稍后重试。",
+    "当前模型繁忙，请稍后重试或切换模型。",
     "上游模型因安全策略拒绝了本次请求（cyber_policy）。"
     "这不是本地权限或网络错误；请核实并说明任务背景与授权范围，"
     "若属误判请向服务提供方反馈。",
@@ -416,6 +418,9 @@ def group_history_events(
 def _turn_id(group: list[dict[str, Any]]) -> str | None:
     for event in group:
         if event.get("type") == "user_msg" and isinstance(event.get("msg_id"), str):
+            return event["msg_id"]
+    for event in group:
+        if event.get("type") == "turn_binding" and isinstance(event.get("msg_id"), str):
             return event["msg_id"]
     for event in reversed(group):
         if event.get("type") == "turn_end" and isinstance(event.get("turn_id"), str):
@@ -745,6 +750,8 @@ def materialize_history_turns(
             elif event_type == "turn_binding":
                 if isinstance(event.get("turn_id"), str):
                     fork_point = event["turn_id"]
+                if started_ms is None:
+                    started_ms = _event_ms(event.get("ts"))
             elif event_type == "turn_end":
                 done = True
                 done_ms = _event_ms(event.get("ts"))
@@ -1271,6 +1278,11 @@ class HistoryIndexStore:
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
             current = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if current in range(10, 35):
+                # Existing source bytes do not change when the translator starts
+                # honoring task_complete.error. Rebuild Codex narrative only.
+                for table in ("history_pages", "history_turn_details"):
+                    connection.execute(f"DELETE FROM {table} WHERE engine='codex'")
             if current in range(10, 34):
                 # v34 separates 64-row wire pages from the full native file
                 # index. Rebuild derived summaries, not transcripts or archives.
@@ -1374,8 +1386,8 @@ class HistoryIndexStore:
                 for table in ("history_pages", "history_turn_details"):
                     connection.execute(
                         f"DELETE FROM {table} WHERE engine='codex'")
-            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33):
-                # The independent v22-v34 invalidations above suffice.
+            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34):
+                # The independent v22-v35 invalidations above suffice.
                 pass
             elif current not in (0, _SCHEMA_VERSION):
                 # v9 changes the invariant of history_turn_details: those rows

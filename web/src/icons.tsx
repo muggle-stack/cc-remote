@@ -31,6 +31,7 @@ const PATHS: Record<string, string> = {
   review: '<path d="M2.5 12S6 5 12 5s9.5 7 9.5 7-3.5 7-9.5 7-9.5-7-9.5-7z"/><circle cx="12" cy="12" r="2.7"/>',
   shield: '<path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z"/><path d="M9.2 12l2 2 3.6-4"/>',
   verify: '<circle cx="12" cy="12" r="8.5"/><path d="M8.5 12.5l2.3 2.3 4.7-5"/>',
+  info: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v5M12 16h.01"/>',
   run: '<path d="M8 5.5v13l11-6.5-11-6.5z"/>',
   research: '<circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.5-4.5M11 8v6M8 11h6"/>',
   simplify: '<path d="M4 7h16M7 12h10M10 17h4"/>',

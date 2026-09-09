@@ -450,16 +450,26 @@ test("policy refusal remains specific through live delivery and history reload",
     + "这不是本地权限或网络错误；请核实并说明任务背景与授权范围，"
     + "若属误判请向服务提供方反馈。";
   const turns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = [];
-  const relay = await mockRightPanelRelay(page, { retained: false, seedTurns: turns });
+  // Keep live delivery isolated from a fabricated empty canonical page. Once
+  // the source has materialized, reload must use that exact canonical history.
+  const relay = await mockRightPanelRelay(page, { retained: false,
+    historyReply: (command) => turns.length === 0 ? null : {
+      type: "history", sid: String(command.session_id), session_id: String(command.session_id),
+      request_id: String(command.cmd_id), revision: "policy-history", generation: "layout-generation",
+      detail: "summary", events: [], turns, has_more: false,
+    },
+  });
   await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
   await expect(page.locator(".composer textarea")).toBeEnabled();
   relay.emit({ type: "user_msg", sid: "layout-parent", msg_id: "policy-user", prompt: "检查这段代码" });
+  relay.emit({ type: "turn_binding", sid: "layout-parent", msg_id: "policy-user", turn_id: "policy-turn" });
   relay.emit({ type: "state", sid: "layout-parent", state: "running", msg_id: "policy-user" });
   relay.emit({ type: "error", sid: "layout-parent", code: "cc_crash", message, msg_id: "policy-user" });
   relay.emit({ type: "turn_end", sid: "layout-parent", turn_id: "policy-turn",
     result: { subtype: "error", duration_ms: 20, is_error: true } });
   relay.emit({ type: "state", sid: "layout-parent", state: "idle" });
-  const problem = page.locator(".turn .note.interrupted");
+  const problem = page.locator(".turn .turn-problem");
   await expect(problem).toHaveText(message);
   await expect(page.locator(".composer textarea")).toBeEnabled();
   expect(relay.commands.filter(c => c.type === "query" || c.type === "steer")).toHaveLength(0);
@@ -473,13 +483,13 @@ test("policy refusal remains specific through live delivery and history reload",
   await expect(problem).toHaveCount(1);
   await expect(problem).toHaveText(message);
   await expect(page.locator('[data-turn-id="followup-user"]')).toContainText("日志说明已完成。");
-  await expect(page.locator('[data-turn-id="followup-user"] .note.interrupted')).toHaveCount(0);
+  await expect(page.locator('[data-turn-id="followup-user"] .turn-problem')).toHaveCount(0);
   for (const theme of ["light", "dark"]) {
     await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
     await expect(problem).toBeVisible();
     expect(await problem.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
-    expect(await problem.evaluate(node => getComputedStyle(node, "::before").display)).toBe("none");
-    expect(await problem.evaluate(node => getComputedStyle(node, "::after").display)).toBe("none");
+    expect(["none", "normal"]).toContain(await problem.evaluate(node => getComputedStyle(node, "::before").content));
+    expect(["none", "normal"]).toContain(await problem.evaluate(node => getComputedStyle(node, "::after").content));
     await page.screenshot({ path: testInfo.outputPath(`policy-refusal-${theme}.png`) });
   }
 });
@@ -631,6 +641,72 @@ test("generated image live snapshot renders outside collapsed process and duplic
   expect(relay.commands.filter((c) => c.type === "get_preview_asset")).toHaveLength(1);
   await image.click();
   await expect(page.locator(".image-lightbox-image")).toBeVisible();
+});
+
+test("provider capacity failure stays local to its turn while the next reply continues", async ({ page }, testInfo) => {
+  const relay = await mockRightPanelRelay(page);
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some((c) => c.type === "get_history")).toBe(true);
+  const sid = "layout-parent";
+  relay.emit({ type: "user_msg", sid, msg_id: "failed-request", prompt: "部署一下。" });
+  relay.emit({ type: "turn_binding", sid, msg_id: "failed-request", turn_id: "failed-native" });
+  relay.emit({ type: "process", sid, item_id: "build", kind: "command", phase: "end",
+    status: "succeeded", turn_id: "failed-native", title: "检查构建", duration_ms: 2000 });
+  relay.emit({ type: "error", sid, msg_id: "failed-request", code: "cc_crash",
+    message: "当前模型繁忙，请稍后重试或切换模型。" });
+  relay.emit({ type: "turn_end", sid, turn_id: "failed-native",
+    result: { subtype: "error", duration_ms: 337204, is_error: true } });
+  relay.emit({ type: "state", sid, state: "idle" });
+  const failed = page.locator('.turn[data-turn-id="failed-request"]');
+  await expect(failed.locator(".turn-process-head")).toContainText("回复未完成");
+  await expect(failed.locator(".turn-problem")).toContainText("当前模型繁忙，请稍后重试或切换模型。");
+  await expect(failed.locator(".turn-process-state.done, .note.interrupted")).toHaveCount(0);
+  await expect(page.locator(".turn-working")).toHaveCount(0);
+
+  relay.emit({ type: "user_msg", sid, msg_id: "followup-native", prompt: "" });
+  relay.emit({ type: "turn_binding", sid, msg_id: "followup-native", turn_id: "followup-native" });
+  relay.emit({ type: "state", sid, state: "running" });
+  relay.emit({ type: "process", sid, item_id: "verify", kind: "command", phase: "start",
+    status: "running", turn_id: "followup-native", title: "继续验证发布" });
+  const followup = page.locator('.turn[data-turn-id="followup-native"]');
+  await expect(followup.locator(".turn-process-head")).toContainText("正在处理");
+  await expect(failed.locator(".turn-problem-continuation")).toContainText("后续回复正在处理中");
+  await expect(failed.locator(".turn-problem")).not.toContainText("请稍后重试");
+  await expect(page.locator(".turn-working")).toHaveCount(1);
+  await expect(failed.locator(".turn-working")).toHaveCount(0);
+  await failed.locator(".turn-process-head").click();
+  await expect(failed).toContainText("检查构建");
+  await page.screenshot({ path: testInfo.outputPath("capacity-followup-light.png") });
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  await page.screenshot({ path: testInfo.outputPath("capacity-followup-dark.png") });
+  expect(await failed.locator(".turn-problem").evaluate(node => node.scrollWidth - node.clientWidth)).toBeLessThan(2);
+
+  relay.emit({ type: "turn_end", sid, turn_id: "followup-native",
+    result: { subtype: "success", duration_ms: 5000, is_error: false } });
+  relay.emit({ type: "state", sid, state: "idle" });
+  await expect(page.locator(".turn-working, .turn-problem-continuation")).toHaveCount(0);
+  await expect(failed.locator(".turn-process-head")).toContainText("回复未完成");
+  await expect(followup.locator(".turn-process-head")).toContainText("已处理");
+  expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toHaveLength(0);
+});
+
+test("provider capacity history keeps its cause after reload without a stuck progress indicator", async ({ page }) => {
+  await mockRightPanelRelay(page, { seedTurns: [{
+    id: "failed-history", prompt: "部署一下。", done: true, forkPointId: "failed-native",
+    error: "当前模型繁忙，请稍后重试或切换模型。", processDetailState: "present",
+    blocks: [{ kind: "process", item_id: "build", processKind: "command", phase: "end",
+      status: "succeeded", title: "检查构建", done: true, turn_id: "failed-native" }],
+  }, { id: "later-history", prompt: "", done: true, forkPointId: "followup-native",
+    blocks: [{ kind: "text", message_id: "finished", channel: "final", text: "已完成部署。", done: true }] }] });
+  await page.goto("/");
+  for (let iteration = 0; iteration < 2; iteration++) {
+    if (iteration) await page.reload();
+    await expect(page.locator(".turn-problem")).toHaveCount(1);
+    await expect(page.locator(".turn-problem")).toContainText("当前模型繁忙");
+    await expect(page.locator(".turn-process-head")).toContainText("回复未完成");
+    await expect(page.getByText("已完成部署。", { exact: true })).toBeVisible();
+    await expect(page.locator(".turn-working, .turn-problem-continuation, .note.interrupted")).toHaveCount(0);
+  }
 });
 
 test("async question first layout keeps optional notes visible with vertical choices and a separate send button", async ({ page }, testInfo) => {

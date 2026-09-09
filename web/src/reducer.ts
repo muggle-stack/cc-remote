@@ -1089,7 +1089,9 @@ function activatePendingLiveBinding(
   }
   if (owner.forkPointId && owner.forkPointId !== binding.turnId
       && owner.liveTaskId !== binding.turnId) return undefined;
-  if (owner.done) {
+  // Resolving an owner for TurnEnd must not reactivate the row already closed
+  // by its preceding Error. Only live content may activate a pending binding.
+  if (owner.done && create) {
     owner.done = false;
     owner.doneTs = undefined;
     owner.durationMs = undefined;
@@ -6601,6 +6603,9 @@ function reduceEvent(
           t.progress = undefined;
           if (e.result.subtype === "error_during_execution") t.interrupted = true;
           if (e.result.is_error) {
+            if (e.result.subtype !== "error_during_execution") {
+              t.error ??= "本次回复未完成，请重试。";
+            }
             t.terminalSource = e.result.subtype === "error_during_execution"
               ? (rt.state === "interrupting" || rt.state === "draining")
                 ? "remote_interrupt"

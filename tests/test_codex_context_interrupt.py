@@ -331,6 +331,17 @@ def test_codex_terminal_provider_failures_keep_distinct_safe_copy():
             {"message": "model execution failed"},
             "Codex 本次回复未完成，请重试。",
         ),
+        *[(error, "当前模型繁忙，请稍后重试或切换模型。") for error in (
+            {"codexErrorInfo": "serverOverloaded"},
+            {"codex_error_info": "server_overloaded"},
+            {"codexErrorInfo": {"serverOverloaded": {}}},
+            {"message": "Selected model is at capacity. Please try a different model. "
+                        "https://private.invalid/?token=SECRET"},
+        )],
+        (
+            {"codex_error_info": {"response_stream_disconnected": {"http_status_code": 401}}},
+            "模型服务认证已失效或当前账号无权限，请检查当前服务的凭据或账号权限后重试。",
+        ),
     ]
 
     for error, expected in cases:
@@ -354,6 +365,19 @@ def test_codex_terminal_provider_failures_keep_distinct_safe_copy():
         "请检查当前服务的凭据或账号权限后重试。"
     )
     assert "Codex 登录" not in custom_provider[0].message
+
+
+def test_codex_capacity_retry_remains_progress_until_a_real_terminal():
+    from cc_remote.protocol import Error, StateEvent, TurnEnd
+
+    translator = CodexStreamTranslator(8000)
+    events = translator.feed({"method": "error", "params": {
+        "willRetry": True, "error": {"codexErrorInfo": "serverOverloaded"},
+    }})
+    assert len(events) == 1 and isinstance(events[0], StateEvent)
+    assert events[0].state == "running" and events[0].phase == "retrying"
+    assert events[0].detail == "当前模型繁忙，Codex 正在重试…"
+    assert not any(isinstance(event, (Error, TurnEnd)) for event in events)
 
 
 def test_codex_empty_completed_is_an_error_but_tool_activity_is_not():

@@ -988,6 +988,16 @@ def test_turn_marker_parser_bounds_terminal_wire_metadata():
         assert by_id[turn_id].completed_at is None
 
 
+def test_task_complete_with_provider_error_is_a_failed_terminal():
+    parsed = parse_turn_markers((json.dumps({"type": "event_msg", "payload": {
+        "type": "task_complete", "turn_id": "capacity-failed", "duration_ms": 337204,
+        "error": {"codex_error_info": "server_overloaded"},
+    }}) + "\n").encode())
+    assert parsed.finished == {"capacity-failed"}
+    assert parsed.terminals[0].status == "failed"
+    assert parsed.terminals[0].duration_ms == 337204
+
+
 def test_turn_marker_parser_reports_visible_user_message_without_turn_id():
     visible = (json.dumps({
         "type": "event_msg",

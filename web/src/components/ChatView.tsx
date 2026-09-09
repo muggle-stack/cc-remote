@@ -46,7 +46,7 @@ import {
   type HistoryImageVariant,
 } from "../history-image-assets";
 import { ImageLightbox } from "./ImageLightbox";
-import { presentHistoricalTurnProblem } from "../problem-presentation";
+import TurnProblem from "./TurnProblem";
 import { queryImageDimensions } from "../img";
 import {
   updateTurnKeySnapshot,
@@ -2550,6 +2550,8 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
   // history alias. App passes those exact active candidates separately so an
   // idle, browsed, missing, or stale owner can never revive an arbitrary row.
   const ambiguousActiveTurnIdSet = new Set(ambiguousActiveTurnIds);
+  const activeTurnIndex = activeTurnId == null ? -1
+    : turns.findIndex((turn) => turn.id === activeTurnId);
   const fallbackWorkingTurnId = activeTurnId == null
       && ambiguousActiveTurnIdSet.size > 1
     ? [...turns].reverse().find((turn) => {
@@ -2909,6 +2911,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
             {showProcessTimeline && (
               <ProcessTimeline blocks={timelineBlocks} done={t.done}
                 active={activePhase === "process"} engine={engine}
+                outcome={t.error ? "failed" : t.interrupted ? "interrupted" : undefined}
                 durationMs={engine === "codex" ? undefined : t.durationMs}
                 startTs={engine === "codex" ? t.processStartedTs : t.ts}
                 doneTs={engine === "codex" ? t.processDoneTs : t.doneTs}
@@ -2981,7 +2984,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                   kind: "history", turnId, imageId, alt: "生成的图片",
                 })} />)}
             </div>}
-            {t.blocks.length > 0 && (
+            {(t.blocks.length > 0 || t.error) && (
               <>
                 {finalBlocks.map((block) => (
                   <div key={block.message_id} className="assistant-answer-segment">
@@ -3019,6 +3022,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                       onPreviewImage={(src, alt) => setZoom({ kind: "data", src, alt })} />}
                   </div>
                 ))}
+                {t.error && <TurnProblem message={t.error} continuing={activeTurnIndex > ti} />}
                 {/* Final metadata already has a stable row. While running,
                     page discovery shares the existing working indicator below
                     instead of reserving an empty 22px metadata row. */}
@@ -3041,7 +3045,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                   )}
                   <Suspense fallback={null}><PagePreviewLinks turn={t} sid={sid} /></Suspense>
                 </div>}
-                {showCompletionFooter && ti === turns.length - 1
+                {showCompletionFooter && !terminalProblem && ti === turns.length - 1
                   && <div className="turn-done-mark"><ClaudeSpark size={22} /></div>}
               </>
             )}
@@ -3081,9 +3085,6 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
               {renderTurnChanges(t)}
               {t.done && t.interrupted && !t.error
                 && <div className="note interrupted">— 已打断 —</div>}
-              {t.error && <div className="note interrupted turn-failure">{
-                presentHistoricalTurnProblem(t.error)
-              }</div>}
             </div>
             );
           })}

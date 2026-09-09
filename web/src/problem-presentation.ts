@@ -15,6 +15,7 @@ const SAFE_TURN_FAILURE_MESSAGES = new Set([
   "请求过于频繁或当前额度受限，请稍后重试。",
   "请求超时，请重新尝试。",
   "Codex 上游服务暂时不可用，请稍后重试。",
+  "当前模型繁忙，请稍后重试或切换模型。",
   "上游模型因安全策略拒绝了本次请求（cyber_policy）。"
     + "这不是本地权限或网络错误；请核实并说明任务背景与授权范围，"
     + "若属误判请向服务提供方反馈。",
@@ -88,7 +89,10 @@ export function presentCommandProblem(
   }
 }
 
-export function presentHistoricalTurnProblem(message: string): string {
+export function presentHistoricalTurnProblem(message: string, continuing = false): string {
+  if (continuing && message.trim() === "当前模型繁忙，请稍后重试或切换模型。") {
+    return "当前模型繁忙，这次请求未完成。";
+  }
   const normalized = message.trim().toLowerCase();
   if (!normalized || normalized === "error") return "该轮未正常结束";
   return safeTurnFailureMessage(message) ?? "该轮未正常结束";
