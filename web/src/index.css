@@ -1682,7 +1682,8 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 }
 /* LOGIN */
 .login{ position:fixed; inset:var(--app-offset-top,0px) 0 auto; height:var(--app-height,100dvh); z-index:60; background:var(--bg);
-  display:flex; align-items:center; justify-content:center; padding:24px; transition:opacity .3s; }
+  display:flex; align-items:center; justify-content:center; padding:24px; transition:opacity .3s; color-scheme:light; }
+:root[data-theme="dark"] .login{ color-scheme:dark; }
 .login.hide{ opacity:0; pointer-events:none; }
 .login-card{ width:100%; max-width:340px; text-align:center; }
 .login-brand{ display:inline-flex; align-items:center; gap:11px; margin-bottom:6px; }
@@ -1696,6 +1697,12 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .login-field:focus-within{ border-color:var(--accent); }
 .login-field svg{ width:18px; height:18px; color:var(--dim); flex:none; }
 .login-field input{ flex:1; min-width:0; width:auto; border:none; background:none; outline:none; color:var(--text); font-size:16px; }
+/* Autofill can impose a browser-owned background; paint the theme surface
+   over it and keep password dots/revealed text readable in either theme. */
+.login-field input:is(:autofill,:-webkit-autofill){
+  box-shadow:0 0 0 1000px var(--surface) inset;
+  -webkit-text-fill-color:var(--text); caret-color:var(--text);
+}
 .login-reveal{ display:grid; place-items:center; width:40px; height:40px; margin-right:-9px; flex:none;
   border-radius:10px; color:var(--dim); transition:color .16s,background .16s; }
 .login-reveal:hover,.login-reveal[aria-pressed="true"]{ color:var(--accent-ink); background:var(--accent-weak); }
