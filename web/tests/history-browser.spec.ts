@@ -644,7 +644,9 @@ test("generated image live snapshot renders outside collapsed process and duplic
 });
 
 test("provider capacity failure stays local to its turn while the next reply continues", async ({ page }, testInfo) => {
-  const relay = await mockRightPanelRelay(page);
+  // This case drives live packets; canonical history is covered below. Do not
+  // let the generic empty-history fixture erase the completed live failure.
+  const relay = await mockRightPanelRelay(page, { historyReply: () => null });
   await page.goto("/");
   await expect.poll(() => relay.commands.some((c) => c.type === "get_history")).toBe(true);
   const sid = "layout-parent";
