@@ -55,6 +55,7 @@ import {
 import { TurnImagePreviewCache } from "../turn-image-previews";
 import type { TextSelectionGuard } from "../history-selection-guard";
 import { HistoryUserImage } from "./HistoryUserImage";
+import { UserImageButton } from "./UserImageButton";
 import {
   HistoryAnchorController,
   HistoryPageActivityController,
@@ -2808,6 +2809,12 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
             if (historyImagesReady) {
               turnImagePreviewCacheRef.current.release(t.id);
             }
+            const imageSizes = t.images?.length
+              ? t.images.map((img) => queryImageDimensions(img) ?? [180, 180])
+              : t.imageRefs?.map((img) => [img.width, img.height]) ?? [];
+            const imageHeight = Math.max(96, Math.min(180,
+              ...imageSizes.map(([width, height]) =>
+                width > 0 && height > 0 ? 240 * height / width : 180)));
             return (
             <div className="turn" key={virtualItem.key}
               data-index={virtualItem.index} data-turn-id={t.id}
@@ -2842,13 +2849,9 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                       const src = `data:${img.media_type};base64,${img.data}`;
                       const [width, height] = queryImageDimensions(img)
                         ?? [180, 180];
-                      return <button key={i} type="button" className="ubub-image-trigger"
-                        style={{ aspectRatio: `${width} / ${height}` }}
-                        aria-label="预览用户发送的图片"
-                        onClick={() => setZoom({ kind: "data", src, alt: "用户发送的图片" })}>
-                        <img src={src} className="ubub-img" width={width}
-                          height={height} alt="用户发送的图片" />
-                      </button>;
+                      return <UserImageButton key={i} width={width} height={height}
+                        src={src} maxHeight={imageHeight}
+                        onClick={() => setZoom({ kind: "data", src, alt: "用户发送的图片" })} />;
                     })}
                   </div>
                 )}
@@ -2865,6 +2868,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                       return <HistoryUserImage key={image.image_id}
                         turnId={historyTurnId} imageId={image.image_id}
                         width={image.width} height={image.height}
+                        maxHeight={imageHeight}
                         asset={thumbnail} fallback={fallback}
                         onLoad={onLoadHistoryImage}
                         onPreview={() => {

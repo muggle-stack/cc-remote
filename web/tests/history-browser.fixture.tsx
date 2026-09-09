@@ -838,6 +838,8 @@ function CodexLiveBurstFixture() {
   const composerLive = params.has("composer-live");
   const composerPaste = params.has("composer-paste");
   const [lastComposerPrompt, setLastComposerPrompt] = useState<string | null>(null);
+  const [lastComposerImageCount, setLastComposerImageCount] = useState(0);
+  const [composerDraft, setComposerDraft] = useState("a");
   const [state, dispatch] = useReducer(
     reduce,
     undefined,
@@ -997,8 +999,12 @@ function CodexLiveBurstFixture() {
         onEdit={() => {}} onGetDiff={() => {}} />
       {composerLive && (
         <div data-testid="live-composer-shell">
+          {composerPaste && <button data-testid="switch-composer-draft"
+            onClick={() => setComposerDraft((value) => value === "a" ? "b" : "a")}>
+            Switch draft
+          </button>}
           <Composer
-            draftKey="fixture-codex-live-composer"
+            draftKey={`fixture-codex-live-composer-${composerDraft}`}
             draftStore={draftStoreRef.current}
             state={runtime.state}
             connState="connected"
@@ -1023,9 +1029,10 @@ function CodexLiveBurstFixture() {
             engine="codex"
             editPrompt={null}
             onEditConsumed={() => {}}
-            onSendQuery={(prompt) => {
+            onSendQuery={(prompt, images) => {
               if (!composerPaste) return false;
               setLastComposerPrompt(prompt);
+              setLastComposerImageCount(images?.length ?? 0);
               return true;
             }}
             onSteerQuery={() => false}
@@ -1047,6 +1054,9 @@ function CodexLiveBurstFixture() {
           />
           {composerPaste && <output data-testid="composer-paste-output">
             {lastComposerPrompt ?? ""}
+          </output>}
+          {composerPaste && <output data-testid="composer-image-count">
+            {lastComposerImageCount}
           </output>}
         </div>
       )}
@@ -2468,6 +2478,50 @@ function InlineImageEvictionFixture() {
   );
 }
 
+const USER_IMAGE_LAYOUT_SIZES = [[600, 1800], [1200, 650], [1000, 760]];
+
+function UserImageLayoutFixture() {
+  const [stage, setStage] = useState("optimistic");
+  const [shortPrompt, setShortPrompt] = useState(false);
+  const images = useMemo<QueryImg[]>(() => USER_IMAGE_LAYOUT_SIZES.map(([width, height], index) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = width; canvas.height = height;
+    const ctx = canvas.getContext("2d")!;
+    ctx.fillStyle = ["#dbeafe", "#ede9fe", "#dcfce7"][index];
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = "#334155";
+    ctx.font = "48px sans-serif";
+    ctx.fillText(`Screenshot ${index + 1}`, 24, 64);
+    return { media_type: "image/png", data: canvas.toDataURL().split(",")[1] };
+  }), []);
+  const turnId = "user-image-layout";
+  const refs = USER_IMAGE_LAYOUT_SIZES.map(([width, height], i) => ({
+    image_id: `image-${i}`, media_type: "image/png" as const,
+    width, height, byte_size: 1024,
+  }));
+  const assets = Object.fromEntries(refs.map((ref, i) => [
+    historyImageAssetKey(turnId, ref.image_id, "thumbnail"),
+    stage === "ready" ? { status: "ready" as const,
+      mediaType: "image/png", data: images[i].data }
+      : { status: "error" as const },
+  ]));
+  return <main style={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
+    <div>{["optimistic", "loading", "ready", "error"].map((value) =>
+      <button key={value} onClick={() => setStage(value)}>{value}</button>)}
+      <button onClick={() => setShortPrompt((value) => !value)}>prompt length</button>
+    </div>
+    <ChatView sid="image-layout-session" engine="codex"
+      historyRevision="image-layout-r1"
+      historyImageAssets={stage === "loading" ? {} : assets}
+      onLoadHistoryImage={() => true}
+      turns={[{ id: turnId, prompt: shortPrompt ? "看这三张图。"
+        : "请查看这些截图，文字与图片应共享右侧边界。".repeat(6),
+      ...(stage === "optimistic" ? { images } : { imageRefs: refs }),
+      blocks: [], done: true, ts: 1_000, doneTs: 2_000 }]}
+      onEdit={() => {}} onGetDiff={() => {}} />
+  </main>;
+}
+
 function HistoryImageFallbackErrorFixture() {
   const turnId = "history-fallback-error";
   const imageId = "history-fallback-image";
@@ -2931,6 +2985,8 @@ createRoot(document.getElementById("root")!).render(
     ? <InlineImageEvictionFixture />
     : rootParams.has("history-image-fallback-error")
     ? <HistoryImageFallbackErrorFixture />
+    : rootParams.has("user-image-layout")
+    ? <UserImageLayoutFixture />
     : rootParams.has("reducer-pipeline")
     ? <ReducerHistoryBrowserFixture />
     : rootParams.has("codex-live-burst")

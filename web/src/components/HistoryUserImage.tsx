@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import type { Turn } from "../domain/conversation";
+import { UserImageButton } from "./UserImageButton";
 import {
   historyImageDisplaySource,
 } from "../turn-image-previews";
@@ -20,6 +21,7 @@ export function HistoryUserImage({
   imageId,
   width,
   height,
+  maxHeight,
   asset,
   fallback,
   onLoad,
@@ -31,6 +33,7 @@ export function HistoryUserImage({
   imageId: string;
   width: number;
   height: number;
+  maxHeight?: number;
   asset?: HistoryImageAsset;
   fallback?: NonNullable<Turn["images"]>[number];
   onLoad?: (
@@ -159,11 +162,12 @@ export function HistoryUserImage({
     if (accepted) setStalled(false);
   };
   const imageButton = (
-    <button ref={triggerRef} type="button"
-      className="ubub-image-trigger history-image-trigger"
+    <UserImageButton buttonRef={triggerRef}
+      className="history-image-trigger"
+      width={width} height={height} maxHeight={maxHeight}
+      src={src ?? undefined} label={label}
       title={asset?.status === "error" ? asset.error : undefined}
-      style={{ aspectRatio: `${width} / ${height}` }}
-      aria-label={src
+      ariaLabel={src
         ? `预览${label}`
         : canRetry
         ? `重试加载${label}`
@@ -173,14 +177,12 @@ export function HistoryUserImage({
         if (src) onPreview();
         else if (canRetry) retryCanonical();
       }}>
-      {src
-        ? <img src={src} className="ubub-img" alt={label} />
-        : <span className={`history-image-placeholder${
+      <span className={`history-image-placeholder${
           canRetry ? " retryable" : ""
         }`} aria-hidden="true">
           {canRetry ? <><span>{asset?.error ?? "图片加载未完成"}</span><span>点击重试</span></> : ""}
-        </span>}
-    </button>
+        </span>
+    </UserImageButton>
   );
   if (!src || !canRetry) return imageButton;
   return (

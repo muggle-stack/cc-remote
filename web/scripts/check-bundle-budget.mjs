@@ -22,8 +22,11 @@ const DIST = resolve(import.meta.dirname, "../dist");
 // Entry, gzip and request-count caps remain unchanged; no icon dependency.
 // Bounded file pagination, scoped request correlation and retry UI add <4 KiB.
 // No new dependencies; gzip and initial request-count caps remain unchanged.
-const MAX_ENTRY_BYTES = 534 * 1024;
-const MAX_INITIAL_BYTES = 933 * 1024;
+// Steer item ownership, explicit Goal recovery and shared clipboard/UI state
+// add <2 KiB at startup. Attachment decoding and clipboard byte imports load
+// on demand; retain the compressed-size and initial request-count limits.
+const MAX_ENTRY_BYTES = 536 * 1024;
+const MAX_INITIAL_BYTES = 935 * 1024;
 const MAX_INITIAL_GZIP_BYTES = 280 * 1024;
 const MAX_INITIAL_JS_FILES = 4;
 

@@ -7167,6 +7167,129 @@ test("multi-line IME growth stays pinned during a Codex tool burst", async ({
   expect(result.worstDistance).toBeLessThanOrEqual(2);
 });
 
+for (const target of ["composer", "new-chat controls"]) {
+  test(`${target === "composer" ? "long paste" : target} mixed clipboard keeps text and deduplicates supplied images`, async ({ page }) => {
+    await page.goto(target === "composer"
+      ? "/tests/history-browser.html?codex-live-burst=1&composer-live=1&composer-paste=1"
+      : "/tests/history-browser.html?newchat-controls=1");
+    const input = page.locator("textarea").first();
+    await input.fill("before REPLACE after");
+    await input.evaluate((node) => {
+      const ta = node as HTMLTextAreaElement;
+      ta.focus(); ta.setSelectionRange(7, 14);
+      const canvas = document.createElement("canvas");
+      canvas.width = 40; canvas.height = 60;
+      canvas.getContext("2d")!.fillRect(0, 0, 40, 60);
+      const source = canvas.toDataURL();
+      const bytes = Uint8Array.from(atob(source.split(",")[1]), (c) => c.charCodeAt(0));
+      const data = new DataTransfer();
+      data.setData("text/plain", "pasted text");
+      data.setData("text/html", `<div>pasted text<img src="${source}"></div>`);
+      data.items.add(new File([bytes], "clipboard.png", { type: "image/png" }));
+      ta.dispatchEvent(new ClipboardEvent("paste", {
+        bubbles: true, cancelable: true, clipboardData: data,
+      }));
+    });
+    await expect(input).toHaveValue("before pasted text after");
+    await expect(page.locator(".attach-image-preview")).toHaveCount(1);
+    if (target === "composer") {
+      await input.press("Enter");
+      await expect(page.getByTestId("composer-paste-output"))
+        .toHaveText("before pasted text after");
+      await expect(page.getByTestId("composer-image-count")).toHaveText("1");
+    }
+  });
+}
+
+test("long paste Feishu private image references report missing images without losing text", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?codex-live-burst=1&composer-live=1&composer-paste=1");
+  const input = page.locator("textarea").first();
+  await input.focus();
+  await input.evaluate((node) => {
+    const data = new DataTransfer();
+    data.setData("text/plain", "飞书测试文字");
+    data.setData("text/html", '<div data-line="true">飞书测试文字</div>'
+      + Array.from({ length: 3 }, (_, i) => `<div data-line="true"><img data-lark-image-uri="imkey://fixture-${i}" src="native-resource://sdk/image?resource_type=image&key=fixture-${i}"></div>`).join(""));
+    node.dispatchEvent(new ClipboardEvent("paste", {
+      bubbles: true, cancelable: true, clipboardData: data,
+    }));
+  });
+  await expect(input).toHaveValue("飞书测试文字");
+  await expect(page.getByText(/飞书的 3 张图片仅提供应用内引用/)).toBeVisible();
+  await expect(page.locator(".attach-image-preview")).toHaveCount(0);
+});
+
+test("long paste rich images remain in their original draft during asynchronous import", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?codex-live-burst=1&composer-live=1&composer-paste=1");
+  const input = page.locator("textarea").first();
+  await input.evaluate((node) => {
+    const original = File.prototype.arrayBuffer;
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => { release = resolve; });
+    (window as unknown as { finishClipboard: () => void }).finishClipboard = release;
+    File.prototype.arrayBuffer = async function () {
+      await ready; return original.call(this);
+    };
+    const canvas = document.createElement("canvas");
+    canvas.width = 50; canvas.height = 50;
+    const data = new DataTransfer();
+    data.setData("text/plain", "original draft text");
+    data.setData("text/html", `<img src="${canvas.toDataURL()}">`);
+    node.dispatchEvent(new ClipboardEvent("paste", {
+      bubbles: true, cancelable: true, clipboardData: data,
+    }));
+  });
+  await page.getByTestId("switch-composer-draft").click();
+  await expect(input).toHaveValue("");
+  await page.evaluate(() => (window as unknown as { finishClipboard: () => void }).finishClipboard());
+  await expect(input).not.toHaveAttribute("placeholder", /正在安全导入/);
+  await expect(page.locator(".attach-image-preview")).toHaveCount(0);
+  await page.getByTestId("switch-composer-draft").click();
+  await expect(input).toHaveValue("original draft text");
+  await expect(page.locator(".attach-image-preview")).toHaveCount(1);
+});
+
+test("canonical image reference keeps portrait and mixed rows aligned through send and reload", async ({ page }, testInfo) => {
+  await page.goto("/tests/history-browser.html?user-image-layout=1");
+  const turn = page.locator('[data-turn-id="user-image-layout"]');
+  const geometry = () => turn.evaluate((node) => {
+    const prompt = node.querySelector(".ubub")!.getBoundingClientRect();
+    const buttons = [...node.querySelectorAll(".ubub-image-trigger")].map((b) => {
+      const rect = b.getBoundingClientRect();
+      const img = b.querySelector("img")?.getBoundingClientRect();
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height,
+        right: rect.right, imageRight: img?.right ?? rect.right };
+    });
+    return { right: prompt.right, buttons };
+  });
+  const initial = await geometry();
+  expect(initial.buttons).toHaveLength(3);
+  for (const button of initial.buttons) {
+    expect(Math.abs(button.height - initial.buttons[0].height)).toBeLessThan(2);
+  }
+  expect(initial.buttons[0].height / initial.buttons[0].width).toBeCloseTo(3, 1);
+  for (const stage of ["loading", "ready", "error"]) {
+    await page.getByRole("button", { name: stage, exact: true }).click();
+    await expect.poll(async () => (await geometry()).buttons.length).toBe(3);
+    const current = await geometry();
+    current.buttons.forEach((button, i) => {
+      expect(Math.abs(button.width - initial.buttons[i].width)).toBeLessThan(2);
+      expect(Math.abs(button.height - initial.buttons[i].height)).toBeLessThan(2);
+      expect(Math.abs(button.right - initial.buttons[i].right)).toBeLessThan(2);
+      expect(Math.abs(button.imageRight - button.right)).toBeLessThan(2);
+    });
+    expect(Math.abs(current.buttons.at(-1)!.right - current.right)).toBeLessThan(2);
+  }
+  await page.getByRole("button", { name: "prompt length" }).click();
+  expect(Math.abs((await geometry()).buttons.at(-1)!.right - (await geometry()).right))
+    .toBeLessThan(2);
+  await page.reload();
+  await expect(turn.locator(".ubub-image-trigger")).toHaveCount(3);
+  expect((await geometry()).buttons.map((button) => button.width))
+    .toEqual(initial.buttons.map((button) => button.width));
+  await page.screenshot({ path: testInfo.outputPath("user-images.png"), fullPage: true });
+});
+
 test("long paste stays out of the textarea and remains editable before send", async ({
   page,
 }) => {

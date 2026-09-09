@@ -25,7 +25,11 @@ import {
   permissionProfileLabel, type Catalog,
 } from "../data";
 import { CommandSheet } from "./CommandSheet";
-import { attachmentBytes, pickFiles } from "../img";
+import { attachmentBytes } from "../img";
+import {
+  readClipboardImport, resolveClipboardImport, insertClipboardText,
+  type ClipboardImport,
+} from "../clipboard-import";
 import type { PendingQuery } from "../reducer";
 import { canEnqueueQuery, type QueueCapacity } from "../runtime-drain";
 import { ImeSubmitGuard } from "../ime-submit";
@@ -190,6 +194,7 @@ export function Composer(p: Props) {
   const [notice, setNotice] = useState<string | null>(null);
   const noticeTimer = useRef<number | null>(null);
   const [importing, setImporting] = useState(false);
+  const importingRef = useRef(false);
   const [dragDepth, setDragDepth] = useState(0);
   const dragOver = dragDepth > 0;
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -328,10 +333,10 @@ export function Composer(p: Props) {
     growTa();
   }, [growTa, input, p.draftKey]);
   const focusTa = () => setTimeout(() => taRef.current?.focus(), 0);
-  const flash = (msg: string) => {
+  const flash = (msg: string, duration = 2200) => {
     setNotice(msg);
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
-    noticeTimer.current = window.setTimeout(() => setNotice(null), 2200);
+    noticeTimer.current = window.setTimeout(() => setNotice(null), duration);
   };
 
   const onInput = (v: string) => setInput(v);
@@ -371,13 +376,21 @@ export function Composer(p: Props) {
     skillRequestScope,
   ]);
 
-  const onPickFiles = async (fl: FileList | File[] | null) => {
-    if (importing) { flash("附件正在导入，请稍候"); return; }
+  const onPickFiles = async (
+    fl: FileList | File[] | null, clipboard?: ClipboardImport,
+  ) => {
+    if (importingRef.current) { flash("附件正在导入，请稍候"); return; }
     const targetDraftKey = draftKeyRef.current;
+    importingRef.current = true;
     setImporting(true);
     try {
+      const [{ pickFiles }, imported] = await Promise.all([
+        import("../attachment-import"),
+        clipboard ? resolveClipboardImport(clipboard)
+          : Promise.resolve({ files: fl, errors: [] }),
+      ]);
       const batch = await pickFiles(
-        fl, images.length + files.length, attachmentBytes(images, files));
+        imported.files, images.length + files.length, attachmentBytes(images, files));
       if (draftKeyRef.current === targetDraftKey) {
         if (batch.images.length) {
           setImages((previous) => [...previous, ...batch.images]);
@@ -393,8 +406,12 @@ export function Composer(p: Props) {
           files: [...prior.files, ...batch.files],
         });
       }
-      if (batch.errors.length) flash(batch.errors.join("；"));
+      const errors = [...imported.errors, ...batch.errors];
+      if (errors.length) flash(errors.join("；"), 10_000);
+    } catch {
+      flash("附件导入失败，请重新添加；已输入的文字会保留。", 10_000);
     } finally {
+      importingRef.current = false;
       setImporting(false);
     }
   };
@@ -429,27 +446,20 @@ export function Composer(p: Props) {
   // Keep the native textarea for reliable selection/undo/IME. Large text is
   // retained privately by the draft and represented only by an editable card.
   const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    const files: File[] = [];
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i];
-      if (it.kind === "file") {
-        const f = it.getAsFile();
-        if (f) files.push(f);
-      }
-    }
-    if (files.length) { e.preventDefault(); void onPickFiles(files); return; }
-    const text = e.clipboardData.getData("text/plain");
-    if (text.length <= LONG_PASTE_THRESHOLD) return;
+    const clipboard = readClipboardImport(e.clipboardData);
+    const { text } = clipboard;
+    const attachments = clipboard.files.length || clipboard.images.length
+      || clipboard.errors.length;
+    if (!attachments && text.length <= LONG_PASTE_THRESHOLD) return;
     e.preventDefault();
     const textarea = e.currentTarget;
-    const id = uuid();
-    updateDraft((current) => ({
-      ...current,
-      pastes: [...current.pastes, makeComposerPaste(text, id)],
-    }));
-    window.setTimeout(() => textarea.focus(), 0);
+    if (text.length > LONG_PASTE_THRESHOLD) {
+      const id = uuid();
+      updateDraft((current) => ({
+        ...current, pastes: [...current.pastes, makeComposerPaste(text, id)],
+      }));
+    } else if (text) insertClipboardText(textarea, text, setInput);
+    if (attachments) void onPickFiles(null, clipboard);
   };
 
   // Send prompt text to cc, honoring busy/queue/interrupt rules.

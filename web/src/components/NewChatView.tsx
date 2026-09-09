@@ -9,7 +9,11 @@ import { Icon } from "../icons";
 import {
   effortsFor, modelsFor, parseSlash, type Catalog, type Effort, type Model,
 } from "../data";
-import { attachmentBytes, pickFiles } from "../img";
+import { attachmentBytes } from "../img";
+import {
+  readClipboardImport, resolveClipboardImport, insertClipboardText,
+  type ClipboardImport,
+} from "../clipboard-import";
 import type { ClaudeProfileInfo, CodexPermissionMode, CodexProfileInfo, CodexServiceTier, CodexWebSearchMode, CollaborationModeName, PermissionProfileInfo, QueryImg, QueryFile, Space, WorkDashboard } from "../protocol";
 import { ImeSubmitGuard } from "../ime-submit";
 import { PendingImageAttachments } from "./PendingImageAttachments";
@@ -277,6 +281,7 @@ export function NewChatView({ cwd, controlScopeKey,
   const [files, setFiles] = useState<QueryFile[]>([]);
   const [pastes, setPastes] = useState<ComposerPaste[]>([]);
   const [importing, setImporting] = useState(false);
+  const importingRef = useRef(false);
   const [creating, setCreating] = useState(false);
   const [sheetKind, setSheetKind] =
     useState<"models" | "efforts" | null>(null);
@@ -404,36 +409,41 @@ export function NewChatView({ cwd, controlScopeKey,
     icon: candidate.ic,
   }))];
 
-  const onPick = async (fl: FileList | File[] | null) => {
-    if (importing) return;
+  const onPick = async (fl: FileList | File[] | null, clipboard?: ClipboardImport) => {
+    if (importingRef.current) return;
+    importingRef.current = true;
     setImporting(true);
     try {
+      const [{ pickFiles }, imported] = await Promise.all([
+        import("../attachment-import"),
+        clipboard ? resolveClipboardImport(clipboard)
+          : Promise.resolve({ files: fl, errors: [] }),
+      ]);
       const batch = await pickFiles(
-        fl, images.length + files.length, attachmentBytes(images, files));
+        imported.files, images.length + files.length, attachmentBytes(images, files));
       if (batch.images.length) setImages((previous) => [...previous, ...batch.images]);
       if (batch.files.length) setFiles((previous) => [...previous, ...batch.files]);
-      if (batch.errors.length) window.alert(batch.errors.join("；"));
+      const errors = [...imported.errors, ...batch.errors];
+      if (errors.length) window.alert(errors.join("；"));
+    } catch {
+      window.alert("附件导入失败，请重新添加；已输入的文字会保留。");
     } finally {
+      importingRef.current = false;
       setImporting(false);
     }
   };
 
   const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    const fs: File[] = [];
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i];
-      if (it.kind === "file") { const f = it.getAsFile(); if (f) fs.push(f); }
-    }
-    if (fs.length) { e.preventDefault(); void onPick(fs); return; }
-    const pastedText = e.clipboardData.getData("text/plain");
-    if (pastedText.length <= LONG_PASTE_THRESHOLD) return;
+    const clipboard = readClipboardImport(e.clipboardData);
+    const pastedText = clipboard.text;
+    const attachments = clipboard.files.length || clipboard.images.length
+      || clipboard.errors.length;
+    if (!attachments && pastedText.length <= LONG_PASTE_THRESHOLD) return;
     e.preventDefault();
-    setPastes((current) => [
-      ...current,
-      makeComposerPaste(pastedText, uuid()),
-    ]);
+    if (pastedText.length > LONG_PASTE_THRESHOLD) {
+      setPastes((current) => [...current, makeComposerPaste(pastedText, uuid())]);
+    } else if (pastedText) insertClipboardText(e.currentTarget, pastedText, setText);
+    if (attachments) void onPick(null, clipboard);
   };
 
   const send = (value = taRef.current?.value ?? text) => {
