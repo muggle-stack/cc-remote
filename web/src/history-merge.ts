@@ -1359,7 +1359,41 @@ export function mergeInitialHistory(
   reserveMatches((historyTurn, liveTurn) => historyTurn.id === liveTurn.id);
   reserveMatches(sharesExactTurnAlias);
 
-  reserveMatches(sameTurn);
+  const itemOwners = new Map<string, Set<number>>();
+  history.forEach((turn, index) => {
+    for (const block of turn.blocks) {
+      const key = blockIdentity(block);
+      const owners = itemOwners.get(key) ?? new Set<number>();
+      owners.add(index);
+      itemOwners.set(key, owners);
+    }
+  });
+  // A steer and its predecessor share a native task. Reserve exact item
+  // ownership before considering that coarse alias, including an old live row
+  // whose user-message binding has already fallen out of the replay ring.
+  const nativeItemOwners = new Map(live.map((turn) => {
+    const owners = new Set(turn.blocks.flatMap((block) =>
+      [...(itemOwners.get(blockIdentity(block)) ?? [])]));
+    return [turn, owners.size === 1 ? [...owners][0] : -1] as const;
+  }));
+  const historyIndexes = new Map(merged.map((turn, index) => [turn, index]));
+  reserveMatches((historyTurn, liveTurn) => {
+    const nativeId = nativeTaskIdentity(historyTurn);
+    if (!nativeId || nativeId !== nativeTaskIdentity(liveTurn)) return false;
+    return nativeItemOwners.get(liveTurn) === historyIndexes.get(historyTurn);
+  });
+  reserveMatches(sharesCompactionTurnAlias);
+  const historyAliasCounts = new Map<Turn, number>();
+  const liveAliasCounts = new Map<Turn, number>();
+  reserveMatches((historyTurn, liveTurn) => sameTurn(historyTurn, liveTurn)
+    // A task-only fallback is safe only when it identifies one row on both
+    // sides. Even identical prompts can represent distinct user steers.
+    && (historyAliasCounts.get(liveTurn) ?? historyAliasCounts.set(liveTurn,
+      history.filter((candidate) => sameTurn(candidate, liveTurn)).length
+    ).get(liveTurn)) === 1
+    && (liveAliasCounts.get(historyTurn) ?? liveAliasCounts.set(historyTurn,
+      live.filter((candidate) => sameTurn(historyTurn, candidate)).length
+    ).get(historyTurn)) === 1);
 
   const explicitActiveOwnerIndexes = options.activeOwnerId
     ? live.flatMap((turn, index) =>
@@ -1569,8 +1603,26 @@ export function mergeInitialHistory(
   // Apply the precomputed mapping in original live order. Matching direction
   // must not reorder unmatched optimistic rows.
   for (let liveIndex = 0; liveIndex < live.length; liveIndex += 1) {
-    const liveTurn = live[liveIndex];
+    let liveTurn = live[liveIndex];
     const index = matches[liveIndex];
+    if (index >= 0 && (settledCodex || options.reconcileReplayOrphans)) {
+      // Heal an older persisted wrong-segment copy only when this canonical
+      // page assigns its exact item id uniquely to a different row. Missing
+      // summary detail and repeated text are never grounds for deleting items.
+      const owned = (block: Block) => {
+        const owners = itemOwners.get(blockIdentity(block));
+        return !owners || owners.size !== 1 || owners.has(index);
+      };
+      liveTurn = {
+        ...liveTurn,
+        blocks: liveTurn.blocks.filter(owned),
+        liveSpillBlocks: liveTurn.liveSpillBlocks?.filter(owned),
+        detailProjection: liveTurn.detailProjection ? {
+          ...liveTurn.detailProjection,
+          blocks: liveTurn.detailProjection.blocks.filter(owned),
+        } : undefined,
+      };
+    }
     if (index >= 0) {
       if (authoritativeHeadDuplicateMatches.has(liveIndex)) continue;
       if (activeReplayMatches.has(liveIndex)) {

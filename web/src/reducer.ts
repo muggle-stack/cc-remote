@@ -824,6 +824,24 @@ function findTurnByEngineId(turns: Turn[], id: string | null | undefined): Turn 
       && block.turn_id === id));
 }
 
+function findMessageEventOwner(
+  turns: Turn[], messageId: string, turnId: string | null | undefined,
+): Turn | undefined {
+  const owner = findTurnOwningMessage(turns, messageId);
+  // A delayed item/completed or replay delta can name the same native task as
+  // a newer steer. Its immutable item id is the stronger ownership evidence.
+  if (owner) {
+    if (!turnId || findTurnByEngineId([owner], turnId)) return owner;
+    // The accepted steer deliberately retires its predecessor's live task and
+    // fork aliases. Retiring those controls must not retire item ownership.
+    if (!owner.liveTaskId && !owner.forkPointId && !owner.codexTurnId) return owner;
+    // Conflicting explicit ownership is not permission to copy an existing
+    // immutable item into another row.
+    return undefined;
+  }
+  return findTurnByEngineId(turns, turnId);
+}
+
 function boundedTerminalFences(
   values: readonly CodexTerminalFence[],
 ): CodexTerminalFence[] {
@@ -6028,7 +6046,7 @@ function reduceEvent(
     case "assistant_msg_start":
       return patch(state, e.sid, (rt) => {
         const turns = cloneTurns(rt.turns);
-        const explicit = findTurnByEngineId(turns, e.turn_id);
+        const explicit = findMessageEventOwner(turns, e.message_id, e.turn_id);
         const t = explicit ?? (!e.turn_id
           ? findTurnOwningMessage(turns, e.message_id)
             ?? preSteerTurn(rt, turns)
@@ -6038,7 +6056,8 @@ function reduceEvent(
         // An explicit owner outside the materialized page must never fall
         // through to a newer live tail. Canonical History will restore it.
         if (!t) { rt.turns = turns; return; }
-        const detachedBackground = e.background === true && t.done;
+        const detachedBackground = t.done && (e.background === true
+          || (!!rt.liveOwner && !turnHasIdentityAlias(t, rt.liveOwner.turnId)));
         if (!detachedBackground) {
           markTurnAsLive(rt, t.id, boundCompletedTurns, e.seq);
         }
@@ -6070,7 +6089,7 @@ function reduceEvent(
     case "delta":
       return patch(state, e.sid, (rt) => {
         const turns = cloneTurns(rt.turns);
-        const explicit = findTurnByEngineId(turns, e.turn_id);
+        const explicit = findMessageEventOwner(turns, e.message_id, e.turn_id);
         const t = explicit ?? (!e.turn_id
           ? findTurnOwningMessage(turns, e.message_id)
             ?? preSteerTurn(rt, turns)
@@ -6078,7 +6097,8 @@ function reduceEvent(
               rt, turns, e.message_id, eventTimestampMs(e.ts), e.seq)
           : undefined);
         if (!t) { rt.turns = turns; return; }
-        const detachedBackground = e.background === true && t.done;
+        const detachedBackground = t.done && (e.background === true
+          || (!!rt.liveOwner && !turnHasIdentityAlias(t, rt.liveOwner.turnId)));
         if (!detachedBackground) {
           markTurnAsLive(rt, t.id, boundCompletedTurns, e.seq);
         }
@@ -6232,14 +6252,15 @@ function reduceEvent(
     case "assistant_msg_end":
       return patch(state, e.sid, (rt) => {
         const turns = cloneTurns(rt.turns);
-        const explicit = findTurnByEngineId(turns, e.turn_id);
+        const explicit = findMessageEventOwner(turns, e.message_id, e.turn_id);
         const candidates = e.turn_id ? [explicit] : turns;
         for (const t of candidates) {
           if (!t) continue;
           const b = mutableTurnBlocks(t).find((b) => b.kind === "text"
             && b.message_id === e.message_id) as TextBlock | undefined;
           if (b) {
-            const detachedBackground = e.background === true && t.done;
+            const detachedBackground = t.done && (e.background === true
+              || (!!rt.liveOwner && !turnHasIdentityAlias(t, rt.liveOwner.turnId)));
             if (!detachedBackground) {
               markTurnAsLive(rt, t.id, boundCompletedTurns, e.seq);
             }
