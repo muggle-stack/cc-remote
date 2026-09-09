@@ -2318,6 +2318,7 @@ test("artifact-audio stops and releases its source when refreshed or closed", as
   await expect(page.getByLabel("second.wav 播放器")).toBeVisible();
   expect(await old.evaluate((node) => (node as HTMLAudioElement).paused)).toBe(true);
   expect(await old.getAttribute("src")).toBeNull();
+  await expect(audio).toHaveAttribute("src", /^blob:/);
   const next = (await audio.elementHandle())!;
   const nextUrl = await next.getAttribute("src");
   expect(nextUrl).not.toBe(oldUrl);

@@ -8,7 +8,7 @@ const WEBKIT_LIVE_INTERACTION_TESTS =
 const WEBKIT_RENDERING_TESTS =
   /generated image|external preview|Codex visualize output|Codex file citations|local Markdown file link|mounted message image|two visible images|HTML preview|artifact-(?:audio|svg|markdown-svg|pdf|gif|invalid-gif)|mobile Markdown source editor|dark desktop code block|Codex settings|Claude settings|history page cache|instant session cache|session cache rejects|canonical image reference|fallback image preview|streaming rerenders|expanded tool batches|Mermaid|chat formulas|Markdown disclosures|real wide Robot|pending composer image|profile keycaps|profile session card (?:edges|manual unread)/;
 const WEBKIT_GOAL_PLAN_TESTS = /[Pp]lan|[Gg]oal/;
-const TURN_REGRESSION_TESTS = /turn regressions/;
+const TURN_REGRESSION_TESTS = /turn regressions|provider capacity/;
 const WEBKIT_SELECTION_TESTS =
   /desktop (text selection|native selection|wheel scrolling)|extending a released native selection|late cached-newer page cannot evict an active text selection/;
 
