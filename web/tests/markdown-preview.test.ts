@@ -1443,6 +1443,36 @@ $$`,
   assert.match(pdfMarkup, /PPTX → PDF/);
   assert.match(pdfMarkup, /正在准备预览/);
 
+  let audioState = reduce(initialState, {
+    type: "open_file_loading", file: "sample.wav", sid: "audio-session",
+    requestId: "audio-1", kind: "file",
+  });
+  const audioReply = { v: 58, type: "file_preview", ts: 4, sid: "audio-session",
+    path: "sample.wav", request_id: "audio-1", format: "audio", content: "",
+    media_type: "audio/wav", data: "UklGRg==", size: 4096,
+    truncated: false, mtime_ns: "1" } as ServerEvent;
+  const audioLoading = audioState;
+  assert.equal(reduce(audioState, { type: "event", event: {
+    ...audioReply, sid: "another-session",
+  } }), audioLoading, "audio bytes must stay in their requesting session");
+  audioState = reduce(audioState, { type: "event", event: audioReply });
+  assert.equal(audioState.artifact?.kind, "audio");
+  assert.equal(audioState.artifact?.mediaType, "audio/wav");
+  const audioMarkup = renderToStaticMarkup(createElement(ArtifactPanel, {
+    artifact: audioState.artifact!, active: "diff", hasBtw: false,
+    onTab: () => {}, onClose: () => {},
+  }));
+  assert.match(audioMarkup, /<audio[^>]*controls/);
+  assert.doesNotMatch(audioMarkup, /auto[Pp]lay/);
+  assert.match(audioMarkup, /刷新文件/);
+  audioState = reduce(audioState, {
+    type: "open_file_loading", file: "next.wav", sid: "audio-session",
+    requestId: "audio-2", kind: "file",
+  });
+  assert.equal(audioState.artifact?.data, undefined);
+  assert.equal(reduce(audioState, { type: "event", event: audioReply }), audioState,
+    "a late audio response cannot replace the newly selected file");
+
   const sandbox = buildSandboxDocument("<h1>safe</h1>");
   assert.match(sandbox, /Content-Security-Policy/);
   assert.match(sandbox, /default-src &#39;none&#39;|default-src 'none'/);

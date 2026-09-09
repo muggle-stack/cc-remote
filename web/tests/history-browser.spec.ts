@@ -2193,6 +2193,95 @@ for (const fixture of ["artifact-svg", "artifact-markdown-svg"] as const) {
   });
 }
 
+test("artifact-audio plays and seeks WAV under production CSP on desktop and mobile", async ({ page }, testInfo) => {
+  await gotoWithProductionCsp(page, "/tests/history-browser.html?artifact-audio=1");
+  const audio = page.getByLabel("reference.wav 播放器");
+  await expect(audio).toBeVisible();
+  await expect(audio).toHaveAttribute("controls", "");
+  await expect(audio).not.toHaveAttribute("autoplay");
+  await expect.poll(() => audio.evaluate((node) => (node as HTMLAudioElement).duration)).toBe(3);
+  expect(await audio.evaluate((node) => (node as HTMLAudioElement).paused)).toBe(true);
+  const box = await audio.boundingBox();
+  await audio.click({ position: { x: 24, y: box!.height / 2 } });
+  await expect.poll(() => audio.evaluate((node) => (node as HTMLAudioElement).currentTime)).toBeGreaterThan(0.1);
+  await audio.evaluate((node) => { const media = node as HTMLAudioElement; media.pause(); media.currentTime = 1.5; });
+  await expect.poll(() => audio.evaluate((node) => (node as HTMLAudioElement).currentTime)).toBe(1.5);
+  await page.getByLabel("播放速度").selectOption("1.5");
+  expect(await audio.evaluate((node) => (node as HTMLAudioElement).playbackRate)).toBe(1.5);
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("link", { name: "下载音频" }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe("reference.wav");
+  const bytes = readFileSync((await download.path())!);
+  expect(bytes.length).toBe(48044);
+  expect(bytes.subarray(8, 12).toString()).toBe("WAVE");
+  expect(await page.locator(".artifact-audio-card").evaluate((node) => node.scrollWidth - node.clientWidth)).toBeLessThan(2);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("audio-preview.png") });
+});
+
+test("artifact-audio stops and releases its source when refreshed or closed", async ({ page }) => {
+  await page.addInitScript(() => {
+    const revoke = URL.revokeObjectURL.bind(URL);
+    (window as unknown as { revokedAudioUrls: string[] }).revokedAudioUrls = [];
+    URL.revokeObjectURL = (url) => {
+      (window as unknown as { revokedAudioUrls: string[] }).revokedAudioUrls.push(url);
+      revoke(url);
+    };
+  });
+  await gotoWithProductionCsp(page, "/tests/history-browser.html?artifact-audio=1");
+  const audio = page.locator("audio");
+  await expect.poll(() => audio.evaluate((node) => (node as HTMLAudioElement).duration)).toBe(3);
+  const old = (await audio.elementHandle())!;
+  const oldUrl = await old.getAttribute("src");
+  const box = await audio.boundingBox();
+  await audio.click({ position: { x: 24, y: box!.height / 2 } });
+  await expect.poll(() => old.evaluate((node) => (node as HTMLAudioElement).paused)).toBe(false);
+  await page.getByRole("button", { name: "刷新文件", exact: true }).click();
+  await expect(page.getByLabel("second.wav 播放器")).toBeVisible();
+  expect(await old.evaluate((node) => (node as HTMLAudioElement).paused)).toBe(true);
+  expect(await old.getAttribute("src")).toBeNull();
+  const next = (await audio.elementHandle())!;
+  const nextUrl = await next.getAttribute("src");
+  expect(nextUrl).not.toBe(oldUrl);
+  await page.getByRole("button", { name: "收起", exact: true }).click();
+  await expect(page.getByTestId("audio-preview-closed")).toBeVisible();
+  expect(await next.evaluate((node) => (node as HTMLAudioElement).paused)).toBe(true);
+  expect(await next.getAttribute("src")).toBeNull();
+  const revoked = await page.evaluate(() => (window as unknown as { revokedAudioUrls: string[] }).revokedAudioUrls);
+  expect(revoked).toContain(oldUrl);
+  expect(revoked).toContain(nextUrl);
+});
+
+test("artifact-audio explains decoder errors and recovers on the next file", async ({ page }) => {
+  await gotoWithProductionCsp(page, "/tests/history-browser.html?artifact-audio=invalid");
+  await expect(page.getByRole("alert")).toContainText("无法播放该音频编码");
+  await expect(page.getByRole("link", { name: "下载音频" })).toBeVisible();
+  await page.getByRole("button", { name: "刷新文件", exact: true }).click();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect.poll(() => page.locator("audio").evaluate((node) => (node as HTMLAudioElement).duration)).toBe(3);
+});
+
+test("artifact-audio decodes an optional operator WAV sample without conversion", async ({ page }, testInfo) => {
+  const path = process.env.CC_REMOTE_AUDIO_TEST_FILE;
+  test.skip(!path, "No operator audio sample selected");
+  const bytes = readFileSync(path!);
+  await page.addInitScript((data) => {
+    (window as unknown as { audioFixture: { data: string; name: string } }).audioFixture = {
+      data, name: "operator-sample.wav",
+    };
+  }, bytes.toString("base64"));
+  await gotoWithProductionCsp(page, "/tests/history-browser.html?artifact-audio=1");
+  const audio = page.locator("audio");
+  await expect.poll(() => audio.evaluate((node) => (node as HTMLAudioElement).duration)).toBeGreaterThan(0);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("link", { name: "下载音频" }).click();
+  const downloaded = await downloadPromise;
+  expect(readFileSync((await downloaded.path())!)).toEqual(bytes);
+  await page.screenshot({ path: testInfo.outputPath("operator-audio-preview.png") });
+});
+
 test("artifact-pdf renders paged PDF content under the production CSP", async ({
   page,
 }) => {

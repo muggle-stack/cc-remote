@@ -2591,6 +2591,43 @@ const UNSAFE_SVG = [
   "</svg>",
 ].join("");
 
+function buildAudioFixture(): string {
+  const bytes = new Uint8Array(44 + 3 * 8000 * 2);
+  const view = new DataView(bytes.buffer);
+  const text = (at: number, value: string) => {
+    for (let index = 0; index < value.length; index++) bytes[at + index] = value.charCodeAt(index);
+  };
+  text(0, "RIFF"); view.setUint32(4, bytes.length - 8, true);
+  text(8, "WAVEfmt "); view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, 8000, true); view.setUint32(28, 16000, true);
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  text(36, "data"); view.setUint32(40, bytes.length - 44, true);
+  return window.btoa(Array.from(bytes, (value) => String.fromCharCode(value)).join(""));
+}
+
+function AudioPreviewFixture() {
+  const [revision, setRevision] = useState(0);
+  const [closed, setClosed] = useState(false);
+  const fixture = useMemo(() => {
+    const supplied = (window as unknown as {
+      audioFixture?: { data: string; name: string };
+    }).audioFixture;
+    return supplied ?? { data: buildAudioFixture(), name: "reference.wav" };
+  }, []);
+  const invalid = new URLSearchParams(location.search).get("artifact-audio") === "invalid";
+  return <main style={{ height: "100dvh" }}>
+    {closed ? <p data-testid="audio-preview-closed">已关闭</p> : <ArtifactPanel
+      artifact={{ kind: "audio", file: revision ? "second.wav" : fixture.name,
+        sid: "audio-session", requestId: `audio-request-${revision}`,
+        data: invalid && !revision ? window.btoa("RIFF0000WAVE") : fixture.data,
+        mediaType: "audio/wav", size: atob(fixture.data).length }}
+      active="diff" hasBtw={false} onTab={() => {}}
+      onRefresh={() => setRevision((value) => value + 1)}
+      onClose={() => setClosed(true)} />}
+  </main>;
+}
+
 function buildPdfFixture(): string {
   const firstPage = [
     "0.15 0.35 0.75 rg",
@@ -2946,7 +2983,9 @@ function CodexFileCitationFixture() {
 
 const rootParams = new URLSearchParams(window.location.search);
 createRoot(document.getElementById("root")!).render(
-  rootParams.has("artifact-html")
+  rootParams.has("artifact-audio")
+    ? <AudioPreviewFixture />
+    : rootParams.has("artifact-html")
     ? <ArtifactPreviewFixture kind="html" />
     : rootParams.has("artifact-pdf")
     ? <ArtifactPreviewFixture kind="pdf" />

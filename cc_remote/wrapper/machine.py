@@ -99,6 +99,7 @@ from cc_remote.codex_daemon_restart import (
     restart_state_is_stale,
     restart_state_path,
 )
+from cc_remote.audio_preview import AUDIO_PREVIEW_MEDIA_TYPES, validate_audio_preview
 from cc_remote.log import logger
 from cc_remote.workspaces import (
     WORK_UPLOADS_MARKER,
@@ -1945,6 +1946,7 @@ class WrapperMachine:
     }
     ARTIFACT_PREVIEW_MEDIA_TYPES = {
         **PREVIEW_ASSET_MEDIA_TYPES,
+        **AUDIO_PREVIEW_MEDIA_TYPES,
         ".pdf": "application/pdf",
     }
     SAFE_RETRY_COMMANDS = frozenset({
@@ -24659,7 +24661,7 @@ class WrapperMachine:
             cls._validate_rendered_preview(media_type, data)
             return {
                 "path": relative,
-                "format": "pdf" if media_type == "application/pdf" else "image",
+                "format": cls._preview_format(relative),
                 "media_type": media_type,
                 "data": data,
                 "size": file_stat.st_size,
@@ -24680,6 +24682,9 @@ class WrapperMachine:
 
     @staticmethod
     def _validate_rendered_preview(media_type: str, data: bytes) -> None:
+        if media_type.startswith("audio/"):
+            validate_audio_preview(media_type, data)
+            return
         if media_type == "image/svg+xml":
             WrapperMachine._validate_svg_preview(data)
             return
@@ -25066,6 +25071,8 @@ class WrapperMachine:
             return "pdf"
         if suffix in cls.PREVIEW_ASSET_MEDIA_TYPES:
             return "image"
+        if suffix in AUDIO_PREVIEW_MEDIA_TYPES:
+            return "audio"
         return "text"
 
     @classmethod

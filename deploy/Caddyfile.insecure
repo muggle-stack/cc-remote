@@ -19,7 +19,7 @@ http://cc-remote.example.com {
 	# Bridge responses retain the relay's HTTP sandbox and per-publication CSP.
 	header @application {
 		# Match the TLS template's narrow HTTPS-only GitHub image allowlist.
-		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://github.com/user-attachments/assets/ https://raw.githubusercontent.com https://user-images.githubusercontent.com https://private-user-images.githubusercontent.com https://camo.githubusercontent.com https://avatars.githubusercontent.com https://github-production-user-asset-6210df.s3.amazonaws.com; connect-src 'self' ws://cc-remote.example.com; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://github.com/user-attachments/assets/ https://raw.githubusercontent.com https://user-images.githubusercontent.com https://private-user-images.githubusercontent.com https://camo.githubusercontent.com https://avatars.githubusercontent.com https://github-production-user-asset-6210df.s3.amazonaws.com; media-src blob:; connect-src 'self' ws://cc-remote.example.com; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "no-referrer"

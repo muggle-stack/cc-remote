@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 57
+PROTOCOL_VERSION = 58
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -2215,7 +2215,7 @@ class DiffReport(_Base):
 
 
 class GetFilePreview(_Command):
-    """client -> wrapper: read one UTF-8 text file below the session cwd."""
+    """client -> wrapper: read one authorized, bounded file preview."""
     type: Literal["get_file_preview"] = "get_file_preview"
     path: PreviewPath
     request_id: WireId
@@ -2231,11 +2231,13 @@ class FilePreview(_Base):
     type: Literal["file_preview"] = "file_preview"
     path: PreviewPath
     request_id: WireId
-    format: Literal["markdown", "text", "html", "image", "pdf"] = "text"
+    format: Literal["markdown", "text", "html", "image", "pdf", "audio"] = "text"
     content: PreviewContent = ""
     media_type: Optional[Literal[
         "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
         "image/svg+xml", "application/pdf",
+        "audio/wav", "audio/mpeg", "audio/mp4", "audio/aac", "audio/flac",
+        "audio/ogg", "audio/webm",
     ]] = None
     data: Optional[ArtifactPreviewData] = None
     converted_from: Optional[str] = Field(default=None, max_length=16)
@@ -2306,7 +2308,7 @@ class PreviewAuthorizationRequired(_Base):
     operation: Literal["file_preview", "preview_asset"]
     path: PreviewPath
     resolved_path: PreviewPath
-    format: Literal["markdown", "text", "html", "image", "pdf"] = "text"
+    format: Literal["markdown", "text", "html", "image", "pdf", "audio"] = "text"
     preview_id: Optional[WireId] = None
 
 

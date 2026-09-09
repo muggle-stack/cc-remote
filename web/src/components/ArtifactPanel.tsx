@@ -27,6 +27,7 @@ import { MermaidBlock } from "./MermaidBlock";
 import { PreviewAuthorizationPrompt } from "./PreviewAuthorizationPrompt";
 import { PanelResizer } from "./PanelResizer";
 import { PdfArtifactPreview } from "./PdfArtifactPreview";
+import { AudioArtifactPreview } from "./AudioArtifactPreview";
 import { previewImageDimension, rehypePreviewHtml } from "../markdown-preview-html";
 
 const EMPTY_GIT_DIFF_SECTIONS: GitDiffSection[] = [];
@@ -526,8 +527,8 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
   ]);
 
   const title = artifact.file.split("/").pop()
-    || (["md", "file", "html", "image", "pdf"].includes(artifact.kind) ? "文件预览" : "改动");
-  const renderedArtifact = ["image", "pdf"].includes(artifact.kind)
+    || (["md", "file", "html", "image", "pdf", "audio"].includes(artifact.kind) ? "文件预览" : "改动");
+  const renderedArtifact = ["image", "pdf", "audio"].includes(artifact.kind)
     || (artifact.kind === "html" && mode === "preview");
 
   return (
@@ -566,7 +567,7 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
           title="由 nono 本机沙箱临时转换，VPS 不保存文件">
           {artifact.convertedFrom.toUpperCase()} → PDF
         </span>}
-        {["md", "file", "html", "image", "pdf"].includes(artifact.kind) && <button className="iconbtn"
+        {["md", "file", "html", "image", "pdf", "audio"].includes(artifact.kind) && <button className="iconbtn"
           onClick={() => onRefresh?.(artifact.file, artifact.line)}
           aria-label="刷新文件" title="重新读取文件"><Icon name="refresh" size={17} /></button>}
         <button className="iconbtn" onClick={leavePanel} aria-label="收起"><Icon name="chevrons-right" /></button>
@@ -580,7 +581,7 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
             authorization={artifact.authorization}
             onDecision={onAuthorizePreview} />
         ) : loading ? (
-          <div className="diff-empty"><span className="thinking"><span/><span/><span/></span> {["md", "file", "html", "image", "pdf"].includes(artifact.kind) ? "正在读取文件…" : "正在读取 diff…"}</div>
+          <div className="diff-empty"><span className="thinking"><span/><span/><span/></span> {["md", "file", "html", "image", "pdf", "audio"].includes(artifact.kind) ? "正在读取文件…" : "正在读取 diff…"}</div>
         ) : artifact.error ? (
           <div className="preview-error"><Icon name="read" size={18} />{artifact.error}</div>
         ) : artifact.kind === "gitdiff" ? (
@@ -636,6 +637,9 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
             title={title} />
         ) : artifact.kind === "pdf" ? (
           <PdfArtifactPreview data={artifact.data} title={title} />
+        ) : artifact.kind === "audio" ? (
+          <AudioArtifactPreview key={artifactKey} data={artifact.data}
+            mediaType={artifact.mediaType} title={title} size={artifact.size} />
         ) : artifact.kind === "file" ? (
           <>
             {artifact.truncated && <div className="preview-truncated">文件共 {artifact.size?.toLocaleString()} 字节，仅预览前 512 KiB。</div>}

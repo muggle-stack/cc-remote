@@ -117,7 +117,8 @@ deployment.
   images from the exact GitHub hosts listed in the template, including the
   dedicated attachment redirect bucket, but not arbitrary external images,
   scripts, or fetch connections. The HTML preview runner remains isolated.
-  Image-policy changes require the managed Caddy configuration to be updated
+  Audio previews use bounded local Blob URLs permitted by `media-src blob:`.
+  Image/media-policy changes require the managed Caddy configuration to be updated
   through the VPS activation transaction; replacing the Web bundle alone is
   insufficient. Do not replace the host allowlist with `https:` or wildcards.
 - `Caddyfile.insecure` — explicit plain-HTTP public-IP template selected only
@@ -148,11 +149,11 @@ deployment.
   migration transaction, restores matching pre-release data before an older
   wrapper is restarted, and verifies both engines' Work ownership backfills.
 
-Protocol v57 is a coordinated upgrade: publish freshly built Relay/Web and
+Protocol v58 is a coordinated upgrade: publish freshly built Relay/Web and
 Wrapper artifacts from the same tagged commit. The strict protocol gate is
 intentional and mixed protocol versions will not communicate. `setup-vps.sh`
 rejects a missing or mismatched web build manifest. Stop the wrapper first;
-activate the v57 relay/web release; then start the v57 wrapper.
+activate the v58 relay/web release; then start the v58 wrapper.
 
 The wrapper installer treats local Work data and versioned private control state
 as part of the release
@@ -165,8 +166,8 @@ the previous code. If data restoration fails, it leaves the
 wrapper stopped instead of running old code against a new schema. A manual or
 legacy-layout deployment must use the same order: stop the wrapper, run
 `work_registry_snapshot.py snapshot` from the new staging tree, activate and
-verify v57, and retain that snapshot with the previous release. To roll back,
-stop v57, run `work_registry_snapshot.py restore`, then switch and start the old
+verify v58, and retain that snapshot with the previous release. To roll back,
+stop v58, run `work_registry_snapshot.py restore`, then switch and start the old
 release. Never copy only `registry.sqlite3` while the wrapper is live because
 committed state may still be in its WAL file. Restoring a pre-release snapshot
 also restores pre-release Work metadata: sessions, projects, or schedule state

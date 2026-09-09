@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+- Play linked audio directly in desktop and mobile file previews (protocol v58),
+  with native playback/seeking, speed selection, original-file download, and
+  playback cleanup on close or file changes. Preserve the existing 8 MiB limit,
+  exact-file authorization and requester-only transport; allow media Blob URLs
+  in the application CSP without expanding script or network permissions.
 - Speed up Codex history reads without changing wire/UI behavior: prefetch one
   older summary page after an explicit idle-session read, reuse bounded pages
   only while the exact rollout fingerprint is unchanged, and batch native

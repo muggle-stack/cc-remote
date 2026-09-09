@@ -837,6 +837,20 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .artifact-html-stage .artifact-html-preview{ flex:1; min-height:0; }
 .artifact-image-stage{ display:grid; width:100%; min-width:0; height:100%; place-items:center; overflow:auto; padding:16px; }
 .artifact-image-stage img{ display:block; max-width:100%; max-height:100%; object-fit:contain; border-radius:8px; box-shadow:var(--shadow-sm); }
+.artifact-audio-stage{ display:flex; width:100%; min-width:0; min-height:0; align-items:flex-start; justify-content:center; overflow:auto; padding:clamp(16px,4vw,32px); }
+.artifact-audio-card{ width:100%; max-width:520px; min-width:0; padding:20px; border:1px solid var(--border); border-radius:16px; background:var(--surface); box-shadow:var(--shadow-sm); }
+.artifact-audio-heading{ display:flex; align-items:center; gap:12px; margin-bottom:20px; min-width:0; }
+.artifact-audio-icon{ display:grid; flex:none; width:44px; height:44px; place-items:center; color:var(--accent-ink); background:var(--accent-weak); border-radius:12px; }
+.artifact-audio-heading>div{ display:flex; min-width:0; flex-direction:column; gap:5px; }
+.artifact-audio-heading strong{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px; }
+.artifact-audio-heading div>span{ color:var(--dim); font-size:12px; }
+.artifact-audio-card audio{ display:block; width:100%; min-width:0; }
+.artifact-audio-actions{ display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; margin-top:16px; color:var(--dim); font-size:12px; }
+.artifact-audio-actions label{ display:flex; align-items:center; gap:6px; }
+.artifact-audio-actions select{ min-height:34px; padding:4px 6px; border:1px solid var(--border); border-radius:7px; background:var(--raised); color:var(--text); font:inherit; }
+.artifact-audio-actions a{ display:inline-flex; align-items:center; min-height:34px; color:var(--accent-ink); text-decoration:none; }
+.artifact-audio-actions a:hover{ text-decoration:underline; }
+.artifact-audio-error{ margin:12px 0 0; color:var(--danger); font-size:12px; line-height:1.6; }
 .artifact-pdf-stage{ display:flex; flex:1; width:100%; min-width:0; height:100%; min-height:0; flex-direction:column; }
 .artifact-pdf-controls{ display:flex; flex:none; min-height:38px; align-items:center; justify-content:center; gap:10px; padding:6px 10px; border-bottom:1px solid var(--line); background:var(--surface); }
 .artifact-pdf-controls span{ min-width:76px; color:var(--dim); font:11px/1.4 var(--mono); text-align:center; }

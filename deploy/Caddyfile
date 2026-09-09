@@ -24,7 +24,7 @@ cc-remote.example.com {
 		Strict-Transport-Security "max-age=31536000"
 		# Only GitHub image hosts and its attachment redirect bucket are external.
 		# Keep scripts, connections, and the HTML preview runner isolated below.
-		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://github.com/user-attachments/assets/ https://raw.githubusercontent.com https://user-images.githubusercontent.com https://private-user-images.githubusercontent.com https://camo.githubusercontent.com https://avatars.githubusercontent.com https://github-production-user-asset-6210df.s3.amazonaws.com; connect-src 'self' wss://cc-remote.example.com; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://github.com/user-attachments/assets/ https://raw.githubusercontent.com https://user-images.githubusercontent.com https://private-user-images.githubusercontent.com https://camo.githubusercontent.com https://avatars.githubusercontent.com https://github-production-user-asset-6210df.s3.amazonaws.com; media-src blob:; connect-src 'self' wss://cc-remote.example.com; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "no-referrer"
