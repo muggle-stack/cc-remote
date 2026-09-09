@@ -68,6 +68,7 @@ export interface WsCallbacks {
   onConnState: (s: ConnState, detail?: string) => void;
   onAuthFail?: () => void;
   onCommandError?: (detail: string) => void;
+  onCommandCompleted?: (commandId: string) => void;
   onWrapperGenerationChanged?: () => void;
   onOutboxChanged?: (protectedSessionIds: string[]) => void;
 }
@@ -841,8 +842,8 @@ export class RelayWs {
     });
   }
 
-  sendSetPermissionProfile(profile: string): void {
-    this.send({
+  sendSetPermissionProfile(profile: string): string | null {
+    return this.sendTracked({
       v: PROTOCOL_VERSION,
       type: "set_permission_profile",
       profile,
@@ -1780,6 +1781,7 @@ export class RelayWs {
           this.completeInvalidatedSessionListRefresh(
             msg.cmd_id, socketGeneration);
           if (this.outbox.ack(msg.client_id, msg.cmd_id)) {
+            this.cb.onCommandCompleted?.(msg.cmd_id);
             this.cb.onOutboxChanged?.(this.pendingSessionIds());
           }
           return;

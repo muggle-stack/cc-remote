@@ -19910,13 +19910,13 @@ class WrapperMachine:
         if ctx is None:
             return await self._missing_session_error(
                 cmd, "切换执行环境")
-        if ctx.state != "idle":
-            error = Error(
-                code=ERR_BUSY,
-                message="Codex 正在处理回合，完成或中断后再切换执行环境。",
-            )
-            await self._emit(ctx, error)
-            return error
+        # Official thread/settings/update is a live control. Serialize the
+        # catalog check, apply and publication, without waiting on the turn's
+        # query lock or interrupting its stream.
+        async with ctx.permission_profile_lock:
+            return await self._set_permission_profile(ctx, cmd)
+
+    async def _set_permission_profile(self, ctx, cmd):
         control_error = await self._runtime_control_preflight(
             ctx, action="切换执行环境")
         if control_error is not None:

@@ -275,6 +275,7 @@ class SessionContext:
     codex_effort_resolve_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock)
     announced_perm: Optional[str] = None
+    permission_profile_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     announced_permission_profile: Optional[str] = None
     announced_web_search: Optional[str] = None
     announced_collaboration_mode: Optional[str] = None

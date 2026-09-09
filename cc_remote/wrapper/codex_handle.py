@@ -1597,6 +1597,7 @@ class CodexHandle:
         self._reader: Optional[asyncio.Task] = None
         self._stderr_task: Optional[asyncio.Task] = None
         self._thread_settings_updated = asyncio.Event()
+        self._thread_settings_lock = asyncio.Lock()
         self._thread_delete_target: Optional[str] = None
         self._thread_deleted_ids: Optional[list[str]] = None
         self.thread_delete_notifications_overflowed = False
@@ -4566,6 +4567,19 @@ class CodexHandle:
         self.approval_policy: Any = value
 
     async def _update_thread_settings(
+        self, *, wait_for_notification: bool = False,
+        _expected_scope: Optional[tuple[object, ...]] = None, **settings: Any,
+    ) -> bool:
+        # All live controls share one notification event. A second request must
+        # not clear/consume the first request's authoritative snapshot.
+        async with self._thread_settings_lock:
+            if _expected_scope is not None and _expected_scope != (
+                    self.thread_id, self._cwd, self._generation):
+                raise RuntimeError("Codex permission scope changed before update")
+            return await self._update_thread_settings_serialized(
+                wait_for_notification=wait_for_notification, **settings)
+
+    async def _update_thread_settings_serialized(
         self, *, wait_for_notification: bool = False, **settings: Any,
     ) -> bool:
         if not self.thread_id:
@@ -4851,15 +4865,24 @@ class CodexHandle:
         if self.work_mode:
             raise ValueError(
                 "Codex Work permission profile is fixed to cc_remote_work")
+        scope = (self.thread_id, self._cwd, self._generation)
         catalog = await self.list_permission_profiles()
+        if scope != (self.thread_id, self._cwd, self._generation):
+            raise RuntimeError("Codex permission scope changed during catalog read")
         selected = next(
             (item for item in catalog if item["id"] == profile), None)
         if selected is None or not selected["allowed"]:
             raise ValueError(
                 "Codex permission profile is unavailable for this cwd")
+        had_reader = self._reader is not None
         authoritative = await self._update_thread_settings(
-            permissions=profile, wait_for_notification=True)
+            permissions=profile, wait_for_notification=True,
+            _expected_scope=scope)
+        if scope != (self.thread_id, self._cwd, self._generation):
+            raise RuntimeError("Codex permission scope changed during update")
         if not authoritative:
+            if had_reader:
+                raise RuntimeError("Codex did not confirm the permission profile")
             self.permission_profile = profile
         log.info(
             "codex permission profile set",

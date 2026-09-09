@@ -455,6 +455,8 @@ export default function App() {
   const stateRef = useRef(state);
   stateRef.current = state;
   const wsRef = useRef<RelayWs | null>(null);
+  const [permissionProfileRequests, setPermissionProfileRequests] =
+    useState<Record<string, string>>({});
   const archivedBrowseRef = useRef<string | null>(null);
   // Reducer state becomes visible after React commits. Keep the command id in a
   // synchronous ref as well so a close/reopen double click (or two idle frames
@@ -2093,6 +2095,8 @@ export default function App() {
     const contextDeferredRetryAttempts =
       contextDeferredRetryAttemptsRef.current;
     const lifecycleEpoch = ++wsLifecycleEpochRef.current;
+    setPermissionProfileRequests((current) =>
+      Object.keys(current).length ? {} : current);
     didInitFocusRef.current = false;  // re-arm initial-focus for this connection lifecycle
     authoritativeSurfaceListsRef.current.delete(`${spaceRef.current}:${engineRef.current}`);
 
@@ -3721,6 +3725,14 @@ export default function App() {
           if (!acceptsLifecycle()) return;
           dispatch({ type: "prune_runtimes", protectedSids });
         },
+        onCommandCompleted: (commandId) => {
+          if (!acceptsLifecycle()) return;
+          setPermissionProfileRequests((current) =>
+            Object.values(current).includes(commandId)
+              ? Object.fromEntries(Object.entries(current)
+                .filter(([, id]) => id !== commandId))
+              : current);
+        },
         onWrapperGenerationChanged: () => {
           if (!acceptsLifecycle()) return;
           turnFileRequestsRef.current.clear();
@@ -4893,7 +4905,12 @@ export default function App() {
     wsRef.current?.sendGetPermissionProfiles();
   };
   const setPermissionProfile = (profile: string) => {
-    wsRef.current?.sendSetPermissionProfile(profile);
+    const commandId = wsRef.current?.sendSetPermissionProfile(profile);
+    if (commandId && focusedSid) {
+      setPermissionProfileRequests((current) => ({
+        ...current, [JSON.stringify([machineId, space, focusedEngine, focusedSid])]: commandId,
+      }));
+    }
   };
   const setWebSearch = (mode: CodexWebSearchMode) => {
     wsRef.current?.sendSetWebSearch(mode);
@@ -5812,6 +5829,8 @@ export default function App() {
           autoCompact={rt.autoCompact}
           perm={rt.perm}
           permissionProfile={rt.permissionProfile}
+          permissionProfilePending={!!permissionProfileRequests[
+            JSON.stringify([machineId, space, focusedEngine, focusedSid])]}
           permissionProfiles={rt.permissionProfiles}
           webSearch={rt.webSearch}
           collaborationMode={rt.collaborationMode}

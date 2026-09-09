@@ -78,6 +78,7 @@ interface Props {
   autoCompact?: AutoCompact | null;
   perm: string;
   permissionProfile: string | null;
+  permissionProfilePending?: boolean;
   permissionProfiles: PermissionProfileInfo[] | null;
   webSearch: "cached" | "live" | null;
   collaborationMode: CollaborationModeName;
@@ -1014,6 +1015,7 @@ export function Composer(p: Props) {
           <button
             type="button"
             className={"hint-mode" + modeCls}
+            aria-busy={p.permissionProfilePending || undefined}
             onClick={openPermissions}
             disabled={locked}
             title={deferredClaudeControls
@@ -1024,7 +1026,7 @@ export function Composer(p: Props) {
           >
             {deferredClaudeControls
               ? externalClaudeOwner
-              : modeLabel}
+              : p.permissionProfilePending ? "环境切换中…" : modeLabel}
             {!deferredClaudeControls && <span className="hint-mode-ch">▾</span>}
           </button>
           <span className="hint-kbds"><kbd>Enter</kbd> 发送 · <kbd>Shift+Tab</kbd> 切模式 · <kbd>/</kbd> 命令{
