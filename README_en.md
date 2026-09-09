@@ -583,6 +583,15 @@ Release path above. Move the relay to the public internet; the wrapper dials it
 **outbound** over `wss://`, and phones hit the same domain. The model link is
 untouched.
 
+For AI-assisted deployment, use the repository's
+[deployment skill](.agents/skills/cc-remote-deploy/SKILL.md) and
+[shared-control acceptance](deploy/README.md#codex-code-shared-control-plane-acceptance):
+each Codex Code account's CLI and Wrapper must connect to the same official
+daemon. After deployment, a supported installed Codex App can be offered
+[optional attachment](deploy/README.md#optional-codex-app-attachment). The agent
+asks first; declining or deferring leaves the App unchanged and does not block
+cc-remote deployment.
+
 ```
 your machine wrapper ──wss:443──▶ Caddy(VPS, auto HTTPS) ──▶ relay(127.0.0.1:8765) ◀──wss:443── phone browser
                                                                 └─ serves web/dist (same origin)

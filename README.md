@@ -490,6 +490,13 @@ export UV_PYTHON_INSTALL_MIRROR=https://registry.npmmirror.com/-/binary/python-b
 优先使用上面的 GitHub Release。把中继搬到公网后，wrapper 从你的机器**出站**
 `wss://` 连它，手机浏览器连同一个域名。模型链路完全不动。
 
+让 AI 协助部署时，使用仓库内的
+[部署 Skill](.agents/skills/cc-remote-deploy/SKILL.md)，并遵循
+[部署验收](deploy/README.md#codex-code-shared-control-plane-acceptance)：每个 Codex Code
+账号的 CLI 与 Wrapper 必须接到同一个官方 daemon。部署后如果本机装有受支持的
+Codex App，AI 会先询问是否接入；这是[可选步骤](deploy/README.md#optional-codex-app-attachment)，
+不同意或暂不回答都不会改动 App，也不影响 cc-remote 部署。
+
 ```
 你的机器 wrapper ──wss:443──▶ Caddy(VPS, 自动 HTTPS) ──▶ relay(127.0.0.1:8765) ◀──wss:443── 手机浏览器
                                                               └─ 同源托管 web/dist

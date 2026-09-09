@@ -6,6 +6,11 @@ machine). The **full step-by-step guide is in the main [README](../README.md#生
 
 ## Deployment contract for automation
 
+The portable agent entrypoint is
+[`.agents/skills/cc-remote-deploy/SKILL.md`](../.agents/skills/cc-remote-deploy/SKILL.md).
+Both `AGENTS.md` and `CLAUDE.md` link it for clients without automatic skill
+discovery. This document remains the deployment source of truth.
+
 This directory is the deployment source of truth for humans and automation.
 Machine inventory is deliberately external: host aliases, usernames, domains,
 addresses, home directories, and credentials belong to the operator's
@@ -56,6 +61,9 @@ healthy, expected Wrappers reconnect, and recent logs contain no new fatal
 errors. Installations using Codex Code must also verify the
 [shared CLI control plane](#codex-code-shared-control-plane-acceptance);
 an online Wrapper alone does not prove bidirectional CLI access.
+After these checks, offer the [optional Codex App attachment](#optional-codex-app-attachment)
+on eligible desktops. Its consent/availability is reported separately and never
+turns a healthy core deployment into a failure.
 On failure, use the installer-owned rollback or the retained previous
 release and matching state snapshot; do not delete old releases during the
 deployment.
@@ -318,6 +326,47 @@ the verified shared endpoint. Never kill an active CLI, delete locks/rollouts,
 disable ownership checks, or force takeover to make this check pass. Report any
 unverified account or stdio fallback as a remaining coordination issue, even
 when Relay/Web health is green; do not claim bidirectional deployment complete.
+
+### Optional Codex App attachment
+
+After core deployment and Codex CLI sharing checks, inspect each in-scope
+Wrapper desktop for an installed official Codex App. This is a **post-deploy
+offer**, not an installer side effect or a condition of Relay/Web health.
+
+- The current helper supports macOS only. Do not install an App on a headless
+  server, crawl unrelated machines, or treat a PWA named cc-remote as Codex App.
+  Read-only discovery may inspect the logged-in user's application locations
+  and bundle metadata (`com.openai.codex`); do not rely on the `.app` filename.
+- If no supported App is installed, skip the offer. If a previously approved
+  shared entry is still verified for the selected account, preserve it without
+  prompting again. A different account or changed setup needs a new choice.
+- Otherwise ask, in the user's language, for example: “检测到本机装有 Codex App。
+  要让它与这个账号的 CLI、cc-remote 共用同一个会话服务吗？这会新增独立的
+  Codex Shared 启动入口，原 App 不改动；不接入也不影响 cc-remote。”
+  Explain that the Desktop launch override is experimental and version-dependent.
+  On multi-account hosts, confirm which account/home to use; do not silently
+  select the first profile or change the default account.
+- A decline or no answer means no App/launcher/configuration changes. Record
+  `declined` or `pending consent` in the handoff, not a failed core deployment.
+  Respect that choice on follow-up deploys unless the user changes it; do not
+  invent a new tracking database solely to remember this offer.
+- After consent, follow the complete
+  [shared Desktop launcher runbook](../docs/codex-desktop-launcher.md), including
+  preflight, installation, live transport checks, user-controlled quit/reopen and
+  removal. Use repository helpers from the chosen trusted source/release; if
+  that version lacks them, report the optional feature unavailable rather than
+  downloading ad hoc scripts or patching the official App.
+- App-control MCP tools are a **separate opt-in**. Describe that a prompt from
+  CLI/cc-remote could then operate the desktop App, subject to native approvals.
+  Only after that choice, follow [the MCP guide](../docs/codex-app-tools.md).
+
+Never force a running private App into sharing, kill a CLI/daemon, merge account
+homes, modify the original App, relax signatures, or use global environment
+overrides to pass this optional check. App attachment is not part of the
+three-tier wire protocol activation and must not restart otherwise healthy
+Wrapper/Relay services. Report core health, CLI sharing, App sharing and optional
+tools separately; a visible launcher or `queued` UI action is not proof that a
+panel opened or that full three-client messaging was tested.
 
 ## Security (short version)
 

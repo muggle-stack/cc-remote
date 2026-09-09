@@ -12,6 +12,11 @@ local `claude` or `codex` session through a WebSocket relay. Two independent lin
 
 ## Deployment
 
+The repository skill is
+[`.agents/skills/cc-remote-deploy/SKILL.md`](.agents/skills/cc-remote-deploy/SKILL.md).
+Use it for deployment, upgrade, verification and recovery requests; agents that
+do not auto-discover repository skills must read it explicitly.
+
 The repository-owned deployment procedure is [`deploy/README.md`](deploy/README.md).
 Read its automation contract and the relevant installation path completely
 before any deploy, redeploy, recovery, verification, or rollback. Do not depend
@@ -30,6 +35,10 @@ For Codex Code, also follow `deploy/README.md`'s shared-control-plane acceptance
 verify each account's daily CLI and Wrapper connect to the same official
 app-server, not a private stdio fallback. Do not force takeover or kill a live
 CLI to satisfy deployment checks.
+After core deployment checks, follow the optional Codex App checkpoint in that
+guide: detect an installed App on an in-scope desktop, ask before attaching it,
+and keep a decline or pending answer separate from deployment success. App
+attachment and optional App-control MCP tools are separate user choices.
 
 ## Critical constraints / traps
 - **Drain footgun**: after `ClaudeSDKClient.interrupt()`, the SDK does NOT kill
