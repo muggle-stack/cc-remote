@@ -42,6 +42,22 @@ def test_persistent_terminal_survives_restart_and_append(tmp_path):
     ) == (_fence("turn-1", duration_ms=42),)
 
 
+def test_legacy_success_fences_are_rebuilt_after_error_semantics_change(tmp_path):
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_bytes(b'{"type":"task_complete","error":{}}\n')
+    ledger = CodexTerminalLedger(tmp_path)
+    ledger.persist("session-1", _fence("turn-1"), rollout)
+    raw = json.loads(ledger.path.read_text())
+    raw["version"] = 1
+    ledger.path.write_text(json.dumps(raw))
+    restarted = CodexTerminalLedger(tmp_path)
+    assert restarted.snapshot("session-1", rollout, revision="a" * 32) == ()
+    restarted.persist("session-1", _fence("turn-1", "failed"), rollout)
+    assert restarted.snapshot(
+        "session-1", rollout, revision="a" * 32,
+    ) == (_fence("turn-1", "failed"),)
+
+
 def test_terminal_witness_rejects_truncate_rotate_and_rollback(tmp_path):
     rollout = tmp_path / "rollout.jsonl"
     original = b"prefix\nterminal-boundary\n"

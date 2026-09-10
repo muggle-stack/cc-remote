@@ -28,7 +28,9 @@ from typing import Callable, Iterable
 from cc_remote.protocol import CodexTerminalFence
 
 
-_SCHEMA_VERSION = 1
+# v1 could persist task_complete(error=...) as a successful terminal.
+# Rebuild these source-derived fences instead of replaying a false success.
+_SCHEMA_VERSION = 2
 _FILENAME = "codex-terminal-ledger.json"
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$")
 _MAX_FILE_BYTES = 2 * 1024 * 1024

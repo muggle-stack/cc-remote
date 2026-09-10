@@ -967,7 +967,7 @@ def parse_turn_markers(data: bytes, partial: bytes = b"") -> TurnMarkers:
             reason = str(payload.get("reason") or "").lower()
             status = (
                 "completed"
-                if kind == "task_complete"
+                if kind == "task_complete" and payload.get("error") is None
                 else "interrupted"
                 if kind == "task_cancelled" or (
                     kind == "turn_aborted"

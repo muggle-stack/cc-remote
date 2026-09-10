@@ -340,6 +340,17 @@ try {
     /crash|warning|wrapper|private|traceback|secret/i);
 
   const hiddenDiagnostic = "provider crash at /private/token; see wrapper logs";
+  const policyFailure = "上游模型因安全策略拒绝了本次请求（cyber_policy）。"
+    + "这不是本地权限或网络错误；请核实并说明任务背景与授权范围，"
+    + "若属误判请向服务提供方反馈。";
+  assert.equal(presentTurnProblem({ code: "cc_crash", message: policyFailure }),
+    policyFailure);
+  assert.equal(presentHistoricalTurnProblem(policyFailure), policyFailure);
+  for (const message of [policyFailure + " secret-token", "cyber_policy private diagnostic"]) {
+    assert.equal(presentTurnProblem({ code: "cc_crash", message }),
+      "本次回复未完成，请重试。");
+    assert.equal(presentHistoricalTurnProblem(message), "该轮未正常结束");
+  }
   assert.equal(presentTurnProblem({ code: "cc_crash", message: hiddenDiagnostic }),
     "本次回复未完成，请重试。");
   for (const safeMessage of [

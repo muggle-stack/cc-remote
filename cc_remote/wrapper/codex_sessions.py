@@ -378,6 +378,48 @@ def codex_session_presence(
     return row is not None
 
 
+def codex_session_confirmed_missing(
+    session_id: str,
+    *,
+    codex_home: str | os.PathLike[str] | None = None,
+) -> bool:
+    """Prove absence from both the readable catalog and rollout roots.
+
+    A truncated listing, locked DB, unreadable directory, or symlink is not
+    evidence of deletion. Do not use the best-effort history glob for this.
+    """
+    home = _codex_home(codex_home)
+    if codex_session_presence(session_id, codex_home=home) is not False:
+        return False
+    scanned = 0
+
+    def failed_scan(error: OSError) -> None:
+        raise error
+
+    try:
+        for root in _session_roots(home):
+            try:
+                mode = os.lstat(root).st_mode
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISDIR(mode):
+                return False
+            for directory, dirs, files in os.walk(root, onerror=failed_scan):
+                scanned += 1 + len(dirs) + len(files)
+                if scanned > 100_000:
+                    return False
+                if any(os.path.islink(os.path.join(directory, name))
+                       for name in dirs):
+                    return False
+                if any(session_id in name and name.endswith(".jsonl")
+                       for name in files):
+                    return False
+    except OSError:
+        return False
+    # A create/archive transaction may have committed while scanning.
+    return codex_session_presence(session_id, codex_home=home) is False
+
+
 def codex_thread_archive_states(
     session_ids: Iterable[str],
     *,

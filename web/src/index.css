@@ -932,6 +932,8 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .note::before,.note::after{ content:""; position:absolute; top:50%; width:calc(50% - 70px); height:1px; background:var(--border); }
 .note::before{ left:0 } .note::after{ right:0 }
 .note.interrupted{ color:var(--danger); }
+.note.turn-failure{ text-align:left; overflow-wrap:anywhere; }
+.note.turn-failure::before,.note.turn-failure::after{ display:none; }
 
 /* EMPTY STATE */
 .empty{ flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center;

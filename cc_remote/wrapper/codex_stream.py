@@ -2768,6 +2768,8 @@ class CodexStreamTranslator:
             self._close_open(out)
             turn = p.get("turn") or {}
             st = turn.get("status") or "completed"
+            if st == "completed" and turn.get("error") is not None:
+                st = "failed"
             # A failed turn may carry provider diagnostics in turn.error. Keep
             # those on the local engine boundary and emit only stable product
             # copy (the error notification above may not fire for every mode).
@@ -3220,6 +3222,11 @@ _RATE_LIMIT_TURN_FAILURE = "请求过于频繁或当前额度受限，请稍后�
 _TIMEOUT_TURN_FAILURE = "请求超时，请重新尝试。"
 _UPSTREAM_TURN_FAILURE = "Codex 上游服务暂时不可用，请稍后重试。"
 _NETWORK_TURN_FAILURE = "网络连接异常，请检查网络后重试。"
+_POLICY_TURN_FAILURE = (
+    "上游模型因安全策略拒绝了本次请求（cyber_policy）。"
+    "这不是本地权限或网络错误；请核实并说明任务背景与授权范围，"
+    "若属误判请向服务提供方反馈。"
+)
 
 
 def _provider_failure_message(error: object) -> str:
@@ -3233,6 +3240,12 @@ def _provider_failure_message(error: object) -> str:
         else ""
     )
     combined = f"{message} {details}"[:8192].lower()
+    info = error.get("codexErrorInfo", error.get("codex_error_info"))
+    if info in ("cyberPolicy", "cyber_policy") or (
+        isinstance(info, dict)
+        and ("cyberPolicy" in info or "cyber_policy" in info)
+    ):
+        return _POLICY_TURN_FAILURE
     status = _structured_http_status(error)
     if status is None:
         status_match = re.search(r"\b([45]\d\d)\b", combined)
@@ -4903,8 +4916,18 @@ def codex_translate_history(
                         turn_visible = True
                         turn_text_visible = True
                         turn_final_visible = True
-                    emit_completed_plan_answer(line_no, raw_ts)
-                    if turn_visible:
+                    terminal_error = p.get("error")
+                    if terminal_error is None:
+                        emit_completed_plan_answer(line_no, raw_ts)
+                    if terminal_error is not None:
+                        events.append(Error(
+                            code=ERR_CC_CRASH,
+                            message=_provider_failure_message(terminal_error),
+                            msg_id=active_msg_id,
+                        ))
+                        close_turn("error", _duration(p), True,
+                                   _completed_ts(p, ts), p.get("turn_id"))
+                    elif turn_visible:
                         close_turn("success", _duration(p), False,
                                    _completed_ts(p, ts), p.get("turn_id"))
                     else:

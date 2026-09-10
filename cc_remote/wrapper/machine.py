@@ -315,7 +315,8 @@ from cc_remote.wrapper.codex_sessions import (
     CODEX_EXACT_CATALOG_MAX_IDS,
     list_codex_sessions, codex_exact_catalog_rows, codex_session_cwd,
     codex_rollout_path, codex_model, codex_effort, codex_session_settings,
-    codex_session_presence, codex_current_provider,
+    codex_session_presence, codex_session_confirmed_missing,
+    codex_current_provider,
     codex_thread_archive_states, codex_thread_catalog_row,
     codex_thread_parent_maps, codex_thread_rollout_record,
 )
@@ -485,6 +486,9 @@ def _codex_terminal_status(message: dict) -> str:
     params = message.get("params")
     turn = params.get("turn") if isinstance(params, dict) else None
     status = turn.get("status") if isinstance(turn, dict) else None
+    if isinstance(turn, dict) and turn.get("error") is not None:
+        if not status or status == "completed":
+            return "failed"
     return status if isinstance(status, str) and status else "completed"
 
 
@@ -25853,7 +25857,7 @@ class WrapperMachine:
                 for row in normalized
                 if isinstance(row.get("native_session_id"), str)
             }
-            for ctx in self.sessions.values():
+            for ctx in tuple(self.sessions.values()):
                 if (
                     ctx.engine != "codex"
                     or ctx.btw
@@ -25877,6 +25881,8 @@ class WrapperMachine:
                         existing["summary"] = title
                     if title and not existing.get("first_prompt"):
                         existing["first_prompt"] = title
+                    continue
+                if await self._prune_missing_codex_context(ctx):
                     continue
                 try:
                     rollout_path = self._codex_rollout_for_wire(wire_sid)
@@ -29893,6 +29899,154 @@ class WrapperMachine:
         async with self._conversation_tree_mutation_lock(engine, sid):
             return await self._handle_delete_session_locked(cmd)
 
+    async def _prune_missing_codex_context(
+        self, ctx: SessionContext,
+    ) -> bool:
+        """Retire an idle orphan, never resume a missing native thread.
+
+        List omission alone is not proof: protect in-flight/queued turns,
+        unmaterialized live threads, and unavailable native state. This path
+        only forgets private projections; it never deletes native data.
+        """
+        if (ctx.engine != "codex" or ctx.space != "code" or ctx.btw
+                or not ctx.session_id or not self._is_resident_context(ctx)
+                or self._session_delete_busy(ctx)
+                or ctx.query_lock.locked()
+                or not callable(getattr(ctx.sdk, "disconnect", None))):
+            return False
+        profile = self._codex_profile_for_ctx(ctx)
+        native_sid = ctx.session_id
+        sid = self._codex_wire_sid(profile, native_sid)
+        home = self._codex_home(profile)
+        async with ctx.query_lock:
+            if (not self._is_resident_context(ctx)
+                    or self._session_delete_busy(ctx)):
+                return False
+            if not await asyncio.to_thread(
+                codex_session_confirmed_missing, native_sid, codex_home=home,
+            ):
+                return False
+            proc = getattr(ctx.sdk, "proc", None)
+
+            def shared_probe_stale() -> bool:
+                # A proxy exit is not proof that the shared daemon lost its
+                # thread. Keep exact-absence evidence bound to this live proxy
+                # through the final retirement boundary.
+                return self._codex_shared_affinity(ctx) and (
+                    proc is None or proc.returncode is not None
+                    or getattr(ctx.sdk, "proc", None) is not proc
+                )
+
+            if shared_probe_stale():
+                return False
+            if proc is not None and proc.returncode is None:
+                # An idle native thread may not have materialized a rollout
+                # yet. A live handle must affirm exact absence, not merely
+                # time out or return a provider/auth error.
+                try:
+                    await asyncio.wait_for(
+                        ctx.sdk.read_thread_parent(native_sid), timeout=5,
+                    )
+                except CodexAppServerError as exc:
+                    if exc.code != -32600 or exc.message not in {
+                        f"thread not found: {native_sid}",
+                        f"no rollout found for thread id {native_sid}",
+                    }:
+                        return False
+                except Exception:
+                    return False
+                else:
+                    return False
+            if (self._session_delete_busy(ctx)
+                    or shared_probe_stale()
+                    or not await asyncio.to_thread(
+                        codex_session_confirmed_missing,
+                        native_sid, codex_home=home,
+                    )):
+                return False
+            # Queue submissions use emit_lock -> queued_query_lock, not
+            # query_lock. Let them run during the scans, then atomically either
+            # preserve accepted work or retire the context before a new submit
+            # can pass its residency check. Keep journal I/O in this boundary.
+            async with ctx.emit_lock:
+                async with ctx.queued_query_lock:
+                    if (not self._is_resident_context(ctx)
+                            or self._session_delete_busy(ctx)
+                            or shared_probe_stale()):
+                        return False
+                    try:
+                        intent = await asyncio.to_thread(
+                            self._codex_forks.begin_delete, sid)
+                    except ForkJournalError:
+                        return False
+                    # A native client can become active during journal I/O.
+                    if (not self._is_resident_context(ctx)
+                            or self._session_delete_busy(ctx)
+                            or shared_probe_stale()):
+                        if intent == "delete_pending":
+                            try:
+                                await asyncio.to_thread(
+                                    self._codex_forks.abort_delete, sid)
+                            except ForkJournalError:
+                                log.warning(
+                                    "orphan Codex tombstone rollback failed",
+                                    session_id=sid)
+                        return False
+                    self.sessions.pop(ctx.key, None)
+            if self.focused_sid in {ctx.key, sid}:
+                self.focused_sid = None
+            self._watch.pop(sid, None)
+            self._codex_sidebar_watches.pop(sid, None)
+            self._codex_thread_started_hints.pop((profile.id, native_sid), None)
+            self._notification_titles.pop(sid, None)
+            self._invalidate_codex_session_catalog()
+            try:
+                await ctx.sdk.disconnect()
+            except Exception as exc:
+                log.warning("orphan Codex proxy cleanup failed",
+                            session_id=sid, error_type=type(exc).__name__)
+            await self._cleanup_codex_steer_attachments(ctx)
+            await self._cleanup_deleted_codex_checkpoint(ctx, sid)
+            try:
+                await asyncio.to_thread(self._codex_turn_leases.release, sid)
+            except Exception as exc:
+                log.warning("orphan Codex lease cleanup failed",
+                            session_id=sid, error_type=type(exc).__name__)
+            self._purge_preview_image_snapshots(ctx.preview_snapshot_token)
+            self._invalidate_session_history(ctx, sid)
+            await self._drop_preview_session("codex", sid)
+            for store, args in (
+                (self._codex_controls, (sid,)),
+                (self._session_plans, (sid,)),
+                (self._session_presentation, ("codex", sid)),
+            ):
+                if store is not None:
+                    try:
+                        await asyncio.to_thread(store.delete, *args)
+                    except Exception as exc:
+                        log.warning("orphan Codex projection cleanup failed",
+                                    session_id=sid,
+                                    error_type=type(exc).__name__)
+            if self._session_pins is not None:
+                try:
+                    await asyncio.to_thread(
+                        self._session_pins.set_pinned, "codex", sid, False)
+                except SessionPinStoreError:
+                    log.warning("orphan Codex pin cleanup failed",
+                                session_id=sid)
+            if intent is not None:
+                try:
+                    await asyncio.to_thread(
+                        self._codex_forks.finish_delete, sid)
+                except ForkJournalError:
+                    # The pending tombstone still prevents fork replay.
+                    log.warning("orphan Codex tombstone finalization failed",
+                                session_id=sid)
+        # All browsers refresh, not only the tab that clicked Delete.
+        await self._invalidate_session_list("codex", "code")
+        log.info("removed missing Codex resident", session_id=sid)
+        return True
+
     async def _handle_delete_session_locked(self, cmd):
         """Delete one native session without confusing Code and Work roots."""
         sid = self._resolve_session_alias(cmd.session_id) or cmd.session_id
@@ -29976,6 +30130,10 @@ class WrapperMachine:
                 **({} if home is None else {"codex_home": home}),
             )
             if rollout_record is None:
+                resident = self._ctx_by_sid(sid)
+                if (resident is not None
+                        and await self._prune_missing_codex_context(resident)):
+                    return await self._handle_list_sessions(cmd)
                 return await self._send_code_delete_error(
                     cmd,
                     sid,

@@ -153,6 +153,45 @@ async function mockRightPanelRelay(
   return { commands, emit: (message: PanelRelayEvent) => emit(message) };
 }
 
+test("policy refusal remains specific through live delivery and history reload", async ({ page }, testInfo) => {
+  const message = "上游模型因安全策略拒绝了本次请求（cyber_policy）。"
+    + "这不是本地权限或网络错误；请核实并说明任务背景与授权范围，"
+    + "若属误判请向服务提供方反馈。";
+  const turns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = [];
+  const relay = await mockRightPanelRelay(page, { retained: false, seedTurns: turns });
+  await page.goto("/");
+  await expect(page.locator(".composer textarea")).toBeEnabled();
+  relay.emit({ type: "user_msg", sid: "layout-parent", msg_id: "policy-user", prompt: "检查这段代码" });
+  relay.emit({ type: "state", sid: "layout-parent", state: "running", msg_id: "policy-user" });
+  relay.emit({ type: "error", sid: "layout-parent", code: "cc_crash", message, msg_id: "policy-user" });
+  relay.emit({ type: "turn_end", sid: "layout-parent", turn_id: "policy-turn",
+    result: { subtype: "error", duration_ms: 20, is_error: true } });
+  relay.emit({ type: "state", sid: "layout-parent", state: "idle" });
+  const problem = page.locator(".turn .note.interrupted");
+  await expect(problem).toHaveText(message);
+  await expect(page.locator(".composer textarea")).toBeEnabled();
+  expect(relay.commands.filter(c => c.type === "query" || c.type === "steer")).toHaveLength(0);
+
+  turns.push({ id: "policy-user", forkPointId: "policy-turn", prompt: "检查这段代码",
+    blocks: [], done: true, error: message, detailEventCount: 0, detailLoaded: true },
+  { id: "followup-user", forkPointId: "followup-turn", prompt: "解释现有日志",
+    blocks: [{ kind: "text", message_id: "followup-answer", text: "日志说明已完成。",
+      channel: "final", done: true }], done: true, detailEventCount: 0, detailLoaded: true });
+  await page.reload();
+  await expect(problem).toHaveCount(1);
+  await expect(problem).toHaveText(message);
+  await expect(page.locator('[data-turn-id="followup-user"]')).toContainText("日志说明已完成。");
+  await expect(page.locator('[data-turn-id="followup-user"] .note.interrupted')).toHaveCount(0);
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
+    await expect(problem).toBeVisible();
+    expect(await problem.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+    expect(await problem.evaluate(node => getComputedStyle(node, "::before").display)).toBe("none");
+    expect(await problem.evaluate(node => getComputedStyle(node, "::after").display)).toBe("none");
+    await page.screenshot({ path: testInfo.outputPath(`policy-refusal-${theme}.png`) });
+  }
+});
+
 test("destroyed BTW stays readable after refresh with disabled input and a working new-chat button", async ({ page }, testInfo) => {
   const relay = await mockRightPanelRelay(page, { visible: true, btwReadOnly: true });
   await page.goto("/");

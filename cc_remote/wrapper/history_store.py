@@ -54,7 +54,10 @@ from cc_remote.protocol import ConversationTurn
 # without phase metadata. Source-complete details and binary assets remain valid.
 # v30 rebuilds Codex narrative rows with bounded generated-image references.
 # Binary assets and other engines' projections remain source-valid.
-_SCHEMA_VERSION = 30
+# v31 rebuilds Codex failures previously cached as successful task_complete.
+# v32 restores reviewed policy-refusal copy previously reduced to a generic
+# failure. Only Codex narrative projections need to be rebuilt.
+_SCHEMA_VERSION = 32
 _FINGERPRINT_SAMPLE_BYTES = 64 * 1024
 _DEFAULT_MAX_ENTRIES = 128
 _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
@@ -124,6 +127,9 @@ _SAFE_HISTORY_TURN_FAILURES = frozenset({
     "请求过于频繁或当前额度受限，请稍后重试。",
     "请求超时，请重新尝试。",
     "Codex 上游服务暂时不可用，请稍后重试。",
+    "上游模型因安全策略拒绝了本次请求（cyber_policy）。"
+    "这不是本地权限或网络错误；请核实并说明任务背景与授权范围，"
+    "若属误判请向服务提供方反馈。",
 })
 _LEGACY_HISTORY_TURN_FAILURES = {
     "Codex 登录已失效或当前账号无权限，请重新登录后重试。":
@@ -1245,7 +1251,7 @@ class HistoryIndexStore:
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
             current = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if current in range(10, 30):
+            if current in range(10, 32):
                 for table in ("history_pages", "history_turn_details"):
                     connection.execute(
                         f"DELETE FROM {table} WHERE engine='codex'")
@@ -1326,8 +1332,8 @@ class HistoryIndexStore:
                 for table in ("history_pages", "history_turn_details"):
                     connection.execute(
                         f"DELETE FROM {table} WHERE engine='codex'")
-            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29):
-                # The independent v22-v30 invalidations above suffice.
+            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31):
+                # The independent v22-v32 invalidations above suffice.
                 pass
             elif current not in (0, _SCHEMA_VERSION):
                 # v9 changes the invariant of history_turn_details: those rows
