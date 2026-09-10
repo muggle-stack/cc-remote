@@ -410,6 +410,80 @@ for (const browsing of [false, true]) {
   });
 }
 
+test("session workspace opens files in the sidebar and returns to its directory", async ({ page }, testInfo) => {
+  if (testInfo.project.name === "chromium") await page.setViewportSize({ width: 1440, height: 950 });
+  const relay = await mockRightPanelRelay(page, { retained: false });
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "更多设置", exact: true })).toBeVisible();
+  if (page.viewportSize()!.width <= 640) {
+    await page.getByRole("button", { name: "更多设置", exact: true }).click();
+  }
+  await page.getByRole("button", { name: "打开会话文件", exact: true }).click();
+  await expect.poll(() => relay.commands.filter((c) => c.type === "browse_files").length).toBe(1);
+  const request = relay.commands.find((c) => c.type === "browse_files")!;
+  expect(request.sid).toBe("layout-parent");
+  const result: PanelRelayEvent<Extract<ServerEvent, { type: "files_listed" }>> = {
+    type: "files_listed", sid: "layout-parent", request_id: String(request.request_id),
+    root: "/tmp/layout", path: "/tmp/layout", kind: "directory", parent: null,
+    revision: "one", next_offset: null, entries: [{ name: "README.md", path: "/tmp/layout/README.md", kind: "file" }],
+  };
+  relay.emit({ ...result, request_id: "stale-request" });
+  await expect(page.getByRole("button", { name: "README.md", exact: true })).toHaveCount(0);
+  relay.emit(result);
+  const bounds = await page.locator(".file-browser-shell").boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+  await page.getByRole("button", { name: "README.md", exact: true }).click();
+  await expect.poll(() => relay.commands.some((c) => c.type === "get_file_preview")).toBe(true);
+  const preview = relay.commands.find((c) => c.type === "get_file_preview")!;
+  relay.emit({ type: "file_preview", sid: "layout-parent", request_id: String(preview.request_id),
+    path: String(preview.path), format: "markdown", content: "# Workspace preview", size: 20, writable: false });
+  await expect(page.getByRole("heading", { name: "Workspace preview" })).toBeVisible();
+  await page.getByRole("button", { name: "← 返回目录", exact: true }).click();
+  await expect(page.getByRole("button", { name: "README.md", exact: true })).toBeVisible();
+  expect(relay.commands.filter((c) => c.type === "browse_files")).toHaveLength(1);
+  await page.getByRole("button", { name: "关闭文件浏览", exact: true }).click();
+  const input = page.locator("textarea").first();
+  await input.fill("/open README.md");
+  await input.press("Enter");
+  await expect.poll(() => relay.commands.filter((c) => c.type === "browse_files").length).toBe(2);
+  const direct = relay.commands.filter((c) => c.type === "browse_files").at(-1)!;
+  expect(direct.path).toBe("README.md");
+  relay.emit({ ...result, request_id: String(direct.request_id), kind: "file", path: "/tmp/layout/README.md" });
+  await expect.poll(() => relay.commands.filter((c) => c.type === "get_file_preview").length).toBe(2);
+  expect(relay.commands.some((c) => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
+});
+
+test("session workspace Codex compaction rejects oversize and sends a session preference", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { retained: false });
+  await page.goto("/");
+  const input = page.locator("textarea").first();
+  await input.fill("/autocompact ");
+  await input.press("Enter");
+  relay.emit({ type: "codex_context", sid: "layout-parent", model: "fixture",
+    threshold_tokens: null, applied_threshold_tokens: null, model_max_tokens: 20000,
+    context_window_tokens: null, limit_tokens: 19000, pending: false, mutable: true, error: null });
+  const setting = page.getByRole("dialog", { name: "Codex 自动压缩", exact: true });
+  await expect(setting).toBeVisible();
+  await setting.getByLabel("压缩阈值（tokens）").fill("20k");
+  await setting.getByRole("button", { name: "应用", exact: true }).click();
+  await expect(setting.getByRole("alert")).toContainText("19,000");
+  expect(relay.commands.some((c) => c.type === "set_codex_context")).toBe(false);
+  await setting.getByLabel("压缩阈值（tokens）").fill("12k");
+  await setting.getByRole("button", { name: "应用", exact: true }).click();
+  await expect.poll(() => relay.commands.some((c) => c.type === "set_codex_context")).toBe(true);
+  const request = relay.commands.find((c) => c.type === "set_codex_context")!;
+  expect([request.sid, request.threshold_tokens]).toEqual(["layout-parent", 12000]);
+  relay.emit({ type: "codex_context", sid: "layout-parent", model: "fixture",
+    threshold_tokens: 12000, applied_threshold_tokens: null, model_max_tokens: 20000,
+    context_window_tokens: 12632, limit_tokens: 19000, pending: true, mutable: true, error: null });
+  await expect(setting.getByRole("status")).toContainText("已保存 12,000");
+  await setting.getByRole("button", { name: "恢复 Codex 默认值" }).click();
+  await expect.poll(() => relay.commands.filter((c) => c.type === "set_codex_context").length).toBe(2);
+  expect(relay.commands.filter((c) => c.type === "set_codex_context").at(-1)?.threshold_tokens).toBeNull();
+  expect(relay.commands.some((c) => c.type === "query")).toBe(false);
+});
+
 test("turn regressions App routes file pages by exact request and opens the archived diff", async ({ page }) => {
   const files = Array.from({ length: 65 }, (_, i) => ({
     path: `/tmp/layout/file-${i}.py`, state: "available" as const, additions: 1, deletions: 1,

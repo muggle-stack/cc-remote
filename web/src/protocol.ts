@@ -106,6 +106,11 @@ export interface SessionControl extends Base {
 }
 export interface SetModel extends Base { type: "set_model"; model: string }
 export interface SetEffort extends Base { type: "set_effort"; effort: EffortLevel }
+export interface SetCodexContext extends Base { type: "set_codex_context"; threshold_tokens?: number | null }
+export interface BrowseFiles extends Base {
+  type: "browse_files"; request_id: string; path?: string; offset?: number;
+  limit?: number; hidden?: boolean; revision?: string | null;
+}
 export interface SetAutoCompact extends Base {
   type: "set_auto_compact";
   mode: AutoCompactMode;
@@ -667,7 +672,33 @@ export interface ContextReport extends Base {
   categories: ContextCategory[];
 }
 
-export type ServerEvent =
+export interface FilesListed extends Base {
+  type: "files_listed";
+  request_id: string;
+  root: string;
+  path: string;
+  kind: "directory" | "file";
+  parent?: string | null;
+  entries: { name: string; path: string; kind: "directory" | "file" | "unsupported" }[];
+  revision?: string | null;
+  next_offset?: number | null;
+  error?: string | null;
+}
+
+export interface CodexContext extends Base {
+  type: "codex_context";
+  model: string;
+  threshold_tokens: number | null;
+  applied_threshold_tokens: number | null;
+  model_max_tokens: number | null;
+  limit_tokens: number | null;
+  context_window_tokens: number | null;
+  pending: boolean;
+  mutable: boolean;
+  error: string | null;
+}
+
+export type ServerEvent = FilesListed | CodexContext
   | TurnFileChangesPage
   | Pong | CommandAck | ReplayStart | ReplayEnd | Snapshot | StateEvent | QueryQueueState | QueuedQueryDetail | QueuedQueryUpdated | Model | Effort | AutoCompact | Fast | CollaborationMode | BtwOpened | BtwSync | BtwClosed | Perm | PermissionProfiles | PermissionProfile | WebSearch | ContextReport | DiffReport | FilePreview | FileSaveResult | PreviewAsset | PreviewAuthorizationRequired | PreviewAuthorizationResult | History | TurnDetail | AgentDetail | HistoryImage | HistoryInvalidated | ArtifactInvalidated | Models | EngineCapabilities | TakeoverState | SessionControl
   | AskUser | AskUserSync | AskUserClosed | GoalState | CompletionState | StatusReport | RateLimitResetResult | Notice | RateLimitUpdate | RollbackResult
@@ -677,7 +708,7 @@ export type ServerEvent =
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 58;
+export const PROTOCOL_VERSION = 59;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

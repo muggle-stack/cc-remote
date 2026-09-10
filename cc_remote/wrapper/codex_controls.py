@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -30,8 +30,11 @@ class CodexControls:
     permission_profile: str | None = None
     web_search: str | None = None
     cwd_override: str | None = None
+    context_threshold_tokens: int | None = None
+    context_window_tokens: int | None = None
+    context_settings_set: bool = False
 
-    def as_dict(self) -> dict[str, str]:
+    def as_dict(self) -> dict[str, object]:
         result = {}
         if self.approval_policy in CODEX_APPROVAL_POLICIES:
             result["approval_policy"] = self.approval_policy
@@ -41,6 +44,11 @@ class CodexControls:
             result["web_search"] = self.web_search
         if _cwd_override(self.cwd_override) is not None:
             result["cwd_override"] = self.cwd_override
+        if _token_count(self.context_threshold_tokens) and _token_count(self.context_window_tokens):
+            result["context_threshold_tokens"] = self.context_threshold_tokens
+            result["context_window_tokens"] = self.context_window_tokens
+        if self.context_settings_set:
+            result["context_settings_set"] = True
         return result
 
 
@@ -61,6 +69,10 @@ def _cwd_override(value: object) -> str | None:
     return value
 
 
+def _token_count(value: object) -> int | None:
+    return value if type(value) is int and 1 <= value <= 100_000_000 else None
+
+
 def _controls(values: object) -> CodexControls:
     raw = values if isinstance(values, dict) else {}
     return CodexControls(
@@ -77,6 +89,9 @@ def _controls(values: object) -> CodexControls:
             else None
         ),
         cwd_override=_cwd_override(raw.get("cwd_override")),
+        context_threshold_tokens=_token_count(raw.get("context_threshold_tokens")),
+        context_window_tokens=_token_count(raw.get("context_window_tokens")),
+        context_settings_set=raw.get("context_settings_set") is True,
     )
 
 
@@ -228,6 +243,9 @@ class CodexControlStore:
                 # Runtime control changes must not clear an explicit cwd
                 # migration that is waiting for its next durable native turn.
                 cwd_override=existing.cwd_override,
+                context_threshold_tokens=existing.context_threshold_tokens,
+                context_window_tokens=existing.context_window_tokens,
+                context_settings_set=existing.context_settings_set,
             )
             payload = controls.as_dict()
             updated = dict(self._sessions)
@@ -275,6 +293,25 @@ class CodexControlStore:
             self._sessions = updated
         return controls
 
+    def set_context(self, session_id: str, threshold: int | None, window: int | None) -> CodexControls:
+        session_id = _session_id(session_id)
+        if threshold is not None and (
+            _token_count(threshold) is None or _token_count(window) is None or threshold > window
+        ):
+            raise CodexControlStoreError("Codex context preference is invalid")
+        with self._lock:
+            existing = _controls(self._sessions.get(session_id))
+            controls = replace(existing, context_threshold_tokens=threshold,
+                               context_window_tokens=window if threshold is not None else None,
+                               context_settings_set=True)
+            updated = dict(self._sessions)
+            updated[session_id] = controls.as_dict()
+            while len(updated) > _MAX_ENTRIES:
+                updated.pop(next(iter(updated)))
+            self._persist(updated)
+            self._sessions = updated
+        return controls
+
     def delete(self, session_id: str) -> None:
         session_id = _session_id(session_id)
         with self._lock:
@@ -299,6 +336,9 @@ class CodexControlStore:
                 permission_profile=existing.permission_profile,
                 web_search=existing.web_search,
                 cwd_override=cwd_override,
+                context_threshold_tokens=existing.context_threshold_tokens,
+                context_window_tokens=existing.context_window_tokens,
+                context_settings_set=existing.context_settings_set,
             )
             payload = controls.as_dict()
             updated = dict(self._sessions)
@@ -327,6 +367,9 @@ class CodexControlStore:
                 permission_profile=existing.permission_profile,
                 web_search=existing.web_search,
                 cwd_override=None,
+                context_threshold_tokens=existing.context_threshold_tokens,
+                context_window_tokens=existing.context_window_tokens,
+                context_settings_set=existing.context_settings_set,
             )
             payload = controls.as_dict()
             updated = dict(self._sessions)
@@ -365,6 +408,9 @@ class CodexControlStore:
                 permission_profile=existing.permission_profile,
                 web_search=existing.web_search,
                 cwd_override=previous,
+                context_threshold_tokens=existing.context_threshold_tokens,
+                context_window_tokens=existing.context_window_tokens,
+                context_settings_set=existing.context_settings_set,
             )
             payload = controls.as_dict()
             updated = dict(durable)

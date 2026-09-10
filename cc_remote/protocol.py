@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 58
+PROTOCOL_VERSION = 59
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -535,6 +535,26 @@ class SetEffort(_Command):
     respawns the cc subprocess with resume — done lazily at the next turn."""
     type: Literal["set_effort"] = "set_effort"
     effort: EffortLevel
+
+
+class SetCodexContext(_Command):
+    """Persist a session-only native Codex auto-compaction threshold."""
+
+    type: Literal["set_codex_context"] = "set_codex_context"
+    threshold_tokens: Optional[int] = Field(default=None, ge=1, le=100_000_000, strict=True)
+
+
+class CodexContext(_Base):
+    type: Literal["codex_context"] = "codex_context"
+    model: str = ""
+    threshold_tokens: Optional[int] = None
+    applied_threshold_tokens: Optional[int] = None
+    model_max_tokens: Optional[int] = None
+    limit_tokens: Optional[int] = None
+    context_window_tokens: Optional[int] = None
+    pending: bool = False
+    mutable: bool = True
+    error: Optional[str] = None
 
 
 class SetAutoCompact(_Command):
@@ -2214,6 +2234,38 @@ class DiffReport(_Base):
     request_id: Optional[WireId] = None
 
 
+class BrowseFiles(_Command):
+    """List one session directory without starting or resuming an engine."""
+
+    type: Literal["browse_files"] = "browse_files"
+    path: str = Field(default=".", max_length=4096)
+    request_id: str = Field(min_length=1, max_length=128)
+    offset: int = Field(default=0, ge=0, le=20_000)
+    limit: int = Field(default=100, ge=1, le=100)
+    hidden: bool = False
+    revision: Optional[str] = Field(default=None, max_length=128)
+
+
+class WorkspaceEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(max_length=1024)
+    path: str = Field(max_length=4096)
+    kind: Literal["directory", "file", "unsupported"]
+
+
+class FilesListed(_Base):
+    type: Literal["files_listed"] = "files_listed"
+    request_id: str
+    root: str = ""
+    path: str = ""
+    kind: Literal["directory", "file"] = "directory"
+    parent: Optional[str] = None
+    entries: list[WorkspaceEntry] = Field(default_factory=list, max_length=100)
+    revision: Optional[str] = None
+    next_offset: Optional[int] = None
+    error: Optional[str] = None
+
+
 class GetFilePreview(_Command):
     """client -> wrapper: read one authorized, bounded file preview."""
     type: Literal["get_file_preview"] = "get_file_preview"
@@ -2753,6 +2805,7 @@ class CompletionState(_Base):
 
 
 AnyMessage = Union[
+    BrowseFiles, FilesListed, SetCodexContext, CodexContext,
     GetTurnFileChanges, TurnFileChangesPage,
     Hello, Query, CancelQueuedQuery, GetQueuedQuery, QueuedQueryDetail, UpdateQueuedQuery, QueuedQueryUpdated, QueryQueueState, Steer, Interrupt, Takeover, TakeoverState, SessionControl, SetModel, SetEffort, SetAutoCompact, SetServiceTier, SetCollaborationMode, SetPerm, GetPermissionProfiles, SetPermissionProfile, SetWebSearch, Fast, CollaborationMode, OpenBtw, CloseBtw, SyncBtw, BtwOpened, BtwSync, BtwClosed, GetContext, GetStatus, ConsumeRateLimitResetCredit, GetDiff, GetFilePreview, SaveMarkdown, GetPreviewAsset, AuthorizePreview, GetHistory, GetTurnDetail, GetAgentDetail, GetHistoryImage, GetModels, GetEngineCapabilities, ManageEnginePlugin, ManageEngineSkill, ManageEngineHook, ListSessions, SwitchSession, NewSession, DeleteWorkSession, DeleteSession, RollbackSession, RollbackResult, CompactSession, StartReview, GetWorkDashboard, CreateWorkProject, DeleteWorkProject, AddWorkSource, DeleteWorkSource, CreateWorkPlugin, DeleteWorkPlugin, CreateWorkSchedule, DeleteWorkSchedule, GetWorkArtifacts, ListDir, Ping, Pong, CommandAck,
     ReplayStart, ReplayEnd, Snapshot, StateEvent, Model, Effort, AutoCompact, Perm, PermissionProfiles, PermissionProfile, WebSearch, ContextReport, StatusReport, RateLimitResetResult, Notice, RateLimitUpdate, DiffReport, FilePreview, FileSaveResult, PreviewAsset, PreviewAuthorizationRequired, PreviewAuthorizationResult, History, TurnDetail, AgentDetail, HistoryImage, HistoryInvalidated, ArtifactInvalidated, Models, EngineCapabilities, AskUser, AskUserSync, AskUserClosed, AnswerQuestion, BackgroundProcessSync,
@@ -2772,7 +2825,7 @@ AnyMessage = Union[
 # are NOT seq'd/buffered.
 DOWNSTREAM_TYPES = frozenset({
     "user_msg", "turn_steered", "state", "model", "effort", "auto_compact", "perm",
-    "permission_profile", "web_search", "fast",
+    "permission_profile", "web_search", "fast", "codex_context",
     "collaboration_mode", "session_control", "query_queue", "btw_opened",
     "assistant_msg_start", "delta", "tool_use", "tool_delta", "tool_result",
     "assistant_msg_end", "process", "turn_plan", "turn_diff", "turn_file_changes", "turn_binding",
@@ -2781,6 +2834,10 @@ DOWNSTREAM_TYPES = frozenset({
 })
 
 _TYPE_MAP: dict[str, type[BaseModel]] = {
+    "browse_files": BrowseFiles,
+    "files_listed": FilesListed,
+    "set_codex_context": SetCodexContext,
+    "codex_context": CodexContext,
     "hello": Hello,
     "query": Query,
     "cancel_queued_query": CancelQueuedQuery,

@@ -18,7 +18,7 @@ import type {
   StatusRateLimit, StatusRateWindow, SessionControl, PermissionProfileInfo,
   PreviewAuthorizationOperation, ClaudeProfileInfo, CodexProfileInfo,
   CodexTerminalFence, AutoCompact, AutoCompactMode,
-  BackgroundProcessItem,
+  BackgroundProcessItem, CodexContext,
 } from "./protocol";
 import type { SendMode } from "./composer-submit";
 import {
@@ -212,6 +212,7 @@ export interface SessionRuntime {
   model: string;
   effort: string;
   autoCompact: AutoCompact | null;
+  codexContext: CodexContext | null;
   perm: string;
   permissionProfile: string | null;
   permissionProfiles: PermissionProfileInfo[] | null;
@@ -460,7 +461,7 @@ export function createRuntime(): SessionRuntime {
     backgroundProcesses: [],
     backgroundLevelEmpty: false,
     backgroundLevelTs: undefined,
-    model: "", effort: "", autoCompact: null, perm: "",
+    model: "", effort: "", autoCompact: null, codexContext: null, perm: "",
     permissionProfile: null, permissionProfiles: null, webSearch: null,
     collaborationMode: "default",
     fast: null,
@@ -4936,6 +4937,7 @@ function reduceEvent(
       });
     }
     case "turn_file_changes_page":
+    case "files_listed":
     case "agent_detail":
       // Agent detail is a requester-correlated side panel projection. App owns
       // it separately so it can never mutate the parent conversation runtime.
@@ -5362,6 +5364,8 @@ function reduceEvent(
       });
     case "effort":
       return patch(state, e.sid, (rt) => { rt.effort = e.effort; });
+    case "codex_context":
+      return patch(state, e.sid, (rt) => { rt.codexContext = e; });
     case "auto_compact":
       return patch(state, e.sid, (rt) => {
         const previous = rt.autoCompact;

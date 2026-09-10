@@ -4,6 +4,9 @@
 
 ## Unreleased
 
+- Add session-specific Codex auto-compaction thresholds (protocol v59), validated against the native model catalog. Settings wait for an idle thread that the native server can reload without disconnecting other clients.
+- Add a session file browser through the folder button and `/open [path]`, with paged directories and the existing file preview sidebar.
+
 - Play linked audio directly in desktop and mobile file previews (protocol v58),
   with native playback/seeking, speed selection, original-file download, and
   playback cleanup on close or file changes. Preserve the existing 8 MiB limit,

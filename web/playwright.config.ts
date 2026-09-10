@@ -1,7 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
 const NEW_CHAT_CONTROL_TESTS =
-  /new-chat controls|default permission picker|256-character profile id|Work multi-account controls/;
+  /session workspace|new-chat controls|default permission picker|256-character profile id|Work multi-account controls/;
 const WEBKIT_VIEWER_TESTS = /remote Viewer/;
 const WEBKIT_LIVE_INTERACTION_TESTS =
   /async question|side chat scope|right panel layout|live append follows|scrolling a live-dirty history window|returning to a background-grown live turn|iOS pointercancel releases process interactions|switching sessions clears retained desktop text selection|nested process disclosures|stationary press opens|dragging a process header|dragging nested process|multi-line IME growth|long paste|oversized edited paste|multi-line composer growth|composer action growth|Codex controls stay on one row|queued messages expand|migration picker/;

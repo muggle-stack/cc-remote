@@ -13,11 +13,13 @@ import type {
   State, QueryImg, QueryFile, ContextReport, StatusReport,
   StatusRateLimit,
   CollaborationModeName, SessionControl, EngineCapabilityKind,
-  EngineCapabilityItem, PermissionProfileInfo, AutoCompact,
+  EngineCapabilityItem, PermissionProfileInfo, AutoCompact, CodexContext,
 } from "../protocol";
 import { presentLegacyExternalControl, presentSessionControl } from "../session-control-ui";
 import type { ConnState } from "../ws";
 import { Icon } from "../icons";
+import { parseContextThreshold } from "../codex-context";
+const CodexContextControl = lazy(() => import("./CodexContextControl"));
 import {
   clientSlashesFor, CODEX_PROMPTS, isKnownCodeOnlySlash, slashToken,
   matchCommands, matchSkills, parseSlash, skillToken,
@@ -48,7 +50,7 @@ import {
   makeComposerPaste,
 } from "../composer-pastes";
 import { PendingImageAttachments } from "./PendingImageAttachments";
-import { QueuedQueryChip } from "./QueuedQueryDialog";
+import { QueuedQueryChip } from "./QueuedQueryChip";
 import { UsageMeter } from "./UsageMeter";
 import { PasteCards } from "./PasteCards";
 import { uuid } from "../util";
@@ -109,6 +111,8 @@ interface Props {
   onSetModel: (model: string) => void;
   onSetEffort: (effort: string) => void;
   onSetAutoCompact?: (selection: AutoCompactSelection) => boolean;
+  codexContext?: CodexContext | null;
+  onSetCodexContext?: (threshold: number | null) => boolean;
   onSetServiceTier?: (tier: string) => void;
   onSetPerm: (perm: string) => void;
   onSetPermissionProfile: (profile: string) => void;
@@ -120,6 +124,7 @@ interface Props {
   onOpenBtw?: () => void;
   onDiff?: () => void;
   onPreview?: (path: string) => void;
+  onOpenFiles?: (path?: string) => void;
   onGoal?: (args: string) => void;
   onStatus?: () => void;
   onRefreshUsage?: () => void;
@@ -535,8 +540,14 @@ export function Composer(p: Props) {
         setCtxOpen(true);
         break;
       case "autocompact": {
-        if (p.engine !== "claude") {
-          flash("自动压缩阈值仅适用于 Claude 会话。");
+        if (p.engine === "codex") {
+          if (args.trim()) {
+            const value = parseContextThreshold(args);
+            if (value === undefined) { flash("格式：/autocompact 200k 或 default"); return; }
+            if (!p.onSetCodexContext?.(value)) flash("压缩设置暂不可用");
+          } else {
+            p.onContext(); setUsageOpen(false); setCtxOpen(false); setAutoCompactOpen(true);
+          }
           break;
         }
         if (!args.trim()) {
@@ -604,6 +615,10 @@ export function Composer(p: Props) {
         if (args.trim()) { flash("/diff 不接受参数"); return; }
         p.onDiff?.();
         break;
+      case "open":
+        p.onOpenFiles?.(args || ".");
+        setInput("");
+        return;
       case "preview":
         if (!args) {
           setInput("/preview ");
@@ -1135,13 +1150,21 @@ export function Composer(p: Props) {
               </div>}>
                 <ContextPopover report={exactContextReport}
                   loading={p.contextLoading} deferred={p.contextDeferred}
-                  error={p.contextError} />
+                  error={p.contextError} onAutoCompact={p.engine === "codex" && p.onSetCodexContext
+                    ? () => { setCtxOpen(false); setAutoCompactOpen(true); } : undefined} />
               </Suspense>
             )}
             {p.engine === "claude" && autoCompactOpen && (
               <div className="ctx-pop auto-compact-pop" role="dialog"
                 aria-label="自动压缩">
                 {autoCompactControl}
+              </div>
+            )}
+            {p.engine === "codex" && autoCompactOpen && (
+              <div className="ctx-pop auto-compact-pop" role="dialog" aria-label="Codex 自动压缩">
+                <Suspense fallback={<p>加载设置…</p>}><CodexContextControl
+                  key={`${p.codexContext?.threshold_tokens}:${p.codexContext?.pending}`}
+                  state={p.codexContext ?? null} onChange={(value) => p.onSetCodexContext?.(value) ?? false} /></Suspense>
               </div>
             )}
           </div>

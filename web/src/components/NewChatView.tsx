@@ -448,9 +448,14 @@ export function NewChatView({ cwd, controlScopeKey,
 
   const send = (value = taRef.current?.value ?? text) => {
     const command = parseSlash(value.trim());
+    if (command?.slash === "open") {
+      onPickCwd();
+      setText("");
+      return;
+    }
     if (command?.slash === "autocompact") {
       if (engine !== "claude") {
-        setAutoCompactNotice("自动压缩阈值仅适用于 Claude 会话。");
+        setAutoCompactNotice("创建 Codex 会话后，可单独设置压缩阈值。");
         setText("");
         return;
       }

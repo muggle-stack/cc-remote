@@ -31,15 +31,11 @@ import { TurnFilePageRequests, type LoadTurnFilePage } from "./turn-file-pages";
 import { Icon } from "./icons";
 import { ChatView } from "./components/ChatView";
 import { Composer } from "./components/Composer";
-import {
-  QueuedQueryDialog,
-  type QueuedQueryEditor,
-} from "./components/QueuedQueryDialog";
+import type { QueuedQueryEditor } from "./components/QueuedQueryDialog";
 import { ReconnectBanner } from "./components/ReconnectBanner";
 import { NoticeStack } from "./components/NoticeStack";
 import { presentCommandProblem } from "./problem-presentation";
 import { LoginForm } from "./components/LoginForm";
-import { DirPicker } from "./components/DirPicker";
 import {
   compatibleNewChatEffort,
   newChatCatalogRequest,
@@ -250,7 +246,7 @@ import {
   activeTurnCandidateIds,
   displayActiveTurnOwnerId,
 } from "./process-blocks";
-import type { AgentDetail } from "./protocol";
+import type { AgentDetail, FilesListed } from "./protocol";
 import type { AgentDetailSelection } from "./components/AgentDetailController";
 import type { RightPanelView } from "./components/PanelTabs";
 
@@ -265,6 +261,13 @@ const BtwPanel = lazy(() => import("./components/BtwPanel").then(
 ));
 const ArtifactPanel = lazy(() => import("./components/ArtifactPanel").then(
   ({ ArtifactPanel: Panel }) => ({ default: Panel }),
+));
+const SessionFilesPanel = lazy(() => import("./components/SessionFilesPanel"));
+const DirPicker = lazy(() => import("./components/DirPicker").then(
+  ({ DirPicker }) => ({ default: DirPicker }),
+));
+const QueuedQueryDialog = lazy(() => import("./components/QueuedQueryDialog").then(
+  ({ QueuedQueryDialog: Dialog }) => ({ default: Dialog }),
 ));
 const RemoteViewerPanel = lazy(() => import("./components/RemoteViewerPanel").then(
   ({ RemoteViewerPanel: Panel }) => ({ default: Panel }),
@@ -348,6 +351,14 @@ export default function App() {
   const [rightView, setRightView] = useState<RightPanelView>(
     btwPanelScopes.length ? "btw" : "diff");
   const [agentPanel, setAgentPanel] = useState<AgentDetailSelection | null>(null);
+  const [fileBrowser, setFileBrowser] = useState<{
+    sid: string; machineId: string; engine: string; space: string;
+    path: string; preview: boolean; id: string;
+  } | null>(null);
+  const filesListenerRef = useRef<((message: FilesListed) => void) | null>(null);
+  const listenFiles = useCallback((listener: ((message: FilesListed) => void) | null) => {
+    filesListenerRef.current = listener;
+  }, []);
   const [viewerSelections, setViewerSelections] = useState(() => readViewerSelections(sessionStorage));
   const [viewerUrl, setViewerUrl] = useState<{ key: string; href: string; openId: string } | null>(null);
   useEffect(() => writeViewerSelections(sessionStorage, viewerSelections), [viewerSelections]);
@@ -894,7 +905,11 @@ export default function App() {
   const selectViewer = (selection: ViewerSelection | null) => {
     if (viewerKey) setViewerSelections((current) => setViewerSelection(current, viewerKey, selection));
   };
+  const filesShowing = fileBrowser?.sid === visibleParentSid
+    && fileBrowser?.machineId === machineId && fileBrowser?.engine === engine
+    && fileBrowser?.space === space;
   const visibleRightPanel = viewerShowing ? "viewer" : agentPanel ? "agent"
+    : filesShowing ? "files"
     : rightView === "btw" && btwShowing ? "btw"
       : state.artifact ? "diff" : btwShowing ? "btw" : null;
   // Questions, hydration and completion receipts must agree with the rendered
@@ -3510,6 +3525,10 @@ export default function App() {
               || (msg.type === "error"
                 && msg.request_id === statusRuntimeBeforeEvent.statusRequestId)
             );
+          if (msg.type === "files_listed") {
+            filesListenerRef.current?.(msg);
+            return;
+          }
           if (msg.type === "agent_detail") {
             agentDetailListenerRef.current?.(msg);
             // Requester-scoped details never belong in the conversation
@@ -5108,9 +5127,11 @@ export default function App() {
     targetSid: string | null,
     file: string,
     line?: number,
+    fromBrowser = false,
   ): boolean => {
     if (!targetSid) return false;
     if (!confirmArtifactDiscard()) return false;
+    if (!fromBrowser) setFileBrowser(null);
     closeViewer();
     const requestId = uuid();
     if (!wsRef.current?.sendGetFilePreview(
@@ -5145,6 +5166,14 @@ export default function App() {
   const previewArtifactFile = (file: string, line?: number) =>
     previewFileForSid(state.artifact?.sid ?? focusedSid, file, line);
   const previewMarkdown = (file: string) => previewFile(file);
+  const openFiles = (path = ".") => {
+    if (!focusedSid || !confirmArtifactDiscard()) return;
+    closeViewer();
+    setAgentPanel(null);
+    dispatch({ type: "clear_artifact" });
+    setFileBrowser({ sid: focusedSid, machineId, engine, space,
+      path, preview: false, id: uuid() });
+  };
   const loadPreviewAsset = (file: string, previewId: string): boolean => {
     const targetSid = state.artifact?.sid ?? focusedSid;
     if (!targetSid) return false;
@@ -5345,6 +5374,8 @@ export default function App() {
   };
   // Header tab switch between the two right-slot views (opening the target lazily).
   const switchRight = (v: RightPanelView) => {
+    if (fileBrowser && !confirmArtifactDiscard()) return;
+    setFileBrowser(null);
     if (v === "diff") {
       setRightView("diff");
       if (!state.artifact) getDiff("");
@@ -5532,7 +5563,7 @@ export default function App() {
         onForkWorktree={openForkWorktree}
         onMigrate={openSessionMigration}
       /></Suspense>
-      <DirPicker
+      {dirPickerOpen && <Suspense fallback={null}><DirPicker
         open={dirPickerOpen}
         path={state.dirPicker?.path ?? null}
         parent={state.dirPicker?.parent ?? null}
@@ -5541,8 +5572,8 @@ export default function App() {
         onBrowse={(p) => wsRef.current?.sendListDir(p) ?? null}
         onConfirm={(cwd) => { if (state.newChat) dispatch({ type: "set_new_chat_cwd", cwd, cwdSource: "explicit" }); setDirPickerOpen(false); }}
         onClose={() => setDirPickerOpen(false)}
-      />
-      <DirPicker
+      /></Suspense>}
+      {migrateSession !== null && <Suspense fallback={null}><DirPicker
         key={`migration-${migrateSession?.session_id ?? "closed"}-${migrateSession?.cwd ?? "unset"}`}
         open={migrateSession !== null}
         path={state.dirPicker?.path ?? null}
@@ -5558,7 +5589,7 @@ export default function App() {
         onBrowse={(p) => wsRef.current?.sendListDir(p) ?? null}
         onConfirm={submitSessionMigration}
         onClose={closeSessionMigration}
-      />
+      /></Suspense>}
       <section className={`pane ${space}-pane`}>
         <header className={`c-head ${space}-head`}>
           <div className="titlewrap">
@@ -5598,6 +5629,11 @@ export default function App() {
           </button>
           <button className="engine-toggle" onClick={toggleEngine} aria-label="切换新会话引擎"
             title="新建会话使用的引擎">{engine === "codex" ? "◇ Codex" : "✳ Claude"}</button>
+          {visibleParentSid && !archivedBrowse && <button className="iconbtn header-files-trigger"
+            aria-label="打开会话文件" title="打开会话文件 · /open"
+            onClick={() => openFiles()} disabled={!state.wrapperOnline}>
+            <Icon name="folder-open" size={19} />
+          </button>}
           <HeaderMenu
             engine={engine}
             theme={theme}
@@ -5607,6 +5643,7 @@ export default function App() {
             onNotificationMode={updateNotificationMode}
             onOpenUsageActivity={openUsageActivity}
             onOpenViewer={visibleParentSid ? () => openViewer() : undefined}
+            onOpenFiles={visibleParentSid && !archivedBrowse && state.wrapperOnline ? () => openFiles() : undefined}
             onToggleTheme={toggleTheme}
             onLogout={() => void logout()}
           />
@@ -5878,6 +5915,10 @@ export default function App() {
           onOpenBtw={openBtw}
           onDiff={() => getDiff("")}
           onPreview={previewMarkdown}
+          onOpenFiles={openFiles}
+          codexContext={rt.codexContext}
+          onSetCodexContext={focusedSid && space === "code" && focusedEngine === "codex"
+            ? (threshold) => wsRef.current?.sendCodexContext(focusedSid, threshold) ?? false : undefined}
           onGoal={runGoal}
           onStatus={openStatus}
           onRefreshUsage={refreshStatus}
@@ -5938,6 +5979,32 @@ export default function App() {
       </section>
       {/* Share the layout's selection: retained hidden chats reserve no space. */}
       {(() => {
+        if (visibleRightPanel === "files" && fileBrowser) {
+          const closeFiles = () => {
+            if (!confirmArtifactDiscard()) return;
+            setFileBrowser(null);
+            dispatch({ type: "clear_artifact" });
+          };
+          return <Suspense fallback={<div className="artifact-panel" role="status">加载目录…</div>}>
+            <SessionFilesPanel key={fileBrowser.id} showingPreview={fileBrowser.preview}
+              browser={{ sid: fileBrowser.sid, initialPath: fileBrowser.path, ws: wsRef.current,
+                hidden: fileBrowser.preview, onListen: listenFiles, onClose: closeFiles,
+                onOpenFile: (path) => {
+                  if (previewFileForSid(fileBrowser.sid, path, undefined, true))
+                    setFileBrowser({ ...fileBrowser, preview: true });
+                } }}
+              onBack={() => {
+                if (!confirmArtifactDiscard()) return;
+                dispatch({ type: "clear_artifact" });
+                setFileBrowser({ ...fileBrowser, preview: false });
+              }}
+              preview={{ artifact: state.artifact, theme,
+                onRefresh: (path, line) => { previewFileForSid(fileBrowser.sid, path, line, true); },
+                onOpenFile: (path, line) => { previewFileForSid(fileBrowser.sid, path, line, true); },
+                onLoadPreviewAsset: loadPreviewAsset, onAuthorizePreview: authorizePreview,
+                onSaveMarkdown: saveMarkdown, onDirtyChange: setArtifactDirty, onClose: closeFiles }} />
+          </Suspense>;
+        }
         if (visibleRightPanel === "viewer" && visibleParentSid && viewerKey) {
           return <Suspense fallback={<div className="artifact-panel empty" role="status"><p>加载预览…</p></div>}>
             <RemoteViewerPanel key={`${viewerKey}:${viewerUrl?.key === viewerKey ? viewerUrl.openId : ""}`}
@@ -6058,7 +6125,7 @@ export default function App() {
           </Suspense>;
         return null;
       })()}
-      <QueuedQueryDialog
+      {queuedQueryEditor && <Suspense fallback={null}><QueuedQueryDialog
         key={queuedQueryEditor
           ? `${queuedQueryEditor.sid}:${queuedQueryEditor.msgId}`
           : "closed"}
@@ -6067,7 +6134,7 @@ export default function App() {
           if (!queuedQueryEditor?.saving) setQueuedQueryEditor(null);
         }}
         onSave={updateQueuedQuery}
-        onRetry={retryQueuedQuery} />
+        onRetry={retryQueuedQuery} /></Suspense>}
       {rt.pendingQuestion && !activeBtwQuestionVisible && (
         <QuestionSheet
           key={rt.pendingQuestion.ask_id}

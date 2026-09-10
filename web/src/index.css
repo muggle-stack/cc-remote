@@ -199,6 +199,7 @@ body{
   .hstat .sd{ width:7px; height:7px; }
   .c-head .iconbtn,.c-head .engine-toggle{ min-height:40px; }
   .c-head .iconbtn{ width:40px; height:40px; }
+  .c-head .header-files-trigger{ display:none; }
   .engine-toggle{ padding-left:7px; padding-right:7px; }
 }
 @media(max-width:380px){
@@ -1451,6 +1452,14 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .ctx-pop-status.error{ color:var(--danger); }
 .auto-compact-control{ display:flex; flex-direction:column; gap:9px; min-width:0; }
 .auto-compact-pop{ width:270px; }
+.context-settings-link{ width:100%; margin-top:12px; border-top:1px solid var(--border); padding:10px 0 0; color:var(--accent-ink); text-align:left; font-size:12px; }
+.codex-context-control{ font-size:12px; line-height:1.5; }
+.codex-context-control p{ margin:0; color:var(--dim); overflow-wrap:anywhere; }
+.codex-context-control p[role="alert"]{ color:var(--danger); }
+.codex-context-input{ display:flex; gap:6px; margin-top:6px; }
+.codex-context-input input{ width:100%; min-width:0; padding:8px; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text); }
+.codex-context-input button{ flex:none; padding:8px 12px; background:var(--accent); color:white; border-radius:8px; }
+.codex-context-default{ align-self:flex-start; color:var(--accent-ink); padding:5px 0; }
 .auto-compact-pop .auto-compact-control{ margin:0; padding:0; border:0; }
 .auto-compact-head{ display:flex; align-items:center; justify-content:space-between;
   gap:10px; color:var(--dim); font-size:11.5px; }

@@ -902,6 +902,18 @@ export class RelayWs {
     return queued ? requestId : null;
   }
 
+  sendBrowseFiles(sid: string, path: string, requestId: string,
+                  hidden = false, offset = 0, revision?: string | null): boolean {
+    return this.send({ v: PROTOCOL_VERSION, type: "browse_files", sid, path,
+      request_id: requestId, hidden, offset, limit: 100, revision, ts: nowTs() });
+  }
+
+  sendCodexContext(sid: string, threshold: number | null): boolean {
+    if (threshold !== null && (!Number.isSafeInteger(threshold) || threshold < 1 || threshold > 100_000_000)) return false;
+    return !!this.sendTracked({ v: PROTOCOL_VERSION, type: "set_codex_context",
+      sid, threshold_tokens: threshold, ts: nowTs() });
+  }
+
   sendSaveMarkdown(path: string, content: string, expectedSize: number,
                    expectedMtimeNs: string, expectedRevision: string,
                    requestId = uuid(),

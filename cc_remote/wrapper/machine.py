@@ -1956,7 +1956,7 @@ class WrapperMachine:
         "get_context", "get_status", "get_diff", "get_turn_file_changes", "get_file_preview",
         "get_preview_asset", "get_goal", "dismiss_goal",
         "acknowledge_completion",
-        "get_queued_query", "list_dir",
+        "get_queued_query", "list_dir", "browse_files",
         "get_work_dashboard", "sync_btw",
     })
     # Commands whose target is a runtime ``sid``.  A /btw runtime is private to
@@ -1965,13 +1965,13 @@ class WrapperMachine:
     BTW_SID_COMMANDS = frozenset({
         "query", "cancel_queued_query", "get_queued_query",
         "update_queued_query", "steer", "interrupt", "takeover",
-        "set_model", "set_effort", "set_auto_compact",
+        "set_model", "set_effort", "set_auto_compact", "set_codex_context",
         "set_service_tier", "set_collaboration_mode", "open_btw", "close_btw",
         "sync_btw",
         "set_perm", "get_permission_profiles", "set_permission_profile",
         "set_web_search",
         "get_context", "get_status", "consume_rate_limit_reset_credit",
-        "get_diff", "get_turn_file_changes", "get_file_preview", "save_markdown",
+        "get_diff", "get_turn_file_changes", "get_file_preview", "save_markdown", "browse_files",
         "get_preview_asset", "authorize_preview",
         "answer_question", "get_goal", "set_goal", "clear_goal",
         "dismiss_goal", "acknowledge_completion",
@@ -11131,6 +11131,23 @@ class WrapperMachine:
         ctx.queued_query_wakeup.set()
         await self._emit(ctx, StateEvent(state=state))
         log.info("state transition", sid=ctx.session_id, state=state)
+        settings = getattr(ctx.sdk, "context_settings", None)
+        if state == "idle" and ctx.engine == "codex" and settings is not None and settings.pending:
+            task = ctx.auto_compact_apply_task
+            if task is None or task.done():
+                task = asyncio.create_task(self._settle_codex_context(ctx))
+                ctx.auto_compact_apply_task = task
+                def finished(completed):
+                    if ctx.auto_compact_apply_task is completed:
+                        ctx.auto_compact_apply_task = None
+                    if not completed.cancelled():
+                        completed.exception()
+                task.add_done_callback(finished)
+
+    async def _settle_codex_context(self, ctx):
+        async with ctx.query_lock:
+            if self._is_resident_context(ctx) and ctx.state == "idle":
+                await self._apply_codex_context(ctx)
 
     async def _emit_current_state(
         self, ctx: SessionContext,
@@ -17660,6 +17677,13 @@ class WrapperMachine:
             if context_error is not None:
                 await self._emit(ctx, context_error)
                 return context_error
+        if ctx.engine == "codex":
+            await self._apply_codex_context(ctx)
+            if ctx.state != "idle" or getattr(ctx.sdk, "turn_active", False):
+                error = Error(code=ERR_BUSY, message="会话已开始新回合，请稍后重试或排队发送",
+                              msg_id=getattr(cmd, "msg_id", None))
+                await self._emit(ctx, error)
+                return error
         # All synchronous rejection paths have passed. A new conversation may
         # now finish before the next sidebar catalog read, so remember its first
         # accepted prompt under the temporary key; capture migrates it to the
@@ -19257,6 +19281,69 @@ class WrapperMachine:
         log.info("effort set", sid=ctx.session_id, effort=applied, engine=ctx.engine)
         return event
 
+    async def _publish_codex_context(self, ctx):
+        from cc_remote.protocol import CodexContext
+        from cc_remote.wrapper.codex_context_settings import model_context_bounds
+
+        settings = getattr(ctx.sdk, "context_settings", None)
+        if ctx.engine != "codex" or settings is None:
+            return None
+        bounds = await asyncio.to_thread(
+            model_context_bounds, ctx.sdk.model, ctx.sdk.codex_home)
+        event = CodexContext(
+            model=ctx.sdk.model or "",
+            threshold_tokens=settings.threshold,
+            applied_threshold_tokens=settings.applied_threshold,
+            model_max_tokens=bounds.max_window if bounds else None,
+            limit_tokens=bounds.limit if bounds else None,
+            context_window_tokens=settings.window,
+            pending=settings.pending,
+            mutable=ctx.space == "code" and not ctx.btw,
+            error=settings.error)
+        await self._emit(ctx, event)
+        return event
+
+    async def _apply_codex_context(self, ctx):
+        settings = getattr(ctx.sdk, "context_settings", None)
+        if ctx.engine != "codex" or settings is None or not settings.pending:
+            return
+        try:
+            await settings.apply(ctx.sdk)
+        except Exception as exc:
+            settings.error = str(exc)[:1024]
+        await self._publish_codex_context(ctx)
+
+    async def _handle_set_codex_context(self, cmd):
+        ctx = self._ctx_for(getattr(cmd, "sid", None))
+        if ctx is None:
+            return await self._missing_session_error(cmd, "设置压缩阈值")
+        async with ctx.query_lock:
+            control_error = await self._runtime_control_preflight(
+                ctx, action="设置压缩阈值", request_id=getattr(cmd, "cmd_id", None),
+                client_id=getattr(cmd, "client_id", None))
+            if control_error is not None:
+                return control_error
+            settings = getattr(ctx.sdk, "context_settings", None)
+            if ctx.engine != "codex" or ctx.space != "code" or ctx.btw or settings is None:
+                error = Error(code=ERR_PROTOCOL, message="此设置仅适用于 Codex Code 主会话",
+                              request_id=getattr(cmd, "cmd_id", None), to=getattr(cmd, "client_id", None))
+                await self._emit(ctx, error)
+                return error
+            previous = (settings.threshold, settings.window, settings.pending, settings.error)
+            try:
+                await settings.select(ctx.sdk, cmd.threshold_tokens)
+                if self._codex_controls is None:
+                    raise ValueError("会话设置存储暂不可用")
+                await asyncio.to_thread(self._codex_controls.set_context,
+                    self._ctx_wire_sid(ctx), settings.threshold, settings.window)
+            except Exception as exc:
+                settings.threshold, settings.window, settings.pending, settings.error = previous
+                settings.error = str(exc)[:1024]
+                return await self._publish_codex_context(ctx)
+            if ctx.state == "idle":
+                await self._apply_codex_context(ctx)
+            return await self._publish_codex_context(ctx)
+
     async def _handle_set_auto_compact(self, cmd):
         """Change Claude's per-session spawn-time compaction threshold safely."""
         ctx = self._ctx_for(getattr(cmd, "sid", None))
@@ -20558,6 +20645,8 @@ class WrapperMachine:
         *,
         prefer_cached_claude: bool = False,
     ):
+        if ctx.engine == "codex":
+            await self._publish_codex_context(ctx)
         try:
             context_source: Literal[
                 "control", "cached_control", "recent_turn"
@@ -23628,6 +23717,37 @@ class WrapperMachine:
         self._preview_challenges.pop(cmd.authorization_id, None)
         await self._emit(ctx, result)
         return result
+
+    async def _handle_browse_files(self, cmd):
+        from cc_remote.protocol import FilesListed
+        from cc_remote.wrapper.workspace_browser import browse_workspace
+
+        sid = getattr(cmd, "sid", None)
+        ctx = self._ctx_for(sid)
+        payload = {}
+        error = None
+        try:
+            if ctx is None:
+                raise ValueError("请先选择一个可用的会话")
+            payload = await asyncio.to_thread(
+                browse_workspace, ctx.cwd, cmd.path, offset=cmd.offset,
+                limit=cmd.limit, hidden=cmd.hidden, revision=cmd.revision)
+        except ValueError as exc:
+            error = str(exc)
+        except FileNotFoundError:
+            error = "文件或目录不存在"
+        except PermissionError:
+            error = "没有权限读取该目录"
+        except OSError:
+            error = "无法打开该目录"
+        response = FilesListed(
+            request_id=cmd.request_id, to=getattr(cmd, "client_id", None),
+            error=error, **payload)
+        if ctx is None:
+            await self._emit_to_sid(sid, response)
+        else:
+            await self._emit(ctx, response)
+        return response
 
     async def _handle_get_file_preview(self, cmd):
         sid = getattr(cmd, "sid", None)
@@ -35084,6 +35204,10 @@ class WrapperMachine:
             # resume response does not expose.
             if resume_id:
                 controls = saved_codex_controls
+                if space == "code" and hasattr(sdk, "context_settings"):
+                    sdk.context_settings.restore(
+                        controls.context_threshold_tokens, controls.context_window_tokens,
+                        controls.context_settings_set)
                 restored_control_profile = False
                 if (space != "work" and permission_mode is None
                         and controls.approval_policy

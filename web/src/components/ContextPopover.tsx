@@ -8,6 +8,7 @@ interface Props {
   deferred?: boolean;
   error?: string | null;
   work?: WorkContextMetrics | null;
+  onAutoCompact?: () => void;
 }
 
 
@@ -95,6 +96,7 @@ export default function ContextPopover(p: Props) {
           {statusNode}
         </>
       ) : loadingNode}
+      {p.onAutoCompact && <button className="context-settings-link" onClick={p.onAutoCompact}>设置自动压缩阈值</button>}
     </div>
   );
 }

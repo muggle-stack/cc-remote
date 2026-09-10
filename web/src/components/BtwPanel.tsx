@@ -30,7 +30,7 @@ import { canEnqueueQuery, type QueueCapacity } from "../runtime-drain";
 import {
   effortNameForDisplay, modelsFor, parseSlash, type Catalog,
 } from "../data";
-import { QueuedQueryChip } from "./QueuedQueryDialog";
+import { QueuedQueryChip } from "./QueuedQueryChip";
 import type { InlineImageAsset } from "../inline-image-assets";
 import {
   composePastePrompt,
@@ -233,9 +233,15 @@ export function BtwPanel(p: Props) {
   const submit = (value = taRef.current?.value ?? input) => {
     if (awaitingFirstChat || !p.sid || inputLockedRef.current) return;
     const command = parseSlash(value.trim());
+    if (command?.slash === "open") {
+      flash("请在主会话打开文件目录。");
+      setInput("");
+      resetTaHeight();
+      return;
+    }
     if (command?.slash === "autocompact") {
       if (p.engine === "codex") {
-        flash("自动压缩阈值仅适用于 Claude 会话。");
+        flash("请在 Codex 主会话设置压缩阈值。");
         setInput("");
         resetTaHeight();
         return;

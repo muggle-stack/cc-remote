@@ -52,6 +52,7 @@ from cc_remote.wrapper.codex_daemon import (
     codex_daemon_mode,
     default_codex_daemon_manager,
 )
+from cc_remote.wrapper.codex_context_settings import NativeContextSettings, model_context_bounds
 from cc_remote.wrapper.codex_sessions import (
     codex_approval,
     codex_context_window,
@@ -1735,6 +1736,8 @@ class CodexHandle:
         # applied through config.web_search on start/resume/fork and retained
         # locally so controlled reconnects preserve it.
         self.web_search_override: Optional[str] = None
+        self.context_settings = NativeContextSettings()
+        self._context_resume_thread_id: Optional[str] = None
         self.web_search: str = (
             "cached" if self.work_mode else (
                 codex_web_search() if self.codex_home is None
@@ -2312,6 +2315,10 @@ class CodexHandle:
         if not connected:  # pragma: no cover - the attempt list is never empty
             raise RuntimeError("unable to start Codex app-server transport")
         bound_thread_id: Optional[str] = None
+        context_config = await self.context_settings.validated_config(self) if not self.work_mode else {}
+        context_will_apply = not resume_id
+        self.context_settings.reloaded = False
+        self._context_resume_thread_id = resume_id if self.context_settings.pending else None
         try:
             if control_only:
                 log.info("codex control connection established", cwd=self._cwd)
@@ -2382,6 +2389,8 @@ class CodexHandle:
                 self._ephemeral_thread_gone = False
             elif resume_id:
                 await self._require_loaded_ephemeral_thread(resume_id)
+                if self.context_settings.pending:
+                    context_will_apply = resume_id not in await self.list_loaded_thread_ids()
                 # A replacement daemon reconstructs approval/profile from
                 # config defaults rather than the last live thread settings.
                 # Controlled reconnects repeat the exact settings that the old
@@ -2398,6 +2407,9 @@ class CodexHandle:
                 )
                 if preserve_controls:
                     resume_params["approvalPolicy"] = preserved_approval
+                    if self.context_settings.pending and self.model:
+                        resume_params["model"] = self.model
+                        resume_params["serviceTier"] = self.service_tier
                     if preserve_permission_profile and preserved_profile:
                         resume_params["permissions"] = preserved_profile
                 if http_only_resume:
@@ -2418,6 +2430,12 @@ class CodexHandle:
                     )
                     if code_config is not None:
                         resume_params["config"] = code_config
+                    if context_config:
+                        resume_params.setdefault("config", {}).update(context_config)
+                    elif self.context_settings.pending and self.context_settings.threshold is None:
+                        # Some({}) deliberately requests a fresh native config.
+                        # Omitting config only rejoins and retains the old override.
+                        resume_params.setdefault("config", {})
                 if _supports_lightweight_resume(self.app_server_version):
                     # Since Codex 0.144.6, excludeTurns is the official way for
                     # clients with a paged history UI to resume a live thread.
@@ -2465,6 +2483,8 @@ class CodexHandle:
                     params["config"] = {
                         "web_search": self.web_search_override,
                     }
+                if context_config:
+                    params.setdefault("config", {}).update(context_config)
                 if self.work_mode:
                     params.update({
                         "baseInstructions": WORK_BASE_INSTRUCTIONS,
@@ -2583,6 +2603,14 @@ class CodexHandle:
                 return
             await self.disconnect()
             raise
+        if (context_will_apply or self.context_settings.reloaded) and self.context_settings.pending and (
+            self.context_settings.threshold is None or context_config
+        ):
+            self.context_settings.applied_threshold = self.context_settings.threshold
+            self.context_settings.applied_window = self.context_settings.window
+            self.context_settings.pending = False
+            self.context_settings.error = None
+        self._context_resume_thread_id = None
         log.info("codex connected", thread_id=self.thread_id, cwd=self._cwd,
                  resume=bool(resume_id), fork=fork)
 
@@ -4767,6 +4795,12 @@ class CodexHandle:
     async def set_model(self, model: str) -> None:
         if not isinstance(model, str) or not model:
             raise ValueError("Codex model must be non-empty")
+        configured_window = max(self.context_settings.window or 0,
+                                self.context_settings.applied_window or 0)
+        if configured_window:
+            bounds = await asyncio.to_thread(model_context_bounds, model, self.codex_home)
+            if bounds is None or configured_window > bounds.max_window:
+                raise ValueError("当前会话的压缩配置超过目标模型上下文上限；请先恢复默认压缩设置")
         authoritative = await self._update_thread_settings(
             model=model, wait_for_notification=True)
         if not authoritative:
@@ -6880,6 +6914,11 @@ class CodexHandle:
         return True
 
     async def _dispatch(self, m: dict, raw_size: Optional[int] = None) -> None:
+        if m.get("method") == "thread/status/changed" and self._context_resume_thread_id:
+            params = m.get("params") or {}
+            if (params.get("threadId") == self._context_resume_thread_id
+                    and (params.get("status") or {}).get("type") == "notLoaded"):
+                self.context_settings.reloaded = True
         has_id = "id" in m
         has_method = "method" in m
         if has_id and not has_method:                       # response to our request
