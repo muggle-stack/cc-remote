@@ -2606,10 +2606,12 @@ class CodexHandle:
         if (context_will_apply or self.context_settings.reloaded) and self.context_settings.pending and (
             self.context_settings.threshold is None or context_config
         ):
-            self.context_settings.applied_threshold = self.context_settings.threshold
-            self.context_settings.applied_window = self.context_settings.window
-            self.context_settings.pending = False
-            self.context_settings.error = None
+            await self.context_settings.confirm_applied(self)
+            self.context_window = self.context_settings.applied_effective_window
+        elif (self.context_settings.applied_model is not None
+                and self.context_settings.applied_model == self.model
+                and self.context_window is None):
+            self.context_window = self.context_settings.applied_effective_window
         self._context_resume_thread_id = None
         log.info("codex connected", thread_id=self.thread_id, cwd=self._cwd,
                  resume=bool(resume_id), fork=fork)
@@ -5490,6 +5492,9 @@ class CodexHandle:
             )
 
     async def get_context_usage(self) -> dict:
+        configured_capacity = (
+            self.context_settings.applied_model is not None
+            and self.context_settings.applied_model == self.model)
         # Real shape (verified, gpt-5.5): tokenUsage = {last:{totalTokens,…},
         # total:{totalTokens,…}, modelContextWindow}. `last.totalTokens` is the most
         # recent turn's full token count ≈ current context depth (what the codex TUI
@@ -5515,7 +5520,9 @@ class CodexHandle:
                     and isinstance(recovered, dict)):
                 self.last_token_usage = recovered
                 window = recovered.get("modelContextWindow")
-                if isinstance(window, int) and not isinstance(window, bool):
+                if (isinstance(window, int) and not isinstance(window, bool)
+                        and self.context_window is None
+                        and not configured_capacity):
                     self.context_window = window
             elif (self.last_token_usage is None
                     and self.thread_id == recovery_thread_id
@@ -5534,12 +5541,12 @@ class CodexHandle:
             used = _nonnegative_int(total.get("totalTokens"))
         # server value (captured in _dispatch) wins; else the config-declared window.
         win = _nonnegative_int(self.context_window)
-        if not win:
+        if not win and not configured_capacity:
             win = _nonnegative_int(u.get("modelContextWindow"))
-        win = win or (
+        win = win or (0 if configured_capacity else (
             codex_context_window() if self.codex_home is None
             else codex_context_window(codex_home=self.codex_home)
-        )
+        ))
         return {"used_tokens": used, "context_window": win, "raw": u}
 
     async def reconcile_turn_start(

@@ -1,4 +1,4 @@
-import type { ContextReport } from "../protocol";
+import type { CodexContext, ContextReport } from "../protocol";
 import type { WorkContextMetrics } from "../work-context";
 
 
@@ -9,6 +9,7 @@ interface Props {
   error?: string | null;
   work?: WorkContextMetrics | null;
   onAutoCompact?: () => void;
+  codexContext?: CodexContext | null;
 }
 
 
@@ -96,6 +97,14 @@ export default function ContextPopover(p: Props) {
           {statusNode}
         </>
       ) : loadingNode}
+      {p.codexContext && <>
+        <div className="ctx-pop-row"><span>自动压缩阈值</span>
+          <span className="ctx-pop-nums">{p.codexContext.applied_threshold_tokens?.toLocaleString() ?? "Codex 默认值"}</span>
+        </div>
+        {p.codexContext.pending && <div className="ctx-pop-status" role="status">
+          已保存 {p.codexContext.threshold_tokens?.toLocaleString() ?? "默认值"}，等待生效
+        </div>}
+      </>}
       {p.onAutoCompact && <button className="context-settings-link" onClick={p.onAutoCompact}>设置自动压缩阈值</button>}
     </div>
   );

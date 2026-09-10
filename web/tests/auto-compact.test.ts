@@ -223,6 +223,32 @@ try {
     ...body,
   } as ServerEvent);
 
+  const codexContextSid = "codex-applied-context";
+  const codexOldReport = event({ type: "context_report", sid: codexContextSid,
+    total_tokens: 142_045, max_tokens: 258_400, percentage: 55, categories: [] });
+  let codexContextState = reduce({
+    ...initialState,
+    focusedSid: codexContextSid,
+    runtimes: { [codexContextSid]: createRuntime() },
+  }, { type: "event", event: codexOldReport });
+  const codexSetting = event({ type: "codex_context", sid: codexContextSid,
+    threshold_tokens: 400_000, applied_threshold_tokens: null, pending: true });
+  codexContextState = reduce(codexContextState, { type: "event", event: codexSetting });
+  assert.equal(codexContextState.runtimes[codexContextSid].contextReport, codexOldReport);
+  codexContextState = reduce(codexContextState, { type: "event", event: {
+    ...codexSetting, applied_threshold_tokens: 400_000, pending: false,
+  } as ServerEvent });
+  assert.equal(codexContextState.runtimes[codexContextSid].contextReport, null,
+    "accepted Codex settings clear the previous configuration's capacity");
+  const codexFreshReport = event({ ...codexOldReport, max_tokens: 400_000, percentage: 35.51 });
+  codexContextState = reduce(codexContextState, { type: "event", event: codexFreshReport });
+  assert.equal(codexContextState.runtimes[codexContextSid].contextReport, codexFreshReport);
+  codexContextState = reduce(codexContextState, { type: "event", event: {
+    ...codexSetting, threshold_tokens: null, applied_threshold_tokens: 400_000, pending: true,
+  } as ServerEvent });
+  assert.equal(codexContextState.runtimes[codexContextSid].contextReport, codexFreshReport,
+    "a pending reset retains the still-applied capacity");
+
   assert.equal(createRuntime().autoCompact, null,
     "a session must not claim a mode before the wrapper reports it");
   const sid = "claude-autocompact-state";

@@ -369,6 +369,21 @@ try {
   }
   assert.equal(presentCommandProblem({ code: "internal", message: hiddenDiagnostic }),
     "操作未完成，请稍后重试。");
+  for (const [raw, expected] of [
+    ["Codex 已自动更新，当前回合在更新时中断；为避免重复执行工具，"
+      + "本次任务未自动重试。请确认已有结果后重新发送。",
+    "Codex 自动更新时连接中断，本轮未确认完成。请检查已有结果后继续。"],
+    ["Codex 共享通道意外断开；为避免重复执行工具，本次任务未自动重试。"
+      + "请确认已有结果后重新发送。",
+    "与 Codex 的连接中断，本轮未确认完成。请检查已有结果后继续。"],
+  ]) {
+    assert.equal(presentTurnProblem({ code: "cc_crash", message: raw }), expected);
+    assert.equal(presentHistoricalTurnProblem(raw), expected);
+    assert.equal(presentHistoricalTurnProblem(expected), expected,
+      "a cached transport cause must survive the history presentation pass");
+  }
+  assert.equal(presentCommandProblem({ code: "steer_outcome_unknown", message: hiddenDiagnostic }),
+    "引导已发出，Codex 尚未确认是否生效。请先查看后续结果。");
   assert.doesNotMatch(
     presentCommandProblem({ code: "protocol", message: hiddenDiagnostic }),
     /crash|wrapper|private|protocol/i);

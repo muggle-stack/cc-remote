@@ -19308,9 +19308,15 @@ class WrapperMachine:
         if ctx.engine != "codex" or settings is None or not settings.pending:
             return
         try:
-            await settings.apply(ctx.sdk)
+            applied = await settings.apply(ctx.sdk)
         except Exception as exc:
             settings.error = str(exc)[:1024]
+            applied = False
+        if applied:
+            # Refresh an already-open context ring immediately after the
+            # native reload, without waiting for another model turn.
+            await self._handle_get_context_locked(ctx, None)
+            return
         await self._publish_codex_context(ctx)
 
     async def _handle_set_codex_context(self, cmd):

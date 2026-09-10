@@ -7,6 +7,16 @@ const PROVIDER_AUTH_TURN_FAILURE =
   "模型服务认证已失效或当前账号无权限，请检查当前服务的凭据或账号权限后重试。";
 const LEGACY_CODEX_AUTH_TURN_FAILURE =
   "Codex 登录已失效或当前账号无权限，请重新登录后重试。";
+const CODEX_UPDATE_INTERRUPTION =
+  "Codex 自动更新时连接中断，本轮未确认完成。请检查已有结果后继续。";
+const CODEX_CONNECTION_INTERRUPTION =
+  "与 Codex 的连接中断，本轮未确认完成。请检查已有结果后继续。";
+const CODEX_TRANSPORT_MESSAGES = new Map([
+  ["Codex 已自动更新，当前回合在更新时中断；为避免重复执行工具，"
+    + "本次任务未自动重试。请确认已有结果后重新发送。", CODEX_UPDATE_INTERRUPTION],
+  ["Codex 共享通道意外断开；为避免重复执行工具，本次任务未自动重试。"
+    + "请确认已有结果后重新发送。", CODEX_CONNECTION_INTERRUPTION],
+]);
 const SAFE_TURN_FAILURE_MESSAGES = new Set([
   // Keep the former network copy safe for replayed rows from an older wrapper.
   "网络异常，连接失败，请重新尝试。",
@@ -16,6 +26,8 @@ const SAFE_TURN_FAILURE_MESSAGES = new Set([
   "请求超时，请重新尝试。",
   "Codex 上游服务暂时不可用，请稍后重试。",
   "当前模型繁忙，请稍后重试或切换模型。",
+  CODEX_UPDATE_INTERRUPTION,
+  CODEX_CONNECTION_INTERRUPTION,
   "上游模型因安全策略拒绝了本次请求（cyber_policy）。"
     + "这不是本地权限或网络错误；请核实并说明任务背景与授权范围，"
     + "若属误判请向服务提供方反馈。",
@@ -26,6 +38,8 @@ function safeTurnFailureMessage(message: string): string | null {
   if (trimmed === LEGACY_CODEX_AUTH_TURN_FAILURE) {
     return PROVIDER_AUTH_TURN_FAILURE;
   }
+  const transportMessage = CODEX_TRANSPORT_MESSAGES.get(trimmed);
+  if (transportMessage) return transportMessage;
   return SAFE_TURN_FAILURE_MESSAGES.has(trimmed) ? trimmed : null;
 }
 
@@ -84,6 +98,8 @@ export function presentCommandProblem(
       return "页面版本已更新，请刷新后重试。";
     case "fork_reconciling":
       return "正在确认派生结果，请稍候…";
+    case "steer_outcome_unknown":
+      return "引导已发出，Codex 尚未确认是否生效。请先查看后续结果。";
     default:
       return "操作未完成，请稍后重试。";
   }

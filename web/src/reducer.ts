@@ -5365,7 +5365,17 @@ function reduceEvent(
     case "effort":
       return patch(state, e.sid, (rt) => { rt.effort = e.effort; });
     case "codex_context":
-      return patch(state, e.sid, (rt) => { rt.codexContext = e; });
+      return patch(state, e.sid, (rt) => {
+        const previous = rt.codexContext;
+        rt.codexContext = e;
+        if ((previous != null && previous.applied_threshold_tokens !== e.applied_threshold_tokens)
+            || (previous == null && !e.pending && e.applied_threshold_tokens != null
+              && rt.contextReport != null && rt.contextReport.max_tokens < e.applied_threshold_tokens)) {
+          rt.contextReport = null;
+          rt.contextExactReport = null;
+          rt.contextError = null;
+        }
+      });
     case "auto_compact":
       return patch(state, e.sid, (rt) => {
         const previous = rt.autoCompact;

@@ -1150,7 +1150,8 @@ export function Composer(p: Props) {
               </div>}>
                 <ContextPopover report={exactContextReport}
                   loading={p.contextLoading} deferred={p.contextDeferred}
-                  error={p.contextError} onAutoCompact={p.engine === "codex" && p.onSetCodexContext
+                  error={p.contextError} codexContext={p.engine === "codex" ? p.codexContext : null}
+                  onAutoCompact={p.engine === "codex" && p.onSetCodexContext
                     ? () => { setCtxOpen(false); setAutoCompactOpen(true); } : undefined} />
               </Suspense>
             )}

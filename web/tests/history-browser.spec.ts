@@ -484,6 +484,38 @@ test("session workspace Codex compaction rejects oversize and sends a session pr
   expect(relay.commands.some((c) => c.type === "query")).toBe(false);
 });
 
+test("session workspace context ring refreshes applied capacity and distinguishes pending thresholds", async ({ page }, testInfo) => {
+  const relay = await mockRightPanelRelay(page, { retained: false });
+  await page.goto("/");
+  const ring = page.getByRole("button", { name: "上下文占用", exact: true });
+  await expect(ring).toBeVisible();
+  await expect.poll(() => relay.commands.some((c) => c.type === "get_history")).toBe(true);
+  const setting: PanelRelayEvent<Extract<ServerEvent, { type: "codex_context" }>> = {
+    type: "codex_context", sid: "layout-parent", model: "fixture",
+    threshold_tokens: 400000, applied_threshold_tokens: null, model_max_tokens: 872000,
+    context_window_tokens: 421053, limit_tokens: 828400, pending: true, mutable: true, error: null,
+  };
+  const report: PanelRelayEvent<Extract<ServerEvent, { type: "context_report" }>> = {
+    type: "context_report", sid: "layout-parent", total_tokens: 142045,
+    max_tokens: 258400, percentage: 55, model: "fixture", categories: [],
+  };
+  relay.emit(setting);
+  relay.emit(report);
+  await ring.click();
+  const popover = page.getByRole("dialog", { name: "上下文占用", exact: true });
+  await expect(popover).toContainText("142,045 / 258,400 (55%)");
+  await expect(popover).toContainText("已保存 400,000，等待生效");
+  relay.emit({ ...setting, applied_threshold_tokens: 400000, pending: false });
+  await expect(popover).not.toContainText("258,400");
+  const request = relay.commands.filter((c) => c.type === "get_context").at(-1)!;
+  relay.emit({ ...report, request_id: String(request.cmd_id), max_tokens: 400000, percentage: 35.51125 });
+  await expect(popover).toContainText("142,045 / 400,000 (36%)");
+  await expect(popover.locator(".ctx-pop-row").filter({ hasText: "自动压缩阈值" })).toContainText("400,000");
+  await expect(popover).not.toContainText("等待生效");
+  await page.screenshot({ path: testInfo.outputPath("applied-context-capacity.png") });
+  expect(relay.commands.some((c) => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
+});
+
 test("turn regressions App routes file pages by exact request and opens the archived diff", async ({ page }) => {
   const files = Array.from({ length: 65 }, (_, i) => ({
     path: `/tmp/layout/file-${i}.py`, state: "available" as const, additions: 1, deletions: 1,
@@ -783,6 +815,26 @@ test("provider capacity history keeps its cause after reload without a stuck pro
     await expect(page.getByText("已完成部署。", { exact: true })).toBeVisible();
     await expect(page.locator(".turn-working, .turn-problem-continuation, .note.interrupted")).toHaveCount(0);
   }
+});
+
+test("turn regressions daemon update keeps its cause across reload and later replies", async ({ page }) => {
+  const raw = "Codex 已自动更新，当前回合在更新时中断；为避免重复执行工具，"
+    + "本次任务未自动重试。请确认已有结果后重新发送。";
+  const expected = "Codex 自动更新时连接中断，本轮未确认完成。请检查已有结果后继续。";
+  const relay = await mockRightPanelRelay(page, { seedTurns: [{
+    id: "interrupted-update", prompt: "修复问题", done: true,
+    error: raw, processDetailState: "present", blocks: [],
+  }, { id: "continued-update", prompt: "继续", done: true,
+    blocks: [{ kind: "text", message_id: "continued-answer", channel: "final",
+      text: "继续核对已有结果。", done: true }] }] });
+  await page.goto("/");
+  for (let iteration = 0; iteration < 2; iteration++) {
+    if (iteration) await page.reload();
+    await expect(page.locator(".turn-problem")).toHaveText(expected);
+    await expect(page.getByText("继续核对已有结果。", { exact: true })).toBeVisible();
+    await expect(page.locator(".turn-working")).toHaveCount(0);
+  }
+  expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toHaveLength(0);
 });
 
 test("async question first layout keeps optional notes visible with vertical choices and a separate send button", async ({ page }, testInfo) => {

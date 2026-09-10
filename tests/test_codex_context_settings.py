@@ -131,3 +131,74 @@ async def test_resume_rebuild_receipt_is_exact_thread_scoped():
     await handle._dispatch({"method": "thread/status/changed", "params": {
         "threadId": "target", "status": {"type": "notLoaded"}}})
     assert handle.context_settings.reloaded
+
+
+@pytest.mark.asyncio
+async def test_applied_capacity_survives_old_rollout_and_yields_to_live_usage(catalog, monkeypatch):
+    from cc_remote.wrapper import codex_handle as module
+    from tests.test_codex_controls import _Cfg
+
+    handle = module.CodexHandle(_Cfg(), codex_home=str(catalog), daemon_mode="never")
+    handle.model, handle.thread_id = "fixture", "target"
+    old = {"last": {"totalTokens": 7000}, "modelContextWindow": 9500}
+    monkeypatch.setattr(module, "recover_codex_context_usage", lambda *a, **k: old)
+    await handle.context_settings.select(handle, 12000)
+    # Saving alone keeps the current native capacity.
+    assert (await handle.get_context_usage())["context_window"] == 9500
+    handle.last_token_usage = None
+    handle._rollout_context_recovery_attempted = False
+    await handle.context_settings.confirm_applied(handle)
+    handle.context_window = handle.context_settings.applied_effective_window
+    usage = await handle.get_context_usage()
+    assert (usage["used_tokens"], usage["context_window"]) == (7000, 12000)
+    assert usage["raw"] == old
+    await handle._dispatch({"method": "thread/tokenUsage/updated", "params": {
+        "threadId": "target", "tokenUsage": {
+            "last": {"totalTokens": 7100}, "modelContextWindow": 11900}}})
+    usage = await handle.get_context_usage()
+    assert (usage["used_tokens"], usage["context_window"]) == (7100, 11900)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured,expected", [(None, 9500), (15000, 14250), (30000, 19000)])
+async def test_reset_capacity_reads_native_inheritance(catalog, configured, expected):
+    settings, handle = NativeContextSettings(), handle_for(catalog)
+    handle.cwd = str(catalog)
+    settings.applied_window = 20000
+    handle._request.return_value = {"config": {"model_context_window": configured}}
+    await settings.select(handle, None)
+    await settings.confirm_applied(handle)
+    assert settings.applied_effective_window == expected
+    assert settings.applied_threshold is None and not settings.pending
+    handle._request.assert_awaited_once_with("config/read", {
+        "cwd": str(catalog), "includeLayers": False})
+
+
+@pytest.mark.asyncio
+async def test_unreadable_reset_capacity_does_not_reuse_old_rollout(catalog, monkeypatch):
+    from cc_remote.wrapper import codex_handle as module
+    from tests.test_codex_controls import _Cfg
+
+    handle = module.CodexHandle(_Cfg(), codex_home=str(catalog), daemon_mode="never")
+    handle.model, handle.thread_id = "fixture", "target"
+    handle._request = AsyncMock(side_effect=RuntimeError("unavailable"))
+    await handle.context_settings.confirm_applied(handle)
+    monkeypatch.setattr(module, "recover_codex_context_usage", lambda *a, **k: {
+        "last": {"totalTokens": 7000}, "modelContextWindow": 19000})
+    usage = await handle.get_context_usage()
+    assert usage["used_tokens"] == 7000 and usage["context_window"] == 0
+
+
+@pytest.mark.asyncio
+async def test_applied_setting_refreshes_context_without_a_model_turn(catalog):
+    from cc_remote.wrapper.machine import WrapperMachine
+
+    settings, handle = NativeContextSettings(), handle_for(catalog)
+    handle.context_settings = settings
+    settings.pending = True
+    settings.apply = AsyncMock(return_value=True)
+    machine = SimpleNamespace(_handle_get_context_locked=AsyncMock(), _publish_codex_context=AsyncMock())
+    ctx = SimpleNamespace(engine="codex", sdk=handle)
+    await WrapperMachine._apply_codex_context(machine, ctx)
+    machine._handle_get_context_locked.assert_awaited_once_with(ctx, None)
+    machine._publish_codex_context.assert_not_called()

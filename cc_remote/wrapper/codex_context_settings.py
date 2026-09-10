@@ -57,10 +57,42 @@ class NativeContextSettings:
         self.window: int | None = None
         self.applied_threshold: int | None = None
         self.applied_window: int | None = None
+        self.applied_effective_window: int | None = None
+        self.applied_model: str | None = None
         self.pending = False
         self.error: str | None = None
         self.lock = asyncio.Lock()
         self.reloaded = False
+
+    async def confirm_applied(self, handle) -> None:
+        """Keep capacity from the accepted configuration separate from old usage.
+
+        Resume can replay a token sample from before the reload. Its token count
+        remains useful, but its modelContextWindow no longer describes this
+        configuration. A subsequent native usage notification takes precedence.
+        """
+        self.applied_threshold, self.applied_window = self.threshold, self.window
+        self.pending, self.error = False, None
+        self.applied_model = handle.model
+        self.applied_effective_window = None
+        bounds = await asyncio.to_thread(
+            model_context_bounds, handle.model, handle.codex_home)
+        if bounds is None:
+            return
+        window = self.applied_window
+        if window is None:
+            try:
+                result = await handle._request("config/read", {
+                    "cwd": handle.cwd, "includeLayers": False,
+                })
+                configured = result.get("config", {}).get("model_context_window")
+            except Exception:
+                # The setting was accepted, but its inherited capacity is
+                # unavailable. Never substitute a pre-reset rollout window.
+                return
+            window = configured if type(configured) is int and configured > 0 else bounds.default_window
+        self.applied_effective_window = (
+            min(window, bounds.max_window) * bounds.effective_percent // 100)
 
     def restore(self, threshold: int | None, window: int | None, selected: bool = False) -> None:
         if threshold is not None and (window is None or threshold > window):
