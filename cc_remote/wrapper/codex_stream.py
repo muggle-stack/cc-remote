@@ -45,6 +45,7 @@ from cc_remote.wrapper.sanitize import bounded_text, bounded_tool_input
 from cc_remote.wrapper.turn_changes import (
     MAX_FILES, MAX_DIFF, MAX_TURN_DIFF, turn_change_event_data,
 )
+from cc_remote.wrapper.usage_limit import usage_limit_failure
 
 _TOOL_TYPES = {
     "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall",
@@ -3316,7 +3317,9 @@ def _retry_detail(error: dict) -> str:
     status_match = re.search(r"\b([45]\d\d)\b", combined)
     status = status_match.group(1) if status_match else _structured_http_status(error)
     attempt = re.search(r"\b(\d+\s*/\s*\d+)\b", combined)
-    if _is_model_capacity_error(error):
+    if usage_limit_failure(error) is not None:
+        text = "账号额度已用完，Codex 正在重试"
+    elif _is_model_capacity_error(error):
         text = "当前模型繁忙，Codex 正在重试"
     elif status:
         text = f"上游服务返回 HTTP {status}，Codex 正在重试"
@@ -3365,6 +3368,9 @@ def _provider_failure_message(error: object) -> str:
     """Map one provider terminal to bounded, user-actionable product copy."""
     if not isinstance(error, dict):
         return _GENERIC_TURN_FAILURE
+    quota_failure = usage_limit_failure(error)
+    if quota_failure is not None:
+        return quota_failure
     message = error.get("message") if isinstance(error.get("message"), str) else ""
     details = (
         error.get("additionalDetails")

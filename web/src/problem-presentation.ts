@@ -11,6 +11,10 @@ const CODEX_UPDATE_INTERRUPTION =
   "Codex 自动更新时连接中断，本轮未确认完成。请检查已有结果后继续。";
 const CODEX_CONNECTION_INTERRUPTION =
   "与 Codex 的连接中断，本轮未确认完成。请检查已有结果后继续。";
+const CODEX_USAGE_LIMIT_FAILURE =
+  "本轮使用的 Codex 账号额度已用完。可切换账号、补充额度，或等待恢复后重试。";
+const CODEX_USAGE_LIMIT_RETRY =
+  /^官方提示可于 ((?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2})（设备当地时间）重试。$/;
 const CODEX_TRANSPORT_MESSAGES = new Map([
   ["Codex 已自动更新，当前回合在更新时中断；为避免重复执行工具，"
     + "本次任务未自动重试。请确认已有结果后重新发送。", CODEX_UPDATE_INTERRUPTION],
@@ -33,6 +37,17 @@ const SAFE_TURN_FAILURE_MESSAGES = new Set([
     + "若属误判请向服务提供方反馈。",
 ]);
 
+function isUsageLimitFailure(message: string): boolean {
+  if (message === CODEX_USAGE_LIMIT_FAILURE) return true;
+  if (!message.startsWith(CODEX_USAGE_LIMIT_FAILURE)) return false;
+  const match = CODEX_USAGE_LIMIT_RETRY.exec(message.slice(CODEX_USAGE_LIMIT_FAILURE.length));
+  if (!match) return false;
+  // Validate without browser-local timezone conversion (including DST gaps).
+  const iso = match[1].replace(" ", "T");
+  const date = new Date(iso + "Z");
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 16) === iso;
+}
+
 function safeTurnFailureMessage(message: string): string | null {
   const trimmed = message.trim();
   if (trimmed === LEGACY_CODEX_AUTH_TURN_FAILURE) {
@@ -40,7 +55,7 @@ function safeTurnFailureMessage(message: string): string | null {
   }
   const transportMessage = CODEX_TRANSPORT_MESSAGES.get(trimmed);
   if (transportMessage) return transportMessage;
-  return SAFE_TURN_FAILURE_MESSAGES.has(trimmed) ? trimmed : null;
+  return SAFE_TURN_FAILURE_MESSAGES.has(trimmed) || isUsageLimitFailure(trimmed) ? trimmed : null;
 }
 
 /** Only reviewed, explicit transport causes may override an interruption label. */
@@ -57,6 +72,7 @@ export function presentTurnOutcome(
   const cause = codexTransportInterruption(message);
   if (cause === "update") return "Codex 自动升级，本轮中断";
   if (cause === "connection") return "连接中断，回复未完成";
+  if (outcome === "failed" && message && isUsageLimitFailure(message.trim())) return "账号额度已用完";
   return outcome === "interrupted" ? "已打断" : "回复未完成";
 }
 

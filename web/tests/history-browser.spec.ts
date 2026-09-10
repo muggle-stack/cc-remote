@@ -876,6 +876,70 @@ test("provider capacity history keeps its cause after reload without a stuck pro
   }
 });
 
+test("turn regressions usage limit shows the native retry date without blocking the next turn", async ({ page }, testInfo) => {
+  const failure = "本轮使用的 Codex 账号额度已用完。可切换账号、补充额度，或等待恢复后重试。"
+    + "官方提示可于 2026-09-15 09:24（设备当地时间）重试。";
+  const relay = await mockRightPanelRelay(page, { historyReply: () => null });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
+  const sid = "layout-parent";
+  relay.emit({ type: "user_msg", sid, msg_id: "limited-request", prompt: "继续检查" });
+  relay.emit({ type: "turn_binding", sid, msg_id: "limited-request", turn_id: "limited-native" });
+  relay.emit({ type: "process", sid, item_id: "check", kind: "command", phase: "end",
+    status: "succeeded", turn_id: "limited-native", title: "检查已有结果", duration_ms: 1000 });
+  relay.emit({ type: "error", sid, msg_id: "limited-request", code: "cc_crash", message: failure });
+  relay.emit({ type: "turn_end", sid, turn_id: "limited-native",
+    result: { subtype: "error", duration_ms: 1000, is_error: true } });
+  relay.emit({ type: "state", sid, state: "idle" });
+  const failed = page.locator('.turn[data-turn-id="limited-request"]');
+  await expect(failed.locator(".turn-process-head")).toContainText("账号额度已用完");
+  await expect(failed.locator(".turn-problem")).toHaveText(failure);
+  await expect(page.locator(".turn-working, .note.interrupted")).toHaveCount(0);
+  expect(await failed.locator(".turn-problem").evaluate(node => node.scrollWidth - node.clientWidth)).toBeLessThan(2);
+  await page.screenshot({ path: testInfo.outputPath("quota-failure-light.png") });
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  await page.screenshot({ path: testInfo.outputPath("quota-failure-dark.png") });
+
+  relay.emit({ type: "user_msg", sid, msg_id: "quota-followup", prompt: "换个账号继续" });
+  relay.emit({ type: "turn_binding", sid, msg_id: "quota-followup", turn_id: "followup-native" });
+  relay.emit({ type: "state", sid, state: "running" });
+  relay.emit({ type: "assistant_msg_start", sid, message_id: "resumed-answer", channel: "final" });
+  relay.emit({ type: "delta", sid, message_id: "resumed-answer", text: "检查完成。", channel: "final" });
+  relay.emit({ type: "turn_end", sid, turn_id: "followup-native",
+    result: { subtype: "success", duration_ms: 1000, is_error: false } });
+  relay.emit({ type: "state", sid, state: "idle" });
+  await expect(page.locator('.turn[data-turn-id="quota-followup"] .turn-problem')).toHaveCount(0);
+  await expect(page.getByText("检查完成。", { exact: true })).toBeVisible();
+  await expect(page.locator(".turn-problem")).toHaveCount(1);
+  await expect(page.locator(".turn-working")).toHaveCount(0);
+  expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toHaveLength(0);
+});
+
+test("turn regressions usage limit history replaces an old generic cache and survives reload", async ({ page }) => {
+  const failure = "本轮使用的 Codex 账号额度已用完。可切换账号、补充额度，或等待恢复后重试。"
+    + "官方提示可于 2026-09-15 09:24（设备当地时间）重试。";
+  // Match the real zero-output failed turn: no tool timeline, only its error.
+  const seedTurns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = [{
+    id: "limited-history", prompt: "继续检查", done: true, forkPointId: "limited-native",
+    error: "该轮未正常结束", blocks: [],
+  }, { id: "quota-followup-history", prompt: "换个账号继续", done: true, forkPointId: "followup-native",
+    blocks: [{ kind: "text", message_id: "finished", channel: "final", text: "检查完成。", done: true }] }];
+  await mockRightPanelRelay(page, { seedTurns });
+  await page.goto("/");
+  await expect(page.locator(".turn-problem")).toHaveText("该轮未正常结束");
+  await expect.poll(() => page.evaluate(async () => {
+    const cache = await import("/src/cache.ts");
+    return (await cache.loadSession("layout-parent"))?.turns.find(turn => turn.id === "limited-history")?.error;
+  })).toBe("该轮未正常结束");
+  seedTurns[0] = { ...seedTurns[0], error: failure };
+  for (let iteration = 0; iteration < 2; iteration++) {
+    await page.reload();
+    await expect(page.locator(".turn-problem")).toHaveText(failure);
+    await expect(page.getByText("检查完成。", { exact: true })).toBeVisible();
+    await expect(page.locator(".turn-working, .note.interrupted")).toHaveCount(0);
+  }
+});
+
 test("turn regressions daemon update keeps its cause across native history refresh and reload", async ({ page }, testInfo) => {
   const raw = "Codex 已自动更新，当前回合在更新时中断；为避免重复执行工具，"
     + "本次任务未自动重试。请确认已有结果后重新发送。";

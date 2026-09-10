@@ -342,6 +342,8 @@ try {
     /crash|warning|wrapper|private|traceback|secret/i);
 
   const hiddenDiagnostic = "provider crash at /private/token; see wrapper logs";
+  const quotaFailure = "本轮使用的 Codex 账号额度已用完。可切换账号、补充额度，或等待恢复后重试。";
+  const quotaRetry = quotaFailure + "官方提示可于 2026-09-15 09:24（设备当地时间）重试。";
   const policyFailure = "上游模型因安全策略拒绝了本次请求（cyber_policy）。"
     + "这不是本地权限或网络错误；请核实并说明任务背景与授权范围，"
     + "若属误判请向服务提供方反馈。";
@@ -363,11 +365,25 @@ try {
     "请求超时，请重新尝试。",
     "Codex 上游服务暂时不可用，请稍后重试。",
     "当前模型繁忙，请稍后重试或切换模型。",
+    quotaFailure,
+    quotaRetry,
   ]) {
     assert.equal(
       presentTurnProblem({ code: "cc_crash", message: safeMessage }),
       safeMessage,
     );
+    assert.equal(presentHistoricalTurnProblem(safeMessage), safeMessage);
+  }
+  assert.equal(presentTurnOutcome("failed", quotaRetry), "账号额度已用完");
+  assert.equal(presentTurnOutcome("interrupted", quotaRetry), "已打断");
+  for (const unsafe of [
+    quotaRetry + " PRIVATE_SECRET",
+    quotaFailure + "官方提示可于 2026-02-30 09:24（设备当地时间）重试。",
+    quotaFailure + "官方提示可于 2026-09-15 25:24（设备当地时间）重试。",
+    quotaFailure + "官方提示可于 0000-09-15 09:24（设备当地时间）重试。",
+  ]) {
+    assert.equal(presentTurnProblem({ code: "cc_crash", message: unsafe }), "本次回复未完成，请重试。");
+    assert.equal(presentHistoricalTurnProblem(unsafe), "该轮未正常结束");
   }
   assert.equal(presentCommandProblem({ code: "internal", message: hiddenDiagnostic }),
     "操作未完成，请稍后重试。");

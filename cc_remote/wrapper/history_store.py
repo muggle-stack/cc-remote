@@ -27,6 +27,7 @@ from cc_remote.attachments import (
     image_dimensions,
 )
 from cc_remote.protocol import ConversationTurn
+from cc_remote.wrapper.usage_limit import is_usage_limit_failure
 
 
 # v17 also discards Codex pages whose legacy rollout user rows were materialized
@@ -57,7 +58,8 @@ from cc_remote.protocol import ConversationTurn
 # v31 retains native model fallback notes and durable per-turn file summaries.
 # v32 repairs missing file summaries on the full-page cache population path.
 # v35 preserves task_complete.error and binds assistant-only native turns.
-_SCHEMA_VERSION = 35
+# v36 restores explicit usage-limit failures and their native retry dates.
+_SCHEMA_VERSION = 36
 _FINGERPRINT_SAMPLE_BYTES = 64 * 1024
 _DEFAULT_MAX_ENTRIES = 128
 _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
@@ -152,7 +154,7 @@ def _historical_turn_failure(value: Any) -> str:
     legacy = _LEGACY_HISTORY_TURN_FAILURES.get(message)
     if legacy is not None:
         return legacy
-    if message in _SAFE_HISTORY_TURN_FAILURES:
+    if message in _SAFE_HISTORY_TURN_FAILURES or is_usage_limit_failure(message):
         return message
     return _GENERIC_HISTORY_TURN_FAILURE
 
@@ -1278,6 +1280,12 @@ class HistoryIndexStore:
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
             current = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if current in range(10, 36):
+                # Native quota errors used to collapse into a generic failure.
+                # Rebuild only Codex narrative projections, once; source bytes,
+                # other engines, and binary assets remain untouched.
+                for table in ("history_pages", "history_turn_details"):
+                    connection.execute(f"DELETE FROM {table} WHERE engine='codex'")
             if current in range(10, 35):
                 # Existing source bytes do not change when the translator starts
                 # honoring task_complete.error. Rebuild Codex narrative only.
@@ -1386,8 +1394,8 @@ class HistoryIndexStore:
                 for table in ("history_pages", "history_turn_details"):
                     connection.execute(
                         f"DELETE FROM {table} WHERE engine='codex'")
-            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34):
-                # The independent v22-v35 invalidations above suffice.
+            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35):
+                # The independent v22-v36 invalidations above suffice.
                 pass
             elif current not in (0, _SCHEMA_VERSION):
                 # v9 changes the invariant of history_turn_details: those rows
