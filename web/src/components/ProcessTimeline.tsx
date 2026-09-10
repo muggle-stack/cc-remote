@@ -15,6 +15,7 @@ import type {
   ToolBlock,
 } from "../domain/conversation";
 import { Icon } from "../icons";
+import { presentTurnOutcome } from "../problem-presentation";
 import { MessageBlock } from "./MessageBlock";
 import { PreviewAuthorizationPrompt } from "./PreviewAuthorizationPrompt";
 import { HistoryUserImage } from "./HistoryUserImage";
@@ -689,7 +690,7 @@ function isPayloadFreeUnfinishedCommandShell(block: Block): boolean {
   return !hasPayload;
 }
 
-export function ProcessTimeline({ blocks, done, active, outcome, durationMs, startTs, doneTs, onOpenFile,
+export function ProcessTimeline({ blocks, done, active, outcome, problem, durationMs, startTs, doneTs, onOpenFile,
   deferredCount = 0, detailLoading = false, detailError, onLoadDetail,
   onRetryDetail,
   canLoadEarlier = false, canLoadNewer = false,
@@ -706,6 +707,7 @@ export function ProcessTimeline({ blocks, done, active, outcome, durationMs, sta
   active?: boolean;
   /** An enclosing terminal failure is separate from individual tool results. */
   outcome?: "failed" | "interrupted";
+  problem?: string;
   durationMs?: number;
   startTs?: number;
   doneTs?: number;
@@ -970,8 +972,7 @@ export function ProcessTimeline({ blocks, done, active, outcome, durationMs, sta
               : <Icon name={processActive ? "spark" : terminalOutcome === "failed"
                 ? "info" : terminalOutcome === "interrupted" ? "stop" : "verify"} size={14} />}
           </span>
-          <span>{terminalOutcome === "failed" ? "回复未完成"
-            : terminalOutcome === "interrupted" ? "已打断"
+          <span>{terminalOutcome ? presentTurnOutcome(terminalOutcome, problem)
             : processSettled ? "已处理" : "正在处理"}
             {elapsed == null ? null : ` ${durationLabel(elapsed)}`}</span>
           <span className="turn-process-count">{countLabel}</span>

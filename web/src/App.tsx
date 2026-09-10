@@ -5629,11 +5629,6 @@ export default function App() {
           </button>
           <button className="engine-toggle" onClick={toggleEngine} aria-label="切换新会话引擎"
             title="新建会话使用的引擎">{engine === "codex" ? "◇ Codex" : "✳ Claude"}</button>
-          {visibleParentSid && !archivedBrowse && <button className="iconbtn header-files-trigger"
-            aria-label="打开会话文件" title="打开会话文件 · /open"
-            onClick={() => openFiles()} disabled={!state.wrapperOnline}>
-            <Icon name="folder-open" size={19} />
-          </button>}
           <HeaderMenu
             engine={engine}
             theme={theme}

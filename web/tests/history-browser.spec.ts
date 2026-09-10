@@ -415,9 +415,8 @@ test("session workspace opens files in the sidebar and returns to its directory"
   const relay = await mockRightPanelRelay(page, { retained: false });
   await page.goto("/");
   await expect(page.getByRole("button", { name: "更多设置", exact: true })).toBeVisible();
-  if (page.viewportSize()!.width <= 640) {
-    await page.getByRole("button", { name: "更多设置", exact: true }).click();
-  }
+  await expect(page.locator(".c-head").getByRole("button", { name: "打开会话文件", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "更多设置", exact: true }).click();
   await page.getByRole("button", { name: "打开会话文件", exact: true }).click();
   await expect.poll(() => relay.commands.filter((c) => c.type === "browse_files").length).toBe(1);
   const request = relay.commands.find((c) => c.type === "browse_files")!;
@@ -439,8 +438,16 @@ test("session workspace opens files in the sidebar and returns to its directory"
   relay.emit({ type: "file_preview", sid: "layout-parent", request_id: String(preview.request_id),
     path: String(preview.path), format: "markdown", content: "# Workspace preview", size: 20, writable: false });
   await expect(page.getByRole("heading", { name: "Workspace preview" })).toBeVisible();
-  await page.getByRole("button", { name: "← 返回目录", exact: true }).click();
+  await page.screenshot({ path: testInfo.outputPath("workspace-preview.png"), animations: "disabled" });
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  await page.screenshot({ path: testInfo.outputPath("workspace-preview-dark.png"), animations: "disabled" });
+  await page.evaluate(() => { document.documentElement.dataset.theme = "light"; });
+  await page.getByRole("button", { name: "返回目录", exact: true }).click();
   await expect(page.getByRole("button", { name: "README.md", exact: true })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("workspace-directory.png"), animations: "disabled" });
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  await page.screenshot({ path: testInfo.outputPath("workspace-directory-dark.png"), animations: "disabled" });
+  await page.evaluate(() => { document.documentElement.dataset.theme = "light"; });
   expect(relay.commands.filter((c) => c.type === "browse_files")).toHaveLength(1);
   await page.getByRole("button", { name: "关闭文件浏览", exact: true }).click();
   const input = page.locator("textarea").first();
@@ -817,23 +824,37 @@ test("provider capacity history keeps its cause after reload without a stuck pro
   }
 });
 
-test("turn regressions daemon update keeps its cause across reload and later replies", async ({ page }) => {
+test("turn regressions daemon update keeps its cause across native history refresh and reload", async ({ page }, testInfo) => {
   const raw = "Codex 已自动更新，当前回合在更新时中断；为避免重复执行工具，"
     + "本次任务未自动重试。请确认已有结果后重新发送。";
   const expected = "Codex 自动更新时连接中断，本轮未确认完成。请检查已有结果后继续。";
-  const relay = await mockRightPanelRelay(page, { seedTurns: [{
+  const seedTurns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = [{
     id: "interrupted-update", prompt: "修复问题", done: true,
+    forkPointId: "updated-native",
     error: raw, processDetailState: "present", blocks: [],
   }, { id: "continued-update", prompt: "继续", done: true,
     blocks: [{ kind: "text", message_id: "continued-answer", channel: "final",
-      text: "继续核对已有结果。", done: true }] }] });
+      text: "继续核对已有结果。", done: true }] }];
+  const relay = await mockRightPanelRelay(page, { seedTurns });
   await page.goto("/");
   for (let iteration = 0; iteration < 2; iteration++) {
     if (iteration) await page.reload();
     await expect(page.locator(".turn-problem")).toHaveText(expected);
+    await expect(page.locator(".turn-process-head")).toContainText("Codex 自动升级，本轮中断");
     await expect(page.getByText("继续核对已有结果。", { exact: true })).toBeVisible();
     await expect(page.locator(".turn-working")).toHaveCount(0);
+    if (!iteration) {
+      await expect.poll(() => page.evaluate(async () => {
+        const cache = await import("/src/cache.ts");
+        const saved = await cache.loadSession("layout-parent");
+        return saved?.turns.find(turn => turn.id === "interrupted-update")?.error;
+      })).toBe(raw);
+      // app-server history carries the interruption, but not the updater's
+      // control-link explanation. The local observed cause must survive it.
+      seedTurns[0] = { ...seedTurns[0], error: undefined, interrupted: true };
+    }
   }
+  await page.screenshot({ path: testInfo.outputPath("codex-update-interruption.png") });
   expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toHaveLength(0);
 });
 

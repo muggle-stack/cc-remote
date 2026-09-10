@@ -2912,6 +2912,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
               <ProcessTimeline blocks={timelineBlocks} done={t.done}
                 active={activePhase === "process"} engine={engine}
                 outcome={t.error ? "failed" : t.interrupted ? "interrupted" : undefined}
+                problem={t.error}
                 durationMs={engine === "codex" ? undefined : t.durationMs}
                 startTs={engine === "codex" ? t.processStartedTs : t.ts}
                 doneTs={engine === "codex" ? t.processDoneTs : t.doneTs}

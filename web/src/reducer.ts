@@ -41,7 +41,7 @@ import {
 import {
   historyContainsTurn, installAuthoritativeTurnDetailPage,
   mergeAuthoritativeTurnDetail, mergeDetailWithLiveTail, mergeInitialHistory,
-  restoreCachedTurnDetails, restoreObservedLiveTurnDetails,
+  restoreCachedTurnDetails, restoreObservedLiveTurnDetails, restoreTurnInterruptionCauses,
 } from "./history-merge";
 import { reconcileBoundCompactionOrphanDetailed } from "./compaction-orphans.ts";
 import {
@@ -76,7 +76,7 @@ import type { HistoryDetailRequestContext } from "./history-requests";
 import { boundRuntimeTurns, pruneRuntimeMap } from "./runtime-bounds";
 import { bumpSessionActivity, setSessionPinned } from "./session-order";
 import { normalizeSessionList } from "./session-list";
-import { presentCommandProblem, presentTurnProblem } from "./problem-presentation";
+import { codexTransportInterruption, presentCommandProblem, presentTurnProblem } from "./problem-presentation";
 import {
   matchQueryAcceptanceHistory,
   queryAcceptanceDescriptor,
@@ -897,7 +897,7 @@ function applyTerminalFence(turn: Turn, fence: CodexTerminalFence): Turn {
     finishOpenBlocks(next, "succeeded", false);
   } else if (fence.status === "interrupted") {
     next.interrupted = true;
-    next.error = undefined;
+    next.error = codexTransportInterruption(turn.error) ? turn.error : undefined;
     next.terminalSource = "unexpected_interrupt";
     finishOpenBlocks(next, "interrupted", true);
   } else {
@@ -4435,6 +4435,11 @@ function reduceEvent(
           ? base.historyGeneration == null
             || base.historyGeneration === e.generation
           : base.historyGeneration == null);
+      if (liveDetailScopeMatches) {
+        // Explanations are independent from heavyweight detail/cache paint.
+        // A later summary refresh must keep a previously restored exact cause.
+        turns = restoreTurnInterruptionCauses(turns, base.turns);
+      }
       if (liveDetailScopeMatches && base.liveDetailTurnIds.length > 0) {
         const observedIds = new Set(base.liveDetailTurnIds);
         turns = restoreObservedLiveTurnDetails(

@@ -43,6 +43,23 @@ function safeTurnFailureMessage(message: string): string | null {
   return SAFE_TURN_FAILURE_MESSAGES.has(trimmed) ? trimmed : null;
 }
 
+/** Only reviewed, explicit transport causes may override an interruption label. */
+export function codexTransportInterruption(message?: string): "update" | "connection" | null {
+  const safe = message ? safeTurnFailureMessage(message) : null;
+  if (safe === CODEX_UPDATE_INTERRUPTION) return "update";
+  if (safe === CODEX_CONNECTION_INTERRUPTION) return "connection";
+  return null;
+}
+
+export function presentTurnOutcome(
+  outcome: "failed" | "interrupted", message?: string,
+): string {
+  const cause = codexTransportInterruption(message);
+  if (cause === "update") return "Codex 自动升级，本轮中断";
+  if (cause === "connection") return "连接中断，回复未完成";
+  return outcome === "interrupted" ? "已打断" : "回复未完成";
+}
+
 function ownershipMessage(message: string): string | null {
   if (!OWNERSHIP_GUIDANCE.test(message)) return null;
   // Ownership rejections are deliberately authored user copy.  Still remove

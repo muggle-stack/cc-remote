@@ -9,6 +9,7 @@ import {
 } from "./domain/conversation.ts";
 import { reconcileProvenCompactionOrphans } from "./compaction-orphans.ts";
 import { generatedImageIdentity, generatedOutputImages } from "./process-blocks.ts";
+import { codexTransportInterruption } from "./problem-presentation.ts";
 export { reconcileProvenCompactionOrphans } from "./compaction-orphans.ts";
 
 function combineText(first: string, second: string): string {
@@ -467,6 +468,33 @@ function nativeTaskIdentity(turn: Turn): string | undefined {
   return turn.liveTaskId ?? turn.forkPointId ?? turn.codexTurnId;
 }
 
+function historicalInterruptionError(history: Turn, previous: Turn): string | undefined {
+  if (history.error != null) return history.error;
+  // Native history knows the outcome, but a daemon replacement's cause exists
+  // only on the control link. Keep it only for the exact interrupted task.
+  const nativeId = nativeTaskIdentity(history);
+  return history.done && history.interrupted
+    && nativeId && nativeId === nativeTaskIdentity(previous)
+    && codexTransportInterruption(previous.error) ? previous.error : undefined;
+}
+
+/** Restore observed control-link causes within the caller's validated history
+ * revision/generation, without resurrecting rows or changing native outcomes. */
+export function restoreTurnInterruptionCauses(
+  summaries: Turn[], previous: readonly Turn[],
+): Turn[] {
+  const observed = previous.filter(turn => codexTransportInterruption(turn.error));
+  if (!observed.length) return summaries;
+  return summaries.map(summary => {
+    if (!summary.done || !summary.interrupted || summary.error != null) return summary;
+    const matches = observed.filter(turn => sharesExactTurnAlias(summary, turn)
+      && nativeTaskIdentity(summary) === nativeTaskIdentity(turn));
+    if (matches.length !== 1) return summary;
+    const error = historicalInterruptionError(summary, matches[0]);
+    return error ? { ...summary, error } : summary;
+  });
+}
+
 function isIdleHistoryRestartOrphan(turn: Turn): boolean {
   return turn.done
     && turn.interrupted === true
@@ -893,7 +921,9 @@ export function restoreCachedTurnDetails(
     const summary = restored[summaryIndex];
     const installed = installCachedDetailRestore(
       summary, cachedTurns[cachedIndex], authority, activeOwnerId);
-    restored[summaryIndex] = installed;
+    const error = historicalInterruptionError(summary, cachedTurns[cachedIndex]);
+    restored[summaryIndex] = error === installed.error
+      ? installed : { ...installed, error };
   }
   return restored;
 }
@@ -1058,12 +1088,12 @@ function mergeTurn(
   };
 }
 
-function restoreAuthoritativeLifecycle(merged: Turn, history: Turn): Turn {
+function restoreAuthoritativeLifecycle(merged: Turn, history: Turn, live: Turn): Turn {
   const restored = {
     ...merged,
     done: history.done,
     interrupted: history.interrupted,
-    error: history.error,
+    error: historicalInterruptionError(history, live),
     progress: history.progress,
     doneTs: history.doneTs,
     durationMs: history.durationMs,
@@ -1641,7 +1671,7 @@ export function mergeInitialHistory(
         );
         merged[index] = preserveLiveOpen
           ? bound
-          : restoreAuthoritativeLifecycle(bound, merged[index]);
+          : restoreAuthoritativeLifecycle(bound, merged[index], liveTurn);
         continue;
       }
       if (replayOrphanMatches.has(liveIndex)) {
@@ -1675,7 +1705,7 @@ export function mergeInitialHistory(
       );
       if (settledCodex && sharesExactTurnAlias(historyTurn, liveTurn)) {
         merged[index] = restoreUnownedHistoryIdentity(
-          restoreAuthoritativeLifecycle(bound, historyTurn),
+          restoreAuthoritativeLifecycle(bound, historyTurn, liveTurn),
           historyTurn,
           liveTurn,
         );
@@ -1706,7 +1736,7 @@ export function mergeInitialHistory(
     );
     merged[index] = preserveLiveOpen
       ? bound
-      : restoreAuthoritativeLifecycle(bound, merged[index]);
+      : restoreAuthoritativeLifecycle(bound, merged[index], liveTurn);
   }
 
   const rows = [...merged, ...unmatched].map((turn, order) => ({ turn, order }));

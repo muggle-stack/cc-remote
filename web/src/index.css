@@ -199,7 +199,6 @@ body{
   .hstat .sd{ width:7px; height:7px; }
   .c-head .iconbtn,.c-head .engine-toggle{ min-height:40px; }
   .c-head .iconbtn{ width:40px; height:40px; }
-  .c-head .header-files-trigger{ display:none; }
   .engine-toggle{ padding-left:7px; padding-right:7px; }
 }
 @media(max-width:380px){

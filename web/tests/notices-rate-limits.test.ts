@@ -40,7 +40,9 @@ try {
     "/src/ErrorBoundary.tsx");
   const {
     presentCommandProblem, presentHistoricalTurnProblem, presentTurnProblem,
+    presentTurnOutcome,
   } = await harness.ssrLoadModule("/src/problem-presentation.ts");
+  const { mergeInitialHistory, restoreCachedTurnDetails } = await harness.ssrLoadModule("/src/history-merge.ts");
   const sid = "notice-session";
   const event = (body: Record<string, unknown>): ServerEvent => ({
     v: 10, ts: 10, sid, ...body,
@@ -369,19 +371,74 @@ try {
   }
   assert.equal(presentCommandProblem({ code: "internal", message: hiddenDiagnostic }),
     "操作未完成，请稍后重试。");
-  for (const [raw, expected] of [
+  for (const [raw, expected, heading] of [
     ["Codex 已自动更新，当前回合在更新时中断；为避免重复执行工具，"
       + "本次任务未自动重试。请确认已有结果后重新发送。",
-    "Codex 自动更新时连接中断，本轮未确认完成。请检查已有结果后继续。"],
+    "Codex 自动更新时连接中断，本轮未确认完成。请检查已有结果后继续。",
+    "Codex 自动升级，本轮中断"],
     ["Codex 共享通道意外断开；为避免重复执行工具，本次任务未自动重试。"
       + "请确认已有结果后重新发送。",
-    "与 Codex 的连接中断，本轮未确认完成。请检查已有结果后继续。"],
+    "与 Codex 的连接中断，本轮未确认完成。请检查已有结果后继续。",
+    "连接中断，回复未完成"],
   ]) {
     assert.equal(presentTurnProblem({ code: "cc_crash", message: raw }), expected);
     assert.equal(presentHistoricalTurnProblem(raw), expected);
     assert.equal(presentHistoricalTurnProblem(expected), expected,
       "a cached transport cause must survive the history presentation pass");
+    for (const message of [raw, expected]) {
+      for (const outcome of ["failed", "interrupted"] as const) {
+        assert.equal(presentTurnOutcome(outcome, message), heading);
+      }
+      const cached = { id: "transport-message", forkPointId: "transport-native",
+        prompt: "work", blocks: [], done: true, error: message };
+      const native = { id: "transport-message", forkPointId: "transport-native",
+        prompt: "work", blocks: [], done: true, interrupted: true };
+      const restored = mergeInitialHistory([native], [cached], {}, true)[0];
+      assert.equal(restored.interrupted, true);
+      assert.equal(restored.error, message,
+        "an authoritative interrupted outcome must retain its observed transport cause");
+      const hydrated = restoreCachedTurnDetails([native], [cached], "idle")[0];
+      assert.equal(hydrated.interrupted, true);
+      assert.equal(hydrated.error, message,
+        "a cache arriving after native history must restore the same observed cause");
+      assert.equal(restoreCachedTurnDetails([{ ...native, forkPointId: "another-native" }], [cached], "idle")[0].error,
+        undefined, "late cache cannot transfer the cause to another task");
+      assert.equal(restoreCachedTurnDetails([{ ...native, interrupted: false }], [cached], "idle")[0].error,
+        undefined, "late cache cannot change a successful outcome");
+      assert.equal(mergeInitialHistory([{ ...native, interrupted: false }], [cached], {}, true)[0].error,
+        undefined, "a successful native terminal clears the earlier transport failure");
+      assert.equal(mergeInitialHistory([{ ...native, forkPointId: "another-native" }], [cached], {}, true)[0].error,
+        undefined, "a different native task cannot inherit an upgrade cause via a visible alias");
+      assert.equal(mergeInitialHistory([{ ...native, forkPointId: undefined }], [cached], {}, true)[0].error,
+        undefined, "without exact native identity, an interrupted row cannot infer an upgrade");
+      for (const cacheFirst of [true, false]) {
+        const recoverySid = "transport-history-refresh";
+        let recovered = { ...initialState, focusedSid: recoverySid,
+          sessions: [{ session_id: recoverySid, engine: "codex", space: "code" }],
+          runtimes: { [recoverySid]: createRuntime() } };
+        const cache = { type: "hydrate_cache", sid: recoverySid,
+          turns: [cached], revision: "transport-r1", generation: "transport-g1" };
+        const refresh = () => {
+          recovered = reduce(recovered, { type: "event", event: event({
+            type: "history", sid: recoverySid, session_id: recoverySid,
+            revision: "transport-r1", generation: "transport-g1",
+            events: [], turns: [native], detail: "summary", has_more: false,
+            in_progress: false, authoritative: true,
+          }) });
+        };
+        if (cacheFirst) recovered = reduce(recovered, cache);
+        refresh();
+        if (!cacheFirst) recovered = reduce(recovered, cache);
+        refresh();
+        refresh();
+        assert.equal(recovered.runtimes[recoverySid].turns[0].error, message,
+          "repeated native refreshes must preserve a cause regardless of cache/history arrival order");
+      }
+    }
   }
+  assert.equal(presentTurnOutcome("interrupted"), "已打断");
+  assert.equal(presentTurnOutcome("interrupted", "Codex updated; private diagnostic"), "已打断");
+  assert.equal(presentTurnOutcome("failed", hiddenDiagnostic), "回复未完成");
   assert.equal(presentCommandProblem({ code: "steer_outcome_unknown", message: hiddenDiagnostic }),
     "引导已发出，Codex 尚未确认是否生效。请先查看后续结果。");
   assert.doesNotMatch(

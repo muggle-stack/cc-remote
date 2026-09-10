@@ -1,5 +1,6 @@
 import { Suspense, lazy, type ComponentProps } from "react";
 import { FileBrowserPanel } from "./FileBrowserPanel";
+import { Icon } from "../icons";
 import type { ArtifactPanel as ArtifactPanelType } from "./ArtifactPanel";
 
 const ArtifactPanel = lazy(() => import("./ArtifactPanel").then(({ ArtifactPanel }) => ({ default: ArtifactPanel })));
@@ -14,7 +15,9 @@ export default function SessionFilesPanel({ browser, preview, showingPreview, on
   return <div className="file-browser-shell">
     <FileBrowserPanel {...browser} />
     {showingPreview && preview.artifact && <>
-      <button className="workspace-back" onClick={onBack}>← 返回目录</button>
+      <button type="button" className="workspace-back" onClick={onBack}>
+        <Icon name="chevron-left" size={14} />返回目录
+      </button>
       <Suspense fallback={<p role="status">加载预览…</p>}>
         <ArtifactPanel {...preview} artifact={preview.artifact} active="diff" hasBtw={false} onTab={() => {}} />
       </Suspense>
