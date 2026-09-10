@@ -7613,6 +7613,17 @@ class WrapperMachine:
                 web_search=getattr(
                     ctx.sdk, "web_search_override", None),
             )
+            settings = getattr(ctx.sdk, "context_settings", None)
+            if (settings is not None and not settings.pending
+                    and type(settings.threshold) is int
+                    and type(settings.window) is int):
+                saved = await asyncio.to_thread(self._codex_controls.get, route_sid)
+                if (saved.context_threshold_tokens == settings.threshold
+                        and saved.context_window_tokens != settings.window):
+                    # Persist a repaired legacy window only after native reload;
+                    # keep any newer saved threshold owned by another command.
+                    await asyncio.to_thread(self._codex_controls.set_context,
+                        route_sid, settings.threshold, settings.window)
         except Exception as exc:
             log.warning(
                 "Codex Remote controls could not be persisted",
@@ -19313,6 +19324,7 @@ class WrapperMachine:
             settings.error = str(exc)[:1024]
             applied = False
         if applied:
+            await self._persist_codex_session_controls(ctx)
             # Refresh an already-open context ring immediately after the
             # native reload, without waiting for another model turn.
             await self._handle_get_context_locked(ctx, None)

@@ -10,6 +10,11 @@ import os
 from pathlib import Path
 
 
+# Codex 0.154.0 ModelInfo::auto_compact_token_limit caps the trigger at
+# floor(raw context window * 9 / 10), independently of usable_context_window.
+_NATIVE_COMPACT_PERCENT = 90
+
+
 @dataclass(frozen=True)
 class ContextBounds:
     default_window: int
@@ -17,13 +22,21 @@ class ContextBounds:
     effective_percent: int
 
     @property
+    def compact_percent(self) -> int:
+        return min(_NATIVE_COMPACT_PERCENT, self.effective_percent)
+
+    def compact_limit(self, window: int) -> int:
+        return min(window, self.max_window) * self.compact_percent // 100
+
+    @property
     def limit(self) -> int:
-        return self.max_window * self.effective_percent // 100
+        return self.compact_limit(self.max_window)
 
     def window_for(self, threshold: int) -> int:
         if not 1 <= threshold <= self.limit:
             raise ValueError(f"压缩阈值必须在 1–{self.limit:,} tokens 之间")
-        return max(self.default_window, math.ceil(threshold * 100 / self.effective_percent))
+        window = (threshold * 100 + self.compact_percent - 1) // self.compact_percent
+        return max(self.default_window, window)
 
 
 def model_context_bounds(model: str, codex_home: str | None) -> ContextBounds | None:
@@ -71,7 +84,10 @@ class NativeContextSettings:
         remains useful, but its modelContextWindow no longer describes this
         configuration. A subsequent native usage notification takes precedence.
         """
-        self.applied_threshold, self.applied_window = self.threshold, self.window
+        self.applied_window = self.window
+        self.applied_threshold = (
+            min(self.threshold, self.window * _NATIVE_COMPACT_PERCENT // 100)
+            if self.threshold is not None and self.window is not None else None)
         self.pending, self.error = False, None
         self.applied_model = handle.model
         self.applied_effective_window = None
@@ -93,6 +109,8 @@ class NativeContextSettings:
             window = configured if type(configured) is int and configured > 0 else bounds.default_window
         self.applied_effective_window = (
             min(window, bounds.max_window) * bounds.effective_percent // 100)
+        if self.applied_threshold is not None:
+            self.applied_threshold = min(self.applied_threshold, bounds.compact_limit(window))
 
     def restore(self, threshold: int | None, window: int | None, selected: bool = False) -> None:
         if threshold is not None and (window is None or threshold > window):
@@ -111,11 +129,20 @@ class NativeContextSettings:
         if self.threshold is None:
             return {}
         bounds = await asyncio.to_thread(model_context_bounds, handle.model, handle.codex_home)
-        if (bounds is None or self.window is None or self.window > bounds.max_window
-                or self.threshold > self.window * bounds.effective_percent // 100):
+        if bounds is None or self.window is None or self.window > bounds.max_window:
             self.pending = True
             self.error = "模型上下文上限已变化，请重新设置压缩阈值"
             return {}
+        try:
+            minimum_window = bounds.window_for(self.threshold)
+        except ValueError as exc:
+            self.pending, self.error = True, str(exc)
+            return {}
+        if self.window < minimum_window:
+            # Migrate preferences saved with the old usable-window formula.
+            # Preserve the requested threshold and never shrink carried context.
+            self.window = minimum_window
+            self.pending = True
         return self.config()
 
     async def select(self, handle, threshold: int | None) -> None:
@@ -154,13 +181,8 @@ class NativeContextSettings:
             if isinstance(handle.last_goal, dict) and handle.last_goal.get("status") == "active":
                 self.error = "目标仍在自动运行，待目标暂停或结束后应用"
                 return False
-            if self.threshold is not None:
-                bounds = await asyncio.to_thread(
-                    model_context_bounds, handle.model, handle.codex_home)
-                if bounds is None or self.window > bounds.max_window:
-                    self.error = "模型上下文上限已变化，请重新设置压缩阈值"
-                    return False
-                bounds.window_for(self.threshold)
+            if self.threshold is not None and not await self.validated_config(handle):
+                return False
             # Check official activity immediately before detaching. Reading
             # state creates no model turn and never downloads history.
             result = await handle._request("thread/read", {"threadId": sid, "includeTurns": False})

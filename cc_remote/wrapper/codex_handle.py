@@ -5497,9 +5497,9 @@ class CodexHandle:
             and self.context_settings.applied_model == self.model)
         # Real shape (verified, gpt-5.5): tokenUsage = {last:{totalTokens,…},
         # total:{totalTokens,…}, modelContextWindow}. `last.totalTokens` is the most
-        # recent turn's full token count ≈ current context depth (what the codex TUI
-        # gauges); `total` is the cumulative session sum (over-counts context). Use
-        # `last` for the "context full?" reading, falling back to `total`.
+        # recent model response's usage, not the native compaction estimator.
+        # App-server does not expose that estimator; don't infer it from the
+        # cumulative session sum in `total`, which over-counts context.
         if (self.thread_id and self.last_token_usage is None
                 and not self._rollout_context_recovery_attempted):
             recovery_thread_id = self.thread_id

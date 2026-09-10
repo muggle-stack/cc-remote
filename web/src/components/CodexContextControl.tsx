@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { CodexContext } from "../protocol";
-import { parseContextThreshold } from "../codex-context";
+import { CODEX_CONTEXT_USAGE_NOTE, parseContextThreshold } from "../codex-context";
 
 export default function CodexContextControl({ state, onChange }: {
   state: CodexContext | null; onChange: (value: number | null) => boolean;
@@ -15,8 +15,8 @@ export default function CodexContextControl({ state, onChange }: {
   return <div className="auto-compact-control codex-context-control">
     <strong>自动压缩 · 当前会话</strong>
     {!state ? <p role="status">读取模型上下文上限…</p> : <>
-      <p>{state.model} · 可用上限 {limit?.toLocaleString() ?? "未读取"} tokens</p>
-      <p>上下文达到设定值时，由 Codex 自动压缩历史。仅影响当前会话。</p>
+      <p>{state.model} · 压缩阈值上限 {limit?.toLocaleString() ?? "未读取"} tokens</p>
+      <p>设置的是自动压缩触发阈值，仅影响当前会话；上下文窗口会另外预留空间。</p>
       <form onSubmit={(event) => {
         event.preventDefault();
         const threshold = parseContextThreshold(input);
@@ -35,9 +35,15 @@ export default function CodexContextControl({ state, onChange }: {
       </form>
       <button className="codex-context-default" disabled={!state.mutable}
         onClick={() => { setInput(""); submit(null); }}>恢复 Codex 默认值</button>
-      <p role="status">{state.pending
-        ? `已保存 ${state.threshold_tokens?.toLocaleString() ?? "默认值"}，等待会话空闲并可重新加载`
-        : `当前设置：${state.applied_threshold_tokens?.toLocaleString() ?? "跟随 Codex 默认值"}`}</p>
+      <p role="status">
+        {state.pending
+          ? `已保存 ${state.threshold_tokens?.toLocaleString() ?? "默认值"}，等待会话空闲并可重新加载`
+          : `设定阈值：${state.threshold_tokens?.toLocaleString() ?? "Codex 默认值"}`}
+        <br />
+        当前生效阈值：{state.applied_threshold_tokens?.toLocaleString()
+          ?? (state.threshold_tokens == null ? "Codex 默认值" : "待确认")}
+      </p>
+      <p>{CODEX_CONTEXT_USAGE_NOTE}</p>
       {(error || state.error) && <p role="alert">{error || state.error}</p>}
     </>}
   </div>;
