@@ -225,7 +225,10 @@ def test_dispatcher_distinguishes_terminal_outcomes_without_tag_collisions(tmp_p
     asyncio.run(run())
 
 
-def test_dispatcher_separates_generic_and_session_payloads(tmp_path):
+@pytest.mark.parametrize("engine,label,space", [
+    ("claude", "Claude", "code"), ("codex", "Codex", "work"), ("dsh", "DSH", "code"),
+])
+def test_dispatcher_separates_generic_and_session_payloads(tmp_path, engine, label, space):
     async def run():
         store = PushSubscriptionStore(str(tmp_path / "push.sqlite3"))
         for mode in ("generic", "session"):
@@ -256,8 +259,8 @@ def test_dispatcher_separates_generic_and_session_payloads(tmp_path):
             outcome="success",
             context={
                 "sid": "session-1",
-                "engine": "codex",
-                "space": "work",
+                "engine": engine,
+                "space": space,
                 "display_name": "  Release\ncheck\u0000  ",
             },
         )
@@ -272,11 +275,12 @@ def test_dispatcher_separates_generic_and_session_payloads(tmp_path):
 
         session = payloads["session"]
         assert session["title"] == "Release check"
+        assert session["body"] == f"{label} 会话已经完成"
         assert session["route"] == {
             "machine_id": "nono",
             "session_id": "session-1",
-            "engine": "codex",
-            "space": "work",
+            "engine": engine,
+            "space": space,
         }
         assert session["url"].startswith("/#notification=")
 

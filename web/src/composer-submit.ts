@@ -19,14 +19,14 @@ export type BusySubmitAction =
 export function classifyBusySubmit(
   state: State,
   mode: SendMode,
-  engine: "claude" | "codex",
+  engine: "claude" | "codex" | "dsh",
   hasPayload: boolean,
 ): BusySubmitAction {
   if (state === "idle") return "noop";
   if (!hasPayload) return "noop";
   if (mode === "queue") return "enqueue";
   if (state !== "running") return "replace";
-  return engine === "codex" ? "steer" : "interrupt-and-replace";
+  return (engine === "codex" || engine === "dsh") ? "steer" : "interrupt-and-replace";
 }
 
 export function isComposerBusy(state: State): boolean {

@@ -15,7 +15,7 @@ export type GoalUiPreferences = Record<string, GoalUiPreference>;
 
 export interface GoalEventOwnership {
   machineId: string;
-  engine: "claude" | "codex";
+  engine: "claude" | "codex" | "dsh";
   space: "code" | "work";
 }
 
@@ -33,7 +33,7 @@ export function resetGoalDismissMigrationTracking(
 export function goalUiScopeKey(
   machineId: string,
   space: "code" | "work",
-  engine: "claude" | "codex",
+  engine: "claude" | "codex" | "dsh",
   sid: string,
 ): string {
   return JSON.stringify([machineId, space, engine, sid]);

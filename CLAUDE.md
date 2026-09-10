@@ -28,6 +28,16 @@ this optional step does not block core deployment. App-control MCP tools require
 a separate choice; sharing alone does not authorize them.
 
 ## Critical constraints / traps
+- **DSH is optional Code only**: `dsh_runtime.py` connects to the operator's
+  DSH 0.1.5-rc.2 Web profile. Model credentials and process ownership stay in
+  DSH. Pairing Cookies remain in a private local file and never cross the relay.
+  Cold reads require `integrations/dsh/cc-remote.mjs`; do not fall back to native
+  `session/follow`, which activates an Agent. Follow cancellation only detaches
+  a subscription; explicit `session/cancel` stops execution. Native step/record
+  identities own output across steering, attempt retries and autonomous goal
+  rounds. Wrapper queues wait for physical native turn completion. Goals use
+  native rounds/activation, not Codex token budgets. Keep unsupported Work,
+  BTW, archive/delete and worktree/migration actions hidden.
 - **Drain footgun**: after `ClaudeSDKClient.interrupt()`, the SDK does NOT kill
   the session — the current turn's stream still emits a terminal
   `ResultMessage(subtype="error_during_execution")`. You MUST keep consuming
@@ -85,7 +95,7 @@ a separate choice; sharing alone does not authorize them.
   `useLayoutEffect` is deliberately dependency-free — late virtualizer/image
   measurements settle without a React render, and constraining it to its read
   set reintroduces a full-viewport jump on touch release.
-- **Protocol version gate**: current wire protocol v60 is declared by
+- **Protocol version gate**: current wire protocol v61 is declared by
   `PROTOCOL_VERSION` in both `protocol.py` and `web/src/protocol.ts`.
   `deserialize` hard-rejects a version mismatch, and
   `_Base` is `extra="forbid"`, so ANY protocol change must be deployed to all

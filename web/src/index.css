@@ -53,7 +53,7 @@ textarea,input{font:inherit}
    indigo (dark) when data-engine="codex". cc (claude) is untouched. Same
    palette we locked in the design mock. Higher specificity than the base
    theme blocks so it wins in both light and dark. ===== */
-:root[data-engine="codex"][data-theme="light"]{
+:root:is([data-engine="codex"],[data-engine="dsh"])[data-theme="light"]{
   --bg:#FBFCFE; --surface:#FFFFFF; --sidebar:#EFF3FA; --raised:#ECF2FB;
   --text:#111726; --dim:#57627A; --faint:#93A0B8;
   --border:#E4EAF3; --border-strong:#D4DDEC; --divider:#EAEFF7;
@@ -66,7 +66,7 @@ textarea,input{font:inherit}
   --shadow-lg:0 12px 48px -10px rgba(20,45,110,.26), 0 2px 8px -3px rgba(20,45,110,.12);
   --r-panel:14px; --r-card:12px; --r-field:11px; --r-btn:9px; --r-chip:7px;
 }
-:root[data-engine="codex"][data-theme="dark"]{
+:root:is([data-engine="codex"],[data-engine="dsh"])[data-theme="dark"]{
   --bg:#0D0E15; --surface:#16171F; --sidebar:#090A10; --raised:#1D1E28;
   --text:#ECEDF3; --dim:#9A9BB0; --faint:#61627A;
   --border:#232430; --border-strong:#31323F; --divider:#20212B;
@@ -80,7 +80,7 @@ textarea,input{font:inherit}
   --r-panel:14px; --r-card:12px; --r-field:11px; --r-btn:9px; --r-chip:7px;
 }
 /* pre-effect flash guard: engine set but theme not yet stamped -> use light codex */
-:root[data-engine="codex"]:not([data-theme]){
+:root:is([data-engine="codex"],[data-engine="dsh"]):not([data-theme]){
   --bg:#FBFCFE; --surface:#FFFFFF; --sidebar:#EFF3FA; --raised:#ECF2FB;
   --text:#111726; --dim:#57627A; --faint:#93A0B8;
   --border:#E4EAF3; --border-strong:#D4DDEC; --divider:#EAEFF7;
@@ -110,7 +110,7 @@ body{
   padding:6px 10px; border-radius:9px; flex:none; transition:.16s; white-space:nowrap;
   color:var(--dim); background:var(--raised); border:1px solid var(--border-strong); }
 .engine-toggle:hover{ color:var(--accent-ink); border-color:var(--accent-line); }
-:root[data-engine="codex"] .engine-toggle{ color:var(--accent); background:var(--accent-weak); border-color:var(--accent-line); }
+:root:is([data-engine="codex"],[data-engine="dsh"]) .engine-toggle{ color:var(--accent); background:var(--accent-weak); border-color:var(--accent-line); }
 .newchat-engine{ display:inline-block; margin-left:8px; font-family:var(--mono); font-size:11px; font-weight:600;
   padding:3px 8px; border-radius:8px; vertical-align:middle; border:1px solid var(--border-strong); color:var(--dim); background:var(--raised); }
 .newchat-engine.codex{ color:var(--accent); background:var(--accent-weak); border-color:var(--accent-line); }
@@ -1781,17 +1781,17 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .scard:hover{ background:var(--surface); }
 .scard.has-profile-ribbon:hover{ border-color:var(--border); }
 .scard.active{ background:var(--surface); border-color:var(--border); box-shadow:var(--shadow-sm); }
-:root[data-engine="codex"][data-theme="dark"] .scard.has-profile-ribbon{
+:root:is([data-engine="codex"],[data-engine="dsh"])[data-theme="dark"] .scard.has-profile-ribbon{
   background:color-mix(in srgb,var(--surface) 68%,var(--sidebar));
   border-color:var(--border-strong); }
-:root[data-engine="codex"][data-theme="dark"] .scard.has-profile-ribbon:hover{
+:root:is([data-engine="codex"],[data-engine="dsh"])[data-theme="dark"] .scard.has-profile-ribbon:hover{
   background:color-mix(in srgb,var(--surface) 86%,var(--sidebar));
   border-color:color-mix(in srgb,var(--border-strong) 72%,var(--faint)); }
 :root[data-theme="dark"] .scard.active{
   background:color-mix(in srgb,var(--accent) 11%,var(--surface));
   border-color:color-mix(in srgb,var(--accent) 45%,var(--border-strong));
   box-shadow:var(--shadow-sm),inset 3px 0 color-mix(in srgb,var(--accent) 72%,transparent); }
-:root[data-engine="codex"][data-theme="dark"] .scard.has-profile-ribbon.active{
+:root:is([data-engine="codex"],[data-engine="dsh"])[data-theme="dark"] .scard.has-profile-ribbon.active{
   background:color-mix(in srgb,var(--accent) 11%,var(--surface));
   border-color:color-mix(in srgb,var(--accent) 45%,var(--border-strong));
   box-shadow:var(--shadow-sm),inset 3px 0 color-mix(in srgb,var(--accent) 72%,transparent); }
@@ -2131,3 +2131,6 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 @media (max-width:540px){
   .dp{ max-width:100%; max-height:min(88vh,calc(var(--app-height,100dvh) - 24px)); border-radius:16px; }
 }
+
+:root[data-engine="dsh"][data-theme="light"],:root[data-engine="dsh"]:not([data-theme]) { --accent:#4D6BFE; --accent-ink:#3556DC; --accent-weak:#EDF0FF; --accent-line:#BBC6FF; }
+:root[data-engine="dsh"][data-theme="dark"] { --accent:#8C9AFF; --accent-ink:#ACB6FF; --accent-weak:#252B4A; --accent-line:#46548F; }

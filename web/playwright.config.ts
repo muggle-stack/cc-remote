@@ -14,7 +14,7 @@ const WEBKIT_SELECTION_TESTS =
 
 export default defineConfig({
   testDir: "./tests",
-  testMatch: "history-browser.spec.ts",
+  testMatch: ["history-browser.spec.ts", "dsh-browser.spec.ts"],
   fullyParallel: false,
   workers: 1,
   retries: process.env.CI ? 2 : 0,
@@ -29,6 +29,7 @@ export default defineConfig({
     reuseExistingServer: false,
   },
   projects: [
+    { name: "webkit-dsh", grep: /DSH/, use: { ...devices["iPhone 15"] } },
     {
       name: "chromium",
       use: {
@@ -47,6 +48,7 @@ export default defineConfig({
     {
       name: "webkit",
       grepInvert: [
+        /DSH/,
         NEW_CHAT_CONTROL_TESTS,
         WEBKIT_VIEWER_TESTS,
         WEBKIT_LIVE_INTERACTION_TESTS,

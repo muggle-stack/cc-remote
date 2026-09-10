@@ -235,21 +235,21 @@ const preferenceStorage = {
   getItem: (key: string) => preferenceValues.get(key) ?? null,
 };
 assert.deepEqual(readEngineSpaces(preferenceStorage, "codex"), {
-  claude: "code", codex: "work",
+  claude: "code", codex: "work", dsh: "code",
 }, "legacy space migrates only to the previously active engine");
 preferenceValues.set(ENGINE_SPACES_KEY, JSON.stringify({
-  claude: "work", codex: "code",
+  claude: "work", codex: "code", dsh: "code",
 }));
 assert.deepEqual(readEngineSpaces(preferenceStorage, "codex"), {
-  claude: "work", codex: "code",
+  claude: "work", codex: "code", dsh: "code",
 }, "persisted engine spaces survive reload independently");
 assert.deepEqual(
-  rememberEngineSpace({ claude: "work", codex: "code" }, "codex", "work"),
-  { claude: "work", codex: "work" },
+  rememberEngineSpace({ claude: "work", codex: "code", dsh: "code" }, "codex", "work"),
+  { claude: "work", codex: "work", dsh: "code" },
   "changing one engine's space must preserve the other engine's memory",
 );
-let switchingSpaces: { claude: "code" | "work"; codex: "code" | "work" } = {
-  claude: "code", codex: "code",
+let switchingSpaces: { claude: "code" | "work"; codex: "code" | "work"; dsh: "code" | "work" } = {
+  claude: "code", codex: "code", dsh: "code",
 };
 switchingSpaces = rememberEngineSpace(switchingSpaces, "claude", "work");
 assert.equal(switchingSpaces.codex, "code",
@@ -1162,7 +1162,7 @@ assert.match(historyAppSource,
   /const refreshStatus = useCallback[\s\S]{0,300}\?\.tag === "archived"[\s\S]{0,220}sendGetStatus/,
   "archived history must not request live Codex status");
 assert.match(historyAppSource,
-  /!archivedBrowse && \(\s*<TerminalControl/,
+  /!archivedBrowse && focusedEngine !== "dsh" && \(\s*<TerminalControl/,
   "archived history must not expose terminal takeover controls");
 assert.match(historyAppSource,
   /<GoalPanel[\s\S]{0,180}revealed=\{!archivedBrowse[\s\S]{0,100}open=\{!archivedBrowse/,
@@ -1553,7 +1553,7 @@ assert.match(layoutCss,
   /\.scard\.has-profile-ribbon\s*\{[^}]*border-color\s*:\s*color-mix\([^}]*background\s*:\s*color-mix\(/s,
   "every profile keycap needs a quiet card edge to hang from");
 assert.match(layoutCss,
-  /:root\[data-engine="codex"\]\[data-theme="dark"\] \.scard\.has-profile-ribbon\s*\{[^}]*background\s*:\s*color-mix\([^}]*border-color\s*:\s*var\(--border-strong\)/s,
+  /:root:is\(\[data-engine="codex"\],\[data-engine="dsh"\]\)\[data-theme="dark"\] \.scard\.has-profile-ribbon\s*\{[^}]*background\s*:\s*color-mix\([^}]*border-color\s*:\s*var\(--border-strong\)/s,
   "dark profile cards need an opaque edge that survives the dark sidebar");
 assert.match(layoutCss,
   /\.scard-profile-ribbon\s*\{[^}]*top\s*:\s*-6px[^}]*height\s*:\s*16px[^}]*max-width\s*:\s*64px[^}]*font-family\s*:\s*var\(--mono\)[^}]*font-size\s*:\s*8\.5px/s,
@@ -18010,7 +18010,7 @@ assert.match(appSource, /draftKey=\{focusedComposerDraftKey\}/);
 assert.match(appSource, /composerDraftsRef\.current\.rekey/,
   "temp session id capture must retain the focused composer draft");
 assert.match(appSource, /\{space === "work" \? "Work" : "Code"\}/);
-assert.match(appSource, /<button className="engine-toggle" onClick=\{toggleEngine\}/);
+assert.match(appSource, /<select className="engine-toggle" value=\{engine\}[\s\S]{0,120}onChange=\{event => toggleEngine/);
 assert.match(appSource, /setNewChatAutoFocus\(false\)/,
   "switching engines must not summon the new-chat keyboard");
 assert.match(appSource, /prepareSurfaceSwitch\(nextEngine, nextSpace\)/,

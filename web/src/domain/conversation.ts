@@ -136,6 +136,8 @@ export interface Turn {
   historyTurnId?: string;
   /** Engine-specific authoritative branch point. */
   forkPointId?: string;
+  /** Some native engines finish a visible steer segment before a forkable turn. */
+  forkAvailable?: boolean;
   /** Claude's authoritative top-level user transcript UUID. */
   checkpointId?: string;
   /** @deprecated Read only while migrating CACHE_VER=5 entries. */

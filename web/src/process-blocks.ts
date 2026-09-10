@@ -102,7 +102,7 @@ export function isCodexPresentationNoise(block: Block): boolean {
 
 export function presentableProcessBlocks(
   blocks: Block[],
-  engine: "claude" | "codex",
+  engine: "claude" | "codex" | "dsh",
 ): Block[] {
   const items = processBlocks(blocks);
   return engine === "codex"

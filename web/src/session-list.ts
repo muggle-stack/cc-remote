@@ -75,7 +75,7 @@ export function normalizeSessionList(
 }
 
 export function shouldAcceptSessionList(
-  activeEngine: "claude" | "codex",
+  activeEngine: "claude" | "codex" | "dsh",
   activeSpace: Space,
   event: SessionList,
 ): boolean {

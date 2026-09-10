@@ -23,11 +23,13 @@ export function readEngineSpaces(
     if (saved) return {
       claude: normalizeSpace(saved.claude),
       codex: normalizeSpace(saved.codex),
+      dsh: "code",
     };
   } catch { /* migrate malformed/legacy storage below */ }
   return {
     claude: currentEngine === "claude" ? legacySpace : "code",
     codex: currentEngine === "codex" ? legacySpace : "code",
+    dsh: "code",
   };
 }
 
@@ -36,5 +38,5 @@ export function rememberEngineSpace(
   engine: Engine,
   space: Space,
 ): EngineSpaces {
-  return { ...spaces, [engine]: space };
+  return { ...spaces, [engine]: engine === "dsh" ? "code" : space };
 }

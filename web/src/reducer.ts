@@ -1,3 +1,4 @@
+import type { DshState, DshPreset, DshCommandResult } from "./protocol";
 // Turn/block state model for the chat UI.
 //
 // Multi-session: AppState holds a `runtimes` map keyed by session id (or a
@@ -198,6 +199,8 @@ export interface Artifact {
 }
 
 export interface SessionRuntime {
+  dsh?: DshState;
+  dshCommandResult?: DshCommandResult;
   turns: Turn[];
   state: State;
   // Display-only activity observed from a native/external client. It must not
@@ -370,6 +373,8 @@ export interface SessionRuntime {
 }
 
 export interface AppState {
+  dshPresets?: DshPreset[];
+  dshError?: string | null;
   // connection / global UI
   connState: ConnState;
   wrapperOnline: boolean;
@@ -442,7 +447,7 @@ export interface AppState {
 
 export interface BtwChat {
   sid: string;
-  engine: "claude" | "codex";
+  engine: "claude" | "codex" | "dsh";
   createdAt: number;
   state: "idle" | "running" | "interrupting" | "draining";
 }
@@ -4959,6 +4964,10 @@ function reduceEvent(
       };
     // The engine's real model catalog. Empty => the wrapper couldn't read it; keep
     // what we have (data.ts's static table) rather than blanking the pickers.
+    case "dsh_command_result":
+      return patch(state, e.sid, (rt) => { rt.dshCommandResult = e; });
+    case "dsh_state":
+      return patch(state, e.sid, (rt) => { rt.dsh = e; });
     case "models": {
       const cacheKey = modelCatalogScopeKey(
         e.engine,
@@ -4968,7 +4977,7 @@ function reduceEvent(
             ? (e.claude_profile_id ?? state.defaultClaudeProfileId)
             : null,
       );
-      const catalog = e.models.length
+      const catalog = e.models.length || e.engine === "dsh"
         ? { ...state.catalog, [cacheKey]: e.models }
         : state.catalog;
       if (e.cwd && e.cwd !== state.newChat?.cwd) {
@@ -5010,6 +5019,7 @@ function reduceEvent(
       }
       return {
         ...state, catalog, catalogDefault, catalogDefaultEffort,
+        ...(e.engine === "dsh" ? { dshPresets: e.dsh_presets ?? [], dshError: e.error ?? null } : {}),
         catalogDefaultCwd,
       };
     }
@@ -6149,7 +6159,7 @@ function reduceEvent(
         // use text containment here: repeated prose and bounded History prefixes
         // are both legitimate content and cannot safely prove replay identity.
         if (!block.done) {
-          block.text = appendField(block.text, e.text, MAX_LIVE_TEXT_CHARS);
+          block.text = e.replace ? e.text.slice(0, MAX_LIVE_TEXT_CHARS) : appendField(block.text, e.text, MAX_LIVE_TEXT_CHARS);
         }
         if (block.channel !== "final" && e.text.length > 0) {
           markTurnDetailAsLive(rt, t.id, boundCompletedTurns);
@@ -6499,6 +6509,12 @@ function reduceEvent(
         }
         let turns = cloneTurns(rt.turns);
         const seq = typeof e.seq === "number" ? e.seq : 0;
+        if (e.autonomous && !turns.some(turn => turnHasIdentityAlias(turn, e.msg_id))) {
+          // The engine explicitly opened a round without a human prompt (for
+          // example a DSH goal continuation). Give it its own exact owner.
+          turns.push({ id: e.msg_id, prompt: "", blocks: [], done: false,
+            forkPointId: e.turn_id, ts: eventTimestampMs(e.ts) });
+        }
         const binding = {
           msgId: e.msg_id,
           turnId: e.turn_id,
@@ -6620,9 +6636,13 @@ function reduceEvent(
             t.forkPointId = e.turn_id;
             t.liveTaskId = undefined;
           }
+          if (e.sid?.startsWith("dsh@")) {
+            t.forkAvailable = e.result.subtype !== "steered";
+          }
           if (e.checkpoint_id) t.checkpointId = e.checkpoint_id;
           t.progress = undefined;
-          if (e.result.subtype === "error_during_execution") t.interrupted = true;
+          const nativeDshInterrupt = !!e.sid?.startsWith("dsh@") && e.result.subtype === "interrupted";
+          if (e.result.subtype === "error_during_execution" || nativeDshInterrupt) t.interrupted = true;
           if (e.result.is_error) {
             if (e.result.subtype !== "error_during_execution") {
               t.error ??= "本次回复未完成，请重试。";
@@ -6643,8 +6663,8 @@ function reduceEvent(
           t.doneTs = e.ts ? Math.round(e.ts * 1000) : (t.ts || Date.now());
           finishOpenBlocks(
             t,
-            e.result.is_error ? "interrupted" : "succeeded",
-            e.result.is_error,
+            e.result.is_error || nativeDshInterrupt ? "interrupted" : "succeeded",
+            e.result.is_error || nativeDshInterrupt,
             e.result.subtype === "steered",
           );
           settleVisibleProcessIfComplete(

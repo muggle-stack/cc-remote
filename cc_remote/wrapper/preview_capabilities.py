@@ -441,7 +441,7 @@ class PreviewCapabilityStore:
             mode, source, granted_at,
         ) = row
         if (
-            engine not in {"claude", "codex"}
+            engine not in {"claude", "codex", "dsh"}
             or space not in {"code", "work"}
             or not cls._valid_text(session_id, maximum=128)
             or not cls._valid_text(path, maximum=PREVIEW_PATH_MAX_BYTES)
@@ -732,7 +732,7 @@ class PreviewCapabilityStore:
         snapshot to the file identity observed at that tool boundary. They must
         not silently turn a transient read into durable future path access.
         """
-        if engine not in {"claude", "codex"} or space not in {"code", "work"}:
+        if engine not in {"claude", "codex", "dsh"} or space not in {"code", "work"}:
             raise PreviewCapabilityError("会话范围无效")
         if not self._valid_text(session_id, maximum=128):
             raise PreviewCapabilityError("会话标识无效")

@@ -149,11 +149,11 @@ deployment.
   migration transaction, restores matching pre-release data before an older
   wrapper is restarted, and verifies both engines' Work ownership backfills.
 
-Protocol v60 is a coordinated upgrade: publish freshly built Relay/Web and
+Protocol v61 is a coordinated upgrade: publish freshly built Relay/Web and
 Wrapper artifacts from the same tagged commit. The strict protocol gate is
 intentional and mixed protocol versions will not communicate. `setup-vps.sh`
 rejects a missing or mismatched web build manifest. Stop the wrapper first;
-activate the v60 relay/web release; then start the v60 wrapper.
+activate the v61 relay/web release; then start the v61 wrapper.
 
 The wrapper installer treats local Work data and versioned private control state
 as part of the release
@@ -166,8 +166,8 @@ the previous code. If data restoration fails, it leaves the
 wrapper stopped instead of running old code against a new schema. A manual or
 legacy-layout deployment must use the same order: stop the wrapper, run
 `work_registry_snapshot.py snapshot` from the new staging tree, activate and
-verify v60, and retain that snapshot with the previous release. To roll back,
-stop v60, run `work_registry_snapshot.py restore`, then switch and start the old
+verify v61, and retain that snapshot with the previous release. To roll back,
+stop v61, run `work_registry_snapshot.py restore`, then switch and start the old
 release. Never copy only `registry.sqlite3` while the wrapper is live because
 committed state may still be in its WAL file. Restoring a pre-release snapshot
 also restores pre-release Work metadata: sessions, projects, or schedule state
@@ -389,3 +389,16 @@ requests reach the relay. Other global options and sites are preserved. If a
 shared Caddyfile already contains an unmanaged `servers` block, setup fails
 closed and asks the administrator to reconcile it instead of silently creating
 ambiguous global behavior.
+
+## Optional DSH engine
+
+Protocol v61 adds the optional DSH Code adapter. All three cc-remote tiers must
+use that protocol even when a device does not enable DSH. Wrapper bundles ship
+`integrations/dsh/cc-remote.mjs`; DSH remains an operator-managed local service.
+Its model authentication and private sessions are outside the release payload.
+
+Follow [DSH setup](../integrations/dsh/README.md) for the native Web-profile patch
+and local pairing. Preserve `CC_REMOTE_DSH_CONNECTION_FILE` in the Wrapper's
+external configuration and keep the mode-0600 pairing file outside release
+directories. Releases must not start DSH, reset its home, migrate user sessions
+or initiate a model probe as an installation side effect.

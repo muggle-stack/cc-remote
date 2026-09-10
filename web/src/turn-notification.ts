@@ -30,7 +30,7 @@ export interface TurnNotificationPresentation {
   title: string;
   body: string;
   sessionId: string | null;
-  engine: "claude" | "codex" | null;
+  engine: "claude" | "codex" | "dsh" | null;
   space: "code" | "work" | null;
 }
 
@@ -67,7 +67,7 @@ export function turnNotificationPresentation(
       space: null,
     };
   }
-  const label = context.engine === "codex" ? "Codex" : "Claude";
+  const label = context.engine === "dsh" ? "DSH" : context.engine === "codex" ? "Codex" : "Claude";
   return {
     title: safeDisplayName(context.display_name) ?? `${label} 会话`,
     body: turnNotificationBody(label, message.result),

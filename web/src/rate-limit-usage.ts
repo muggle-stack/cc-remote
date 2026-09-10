@@ -42,7 +42,7 @@ export function accountQuotaWindows(
 
 export function quotaWindowsForLimits(
   limits: readonly StatusRateLimit[],
-  accountLimitId: "codex" | "claude",
+  accountLimitId: "codex" | "claude" | "dsh",
 ): QuotaWindows {
   const hasWindow = (limit: StatusRateLimit, duration: number): boolean =>
     [limit.primary, limit.secondary].some(

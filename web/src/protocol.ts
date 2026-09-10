@@ -1,7 +1,7 @@
 // Mirror of cc_remote/protocol.py. Kept in sync manually (generate later).
 
 export type State = "idle" | "running" | "interrupting" | "draining";
-export type Engine = "claude" | "codex";
+export type Engine = "claude" | "codex" | "dsh";
 export type Space = "code" | "work";
 export type RestoreMode = "conversation" | "files" | "both";
 export type RestoreOutcome = "succeeded" | "failed" | "skipped";
@@ -192,7 +192,7 @@ export interface SessionMigrated extends Base {
 export interface UserMsg extends Base { type: "user_msg"; msg_id: string; client_msg_id?: string | null; prompt: string; images?: QueryImg[] | null; files?: { filename: string }[] | null }
 export interface TurnSteered extends Base { type: "turn_steered"; msg_id: string; turn_id: string; prompt: string; images?: QueryImg[] | null; files?: { filename: string }[] | null }
 export interface AssistantMsgStart extends Base { type: "assistant_msg_start"; message_id: string; turn_id?: string | null; background?: boolean | null; channel?: AssistantChannel }
-export interface Delta extends Base { type: "delta"; message_id: string; turn_id?: string | null; background?: boolean | null; text: string; channel?: AssistantChannel }
+export interface Delta extends Base { replace?: boolean; type: "delta"; message_id: string; turn_id?: string | null; background?: boolean | null; text: string; channel?: AssistantChannel }
 export interface ToolUse extends Base {
   type: "tool_use";
   message_id: string;
@@ -287,7 +287,7 @@ export interface TurnChangeSummary { revision: string; files: TurnFileChange[]; 
 export interface TurnFileChanges extends Base { type: "turn_file_changes"; turn_id: string; changes: TurnChangeSummary }
 export interface TurnFileChangesPage extends Base { type: "turn_file_changes_page"; engine: Engine; turn_id: string; revision: string; offset: number; files: TurnFileChange[]; total_files: number; next_offset?: number | null; request_id?: string | null }
 export interface GetTurnFileChanges extends Base { type: "get_turn_file_changes"; sid: string; engine: Engine; turn_id: string; revision: string; offset?: number; limit?: number }
-export interface TurnBinding extends Base { type: "turn_binding"; msg_id: string; turn_id: string }
+export interface TurnBinding extends Base { type: "turn_binding"; msg_id: string; turn_id: string; autonomous?: boolean }
 export interface TurnResult { subtype: string; duration_ms: number; is_error: boolean; total_cost_usd?: number | null; num_turns?: number | null }
 export interface TurnNotificationContext { engine: Engine; space: Space; display_name?: string | null; parent_session_id?: string | null }
 export interface TurnEnd extends Base { type: "turn_end"; result: TurnResult; turn_id?: string | null; checkpoint_id?: string | null; notification_context?: TurnNotificationContext | null }
@@ -342,9 +342,11 @@ export interface ListSessions extends Base { type: "list_sessions"; engine?: Eng
 export interface SwitchSession extends Base { type: "switch_session"; session_id: string; engine?: Engine; space?: Space }
 export interface NewSession extends Base {
   type: "new_session";
+  dsh_agent_preset?: string | null;
+  dsh_effort?: string | null;
   request_id?: string | null;
   cwd?: string | null;
-  engine?: "claude" | "codex";
+  engine?: "claude" | "codex" | "dsh";
   claude_profile_id?: string | null;
   codex_profile_id?: string | null;
   space?: Space;
@@ -397,7 +399,7 @@ export interface RollbackResult extends Base {
   prefill_text?: string | null;
   detail?: string | null;
 }
-export interface CompactSession extends Base { type: "compact_session"; session_id: string; engine?: "claude" | "codex"; space?: "code" }
+export interface CompactSession extends Base { type: "compact_session"; session_id: string; engine?: "claude" | "codex" | "dsh"; space?: "code" }
 export interface StartReview extends Base { type: "start_review"; session_id: string; engine?: "codex"; space?: "code"; target: "uncommittedChanges" | "baseBranch" | "commit" | "custom"; value?: string | null }
 export interface GetWorkDashboard extends Base { type: "get_work_dashboard"; engine?: Engine }
 export interface CreateWorkProject extends Base { type: "create_work_project"; engine?: Engine; name: string; description?: string }
@@ -511,7 +513,14 @@ export interface CatalogModel {
 }
 // Effective controls for a NEW no-override session. These are display metadata,
 // not the focused session's controls and not implicit overrides on NewSession.
-export interface Models extends Base { type: "models"; engine: string; models: CatalogModel[]; default_model?: string | null; default_effort?: string | null; cwd?: string | null; claude_profile_id?: string | null; codex_profile_id?: string | null }
+export interface DshPreset { id: string; name: string; description: string; is_default: boolean; available: boolean }
+export interface DshCommandInfo { name: string; description: string; input_hint?: string | null; attachments: boolean }
+export interface DshPermissionOption { value: string; name: string; description: string }
+export interface DshGoal { id: string; revision: number; objective: string; phase: "active" | "paused" | "blocked" | "complete"; rounds: number; max_rounds: number; blocked_reason?: string | null; activation?: "armed" | "disarmed" | null }
+export interface DshCommandResult extends Base { type: "dsh_command_result"; request_id: string; status: "success" | "error" | "unknown"; text: string }
+export interface DshState extends Base { type: "dsh_state"; connected: boolean; error?: string | null; agent_preset?: string | null; commands: DshCommandInfo[]; permissions: DshPermissionOption[]; permission?: string | null; goal?: DshGoal | null }
+export interface SetDshControl extends Base { type: "set_dsh_control"; sid: string; kind: "permission" | "effort" | "command"; value: string; images?: QueryImg[]; files?: QueryFile[] }
+export interface Models extends Base { dsh_presets?: DshPreset[]; error?: string | null; type: "models"; engine: string; models: CatalogModel[]; default_model?: string | null; default_effort?: string | null; cwd?: string | null; claude_profile_id?: string | null; codex_profile_id?: string | null }
 export interface GetEngineCapabilities extends Base { type: "get_engine_capabilities"; engine: Engine; space?: Space; client_id?: string | null; cwd?: string | null; skills_only?: boolean; claude_profile_id?: string | null; codex_profile_id?: string | null }
 export interface ManageEnginePlugin extends Base { type: "manage_engine_plugin"; engine: Engine; action: "install" | "uninstall"; plugin_id: string; space?: Space; client_id?: string | null; cwd?: string | null; claude_profile_id?: string | null; codex_profile_id?: string | null }
 export interface ManageEngineSkill extends Base { type: "manage_engine_skill"; engine: Engine; action: "create" | "remove" | "enable" | "disable"; skill_id?: string | null; name?: string | null; description?: string | null; instructions?: string | null; scope?: "user" | "project"; space?: Space; client_id?: string | null; cwd?: string | null; claude_profile_id?: string | null; codex_profile_id?: string | null }
@@ -701,7 +710,7 @@ export interface CodexContext extends Base {
 
 export type ServerEvent = FilesListed | CodexContext
   | TurnFileChangesPage
-  | Pong | CommandAck | ReplayStart | ReplayEnd | Snapshot | StateEvent | QueryQueueState | QueuedQueryDetail | QueuedQueryUpdated | Model | Effort | AutoCompact | Fast | CollaborationMode | BtwOpened | BtwSync | BtwClosed | Perm | PermissionProfiles | PermissionProfile | WebSearch | ContextReport | DiffReport | FilePreview | FileSaveResult | PreviewAsset | PreviewAuthorizationRequired | PreviewAuthorizationResult | History | TurnDetail | AgentDetail | HistoryImage | HistoryInvalidated | ArtifactInvalidated | Models | EngineCapabilities | TakeoverState | SessionControl
+  | Pong | CommandAck | ReplayStart | ReplayEnd | Snapshot | StateEvent | QueryQueueState | QueuedQueryDetail | QueuedQueryUpdated | Model | Effort | AutoCompact | Fast | CollaborationMode | BtwOpened | BtwSync | BtwClosed | Perm | PermissionProfiles | PermissionProfile | WebSearch | ContextReport | DiffReport | FilePreview | FileSaveResult | PreviewAsset | PreviewAuthorizationRequired | PreviewAuthorizationResult | History | TurnDetail | AgentDetail | HistoryImage | HistoryInvalidated | ArtifactInvalidated | Models | DshState | DshCommandResult | EngineCapabilities | TakeoverState | SessionControl
   | AskUser | AskUserSync | AskUserClosed | GoalState | CompletionState | StatusReport | RateLimitResetResult | Notice | RateLimitUpdate | RollbackResult
   | SessionList | SessionListInvalidated | SessionActivity | SessionFocus | SessionRekey | SessionForked | SessionMigrated | WorkDashboard | WorkArtifacts
   | DirList
@@ -709,7 +718,7 @@ export type ServerEvent = FilesListed | CodexContext
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 60;
+export const PROTOCOL_VERSION = 61;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 
@@ -777,7 +786,7 @@ export function sessionControlLocksInput(control: SessionControl): boolean {
 /** Local storage is user-controlled and may contain stale values from older
  * builds. Normalize before a value reaches a strict Pydantic command frame. */
 export function normalizeEngine(value: string | null): Engine {
-  return value === "codex" ? "codex" : "claude";
+  return value === "dsh" ? "dsh" : value === "codex" ? "codex" : "claude";
 }
 
 export function normalizeDiffTheme(value: string | null): DiffTheme {

@@ -248,6 +248,8 @@ def build_bundle(
         if role == "relay":
             _copy_tree(root / "web" / "dist", staging / "web" / "dist")
         else:
+            for filename in ("cc-remote.mjs", "README.md"):
+                _copy_file(root / "integrations" / "dsh" / filename, staging / "integrations" / "dsh" / filename)
             for filename in _WRAPPER_SCRIPTS:
                 target = staging / "scripts" / filename
                 _copy_file(root / "scripts" / filename, target)

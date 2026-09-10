@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 60
+PROTOCOL_VERSION = 61
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -43,7 +43,7 @@ MAX_BACKGROUND_PROCESS_COMMAND_CHARS = 16 * 1024
 MAX_BACKGROUND_PROCESS_CWD_CHARS = 4 * 1024
 
 State = Literal["idle", "running", "interrupting", "draining"]
-Engine = Literal["claude", "codex"]
+Engine = Literal["claude", "codex", "dsh"]
 Space = Literal["code", "work"]
 RestoreMode = Literal["conversation", "files", "both"]
 RestoreOutcome = Literal["succeeded", "failed", "skipped"]
@@ -788,7 +788,7 @@ class BtwSessionInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
     btw_sid: WireId
     parent_sid: WireId
-    engine: Literal["claude", "codex"]
+    engine: Literal["claude", "codex", "dsh"]
     created_at: float = Field(ge=0)
     state: State = "idle"
 
@@ -855,6 +855,8 @@ class AssistantMsgStart(_Base):
 
 
 class Delta(_Base):
+    # Replace a provisional DSH attempt at its authoritative settlement.
+    replace: bool = False
     type: Literal["delta"] = "delta"
     message_id: WireId
     turn_id: Optional[WireId] = None
@@ -1070,6 +1072,8 @@ class TurnBinding(_Base):
     type: Literal["turn_binding"] = "turn_binding"
     msg_id: WireId
     turn_id: WireId
+    # A native autonomous round has no human/optimistic prompt row.
+    autonomous: bool = False
 
 
 class TurnResult(BaseModel):
@@ -1197,14 +1201,14 @@ class ListSessions(_Command):
     session store (Claude ~/.claude/projects vs Codex ~/.codex/sessions);
     optional, default claude."""
     type: Literal["list_sessions"] = "list_sessions"
-    engine: Literal["claude", "codex"] = "claude"
+    engine: Literal["claude", "codex", "dsh"] = "claude"
     space: Space = "code"
 
 
 class SessionList(_Base):
     """wrapper -> client: the sessions (downstream so a reconnect restores it)."""
     type: Literal["session_list"] = "session_list"
-    engine: Literal["claude", "codex"]
+    engine: Literal["claude", "codex", "dsh"]
     space: Space = "code"
     # Exact ListSessions.cmd_id. A single Codex read may paint a cached list and
     # then a refreshed list, so both responses intentionally carry the same id.
@@ -1225,7 +1229,7 @@ class SessionListInvalidated(_Base):
     ListSessions; the wrapper never broadcasts an uncorrelated SessionList.
     """
     type: Literal["session_list_invalidated"] = "session_list_invalidated"
-    engine: Literal["claude", "codex"]
+    engine: Literal["claude", "codex", "dsh"]
     space: Space = "code"
 
 
@@ -1239,7 +1243,7 @@ class SessionActivity(_Base):
     presentation.
     """
     type: Literal["session_activity"] = "session_activity"
-    engine: Literal["claude", "codex"]
+    engine: Literal["claude", "codex", "dsh"]
     session_id: WireId
     state: State
 
@@ -1270,6 +1274,8 @@ class NewSession(_Command):
     engine: Engine = "claude"
     claude_profile_id: Optional[WireId] = None
     codex_profile_id: Optional[WireId] = None
+    dsh_agent_preset: Optional[str] = Field(default=None, min_length=1, max_length=256)
+    dsh_effort: Optional[str] = Field(default=None, min_length=1, max_length=64)
     space: Space = "code"
     project_id: Optional[WireId] = None
     model: Optional[ModelName] = None    # None -> engine default (settings.json / codex config)
@@ -1295,6 +1301,10 @@ class NewSession(_Command):
 
     @model_validator(mode="after")
     def initial_query_requires_message_id(self):
+        if self.engine == "dsh" and self.space != "code":
+            raise ValueError("DSH supports Code sessions")
+        if self.engine != "dsh" and (self.dsh_agent_preset or self.dsh_effort):
+            raise ValueError("DSH controls require the DSH engine")
         if _attachment_count(self.images, self.files) > MAX_ATTACHMENT_COUNT:
             raise ValueError(
                 f"new_session attachments exceed {MAX_ATTACHMENT_COUNT} items")
@@ -1395,7 +1405,7 @@ class RollbackResult(_Base):
 class CompactSession(_Command):
     type: Literal["compact_session"] = "compact_session"
     session_id: WireId
-    engine: Literal["claude", "codex"] = "codex"
+    engine: Literal["claude", "codex", "dsh"] = "codex"
     space: Literal["code"] = "code"
 
 
@@ -1739,13 +1749,85 @@ class GetModels(_Command):
     its model list therefore remains empty and the client keeps the static table.
     """
     type: Literal["get_models"] = "get_models"
-    engine: Optional[Literal["cc", "claude", "codex"]] = None
+    engine: Optional[Literal["cc", "claude", "codex", "dsh"]] = None
     client_id: Optional[WireId] = None  # requester, so the wrapper routes Models back to=<client_id>
     # Legacy Claude defaults can depend on project/local settings, so resolve
     # them in the prospective cwd. Explicit account profiles remain user-scoped.
     cwd: Optional[str] = Field(default=None, max_length=4096)
     claude_profile_id: Optional[WireId] = None
     codex_profile_id: Optional[WireId] = None
+
+
+class DshPreset(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(min_length=1, max_length=256)
+    name: str = Field(max_length=256)
+    description: str = Field(default="", max_length=4096)
+    is_default: bool = False
+    available: bool = True
+
+
+class DshCommandInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=128)
+    description: str = Field(default="", max_length=4096)
+    input_hint: Optional[str] = Field(default=None, max_length=1024)
+    attachments: bool = False
+
+
+class DshPermissionOption(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    value: str = Field(min_length=1, max_length=256)
+    name: str = Field(max_length=256)
+    description: str = Field(default="", max_length=4096)
+
+
+class DshGoal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(min_length=1, max_length=256)
+    revision: int = Field(ge=0)
+    objective: str = Field(max_length=65536)
+    phase: Literal["active", "paused", "blocked", "complete"]
+    rounds: int = Field(ge=0)
+    max_rounds: int = Field(ge=1)
+    blocked_reason: Optional[str] = Field(default=None, max_length=4096)
+    activation: Optional[Literal["armed", "disarmed"]] = None
+
+
+class DshState(_Base):
+    """Native DSH controls. Replaced as a whole, never merged across sessions."""
+    type: Literal["dsh_state"] = "dsh_state"
+    connected: bool = True
+    error: Optional[str] = Field(default=None, max_length=4096)
+    agent_preset: Optional[str] = Field(default=None, max_length=256)
+    commands: list[DshCommandInfo] = Field(default_factory=list, max_length=256)
+    permissions: list[DshPermissionOption] = Field(default_factory=list, max_length=64)
+    permission: Optional[str] = Field(default=None, max_length=256)
+    goal: Optional[DshGoal] = None
+
+
+class DshCommandResult(_Base):
+    """Requester-only native command result; not a model answer or replay item."""
+    type: Literal["dsh_command_result"] = "dsh_command_result"
+    request_id: WireId
+    status: Literal["success", "error", "unknown"]
+    text: str = Field(default="", max_length=16384)
+
+
+class SetDshControl(_Command):
+    type: Literal["set_dsh_control"] = "set_dsh_control"
+    sid: WireId
+    kind: Literal["permission", "effort", "command"]
+    value: str = Field(min_length=1, max_length=65536)
+    images: Optional[list[QueryImage]] = Field(default=None, max_length=MAX_ATTACHMENT_COUNT)
+    files: Optional[list[QueryFile]] = Field(default=None, max_length=MAX_ATTACHMENT_COUNT)
+
+    @model_validator(mode="after")
+    def command_attachments(self):
+        count = _attachment_count(self.images, self.files)
+        if count > MAX_ATTACHMENT_COUNT or (count and self.kind != "command"):
+            raise ValueError("DSH attachments require a bounded native command")
+        return self
 
 
 class Models(_Base):
@@ -1759,6 +1841,8 @@ class Models(_Base):
     `default_model`/`default_effort` are what a NEW no-override session starts on.
     They are NOT the focused session's controls (those are per-session events)."""
     type: Literal["models"] = "models"
+    dsh_presets: list[DshPreset] = Field(default_factory=list, max_length=256)
+    error: Optional[str] = Field(default=None, max_length=4096)
     engine: str
     models: list[dict[str, Any]] = []
     default_model: Optional[str] = Field(default=None, max_length=256)
@@ -2193,7 +2277,7 @@ class GetDiff(_Command):
     theme: Literal["light", "dark"] = "light"
     turn_id: Optional[WireId] = None
     revision: Optional[str] = Field(default=None, min_length=1, max_length=64)
-    engine: Optional[Literal["claude", "codex"]] = None
+    engine: Optional[Literal["claude", "codex", "dsh"]] = None
 
     @model_validator(mode="after")
     def require_complete_archive_identity(self):
@@ -2207,7 +2291,7 @@ class GetTurnFileChanges(_Command):
     """Read an immutable file-index page without resuming the engine."""
     type: Literal["get_turn_file_changes"] = "get_turn_file_changes"
     sid: WireId
-    engine: Literal["claude", "codex"]
+    engine: Literal["claude", "codex", "dsh"]
     turn_id: WireId
     revision: str = Field(min_length=1, max_length=64)
     offset: int = Field(default=0, ge=0, le=4096, strict=True)
@@ -2217,7 +2301,7 @@ class GetTurnFileChanges(_Command):
 class TurnFileChangesPage(_Base):
     """Private one-shot response; never retained in the live replay ring."""
     type: Literal["turn_file_changes_page"] = "turn_file_changes_page"
-    engine: Literal["claude", "codex"]
+    engine: Literal["claude", "codex", "dsh"]
     turn_id: WireId
     revision: str = Field(min_length=1, max_length=64)
     offset: int = Field(ge=0, le=4096)
@@ -2755,7 +2839,7 @@ class ThreadGoal(BaseModel):
     threadId: WireId
     objective: str = Field(min_length=1, max_length=16 * 1024)
     status: GoalStatus
-    engine: Literal["claude", "codex"]
+    engine: Literal["claude", "codex", "dsh"]
     tokenBudget: Optional[int] = Field(default=None, ge=1)
     tokensUsed: int = Field(ge=0)
     timeUsedSeconds: int = Field(ge=0)
@@ -2825,7 +2909,7 @@ AnyMessage = Union[
 # wrapper_disconnected, wrapper_reconnected) are synthesized per-reconnect and
 # are NOT seq'd/buffered.
 DOWNSTREAM_TYPES = frozenset({
-    "user_msg", "turn_steered", "state", "model", "effort", "auto_compact", "perm",
+    "user_msg", "turn_steered", "state", "model", "effort", "auto_compact", "perm", "dsh_state",
     "permission_profile", "web_search", "fast", "codex_context",
     "collaboration_mode", "session_control", "query_queue", "btw_opened",
     "assistant_msg_start", "delta", "tool_use", "tool_delta", "tool_result",
@@ -2886,6 +2970,9 @@ _TYPE_MAP: dict[str, type[BaseModel]] = {
     "get_history_image": GetHistoryImage,
     "get_models": GetModels,
     "models": Models,
+    "dsh_state": DshState,
+    "dsh_command_result": DshCommandResult,
+    "set_dsh_control": SetDshControl,
     "get_engine_capabilities": GetEngineCapabilities,
     "engine_capabilities": EngineCapabilities,
     "manage_engine_plugin": ManageEnginePlugin,

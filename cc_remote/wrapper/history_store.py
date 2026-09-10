@@ -724,10 +724,13 @@ def materialize_history_turns(
                     if message_id not in texts:
                         texts[message_id] = []
                         text_order.append(message_id)
-                    texts[message_id].append(event["text"])
+                    if event.get("replace"):
+                        texts[message_id] = [event["text"]]
+                    else:
+                        texts[message_id].append(event["text"])
                     block = add_live_text(message_id, channels[message_id])
                     if block is not None:
-                        block["text"] += event["text"]
+                        block["text"] = event["text"] if event.get("replace") else block["text"] + event["text"]
                     stamp = _event_ms(event.get("ts"))
                     if stamp is not None:
                         text_first_ms.setdefault(message_id, stamp)

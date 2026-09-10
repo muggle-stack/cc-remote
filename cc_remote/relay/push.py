@@ -251,7 +251,7 @@ def _session_payload(
         context.get("parent_session_id") or context.get("sid"),
         maximum=256,
     )
-    if engine not in {"claude", "codex"} or space not in {"code", "work"} or sid is None:
+    if engine not in {"claude", "codex", "dsh"} or space not in {"code", "work"} or sid is None:
         return None
     route = {
         "machine_id": machine_id,
@@ -259,7 +259,7 @@ def _session_payload(
         "engine": engine,
         "space": space,
     }
-    engine_label = "Codex" if engine == "codex" else "Claude"
+    engine_label = "DSH" if engine == "dsh" else "Codex" if engine == "codex" else "Claude"
     display_name = _clean_display_name(context.get("display_name"))
     encoded_route = quote(
         json.dumps(route, ensure_ascii=False, separators=(",", ":")),

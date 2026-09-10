@@ -148,6 +148,7 @@ from cc_remote.protocol import (
     ERR_QUEUE_FULL,
 )
 from cc_remote.wrapper.ringbuffer import RingBuffer
+from cc_remote.wrapper.dsh_runtime import DshRuntime
 from cc_remote.wrapper.session_pins import SessionPinStore, SessionPinStoreError
 from cc_remote.wrapper.session_plans import (
     SessionPlanStore,
@@ -1969,7 +1970,7 @@ class WrapperMachine:
         "set_service_tier", "set_collaboration_mode", "open_btw", "close_btw",
         "sync_btw",
         "set_perm", "get_permission_profiles", "set_permission_profile",
-        "set_web_search",
+        "set_web_search", "set_dsh_control",
         "get_context", "get_status", "consume_rate_limit_reset_credit",
         "get_diff", "get_turn_file_changes", "get_file_preview", "save_markdown", "browse_files",
         "get_preview_asset", "authorize_preview",
@@ -1996,6 +1997,7 @@ class WrapperMachine:
         self.cfg = cfg
         self.transport = transport
         self._command_router = CommandRouter(self)
+        self._dsh = DshRuntime(self)
         self.instance_id = uuid4().hex
         # Each configured CLAUDE_CONFIG_DIR is an independent account/session
         # boundary. Keep implicit single-account mode source-compatible and
@@ -3512,7 +3514,7 @@ class WrapperMachine:
         )
         display_name = self._notification_titles.get(route_sid or "")
         return TurnNotificationContext(
-            engine="codex" if ctx.engine == "codex" else "claude",
+            engine=ctx.engine,
             space="work" if ctx.space == "work" else "code",
             display_name=display_name,
             parent_session_id=ctx.parent_sid if ctx.btw else None,
@@ -8930,7 +8932,7 @@ class WrapperMachine:
                 if cmd.type == "get_models":
                     self._start_models_command(cmd)
                     continue
-                if cmd.type == "steer":
+                if cmd.type in {"steer", "set_dsh_control"}:
                     # turn/steer is a short app-server RPC, but it must not
                     # monopolize the serial command lane and delay an explicit
                     # Stop arriving from another client.
@@ -9105,6 +9107,7 @@ class WrapperMachine:
                     *followup_recovery_tasks, return_exceptions=True)
             for c in self.sessions.values():
                 c.claude_followup_recovery_task = None
+            await self._dsh.close()
             await self.transport.stop()
             for c in list(self.sessions.values()):
                 disconnected = False
@@ -10294,7 +10297,7 @@ class WrapperMachine:
             msg.model_copy(update={
                 "notification_context": self._notification_context(ctx),
             })
-            if isinstance(msg, TurnEnd)
+            if isinstance(msg, TurnEnd) and not (ctx.engine == "dsh" and msg.result.subtype == "steered")
             else msg
         )
         await self.transport.send(live)
@@ -10378,6 +10381,7 @@ class WrapperMachine:
                 and not msg.result.is_error
                 and msg.result.subtype != "steered"
                 and not ctx.btw
+                and not (ctx.engine == "dsh" and msg.result.subtype == "interrupted")
                 and self._session_presentation is not None
             ):
                 sid = self._ctx_wire_sid(ctx) or ctx.key
@@ -11605,7 +11609,9 @@ class WrapperMachine:
             )
             await self._emit(ctx, error)
             return error
-        result = await self._command_router.dispatch(cmd)
+        result = await self._dsh.dispatch(cmd)
+        if result is UNHANDLED_COMMAND:
+            result = await self._command_router.dispatch(cmd)
         if result is UNHANDLED_COMMAND:
             log.warning(
                 "unexpected command",
@@ -12014,6 +12020,10 @@ class WrapperMachine:
                 # Permission/collaboration modes are live control state, not
                 # transcript history. Always seed them on hello even when the
                 # browser's replay cursor is already at the ring tail.
+                if ctx.engine == "dsh":
+                    await self.transport.send(ctx.sdk.state.model_copy(deep=True, update={
+                        "sid": sid, "to": cmd.client_id, "seq": None,
+                        "route_id": getattr(cmd, "route_id", None)}))
                 permission_mode = _session_permission_mode(ctx)
                 ctx.announced_perm = permission_mode
                 await self.transport.send(Perm(
@@ -17525,6 +17535,8 @@ class WrapperMachine:
         *,
         launch_receipt: asyncio.Future[bool] | None = None,
     ):
+        if ctx.engine == "dsh":
+            return await self._dsh.query(ctx, cmd, launch_receipt=launch_receipt)
         if await self._refresh_btw_availability(ctx):
             error = Error(code=ERR_NOT_RUNNING, message=self.BTW_DESTROYED_MESSAGE,
                           msg_id=getattr(cmd, "msg_id", None))

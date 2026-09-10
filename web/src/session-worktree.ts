@@ -17,7 +17,7 @@ export interface PendingWorktreeFork {
 
 export interface PendingSessionFork extends PendingWorktreeFork {
   forkPointId: string;
-  engine: "claude" | "codex";
+  engine: "claude" | "codex" | "dsh";
 }
 
 export interface PendingSessionMigration {
@@ -29,7 +29,7 @@ export interface ForkFocusLease {
   requestId: string;
   parentSessionId: string;
   childSessionId: string;
-  engine: "claude" | "codex";
+  engine: "claude" | "codex" | "dsh";
   space: "code";
   machineId: string;
   cwd: string;
@@ -45,7 +45,7 @@ export function forkFocusLeaseSession(
   lease: ForkFocusLease | null,
   sessions: readonly SessionInfo[],
   machineId: string,
-  engine: "claude" | "codex",
+  engine: "claude" | "codex" | "dsh",
   space: "code" | "work",
 ): SessionInfo | null {
   if (!lease || lease.machineId !== machineId || lease.engine !== engine
@@ -88,11 +88,11 @@ export function withoutForkFocusPlaceholder(
 export function sessionMenuCapabilities(session: SessionInfo): SessionMenuCapabilities {
   return {
     rename: true,
-    archive: true,
+    archive: session.engine !== "dsh",
     forkWorktree: session.engine === "codex" && session.tag !== "archived",
     migrate: session.engine === "codex" && session.space !== "work"
       && session.tag !== "archived",
-    delete: true,
+    delete: session.engine !== "dsh",
   };
 }
 
@@ -176,12 +176,12 @@ export function isTerminalSessionMigrationError(code: string): boolean {
   return code !== "wrapper_offline";
 }
 
-export function canForkTurn<T extends { done: boolean; forkPointId?: string }>(
-  engine: "claude" | "codex",
+export function canForkTurn<T extends { done: boolean; forkPointId?: string; forkAvailable?: boolean }>(
+  engine: "claude" | "codex" | "dsh",
   turn: T,
 ): turn is T & { done: true; forkPointId: string } {
-  return (engine === "claude" || engine === "codex")
-    && turn.done && !!turn.forkPointId;
+  return (engine === "claude" || engine === "codex" || engine === "dsh")
+    && turn.done && !!turn.forkPointId && turn.forkAvailable !== false;
 }
 
 /** Provisional errors keep the reliable command and its UI ownership pending.

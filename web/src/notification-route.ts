@@ -24,7 +24,7 @@ export function parseNotificationRoute(value: unknown): NotificationRoute | null
   }
   if (typeof row.machine_id !== "string" || !WIRE_ID.test(row.machine_id)
       || !safeSessionId(row.session_id)
-      || (row.engine !== "claude" && row.engine !== "codex")
+      || (row.engine !== "claude" && row.engine !== "codex" && row.engine !== "dsh")
       || (row.space !== "code" && row.space !== "work")) {
     return null;
   }

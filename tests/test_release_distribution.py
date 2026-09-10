@@ -163,6 +163,7 @@ def test_release_bundles_are_deterministic_and_role_scoped(
     assert not any("/node_modules/" in name for name in members)
 
     if role == "relay":
+        assert not any("/integrations/dsh/" in name for name in members)
         assert f"{prefix}/web/dist/index.html" in members
         assert f"{prefix}/web/dist/cc-remote-viewer-runner.js" in members
         assert f"{prefix}/requirements-relay.lock" in members
@@ -172,6 +173,9 @@ def test_release_bundles_are_deterministic_and_role_scoped(
         assert f"{prefix}/deploy/install-wrapper.sh" not in members
         assert f"{prefix}/requirements-wrapper.lock" not in members
     else:
+        assert f"{prefix}/integrations/dsh/cc-remote.mjs" in members
+        assert f"{prefix}/integrations/dsh/README.md" in members
+        assert f"{prefix}/integrations/dsh/cc-remote.test.mjs" not in members
         assert not any("/web/" in name for name in members)
         assert f"{prefix}/requirements-wrapper.lock" in members
         assert f"{prefix}/deploy/install-wrapper.sh" in members

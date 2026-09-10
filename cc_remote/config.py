@@ -262,6 +262,9 @@ class WrapperConfig:
     # CLAUDE_CONFIG_DIR. Empty preserves the historical single-account path.
     claude_profiles_json: str = field(
         default_factory=_claude_profiles_json)
+    # Optional local DSH control credential, created by dsh_pair.
+    dsh_connection_file: str = field(default_factory=lambda: _env(
+        "CC_REMOTE_DSH_CONNECTION_FILE", "").strip())
     # Optional proxy inherited only by Codex subprocesses launched by this
     # wrapper.  It deliberately does not mutate the wrapper process or the
     # user's shell/CLI environment.

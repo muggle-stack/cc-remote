@@ -245,6 +245,7 @@ const fromCatalog = (entries: CatalogModel[]): Model[] =>
   });
 
 export const modelsFor = (engine?: string, catalog?: Catalog): Model[] => {
+  if (engine === "dsh") return fromCatalog(catalog?.dsh ?? []);
   if (engine !== "codex") return MODELS;
   const live = catalog?.codex;
   return live?.length ? fromCatalog(live) : CODEX_MODELS;
@@ -261,7 +262,7 @@ export const defaultModelFor = (engine?: string, catalog?: Catalog,
   // them. Claude may legitimately use a custom/provider alias absent from the
   // common suggestions above, so preserve its wrapper-resolved id.
   return want && (engine !== "codex" || list.some((m) => m.id === want))
-    ? want : list[0].id;
+    ? want : (list[0]?.id ?? "");
 };
 
 /** Effort levels the SELECTED model actually accepts. Unknown/unset model falls back
@@ -269,7 +270,7 @@ export const defaultModelFor = (engine?: string, catalog?: Catalog,
 export const effortsFor = (engine?: string, model?: string | null, catalog?: Catalog): Effort[] => {
   const m = model ? modelsFor(engine, catalog).find((x) => x.id === model) : undefined;
   if (m?.efforts) return m.efforts;
-  return engine === "codex" ? CODEX_EFFORTS : EFFORTS;
+  return engine === "dsh" ? [] : engine === "codex" ? CODEX_EFFORTS : EFFORTS;
 };
 
 /** A null app-server thread effort is a real model-default state, not loading.
@@ -296,9 +297,9 @@ export function effortIsSelectable(
  *  switches to a model that lacks the current level (sol `ultra` -> luna `max`). */
 export const defaultEffortFor = (engine?: string, model?: string | null, catalog?: Catalog): string => {
   const list = effortsFor(engine, model, catalog);
-  return list.reduce((a, b) => (rank(b.id) > rank(a.id) ? b : a)).id;
+  return list.length ? list.reduce((a, b) => (rank(b.id) > rank(a.id) ? b : a)).id : "";
 };
-export const permsFor = (engine?: string): Perm[] => (engine === "codex" ? CODEX_PERMS : PERMS);
+export const permsFor = (engine?: string): Perm[] => (engine === "dsh" ? [] : engine === "codex" ? CODEX_PERMS : PERMS);
 
 // Map a cc-reported model id (e.g. "claude-mythos-5-1[1m]") to a MODELS entry id.
 // An id we don't know (any codex model) passes through verbatim — the codex chips
@@ -382,11 +383,11 @@ export const CODEX_CLIENT_SLASHES = new Set(["model", "plan", "normal", "clear",
 const HIDDEN_CODE_ONLY_SLASHES = new Set(["rollback"]);
 export type CommandSurface = "code" | "work";
 export const commandsFor = (engine?: string, surface: CommandSurface = "code"): Command[] => (
-  surface === "work"
+  engine === "dsh" ? CODEX_COMMANDS.filter(c => !isCmd(c) || ["model", "context", "diff", "preview", "open", "skills"].includes(c.slash)) : surface === "work"
     ? engine === "codex" ? CODEX_WORK_COMMANDS : WORK_COMMANDS
     : engine === "codex" ? CODEX_COMMANDS : COMMANDS
 );
-export const clientSlashesFor = (engine?: string): Set<string> => (engine === "codex" ? CODEX_CLIENT_SLASHES : CLIENT_SLASHES);
+export const clientSlashesFor = (engine?: string): Set<string> => (engine === "dsh" ? new Set(["model", "context", "diff", "preview", "open", "skills"]) : engine === "codex" ? CODEX_CLIENT_SLASHES : CLIENT_SLASHES);
 
 /** A built-in command intentionally available on Code but absent from Work.
  * Unknown slashes return false so user-installed Claude skills remain usable. */

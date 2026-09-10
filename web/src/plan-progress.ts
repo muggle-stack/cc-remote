@@ -17,7 +17,7 @@ export type TurnPlanProgressSource = "runtime" | "history";
 
 export interface SessionPlanProgressScope {
   machineId: string;
-  engine: "claude" | "codex";
+  engine: "claude" | "codex" | "dsh";
   space: "code" | "work";
   sid: string;
 }
@@ -81,7 +81,7 @@ export class SessionPlanProgressCache {
     runtimeLoading,
   }: {
     machineId?: string;
-    engine?: "claude" | "codex";
+    engine?: "claude" | "codex" | "dsh";
     space?: "code" | "work";
     sid: string;
     runtime: TurnPlanProgress | null;

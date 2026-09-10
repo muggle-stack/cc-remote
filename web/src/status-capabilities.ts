@@ -4,7 +4,7 @@ import type { StatusAccount } from "./protocol";
 export function shouldOpenCodexStatus(
   requestedSid: string | null,
   focusedSid: string | null,
-  engine: "claude" | "codex",
+  engine: "claude" | "codex" | "dsh",
 ): boolean {
   return engine === "codex" && requestedSid !== null && requestedSid === focusedSid;
 }

@@ -30,7 +30,7 @@ export default defineConfig({
               // Keep small, shared projection primitives out of the entry
               // without adding a fifth startup request. They have no UI side
               // effects and change only with the bounded-history contract.
-              test: /node_modules[\\/]|preload-helper|src[\\/](?:compaction-orphans|history-browse|history-requests|runtime-bounds|remote-viewer)\.ts$/,
+              test: /node_modules[\\/]|preload-helper|src[\\/](?:compaction-orphans|history-browse|history-requests|runtime-bounds|remote-viewer)\.ts$|src[\\/]icons\.tsx$/,
               tags: ["$initial"],
               priority: 10,
             },

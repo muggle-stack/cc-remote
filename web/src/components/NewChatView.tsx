@@ -1,3 +1,4 @@
+import type { DshPreset } from "../protocol";
 // Empty-state "new chat" page: a centered composer (a la Claude app / Codex)
 // with a working directory, optional model/effort overrides, and attachments.
 // A null override is intentional: the wrapper/engine keeps its own local default.
@@ -7,7 +8,7 @@ import {
 } from "react";
 import { Icon } from "../icons";
 import {
-  effortsFor, modelsFor, parseSlash, type Catalog, type Effort, type Model,
+  modelsFor, parseSlash, type Catalog, type Effort, type Model,
 } from "../data";
 import { attachmentBytes } from "../img";
 import {
@@ -36,117 +37,16 @@ import {
 
 const AutoCompactControl = lazy(() => import("./AutoCompactControl"));
 
-type Engine = "claude" | "codex";
-
-export interface NewChatCatalogRequest {
-  engine: Engine;
-  cwd?: string;
-  claudeProfileId?: string;
-  codexProfileId?: string;
-}
-
-/** Catalog reads are scoped like the session they describe. Work owns its own
- * private cwd, so it must never probe Claude settings through the Code cwd. */
-export function newChatCatalogRequest(
-  engine: Engine, space: Space, cwd: string,
-  codexProfileId?: string | null,
-  claudeProfileId?: string | null,
-): NewChatCatalogRequest | null {
-  if (engine === "codex") {
-    return {
-      engine,
-      ...(codexProfileId ? { codexProfileId } : {}),
-    };
-  }
-  return space === "code" ? {
-    engine,
-    cwd,
-    ...(claudeProfileId ? { claudeProfileId } : {}),
-  } : null;
-}
-
-export interface NewChatLocalDefaults {
-  model: string | null;
-  effort: string | null;
-}
-
-/** Cwd-aware Claude defaults are presentation metadata for that exact Code
- * directory only. Codex defaults are machine-wide and may be shown in either
- * surface. The selected overrides themselves remain null until the user picks. */
-export function resolveNewChatLocalDefaults(
-  engine: Engine,
-  space: Space,
-  cwd: string,
-  modelDefaults: Record<string, string>,
-  effortDefaults: Record<string, string>,
-  defaultCwds: Record<string, string>,
-  catalogScopeKey: string = engine,
-): NewChatLocalDefaults {
-  if (engine === "claude"
-      && (space !== "code" || defaultCwds[catalogScopeKey] !== cwd)) {
-    return { model: null, effort: null };
-  }
-  return {
-    model: modelDefaults[catalogScopeKey] ?? null,
-    effort: effortDefaults[catalogScopeKey] ?? null,
-  };
-}
-
-/** Keep a user's explicit effort only when the newly selected model supports
- * it. Unknown/default targets fail safe to null; we never invent a highest
- * effort on the user's behalf. */
-export function compatibleNewChatEffort(
-  engine: Engine,
-  nextModel: string | null,
-  currentEffort: string | null,
-  catalog: Catalog,
-  localDefaultModel: string | null,
-): string | null {
-  if (!currentEffort) return null;
-  const effectiveModel = nextModel ?? localDefaultModel;
-  if (!effectiveModel) return null;
-  if (!modelsFor(engine, catalog).some(
-    (candidate) => candidate.id === effectiveModel,
-  )) return null;
-  return effortsFor(engine, effectiveModel, catalog).some(
-    (candidate) => candidate.id === currentEffort,
-  ) ? currentEffort : null;
-}
-
-export function reconcileNewChatSelection(
-  engine: Engine,
-  model: string | null,
-  effort: string | null,
-  catalog: Catalog,
-  localDefaultModel: string | null,
-): { model: string | null; effort: string | null } {
-  if (model && !modelsFor(engine, catalog).some(
-    (candidate) => candidate.id === model,
-  )) {
-    // A fallback model can disappear when the authoritative, entitlement-
-    // filtered catalog arrives. Clear both overrides instead of submitting a
-    // now-inaccessible model with a stale effort.
-    return { model: null, effort: null };
-  }
-  return {
-    model,
-    effort: compatibleNewChatEffort(
-      engine, model, effort, catalog, localDefaultModel),
-  };
-}
-
-export function newChatEfforts(
-  engine: Engine,
-  effectiveModel: string | null,
-  catalog: Catalog,
-): Effort[] {
-  // Without an authoritative Codex default there is no model against which an
-  // explicit effort can be validated. Keep only the null/default choice.
-  if (engine === "codex" && !effectiveModel) return [];
-  return effortsFor(engine, effectiveModel, catalog);
-}
+type Engine = "claude" | "codex" | "dsh";
+import { newChatEfforts } from "../new-chat-selection";
+export { compatibleNewChatEffort, newChatCatalogRequest, resolveNewChatLocalDefaults,
+  reconcileNewChatSelection, newChatEfforts } from "../new-chat-selection";
 
 interface Props {
+  dshPresets?: DshPreset[];
+  dshPreset?: string | null;
+  dshError?: string | null;
+  onPickDshPreset?: (value: string) => void;
   cwd: string;
   /** Authorization boundary for local execution-control choices. */
   controlScopeKey: string;
@@ -275,6 +175,7 @@ export function NewChatView({ cwd, controlScopeKey,
   onPickModel, onPickEffort, onPickAutoCompact, onPickClaudeProfile,
   onPickCodexProfile,
   permissionProfiles, onGetPermissionProfiles,
+  dshPresets = [], dshPreset, dshError, onPickDshPreset,
   onSend }: Props) {
   const [text, setText] = useState("");
   const [images, setImages] = useState<QueryImg[]>([]);
@@ -354,7 +255,7 @@ export function NewChatView({ cwd, controlScopeKey,
       ...patch,
     }));
   };
-  const accountProfiles = engine === "codex" ? codexProfiles : claudeProfiles;
+  const accountProfiles = engine === "dsh" ? [] : engine === "codex" ? codexProfiles : claudeProfiles;
   const defaultAccountProfileId = engine === "codex"
     ? defaultCodexProfileId : defaultClaudeProfileId;
   const accountProfileId = engine === "codex"
@@ -368,7 +269,7 @@ export function NewChatView({ cwd, controlScopeKey,
   const selectedProfileWarning = selectedProfileMissing
     ? `所选 ${engine === "codex" ? "Codex" : "Claude"} 账号已移除，请重新选择。`
     : selectedAccountProfile?.error ?? null;
-  const canSend = (text.trim().length > 0 || hasAttachments || pastes.length > 0)
+  const canSend = !(engine === "dsh" && (dshError || !dshPresets.length)) && (text.trim().length > 0 || hasAttachments || pastes.length > 0)
     && !creating && !importing && !selectedProfileMissing;
   const modelList = modelsFor(engine, catalog);
   const effectiveModel = model ?? defaultModel;
@@ -417,7 +318,7 @@ export function NewChatView({ cwd, controlScopeKey,
       const [{ pickFiles }, imported] = await Promise.all([
         import("../attachment-import"),
         clipboard ? resolveClipboardImport(clipboard)
-          : Promise.resolve({ files: fl, errors: [] }),
+          : Promise.resolve({ files: fl ? Array.from(fl) : null, errors: [] }),
       ]);
       const batch = await pickFiles(
         imported.files, images.length + files.length, attachmentBytes(images, files));
@@ -563,8 +464,20 @@ export function NewChatView({ cwd, controlScopeKey,
         <div className="newchat-greet">{space === "work"
           ? "开始一项工作"
           : engine === "codex" ? "开始 Codex 新对话" : "开始新对话"}
-          <span className={`newchat-engine ${engine}`}>{engine === "codex" ? "◇ Codex" : "✳ Claude"}</span>
+          <span className={`newchat-engine ${engine}`}>{engine === "dsh" ? "DSH" : engine === "codex" ? "◇ Codex" : "✳ Claude"}</span>
         </div>
+        {engine === "dsh" && <div className="dsh-preset-row">
+          <label>Agent Preset
+            <select aria-label="DSH Agent Preset" value={dshPreset ?? ""}
+              onChange={event => onPickDshPreset?.(event.target.value)} disabled={creating}>
+              <option value="">DSH 默认</option>
+              {dshPresets.map(preset => <option key={preset.id} value={preset.id} disabled={!preset.available}>
+                {preset.name}{preset.available ? "" : " · 不可用"}
+              </option>)}
+            </select>
+          </label>
+          <p>{dshError || dshPresets.find(preset => dshPreset ? preset.id === dshPreset : preset.is_default)?.description || "正在读取设备上的 DSH…"}</p>
+        </div>}
         {space === "work" ? (
           <>
             <div className="work-private-note"><Icon name="lock" size={14} />

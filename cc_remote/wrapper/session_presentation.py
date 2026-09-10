@@ -23,11 +23,11 @@ from uuid import uuid4
 _WIRE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$")
 _MAX_ENTRIES = 4096
 _MAX_FILE_BYTES = 16 * 1024 * 1024
-_ENGINES = frozenset({"claude", "codex"})
+_ENGINES = frozenset({"claude", "codex", "dsh"})
 _LEGACY_ENGINE = "legacy"
 
 
-def _engine(value: object) -> Literal["claude", "codex"]:
+def _engine(value: object) -> Literal["claude", "codex", "dsh"]:
     if value not in _ENGINES:
         raise SessionPresentationStoreError(
             "session presentation engine is invalid")
@@ -163,7 +163,7 @@ class SessionPresentationStore:
 
     def completion_engine(
         self, session_id: str, completion_id: str,
-    ) -> Literal["claude", "codex"] | None:
+    ) -> Literal["claude", "codex", "dsh"] | None:
         """Resolve an engine-less legacy acknowledgement without guessing.
 
         Protocol v34 predates engine-scoped completion commands. A cold
@@ -174,9 +174,9 @@ class SessionPresentationStore:
         """
         completion_id = _wire_id(completion_id)  # type: ignore[assignment]
         assert completion_id is not None
-        matches: list[Literal["claude", "codex"]] = []
+        matches: list[Literal["claude", "codex", "dsh"]] = []
         with self._lock:
-            for engine in ("claude", "codex"):
+            for engine in ("claude", "codex", "dsh"):
                 snapshot = self._sessions.get(_scope_key(engine, session_id))
                 if (
                     snapshot is not None

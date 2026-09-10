@@ -10,7 +10,7 @@ import {
 } from "./PlanProgressPopover";
 
 interface Props {
-  engine: "claude" | "codex";
+  engine: "claude" | "codex" | "dsh";
   goal: ThreadGoal | null;
   revealed: boolean;
   open: boolean;
@@ -90,7 +90,7 @@ export function GoalPanel(p: Props) {
   const total = goal?.tokenBudget ?? null;
   const progress = total ? Math.min(100, used / total * 100) : null;
   const visualProgress = goal?.status === "complete" ? 100 : progress;
-  const engineName = p.engine === "codex" ? "Codex" : "Claude";
+  const engineName = p.engine === "dsh" ? "DSH" : p.engine === "codex" ? "Codex" : "Claude";
   const planPresentation = p.plan
     ? planProgressPresentation(p.plan.block, p.plan.detailLoading) : null;
   const planHeadline = planPresentation?.stale

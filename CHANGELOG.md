@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+- Add DeepSeek Harness 0.1.5-rc.2 as an optional Code engine (protocol v61):
+  native Agent Presets, models/effort, permission presets, goals, commands,
+  questions/approvals, attachments, steering, queued prompts, cancellation and
+  forks. Keep authentication local, cold history non-activating, and durable
+  message ownership stable across retries, steering and reconnects. Include
+  desktop/mobile themes and an isolated zero-provider native acceptance runner.
 - Set a per-session maximum usable Codex context (protocol v60), validated against
   the native model catalog. A 300k setting means a 300,000-token window, with
   compaction near 95% subject to native limits. Preserve existing saved numbers,

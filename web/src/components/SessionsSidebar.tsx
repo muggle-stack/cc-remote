@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type TouchEvent } from "react";
 import type { ClaudeProfileInfo, CodexProfileInfo, Engine, SessionInfo, Space, State } from "../protocol";
 import type { CompletionBadgeKind } from "../completion-badges";
+const NO_ACCOUNT_PROFILES: never[] = [];
 import { Icon, ClaudeMark } from "../icons";
 import {
   compareSessionsByActivity,
@@ -91,7 +92,7 @@ export function SessionsSidebar({ open, engine, space,
   const pressTimer = useRef<number | null>(null);
   const pressStart = useRef<{ x: number; y: number } | null>(null);
 
-  const accountProfiles = engine === "codex" ? codexProfiles : claudeProfiles;
+  const accountProfiles = engine === "dsh" ? NO_ACCOUNT_PROFILES : engine === "codex" ? codexProfiles : claudeProfiles;
   const defaultAccountProfileId = engine === "codex"
     ? defaultCodexProfileId : defaultClaudeProfileId;
   const showProfileManagement = accountProfiles.length > 1;
@@ -466,7 +467,7 @@ export function SessionsSidebar({ open, engine, space,
           <div className="space-switch" role="tablist" aria-label="切换工作空间">
             <button role="tab" aria-selected={space === "work"}
               className={space === "work" ? "active" : ""}
-              onClick={() => onSpaceChange("work")}>
+              onClick={() => onSpaceChange("work")} disabled={engine === "dsh"}>
               <Icon name="work" size={17} />Work
             </button>
             <button role="tab" aria-selected={space === "code"}

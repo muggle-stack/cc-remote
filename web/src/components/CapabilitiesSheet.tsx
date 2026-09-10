@@ -21,7 +21,7 @@ export interface HookDraft {
 
 interface Props {
   open: boolean;
-  engine: "claude" | "codex";
+  engine: "claude" | "codex" | "dsh";
   activeKind: EngineCapabilityKind | "all";
   report: EngineCapabilities | null;
   loading: boolean;

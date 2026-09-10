@@ -5,7 +5,7 @@ import type { NotificationMode } from "../notification-mode";
 import type { PushBindingState } from "../push";
 
 interface Props {
-  engine: "claude" | "codex";
+  engine: "claude" | "codex" | "dsh";
   theme: "light" | "dark";
   notificationMode: NotificationMode;
   notificationBinding: PushBindingState;

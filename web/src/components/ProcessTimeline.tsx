@@ -736,7 +736,7 @@ export function ProcessTimeline({ blocks, done, active, outcome, problem, durati
     variant: HistoryImageVariant,
   ) => boolean;
   onPreviewHistoryImage?: (turnId: string, imageId: string) => void;
-  engine?: "claude" | "codex";
+  engine?: "claude" | "codex" | "dsh";
   /** The session-level progress strip owns this plan instead of this row. */
   externalPlanItemId?: string | null;
   openOverride?: boolean;

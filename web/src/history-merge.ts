@@ -997,6 +997,7 @@ function mergeTurn(
     clientMsgId: history.clientMsgId ?? live.clientMsgId,
     historyTurnId,
     forkPointId: history.forkPointId ?? live.forkPointId,
+    forkAvailable: history.forkAvailable ?? live.forkAvailable,
     checkpointId: history.checkpointId ?? live.checkpointId,
     prompt: history.prompt || live.prompt,
     blocks,

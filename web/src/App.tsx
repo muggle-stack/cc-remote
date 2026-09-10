@@ -39,10 +39,10 @@ import { LoginForm } from "./components/LoginForm";
 import {
   compatibleNewChatEffort,
   newChatCatalogRequest,
-  NewChatView,
   reconcileNewChatSelection,
   resolveNewChatLocalDefaults,
-} from "./components/NewChatView";
+} from "./new-chat-selection";
+const NewChatView = lazy(() => import("./components/NewChatView").then(m => ({ default: m.NewChatView })));
 import { QuestionSheet } from "./components/QuestionSheet";
 import { WorkDashboardSheet } from "./components/WorkDashboardSheet";
 import type { HookDraft, SkillDraft } from "./components/CapabilitiesSheet";
@@ -253,6 +253,7 @@ import type { RightPanelView } from "./components/PanelTabs";
 const THEME_KEY = "cc_remote_theme";
 const ENGINE_KEY = "cc_remote_engine";  // which backend the NEXT new session uses
 const MACHINE_KEY = "cc_remote_machine";
+const DshGoalPanel = lazy(() => import("./components/DshGoalPanel"));
 const GoalPanel = lazy(() => import("./components/GoalPanel").then(
   ({ GoalPanel: Panel }) => ({ default: Panel }),
 ));
@@ -334,6 +335,7 @@ export default function App() {
   const [authReady, setAuthReady] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [dirPickerOpen, setDirPickerOpen] = useState(false);
+  const [dshPresetSelection, setDshPresetSelection] = useState<{ scope: string; value: string } | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
   const [newChatAutoFocus, setNewChatAutoFocus] = useState(true);
   // A cold Work/Code or engine switch has no trustworthy row to paint until
@@ -1035,7 +1037,7 @@ export default function App() {
   const focusedSession = state.sessions.find(
     (session) => session.session_id === focusedSid);
   const archivedBrowse = focusedSession?.tag === "archived";
-  const focusedEngine = (focusedSession?.engine ?? engine) as "claude" | "codex";
+  const focusedEngine = (focusedSession?.engine ?? engine) as "claude" | "codex" | "dsh";
   useEffect(() => {
     if (!focusedSid || state.newChat) {
       archivedBrowseRef.current = null;
@@ -1205,7 +1207,7 @@ export default function App() {
   }, [activeBtwSid, focusedSid]);
 
   useEffect(() => {
-    if (!authed || !focusedSid || !focusedGoalScopeKey || state.newChat
+    if (focusedEngine === "dsh" || !authed || !focusedSid || !focusedGoalScopeKey || state.newChat
         || archivedBrowse
         || state.connState !== "connected" || !state.wrapperOnline) {
       return;
@@ -1243,6 +1245,7 @@ export default function App() {
   }, [
     authed,
     archivedBrowse,
+    focusedEngine,
     focusedGoalScopeKey,
     focusedSid,
     state.connState,
@@ -1647,7 +1650,7 @@ export default function App() {
         .find((session) => session.session_id === sid);
     const scope: HistoryPageCacheScope = {
       machineId,
-      engine: listed?.engine === "codex" || listed?.engine === "claude"
+      engine: listed?.engine === "codex" || listed?.engine === "claude" || listed?.engine === "dsh"
         ? listed.engine : fallbackEngine,
       space: listed?.space === "work" || listed?.space === "code"
         ? listed.space : fallbackSpace,
@@ -1831,7 +1834,7 @@ export default function App() {
     state.newChat,
   ]);
   useEffect(() => {
-    if (state.newChat || !focusedAccountProfileId
+    if (state.newChat || (focusedEngine !== "dsh" && !focusedAccountProfileId)
         || state.connState !== "connected" || !state.wrapperOnline) return;
     wsRef.current?.sendGetModels(
       focusedEngine,
@@ -1930,7 +1933,7 @@ export default function App() {
 
   const focusListedSession = useCallback((selected: SessionInfo) => {
     const selectedEngine: Engine = selected.engine === "codex"
-      || selected.engine === "claude"
+      || selected.engine === "claude" || selected.engine === "dsh"
       ? selected.engine : engineRef.current;
     const selectedSpace: Space = selected.space === "work"
       || selected.space === "code"
@@ -2069,9 +2072,8 @@ export default function App() {
 
   // Engine and Work/Code switches are navigation. Each surface restores the
   // session that was last open there instead of silently starting a new one.
-  const toggleEngine = () => {
+  const toggleEngine = (nextEngine: Engine) => {
     cancelPendingNotificationTarget();
-    const nextEngine: Engine = engine === "codex" ? "claude" : "codex";
     const nextSpace = spacesByEngineRef.current[nextEngine];
     pendingCreateRef.current = null;
     setCreateError(null);
@@ -2088,7 +2090,7 @@ export default function App() {
   };
 
   const switchSpace = (next: Space) => {
-    if (next === space || !confirmArtifactDiscard()) return;
+    if ((engine === "dsh" && next !== "code") || next === space || !confirmArtifactDiscard()) return;
     cancelPendingNotificationTarget();
     pendingCreateRef.current = null;
     setCreateError(null);
@@ -3885,7 +3887,7 @@ export default function App() {
     if (latest && latest.session_id !== state.focusedSid) {
       dispatch({ type: "exit_new_chat" });
       dispatch({ type: "focus_session", sid: latest.session_id });
-      const latestEngine = (latest.engine as "claude" | "codex") || engineRef.current;
+      const latestEngine = (latest.engine as "claude" | "codex" | "dsh") || engineRef.current;
       wsRef.current.setFocusedSid(latest.session_id, latestEngine, spaceRef.current);
       requestHistory(
         latest.session_id, undefined, HISTORY_INITIAL_PAGE);
@@ -4092,6 +4094,11 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [authed]);
 
+  const setPerm = useCallback((perm: string) => {
+    if (focusedEngine === "dsh" && focusedSid) wsRef.current?.sendDshControl(focusedSid, "permission", perm);
+    else wsRef.current?.sendSetPerm(perm);
+  }, [focusedEngine, focusedSid]);
+
   // Shift+Tab follows each engine's real mode control: Claude cycles permission
   // modes; Codex toggles collaboration mode without touching approvalPolicy.
   useEffect(() => {
@@ -4106,7 +4113,10 @@ export default function App() {
             rt.collaborationMode === "plan" ? "default" : "plan");
           return;
         }
-        const modes = permsFor(focusedEngine).map((p) => p.id);
+        const modes = focusedEngine === "dsh"
+          ? (rt.dsh?.permissions ?? []).filter(p => p.value !== "custom").map(p => p.value)
+          : permsFor(focusedEngine).map((p) => p.id);
+        if (!modes.length) return;
         const current = modes.indexOf(rt.perm);
         setPerm(modes[current < 0 ? 0 : (current + 1) % modes.length]);
       }
@@ -4114,7 +4124,7 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [authed, focusedSid, rt.perm, rt.collaborationMode, rt.control,
-    rt.external, focusedEngine]);
+    rt.external, rt.dsh?.permissions, focusedEngine, setPerm]);
 
   const requestHistoryTurnDetail = useCallback((
     displayTurnId: string, before?: string | null,
@@ -4592,7 +4602,7 @@ export default function App() {
     prompt: string, images?: QueryImg[], files?: QueryFile[],
   ): boolean => {
     const ws = wsRef.current;
-    if (!ws || !focusedSid || focusedEngine !== "codex") return false;
+    if (!ws || !focusedSid || (focusedEngine !== "codex" && focusedEngine !== "dsh")) return false;
     const runtime = stateRef.current.runtimes[focusedSid];
     if (ws.pendingQueryFor(focusedSid) || runtime?.acceptancePending) {
       return false;
@@ -4838,7 +4848,8 @@ export default function App() {
         mode: autoCompactMode,
         thresholdTokens: autoCompactThresholdTokens,
       } : undefined,
-      engine === "claude" ? newChatClaudeProfileId : undefined);
+      engine === "claude" ? newChatClaudeProfileId : undefined,
+      engine === "dsh" && dshPresetSelection?.scope === activeScopeKey ? dshPresetSelection.value : undefined);
     if (queued) {
       pendingCreateRef.current = msg_id;
       createRequestsRef.current.set(msg_id, {
@@ -4906,7 +4917,8 @@ export default function App() {
     wsRef.current?.sendSetModel(model);
   };
   const setEffort = (effort: string) => {
-    wsRef.current?.sendSetEffort(effort);
+    if (focusedEngine === "dsh" && focusedSid) wsRef.current?.sendDshControl(focusedSid, "effort", effort);
+    else wsRef.current?.sendSetEffort(effort);
   };
   const setAutoCompact = (selection: AutoCompactSelection): boolean => (
     wsRef.current?.sendSetAutoCompact(
@@ -4916,9 +4928,6 @@ export default function App() {
   // event owns the chip state; here we only forward the requested transition.
   const setServiceTier = (tier: string) => {
     wsRef.current?.sendSetServiceTier(tier);
-  };
-  const setPerm = (perm: string) => {
-    wsRef.current?.sendSetPerm(perm);
   };
   const getPermissionProfiles = () => {
     wsRef.current?.sendGetPermissionProfiles();
@@ -5612,7 +5621,7 @@ export default function App() {
           <span className={`hstat ${effectiveState}`}><span className="sd" />
             <span className="hstat-label">{effectiveState}</span></span>
           {space === "code" && focusedSid && !state.newChat
-              && !archivedBrowse && (
+              && !archivedBrowse && focusedEngine !== "dsh" && (
             <TerminalControl control={rt.control} engine={focusedEngine}
               availability={state.connState !== "connected" || !state.wrapperOnline
                 ? "offline" : rt.replaying || !rt.syncReady ? "syncing" : "online"}
@@ -5627,8 +5636,13 @@ export default function App() {
             <Icon name="devices" size={18} />
             <span>{activeDevice?.label ?? machineId}</span><i />
           </button>
-          <button className="engine-toggle" onClick={toggleEngine} aria-label="切换新会话引擎"
-            title="新建会话使用的引擎">{engine === "codex" ? "◇ Codex" : "✳ Claude"}</button>
+          <span className="engine-selector"><select className="engine-toggle" value={engine}
+            onChange={event => toggleEngine(event.target.value as Engine)}
+            aria-label="切换新会话引擎" title="新建会话使用的引擎">
+            <option value="claude">✳ Claude</option>
+            <option value="codex">◇ Codex</option>
+            <option value="dsh">DSH</option>
+          </select><Icon name="chev" size={12} /></span>
           <HeaderMenu
             engine={engine}
             theme={theme}
@@ -5661,7 +5675,11 @@ export default function App() {
             <span className="loading-tx">正在恢复会话</span>
           </div>
         ) : state.newChat ? (
-          <NewChatView cwd={state.newChat.cwd}
+          <Suspense fallback={null}><NewChatView cwd={state.newChat.cwd}
+            dshPresets={state.dshPresets}
+            dshError={state.dshError}
+            dshPreset={dshPresetSelection?.scope === activeScopeKey ? dshPresetSelection.value : null}
+            onPickDshPreset={value => setDshPresetSelection({ scope: activeScopeKey, value })}
             controlScopeKey={`${activeScopeKey}\u0000${newChatProfileId ?? "__default__"}`}
             space={space}
             createError={createError}
@@ -5704,7 +5722,7 @@ export default function App() {
               wsRef.current?.sendGetPermissionProfiles(
                 cwd, newChatCodexProfileId);
             }}
-            onSend={sendFirstMessage} />
+            onSend={sendFirstMessage} /></Suspense>
         ) : (
           <>
             <ChatView key={`${activeScopeKey}\u0000${focusedSid ?? ""}`}
@@ -5787,6 +5805,9 @@ export default function App() {
               ? <span className="goal-suspense" role="status"
                   aria-label={planProgress ? "正在加载计划进度" : "正在加载 Goal"} />
               : null}>
+              {focusedEngine === "dsh" && rt.dsh?.goal && <DshGoalPanel key={focusedSid}
+                goal={rt.dsh.goal} disabled={!state.wrapperOnline || !rt.dsh.connected}
+                onCommand={line => { if (focusedSid) wsRef.current?.sendDshControl(focusedSid, "command", line); }} />}
               <GoalPanel engine={focusedEngine} goal={rt.goal}
                 revealed={!archivedBrowse && !!goalUi?.revealed}
                 open={!archivedBrowse && !!goalUi?.open}
@@ -5838,6 +5859,9 @@ export default function App() {
             </Suspense>
 
             <Composer
+          dsh={rt.dsh}
+          dshCommandResult={rt.dshCommandResult}
+          onDshCommand={(value, images, files) => focusedSid ? wsRef.current?.sendDshControl(focusedSid, "command", value, images, files) ?? null : null}
           draftKey={focusedComposerDraftKey}
           draftStore={composerDraftsRef.current}
           surface={space}

@@ -14,7 +14,7 @@ import {
 } from "../rate-limit-usage";
 
 interface Props {
-  engine?: "claude" | "codex";
+  engine?: "claude" | "codex" | "dsh";
   open: boolean;
   report: StatusReport | null;
   rateLimits?: StatusRateLimit[] | null;
