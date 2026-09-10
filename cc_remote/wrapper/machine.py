@@ -23737,7 +23737,8 @@ class WrapperMachine:
                 raise ValueError("请先选择一个可用的会话")
             payload = await asyncio.to_thread(
                 browse_workspace, ctx.cwd, cmd.path, offset=cmd.offset,
-                limit=cmd.limit, hidden=cmd.hidden, revision=cmd.revision)
+                limit=cmd.limit, hidden=cmd.hidden, revision=cmd.revision,
+                confine_to_cwd=ctx.space != "code")
         except ValueError as exc:
             error = str(exc)
         except FileNotFoundError:

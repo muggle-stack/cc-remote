@@ -1,4 +1,4 @@
-"""Bounded, non-recursive directory reads beneath an open session root."""
+"""Bounded, non-recursive directory reads starting at a session's cwd."""
 
 from __future__ import annotations
 
@@ -12,9 +12,11 @@ MAX_DIRECTORY_ENTRIES = 20_000
 def browse_workspace(
     cwd: str, path: str, *, offset: int = 0, limit: int = 100,
     hidden: bool = False, revision: str | None = None,
+    confine_to_cwd: bool = True,
 ) -> dict:
-    root = os.path.realpath(cwd)
-    candidate = os.path.abspath(os.path.join(root, os.path.expanduser(path or ".")))
+    start = os.path.realpath(cwd)
+    root = start if confine_to_cwd else os.path.abspath(os.sep)
+    candidate = os.path.abspath(os.path.join(start, os.path.expanduser(path or ".")))
     if os.path.commonpath([root, candidate]) != root:
         raise ValueError("请选择当前会话目录内的文件或文件夹")
     parts = Path(os.path.relpath(candidate, root)).parts

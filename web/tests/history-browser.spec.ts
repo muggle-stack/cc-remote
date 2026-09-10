@@ -461,6 +461,58 @@ test("session workspace opens files in the sidebar and returns to its directory"
   expect(relay.commands.some((c) => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
 });
 
+test("session workspace browses outside cwd and never shows an old directory after navigation fails", async ({ page }, testInfo) => {
+  const relay = await mockRightPanelRelay(page, { retained: false });
+  await page.goto("/");
+  await page.getByRole("button", { name: "更多设置", exact: true }).click();
+  await page.getByRole("button", { name: "打开会话文件", exact: true }).click();
+  const requests = () => relay.commands.filter((c) => c.type === "browse_files");
+  await expect.poll(() => requests().length).toBe(1);
+  const listing: PanelRelayEvent<Extract<ServerEvent, { type: "files_listed" }>> = {
+    type: "files_listed", sid: "layout-parent", request_id: String(requests()[0].request_id),
+    root: "/", path: "/tmp/layout", kind: "directory", parent: "/tmp",
+    revision: "one", next_offset: null,
+    entries: [{ name: "README.md", path: "/tmp/layout/README.md", kind: "file" }],
+  };
+  relay.emit(listing);
+  const panel = page.locator(".workspace-files");
+  const path = panel.getByRole("textbox", { name: "文件或目录路径", exact: true });
+  await expect(panel.locator(".artifact-path")).toHaveText("/tmp/layout");
+  await expect(panel.getByRole("button", { name: "上级目录", exact: true })).toBeEnabled();
+  await panel.getByRole("button", { name: "上级目录", exact: true }).click();
+  await expect.poll(() => requests().length).toBe(2);
+  expect(requests()[1].path).toBe("/tmp");
+  await expect(panel.getByRole("button", { name: "README.md", exact: true })).toHaveCount(0);
+  relay.emit({ ...listing, request_id: String(requests()[1].request_id),
+    path: "/tmp", parent: "/", entries: [{ name: "layout", path: "/tmp/layout", kind: "directory" }] });
+  await expect(path).toHaveValue("/tmp");
+  await expect(panel.locator(".artifact-path")).toHaveText("/tmp");
+
+  await path.fill("/home/example");
+  await panel.getByRole("button", { name: "打开", exact: true }).click();
+  await expect.poll(() => requests().length).toBe(3);
+  expect(requests()[2].path).toBe("/home/example");
+  relay.emit({ ...listing, request_id: String(requests()[2].request_id),
+    path: "", parent: null, entries: [], error: "没有权限读取该目录" });
+  await expect(panel.getByRole("alert")).toHaveText("没有权限读取该目录");
+  await expect(path).toHaveValue("/home/example");
+  await expect(panel.locator(".workspace-entry")).toHaveCount(0);
+  await expect(panel.locator(".artifact-path")).toHaveText("");
+  await panel.getByRole("button", { name: "刷新目录", exact: true }).click();
+  await expect.poll(() => requests().length).toBe(4);
+  expect(requests()[3].path).toBe("/home/example");
+  relay.emit(listing); // A late old response must not restore the project list.
+  await expect(panel.locator(".workspace-entry")).toHaveCount(0);
+  relay.emit({ ...listing, request_id: String(requests()[3].request_id),
+    path: "/home/example", parent: "/home",
+    entries: [{ name: "notes.md", path: "/home/example/notes.md", kind: "file" }] });
+  await expect(panel.getByRole("alert")).toHaveCount(0);
+  await expect(panel.locator(".artifact-path")).toHaveText("/home/example");
+  await expect(panel.getByRole("button", { name: "notes.md", exact: true })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("workspace-external-directory.png") });
+  expect(relay.commands.some((c) => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
+});
+
 test("session workspace Codex compaction rejects oversize and sends a session preference", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { retained: false });
   await page.goto("/");

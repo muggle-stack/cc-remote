@@ -56,8 +56,10 @@ Busy sessions retain a pending preference until the thread is idle and other cli
 release it. Work and temporary side chats are not supported yet. Restore defaults
 before selecting a model with a smaller context window.
 
-Use the header folder button (More → Session files on mobile) or `/open [path]` to browse the session directory.
-Files open in the preview sidebar; returning preserves the directory listing.
+Use More → Session files or `/open [path]` to browse directories. Code starts in
+the session directory and supports parent directories, absolute paths, and `~`;
+Work stays within its workspace. Files open in the preview sidebar; returning
+preserves the directory listing. External files retain per-file preview authorization.
 Directory reads are paged and non-recursive; symlinks and special files cannot be opened.
 
 ## What changed in v3
