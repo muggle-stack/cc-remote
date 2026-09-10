@@ -1799,6 +1799,10 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
    so the "当前"/"运行" pill never sits under it. */
 .scard-top{ display:flex; align-items:center; gap:9px; margin-bottom:3px; padding-right:30px; }
 .scard-title{ font-weight:600; font-size:14.5px; letter-spacing:-.01em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; text-align:left; }
+@media (max-width:979px){
+  .scard-top.has-btw-completion{ display:grid; grid-template-columns:minmax(0,1fr) auto auto; row-gap:6px; }
+  .scard-top.has-btw-completion .pill.completed{ grid-column:1 / -1; justify-self:start; }
+}
 .scard-profile-ribbon{ position:absolute; top:-6px; left:12px; z-index:2;
   display:inline-flex; align-items:center; justify-content:center;
   min-width:26px; height:16px; max-width:64px; padding:0 6px;

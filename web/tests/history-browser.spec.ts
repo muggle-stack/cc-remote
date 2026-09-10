@@ -2292,6 +2292,62 @@ for (const cover of ["agent", "diff"] as const) {
   });
 }
 
+for (const parentState of ["running", "interrupting"] as const) {
+  test(`right panel layout retains completed side chat badge while parent is ${parentState}`, async ({
+    page,
+  }, testInfo) => {
+    const mobile = isMobileWebKitProject(testInfo.project.name);
+    if (!mobile) await page.setViewportSize({ width: 1568, height: 881 });
+    const relay = await mockRightPanelRelay(page, { visible: true });
+    await page.goto("/");
+    await expect(page.locator(".btw-panel")).toBeVisible();
+    relay.emit({ type: "state", sid: "layout-parent", state: parentState });
+    await page.getByRole("button", { name: "收起侧边对话", exact: true }).click();
+    await expect(page.locator(".btw-panel")).toHaveCount(0);
+    const parent = page.locator(".scard").filter({ hasText: "Layout parent" });
+    await expect(parent).toBeAttached();
+    if (!await page.locator(".sessions.show").count()) await page.keyboard.press("Control+b");
+    await expect(page.locator(".sessions")).toBeInViewport({ ratio: 1 });
+    await expect(parent).toBeInViewport();
+    await expect(parent.getByText(parentState === "running" ? "运行" : "中断", {
+      exact: true,
+    })).toBeVisible();
+
+    relay.emit({ type: "user_msg", sid: "btw-layout-child", seq: 1,
+      msg_id: "hidden-work", prompt: "后台侧聊任务" });
+    relay.emit({ type: "turn_end", sid: "btw-layout-child", seq: 2,
+      result: { subtype: "success", duration_ms: 1000, is_error: false } });
+    relay.emit({ type: "state", sid: "btw-layout-child", seq: 3, state: "idle" });
+    const badge = parent.getByText("BTW 完成", { exact: true });
+    await expect(badge).toBeVisible();
+    await expect(badge).toBeInViewport({ ratio: 1 });
+    const geometry = await parent.evaluate((card) => {
+      const badge = card.querySelector(".pill.completed")!.getBoundingClientRect();
+      const menu = card.querySelector(".scard-actions")!.getBoundingClientRect();
+      const title = card.querySelector(".scard-title")!.getBoundingClientRect();
+      return {
+        titleWidth: title.width,
+        badgeUnderMenu: badge.left < menu.right && badge.right > menu.left
+          && badge.top < menu.bottom && badge.bottom > menu.top,
+      };
+    });
+    expect(geometry.titleWidth).toBeGreaterThan(0);
+    expect(geometry.badgeUnderMenu).toBe(false);
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await expect(badge).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("btw-completed-parent-busy.png") });
+
+    if (mobile) await page.keyboard.press("Control+b");
+    await page.keyboard.press("Control+Shift+k");
+    await expect(page.locator(".btw-panel")).toBeVisible();
+    await expect(badge).toHaveCount(0);
+    await expect(parent.locator(`.pill.${parentState}`)).toHaveCount(1);
+    expect(relay.commands.some((command) =>
+      ["open_btw", "close_btw", "query", "steer", "interrupt"].includes(String(command.type))))
+      .toBe(false);
+  });
+}
+
 test("right panel visibility acknowledges only the selected side chat", async ({ page }) => {
   await page.setViewportSize({ width: 1568, height: 881 });
   const relay = await mockRightPanelRelay(page, { visible: true });

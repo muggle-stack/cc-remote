@@ -294,9 +294,14 @@ export function SessionsSidebar({ open, engine, space,
     const unreadScope = machineId ? { machineId, engine: s.engine ?? engine, space: s.space ?? space } : null;
     const completion = unreadScope && manualUnread.marks[manualUnreadKey(unreadScope, s.session_id)]
       ? "unread" : completionBadges?.[s.session_id];
-    const completionLabel = completion === "unread" ? "未读" : completion === "btw" ? "BTW 完成"
-      : completion === "both" ? "2 项完成"
-      : completion ? "已完成" : null;
+    const sessionBusy = st === "running" || st === "interrupting";
+    // Parent activity hides its own completion, not an unread side-chat result.
+    const visibleCompletion = sessionBusy && completion !== "unread"
+      ? completion === "btw" || completion === "both" ? "btw" : undefined
+      : completion;
+    const completionLabel = visibleCompletion === "unread" ? "未读" : visibleCompletion === "btw" ? "BTW 完成"
+      : visibleCompletion === "both" ? "2 项完成"
+      : visibleCompletion ? "已完成" : null;
     const forkBlocked = isWorktreeForkBlockedByState(st);
     const migrationBlocked = isSessionMigrationBlockedByState(st);
     const archiveBlocked = !isArchived && engine === "codex"
@@ -320,15 +325,15 @@ export function SessionsSidebar({ open, engine, space,
             {profilePresentation.name}
           </span>
         )}
-        <div className="scard-top">
+        <div className={"scard-top" + (sessionBusy && visibleCompletion === "btw" ? " has-btw-completion" : "")}>
           <span className="scard-title">
             {s.summary || (s.first_prompt || "").slice(0, 40) || s.session_id.slice(0, 8)}
           </span>
           {isActive && <span className="pill idle"><span className="sd" />当前</span>}
-          {(st === "running" || st === "interrupting") && (
+          {sessionBusy && (
             <span className={"pill " + st}><span className="sd" />{st === "running" ? "运行" : "中断"}</span>
           )}
-          {completionLabel && (completion === "unread" || (st !== "running" && st !== "interrupting")) && (
+          {completionLabel && (
             <span className="pill completed"><span className="sd" />{completionLabel}</span>
           )}
         </div>

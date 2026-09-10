@@ -10919,6 +10919,28 @@ try {
     2,
     "a newly running turn must hide an older completion label",
   );
+  ([
+    ["idle", "both", "2 项完成"],
+    ["running", "btw", "BTW 完成"],
+    ["interrupting", "btw", "BTW 完成"],
+    ["running", "both", "BTW 完成"],
+    ["interrupting", "both", "BTW 完成"],
+    ["running", "main", null],
+    ["interrupting", "main", null],
+  ] as const).forEach(([state, completion, label]) => {
+    const markup = renderToStaticMarkup(createElement(SessionsSidebar, {
+      ...sidebarProps,
+      sessions: [{ session_id: "parent", summary: "Parent", state: "idle" }],
+      liveStates: { parent: state },
+      completionBadges: { parent: completion },
+    }));
+    assert.deepEqual(
+      [...markup.matchAll(/class="pill completed"><span class="sd"><\/span>([^<]+)</g)]
+        .map((match) => match[1]),
+      label ? [label] : [],
+      `${state} parent must show the appropriate ${completion} completion badge`,
+    );
+  });
   const profileSidebarMarkup = renderToStaticMarkup(createElement(
     SessionsSidebar,
     {
