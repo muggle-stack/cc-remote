@@ -59,7 +59,8 @@ from cc_remote.wrapper.usage_limit import is_usage_limit_failure
 # v32 repairs missing file summaries on the full-page cache population path.
 # v35 preserves task_complete.error and binds assistant-only native turns.
 # v36 restores explicit usage-limit failures and their native retry dates.
-_SCHEMA_VERSION = 36
+# v37 restores reviewed policy-refusal copy across both branch histories.
+_SCHEMA_VERSION = 37
 _FINGERPRINT_SAMPLE_BYTES = 64 * 1024
 _DEFAULT_MAX_ENTRIES = 128
 _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
@@ -1280,6 +1281,11 @@ class HistoryIndexStore:
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
             current = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if current in range(10, 37):
+                # Both earlier branch histories may cache generic policy errors.
+                # Keep source bytes, other engines and binary assets intact.
+                for table in ("history_pages", "history_turn_details"):
+                    connection.execute(f"DELETE FROM {table} WHERE engine='codex'")
             if current in range(10, 36):
                 # Native quota errors used to collapse into a generic failure.
                 # Rebuild only Codex narrative projections, once; source bytes,
@@ -1394,8 +1400,8 @@ class HistoryIndexStore:
                 for table in ("history_pages", "history_turn_details"):
                     connection.execute(
                         f"DELETE FROM {table} WHERE engine='codex'")
-            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35):
-                # The independent v22-v36 invalidations above suffice.
+            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36):
+                # The independent v22-v37 invalidations above suffice.
                 pass
             elif current not in (0, _SCHEMA_VERSION):
                 # v9 changes the invariant of history_turn_details: those rows
