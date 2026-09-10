@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import json
-import math
 import os
 from pathlib import Path
 
@@ -13,6 +12,7 @@ from pathlib import Path
 # Codex 0.154.0 ModelInfo::auto_compact_token_limit caps the trigger at
 # floor(raw context window * 9 / 10), independently of usable_context_window.
 _NATIVE_COMPACT_PERCENT = 90
+_COMPACT_TARGET_PERCENT = 95
 
 
 @dataclass(frozen=True)
@@ -21,22 +21,25 @@ class ContextBounds:
     max_window: int
     effective_percent: int
 
-    @property
-    def compact_percent(self) -> int:
-        return min(_NATIVE_COMPACT_PERCENT, self.effective_percent)
+    def effective_window(self, window: int) -> int:
+        return min(window, self.max_window) * self.effective_percent // 100
 
     def compact_limit(self, window: int) -> int:
-        return min(window, self.max_window) * self.compact_percent // 100
+        # Target 95% of usable capacity, subject to Codex's separate raw-window
+        # ceiling. With a 95% usable window the native ceiling is ~94.7% of it.
+        return max(1, min(
+            self.effective_window(window) * _COMPACT_TARGET_PERCENT // 100,
+            min(window, self.max_window) * _NATIVE_COMPACT_PERCENT // 100,
+        ))
 
     @property
     def limit(self) -> int:
-        return self.compact_limit(self.max_window)
+        return self.effective_window(self.max_window)
 
-    def window_for(self, threshold: int) -> int:
-        if not 1 <= threshold <= self.limit:
-            raise ValueError(f"压缩阈值必须在 1–{self.limit:,} tokens 之间")
-        window = (threshold * 100 + self.compact_percent - 1) // self.compact_percent
-        return max(self.default_window, window)
+    def window_for(self, max_tokens: int) -> int:
+        if not 1 <= max_tokens <= self.limit:
+            raise ValueError(f"上下文上限必须在 1–{self.limit:,} tokens 之间")
+        return (max_tokens * 100 + self.effective_percent - 1) // self.effective_percent
 
 
 def model_context_bounds(model: str, codex_home: str | None) -> ContextBounds | None:
@@ -66,6 +69,7 @@ def model_context_bounds(model: str, codex_home: str | None) -> ContextBounds | 
 
 class NativeContextSettings:
     def __init__(self):
+        self.max_tokens: int | None = None
         self.threshold: int | None = None
         self.window: int | None = None
         self.applied_threshold: int | None = None
@@ -112,53 +116,49 @@ class NativeContextSettings:
         if self.applied_threshold is not None:
             self.applied_threshold = min(self.applied_threshold, bounds.compact_limit(window))
 
-    def restore(self, threshold: int | None, window: int | None, selected: bool = False) -> None:
-        if threshold is not None and (window is None or threshold > window):
-            threshold = window = None
-        self.threshold, self.window = threshold, window
-        self.pending = selected or threshold is not None
+    def restore(self, max_tokens: int | None, window: int | None, selected: bool = False) -> None:
+        self.max_tokens, self.window = max_tokens, window
+        # A persisted raw window may belong to the former threshold setting.
+        # Recalculate against this account's model before submitting any config.
+        self.threshold = None
+        self.pending = selected or max_tokens is not None
 
     def config(self) -> dict:
-        if self.threshold is None:
+        if self.max_tokens is None or self.threshold is None or self.window is None:
             return {}
         return {"model_auto_compact_token_limit": self.threshold,
                 "model_context_window": self.window,
                 "model_auto_compact_token_limit_scope": "total"}
 
     async def validated_config(self, handle) -> dict:
-        if self.threshold is None:
+        if self.max_tokens is None:
             return {}
         bounds = await asyncio.to_thread(model_context_bounds, handle.model, handle.codex_home)
-        if bounds is None or self.window is None or self.window > bounds.max_window:
+        if bounds is None:
             self.pending = True
-            self.error = "模型上下文上限已变化，请重新设置压缩阈值"
+            self.error = "尚未读取到此模型的上下文上限，请刷新模型目录后重试"
             return {}
         try:
-            minimum_window = bounds.window_for(self.threshold)
+            window = bounds.window_for(self.max_tokens)
         except ValueError as exc:
             self.pending, self.error = True, str(exc)
             return {}
-        if self.window < minimum_window:
-            # Migrate preferences saved with the old usable-window formula.
-            # Preserve the requested threshold and never shrink carried context.
-            self.window = minimum_window
+        threshold = bounds.compact_limit(window)
+        if (self.window, self.threshold) != (window, threshold):
+            # Preserve the number the user entered, now explicitly a usable
+            # capacity. Lowering it must also lower the window at safe reload.
+            self.window, self.threshold = window, threshold
             self.pending = True
         return self.config()
 
-    async def select(self, handle, threshold: int | None) -> None:
+    async def select(self, handle, max_tokens: int | None) -> None:
         bounds = await asyncio.to_thread(
             model_context_bounds, handle.model, handle.codex_home)
-        if threshold is not None and bounds is None:
+        if max_tokens is not None and bounds is None:
             raise ValueError("尚未读取到此模型的上下文上限，请刷新模型目录后重试")
-        window = bounds.window_for(threshold) if threshold is not None else None
-        if window is not None:
-            # Lowering the trigger must not also shrink the available model
-            # window around already-carried history.
-            observed = getattr(handle, "context_window", 0)
-            observed_raw = (math.ceil(observed * 100 / bounds.effective_percent)
-                            if type(observed) is int and observed > 0 else 0)
-            window = max(window, min(bounds.max_window, max(self.window or 0, observed_raw)))
-        self.threshold, self.window = threshold, window
+        window = bounds.window_for(max_tokens) if max_tokens is not None else None
+        self.max_tokens, self.window = max_tokens, window
+        self.threshold = bounds.compact_limit(window) if window is not None else None
         self.pending = True
         self.error = None
 
@@ -173,7 +173,7 @@ class NativeContextSettings:
                 return False
             sid = handle.thread_id
             if not sid or handle.work_mode or handle._ephemeral_thread_id:
-                self.error = "此会话暂不支持重新加载压缩配置"
+                self.error = "此会话暂不支持重新加载上下文配置"
                 return False
             if handle._pending_server_request_ids:
                 self.error = "等待当前交互完成后应用"
@@ -181,7 +181,7 @@ class NativeContextSettings:
             if isinstance(handle.last_goal, dict) and handle.last_goal.get("status") == "active":
                 self.error = "目标仍在自动运行，待目标暂停或结束后应用"
                 return False
-            if self.threshold is not None and not await self.validated_config(handle):
+            if self.max_tokens is not None and not await self.validated_config(handle):
                 return False
             # Check official activity immediately before detaching. Reading
             # state creates no model turn and never downloads history.

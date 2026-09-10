@@ -4,7 +4,11 @@
 
 ## Unreleased
 
-- Add session-specific Codex auto-compaction thresholds (protocol v59), validated against the native model catalog. Settings wait for an idle thread that the native server can reload without disconnecting other clients.
+- Set a per-session maximum usable Codex context (protocol v60), validated against
+  the native model catalog. A 300k setting means a 300,000-token window, with
+  compaction near 95% subject to native limits. Preserve existing saved numbers,
+  report applied capacity separately from compaction, and apply window reductions
+  only when the native thread can safely reload without disconnecting other clients.
 - Add a session file browser through the folder button and `/open [path]`, with paged directories and the existing file preview sidebar.
 
 - Play linked audio directly in desktop and mobile file previews (protocol v58),

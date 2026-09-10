@@ -2432,7 +2432,7 @@ class CodexHandle:
                         resume_params["config"] = code_config
                     if context_config:
                         resume_params.setdefault("config", {}).update(context_config)
-                    elif self.context_settings.pending and self.context_settings.threshold is None:
+                    elif self.context_settings.pending and self.context_settings.max_tokens is None:
                         # Some({}) deliberately requests a fresh native config.
                         # Omitting config only rejoins and retains the old override.
                         resume_params.setdefault("config", {})
@@ -2604,7 +2604,7 @@ class CodexHandle:
             await self.disconnect()
             raise
         if (context_will_apply or self.context_settings.reloaded) and self.context_settings.pending and (
-            self.context_settings.threshold is None or context_config
+            self.context_settings.max_tokens is None or context_config
         ):
             await self.context_settings.confirm_applied(self)
             self.context_window = self.context_settings.applied_effective_window
@@ -4802,7 +4802,7 @@ class CodexHandle:
         if configured_window:
             bounds = await asyncio.to_thread(model_context_bounds, model, self.codex_home)
             if bounds is None or configured_window > bounds.max_window:
-                raise ValueError("当前会话的压缩配置超过目标模型上下文上限；请先恢复默认压缩设置")
+                raise ValueError("当前会话的上下文配置超过目标模型上限；请先恢复默认上下文设置")
         authoritative = await self._update_thread_settings(
             model=model, wait_for_notification=True)
         if not authoritative:

@@ -5373,9 +5373,11 @@ function reduceEvent(
       return patch(state, e.sid, (rt) => {
         const previous = rt.codexContext;
         rt.codexContext = e;
-        if ((previous != null && previous.applied_threshold_tokens !== e.applied_threshold_tokens)
-            || (previous == null && !e.pending && e.applied_threshold_tokens != null
-              && rt.contextReport != null && rt.contextReport.max_tokens < e.applied_threshold_tokens)) {
+        if ((previous != null && (
+          previous.applied_max_context_tokens !== e.applied_max_context_tokens
+          || previous.applied_threshold_tokens !== e.applied_threshold_tokens))
+            || (previous == null && !e.pending && e.applied_max_context_tokens != null
+              && rt.contextReport != null && rt.contextReport.max_tokens !== e.applied_max_context_tokens)) {
           rt.contextReport = null;
           rt.contextExactReport = null;
           rt.contextError = null;

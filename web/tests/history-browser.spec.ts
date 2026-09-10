@@ -513,37 +513,37 @@ test("session workspace browses outside cwd and never shows an old directory aft
   expect(relay.commands.some((c) => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
 });
 
-test("session workspace Codex compaction rejects oversize and sends a session preference", async ({ page }) => {
+test("session workspace Codex capacity rejects oversize and sends a session preference", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { retained: false });
   await page.goto("/");
   const input = page.locator("textarea").first();
   await input.fill("/autocompact ");
   await input.press("Enter");
   relay.emit({ type: "codex_context", sid: "layout-parent", model: "fixture",
-    threshold_tokens: null, applied_threshold_tokens: null, model_max_tokens: 20000,
-    context_window_tokens: null, limit_tokens: 18000, pending: false, mutable: true, error: null });
-  const setting = page.getByRole("dialog", { name: "Codex 自动压缩", exact: true });
+    max_context_tokens: null, applied_max_context_tokens: null, applied_threshold_tokens: null, model_max_tokens: 20000,
+    context_window_tokens: null, limit_tokens: 19000, pending: false, mutable: true, error: null });
+  const setting = page.getByRole("dialog", { name: "Codex 上下文上限", exact: true });
   await expect(setting).toBeVisible();
-  await setting.getByLabel("压缩阈值（tokens）").fill("20k");
+  await setting.getByLabel("上下文上限（tokens）").fill("20k");
   await setting.getByRole("button", { name: "应用", exact: true }).click();
-  await expect(setting.getByRole("alert")).toContainText("18,000");
+  await expect(setting.getByRole("alert")).toContainText("19,000");
   expect(relay.commands.some((c) => c.type === "set_codex_context")).toBe(false);
-  await setting.getByLabel("压缩阈值（tokens）").fill("12k");
+  await setting.getByLabel("上下文上限（tokens）").fill("12k");
   await setting.getByRole("button", { name: "应用", exact: true }).click();
   await expect.poll(() => relay.commands.some((c) => c.type === "set_codex_context")).toBe(true);
   const request = relay.commands.find((c) => c.type === "set_codex_context")!;
-  expect([request.sid, request.threshold_tokens]).toEqual(["layout-parent", 12000]);
+  expect([request.sid, request.max_context_tokens]).toEqual(["layout-parent", 12000]);
   relay.emit({ type: "codex_context", sid: "layout-parent", model: "fixture",
-    threshold_tokens: 12000, applied_threshold_tokens: null, model_max_tokens: 20000,
-    context_window_tokens: 13334, limit_tokens: 18000, pending: true, mutable: true, error: null });
-  await expect(setting.getByRole("status")).toContainText("已保存 12,000");
+    max_context_tokens: 12000, applied_max_context_tokens: null, applied_threshold_tokens: null, model_max_tokens: 20000,
+    context_window_tokens: 12632, limit_tokens: 19000, pending: true, mutable: true, error: null });
+  await expect(setting.getByRole("status")).toContainText("已保存上限 12,000");
   await setting.getByRole("button", { name: "恢复 Codex 默认值" }).click();
   await expect.poll(() => relay.commands.filter((c) => c.type === "set_codex_context").length).toBe(2);
-  expect(relay.commands.filter((c) => c.type === "set_codex_context").at(-1)?.threshold_tokens).toBeNull();
+  expect(relay.commands.filter((c) => c.type === "set_codex_context").at(-1)?.max_context_tokens).toBeNull();
   expect(relay.commands.some((c) => c.type === "query")).toBe(false);
 });
 
-test("session workspace context ring refreshes applied capacity and distinguishes pending thresholds", async ({ page }, testInfo) => {
+test("session workspace context ring refreshes applied capacity and distinguishes pending capacities", async ({ page }, testInfo) => {
   const relay = await mockRightPanelRelay(page, { retained: false });
   await page.goto("/");
   const ring = page.getByRole("button", { name: "上下文占用", exact: true });
@@ -551,8 +551,8 @@ test("session workspace context ring refreshes applied capacity and distinguishe
   await expect.poll(() => relay.commands.some((c) => c.type === "get_history")).toBe(true);
   const setting: PanelRelayEvent<Extract<ServerEvent, { type: "codex_context" }>> = {
     type: "codex_context", sid: "layout-parent", model: "fixture",
-    threshold_tokens: 400000, applied_threshold_tokens: null, model_max_tokens: 872000,
-    context_window_tokens: 444445, limit_tokens: 784800, pending: true, mutable: true, error: null,
+    max_context_tokens: 400000, applied_max_context_tokens: null, applied_threshold_tokens: null, model_max_tokens: 872000,
+    context_window_tokens: 421053, limit_tokens: 828400, pending: true, mutable: true, error: null,
   };
   const report: PanelRelayEvent<Extract<ServerEvent, { type: "context_report" }>> = {
     type: "context_report", sid: "layout-parent", total_tokens: 142045,
@@ -563,19 +563,19 @@ test("session workspace context ring refreshes applied capacity and distinguishe
   await ring.click();
   const popover = page.getByRole("dialog", { name: "上下文占用", exact: true });
   await expect(popover).toContainText("142,045 / 258,400 (55%)");
-  await expect(popover).toContainText("已保存 400,000，等待生效");
-  relay.emit({ ...setting, applied_threshold_tokens: 400000, pending: false });
+  await expect(popover).toContainText("已保存上限 400,000，等待生效");
+  relay.emit({ ...setting, applied_max_context_tokens: 400000, applied_threshold_tokens: 378947, pending: false });
   await expect(popover).not.toContainText("258,400");
   const request = relay.commands.filter((c) => c.type === "get_context").at(-1)!;
-  relay.emit({ ...report, request_id: String(request.cmd_id), max_tokens: 422222, percentage: 33.6422 });
-  await expect(popover).toContainText("142,045 / 422,222 (34%)");
-  await expect(popover.locator(".ctx-pop-row").filter({ hasText: "生效压缩阈值" })).toContainText("400,000");
+  relay.emit({ ...report, request_id: String(request.cmd_id), max_tokens: 400000, percentage: 35.51125 });
+  await expect(popover).toContainText("142,045 / 400,000 (36%)");
+  await expect(popover.locator(".ctx-pop-row").filter({ hasText: "生效压缩阈值" })).toContainText("378,947");
   await expect(popover).not.toContainText("等待生效");
   await page.screenshot({ path: testInfo.outputPath("applied-context-capacity.png") });
   expect(relay.commands.some((c) => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
 });
 
-test("session workspace distinguishes 300k compaction trigger from native usage and capacity", async ({ page }, testInfo) => {
+test("session workspace distinguishes 300k capacity from native usage and compaction", async ({ page }, testInfo) => {
   const relay = await mockRightPanelRelay(page, { retained: false });
   await page.goto("/");
   const input = page.locator("textarea").first();
@@ -583,28 +583,28 @@ test("session workspace distinguishes 300k compaction trigger from native usage 
   await input.press("Enter");
   const state: PanelRelayEvent<Extract<ServerEvent, { type: "codex_context" }>> = {
     type: "codex_context", sid: "layout-parent", model: "gpt-6-astra",
-    threshold_tokens: 300000, applied_threshold_tokens: 284211, model_max_tokens: 872000,
-    context_window_tokens: 333334, limit_tokens: 784800, pending: true, mutable: true, error: null,
+    max_context_tokens: 300000, applied_max_context_tokens: 400000, applied_threshold_tokens: 378947, model_max_tokens: 872000,
+    context_window_tokens: 315790, limit_tokens: 828400, pending: true, mutable: true, error: null,
   };
   relay.emit(state);
-  const setting = page.getByRole("dialog", { name: "Codex 自动压缩", exact: true });
-  await expect(setting).toContainText("压缩阈值上限 784,800");
-  await expect(setting.getByRole("status")).toContainText("已保存 300,000");
-  await expect(setting.getByRole("status")).toContainText("当前生效阈值：284,211");
+  const setting = page.getByRole("dialog", { name: "Codex 上下文上限", exact: true });
+  await expect(setting).toContainText("可设置上限 828,400");
+  await expect(setting.getByRole("status")).toContainText("已保存上限 300,000");
+  await expect(setting.getByRole("status")).toContainText("当前生效上限：400,000");
   await expect(setting).toContainText("可能早于页面数字");
 
-  relay.emit({ ...state, pending: false });
-  await expect(setting.getByRole("status")).toContainText("设定阈值：300,000");
+  relay.emit({ ...state, applied_max_context_tokens: 300000,
+    applied_threshold_tokens: 284211, pending: false });
+  await expect(setting.getByRole("status")).toContainText("设定上限：300,000");
+  await expect(setting.getByRole("status")).toContainText("当前生效上限：300,000");
   await expect(setting.getByRole("status")).toContainText("当前生效阈值：284,211");
-  relay.emit({ ...state, applied_threshold_tokens: 300000, pending: false });
-  await expect(setting.getByRole("status")).toContainText("当前生效阈值：300,000");
-  await expect(setting).not.toContainText("284,211");
+  await expect(setting).not.toContainText("400,000");
   expect(await setting.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("context-300k-settings.png"), animations: "disabled" });
 
   const report: PanelRelayEvent<Extract<ServerEvent, { type: "context_report" }>> = {
     type: "context_report", sid: "layout-parent", total_tokens: 252460,
-    max_tokens: 316667, percentage: 79.7241, model: "gpt-6-astra", categories: [],
+    max_tokens: 300000, percentage: 84.1533, model: "gpt-6-astra", categories: [],
   };
   relay.emit(report);
   await page.getByRole("button", { name: "上下文占用", exact: true }).click();
@@ -612,8 +612,8 @@ test("session workspace distinguishes 300k compaction trigger from native usage 
   const popover = page.getByRole("dialog", { name: "上下文占用", exact: true });
   const request = relay.commands.filter((c) => c.type === "get_context").at(-1)!;
   relay.emit({ ...report, request_id: String(request.cmd_id) });
-  await expect(popover).toContainText("252,460 / 316,667 (80%)");
-  await expect(popover.locator(".ctx-pop-row").filter({ hasText: "生效压缩阈值" })).toContainText("300,000");
+  await expect(popover).toContainText("252,460 / 300,000 (84%)");
+  await expect(popover.locator(".ctx-pop-row").filter({ hasText: "生效压缩阈值" })).toContainText("284,211");
   await expect(popover).toContainText("最近一次模型返回值");
   await expect(popover).not.toContainText("正在读取真实上下文");
   for (const theme of ["light", "dark"]) {

@@ -7615,15 +7615,15 @@ class WrapperMachine:
             )
             settings = getattr(ctx.sdk, "context_settings", None)
             if (settings is not None and not settings.pending
-                    and type(settings.threshold) is int
+                    and type(settings.max_tokens) is int
                     and type(settings.window) is int):
                 saved = await asyncio.to_thread(self._codex_controls.get, route_sid)
-                if (saved.context_threshold_tokens == settings.threshold
+                if (saved.context_max_tokens == settings.max_tokens
                         and saved.context_window_tokens != settings.window):
                     # Persist a repaired legacy window only after native reload;
-                    # keep any newer saved threshold owned by another command.
+                    # keep any newer saved capacity owned by another command.
                     await asyncio.to_thread(self._codex_controls.set_context,
-                        route_sid, settings.threshold, settings.window)
+                        route_sid, settings.max_tokens, settings.window)
         except Exception as exc:
             log.warning(
                 "Codex Remote controls could not be persisted",
@@ -19303,7 +19303,8 @@ class WrapperMachine:
             model_context_bounds, ctx.sdk.model, ctx.sdk.codex_home)
         event = CodexContext(
             model=ctx.sdk.model or "",
-            threshold_tokens=settings.threshold,
+            max_context_tokens=settings.max_tokens,
+            applied_max_context_tokens=settings.applied_effective_window,
             applied_threshold_tokens=settings.applied_threshold,
             model_max_tokens=bounds.max_window if bounds else None,
             limit_tokens=bounds.limit if bounds else None,
@@ -19334,10 +19335,10 @@ class WrapperMachine:
     async def _handle_set_codex_context(self, cmd):
         ctx = self._ctx_for(getattr(cmd, "sid", None))
         if ctx is None:
-            return await self._missing_session_error(cmd, "设置压缩阈值")
+            return await self._missing_session_error(cmd, "设置上下文上限")
         async with ctx.query_lock:
             control_error = await self._runtime_control_preflight(
-                ctx, action="设置压缩阈值", request_id=getattr(cmd, "cmd_id", None),
+                ctx, action="设置上下文上限", request_id=getattr(cmd, "cmd_id", None),
                 client_id=getattr(cmd, "client_id", None))
             if control_error is not None:
                 return control_error
@@ -19347,15 +19348,15 @@ class WrapperMachine:
                               request_id=getattr(cmd, "cmd_id", None), to=getattr(cmd, "client_id", None))
                 await self._emit(ctx, error)
                 return error
-            previous = (settings.threshold, settings.window, settings.pending, settings.error)
+            previous = (settings.max_tokens, settings.threshold, settings.window, settings.pending, settings.error)
             try:
-                await settings.select(ctx.sdk, cmd.threshold_tokens)
+                await settings.select(ctx.sdk, cmd.max_context_tokens)
                 if self._codex_controls is None:
                     raise ValueError("会话设置存储暂不可用")
                 await asyncio.to_thread(self._codex_controls.set_context,
-                    self._ctx_wire_sid(ctx), settings.threshold, settings.window)
+                    self._ctx_wire_sid(ctx), settings.max_tokens, settings.window)
             except Exception as exc:
-                settings.threshold, settings.window, settings.pending, settings.error = previous
+                settings.max_tokens, settings.threshold, settings.window, settings.pending, settings.error = previous
                 settings.error = str(exc)[:1024]
                 return await self._publish_codex_context(ctx)
             if ctx.state == "idle":
@@ -35225,7 +35226,7 @@ class WrapperMachine:
                 controls = saved_codex_controls
                 if space == "code" and hasattr(sdk, "context_settings"):
                     sdk.context_settings.restore(
-                        controls.context_threshold_tokens, controls.context_window_tokens,
+                        controls.context_max_tokens, controls.context_window_tokens,
                         controls.context_settings_set)
                 restored_control_profile = False
                 if (space != "work" and permission_mode is None

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -21,21 +22,24 @@ def catalog(tmp_path):
 
 def test_bounds_and_profiles(catalog, tmp_path):
     bounds = model_context_bounds("fixture", str(catalog))
-    assert bounds.limit == 18000
-    assert bounds.window_for(12000) == 13334
+    assert bounds.limit == 19000
+    assert bounds.window_for(12000) == 12632
     with pytest.raises(ValueError):
-        bounds.window_for(18001)
+        bounds.window_for(19001)
     assert model_context_bounds("unknown", str(catalog)) is None
     assert model_context_bounds("fixture", str(tmp_path / "other-account")) is None
     for value in (True, 0, -1, 100000001, 1.1):
         with pytest.raises(ValidationError):
-            SetCodexContext(threshold_tokens=value)
+            SetCodexContext(max_context_tokens=value)
+    with pytest.raises(ValidationError):
+        SetCodexContext(threshold_tokens=12000)
 
 
 def test_smaller_usable_window_remains_a_hard_bound():
     bounds = ContextBounds(10000, 20000, 80)
     assert bounds.limit == 16000
     assert bounds.window_for(12000) == 15000
+    assert bounds.compact_limit(15000) == 11400
     with pytest.raises(ValueError):
         bounds.window_for(16001)
 
@@ -46,13 +50,13 @@ def test_preferences_survive_restart_other_controls_and_reset(catalog):
     store.update("profile@one", approval_policy="on-request", permission_profile="workspace", web_search="cached")
     store.set_cwd_override("profile@one", str(catalog))
     restored = CodexControlStore(catalog)
-    assert restored.get("profile@one").context_threshold_tokens == 12000
-    assert restored.get("profile@two").context_threshold_tokens is None
-    assert restored.get("other@one").context_threshold_tokens is None
+    assert restored.get("profile@one").context_max_tokens == 12000
+    assert restored.get("profile@two").context_max_tokens is None
+    assert restored.get("other@one").context_max_tokens is None
     restored.set_context("profile@one", None, None)
     default = CodexControlStore(catalog).get("profile@one")
     assert default.context_settings_set
-    assert default.context_threshold_tokens is None
+    assert default.context_max_tokens is None
     assert default.approval_policy == "on-request"
 
 
@@ -76,16 +80,16 @@ def astra_catalog(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("threshold,window,capacity", [
-    (300000, 333334, 316667), (400000, 444445, 422222),
-    (784800, 872000, 828400),
+@pytest.mark.parametrize("capacity,window,threshold", [
+    (300000, 315790, 284211), (400000, 421053, 378947),
+    (828400, 872000, 784800), (200000, 210527, 189474),
 ])
-async def test_requested_threshold_survives_native_compaction_headroom(
-    astra_catalog, threshold, window, capacity,
+async def test_requested_capacity_is_exact_and_compaction_is_near_95_percent(
+    astra_catalog, capacity, window, threshold,
 ):
     settings, handle = NativeContextSettings(), handle_for(astra_catalog)
     handle.model = "gpt-6-astra"
-    await settings.select(handle, threshold)
+    await settings.select(handle, capacity)
     config = await settings.validated_config(handle)
     assert config["model_context_window"] == window
     # Codex 0.154.0 ModelInfo::auto_compact_token_limit clamps the request
@@ -96,13 +100,15 @@ async def test_requested_threshold_survives_native_compaction_headroom(
     await settings.confirm_applied(handle)
     assert settings.applied_threshold == threshold
     assert settings.applied_effective_window == capacity
+    assert 0.94 < settings.applied_threshold / capacity <= 0.95
 
 
 @pytest.mark.asyncio
-async def test_saved_300k_window_is_repaired_before_safe_reload(astra_catalog):
+@pytest.mark.parametrize("saved_window", [315790, 333334, 444445])
+async def test_saved_300k_capacity_is_restored_only_at_safe_reload(astra_catalog, saved_window):
     settings, handle = NativeContextSettings(), handle_for(astra_catalog)
     handle.model = "gpt-6-astra"
-    settings.restore(300000, 315790, selected=True)
+    settings.restore(300000, saved_window, selected=True)
     handle.turn_active = True
     assert not await settings.apply(handle)
     handle._request.assert_not_called()
@@ -110,49 +116,108 @@ async def test_saved_300k_window_is_repaired_before_safe_reload(astra_catalog):
 
     async def resume(*args, **kwargs):
         config = await settings.validated_config(handle)
-        assert config["model_context_window"] == 333334
+        assert config["model_context_window"] == 315790
+        assert config["model_auto_compact_token_limit"] == 284211
         await settings.confirm_applied(handle)
 
     handle.turn_active = False
     handle.force_reconnect.side_effect = resume
     assert await settings.apply(handle)
-    assert settings.threshold == settings.applied_threshold == 300000
-    assert settings.window == 333334 and not settings.pending
+    assert settings.max_tokens == settings.applied_effective_window == 300000
+    assert settings.threshold == settings.applied_threshold == 284211
+    assert settings.window == 315790 and not settings.pending
 
 
 @pytest.mark.asyncio
-async def test_old_clamped_config_never_reports_requested_threshold_as_applied(astra_catalog):
+async def test_legacy_setting_migrates_capacity_without_changing_the_users_number(astra_catalog):
+    path = astra_catalog / "codex-session-controls.json"
+    path.write_text(json.dumps({"version": 1, "sessions": {
+        "primary@one": {"context_threshold_tokens": 300000,
+                        "context_window_tokens": 333334, "context_settings_set": True},
+    }}))
+    path.chmod(0o600)
+    controls = CodexControlStore(astra_catalog).get("primary@one")
     settings, handle = NativeContextSettings(), handle_for(astra_catalog)
     handle.model = "gpt-6-astra"
-    settings.restore(300000, 315790, selected=True)
+    settings.restore(controls.context_max_tokens, controls.context_window_tokens,
+                     controls.context_settings_set)
+    assert settings.config() == {}  # Do not send the old threshold as capacity.
+    await settings.validated_config(handle)
     await settings.confirm_applied(handle)
-    assert settings.threshold == 300000
+    assert settings.max_tokens == 300000
     assert settings.applied_threshold == 284211
     assert settings.applied_effective_window == 300000
 
 
 @pytest.mark.asyncio
-async def test_saved_threshold_above_native_max_stays_pending(astra_catalog):
+async def test_saved_capacity_above_model_max_stays_pending(astra_catalog):
     settings, handle = NativeContextSettings(), handle_for(astra_catalog)
     handle.model = "gpt-6-astra"
-    settings.restore(800000, 842106, selected=True)
+    settings.restore(828401, 872001, selected=True)
     assert await settings.validated_config(handle) == {}
     assert not await settings.apply(handle)
-    assert settings.pending and settings.threshold == 800000
-    assert "784,800" in settings.error
+    assert settings.pending and settings.max_tokens == 828401
+    assert "828,400" in settings.error
     handle._request.assert_not_called()
-    with pytest.raises(ValueError, match="784,800"):
-        await settings.select(handle, 784801)
+    with pytest.raises(ValueError, match="828,400"):
+        await settings.select(handle, 828401)
 
 
 @pytest.mark.asyncio
-async def test_lowering_threshold_preserves_previously_available_window(astra_catalog):
+async def test_lowering_capacity_also_lowers_window_despite_old_usage(astra_catalog):
     settings, handle = NativeContextSettings(), handle_for(astra_catalog)
     handle.model = "gpt-6-astra"
-    settings.restore(400000, 444445, selected=True)
+    await settings.select(handle, 400000)
+    await settings.confirm_applied(handle)
+    handle.context_window = 400000
     await settings.select(handle, 300000)
-    assert settings.window == 444445
-    assert settings.threshold == 300000
+    assert settings.window == 315790 and settings.max_tokens == 300000
+    assert settings.threshold == 284211
+    assert settings.applied_effective_window == 400000 and settings.pending
+    await settings.confirm_applied(handle)
+    assert settings.applied_effective_window == 300000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("save_fails", [False, True])
+async def test_capacity_command_saves_session_limit_and_preserves_live_configuration(
+    astra_catalog, monkeypatch, save_fails,
+):
+    from cc_remote.wrapper.machine import WrapperMachine
+
+    store = CodexControlStore(astra_catalog)
+    settings, handle = NativeContextSettings(), handle_for(astra_catalog)
+    handle.model, handle.context_settings = "gpt-6-astra", settings
+    await settings.select(handle, 400000)
+    await settings.confirm_applied(handle)
+    if save_fails:
+        def fail(*args):
+            raise OSError("storage unavailable")
+        monkeypatch.setattr(store, "set_context", fail)
+    ctx = SimpleNamespace(sdk=handle, engine="codex", space="code", btw=False,
+                          state="running", query_lock=asyncio.Lock())
+    machine = SimpleNamespace(
+        _ctx_for=lambda sid: ctx, _ctx_wire_sid=lambda ctx: "primary@one",
+        _runtime_control_preflight=AsyncMock(return_value=None),
+        _codex_controls=store, _emit=AsyncMock(), _apply_codex_context=AsyncMock(),
+    )
+    machine._publish_codex_context = lambda ctx: WrapperMachine._publish_codex_context(machine, ctx)
+    result = await WrapperMachine._handle_set_codex_context(
+        machine, SetCodexContext(sid="primary@one", max_context_tokens=300000))
+    assert result.applied_max_context_tokens == 400000
+    assert result.applied_threshold_tokens == 378947
+    assert result.limit_tokens == 828400
+    if save_fails:
+        assert (settings.max_tokens, settings.window, settings.threshold) == (400000, 421053, 378947)
+        assert result.error == "storage unavailable" and not result.pending
+        assert store.get("primary@one").context_max_tokens is None
+    else:
+        assert result.max_context_tokens == 300000 and result.pending
+        assert store.get("primary@one").context_max_tokens == 300000
+        assert store.get("primary@one").context_window_tokens == 315790
+        assert store.get("other@one").context_max_tokens is None
+    machine._apply_codex_context.assert_not_called()
+    handle.force_reconnect.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -161,8 +226,7 @@ async def test_apply_waits_for_terminal_and_unsubscribes_before_resume(catalog):
     handle = handle_for(catalog)
     await settings.select(handle, 12000)
     async def resume(*args, **kwargs):
-        settings.applied_threshold = settings.threshold
-        settings.pending = False
+        await settings.confirm_applied(handle)
     handle.force_reconnect.side_effect = resume
     handle.turn_active = True
     assert not await settings.apply(handle)
@@ -171,9 +235,9 @@ async def test_apply_waits_for_terminal_and_unsubscribes_before_resume(catalog):
     assert await settings.apply(handle)
     assert [call.args[0] for call in handle._request.call_args_list] == ["thread/read", "thread/unsubscribe"]
     handle.force_reconnect.assert_awaited_once()
-    assert settings.applied_threshold == 12000 and not settings.pending
-    assert settings.config() == {"model_context_window": 13334,
-        "model_auto_compact_token_limit": 12000, "model_auto_compact_token_limit_scope": "total"}
+    assert settings.applied_threshold == 11368 and not settings.pending
+    assert settings.config() == {"model_context_window": 12632,
+        "model_auto_compact_token_limit": 11368, "model_auto_compact_token_limit_scope": "total"}
 
 
 @pytest.mark.asyncio
@@ -247,7 +311,7 @@ async def test_applied_capacity_survives_old_rollout_and_yields_to_live_usage(ca
     await handle.context_settings.confirm_applied(handle)
     handle.context_window = handle.context_settings.applied_effective_window
     usage = await handle.get_context_usage()
-    assert (usage["used_tokens"], usage["context_window"]) == (7000, 12667)
+    assert (usage["used_tokens"], usage["context_window"]) == (7000, 12000)
     assert usage["raw"] == old
     await handle._dispatch({"method": "thread/tokenUsage/updated", "params": {
         "threadId": "target", "tokenUsage": {
@@ -304,22 +368,22 @@ async def test_applied_setting_refreshes_context_without_a_model_turn(catalog):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("pending,newer_threshold,expected", [
-    (False, None, 333334), (True, None, 315790), (False, 400000, 444445),
+@pytest.mark.parametrize("pending,newer_capacity,expected", [
+    (False, None, 315790), (True, None, 333334), (False, 400000, 421053),
 ])
 async def test_repaired_window_persists_only_after_apply_without_overwriting_newer_choice(
-    astra_catalog, pending, newer_threshold, expected,
+    astra_catalog, pending, newer_capacity, expected,
 ):
     from cc_remote.wrapper.machine import WrapperMachine
 
     store = CodexControlStore(astra_catalog)
-    store.set_context("primary@one", newer_threshold or 300000,
-                      444445 if newer_threshold else 315790)
+    store.set_context("primary@one", newer_capacity or 300000,
+                      421053 if newer_capacity else 333334)
     store.set_context("other@one", 300000, 315790)
     settings, handle = NativeContextSettings(), handle_for(astra_catalog)
     handle.model = "gpt-6-astra"
     handle.context_settings = settings
-    settings.restore(300000, 315790, selected=True)
+    settings.restore(300000, 333334, selected=True)
     await settings.validated_config(handle)
     if not pending:
         await settings.confirm_applied(handle)
@@ -328,6 +392,6 @@ async def test_repaired_window_persists_only_after_apply_without_overwriting_new
     await WrapperMachine._persist_codex_session_controls(machine, ctx)
     reopened = CodexControlStore(astra_catalog)
     saved = reopened.get("primary@one")
-    assert saved.context_threshold_tokens == (newer_threshold or 300000)
+    assert saved.context_max_tokens == (newer_capacity or 300000)
     assert saved.context_window_tokens == expected
     assert reopened.get("other@one").context_window_tokens == 315790

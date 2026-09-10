@@ -101,17 +101,14 @@ export default function ContextPopover(p: Props) {
       {p.codexContext && <>
         <div className="ctx-pop-row"><span>生效压缩阈值</span>
           <span className="ctx-pop-nums">{p.codexContext.applied_threshold_tokens?.toLocaleString()
-            ?? (p.codexContext.threshold_tokens == null ? "Codex 默认值" : "待确认")}</span>
+            ?? (p.codexContext.max_context_tokens == null ? "Codex 默认值" : "待确认")}</span>
         </div>
         {p.codexContext.pending && <div className="ctx-pop-status" role="status">
-          已保存 {p.codexContext.threshold_tokens?.toLocaleString() ?? "默认值"}，等待生效
+          已保存上限 {p.codexContext.max_context_tokens?.toLocaleString() ?? "默认值"}，等待生效
         </div>}
-        {!p.codexContext.pending && p.codexContext.threshold_tokens != null
-          && p.codexContext.threshold_tokens !== p.codexContext.applied_threshold_tokens
-          && <div className="ctx-pop-status">设定阈值：{p.codexContext.threshold_tokens.toLocaleString()}</div>}
         <div className="ctx-pop-foot">{CODEX_CONTEXT_USAGE_NOTE}</div>
       </>}
-      {p.onAutoCompact && <button className="context-settings-link" onClick={p.onAutoCompact}>设置自动压缩阈值</button>}
+      {p.onAutoCompact && <button className="context-settings-link" onClick={p.onAutoCompact}>设置上下文上限</button>}
     </div>
   );
 }

@@ -232,11 +232,13 @@ try {
     runtimes: { [codexContextSid]: createRuntime() },
   }, { type: "event", event: codexOldReport });
   const codexSetting = event({ type: "codex_context", sid: codexContextSid,
-    threshold_tokens: 400_000, applied_threshold_tokens: null, pending: true });
+    max_context_tokens: 400_000, applied_max_context_tokens: null,
+    applied_threshold_tokens: null, pending: true });
   codexContextState = reduce(codexContextState, { type: "event", event: codexSetting });
   assert.equal(codexContextState.runtimes[codexContextSid].contextReport, codexOldReport);
   codexContextState = reduce(codexContextState, { type: "event", event: {
-    ...codexSetting, applied_threshold_tokens: 400_000, pending: false,
+    ...codexSetting, applied_max_context_tokens: 400_000,
+    applied_threshold_tokens: 378_947, pending: false,
   } as ServerEvent });
   assert.equal(codexContextState.runtimes[codexContextSid].contextReport, null,
     "accepted Codex settings clear the previous configuration's capacity");
@@ -244,10 +246,25 @@ try {
   codexContextState = reduce(codexContextState, { type: "event", event: codexFreshReport });
   assert.equal(codexContextState.runtimes[codexContextSid].contextReport, codexFreshReport);
   codexContextState = reduce(codexContextState, { type: "event", event: {
-    ...codexSetting, threshold_tokens: null, applied_threshold_tokens: 400_000, pending: true,
+    ...codexSetting, max_context_tokens: null, applied_max_context_tokens: 400_000,
+    applied_threshold_tokens: 378_947, pending: true,
   } as ServerEvent });
   assert.equal(codexContextState.runtimes[codexContextSid].contextReport, codexFreshReport,
     "a pending reset retains the still-applied capacity");
+  codexContextState = reduce(codexContextState, { type: "event", event: {
+    ...codexSetting, max_context_tokens: 300_000, applied_max_context_tokens: 300_000,
+    applied_threshold_tokens: 284_211, pending: false,
+  } as ServerEvent });
+  assert.equal(codexContextState.runtimes[codexContextSid].contextReport, null,
+    "lowering Codex capacity must clear the old larger window too");
+  const coldState = reduce({ ...initialState,
+    focusedSid: codexContextSid,
+    runtimes: { [codexContextSid]: { ...createRuntime(), contextReport: codexFreshReport } },
+  }, { type: "event", event: event({ ...codexSetting,
+    max_context_tokens: 300_000, applied_max_context_tokens: 300_000,
+    applied_threshold_tokens: 284_211, pending: false }) });
+  assert.equal(coldState.runtimes[codexContextSid].contextReport, null,
+    "the first accepted Codex capacity invalidates a larger cached report");
 
   assert.equal(createRuntime().autoCompact, null,
     "a session must not claim a mode before the wrapper reports it");

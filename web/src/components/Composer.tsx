@@ -18,7 +18,7 @@ import type {
 import { presentLegacyExternalControl, presentSessionControl } from "../session-control-ui";
 import type { ConnState } from "../ws";
 import { Icon } from "../icons";
-import { parseContextThreshold } from "../codex-context";
+import { parseContextCapacity } from "../codex-context";
 const CodexContextControl = lazy(() => import("./CodexContextControl"));
 import {
   clientSlashesFor, CODEX_PROMPTS, isKnownCodeOnlySlash, slashToken,
@@ -112,7 +112,7 @@ interface Props {
   onSetEffort: (effort: string) => void;
   onSetAutoCompact?: (selection: AutoCompactSelection) => boolean;
   codexContext?: CodexContext | null;
-  onSetCodexContext?: (threshold: number | null) => boolean;
+  onSetCodexContext?: (maxTokens: number | null) => boolean;
   onSetServiceTier?: (tier: string) => void;
   onSetPerm: (perm: string) => void;
   onSetPermissionProfile: (profile: string) => void;
@@ -542,9 +542,9 @@ export function Composer(p: Props) {
       case "autocompact": {
         if (p.engine === "codex") {
           if (args.trim()) {
-            const value = parseContextThreshold(args);
+            const value = parseContextCapacity(args);
             if (value === undefined) { flash("格式：/autocompact 200k 或 default"); return; }
-            if (!p.onSetCodexContext?.(value)) flash("压缩设置暂不可用");
+            if (!p.onSetCodexContext?.(value)) flash("上下文设置暂不可用");
           } else {
             p.onContext(); setUsageOpen(false); setCtxOpen(false); setAutoCompactOpen(true);
           }
@@ -1162,9 +1162,9 @@ export function Composer(p: Props) {
               </div>
             )}
             {p.engine === "codex" && autoCompactOpen && (
-              <div className="ctx-pop auto-compact-pop" role="dialog" aria-label="Codex 自动压缩">
+              <div className="ctx-pop auto-compact-pop" role="dialog" aria-label="Codex 上下文上限">
                 <Suspense fallback={<p>加载设置…</p>}><CodexContextControl
-                  key={`${p.codexContext?.threshold_tokens}:${p.codexContext?.pending}`}
+                  key={`${p.codexContext?.max_context_tokens}:${p.codexContext?.pending}`}
                   state={p.codexContext ?? null} onChange={(value) => p.onSetCodexContext?.(value) ?? false} /></Suspense>
               </div>
             )}

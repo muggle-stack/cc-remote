@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 59
+PROTOCOL_VERSION = 60
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -538,16 +538,17 @@ class SetEffort(_Command):
 
 
 class SetCodexContext(_Command):
-    """Persist a session-only native Codex auto-compaction threshold."""
+    """Set usable context capacity for one Codex session; derive compaction."""
 
     type: Literal["set_codex_context"] = "set_codex_context"
-    threshold_tokens: Optional[int] = Field(default=None, ge=1, le=100_000_000, strict=True)
+    max_context_tokens: Optional[int] = Field(default=None, ge=1, le=100_000_000, strict=True)
 
 
 class CodexContext(_Base):
     type: Literal["codex_context"] = "codex_context"
     model: str = ""
-    threshold_tokens: Optional[int] = None
+    max_context_tokens: Optional[int] = None
+    applied_max_context_tokens: Optional[int] = None
     applied_threshold_tokens: Optional[int] = None
     model_max_tokens: Optional[int] = None
     limit_tokens: Optional[int] = None

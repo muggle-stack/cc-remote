@@ -908,10 +908,10 @@ export class RelayWs {
       request_id: requestId, hidden, offset, limit: 100, revision, ts: nowTs() });
   }
 
-  sendCodexContext(sid: string, threshold: number | null): boolean {
-    if (threshold !== null && (!Number.isSafeInteger(threshold) || threshold < 1 || threshold > 100_000_000)) return false;
+  sendCodexContext(sid: string, maxTokens: number | null): boolean {
+    if (maxTokens !== null && (!Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > 100_000_000)) return false;
     return !!this.sendTracked({ v: PROTOCOL_VERSION, type: "set_codex_context",
-      sid, threshold_tokens: threshold, ts: nowTs() });
+      sid, max_context_tokens: maxTokens, ts: nowTs() });
   }
 
   sendSaveMarkdown(path: string, content: string, expectedSize: number,

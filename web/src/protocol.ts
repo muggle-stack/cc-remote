@@ -106,7 +106,7 @@ export interface SessionControl extends Base {
 }
 export interface SetModel extends Base { type: "set_model"; model: string }
 export interface SetEffort extends Base { type: "set_effort"; effort: EffortLevel }
-export interface SetCodexContext extends Base { type: "set_codex_context"; threshold_tokens?: number | null }
+export interface SetCodexContext extends Base { type: "set_codex_context"; max_context_tokens?: number | null }
 export interface BrowseFiles extends Base {
   type: "browse_files"; request_id: string; path?: string; offset?: number;
   limit?: number; hidden?: boolean; revision?: string | null;
@@ -688,7 +688,8 @@ export interface FilesListed extends Base {
 export interface CodexContext extends Base {
   type: "codex_context";
   model: string;
-  threshold_tokens: number | null;
+  max_context_tokens: number | null;
+  applied_max_context_tokens: number | null;
   applied_threshold_tokens: number | null;
   model_max_tokens: number | null;
   limit_tokens: number | null;
@@ -708,7 +709,7 @@ export type ServerEvent = FilesListed | CodexContext
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 59;
+export const PROTOCOL_VERSION = 60;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

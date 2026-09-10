@@ -5913,7 +5913,7 @@ export default function App() {
           onOpenFiles={openFiles}
           codexContext={rt.codexContext}
           onSetCodexContext={focusedSid && space === "code" && focusedEngine === "codex"
-            ? (threshold) => wsRef.current?.sendCodexContext(focusedSid, threshold) ?? false : undefined}
+            ? (maxTokens) => wsRef.current?.sendCodexContext(focusedSid, maxTokens) ?? false : undefined}
           onGoal={runGoal}
           onStatus={openStatus}
           onRefreshUsage={refreshStatus}

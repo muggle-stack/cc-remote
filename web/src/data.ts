@@ -373,7 +373,7 @@ export const CODEX_COMMANDS: Command[] = [
   OPEN_FILES_COMMAND,
   { slash: "status", name: "完整状态", ds: "线程 · 配置 · 账户 · 限额 · token", ic: "cpu" },
   { slash: "context", name: "上下文用量", ds: "查看 token 占用与容量", ic: "cpu" },
-  { slash: "autocompact", name: "自动压缩", ds: "/autocompact [200k | default] 设置当前会话阈值", ic: "simplify" },
+  { slash: "autocompact", name: "上下文上限", ds: "/autocompact [300k | default] 设置当前会话的最大上下文", ic: "simplify" },
   COMPACT_COMMAND,
   { slash: "clear", name: "新会话", ds: "开新 codex 会话", ic: "close" },
 ];

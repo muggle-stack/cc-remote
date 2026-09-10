@@ -30,7 +30,7 @@ class CodexControls:
     permission_profile: str | None = None
     web_search: str | None = None
     cwd_override: str | None = None
-    context_threshold_tokens: int | None = None
+    context_max_tokens: int | None = None
     context_window_tokens: int | None = None
     context_settings_set: bool = False
 
@@ -44,8 +44,8 @@ class CodexControls:
             result["web_search"] = self.web_search
         if _cwd_override(self.cwd_override) is not None:
             result["cwd_override"] = self.cwd_override
-        if _token_count(self.context_threshold_tokens) and _token_count(self.context_window_tokens):
-            result["context_threshold_tokens"] = self.context_threshold_tokens
+        if _token_count(self.context_max_tokens) and _token_count(self.context_window_tokens):
+            result["context_max_tokens"] = self.context_max_tokens
             result["context_window_tokens"] = self.context_window_tokens
         if self.context_settings_set:
             result["context_settings_set"] = True
@@ -89,7 +89,11 @@ def _controls(values: object) -> CodexControls:
             else None
         ),
         cwd_override=_cwd_override(raw.get("cwd_override")),
-        context_threshold_tokens=_token_count(raw.get("context_threshold_tokens")),
+        # Preserve the number entered in pre-v60 controls as the requested
+        # usable capacity. Old native window/threshold arithmetic is revalidated.
+        context_max_tokens=_token_count(raw.get("context_max_tokens")
+                                       if "context_max_tokens" in raw
+                                       else raw.get("context_threshold_tokens")),
         context_window_tokens=_token_count(raw.get("context_window_tokens")),
         context_settings_set=raw.get("context_settings_set") is True,
     )
@@ -243,7 +247,7 @@ class CodexControlStore:
                 # Runtime control changes must not clear an explicit cwd
                 # migration that is waiting for its next durable native turn.
                 cwd_override=existing.cwd_override,
-                context_threshold_tokens=existing.context_threshold_tokens,
+                context_max_tokens=existing.context_max_tokens,
                 context_window_tokens=existing.context_window_tokens,
                 context_settings_set=existing.context_settings_set,
             )
@@ -293,16 +297,16 @@ class CodexControlStore:
             self._sessions = updated
         return controls
 
-    def set_context(self, session_id: str, threshold: int | None, window: int | None) -> CodexControls:
+    def set_context(self, session_id: str, max_tokens: int | None, window: int | None) -> CodexControls:
         session_id = _session_id(session_id)
-        if threshold is not None and (
-            _token_count(threshold) is None or _token_count(window) is None or threshold > window
+        if max_tokens is not None and (
+            _token_count(max_tokens) is None or _token_count(window) is None or max_tokens > window
         ):
             raise CodexControlStoreError("Codex context preference is invalid")
         with self._lock:
             existing = _controls(self._sessions.get(session_id))
-            controls = replace(existing, context_threshold_tokens=threshold,
-                               context_window_tokens=window if threshold is not None else None,
+            controls = replace(existing, context_max_tokens=max_tokens,
+                               context_window_tokens=window if max_tokens is not None else None,
                                context_settings_set=True)
             updated = dict(self._sessions)
             updated[session_id] = controls.as_dict()
@@ -336,7 +340,7 @@ class CodexControlStore:
                 permission_profile=existing.permission_profile,
                 web_search=existing.web_search,
                 cwd_override=cwd_override,
-                context_threshold_tokens=existing.context_threshold_tokens,
+                context_max_tokens=existing.context_max_tokens,
                 context_window_tokens=existing.context_window_tokens,
                 context_settings_set=existing.context_settings_set,
             )
@@ -367,7 +371,7 @@ class CodexControlStore:
                 permission_profile=existing.permission_profile,
                 web_search=existing.web_search,
                 cwd_override=None,
-                context_threshold_tokens=existing.context_threshold_tokens,
+                context_max_tokens=existing.context_max_tokens,
                 context_window_tokens=existing.context_window_tokens,
                 context_settings_set=existing.context_settings_set,
             )
@@ -408,7 +412,7 @@ class CodexControlStore:
                 permission_profile=existing.permission_profile,
                 web_search=existing.web_search,
                 cwd_override=previous,
-                context_threshold_tokens=existing.context_threshold_tokens,
+                context_max_tokens=existing.context_max_tokens,
                 context_window_tokens=existing.context_window_tokens,
                 context_settings_set=existing.context_settings_set,
             )
