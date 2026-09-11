@@ -18226,7 +18226,8 @@ assert.doesNotMatch(composerSource, /交付物/);
 assert.doesNotMatch(composerSource, /项目与资料/);
 assert.match(composerSource, /工作设置/);
 assert.match(contextPopoverSource, /会话新增上下文/);
-assert.match(composerSource, /workContext\.sessionPercentage\.toFixed\(0\)/);
+assert.match(composerSource, /workContext\.session_percentage \?\? workContext\.percentage/,
+  "the Work summary uses the report's precomputed session percentage; details load on demand");
 assert.match(contextPopoverSource,
   /usage\(p\.report\.total_tokens, p\.report\.percentage\)/,
   "Code must render the last native engine-total context reading");

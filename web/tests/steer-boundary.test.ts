@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { createServer } from "vite";
-import { mergeInitialHistory } from "../src/history-merge.ts";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import {
+  mergeAuthoritativeTurnDetail, mergeInitialHistory, restoreObservedLiveTurnDetails,
+} from "../src/history-merge.ts";
 import type { Turn } from "../src/reducer.ts";
 
 // A final item and a user steer can be recorded 78 ms apart inside ONE native
@@ -36,11 +40,93 @@ assert.deepEqual(repaired.map((turn) => turn.blocks.map((block) =>
   block.kind === "text" ? block.message_id : null)),
 [["answer-old"], ["answer-guided"]]);
 
+// Two steers can materialize consecutively after compaction. The first is a
+// real user row with no process of its own. Older clients cached the previous
+// segment's items and clock under it, then reported an endless detail failure.
+const compactProcess: Turn["blocks"][number] = {
+  kind: "process", processKind: "compaction", item_id: "compact-old",
+  phase: "end", status: "succeeded", title: "Compacted", done: true,
+};
+const compactHistory: Turn[] = [{
+  id: "original", prompt: "deploy", done: true,
+  blocks: [compactProcess], processDetailState: "present",
+  detailReasons: ["process"], detailEventCount: 1,
+  processStartedTs: 10_000, processDoneTs: 30_000,
+}, {
+  id: "native-latest", clientMsgId: "latest", prompt: "最新的", done: true,
+  blocks: [], processDetailState: "none", detailReasons: [], detailEventCount: 0,
+}, {
+  id: "native-flash", clientMsgId: "flash", prompt: "ds v4.1 flash适配了吗？",
+  forkPointId: task, done: false, blocks: [], processDetailState: "unknown",
+}];
+const reconcileOptions = {
+  reconcileReplayOrphans: true, preserveLiveTailOpen: true, activeOwnerId: "flash",
+};
+for (const retainedFork of [undefined, task]) {
+for (const retainedBlocks of [[], [compactProcess]]) {
+  const stale: Turn[] = [compactHistory[0], {
+    ...compactHistory[1], id: "latest", historyTurnId: "native-latest",
+    forkPointId: retainedFork,
+    blocks: retainedBlocks,
+    processDetailState: "present", detailReasons: ["process"], detailEventCount: 6,
+    processStartedTs: 20_000, processDoneTs: 30_000, detailLoaded: true,
+    detailError: "详细过程未完整返回，请重试",
+  }, { ...compactHistory[2], id: "flash" }];
+  let healed = mergeInitialHistory(compactHistory, stale, reconcileOptions, true);
+  healed = restoreObservedLiveTurnDetails(healed, stale);
+  const latest = healed.find(turn => turn.id === "latest")!;
+  assert.equal(latest.processDetailState, "none");
+  assert.equal(latest.processStartedTs, undefined);
+  assert.equal(latest.processDoneTs, undefined);
+  assert.equal(latest.detailEventCount, 0);
+  assert.deepEqual(latest.detailReasons, []);
+  assert.equal(latest.detailError, undefined);
+  assert.deepEqual(latest.blocks, []);
+  assert.equal(healed[0].blocks.length, 1,
+    "repair keeps the original compaction instead of deleting its process");
+  assert.equal(healed[2].done, false, "the latest steer keeps running");
+  const refreshed = mergeInitialHistory(compactHistory, healed, reconcileOptions, true);
+  assert.equal(refreshed[1].processDetailState, "none",
+    "another refresh must not restore the phantom disclosure");
+  const loaded = mergeAuthoritativeTurnDetail(latest, stale[1], compactHistory);
+  assert.equal(loaded.processDetailState, "none",
+    "expanded detail cannot restore an optimistic task alias or foreign process");
+  assert.equal(loaded.processStartedTs, undefined);
+  assert.equal(loaded.detailEventCount, 0);
+  assert.deepEqual(loaded.blocks, []);
+}
+}
+
+const opaqueSummary = { ...compactHistory[1], processDetailState: "unknown" as const };
+const realDeferred: Turn = {
+  ...compactHistory[1], processDetailState: "present", detailEventCount: 12,
+  detailReasons: ["process"], detailHasMore: true,
+};
+assert.equal(mergeInitialHistory([opaqueSummary], [realDeferred], reconcileOptions, true)[0].processDetailState,
+  "present", "an opaque or bounded page cannot erase real deferred process");
+assert.equal(mergeInitialHistory([compactHistory[1]], [realDeferred], reconcileOptions, true)[0].processDetailState,
+  "present", "unread detail pages keep the process affordance on a closed steer");
+const retainedReal = { ...realDeferred, detailHasMore: false, blocks: [compactProcess] };
+assert.equal(mergeInitialHistory([compactHistory[1]], [retainedReal], reconcileOptions, true)[0].processDetailState,
+  "present", "an omitted process item without another proven owner remains visible");
+
 const harness = await createServer({ root: process.cwd(), appType: "custom",
   logLevel: "silent", server: { middlewareMode: true, watch: null } });
 try {
   const { initialState, createRuntime, reduce } =
     await harness.ssrLoadModule("/src/reducer.ts");
+  const { ChatView } = await harness.ssrLoadModule("/src/components/ChatView.tsx");
+  const repairedMarkup = renderToStaticMarkup(createElement(ChatView, {
+    sid: "compact-steers", engine: "codex",
+    turns: mergeInitialHistory(compactHistory, [{
+      ...compactHistory[1], processDetailState: "present", detailLoaded: true,
+      detailEventCount: 6, detailReasons: ["process"], processStartedTs: 20_000,
+      processDoneTs: 30_000,
+    }], reconcileOptions, true),
+    onEdit: () => {}, onGetDiff: () => {}, onLoadDetail: () => {},
+  }));
+  assert.doesNotMatch(repairedMarkup, /详细过程未完整返回|加载失败/);
+  assert.match(repairedMarkup, /最新的/);
   for (const explicitTask of [undefined, task]) {
   for (const priorDone of [false, true]) {
     let state = { ...initialState, focusedSid: "s", runtimes: { s: {

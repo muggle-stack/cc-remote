@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+- Repair process ownership and empty details when steering during Codex compaction, including refresh and session reload.
+- Align the Codex context gauge with native compaction estimates (protocol v63).
+  Match bounded local log reads to the account, thread and latest rollout sample;
+  invalidate estimates after compaction and show recent request usage without a
+  percentage when no matching estimate is available. Refresh active visible sessions.
 - Add DeepSeek Harness 0.1.5-rc.2 as an optional Code engine (protocol v61):
   native Agent Presets, models/effort, permission presets, goals, commands,
   questions/approvals, attachments, steering, queued prompts, cancellation and

@@ -60,7 +60,7 @@ Agent or terminate the DSH process.
 
 ## Implemented integration
 
-The Code engine and UI are implemented on protocol v61. The current supported
+The Code engine and UI are implemented on protocol v63. The current supported
 feature inventory, setup and verification commands are maintained in
 [`integrations/dsh/README.md`](../integrations/dsh/README.md).
 

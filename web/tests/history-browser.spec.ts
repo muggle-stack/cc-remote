@@ -556,7 +556,7 @@ test("session workspace context ring refreshes applied capacity and distinguishe
   };
   const report: PanelRelayEvent<Extract<ServerEvent, { type: "context_report" }>> = {
     type: "context_report", sid: "layout-parent", total_tokens: 142045,
-    max_tokens: 258400, percentage: 55, model: "fixture", categories: [],
+    max_tokens: 258400, percentage: 55, model: "fixture", categories: [], source: "native_estimate",
   };
   relay.emit(setting);
   relay.emit(report);
@@ -591,7 +591,7 @@ test("session workspace distinguishes 300k capacity from native usage and compac
   await expect(setting).toContainText("可设置上限 828,400");
   await expect(setting.getByRole("status")).toContainText("已保存上限 300,000");
   await expect(setting.getByRole("status")).toContainText("当前生效上限：400,000");
-  await expect(setting).toContainText("可能早于页面数字");
+  await expect(setting).toContainText("进度按 Codex 原生上下文估算显示");
 
   relay.emit({ ...state, applied_max_context_tokens: 300000,
     applied_threshold_tokens: 284211, pending: false });
@@ -603,8 +603,8 @@ test("session workspace distinguishes 300k capacity from native usage and compac
   await page.screenshot({ path: testInfo.outputPath("context-300k-settings.png"), animations: "disabled" });
 
   const report: PanelRelayEvent<Extract<ServerEvent, { type: "context_report" }>> = {
-    type: "context_report", sid: "layout-parent", total_tokens: 252460,
-    max_tokens: 300000, percentage: 84.1533, model: "gpt-6-astra", categories: [],
+    type: "context_report", sid: "layout-parent", total_tokens: 245325,
+    max_tokens: 300000, percentage: 81.775, model: "gpt-6-astra", categories: [], source: "recent_turn",
   };
   relay.emit(report);
   await page.getByRole("button", { name: "上下文占用", exact: true }).click();
@@ -612,16 +612,57 @@ test("session workspace distinguishes 300k capacity from native usage and compac
   const popover = page.getByRole("dialog", { name: "上下文占用", exact: true });
   const request = relay.commands.filter((c) => c.type === "get_context").at(-1)!;
   relay.emit({ ...report, request_id: String(request.cmd_id) });
-  await expect(popover).toContainText("252,460 / 300,000 (84%)");
+  await expect(popover).toContainText("最近请求用量");
+  await expect(popover).toContainText("245,325 tokens");
+  await expect(popover).not.toContainText("82%");
+  await expect(popover.locator(".ctx-pop-bar")).toHaveCount(0);
+  const ring = page.getByRole("button", { name: "上下文占用", exact: true });
+  await expect(ring.locator(".hr-fill")).toHaveCount(0);
+  // Same incident: billing usage was 245325, but Codex compacted at 284793.
+  const nativeReport = { ...report, source: "native_estimate" as const,
+    total_tokens: 284793, percentage: 94.931, auto_compact_threshold_tokens: 284211 };
+  relay.emit(nativeReport);
+  await expect(popover).toContainText("284,793 / 300,000 (95%)");
+  await expect(popover.locator(".ctx-pop-bar i")).toHaveCSS("width", /.+/);
+  expect(await popover.locator(".ctx-pop-bar i").evaluate(node => (node as HTMLElement).style.width)).toBe("94.931%");
+  expect(Number(await ring.locator(".hr-fill").getAttribute("stroke-dashoffset"))).toBeCloseTo(4.7775325);
   await expect(popover.locator(".ctx-pop-row").filter({ hasText: "生效压缩阈值" })).toContainText("284,211");
-  await expect(popover).toContainText("最近一次模型返回值");
   await expect(popover).not.toContainText("正在读取真实上下文");
   for (const theme of ["light", "dark"]) {
     await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
     expect(await popover.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
     await page.screenshot({ path: testInfo.outputPath(`context-300k-usage-${theme}.png`), animations: "disabled" });
   }
+  // A missing native reading must not revive the cached pre-compaction 95%.
+  relay.emit(report);
+  await expect(popover).toContainText("245,325 tokens");
+  await expect(popover).not.toContainText("95%");
+  await expect(ring.locator(".hr-fill")).toHaveCount(0);
+  relay.emit({ ...nativeReport, total_tokens: 33824, percentage: 11.27467 });
+  await expect(popover).toContainText("33,824 / 300,000 (11%)");
   expect(relay.commands.some((c) => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
+});
+
+test("session workspace refreshes native context during a running turn", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { retained: false });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_context")).toBe(true);
+  const report: PanelRelayEvent<Extract<ServerEvent, { type: "context_report" }>> = {
+    type: "context_report", sid: "layout-parent", total_tokens: 281362,
+    max_tokens: 300000, percentage: 93.78733, model: "fixture", categories: [], source: "native_estimate",
+  };
+  const first = relay.commands.filter(c => c.type === "get_context").at(-1)!;
+  relay.emit({ ...report, request_id: String(first.cmd_id) });
+  relay.emit({ type: "state", sid: "layout-parent", state: "running" });
+  const count = relay.commands.filter(c => c.type === "get_context").length;
+  await expect.poll(() => relay.commands.filter(c => c.type === "get_context").length,
+    { timeout: 8000 }).toBeGreaterThan(count);
+  const next = relay.commands.filter(c => c.type === "get_context").at(-1)!;
+  relay.emit({ ...report, request_id: String(next.cmd_id), total_tokens: 284793, percentage: 94.931 });
+  const ring = page.getByRole("button", { name: "上下文占用", exact: true });
+  await expect.poll(async () => Number(await ring.locator(".hr-fill").getAttribute("stroke-dashoffset")))
+    .toBeCloseTo(4.7775325);
+  expect(relay.commands.some(c => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
 });
 
 test("turn regressions App routes file pages by exact request and opens the archived diff", async ({ page }) => {
@@ -1489,6 +1530,61 @@ test("async question dialog retains an IME draft when control becomes read-only"
   await expect(input).toHaveValue("三指拖拽的补充");
   expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
 });
+
+for (const staleProcess of [false, true]) {
+test(`turn regressions compaction steer clears phantom detail failure across history and reload (${staleProcess ? "foreign process" : "clock only"})`, async ({ page }, testInfo) => {
+  const seedTurns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = [{
+    id: "compact-original", prompt: "部署一下", done: true,
+    processDetailState: "present", detailReasons: ["process"], detailEventCount: 1,
+    blocks: [{ kind: "process", processKind: "compaction", item_id: "original-compact",
+      phase: "end", status: "succeeded", title: "上下文已压缩", done: true }],
+  }, {
+    id: "native-latest", clientMsgId: "latest", prompt: "最新的", done: true,
+    forkPointId: "compact-native-task",
+    blocks: [], processDetailState: "present", detailReasons: ["process"],
+    detailEventCount: 6, detailLoaded: true,
+    processStartedTs: 20_000, processDoneTs: 127_000,
+  }, {
+    id: "native-flash", clientMsgId: "flash", forkPointId: "compact-native-task",
+    prompt: "ds v4.1 flash适配了吗？", done: false,
+    blocks: [{ kind: "text", channel: "commentary", message_id: "flash-commentary",
+      text: "正在核对模型目录", done: false }],
+  }];
+  if (staleProcess) seedTurns[1].blocks = [...seedTurns[0].blocks];
+  let buildSeq = 1;
+  const historyReply = (): PanelRelayEvent<Extract<ServerEvent, { type: "history" }>> => ({
+    type: "history", session_id: "layout-parent", sid: "layout-parent",
+    revision: "layout-history", generation: "layout-generation", detail: "summary",
+    events: [], turns: seedTurns, has_more: false, in_progress: true, live_seq: 0,
+    newest_id: "native-flash", build_seq: buildSeq,
+  });
+  const relay = await mockRightPanelRelay(page, { historyReply });
+  await page.goto("/");
+  const latest = page.locator('[data-turn-id="native-latest"]');
+  await expect(latest.locator(".turn-process-head")).toBeVisible();
+  await latest.locator(".turn-process-head").click();
+  await expect(latest.getByText(staleProcess
+    ? "上下文已压缩" : "详细过程未完整返回，请重试")).toBeVisible();
+  seedTurns[1] = { ...seedTurns[1], processDetailState: "none", detailReasons: [],
+    detailEventCount: 0, detailLoaded: false, processStartedTs: undefined,
+    processDoneTs: undefined, forkPointId: undefined, blocks: [] };
+  buildSeq += 1;
+  relay.emit(historyReply());
+  for (let pass = 0; pass < 2; pass++) {
+    if (pass) await page.reload();
+    await expect(latest.getByText("最新的", { exact: true })).toBeVisible();
+    await expect(latest.locator(".turn-process-head")).toHaveCount(0);
+    await expect(page.getByText("详细过程未完整返回，请重试")).toHaveCount(0);
+    await expect(page.getByText("正在核对模型目录", { exact: true })).toBeVisible();
+    await expect(page.locator('[data-turn-id="native-flash"] .turn-process-head'))
+      .toContainText("正在处理");
+    await expect(page.locator('[data-turn-id="compact-original"] .turn-process-head')).toHaveCount(1);
+  }
+  await page.screenshot({ path: testInfo.outputPath("compaction-steer-repaired.png") });
+  expect(relay.commands.filter(command => ["query", "steer", "interrupt"].includes(String(command.type))))
+    .toHaveLength(0);
+});
+}
 
 for (const processDetailState of ["none", "unknown"] as const) {
   test(`direct reply summary has no empty detail entry across refresh (${processDetailState})`, async ({ page }) => {

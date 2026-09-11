@@ -16,6 +16,9 @@ const nativeState: Omit<DshState, "v" | "ts"> = { type: "dsh_state", sid, connec
 
 async function mockDshRelay(page: Page, { running = false, commandSuccess = false } = {}) {
   const commands: Record<string, unknown>[] = [];
+  const context = { type: "context_report", sid, total_tokens: 24000,
+    max_tokens: 64000, percentage: 37.5, available: true,
+    source: "recent_turn", categories: [] };
   let emit: (event: Record<string, unknown>) => void = () => {};
   await page.addInitScript(() => {
     localStorage.setItem("cc_remote_engine", "dsh");
@@ -36,7 +39,7 @@ async function mockDshRelay(page: Page, { running = false, commandSuccess = fals
       emit({ type: "model", sid, model: "dsh:local:deepseek-flash" });
       emit({ type: "effort", sid, effort: "off" });
       emit({ type: "perm", sid, mode: "read-only" });
-      emit({ type: "context_report", sid, total_tokens: 24000, max_tokens: 64000, percentage: 37.5, available: true, source: "recent_turn" });
+      emit(context);
       emit({ type: "replay_end", sid, to_seq: 0, truncated: false });
     };
     socket.onMessage(raw => {
@@ -60,6 +63,7 @@ async function mockDshRelay(page: Page, { running = false, commandSuccess = fals
           ] }], has_more: false });
       if (cmd.type === "set_dsh_control") emit({ type: "dsh_command_result", sid, request_id: cmd.cmd_id,
         status: commandSuccess ? "success" : "error", text: commandSuccess ? "命令已执行" : "当前目标不能替换，请使用 /goal edit" });
+      if (cmd.type === "get_context") emit({ ...context, request_id: cmd.cmd_id });
       if (cmd.type === "get_engine_capabilities") emit({ type: "engine_capabilities", sid, engine: "dsh", space: "code", cwd: "/tmp/dsh-test",
         request_id: cmd.cmd_id, skills_only: cmd.skills_only, items: [{ kind: "skill", id: "review", name: "review", description: "审查变更", enabled: true, actions: [] }] });
       if (cmd.type === "ping") emit({ type: "pong", n: cmd.n });
@@ -76,6 +80,28 @@ async function openDsh(page: Page, options = {}) {
   await expect(page.locator(".composer textarea")).toBeVisible();
   return relay;
 }
+
+test("DSH context reports remain visible without a Codex estimate and clear unavailable readings", async ({ page }, info) => {
+  const relay = await openDsh(page, { running: true });
+  const ring = page.getByRole("button", { name: "上下文占用", exact: true });
+  await ring.click();
+  const popover = page.getByRole("dialog", { name: "上下文占用", exact: true });
+  await expect(popover).toContainText("24,000 / 64,000 (38%)");
+  await expect(popover.locator(".ctx-pop-bar i")).toHaveAttribute("style", "width: 37.5%;");
+  await expect(popover.getByText("设置上下文上限", { exact: true })).toHaveCount(0);
+  await expect(popover).not.toContainText("Codex");
+  relay.emit({ type: "context_report", sid, source: "recent_turn", available: true,
+    total_tokens: 6400, max_tokens: 64000, percentage: 10, categories: [] });
+  await expect(popover).toContainText("6,400 / 64,000 (10%)");
+  await expect(popover.locator(".ctx-pop-bar i")).toHaveAttribute("style", "width: 10%;");
+  await page.screenshot({ path: info.outputPath("dsh-context.png"), animations: "disabled" });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+  relay.emit({ type: "context_report", sid, source: "recent_turn", available: false,
+    total_tokens: 0, max_tokens: 0, percentage: 0, categories: [] });
+  await expect(popover.locator(".ctx-pop-nums")).toHaveCount(0);
+  await expect(ring.locator(".hr-fill")).toHaveCount(0);
+  expect(relay.commands.some(c => c.type === "query" || c.type === "steer")).toBe(false);
+});
 
 test("DSH native controls remain usable while running and preserve command drafts", async ({ page }) => {
   const relay = await openDsh(page, { running: true });

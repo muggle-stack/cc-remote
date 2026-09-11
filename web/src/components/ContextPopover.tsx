@@ -1,6 +1,7 @@
 import type { CodexContext, ContextReport } from "../protocol";
-import type { WorkContextMetrics } from "../work-context";
-import { CODEX_CONTEXT_USAGE_NOTE } from "../codex-context";
+import { workContextMetrics } from "../work-context";
+export const CODEX_CONTEXT_USAGE_NOTE =
+  "进度按 Codex 原生上下文估算显示；估算暂不可用时，仅显示最近请求用量。";
 
 
 interface Props {
@@ -8,15 +9,18 @@ interface Props {
   loading?: boolean;
   deferred?: boolean;
   error?: string | null;
-  work?: WorkContextMetrics | null;
+  work?: boolean;
   onAutoCompact?: () => void;
   codexContext?: CodexContext | null;
+  codex?: boolean;
 }
 
 
 export default function ContextPopover(p: Props) {
-  const workMode = p.work !== undefined;
-  const hasCapacity = (p.report?.max_tokens ?? 0) > 0;
+  const workMode = !!p.work;
+  const work = workMode && p.report ? workContextMetrics(p.report) : null;
+  const recentCodex = p.codex && p.report?.source !== "native_estimate";
+  const hasCapacity = !recentCodex && (p.report?.max_tokens ?? 0) > 0;
   const status = p.loading
     ? "正在读取真实上下文…"
     : p.deferred
@@ -38,29 +42,30 @@ export default function ContextPopover(p: Props) {
   return (
     <div className={"ctx-pop" + (workMode ? " work-ctx-pop" : "")}
       role="dialog" aria-label={workMode ? "Work 上下文占用" : "上下文占用"}>
-      {p.report && (workMode ? p.work : true) ? workMode ? (
+      {p.report && (workMode ? work : true) ? workMode ? (
         <>
           <div className="ctx-pop-row">
-            <span>{p.work!.hasBreakdown ? "会话新增上下文" : "上下文窗口"}</span>
+            <span>{recentCodex ? "最近请求用量" : work!.hasBreakdown ? "会话新增上下文" : "上下文窗口"}</span>
             <span className="ctx-pop-nums">
-              {usage(p.work!.sessionTokens, p.work!.sessionPercentage)}
+              {recentCodex ? usage(p.report.total_tokens, 0)
+                : usage(work!.sessionTokens, work!.sessionPercentage)}
             </span>
           </div>
           {hasCapacity && (
             <div className="ctx-pop-bar"><i style={{
-              width: `${Math.min(p.work!.sessionPercentage, 100)}%`,
+              width: `${Math.min(work!.sessionPercentage, 100)}%`,
             }} /></div>
           )}
-          {p.work!.hasBreakdown && (
+          {work!.hasBreakdown && !recentCodex && (
             <div className="work-ctx-details">
               <div className="ctx-pop-row"><span>真实总占用</span>
                 <span className="ctx-pop-nums">
-                  {usage(p.work!.totalTokens, p.work!.totalPercentage)}
+                  {usage(work!.totalTokens, work!.totalPercentage)}
                 </span>
               </div>
               <div className="ctx-pop-row"><span>Work 启动基线</span>
                 <span className="ctx-pop-nums">
-                  {p.work!.fixedTokens.toLocaleString()}
+                  {work!.fixedTokens.toLocaleString()}
                 </span>
               </div>
             </div>
@@ -70,7 +75,7 @@ export default function ContextPopover(p: Props) {
         </>
       ) : (
         <>
-          <div className="ctx-pop-row"><span>上下文窗口</span>
+          <div className="ctx-pop-row"><span>{recentCodex ? "最近请求用量" : p.codex ? "上下文估算" : "上下文窗口"}</span>
             <span className="ctx-pop-nums">
               {usage(p.report.total_tokens, p.report.percentage)}
             </span>
@@ -98,9 +103,14 @@ export default function ContextPopover(p: Props) {
           {statusNode}
         </>
       ) : loadingNode}
+      {recentCodex && p.report && <div className="ctx-pop-foot">
+        压缩估算暂不可用，此用量不代表距离压缩的进度。
+      </div>}
       {p.codexContext && <>
         <div className="ctx-pop-row"><span>生效压缩阈值</span>
-          <span className="ctx-pop-nums">{p.codexContext.applied_threshold_tokens?.toLocaleString()
+          <span className="ctx-pop-nums">{(p.report?.source === "native_estimate"
+            ? p.report.auto_compact_threshold_tokens ?? p.codexContext.applied_threshold_tokens
+            : p.codexContext.applied_threshold_tokens)?.toLocaleString()
             ?? (p.codexContext.max_context_tokens == null ? "Codex 默认值" : "待确认")}</span>
         </div>
         {p.codexContext.pending && <div className="ctx-pop-status" role="status">

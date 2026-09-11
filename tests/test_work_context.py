@@ -75,6 +75,12 @@ def test_context_breakdown_is_emitted_only_when_work_has_a_baseline():
 
     recent = code.model_copy(update={"source": "recent_turn"})
     assert json.loads(serialize(recent))["source"] == "recent_turn"
+    native = ContextReport(total_tokens=284793, max_tokens=300000, percentage=94.931,
+                           source="native_estimate", auto_compact_threshold_tokens=284211)
+    payload = json.loads(serialize(native))
+    assert payload["source"] == "native_estimate"
+    assert payload["total_tokens"] == 284793
+    assert payload["auto_compact_threshold_tokens"] == 284211
     assert GetContext().refresh is False
     assert json.loads(serialize(GetContext(refresh=True)))["refresh"] is True
 

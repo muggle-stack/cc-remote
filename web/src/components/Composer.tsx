@@ -43,7 +43,6 @@ import {
   isSettlingStopDisabled,
   type SendMode,
 } from "../composer-submit";
-import { workContextMetrics } from "../work-context";
 import type { ComposerDraft, ComposerDraftStore } from "../composer-drafts";
 import {
   composePastePrompt,
@@ -773,16 +772,17 @@ export function Composer(p: Props) {
   const contextAvailable = p.contextReport?.available !== false;
   const currentContextExact = !!p.contextReport && contextAvailable
     && p.contextReport.source !== "recent_turn";
-  const lastExactContextReport = currentContextExact
+  const lastExactContextReport = p.engine === "codex" || p.engine === "dsh" || currentContextExact
     ? p.contextReport : p.contextExactReport ?? null;
   const exactContextReport = lastExactContextReport?.available !== false
     ? lastExactContextReport : null;
-  const contextHasCapacity = (exactContextReport?.max_tokens ?? 0) > 0;
+  const codexEstimate = p.engine !== "codex"
+    || p.contextReport?.source === "native_estimate";
+  const contextHasCapacity = codexEstimate && (exactContextReport?.max_tokens ?? 0) > 0;
   const contextRingHasCapacity = contextAvailable
+    && codexEstimate
     && (p.contextReport?.max_tokens ?? 0) > 0;
-  const workContext = workSurface && exactContextReport
-    ? workContextMetrics(exactContextReport)
-    : null;
+  const workContext = workSurface ? exactContextReport : null;
   const autoCompactSelection = normalizeAutoCompactSelection(
     p.autoCompact?.mode ?? "inherit",
     p.autoCompact?.threshold_tokens ?? null,
@@ -1032,9 +1032,9 @@ export function Composer(p: Props) {
                       setCtxOpen((o) => !o);
                     }}>
                     <span>会话上下文</span><b>{workContext && contextHasCapacity
-                        ? `${workContext.sessionPercentage.toFixed(0)}%`
-                        : workContext
-                          ? `${workContext.sessionTokens.toLocaleString()} tokens`
+                        ? `${(workContext.session_percentage ?? workContext.percentage).toFixed(0)}%`
+                        : workContext && codexEstimate
+                          ? `${(workContext.session_tokens ?? workContext.total_tokens).toLocaleString()} tokens`
                           : "查看"}</b>
                   </button>
                   {ctxOpen && (
@@ -1043,7 +1043,7 @@ export function Composer(p: Props) {
                     </div>}>
                       <ContextPopover report={exactContextReport}
                         loading={p.contextLoading} deferred={p.contextDeferred}
-                        error={p.contextError} work={workContext} />
+                        error={p.contextError} work codex={p.engine === "codex"} />
                     </Suspense>
                   )}
                   {p.engine === "claude" && autoCompactOpen && (
@@ -1151,7 +1151,7 @@ export function Composer(p: Props) {
             )}
             <button
               className={"hint-ring"
-                + (contextAvailable ? "" : " unavailable")}
+                + (contextAvailable && codexEstimate ? "" : " unavailable")}
               aria-expanded={ctxOpen}
               aria-label="上下文占用"
               title="上下文占用"
@@ -1166,15 +1166,14 @@ export function Composer(p: Props) {
             >
               <svg viewBox="0 0 36 36" width="20" height="20" aria-hidden="true">
                 <circle className="hr-track" cx="18" cy="18" r="15" />
-                <circle
+                {contextRingHasCapacity ? <circle
                   className="hr-fill"
                   cx="18" cy="18" r="15"
                   strokeDasharray="94.25"
-                  strokeDashoffset={94.25 * (1 - Math.min(
-                    contextRingHasCapacity
-                      ? p.contextReport?.percentage ?? 0 : 0, 100) / 100)}
+                  strokeDashoffset={94.25 * (1 - Math.min(p.contextReport?.percentage ?? 0, 100) / 100)}
                   transform="rotate(-90 18 18)"
-                />
+                /> : <text x="18" y="24" textAnchor="middle" fontSize="18"
+                  fill="currentColor" stroke="none">?</text>}
               </svg>
             </button>
             {ctxOpen && (
@@ -1183,6 +1182,7 @@ export function Composer(p: Props) {
               </div>}>
                 <ContextPopover report={exactContextReport}
                   loading={p.contextLoading} deferred={p.contextDeferred}
+                  codex={p.engine === "codex"}
                   error={p.contextError} codexContext={p.engine === "codex" ? p.codexContext : null}
                   onAutoCompact={p.engine === "codex" && p.onSetCodexContext
                     ? () => { setCtxOpen(false); setAutoCompactOpen(true); } : undefined} />

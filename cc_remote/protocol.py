@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 61
+PROTOCOL_VERSION = 63
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -2038,11 +2038,10 @@ class ContextReport(_Base):
     # unavailable instead of presenting a fabricated 0% to the user.  ``None``
     # is omitted so older Code reports retain their exact historical shape.
     available: Optional[bool] = None
-    # Claude may fall back to the most recent exact control response or the
-    # newest main-chain assistant usage. Omitted reports retain the historical
-    # exact/control meaning (including all Codex reports).
+    # Native Codex compaction estimates and recent model usage are distinct.
+    # Claude may also fall back to cached control or recent assistant usage.
     source: Optional[
-        Literal["control", "cached_control", "recent_turn"]
+        Literal["control", "cached_control", "recent_turn", "native_estimate"]
     ] = None
     # Work reports keep the engine's real context usage above for honest
     # remaining-capacity calculations, while exposing the fresh-session startup
@@ -2053,8 +2052,8 @@ class ContextReport(_Base):
     session_percentage: Optional[float] = None
     model: Optional[str] = None
     is_auto_compact_enabled: Optional[bool] = None
-    # Claude's effective automatic-compaction boundary and physical context
-    # capacity. They are observations from get_context_usage(), not substitutes
+    # Native automatic-compaction boundary and physical context capacity.
+    # These observations are not substitutes
     # for the desired/applied session control carried by AutoCompact.
     auto_compact_threshold_tokens: Optional[int] = Field(default=None, ge=0)
     raw_max_tokens: Optional[int] = Field(default=None, ge=0)

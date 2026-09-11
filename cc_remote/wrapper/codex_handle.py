@@ -78,6 +78,7 @@ from cc_remote.wrapper.work_prompt import (
     WORK_DEVELOPER_INSTRUCTIONS,
 )
 from cc_remote.wrapper.work_context import recover_codex_context_usage
+from cc_remote.wrapper.codex_context_usage import read_codex_context_estimate
 
 log = logger("cc_remote.wrapper.codex_handle")
 
@@ -1644,6 +1645,7 @@ class CodexHandle:
         self._http_provider_repair_tasks: set[asyncio.Task] = set()
         self._http_provider_repair_stop = asyncio.Event()
         self.last_token_usage: Optional[dict] = None
+        self._context_usage_turn_id: Optional[str] = None
         self.context_window: Optional[int] = None
         self._rollout_context_recovery_attempted = False
         self.app_server_version: Optional[str] = None
@@ -2043,6 +2045,7 @@ class CodexHandle:
         self._compaction_continuation_turn_id = None
         self._discard_managed_compaction_continuation()
         self.last_token_usage = None
+        self._context_usage_turn_id = None
         self.context_window = None
         self._rollout_context_recovery_attempted = False
         self._configured_default_effort = None
@@ -5498,8 +5501,8 @@ class CodexHandle:
         # Real shape (verified, gpt-5.5): tokenUsage = {last:{totalTokens,…},
         # total:{totalTokens,…}, modelContextWindow}. `last.totalTokens` is the most
         # recent model response's usage, not the native compaction estimator.
-        # App-server does not expose that estimator; don't infer it from the
-        # cumulative session sum in `total`, which over-counts context.
+        # Read the native estimate separately, matched to this sample. Never
+        # substitute the cumulative session sum in `total` for context depth.
         if (self.thread_id and self.last_token_usage is None
                 and not self._rollout_context_recovery_attempted):
             recovery_thread_id = self.thread_id
@@ -5535,10 +5538,7 @@ class CodexHandle:
                 self._rollout_context_recovery_attempted = False
         u = self.last_token_usage if isinstance(self.last_token_usage, dict) else {}
         last = u.get("last") if isinstance(u.get("last"), dict) else {}
-        total = u.get("total") if isinstance(u.get("total"), dict) else {}
         used = _nonnegative_int(last.get("totalTokens"))
-        if used is None:
-            used = _nonnegative_int(total.get("totalTokens"))
         # server value (captured in _dispatch) wins; else the config-declared window.
         win = _nonnegative_int(self.context_window)
         if not win and not configured_capacity:
@@ -5547,7 +5547,26 @@ class CodexHandle:
             codex_context_window() if self.codex_home is None
             else codex_context_window(codex_home=self.codex_home)
         ))
-        return {"used_tokens": used, "context_window": win, "raw": u}
+        source = "recent_turn"
+        threshold = None
+        if self.thread_id and used is not None and win:
+            identity = (self._generation, self.thread_id, self.model, self.context_window)
+            estimate = await asyncio.to_thread(
+                read_codex_context_estimate, self.thread_id,
+                codex_home=self.codex_home, last=last, window=win,
+                turn_id=self._context_usage_turn_id,
+            )
+            if (identity != (self._generation, self.thread_id, self.model, self.context_window)
+                    or self.last_token_usage is not u):
+                # A newer sample, compaction or reconnect won the read. Do not
+                # publish either old counter into that new context generation.
+                return {"used_tokens": None, "context_window": self.context_window or 0,
+                        "raw": {}, "source": "recent_turn"}
+            if estimate is not None:
+                used, threshold = estimate.used_tokens, estimate.threshold_tokens
+                source = "native_estimate"
+        return {"used_tokens": used, "context_window": win, "raw": u,
+                "source": source, "auto_compact_threshold_tokens": threshold}
 
     async def reconcile_turn_start(
         self,
@@ -7111,6 +7130,12 @@ class CodexHandle:
             method == "thread/compacted"
             or self._notification_is_context_compaction(m)
         ):
+            self.last_token_usage = None
+            self._context_usage_turn_id = None
+            # Wait for a post-compaction notification. The rollout can still
+            # be flushing, and recovering its old tail would revive the high
+            # pre-compaction gauge immediately after the context was reset.
+            self._rollout_context_recovery_attempted = True
             # This notification has already passed exact thread/turn routing.
             # Freeze its native owner now; a later different turn cannot inherit
             # the continuation right.
@@ -7229,6 +7254,7 @@ class CodexHandle:
             tu = (m.get("params") or {}).get("tokenUsage")
             if isinstance(tu, dict):
                 self.last_token_usage = tu
+                self._context_usage_turn_id = _notification_turn_id(m)
                 # modelContextWindow is the SERVER-authoritative window (e.g. 258400);
                 # keep the last non-null value so get_context_usage always has it.
                 mcw = tu.get("modelContextWindow")

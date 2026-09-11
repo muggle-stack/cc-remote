@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { CodexContext } from "../protocol";
-import { CODEX_CONTEXT_USAGE_NOTE, parseContextCapacity } from "../codex-context";
+import { parseContextCapacity } from "../codex-context";
+import { CODEX_CONTEXT_USAGE_NOTE } from "./ContextPopover";
 
 export default function CodexContextControl({ state, onChange }: {
   state: CodexContext | null; onChange: (value: number | null) => boolean;
