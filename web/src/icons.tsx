@@ -9,6 +9,7 @@ export function EngineIcon({ engine, size = 16 }: { engine: Engine; size?: numbe
 
 const PATHS: Record<string, string> = {
   codex: '<path d="m12 3 9 9-9 9-9-9Z"/>',
+  dsh: '<path d="M3 11a7 7 0 0 1 13-3c2 .2 3-1 4-3 1 3 .5 5-1.5 6.5C18 17 14 19 10 18.5 6 18 3 15 3 11ZM4 13c3 1 5 1 7 0m-1 5 2-3"/><circle cx="7.5" cy="10" r=".8" fill="currentColor" stroke="none"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   image: '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1.5"/><path d="m3 16 5-5 4 4 3-3 6 6"/>',

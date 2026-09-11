@@ -36,7 +36,7 @@ from cc_remote.wrapper.preview_capabilities import PreviewCapabilityStore
 from tests.test_multisession import _mk_ctx, _mk_machine
 
 
-@pytest.mark.parametrize("engine", ["claude", "codex"])
+@pytest.mark.parametrize("engine", ["claude", "codex", "dsh"])
 @pytest.mark.parametrize("foreign_owner", [False, True])
 def test_code_open_reads_os_readable_files_outside_session(
         tmp_path, monkeypatch, engine, foreign_owner):

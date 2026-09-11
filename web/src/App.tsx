@@ -1651,7 +1651,6 @@ export default function App() {
   // `engine` selects the backend (Claude Code / Codex): the whole UI re-skins via
   // data-engine, and the sidebar re-lists that engine's own sessions.
   const engineRef = useRef(engine);
-  const harnessPointerSelectionRef = useRef(false);
   engineRef.current = engine;
   const spaceRef = useRef(space);
   spaceRef.current = space;

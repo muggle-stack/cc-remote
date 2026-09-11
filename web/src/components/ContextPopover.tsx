@@ -85,9 +85,6 @@ export default function ContextPopover(p: Props) {
           {p.report.model && <div className="ctx-pop-foot">{p.report.model}</div>}
         </>
       ) : <div className="ctx-pop-row"><span>上下文窗口</span><span className="ctx-pop-nums">—</span></div>}
-      {p.dsh && p.report?.source === "native_estimate" && <div className="ctx-pop-foot">
-        按 DSH 原生估算显示，随新增内容和上下文压缩更新。
-      </div>}
       {p.codexContext && <>
         <div className="ctx-pop-row"><span>生效压缩阈值</span>
           <span className="ctx-pop-nums">{(p.report?.source === "native_estimate"
