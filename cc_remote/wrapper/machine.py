@@ -1699,12 +1699,23 @@ def _apply_codex_process_clocks(
     """Overlay exact live starts without changing turn lifecycle.
 
     The browser alias and sidecar are both tied to the same rollout inode. A
-    clock therefore proves process presence and its earliest start, but never
-    proves that the turn is still running or that it reached a terminal.
+    clock can refine an opaque summary and its earliest start, but cannot
+    override an exact process-free source segment. Older wrappers could start
+    a steer's clock at RPC acceptance, before its native user item existed.
     """
     if not clocks.has_clocks:
         return
     for turn in turns:
+        if (
+            turn.get("processDetailState") == "none"
+            and turn.get("done") is True
+            and not turn.get("forkPointId")
+        ):
+            # A completed segment without the native terminal/fork belongs to
+            # a steer boundary. An acceptance-time clock cannot contradict its
+            # exact empty source projection. The enclosing task's own clock can
+            # still recover work omitted from an opaque/compacted history tail.
+            continue
         visible_id = turn.get("id")
         client_message_id = turn.get("clientMsgId")
         if not isinstance(client_message_id, str):
@@ -4296,17 +4307,28 @@ class WrapperMachine:
         ):
             return
         binding = ctx.active_turn_binding
-        if binding is None:
+        if (
+            ctx.codex_process_clock_owner is None
+            and binding is not None
+            and ctx.codex_published_steers.get(binding.msg_id) == binding.turn_id
+            and binding.msg_id not in ctx.codex_materialized_steers
+        ):
             return
+        owner = ctx.codex_process_clock_owner or (
+            (binding.msg_id, binding.turn_id) if binding is not None else None
+        )
+        if owner is None:
+            return
+        client_message_id, native_turn_id = owner
         msg_turn_id = getattr(msg, "turn_id", None)
         if (
             isinstance(msg_turn_id, str)
-            and msg_turn_id != binding.turn_id
+            and msg_turn_id != native_turn_id
         ):
             # A late item from another native turn must never start the active
             # browser message's presentation clock.
             return
-        binding_key = (binding.msg_id, binding.turn_id)
+        binding_key = owner
         if ctx.codex_process_clock_binding == binding_key:
             return
         raw_ts = getattr(msg, "ts", None)
@@ -4338,18 +4360,21 @@ class WrapperMachine:
             log.warning(
                 "Codex process-clock rollout lookup failed open",
                 session_id=sid,
-                turn_id=binding.turn_id,
+                turn_id=native_turn_id,
                 error_type=type(exc).__name__,
             )
             return
-        if ctx.active_turn_binding != binding:
+        if ctx.codex_process_clock_owner is not None:
+            if ctx.codex_process_clock_owner != owner:
+                return
+        elif ctx.active_turn_binding != binding:
             return
         if not source_path:
             return
         observation = await self._persist_codex_process_start(
             source_path,
-            binding.msg_id,
-            binding.turn_id,
+            client_message_id,
+            native_turn_id,
             started_ms,
         )
         # Store failure is presentation-only. Suppress one error per binding;
@@ -4361,7 +4386,7 @@ class WrapperMachine:
                 log.debug(
                     "retained earlier Codex process clock",
                     session_id=sid,
-                    turn_id=binding.turn_id,
+                    turn_id=native_turn_id,
                 )
 
     @staticmethod
@@ -4623,6 +4648,19 @@ class WrapperMachine:
             and previous.client_message_id != proof.client_message_id
         ):
             return False
+        if (
+            proof.kind == "steer"
+            and proof.client_message_id not in ctx.codex_materialized_steers
+            and ctx.active_turn_binding is not None
+            and ctx.active_turn_binding.turn_id == proof.expected_turn_id
+        ):
+            ctx.codex_materialized_steers[proof.client_message_id] = None
+            while len(ctx.codex_materialized_steers) > self.CODEX_PUBLISHED_STEER_IDS:
+                oldest = next(iter(ctx.codex_materialized_steers))
+                ctx.codex_materialized_steers.pop(oldest)
+            ctx.codex_process_clock_owner = (
+                proof.client_message_id, proof.expected_turn_id,
+            )
         pending_identities[proof.native_message_id] = proof
         while len(pending_identities) > self.CODEX_PUBLISHED_STEER_IDS:
             pending_identities.pop(next(iter(pending_identities)))
@@ -9956,6 +9994,20 @@ class WrapperMachine:
         if isinstance(msg, (TurnBinding, TurnSteered)):
             if msg.seq is None:
                 return
+            if ctx.engine == "codex":
+                accepted_remote_steer = (
+                    isinstance(msg, TurnSteered)
+                    and ctx.codex_published_steers.get(msg.msg_id) == msg.turn_id
+                    and msg.msg_id not in ctx.codex_materialized_steers
+                )
+                if not accepted_remote_steer:
+                    ctx.codex_process_clock_owner = (msg.msg_id, msg.turn_id)
+                elif (ctx.codex_process_clock_owner is None
+                      and ctx.active_turn_binding is not None):
+                    previous = ctx.active_turn_binding
+                    ctx.codex_process_clock_owner = (
+                        previous.msg_id, previous.turn_id,
+                    )
             ctx.active_turn_binding = ActiveTurnBinding(
                 msg_id=msg.msg_id,
                 turn_id=msg.turn_id,
@@ -9967,6 +10019,7 @@ class WrapperMachine:
             isinstance(msg, StateEvent) and msg.state == "idle"
         ):
             ctx.active_turn_binding = None
+            ctx.codex_process_clock_owner = None
 
     @staticmethod
     def _codex_terminal_fence_from_event(
@@ -22525,6 +22578,7 @@ class WrapperMachine:
                 await self._apply_codex_steer_user_identity(ctx, proof)
         ctx.codex_uncertain_steer = None
         ctx.codex_published_steers.clear()
+        ctx.codex_materialized_steers.clear()
         directories = ctx.codex_steer_attachment_dirs
         if not directories:
             return
@@ -22549,7 +22603,9 @@ class WrapperMachine:
         published.pop(event.msg_id, None)
         published[event.msg_id] = event.turn_id
         while len(published) > self.CODEX_PUBLISHED_STEER_IDS:
-            published.pop(next(iter(published)))
+            oldest = next(iter(published))
+            published.pop(oldest)
+            ctx.codex_materialized_steers.pop(oldest, None)
 
     async def _confirm_uncertain_codex_steer(
         self, ctx: SessionContext, raw: dict,

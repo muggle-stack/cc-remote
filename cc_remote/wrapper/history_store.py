@@ -60,7 +60,9 @@ from cc_remote.wrapper.usage_limit import is_usage_limit_failure
 # v35 preserves task_complete.error and binds assistant-only native turns.
 # v36 restores explicit usage-limit failures and their native retry dates.
 # v37 restores reviewed policy-refusal copy across both branch histories.
-_SCHEMA_VERSION = 37
+# Rebuild pages which promoted an RPC-accepted steer's presentation clock to
+# process presence before the native user segment existed.
+_SCHEMA_VERSION = 38
 _FINGERPRINT_SAMPLE_BYTES = 64 * 1024
 _DEFAULT_MAX_ENTRIES = 128
 _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
@@ -1281,6 +1283,11 @@ class HistoryIndexStore:
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
             current = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if current in range(10, 38):
+                # RPC-accepted steers could cache a phantom process. Invalidate
+                # only derived Codex narrative; retain other engines and assets.
+                for table in ("history_pages", "history_turn_details"):
+                    connection.execute(f"DELETE FROM {table} WHERE engine='codex'")
             if current in range(10, 37):
                 # Both earlier branch histories may cache generic policy errors.
                 # Keep source bytes, other engines and binary assets intact.
@@ -1400,8 +1407,8 @@ class HistoryIndexStore:
                 for table in ("history_pages", "history_turn_details"):
                     connection.execute(
                         f"DELETE FROM {table} WHERE engine='codex'")
-            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36):
-                # The independent v22-v37 invalidations above suffice.
+            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37):
+                # The independent v22-v38 invalidations above suffice.
                 pass
             elif current not in (0, _SCHEMA_VERSION):
                 # v9 changes the invariant of history_turn_details: those rows

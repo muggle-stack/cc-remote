@@ -1490,6 +1490,61 @@ test("async question dialog retains an IME draft when control becomes read-only"
   expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
 });
 
+for (const staleProcess of [false, true]) {
+test(`turn regressions compaction steer clears phantom detail failure across history and reload (${staleProcess ? "foreign process" : "clock only"})`, async ({ page }, testInfo) => {
+  const seedTurns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = [{
+    id: "compact-original", prompt: "部署一下", done: true,
+    processDetailState: "present", detailReasons: ["process"], detailEventCount: 1,
+    blocks: [{ kind: "process", processKind: "compaction", item_id: "original-compact",
+      phase: "end", status: "succeeded", title: "上下文已压缩", done: true }],
+  }, {
+    id: "native-latest", clientMsgId: "latest", prompt: "最新的", done: true,
+    forkPointId: "compact-native-task",
+    blocks: [], processDetailState: "present", detailReasons: ["process"],
+    detailEventCount: 6, detailLoaded: true,
+    processStartedTs: 20_000, processDoneTs: 127_000,
+  }, {
+    id: "native-flash", clientMsgId: "flash", forkPointId: "compact-native-task",
+    prompt: "ds v4.1 flash适配了吗？", done: false,
+    blocks: [{ kind: "text", channel: "commentary", message_id: "flash-commentary",
+      text: "正在核对模型目录", done: false }],
+  }];
+  if (staleProcess) seedTurns[1].blocks = [...seedTurns[0].blocks];
+  let buildSeq = 1;
+  const historyReply = (): PanelRelayEvent<Extract<ServerEvent, { type: "history" }>> => ({
+    type: "history", session_id: "layout-parent", sid: "layout-parent",
+    revision: "layout-history", generation: "layout-generation", detail: "summary",
+    events: [], turns: seedTurns, has_more: false, in_progress: true, live_seq: 0,
+    newest_id: "native-flash", build_seq: buildSeq,
+  });
+  const relay = await mockRightPanelRelay(page, { historyReply });
+  await page.goto("/");
+  const latest = page.locator('[data-turn-id="native-latest"]');
+  await expect(latest.locator(".turn-process-head")).toBeVisible();
+  await latest.locator(".turn-process-head").click();
+  await expect(latest.getByText(staleProcess
+    ? "上下文已压缩" : "详细过程未完整返回，请重试")).toBeVisible();
+  seedTurns[1] = { ...seedTurns[1], processDetailState: "none", detailReasons: [],
+    detailEventCount: 0, detailLoaded: false, processStartedTs: undefined,
+    processDoneTs: undefined, forkPointId: undefined, blocks: [] };
+  buildSeq += 1;
+  relay.emit(historyReply());
+  for (let pass = 0; pass < 2; pass++) {
+    if (pass) await page.reload();
+    await expect(latest.getByText("最新的", { exact: true })).toBeVisible();
+    await expect(latest.locator(".turn-process-head")).toHaveCount(0);
+    await expect(page.getByText("详细过程未完整返回，请重试")).toHaveCount(0);
+    await expect(page.getByText("正在核对模型目录", { exact: true })).toBeVisible();
+    await expect(page.locator('[data-turn-id="native-flash"] .turn-process-head'))
+      .toContainText("正在处理");
+    await expect(page.locator('[data-turn-id="compact-original"] .turn-process-head')).toHaveCount(1);
+  }
+  await page.screenshot({ path: testInfo.outputPath("compaction-steer-repaired.png") });
+  expect(relay.commands.filter(command => ["query", "steer", "interrupt"].includes(String(command.type))))
+    .toHaveLength(0);
+});
+}
+
 for (const processDetailState of ["none", "unknown"] as const) {
   test(`direct reply summary has no empty detail entry across refresh (${processDetailState})`, async ({ page }) => {
     const relay = await mockRightPanelRelay(page, { seedTurns: [{

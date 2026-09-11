@@ -4398,7 +4398,7 @@ function reduceEvent(
             .map((alias) => loadedDetail.get(alias))
             .find((candidate): candidate is Turn => !!candidate);
           if (!detail) return turn;
-          const merged = mergeAuthoritativeTurnDetail(turn, detail);
+          const merged = mergeAuthoritativeTurnDetail(turn, detail, built.turns);
           // A completed row may be the neutral-steer segment whose Plan spans
           // the following clarification, but only a current running History
           // (or a newer live frame which raced this page) may keep it open. An
