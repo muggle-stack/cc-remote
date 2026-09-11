@@ -34,7 +34,7 @@ CLAUDE_DEFAULT_AUTO_COMPACT_MODE = "inherit"
 _V3_FORCED_AUTO_COMPACT_TOKENS = 500_000
 _NATIVE_AUTO_COMPACT_POLICY = "native"
 
-_MODEL_ID = re.compile(r"^claude-[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,254}$")
+_MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]/-]{0,254}$")  # local patch: allow provider-native ids, not only claude-*
 _MAX_ENTRIES = 4096
 _MAX_FILE_BYTES = 1024 * 1024
 _MAX_RECORD_BYTES = 16 * 1024 * 1024
