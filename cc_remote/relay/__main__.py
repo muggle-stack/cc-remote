@@ -11,6 +11,14 @@ from cc_remote.relay.server import create_app
 log = logger("cc_remote.relay")
 
 
+def _forwarded_allow_ips() -> str:
+    # local patch: extra trusted proxy IPs (e.g. a same-host Caddy reached via
+    # a tailnet address) come from env, comma-separated.
+    import os
+    extra = os.environ.get("CC_FORWARDED_ALLOW_IPS", "").strip()
+    return "127.0.0.1,::1" + ("," + extra if extra else "")
+
+
 def main() -> None:
     cfg = relay_config()
     validate_relay_config(cfg)
@@ -26,7 +34,7 @@ def main() -> None:
         log_config=uvicorn_log_config(),
         access_log=False,
         proxy_headers=True,
-        forwarded_allow_ips="127.0.0.1,::1",
+        forwarded_allow_ips=_forwarded_allow_ips(),  # local patch: env-extensible
         ws_max_size=cfg.ws_max_size_bytes,
         ws_max_queue=2,
     )
