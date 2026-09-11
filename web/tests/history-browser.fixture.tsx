@@ -2286,25 +2286,35 @@ function GoalUiFixture({ status, withPlan, hidden, longGoal, newerTurn,
   newerTurn: boolean;
   longPlan: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const params = new URLSearchParams(window.location.search);
+  const engine = params.get("engine") === "claude" ? "claude" : "codex";
+  const [open, setOpen] = useState(params.has("goal-open"));
   const [revealed, setRevealed] = useState(!hidden && status !== "none");
   const [planDetailRequests, setPlanDetailRequests] = useState(0);
   const loading = status === "loading";
   const goalStatus = status === "blocked" ? "blocked"
     : status === "complete" ? "complete" : "active";
-  const goal: ThreadGoal | null = loading || status === "none" ? null : {
+  const [goal, setGoal] = useState<ThreadGoal | null>(loading || status === "none" ? null : {
     threadId: "goal-fixture-thread",
     objective: longGoal
       ? "按照计划完成所有功能模块；每个模块验证无误后分别提交并推送，确保核心行为一致。".repeat(8)
       : "完成 protocol v30 发布并验证所有终端同步升级",
     status: goalStatus,
-    engine: "codex",
-    tokenBudget: 100_000,
+    engine,
+    iterations: engine === "claude" ? 3 : undefined,
+    tokenBudget: engine === "codex" ? 100_000 : null,
     tokensUsed: 37_000,
     timeUsedSeconds: 321,
     updatedAt: 1_800_000_000,
     lastReason: "已完成协议兼容性检查，正在验证三端同步状态。",
-  };
+  });
+  useEffect(() => {
+    document.documentElement.dataset.engine = engine;
+    document.documentElement.dataset.theme = new URLSearchParams(window.location.search).get("theme") ?? "light";
+    const refresh = () => setGoal(current => current ? { ...current, tokensUsed: current.tokensUsed + 1000, updatedAt: Date.now() / 1000 } : null);
+    window.addEventListener("goal-fixture-refresh", refresh);
+    return () => window.removeEventListener("goal-fixture-refresh", refresh);
+  }, [engine]);
   const plan: TurnPlanProgress | null = withPlan ? {
     turnId: "goal-fixture-turn",
     block: {
@@ -2350,12 +2360,18 @@ function GoalUiFixture({ status, withPlan, hidden, longGoal, newerTurn,
         <div data-testid="goal-fixture-content" style={{ flex: 1 }} />
       </div>
       <output data-testid="plan-detail-requests">{planDetailRequests}</output>
-      <GoalPanel engine="codex" goal={goal} revealed={revealed} open={open}
+      <GoalPanel engine={engine} goal={goal} revealed={revealed} open={open}
         loading={loading} completedGoalRetired={completedGoalRetired} plan={plan}
         onLoadPlanDetail={() => setPlanDetailRequests((value) => value + 1)}
         onOpen={() => setOpen(true)} onClose={() => setOpen(false)}
-        onDismiss={() => setRevealed(false)} onSave={() => setOpen(false)}
-        onClear={() => setRevealed(false)} />
+        onDismiss={() => setRevealed(false)} onSave={async (objective, nextStatus, budget) => {
+          if (params.has("goal-fail")) throw new Error("原生目标暂时无法更新，输入已保留。");
+          setGoal({ ...goal, threadId: "goal-fixture-thread", engine, objective, status: nextStatus,
+            tokenBudget: budget, tokensUsed: goal?.tokensUsed ?? 0, timeUsedSeconds: goal?.timeUsedSeconds ?? 0 });
+          setRevealed(true);
+        }}
+        onStatus={nextStatus => setGoal(current => current ? { ...current, status: nextStatus } : null)}
+        onClear={() => { setGoal(null); setRevealed(false); setOpen(false); }} />
       <div className="composer" data-testid="goal-fixture-composer"
         style={{ height: 48 }}>
         <div className="composer-in" />

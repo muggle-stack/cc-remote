@@ -16,6 +16,8 @@ const PATHS: Record<string, string> = {
   dots: '<circle cx="12" cy="5" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="12" cy="19" r="1.4"/>',
   send: '<path d="M12 19V6M6 12l6-6 6 6"/>',
   stop: '<rect x="6" y="6" width="12" height="12" rx="2.5"/>',
+  pause: '<path d="M8 5v14M16 5v14"/>',
+  'arrow-right': '<path d="M5 12h14m-5-5 5 5-5 5"/>',
   bolt: '<path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z"/>',
   queue: '<path d="M4 7h16M4 12h16M4 17h10"/>',
   term: '<path d="M5 8l4 4-4 4M12 16h7"/>',

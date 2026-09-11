@@ -23311,9 +23311,14 @@ class WrapperMachine:
                     )
                     if isinstance(query_result, Error):
                         ctx.sdk.restore_goal_state(previous)
+                        query_result = query_result.model_copy(update={
+                            "request_id": getattr(cmd, "cmd_id", None),
+                            "to": getattr(cmd, "client_id", None),
+                        })
+                        await self._emit(ctx, query_result)
                         return query_result
                     ctx.goal_visible = True
-                    event = GoalState(goal=goal)
+                    event = GoalState(goal=goal, request_id=getattr(cmd, "cmd_id", None))
                     await self._emit(ctx, event)
                     return event
                 except Exception as exc:
@@ -23331,6 +23336,14 @@ class WrapperMachine:
             # cannot become a second writer. launch_lock also makes an immediate
             # interrupt wait until the authoritative automatic turn id is known.
             async with ctx.launch_lock:
+                if (ctx.state == "running" and ctx.codex_spontaneous_turn_id is not None
+                        and getattr(cmd, "objective", None) is None
+                        and getattr(cmd, "token_budget", None) is None
+                        and getattr(cmd, "status", None) in {"paused", "complete"}):
+                    goal = await ctx.sdk.set_goal(status=cmd.status)
+                    event = GoalState(goal=goal, request_id=getattr(cmd, "cmd_id", None))
+                    await self._emit(ctx, event)
+                    return event
                 if ctx.state != "idle":
                     # The browser may retry after receiving GoalState but before
                     # its CommandAck, or two taps may enqueue equivalent command
@@ -23339,7 +23352,7 @@ class WrapperMachine:
                     # false failure banner even though the Goal is active.
                     applied = self._codex_goal_update_already_applied(ctx, cmd)
                     if applied is not None:
-                        event = GoalState(goal=applied)
+                        event = GoalState(goal=applied, request_id=getattr(cmd, "cmd_id", None))
                         await self._emit(ctx, event)
                         return event
                     error = Error(
@@ -23382,7 +23395,7 @@ class WrapperMachine:
                     ctx.codex_goal_mutation = None
                     if ctx.state != "idle":
                         await self._set_idle_after_managed_turn(ctx)
-            event = GoalState(goal=goal)
+            event = GoalState(goal=goal, request_id=getattr(cmd, "cmd_id", None))
             await self._emit(ctx, event)
             return event
         except Exception as exc:
@@ -23391,7 +23404,7 @@ class WrapperMachine:
                 mutation = ctx.codex_goal_mutation
                 if mutation is not None:
                     mutation.applied = True
-                event = GoalState(goal=applied)
+                event = GoalState(goal=applied, request_id=getattr(cmd, "cmd_id", None))
                 await self._emit(ctx, event)
                 return event
             automatic_turn_live = bool(
@@ -23432,9 +23445,14 @@ class WrapperMachine:
                     )
                     if isinstance(query_result, Error):
                         ctx.sdk.restore_goal_state(previous)
+                        query_result = query_result.model_copy(update={
+                            "request_id": getattr(cmd, "cmd_id", None),
+                            "to": getattr(cmd, "client_id", None),
+                        })
+                        await self._emit(ctx, query_result)
                         return query_result
                     ctx.goal_visible = False
-                    event = GoalState(goal=None)
+                    event = GoalState(goal=None, request_id=getattr(cmd, "cmd_id", None))
                     await self._emit(ctx, event)
                     return event
                 except Exception as exc:
@@ -23464,7 +23482,7 @@ class WrapperMachine:
             if (ctx.codex_spontaneous_turn_id is not None
                     and ctx.state == "running"):
                 await self._handle_interrupt(Interrupt(sid=ctx.key))
-            event = GoalState(goal=None)
+            event = GoalState(goal=None, request_id=getattr(cmd, "cmd_id", None))
             await self._emit(ctx, event)
             return event
         except Exception as exc:

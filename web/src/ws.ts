@@ -8,7 +8,7 @@
 // no cursor reset, no re-hello (background turns keep streaming). All outbound
 // commands that target a session stamp `sid: focusedSid`.
 import type {
-  AutoCompactMode, DiffTheme, DshReadKind, Engine, GoalStatus, QueryFile,
+  AutoCompactMode, DiffTheme, DshGoalAction, DshReadKind, Engine, GoalStatus, QueryFile,
   QueryImg, ServerEvent, SessionControl, Space,
 } from "./protocol.ts";
 import {
@@ -785,6 +785,10 @@ export class RelayWs {
     return this.sendTracked({ v: PROTOCOL_VERSION, type: "act_dsh_subagent", ts: nowTs(), sid, target_sid, action, prompt });
   }
 
+  sendActDshGoal(sid: string, action: DshGoalAction): string | null {
+    return this.sendTracked({ v: PROTOCOL_VERSION, type: "act_dsh_goal", ts: nowTs(), sid, ...action });
+  }
+
   sendDownloadDsh(sid: string, export_id?: string, offset = 0, cancel = false): string | null {
     return this.sendTracked({ v: PROTOCOL_VERSION, type: "download_dsh", ts: nowTs(), sid, export_id, offset, cancel });
   }
@@ -1246,16 +1250,16 @@ export class RelayWs {
     });
   }
 
-  sendSetGoal(objective: string | null, status: GoalStatus | null, tokenBudget: number | null): void {
-    const obj: Record<string, unknown> = { v: PROTOCOL_VERSION, type: "set_goal", ts: nowTs(), ...this.sidObj() };
+  sendSetGoal(objective: string | null, status: GoalStatus | null, tokenBudget: number | null, sid?: string): string | null {
+    const obj: Record<string, unknown> = { v: PROTOCOL_VERSION, type: "set_goal", ts: nowTs(), ...(sid ? { sid } : this.sidObj()) };
     if (objective !== null) obj.objective = objective;
     if (status !== null) obj.status = status;
     if (tokenBudget !== null) obj.token_budget = tokenBudget;
-    this.send(obj);
+    return this.sendTracked(obj);
   }
 
-  sendClearGoal(): void {
-    this.send({ v: PROTOCOL_VERSION, type: "clear_goal", ts: nowTs(), ...this.sidObj() });
+  sendClearGoal(sid?: string): string | null {
+    return this.sendTracked({ v: PROTOCOL_VERSION, type: "clear_goal", ts: nowTs(), ...(sid ? { sid } : this.sidObj()) });
   }
 
   sendDismissGoalTo(sid: string, goalId: string): string | null {

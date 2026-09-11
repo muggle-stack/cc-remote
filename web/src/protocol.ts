@@ -522,6 +522,8 @@ export type DshReadKind = "search" | "references" | "subagents" | "conversation"
 export interface ReadDsh extends Base { type: "read_dsh"; cmd_id: string; sid: string; kind: DshReadKind; query?: string; target_sid?: string | null; before_seq?: number | null }
 export interface ActDshSubagent extends Base { type: "act_dsh_subagent"; cmd_id: string; sid: string; target_sid: string; action: "queue" | "steer" | "stop"; prompt?: string }
 export interface DownloadDsh extends Base { type: "download_dsh"; cmd_id: string; sid: string; export_id?: string | null; offset?: number; cancel?: boolean }
+export interface ActDshGoal extends Base { type: "act_dsh_goal"; cmd_id: string; sid: string; action: "create" | "edit" | "pause" | "resume" | "complete" | "clear"; goal_id?: string | null; revision?: number | null; objective?: string | null; max_rounds?: number | null }
+export type DshGoalAction = Pick<ActDshGoal, "action" | "goal_id" | "revision" | "objective" | "max_rounds">;
 export interface DshJob { id: string; label: string; status: "running" | "stopping" | "completed" | "killed" | "failed"; detail: string }
 export interface DshItem { id: string; title: string; detail: string; sid?: string | null; path?: string | null; mention?: string | null; state: string; mode?: "one-shot" | "continuable" | null; has_children: boolean; controllable?: boolean }
 export interface DshReadResult extends Base { type: "dsh_read_result"; request_id: string; kind: DshReadKind; items: DshItem[]; next_seq?: number | null; has_more: boolean; available: boolean; error?: string | null }
@@ -726,7 +728,7 @@ export type ServerEvent = FilesListed | CodexContext
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 64;
+export const PROTOCOL_VERSION = 65;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

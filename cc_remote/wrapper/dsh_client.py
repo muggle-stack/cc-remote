@@ -38,7 +38,8 @@ _RPC_ENDPOINTS = frozenset({
     "session/page", "session/attachment", "session/updateQueue",
     "session/rename", "session/fork", "agentPresets/list",
     "commands/list", "commands/execute", "skills/list", "$events/result",
-    "fileUploads/upload", "goals/get", "session/search", "fileReferences/list",
+    "fileUploads/upload", "goals/get", "goals/create", "goals/edit", "goals/pause",
+    "goals/resume", "goals/complete", "goals/clear", "session/search", "fileReferences/list",
     "sessionReferenceResolver/candidates", "subagents/list", "subagents/prompt",
     "subagents/interruptByParent", "workspace/archiveSession", "pluginInventory/list",
 })
@@ -158,6 +159,11 @@ def _remote_error(value: object) -> DshError:
             and "session search is disabled" in str(value.get("message", ""))):
         return DshError("search_disabled", "DSH 尚未开启全文搜索，请启用会话索引。")
     messages = {
+        "GOAL_STALE_REVISION": "目标已在其他页面更新，请重新打开编辑后提交。输入内容已保留。",
+        "GOAL_ALREADY_EXISTS": "已有进行中的目标，请编辑当前目标，或先清除后新建。",
+        "GOAL_NOT_FOUND": "当前目标已清除，请重新打开目标窗口。",
+        "GOAL_INVALID_MAX_ROUNDS": "轮次上限必须是大于 0 的整数。",
+        "GOAL_INVALID_TRANSITION": "目标状态已变化，或轮次已用完，请查看最新状态后继续。",
         "subagent/parent-unavailable": "父会话尚未运行，当前只能查看子代理记录。",
         "subagent/not-resumable": "该子代理当前只支持查看。",
         "subagent/unauthorized": "该子代理不属于当前会话。",
@@ -248,7 +254,7 @@ class DshClient:
     async def history_snapshot(
         self, session_id: str, *, before_seq: int | None = None,
         through_seq: int | None = None, max_messages: int = 16,
-        query: str | None = None, deliverables: bool = False,
+        query: str | None = None, deliverables: bool = False, commands: bool = False,
     ) -> dict:
         """Obtain an exact cold page via the optional read-only Host plugin.
 
@@ -272,6 +278,8 @@ class DshClient:
             params["query"] = query
         if deliverables:
             params["deliverables"] = "1"
+        if commands:
+            params["commands"] = "1"
         if before_seq is not None:
             params["beforeSeq"] = before_seq
         if through_seq is not None:

@@ -58,6 +58,7 @@ import {
   codexProfileIdForSession,
   codexProfilePresentation,
 } from "./codex-profile-presentation";
+import type { GoalApi } from "./goal-api";
 import { parseGoalCommand } from "./goal-command";
 import {
   BTW_PANEL_SCOPES_KEY, btwPanelScopeKey, readBtwPanelScopes,
@@ -473,6 +474,13 @@ export default function App() {
   stateRef.current = state;
   const wsRef = useRef<RelayWs | null>(null);
   const [dshApi] = useState(() => new DshApi(() => wsRef.current));
+  const goalApiRef = useRef<GoalApi | null>(null);
+  const getGoalApi = useCallback(async () => {
+    const transport = wsRef.current;
+    const { GoalApi } = await import("./goal-api");
+    if (!transport || transport !== wsRef.current) throw new Error("连接已切换，请重试。");
+    return goalApiRef.current ??= new GoalApi(() => wsRef.current);
+  }, []);
   const [dshPanel, setDshPanel] = useState<{ sid: string; scope: string; selection: DshPanelSelection } | null>(null);
   const [permissionProfileRequests, setPermissionProfileRequests] =
     useState<Record<string, string>>({});
@@ -966,6 +974,7 @@ export default function App() {
   ) as Record<string, CompletionBadgeKind>;
   const activeScopeKey = sessionScopeKey(machineId, engine, space);
   useEffect(() => () => dshApi.reset(), [activeScopeKey, dshApi]);
+  useEffect(() => () => goalApiRef.current?.reset(), [activeScopeKey]);
   const activeWorkDashboard = workDashboardMachineId === machineId
     ? workDashboards[engine] ?? null
     : null;
@@ -2198,6 +2207,7 @@ export default function App() {
           if (!acceptsLifecycle()) return;
           if (turnFileRequestsRef.current.accept(msg)) return;
           if (dshApi.accept(msg)) return;
+          if (goalApiRef.current?.accept(msg)) return;
           const settlesContextRequest = !!(
             (msg.type === "context_report"
                 || (msg.type === "error" && msg.code !== "wrapper_offline"))
@@ -3676,6 +3686,7 @@ export default function App() {
           if (s !== "connected") {
             turnFileRequestsRef.current.clear();
             dshApi.reset();
+            goalApiRef.current?.reset();
             skillCatalogRequestsRef.current?.resetReads();
             // The fork result is authoritative only for this live connection.
             // A reconnect will obtain a fresh native SessionList, so do not
@@ -5025,6 +5036,10 @@ export default function App() {
   };
   const runGoal = (args: string) => {
     if (!focusedSid || !focusedGoalScopeKey || archivedBrowse) return;
+    if (focusedEngine === "dsh") {
+      setGoalUi({ revealed: true, open: true, loading: false });
+      return;
+    }
     const command = parseGoalCommand(args, focusedEngine);
     rememberFocusedGoalUi();
     if (command.kind === "clear") {
@@ -5848,12 +5863,15 @@ export default function App() {
               ? <span className="goal-suspense" role="status"
                   aria-label={planProgress ? "正在加载计划进度" : "正在加载 Goal"} />
               : null}>
-              {focusedEngine === "dsh" && rt.dsh?.goal && <DshGoalPanel key={focusedSid}
-                goal={rt.dsh.goal} disabled={!state.wrapperOnline || !rt.dsh.connected}
-                onCommand={line => { if (focusedSid) wsRef.current?.sendDshControl(focusedSid, "command", line); }} />}
-              <GoalPanel engine={focusedEngine} goal={rt.goal}
+              {focusedEngine === "dsh" && !archivedBrowse && <DshGoalPanel key={focusedGoalScopeKey}
+                goal={rt.dsh?.goal ?? null} open={!!goalUi?.open}
+                disabled={!state.wrapperOnline || !rt.dsh?.connected || !rt.dsh.commands.some(c => c.name === "goal")}
+                onOpen={() => setGoalUi({ open: true })} onClose={() => setGoalUi({ open: false })}
+                onAction={action => dshApi.goal(focusedSid!, action)} />}
+              {focusedEngine !== "dsh" && <GoalPanel engine={focusedEngine} goal={rt.goal}
                 revealed={!archivedBrowse && !!goalUi?.revealed}
                 open={!archivedBrowse && !!goalUi?.open}
+                key={focusedGoalScopeKey}
                 loading={!!goalUi?.loading}
                 completedGoalRetired={completedGoalRetired}
                 plan={planProgress}
@@ -5887,18 +5905,18 @@ export default function App() {
                   }
                   setGoalUi({ revealed: false, open: false, loading: false });
                 }}
-                onSave={(objective, status, budget) => {
+                disabled={!state.wrapperOnline || state.connState !== "connected"}
+                onStatus={async status => (await getGoalApi()).save(focusedSid!, null, status, null)}
+                onSave={async (objective, status, budget) => {
                   rememberFocusedGoalUi();
-                  wsRef.current?.sendSetGoal(
-                    objective, status,
+                  await (await getGoalApi()).save(focusedSid!, objective,
+                    focusedEngine === "claude" ? "active" : status,
                     focusedEngine === "codex" ? budget : null);
-                  setGoalUi({ revealed: true, open: false, loading: false });
                 }}
-                onClear={() => {
+                onClear={async () => {
                   rememberFocusedGoalUi();
-                  wsRef.current?.sendClearGoal();
-                  setGoalUi({ revealed: false, open: false, loading: false });
-                }} />
+                  await (await getGoalApi()).clear(focusedSid!);
+                }} />}
             </Suspense>
 
             <Composer

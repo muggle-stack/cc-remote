@@ -1,0 +1,101 @@
+.goal-card.sheet { padding:0; overflow:visible; right:auto; bottom:auto; height:fit-content;
+  display:flex; flex-direction:column; border:1px solid var(--border-strong); border-radius:30px;
+  background:var(--surface); box-shadow:0 24px 100px #0005; outline:none;
+  transform:translate(-50%,-50%); }
+.goal-card .goal-sheet-head { display:flex; align-items:center; gap:10px; padding:25px 26px 14px;
+  border:0; background:none; flex:none; }
+.goal-card .goal-sheet-icon { display:grid; place-items:center; width:28px; height:28px;
+  flex:none; padding:0; border:0; background:none; color:var(--accent); }
+.goal-card .goal-sheet-head b { font:650 15px/1.4 var(--sans); color:var(--text); }
+.goal-card .goal-card-status { display:flex; align-items:center; gap:5px; margin-left:auto;
+  color:var(--dim); font-size:11px; white-space:nowrap; }
+.goal-card-status i { width:5px; height:5px; border-radius:50%; background:var(--accent); }
+.goal-card .goal-icon-button { display:grid; place-items:center; width:34px; height:34px; padding:0;
+  flex:none; border-radius:50%; color:var(--dim); background:var(--raised); }
+.goal-card .goal-sheet-head > button { margin-left:auto; }
+.goal-card .goal-card-status + button { margin-left:4px; }
+.goal-card button:hover { background:var(--accent-weak); }
+.goal-card button:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+.goal-card button:disabled { opacity:.45; cursor:default; }
+.goal-card .goal-sheet-scroll { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain;
+  padding:14px 30px 24px; scrollbar-width:thin; }
+.goal-card .goal-editor { display:block; }
+.goal-card .goal-editor textarea { display:block; width:100%; box-sizing:border-box; min-height:145px;
+  border:0; border-radius:18px; padding:10px 2px; background:transparent; outline:none; box-shadow:none;
+  color:var(--text); font:500 21px/1.7 var(--sans); font-size:21px !important; resize:none; }
+.goal-card .goal-editor textarea::placeholder { color:var(--faint); font-weight:400; }
+.goal-card .goal-editor textarea:focus { box-shadow:none; }
+.goal-card .goal-hint { margin:12px 0 0; color:var(--dim); font-size:12px; line-height:1.6; }
+.goal-card .goal-objective { margin:3px 0 24px; color:var(--text); font-size:20px;
+  font-weight:500; line-height:1.65; white-space:pre-wrap; overflow-wrap:anywhere; }
+.goal-card .goal-sheet-actions { display:flex; align-items:center; justify-content:flex-end; gap:10px;
+  flex:none; position:relative; padding:18px 26px 24px; border:0; background:none; }
+.goal-card .goal-sheet-actions::before { content:""; position:absolute; top:0; left:30px; right:30px;
+  height:1px; background:var(--divider); }
+.goal-card .goal-sheet-actions button { min-height:40px; padding:9px 17px; border-radius:999px;
+  display:inline-flex; align-items:center; justify-content:center; gap:7px; font-size:13px; font-weight:550; }
+.goal-card .goal-sheet-actions .goal-icon-button { min-width:36px; min-height:36px; width:36px; height:36px; padding:0; }
+.goal-card .goal-primary { color:var(--surface); background:var(--accent); min-width:105px; }
+.goal-card .goal-primary:hover { background:var(--accent); filter:brightness(1.08); }
+.goal-card .goal-cancel,.goal-card .goal-edit { color:var(--dim); background:transparent; }
+.goal-card .goal-edit { margin-right:auto; padding-left:3px; }
+.goal-card .goal-secondary { border:1px solid var(--border-strong); color:var(--text); background:none; }
+.goal-card .goal-budget { margin:20px 0 4px; }
+.goal-card .goal-budget > div { display:flex; align-items:center; justify-content:space-between; gap:10px;
+  color:var(--dim); font-size:12px; }
+.goal-card .goal-budget b { font:500 14px var(--mono); color:var(--text); }
+.goal-card .goal-budget em { font-style:normal; color:var(--dim); }
+.goal-card progress { display:block; width:100%; height:6px; margin:12px 0; border:0; border-radius:999px;
+  appearance:none; overflow:hidden; background:var(--border); accent-color:var(--accent); }
+.goal-card progress::-webkit-progress-bar { background:var(--border); border-radius:999px; }
+.goal-card progress::-webkit-progress-value { background:var(--accent); border-radius:999px; }
+.goal-card progress::-moz-progress-bar { background:var(--accent); border-radius:999px; }
+.goal-card .goal-budget > small { display:block; text-align:right; color:var(--dim); font-size:11px; }
+.goal-card .goal-stats { display:flex; justify-content:space-between; gap:12px; margin:22px 0 0;
+  padding:15px 18px; border:0; border-radius:19px; background:var(--raised); }
+.goal-card .goal-stats > div { display:flex; flex-direction:column; gap:5px; border:0; padding:0; min-width:0; }
+.goal-card .goal-stats small { color:var(--dim); font-size:11px; }
+.goal-card .goal-stats b { color:var(--text); font:550 15px var(--mono); white-space:nowrap; }
+.goal-card .goal-last-check { margin:22px 0 0; padding:0; background:none; border:0; }
+.goal-card .goal-last-check small { display:block; margin-bottom:9px; color:var(--dim); font-size:11px; }
+.goal-card .goal-last-check p { margin:0; padding:14px 17px; background:var(--accent-weak); border-radius:18px;
+  color:var(--text); font-size:13px; line-height:1.65; white-space:pre-wrap; overflow-wrap:anywhere; }
+.goal-card .goal-error { margin:16px 0 0; padding:11px 14px; color:var(--danger); background:var(--danger-weak);
+  border-radius:16px; font-size:12px; line-height:1.5; }
+.goal-card .goal-error p { margin:8px 0; color:var(--dim); }
+.goal-card .goal-conflict-retry { padding:5px 0; border-radius:8px; color:var(--accent-ink); font-size:12px; }
+.goal-card .goal-plan-section { padding-bottom:18px; margin-bottom:20px; }
+.goal-card .goal-plan-entry { border-radius:18px; }
+.goal-limit { position:relative; margin-right:auto; }
+.goal-card .goal-limit-trigger { border:1px solid var(--border-strong); background:none; color:var(--dim);
+  white-space:nowrap; padding-left:12px; padding-right:12px; }
+.goal-limit-picker { position:absolute; bottom:calc(100% + 12px); left:0; z-index:2; width:260px;
+  max-width:calc(100vw - 60px); padding:17px; border:1px solid var(--border-strong); border-radius:22px;
+  background:var(--surface); box-shadow:var(--shadow-lg); }
+.goal-limit-picker label { display:flex; align-items:center; justify-content:space-between; gap:12px;
+  color:var(--dim); font-size:12px; }
+.goal-limit-picker input { width:110px; min-width:0; border:1px solid var(--border-strong); border-radius:11px;
+  padding:8px 10px; color:var(--text); background:var(--raised); font:16px var(--mono); }
+.goal-limit-picker input:focus { outline:2px solid var(--accent-line); }
+.goal-limit-presets { display:flex; flex-wrap:wrap; gap:5px; margin-top:12px; }
+.goal-card .goal-limit-presets button { padding:6px 10px; min-height:32px; color:var(--dim); background:var(--raised); font-size:12px; }
+.goal-limit-picker small { display:block; color:var(--danger); font-size:11px; margin-top:9px; }
+.goal-card .goal-limit-done { width:100%; margin-top:12px; color:var(--accent-ink); background:var(--accent-weak); }
+.goal-more { position:relative; }
+.goal-more-menu { position:absolute; bottom:calc(100% + 10px); right:0; width:150px; z-index:2;
+  padding:6px; border:1px solid var(--border-strong); border-radius:20px; background:var(--surface); box-shadow:var(--shadow-lg); }
+.goal-card .goal-more-menu button { display:flex; width:100%; justify-content:flex-start; padding:10px 13px; border-radius:14px; color:var(--dim); }
+.goal-card .goal-more-menu .goal-danger { color:var(--danger); margin:0; }
+@media (max-width:600px) {
+  .goal-card.sheet { border-radius:28px; }
+  .goal-card .goal-sheet-head { padding:20px 19px 12px; gap:8px; }
+  .goal-card .goal-sheet-head b { font-size:14px; }
+  .goal-card .goal-sheet-scroll { padding:12px 23px 21px; }
+  .goal-card .goal-editor textarea { font-size:19px !important; min-height:130px; }
+  .goal-card .goal-objective { font-size:19px; }
+  .goal-card .goal-sheet-actions { padding:16px 18px 20px; gap:6px; flex-wrap:wrap; }
+  .goal-card .goal-sheet-actions::before { left:23px; right:23px; }
+  .goal-card .goal-sheet-actions button { padding-left:12px; padding-right:12px; }
+  .goal-card .goal-card-status { font-size:10px; gap:4px; }
+  .goal-card .goal-stats { gap:8px; padding:14px; }
+}

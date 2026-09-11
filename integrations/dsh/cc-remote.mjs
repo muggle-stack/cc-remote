@@ -8,7 +8,7 @@
  */
 import { createRequire } from 'node:module';
 export const name = 'cc-remote-history';
-export const inject = ['connection', 'sessionQuery', 'typertGateway'];
+export const inject = ['connection', 'sessionQuery', 'typertGateway', 'agents', 'commands', 'agentPresets'];
 export const SNAPSHOT_PATH = '/api/cc-remote.snapshot';
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u;
@@ -24,7 +24,7 @@ export function apply(ctx) {
 
 export async function snapshot(ctx, request) {
   const params = new URL(request.url).searchParams;
-  const allowed = new Set(['sessionId', 'beforeSeq', 'throughSeq', 'maxMessages', 'query', 'deliverables']);
+  const allowed = new Set(['sessionId', 'beforeSeq', 'throughSeq', 'maxMessages', 'query', 'deliverables', 'commands']);
   if ([...params.keys()].some(key => !allowed.has(key) || params.getAll(key).length !== 1)) {
     return failure(400, 'invalid_request');
   }
@@ -33,6 +33,7 @@ export async function snapshot(ctx, request) {
   const query = params.get('query');
   if (query !== null && (!query.trim() || query.length > 1000)) return failure(400, 'invalid_query');
   if (params.has('deliverables') && params.get('deliverables') !== '1') return failure(400, 'invalid_request');
+  if (params.has('commands') && params.get('commands') !== '1') return failure(400, 'invalid_request');
   let beforeSeq, throughSeq, maxMessages;
   try {
     beforeSeq = integer(params, 'beforeSeq', 0, Number.MAX_SAFE_INTEGER);
@@ -87,6 +88,7 @@ export async function snapshot(ctx, request) {
       contract: 1, header: source.header, cursor, ...page,
       version: nativeVersion(),
       ...(params.has('deliverables') ? { deliverables: producedFiles(source.events, cursor) } : {}),
+      ...(params.has('commands') ? { commands: await commandCatalog(ctx, source) } : {}),
       projections: source.projections ?? { asOfSeq: source.cursor, values: {} },
     });
     if (Buffer.byteLength(body) > MAX_RESPONSE_BYTES) return failure(413, 'page_too_large');
@@ -99,6 +101,18 @@ export async function snapshot(ctx, request) {
   } finally {
     source?.[Symbol.dispose]();
   }
+}
+
+export async function commandCatalog(ctx, source) {
+  // commands/list's Gateway lookup resumes a cold Agent. Read the registry
+  // directly instead: in pinned DSH, list() merges descriptors by scope only.
+  // The official standingKeyFor() supplies the recorded preset's registry scope
+  // without creating an Agent, Session or turn. A live Agent must retain its
+  // exact (possibly older) preset generation and per-agent command overrides.
+  const live = ctx.agents.get(source.header.id);
+  const preset = source.projections?.values?.agentPreset ?? source.header.agentPreset;
+  const scope = live ?? await ctx.agentPresets.standingKeyFor(preset);
+  return ctx.commands.list(scope);
 }
 
 function nativeVersion() {

@@ -10,7 +10,7 @@ import type {
 } from "./protocol";
 
 export interface CmdGroup { g: string }
-export interface Cmd { slash: string; name: string; ds: string; ic: string }
+export interface Cmd { slash: string; name: string; ds: string; ic: string; unavailable?: boolean }
 const OPEN_FILES_COMMAND: Cmd = { slash: "open", name: "打开目录或文件", ds: "/open [路径] 浏览会话文件，点击文件在侧栏预览", ic: "folder-open" };
 export type Command = CmdGroup | Cmd;
 const COMPACT_COMMAND: Cmd = {

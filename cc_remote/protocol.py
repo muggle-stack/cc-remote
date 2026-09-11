@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 64
+PROTOCOL_VERSION = 65
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -1850,6 +1850,33 @@ class ActDshSubagent(_Command):
     prompt: str = Field(default="", max_length=65536)
 
 
+class ActDshGoal(_Command):
+    """Native mutations use the exact Goal revision displayed by the client."""
+    type: Literal["act_dsh_goal"] = "act_dsh_goal"
+    cmd_id: WireId
+    sid: WireId
+    action: Literal["create", "edit", "pause", "resume", "complete", "clear"]
+    goal_id: Optional[WireId] = None
+    revision: Optional[int] = Field(default=None, ge=0, strict=True)
+    objective: Optional[str] = Field(default=None, min_length=1, max_length=16384)
+    max_rounds: Optional[int] = Field(default=None, ge=1, le=9007199254740991, strict=True)
+
+    @model_validator(mode="after")
+    def mutation_shape(self):
+        if self.action == "create":
+            if self.goal_id is not None or self.revision is not None or not self.objective or not self.objective.strip():
+                raise ValueError("Goal creation requires an objective and no previous ref")
+        elif self.goal_id is None or self.revision is None:
+            raise ValueError("Goal mutation requires an exact ref")
+        if self.action == "edit" and self.objective is None and self.max_rounds is None:
+            raise ValueError("Goal edit requires an objective or round cap")
+        if self.action not in {"create", "edit"} and (self.objective is not None or self.max_rounds is not None):
+            raise ValueError("Goal transition cannot edit the goal")
+        if self.objective is not None and not self.objective.strip():
+            raise ValueError("Goal objective must not be blank")
+        return self
+
+
 class DownloadDsh(_Command):
     cmd_id: WireId
     type: Literal["download_dsh"] = "download_dsh"
@@ -2970,7 +2997,7 @@ class CompletionState(_Base):
 
 
 AnyMessage = Union[
-    ReadDsh, DshReadResult, ActDshSubagent, DownloadDsh, DshDownloadChunk,
+    ReadDsh, DshReadResult, ActDshSubagent, ActDshGoal, DownloadDsh, DshDownloadChunk,
     BrowseFiles, FilesListed, SetCodexContext, CodexContext,
     GetTurnFileChanges, TurnFileChangesPage,
     Hello, Query, CancelQueuedQuery, GetQueuedQuery, QueuedQueryDetail, UpdateQueuedQuery, QueuedQueryUpdated, QueryQueueState, Steer, Interrupt, Takeover, TakeoverState, SessionControl, SetModel, SetEffort, SetAutoCompact, SetServiceTier, SetCollaborationMode, SetPerm, GetPermissionProfiles, SetPermissionProfile, SetWebSearch, Fast, CollaborationMode, OpenBtw, CloseBtw, SyncBtw, BtwOpened, BtwSync, BtwClosed, GetContext, GetStatus, ConsumeRateLimitResetCredit, GetDiff, GetFilePreview, SaveMarkdown, GetPreviewAsset, AuthorizePreview, GetHistory, GetTurnDetail, GetAgentDetail, GetHistoryImage, GetModels, GetEngineCapabilities, ManageEnginePlugin, ManageEngineSkill, ManageEngineHook, ListSessions, SwitchSession, NewSession, DeleteWorkSession, DeleteSession, RollbackSession, RollbackResult, CompactSession, StartReview, GetWorkDashboard, CreateWorkProject, DeleteWorkProject, AddWorkSource, DeleteWorkSource, CreateWorkPlugin, DeleteWorkPlugin, CreateWorkSchedule, DeleteWorkSchedule, GetWorkArtifacts, ListDir, Ping, Pong, CommandAck,
@@ -3054,6 +3081,7 @@ _TYPE_MAP: dict[str, type[BaseModel]] = {
     "read_dsh": ReadDsh,
     "dsh_read_result": DshReadResult,
     "act_dsh_subagent": ActDshSubagent,
+    "act_dsh_goal": ActDshGoal,
     "download_dsh": DownloadDsh,
     "dsh_download_chunk": DshDownloadChunk,
     "dsh_state": DshState,

@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from cc_remote.protocol import (
-    DshCommandResult, DshGoal, DshState, Effort, EngineCapabilities, Error, FilePreview, FilesListed, History, HistoryImage, Model,
+    DshCommandInfo, DshCommandResult, DshGoal, DshState, Effort, EngineCapabilities, Error, FilePreview, FilesListed, History, HistoryImage, Model,
     Models, Perm, Query, SessionActivity, SessionFocus, SessionForked, SessionInfo,
     SessionList, SessionListInvalidated, StateEvent, TurnBinding, TurnDetail,
     TurnEnd, UserMsg,
@@ -161,7 +161,7 @@ class DshRuntime:
 
     async def error(self, cmd, exc):
         sid = getattr(cmd, "session_id", None) or getattr(cmd, "sid", None)
-        if cmd.type == "set_dsh_control" and cmd.kind == "command" and cmd.cmd_id:
+        if (cmd.type == "act_dsh_goal" or (cmd.type == "set_dsh_control" and cmd.kind == "command")) and cmd.cmd_id:
             msg = DshCommandResult(sid=sid, request_id=cmd.cmd_id,
                 status="unknown" if exc.outcome_unknown else "error", text=str(exc), to=cmd.client_id)
             await self.machine.transport.send(msg)
@@ -471,6 +471,10 @@ class DshRuntime:
         self.machine.focused_sid = ctx.key
         await self.machine.transport.send(SessionFocus(
             session_id=ctx.key, cwd=ctx.cwd, to=getattr(cmd, "client_id", None)))
+        # Discovery is needed before the first prompt, including after a
+        # Wrapper restart. The native commands/list RPC would resume the Agent.
+        snapshot = await self.client.history_snapshot(ctx.key, max_messages=1, commands=True)
+        await self.snapshot_projections(ctx, snapshot)
         await self.projections(ctx, {})
         await self.machine._emit(ctx, self.machine._session_control(ctx))
         items = await self.client.list_sessions()
@@ -651,6 +655,33 @@ class DshRuntime:
             return result
         return None
 
+    async def handle_act_dsh_goal(self, cmd):
+        ctx = await self.ctx(cmd.sid)
+        await self.ensure_unarchived(ctx.key)
+        await self.activate(ctx)
+        self.validate_command(ctx, "/goal")
+        # Pass the browser's ref unchanged; never overwrite another client's edit.
+        args = {"agentId": ctx.sdk.native_id}
+        if cmd.action != "create":
+            args["ref"] = {"id": cmd.goal_id, "revision": cmd.revision}
+        if cmd.action in {"create", "edit"}:
+            args["request"] = {
+                **({"objective": cmd.objective} if cmd.objective is not None else {}),
+                **({"maxGoalRounds": cmd.max_rounds} if cmd.max_rounds is not None else {}),
+            }
+        try:
+            await self.client.rpc("goals/" + cmd.action, args)
+        finally:
+            # Refresh even after a stale ref or lost response, without retrying.
+            with suppress(DshError):
+                snapshot = await self.client.history_snapshot(ctx.key, max_messages=1)
+                await self.snapshot_projections(ctx, snapshot)
+            await self.refresh_goal(ctx)
+        result = DshCommandResult(sid=ctx.key, request_id=cmd.cmd_id,
+            status="success", text="", to=cmd.client_id)
+        await self.machine.transport.send(result)
+        return result
+
     def validate_command(self, ctx, line, attachments=False):
         name = line.lstrip("/").split(maxsplit=1)[0] if line.strip() else ""
         command = next((c for c in ctx.sdk.commands if c["name"] == name), None)
@@ -752,8 +783,23 @@ class DshRuntime:
         await self.machine.transport.send(SessionListInvalidated(engine="dsh"))
 
     async def snapshot_projections(self, ctx, snapshot):
+        if "commands" in snapshot:
+            self.set_commands(ctx, snapshot["commands"])
         projection = snapshot.get("projections", {})
         await self.projections(ctx, projection.get("values", {}), seq=projection.get("asOfSeq", snapshot.get("cursor")))
+
+    def set_commands(self, ctx, commands):
+        if not isinstance(commands, list) or len(commands) > 256:
+            raise DshError("invalid_commands", "DSH 命令列表格式不兼容。")
+        try:
+            info = [DshCommandInfo(
+                name=c["name"], description=c.get("description", ""),
+                input_hint=(c.get("input") or {}).get("hint"),
+                attachments=(c.get("input") or {}).get("attachments", False)) for c in commands]
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise DshError("invalid_commands", "DSH 命令列表格式不兼容。") from None
+        ctx.sdk.commands = commands
+        ctx.sdk.state.commands = info
 
     async def projections(self, ctx, values, *, seq=None):
         handle = ctx.sdk
@@ -822,7 +868,7 @@ class DshRuntime:
             return
         epoch = handle.goal_epoch
         with suppress(DshError):
-            value = await self.client.rpc("goals/get", {"agent": handle.native_id})
+            value = await self.client.rpc("goals/get", {"agentId": handle.native_id})
             goal = handle.state.goal
             if value and goal and epoch == handle.goal_epoch and (value["id"], value["revision"]) == (goal.id, goal.revision):
                 goal.activation = value["activation"]
@@ -849,12 +895,7 @@ class DshRuntime:
                             write_state="writable", terminal_attached=False)
                         await self.snapshot_projections(ctx, frame)
                         commands = await self.client.rpc("commands/list", {"agentId": handle.native_id})
-                        handle.commands = commands
-                        from cc_remote.protocol import DshCommandInfo
-                        handle.state.commands = [DshCommandInfo(
-                            name=c["name"], description=c.get("description", ""),
-                            input_hint=(c.get("input") or {}).get("hint"),
-                            attachments=(c.get("input") or {}).get("attachments", False)) for c in commands]
+                        self.set_commands(ctx, commands)
                         await self.machine._emit(ctx, handle.state.model_copy(deep=True))
                         # Reconnect restores the canonical tail before additional deltas.
                         await self.handle_get_history(SimpleNamespace(

@@ -54,6 +54,26 @@ try {
   const blob = await finished;
   assert.equal(blob.type, "application/zip");
   assert.deepEqual([...new Uint8Array(await blob.arrayBuffer())], [80, 75, 3, 4]);
+  const { GoalApi } = await harness.ssrLoadModule("/src/goal-api.ts");
+  const goalCalls: { sid: string; objective: string | null; status: string | null; budget: number | null }[] = [];
+  const goals = new GoalApi(() => ({
+    sendSetGoal(objective: string | null, status: string | null, budget: number | null, sid: string) {
+      goalCalls.push({ sid, objective, status, budget }); return "goal-" + goalCalls.length;
+    },
+    sendClearGoal() { return "clear-goal"; },
+  }));
+  const saving = goals.save("codex-a", "ship", "active", 100000);
+  assert.deepEqual(goalCalls[0], { sid: "codex-a", objective: "ship", status: "active", budget: 100000 });
+  assert.equal(goals.accept({ type: "goal_state", sid: "codex-b", request_id: "goal-1" }), false);
+  assert.equal(goals.accept({ type: "goal_state", sid: "codex-a", request_id: "goal-1" }), false,
+    "successful projection still belongs to the reducer");
+  await saving;
+  const failing = goals.save("claude-a", "keep draft", "active", null);
+  assert.equal(goals.accept({ type: "error", sid: "claude-a", request_id: "goal-2", message: "busy" }), true);
+  await assert.rejects(failing, /busy/);
+  const clearing = goals.clear("codex-a");
+  goals.reset();
+  await assert.rejects(clearing, /连接已切换/);
   console.log("DSH private reads, cancellation, transport scope, mentions and download: passed");
 } finally {
   await harness.close();

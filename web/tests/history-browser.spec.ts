@@ -6934,6 +6934,7 @@ test("goal editor stays inside the tablet visual viewport above the keyboard", a
     );
     window.dispatchEvent(new Event("resize"));
   }, { top: visualTop, height: visualHeight });
+  await dialog.getByRole("button", { name: "修改目标", exact: true }).click();
   await dialog.locator("textarea").focus();
 
   await expect.poll(async () => dialog.boundingBox()).not.toBeNull();
@@ -9111,4 +9112,85 @@ test("profile session card edges remain visible in dark theme", async ({
   const inactive = appearance.find((card) => !card.active)!;
   expect(active.background).not.toBe(inactive.background);
   expect(active.boxShadow).not.toBe("none");
+});
+
+for (const engine of ["codex", "claude"] as const) {
+  for (const theme of ["light", "dark"] as const) {
+    test(`Goal rounded ${engine} card supports native fields and preserves edits (${theme})`, async ({ page }, info) => {
+      await page.goto(`/tests/history-browser.html?goal-ui=1&engine=${engine}&theme=${theme}`);
+      await page.getByRole("button", { name: /查看 Goal/ }).click();
+      const dialog = page.getByRole("dialog", { name: `${engine === "codex" ? "Codex" : "Claude"} Goal` });
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByRole("textbox")).toHaveCount(0);
+      expect(await dialog.evaluate(node => parseFloat(getComputedStyle(node).borderRadius))).toBeGreaterThanOrEqual(28);
+      await expect(dialog.getByText("完成 protocol v30 发布并验证所有终端同步升级", { exact: true })).toHaveCount(1);
+      if (engine === "claude") {
+        await expect(dialog).toContainText("检查轮次");
+        await expect(dialog).toContainText("3 次");
+        await expect(dialog).toContainText("最近一次检查");
+        await expect(dialog.getByText("Token 预算", { exact: true })).toHaveCount(0);
+        await expect(dialog.getByRole("button", { name: "暂停续行" })).toHaveCount(0);
+      } else {
+        await expect(dialog.getByRole("progressbar", { name: "Token 预算用量" })).toHaveAttribute("value", "37000");
+      }
+      await page.screenshot({ path: info.outputPath(`${engine}-${theme}-active.png`) });
+      await dialog.getByRole("button", { name: "修改目标", exact: true }).click();
+      await dialog.getByLabel("目标内容").fill("修复引导后的输出中断，\n并通过回归测试。");
+      await page.evaluate(() => window.dispatchEvent(new Event("goal-fixture-refresh")));
+      await expect(dialog.getByLabel("目标内容")).toHaveValue("修复引导后的输出中断，\n并通过回归测试。");
+      await expect(dialog.getByText("完成 protocol v30 发布并验证所有终端同步升级", { exact: true })).toHaveCount(0);
+      if (engine === "codex") {
+        await dialog.getByRole("button", { name: /预算 ·/ }).click();
+        await dialog.getByLabel("Token 预算", { exact: true }).fill("0");
+        await expect(dialog.getByRole("button", { name: "保存修改", exact: true })).toBeDisabled();
+        await dialog.getByLabel("Token 预算", { exact: true }).fill("250000");
+        await dialog.getByRole("button", { name: "确定", exact: true }).click();
+      }
+      await page.screenshot({ path: info.outputPath(`${engine}-${theme}-editing.png`) });
+      await dialog.getByRole("button", { name: "保存修改", exact: true }).click();
+      await expect(dialog.getByRole("textbox")).toHaveCount(0);
+      await expect(dialog).toContainText("修复引导后的输出中断");
+      if (engine === "codex") await expect(dialog.getByRole("progressbar")).toHaveAttribute("max", "250000");
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    });
+  }
+}
+
+test("Goal creation uses optional Codex budget and shows native errors without discarding drafts", async ({ page }, info) => {
+  await page.goto("/tests/history-browser.html?goal-ui=1&goal-status=none&goal-open=1&theme=dark");
+  const dialog = page.getByRole("dialog", { name: "Codex Goal" });
+  await expect(dialog.getByRole("button", { name: "开始目标", exact: true })).toBeDisabled();
+  await dialog.getByLabel("目标内容").fill("完善 Goal 界面并通过桌面、手机回归。");
+  await expect(dialog.getByRole("button", { name: /预算 · 不限/ })).toBeVisible();
+  await page.screenshot({ path: info.outputPath("codex-create.png") });
+  await dialog.getByRole("button", { name: "开始目标", exact: true }).click();
+  await expect(dialog).toContainText("当前目标");
+  await expect(dialog.getByRole("progressbar")).toHaveCount(0);
+  await page.goto("/tests/history-browser.html?goal-ui=1&goal-fail=1");
+  await page.getByRole("button", { name: /查看 Goal/ }).click();
+  await dialog.getByRole("button", { name: "修改目标", exact: true }).click();
+  await dialog.getByLabel("目标内容").fill("失败后保留我的目标");
+  await dialog.getByRole("button", { name: "保存修改", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("输入已保留");
+  await expect(dialog.getByLabel("目标内容")).toHaveValue("失败后保留我的目标");
+});
+
+test("Goal completed state preserves actual budget usage and nested Escape only closes the budget picker", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?goal-ui=1&goal-status=complete");
+  const chip = page.getByRole("button", { name: /查看 Goal/ });
+  expect(await chip.locator(".goal-chip-ring").evaluate(node =>
+    parseFloat((node as HTMLElement).style.getPropertyValue("--goal-progress")))).toBeCloseTo(133.2);
+  await chip.click();
+  const dialog = page.getByRole("dialog", { name: "Codex Goal" });
+  await expect(dialog.getByRole("progressbar")).toHaveAttribute("value", "37000");
+  await dialog.getByRole("button", { name: "修改目标", exact: true }).click();
+  await dialog.getByRole("button", { name: /预算 ·/ }).click();
+  await dialog.getByLabel("Token 预算", { exact: true }).focus();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel("Token 预算", { exact: true })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
 });

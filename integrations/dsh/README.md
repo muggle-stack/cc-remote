@@ -73,9 +73,18 @@ it does not stop native Agents. The Stop button explicitly calls native cancel.
 - **Interactions:** scoped native questions and one-time tool approvals. Native
   cancellation closes the matching question; history does not reopen it.
 - **Goals:** objective, native phase, rounds consumed/limit, and whether automatic
-  continuation is armed. Pause, resume, edit and clear use native `/goal`
-  commands. Opening history never resumes a goal.
-- **Commands and Skills:** the command menu is read from the active Agent;
+  continuation is armed. Bare `/goal` opens a rounded editor; create, edit, pause,
+  resume, complete and clear use the native goal APIs. Edits carry the exact goal
+  ID and revision captured when editing began; a stale update preserves the draft
+  for review. The optional creation cap defaults to 256 native rounds. Increasing
+  an exhausted cap and resuming are separate actions. `/goal <arguments>` keeps
+  its native command behavior. Opening history never resumes a goal.
+- **Commands and Skills:** the command menu is read before the first prompt,
+  including on cold session focus. The history bridge reads the native registry
+  using the exact live Agent scope or the recorded preset's official standing
+  scope; it does not resume an Agent to discover commands. `/goal` and `/plan`
+  are present in standard/PTC sessions. Minimal does not provide them, and the
+  menu explains their absence instead of presenting working controls. Native
   commands accepting attachments receive the selected images/files. Failed or
   ambiguous commands preserve the draft. `/model`, `/context`, `/diff`, `/open`
   and `/preview` use the shared interface. Skills are listed from DSH; installation
@@ -108,8 +117,11 @@ Codex per-session context-window override does not apply to DSH.
   background jobs, produced files and read-only version/plugin diagnostics.
   Continuable children expose queue, steer and stop only when their parent is
   available; delivery validates the exact parent/child identity again.
-- Plan mode uses the native projection, including pending transitions. Native
-  plan review displays the Markdown plan and returns the selected native answer.
+- `/plan` enters native plan mode; `/plan <message>` also sends that message and
+  `/plan off` exits. The composer has no redundant plan toggle. Active/pending
+  status follows the native projection. Plan review displays the Markdown plan
+  and returns the selected native answer. DSH plan policy guides planning; it
+  does not change sandbox permissions or restrict the available tools.
 - Export includes the native complete session ZIP with descendant sessions and
   attachments. It uses private, requester-scoped chunks, never replay/history.
   Exports are capped at 128 MiB, at most two at once. Cancellation and Wrapper
@@ -138,7 +150,7 @@ to a pre-steer question stays under that question, including after refresh.
 Autonomous goal rounds get their own rows. Disconnects preserve the unfinished
 state with a connection notice until the native terminal is known.
 
-The Web, relay and Wrapper must all run **protocol v64**. Wrapper release bundles
+The Web, relay and Wrapper must all run **protocol v65**. Wrapper release bundles
 include this bridge; DSH and its patch/configuration are independently managed.
 Use [the repository release procedure](../../deploy/README.md) for deployment.
 
@@ -162,9 +174,13 @@ npm install --ignore-scripts --save-exact @deepseek-ai/dsh@0.1.5-rc.2
 python -m tests.dsh_native --installation /absolute/path/to/disposable-install
 ```
 
-It exercises actual authentication, cold history, model/effort/permissions,
+It exercises actual authentication, cold history and command discovery after a
+server restart (asserting no Agent or model activation), model/effort/permissions,
 prompts, steering/cancel, questions/approvals, attachments, image reads, forks,
-context, file browsing and goal commands. It also runs upstream's V0/V1/V2
+context, file browsing, goal create/pause/resume/edit/clear and native plan
+entry/exit/review. Bare `/goal`, `/plan` and `/plan off` must not call the model
+adapter; both keep-planning and approval must preserve native transitions.
+It also runs upstream's V0/V1/V2
 physical codecs and migrations into V3: legacy `code` becomes `ptc`, original
 fixture bytes stay unchanged, and unsupported records are refused. These are
 isolated compatibility checks, not an upgrade of the operator's session store.
