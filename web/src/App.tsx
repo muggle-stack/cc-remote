@@ -3430,9 +3430,10 @@ export default function App() {
             // Warm the sibling Work/Code surface once per page lifetime. Codex
             // reuses the just-read native catalog in the wrapper, so this does
             // not start a second app-server and the user's first toggle is fast.
+            // DSH is Code-only: its runtime rejects even a read of Work.
             const siblingSpace: Space = listedSpace === "work" ? "code" : "work";
             const siblingKey = `${siblingSpace}:${msg.engine}`;
-            if (!prefetchedSurfacesRef.current.has(siblingKey)) {
+            if (msg.engine !== "dsh" && !prefetchedSurfacesRef.current.has(siblingKey)) {
               prefetchedSurfacesRef.current.add(siblingKey);
               ws.sendListSessions(msg.engine, siblingSpace);
             }

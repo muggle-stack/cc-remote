@@ -52,9 +52,15 @@ async function mockDshRelay(page: Page, { running = false, commandSuccess = fals
         { id: "standard", name: "标准", description: "文件、命令与交互工具", available: true, is_default: true },
         { id: "ptc", name: "代码编排", description: "通过代码组织工具调用", available: true, is_default: false },
       ] });
-      if (cmd.type === "list_sessions") emit({ type: "session_list", engine: cmd.engine, space: "code", request_id: cmd.cmd_id,
-        sessions: cmd.engine === "dsh" ? [{ session_id: sid, engine: "dsh", space: "code", cwd: "/tmp/dsh-test",
-          summary: "DSH 原生会话", state: running ? "running" : "idle", last_modified: "100" }] : [] });
+      if (cmd.type === "list_sessions") {
+        // Match the real runtime: DSH has no Work catalog. A permissive mock
+        // would hide unsupported background reads during a harness switch.
+        if (cmd.engine === "dsh" && cmd.space === "work") emit({ type: "error",
+          code: "dsh_unsupported", request_id: cmd.cmd_id, message: "DSH 目前支持 Code。" });
+        else emit({ type: "session_list", engine: cmd.engine ?? "claude", space: cmd.space ?? "code", request_id: cmd.cmd_id,
+          sessions: cmd.engine === "dsh" ? [{ session_id: sid, engine: "dsh", space: "code", cwd: "/tmp/dsh-test",
+            summary: "DSH 原生会话", state: running ? "running" : "idle", last_modified: "100" }] : [] });
+      }
       if (cmd.type === "switch_session") { emit({ type: "session_focus", session_id: cmd.session_id }); snapshot(); }
       if (cmd.type === "get_history") emit({ type: "history", sid, session_id: sid, revision: "dsh-history",
         generation: "dsh-generation", detail: "summary", events: [], turns: [{ id: "native-prompt", clientMsgId: "native-prompt",
@@ -288,4 +294,27 @@ test("DSH preset picker uses the native roster and carries the selected preset",
   const command = relay.commands.find(c => c.type === "new_session")!;
   expect(command.claude_profile_id).toBeUndefined();
   expect(command.codex_profile_id).toBeUndefined();
+});
+
+test("DSH loading and harness switches only prefetch supported session surfaces", async ({ page }) => {
+  const relay = await openDsh(page);
+  await expect.poll(() => relay.commands.some(cmd => cmd.type === "get_context")).toBe(true);
+  const dshLists = () => relay.commands.filter(cmd => cmd.type === "list_sessions" && cmd.engine === "dsh");
+  expect(dshLists().length).toBeGreaterThan(0);
+  expect(dshLists().map(cmd => cmd.space ?? "code")).not.toContain("work");
+  await expect(page.locator(".banner")).toHaveCount(0);
+
+  const selector = page.locator(".engine-toggle");
+  for (const engine of ["codex", "claude"]) {
+    const switches = relay.commands.filter(cmd => cmd.type === "switch_session").length;
+    await selector.selectOption(engine);
+    // Supported engines still warm Work; the DSH guard must not disable this.
+    await expect.poll(() => relay.commands.some(cmd => cmd.type === "list_sessions"
+      && (cmd.engine ?? "claude") === engine && cmd.space === "work")).toBe(true);
+    await selector.selectOption("dsh");
+    await expect.poll(() => relay.commands.filter(cmd => cmd.type === "switch_session").length).toBeGreaterThan(switches);
+    await expect(page.getByText("验证图片、引导与原生控件", { exact: true })).toBeVisible();
+    expect(dshLists().map(cmd => cmd.space ?? "code")).not.toContain("work");
+    await expect(page.locator(".banner")).toHaveCount(0);
+  }
 });

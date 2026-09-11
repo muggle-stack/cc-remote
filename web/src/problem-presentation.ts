@@ -127,8 +127,9 @@ export function presentCommandProblem(
     case "dsh_history_bridge_required":
       return "DSH 尚未加载 cc-remote 的只读历史插件。";
     case "dsh_unsupported":
+      return "DSH 暂不支持此操作。";
     case "dsh_gateway/not-found":
-      return "当前 DSH 版本不支持此操作，请检查版本和插件。";
+      return "DSH 接口不兼容，请检查 DSH 版本。";
     case "wrapper_offline":
       return "设备正在重新连接…";
     case "invalid_cwd":

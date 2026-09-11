@@ -179,8 +179,12 @@ async def test_ambiguous_mutation_is_not_retried():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [301, 302, 401, 403, 404, 500])
-async def test_rpc_rejection_does_not_follow_or_retry(status):
+@pytest.mark.parametrize(("status", "code"), [
+    (301, "unavailable"), (302, "unavailable"),
+    (401, "auth_required"), (403, "auth_required"),
+    (404, "gateway/not-found"), (500, "unavailable"),
+])
+async def test_rpc_rejection_does_not_follow_or_retry(status, code):
     count = 0
     async def handle(_request):
         nonlocal count
@@ -188,8 +192,9 @@ async def test_rpc_rejection_does_not_follow_or_retry(status):
         return httpx.Response(status, headers={"Location": "http://evil.invalid/"})
     client = DshClient(connection(), http_transport=httpx.MockTransport(handle))
     try:
-        with pytest.raises(DshError):
+        with pytest.raises(DshError) as error:
             await client.rpc("session/prompt", {"request": {"content": "private"}})
+        assert error.value.code == code
         assert count == 1
     finally:
         await client.close()

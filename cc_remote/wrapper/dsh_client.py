@@ -209,7 +209,7 @@ class DshClient:
                 if response.status_code in {401, 403}:
                     raise DshError("auth_required", "DSH 本机认证失败，请重新配对。")
                 if response.status_code == 404:
-                    raise DshError("unsupported", "DSH 接口不兼容；此适配器适用于 0.1.5。")
+                    raise DshError("gateway/not-found", "DSH 接口不兼容；此适配器适用于 0.1.5。")
                 if response.status_code != 200:
                     raise DshError("unavailable", "DSH 未能处理请求。请检查本机 DSH。", outcome_unknown=True)
                 raw = bytearray()
