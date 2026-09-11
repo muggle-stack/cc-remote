@@ -168,7 +168,7 @@ function clamp(value: number, minimum: number, maximum: number): number {
   return Math.min(Math.max(value, minimum), maximum);
 }
 
-/** Center a floating dialog in the visible conversation, above the composer. */
+/** Center a dialog in the chat; use the visible height when the chat is too short. */
 export function useChatDialogGeometry({
   open,
   maxWidth,
@@ -197,7 +197,13 @@ export function useChatDialogGeometry({
       const visual = visualBounds();
       const chat = (threadShell && elementBounds(threadShell))
         ?? fallbackChatBounds(scope);
-      const bounds = chat ? intersection(visual, chat) ?? visual : visual;
+      let bounds = chat ? intersection(visual, chat) ?? visual : visual;
+      // The modal owns input while open. Reserving the background composer
+      // above a mobile keyboard can leave room for only the header and footer.
+      // Keep the chat's horizontal scope, but allow its full visible height.
+      if (bounds.bottom - bounds.top - gutter * 2 < minimumHeight) {
+        bounds = { ...bounds, top: visual.top, bottom: visual.bottom };
+      }
       const rawWidth = Math.max(1, bounds.right - bounds.left);
       const availableWidth = rawWidth > gutter * 2
         ? rawWidth - gutter * 2
@@ -223,6 +229,13 @@ export function useChatDialogGeometry({
     window.addEventListener("resize", schedule);
     window.visualViewport?.addEventListener("resize", schedule);
     window.visualViewport?.addEventListener("scroll", schedule);
+    // Safari's focus-out settling can update the mirrored app viewport after
+    // the last resize callback. This also covers shells whose box did not
+    // resize: the old keyboard-sized maxHeight must not remain on the dialog.
+    const viewportObserver = new MutationObserver(schedule);
+    viewportObserver.observe(document.documentElement, {
+      attributes: true, attributeFilter: ["style"],
+    });
     if (threadShell) resizeObserver?.observe(threadShell);
     const pane = scope?.closest<HTMLElement>(".pane")
       ?? document.querySelector<HTMLElement>(".pane");
@@ -233,6 +246,7 @@ export function useChatDialogGeometry({
       window.removeEventListener("resize", schedule);
       window.visualViewport?.removeEventListener("resize", schedule);
       window.visualViewport?.removeEventListener("scroll", schedule);
+      viewportObserver.disconnect();
       resizeObserver?.disconnect();
     };
   }, [gutter, maxHeight, maxWidth, minimumHeight, open, scopeRef]);

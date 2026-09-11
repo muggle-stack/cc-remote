@@ -314,6 +314,9 @@ async function mockRightPanelRelay(
       } else if (command.type === "get_diff") {
         emit({ type: "diff_report", sid: String(command.sid),
           request_id: String(command.cmd_id), file: "", diff: "" });
+      } else if (command.type === "get_goal") {
+        emit({ type: "goal_state", sid: String(command.sid),
+          request_id: String(command.cmd_id), goal: null });
       } else if (command.type === "ping") {
         emit({ type: "pong", n: Number(command.n) });
       }
@@ -9193,4 +9196,90 @@ test("Goal completed state preserves actual budget usage and nested Escape only 
   await expect(dialog.getByLabel("Token 预算", { exact: true })).toHaveCount(0);
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
+});
+
+for (const engine of ["codex", "claude"] as const) {
+  test(`Goal ${engine} editor stays usable through mobile keyboard open and close`, async ({ page }, info) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const relay = await mockRightPanelRelay(page, { retained: false, engine });
+    await page.goto("/");
+    const composer = page.locator(".composer textarea");
+    await composer.fill("/goal");
+    await composer.press("Enter");
+    const dialog = page.getByRole("dialog", { name: `${engine === "codex" ? "Codex" : "Claude"} Goal` });
+    const editor = dialog.getByLabel("目标内容");
+    await expect(editor).toBeVisible();
+    await editor.fill("键盘收起后保留目标，恢复完整编辑区。");
+    const originalHeight = (await dialog.boundingBox())!.height;
+    for (const { height, top } of [{ height: 350, top: 30 }, { height: 280, top: 12 }]) {
+      await editor.focus();
+      await page.evaluate(({ height, top }) => {
+        Object.defineProperties(window.visualViewport!, {
+          height: { configurable: true, value: height },
+          offsetTop: { configurable: true, value: top },
+        });
+        window.visualViewport!.dispatchEvent(new Event("resize"));
+      }, { height, top });
+      await expect.poll(async () => {
+        const visible = await dialog.locator(".goal-sheet-scroll").boundingBox();
+        return visible?.height ?? 0;
+      }).toBeGreaterThan(80);
+      await expect.poll(() => dialog.evaluate(node => {
+        const box = node.getBoundingClientRect();
+        const viewport = window.visualViewport!;
+        return box.top >= viewport.offsetTop - 1
+          && box.bottom <= viewport.offsetTop + viewport.height + 1;
+      })).toBe(true);
+      await expect(dialog.getByRole("button", { name: "开始目标", exact: true })).toBeInViewport();
+      await expect(editor).toBeFocused();
+      await expect(editor).toHaveValue("键盘收起后保留目标，恢复完整编辑区。");
+      await page.screenshot({ path: info.outputPath(`goal-${engine}-keyboard-${height}.png`) });
+      await editor.blur();
+      await page.evaluate(() => {
+        Object.defineProperties(window.visualViewport!, {
+          height: { configurable: true, value: window.innerHeight },
+          offsetTop: { configurable: true, value: 0 },
+        });
+        window.visualViewport!.dispatchEvent(new Event("resize"));
+      });
+      await expect.poll(async () => Math.abs((await dialog.boundingBox())!.height - originalHeight)).toBeLessThan(2);
+      await expect.poll(() => editor.evaluate(input => {
+        const editorBox = input.getBoundingClientRect();
+        const bodyBox = input.closest(".goal-sheet-scroll")!.getBoundingClientRect();
+        return editorBox.top >= bodyBox.top && editorBox.bottom <= bodyBox.bottom;
+      })).toBe(true);
+      await expect(editor).toHaveValue("键盘收起后保留目标，恢复完整编辑区。");
+    }
+    await page.screenshot({ path: info.outputPath(`goal-${engine}-restored.png`) });
+    expect(relay.commands.some(command => ["query", "set_goal", "interrupt"].includes(String(command.type)))).toBe(false);
+  });
+}
+
+test("Goal editor restores after a late keyboard viewport correction without another resize", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/tests/history-browser.html?goal-ui=1&goal-status=none&goal-open=1");
+  const dialog = page.getByRole("dialog", { name: "Codex Goal" });
+  const editor = dialog.getByLabel("目标内容");
+  await editor.fill("晚到的键盘恢复也不能隐藏这段草稿。");
+  const fullHeight = (await dialog.boundingBox())!.height;
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty("--app-height", "220px");
+    document.documentElement.style.setProperty("--app-offset-top", "20px");
+    window.dispatchEvent(new Event("resize"));
+  });
+  await expect.poll(async () => (await dialog.boundingBox())!.height).toBeLessThan(fullHeight - 80);
+  // A delayed viewport synchronization is allowed to arrive after the final
+  // native resize event. The fixture's chat box itself remains 100dvh tall.
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty("--app-height", `${window.innerHeight}px`);
+    document.documentElement.style.setProperty("--app-offset-top", "0px");
+  });
+  await expect.poll(async () => Math.abs((await dialog.boundingBox())!.height - fullHeight)).toBeLessThan(2);
+  await expect(editor).toBeFocused();
+  await expect(editor).toHaveValue("晚到的键盘恢复也不能隐藏这段草稿。");
+  await expect.poll(() => editor.evaluate(node => {
+    const editorBox = node.getBoundingClientRect();
+    const bodyBox = node.closest(".goal-sheet-scroll")!.getBoundingClientRect();
+    return editorBox.top >= bodyBox.top && editorBox.bottom <= bodyBox.bottom;
+  })).toBe(true);
 });

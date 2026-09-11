@@ -635,6 +635,47 @@ test("DSH Goal form creates native round cap, pauses, edits and resumes", async 
   await expect(page.locator(".dsh-goal")).toHaveCount(0);
 });
 
+test("DSH Goal editor keeps its round cap and draft through a mobile keyboard cycle", async ({ page }, info) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const relay = await openDsh(page);
+  relay.emit({ ...nativeState, goal: null });
+  await page.locator(".composer textarea").fill("/goal");
+  await page.locator(".composer textarea").press("Enter");
+  const dialog = page.getByRole("dialog", { name: "DSH Goal" });
+  const editor = dialog.getByLabel("目标内容");
+  await editor.fill("完成手机端 Goal 回归。");
+  const fullHeight = (await dialog.boundingBox())!.height;
+  await page.evaluate(() => {
+    Object.defineProperties(window.visualViewport!, {
+      height: { configurable: true, value: 300 },
+      offsetTop: { configurable: true, value: 24 },
+    });
+    window.visualViewport!.dispatchEvent(new Event("resize"));
+  });
+  await expect.poll(async () => (await dialog.locator(".goal-sheet-scroll").boundingBox())!.height).toBeGreaterThan(80);
+  await expect.poll(() => dialog.evaluate(node => {
+    const box = node.getBoundingClientRect();
+    const viewport = window.visualViewport!;
+    return box.top >= viewport.offsetTop - 1
+      && box.bottom <= viewport.offsetTop + viewport.height + 1;
+  })).toBe(true);
+  await expect(editor).toBeFocused();
+  await expect(dialog.getByRole("button", { name: /轮次上限 · 256/ })).toBeInViewport();
+  await expect(dialog.getByRole("button", { name: "开始目标", exact: true })).toBeInViewport();
+  await editor.blur();
+  await page.evaluate(() => {
+    Object.defineProperties(window.visualViewport!, {
+      height: { configurable: true, value: window.innerHeight },
+      offsetTop: { configurable: true, value: 0 },
+    });
+    window.visualViewport!.dispatchEvent(new Event("resize"));
+  });
+  await expect.poll(async () => Math.abs((await dialog.boundingBox())!.height - fullHeight)).toBeLessThan(2);
+  await expect(editor).toHaveValue("完成手机端 Goal 回归。");
+  await page.screenshot({ path: info.outputPath("dsh-goal-keyboard-restored.png") });
+  expect(relay.commands.some(command => ["query", "act_dsh_goal", "set_dsh_control"].includes(String(command.type)))).toBe(false);
+});
+
 test("DSH Goal live updates preserve edit and its original revision; exhausted goals require a higher cap", async ({ page }) => {
   const relay = await openDsh(page);
   await page.getByRole("button", { name: /查看 DSH Goal/ }).click();

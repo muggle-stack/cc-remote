@@ -1,4 +1,4 @@
-.goal-card.sheet { padding:0; overflow:visible; right:auto; bottom:auto; height:fit-content;
+.goal-card.sheet { padding:0; overflow:visible; right:auto; bottom:auto; height:auto;
   display:flex; flex-direction:column; border:1px solid var(--border-strong); border-radius:30px;
   background:var(--surface); box-shadow:0 24px 100px #0005; outline:none;
   transform:translate(-50%,-50%); }
@@ -17,7 +17,7 @@
 .goal-card button:hover { background:var(--accent-weak); }
 .goal-card button:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
 .goal-card button:disabled { opacity:.45; cursor:default; }
-.goal-card .goal-sheet-scroll { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain;
+.goal-card .goal-sheet-scroll { flex:1 1 auto; min-height:0; overflow-y:auto; overscroll-behavior:contain;
   padding:14px 30px 24px; scrollbar-width:thin; }
 .goal-card .goal-editor { display:block; }
 .goal-card .goal-editor textarea { display:block; width:100%; box-sizing:border-box; min-height:145px;

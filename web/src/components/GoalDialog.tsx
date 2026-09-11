@@ -12,7 +12,9 @@ export function GoalSheet({ engine, title, status, scopeRef, onClose, children, 
   const dialogRef = useRef<HTMLElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
-  const geometry = useChatDialogGeometry({ open: true, maxWidth: 540, maxHeight: 720, scopeRef });
+  const geometry = useChatDialogGeometry({
+    open: true, maxWidth: 540, maxHeight: 720, minimumHeight: 320, scopeRef,
+  });
   const hasGeometry = !!geometry;
   useEffect(() => {
     if (!hasGeometry) return;
