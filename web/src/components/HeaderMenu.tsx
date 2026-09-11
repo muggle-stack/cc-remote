@@ -14,6 +14,7 @@ interface Props {
   onOpenUsageActivity: () => void;
   onOpenViewer?: () => void;
   onOpenFiles?: () => void;
+  onOpenDshTools?: () => void;
   onToggleTheme: () => void;
   onLogout: () => void;
 }
@@ -39,6 +40,7 @@ export function HeaderMenu({
   onOpenUsageActivity,
   onOpenViewer,
   onOpenFiles,
+  onOpenDshTools,
   onToggleTheme,
   onLogout,
 }: Props) {
@@ -165,6 +167,11 @@ export function HeaderMenu({
                     }}>
                     <Icon name="folder-open" size={18} />
                     <span><b>会话文件</b><small>浏览目录并预览文件</small></span>
+                    <Icon name="chevron-right" size={16} />
+                  </button>}
+                  {onOpenDshTools && <button type="button" className="header-menu-item" onClick={() => { close(); onOpenDshTools(); }}>
+                    <Icon name="plan" size={18} />
+                    <span><b>会话工具</b><small>子代理、后台任务、文件与导出</small></span>
                     <Icon name="chevron-right" size={16} />
                   </button>}
                   {engine === "codex" && <button ref={onOpenViewer || onOpenFiles ? undefined : firstRef} type="button"

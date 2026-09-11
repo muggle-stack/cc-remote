@@ -1,3 +1,5 @@
+import type { DshRead } from "../dsh-api";
+import DshSearch from "./DshSearch";
 import { useEffect, useRef, useState, type TouchEvent } from "react";
 import type { ClaudeProfileInfo, CodexProfileInfo, Engine, SessionInfo, Space, State } from "../protocol";
 import type { CompletionBadgeKind } from "../completion-badges";
@@ -22,6 +24,8 @@ import { manualUnreadKey } from "../manual-unread";
 import { useManualUnread } from "../use-manual-unread";
 
 interface Props {
+  readDsh?: DshRead;
+  onDshSearch?: (sid: string, query: string) => void;
   open: boolean;
   engine: Engine;
   space: Space;
@@ -72,7 +76,7 @@ function sessionDateGroup(value?: string | null): { key: string; label: string }
   return { key: "older", label: "更早" };
 }
 
-export function SessionsSidebar({ open, engine, space,
+export function SessionsSidebar({ open, engine, space, readDsh, onDshSearch,
   profileScopeKey, machineId, claudeProfiles = [], defaultClaudeProfileId,
   codexProfiles = [], defaultCodexProfileId,
   onSpaceChange, sessions, liveStates,
@@ -305,7 +309,7 @@ export function SessionsSidebar({ open, engine, space,
       : visibleCompletion ? "已完成" : null;
     const forkBlocked = isWorktreeForkBlockedByState(st);
     const migrationBlocked = isSessionMigrationBlockedByState(st);
-    const archiveBlocked = !isArchived && engine === "codex"
+    const archiveBlocked = !isArchived && (engine === "codex" || engine === "dsh")
       && isSessionArchiveBlockedByState(st);
     const profilePresentation = profilePresentationFor(s);
     return (
@@ -509,6 +513,8 @@ export function SessionsSidebar({ open, engine, space,
               aria-label={space === "work" ? "搜索工作" : "搜索会话"} />
           </div>
           <div className="s-scroll" onClick={closeMenu}>
+            {engine === "dsh" && q.trim() && readDsh && onDshSearch && (activeSessionId || sessions.length > 0) &&
+              <DshSearch key={profileScopeKey} query={q} sid={activeSessionId ?? sessions[0].session_id} read={readDsh} onSelect={onDshSearch} />}
             {filtered.length === 0 && <div className="s-group">{sessions.length === 0 ? "暂无会话" : "无匹配"}</div>}
             {pinned.length > 0 && renderGroup("__pinned__", pinned, "置顶")}
             {groupKeys.map((k) => renderGroup(k, groups[k]))}

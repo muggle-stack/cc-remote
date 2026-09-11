@@ -85,6 +85,7 @@ import { mergeDetailWithLiveTail } from "../history-merge";
 import { presentAsyncQuestionReplies } from "../async-question-presentation";
 import type { QueryAcceptanceResult } from "../outbox";
 
+const DshProducedFiles = lazy(() => import("./DshProducedFiles"));
 const AsyncQuestionCard = lazy(() => import("./AsyncQuestionCard"));
 const AsyncQuestionHost = lazy(() => import("./AsyncQuestionDialog"));
 const PagePreviewLinks = lazy(() => import("./PagePreviewLinks").then((module) => ({ default: module.PagePreviewLinks })));
@@ -3025,6 +3026,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                       onPreviewImage={(src, alt) => setZoom({ kind: "data", src, alt })} />}
                   </div>
                 ))}
+                {engine === "dsh" && onOpenFile && <Suspense fallback={null}><DshProducedFiles turn={t} onOpen={onOpenFile} /></Suspense>}
                 {t.error && <TurnProblem message={t.error} continuing={activeTurnIndex > ti} />}
                 {/* Final metadata already has a stable row. While running,
                     page discovery shares the existing working indicator below

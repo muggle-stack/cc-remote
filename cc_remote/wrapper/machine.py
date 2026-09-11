@@ -1969,7 +1969,7 @@ class WrapperMachine:
     }
     SAFE_RETRY_COMMANDS = frozenset({
         "list_sessions", "get_history", "get_turn_detail", "get_agent_detail",
-        "get_history_image",
+        "get_history_image", "read_dsh",
         "get_models", "get_permission_profiles", "get_engine_capabilities",
         "get_context", "get_status", "get_diff", "get_turn_file_changes", "get_file_preview",
         "get_preview_asset", "get_goal", "dismiss_goal",
@@ -1988,7 +1988,7 @@ class WrapperMachine:
         "set_service_tier", "set_collaboration_mode", "open_btw", "close_btw",
         "sync_btw",
         "set_perm", "get_permission_profiles", "set_permission_profile",
-        "set_web_search", "set_dsh_control",
+        "set_web_search", "set_dsh_control", "read_dsh", "act_dsh_subagent", "download_dsh",
         "get_context", "get_status", "consume_rate_limit_reset_credit",
         "get_diff", "get_turn_file_changes", "get_file_preview", "save_markdown", "browse_files",
         "get_preview_asset", "authorize_preview",

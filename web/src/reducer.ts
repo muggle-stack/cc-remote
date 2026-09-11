@@ -4957,6 +4957,8 @@ function reduceEvent(
       });
     }
     case "turn_file_changes_page":
+    case "dsh_read_result":
+    case "dsh_download_chunk":
     case "files_listed":
     case "agent_detail":
       // Agent detail is a requester-correlated side panel projection. App owns

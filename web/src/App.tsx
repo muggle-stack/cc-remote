@@ -1,3 +1,5 @@
+import { DshApi } from "./dsh-api";
+import type { DshPanelSelection } from "./components/DshPanel";
 import {
   lazy,
   Suspense,
@@ -294,6 +296,7 @@ const CapabilitiesSheet = lazy(() => import("./components/CapabilitiesSheet").th
 const AgentDetailController = lazy(() => import("./components/AgentDetailController").then(
   ({ AgentDetailController: Controller }) => ({ default: Controller }),
 ));
+const DshPanel = lazy(() => import("./components/DshPanel"));
 const SessionsSidebar = lazy(() => import("./components/SessionsSidebar").then(
   ({ SessionsSidebar: Sidebar }) => ({ default: Sidebar }),
 ));
@@ -478,6 +481,8 @@ export default function App() {
     if (!transport || transport !== wsRef.current) throw new Error("连接已切换，请重试。");
     return goalApiRef.current ??= new GoalApi(() => wsRef.current);
   }, []);
+  const [dshApi] = useState(() => new DshApi(() => wsRef.current));
+  const [dshPanel, setDshPanel] = useState<{ sid: string; scope: string; selection: DshPanelSelection } | null>(null);
   const [permissionProfileRequests, setPermissionProfileRequests] =
     useState<Record<string, string>>({});
   const archivedBrowseRef = useRef<string | null>(null);
@@ -970,6 +975,7 @@ export default function App() {
   ) as Record<string, CompletionBadgeKind>;
   const activeScopeKey = sessionScopeKey(machineId, engine, space);
   useEffect(() => () => goalApiRef.current?.reset(), [activeScopeKey]);
+  useEffect(() => () => dshApi.reset(), [activeScopeKey, dshApi]);
   const activeWorkDashboard = workDashboardMachineId === machineId
     ? workDashboards[engine] ?? null
     : null;
@@ -2203,6 +2209,7 @@ export default function App() {
           if (!acceptsLifecycle()) return;
           if (turnFileRequestsRef.current.accept(msg)) return;
           if (goalApiRef.current?.accept(msg)) return;
+          if (dshApi.accept(msg)) return;
           const settlesContextRequest = !!(
             (msg.type === "context_report"
                 || (msg.type === "error" && msg.code !== "wrapper_offline"))
@@ -3681,6 +3688,7 @@ export default function App() {
           if (s !== "connected") {
             turnFileRequestsRef.current.clear();
             goalApiRef.current?.reset();
+            dshApi.reset();
             skillCatalogRequestsRef.current?.resetReads();
             // The fork result is authoritative only for this live connection.
             // A reconnect will obtain a fresh native SessionList, so do not
@@ -3847,6 +3855,7 @@ export default function App() {
     };
   }, [
     acceptSkillCatalog,
+    dshApi,
     authed,
     clearForkFocusLease,
     clearHistoryDetailRequests,
@@ -5567,6 +5576,13 @@ export default function App() {
         completionBadges={completionBadges}
         activeSessionId={focusedSid}
         machineId={machineId}
+        readDsh={engine === "dsh" ? dshApi.read : undefined}
+        onDshSearch={(sid, query) => {
+          if (!focusedSid && !state.sessions.length) return;
+          setDshPanel({ sid: focusedSid ?? state.sessions[0].session_id, scope: activeScopeKey,
+            selection: { kind: "conversation", target: sid, query } });
+          if (isMobile()) setSidebarOpen(false);
+        }}
         onSelect={(id) => {
           if (!confirmArtifactDiscard()) return false;
           cancelPendingNotificationTarget();
@@ -5693,6 +5709,7 @@ export default function App() {
             notificationBinding={pushBinding.state}
             notificationAvailable={typeof Notification !== "undefined"}
             onNotificationMode={updateNotificationMode}
+            onOpenDshTools={engine === "dsh" && focusedSid ? () => setDshPanel({ sid: focusedSid, scope: activeScopeKey, selection: { kind: "subagents" } }) : undefined}
             onOpenUsageActivity={openUsageActivity}
             onOpenViewer={visibleParentSid ? () => openViewer() : undefined}
             onOpenFiles={visibleParentSid && !archivedBrowse && state.wrapperOnline ? () => openFiles() : undefined}
@@ -5905,6 +5922,8 @@ export default function App() {
 
             <Composer
           dsh={rt.dsh}
+          dshSid={focusedSid ?? undefined}
+          readDsh={dshApi.read}
           dshCommandResult={rt.dshCommandResult}
           onDshCommand={(value, images, files) => focusedSid ? wsRef.current?.sendDshControl(focusedSid, "command", value, images, files) ?? null : null}
           draftKey={focusedComposerDraftKey}
@@ -6040,6 +6059,17 @@ export default function App() {
         )}
         {/* context usage now lives in the composer's ring popover (see Composer) */}
       </section>
+      {dshPanel?.scope === activeScopeKey && <Suspense fallback={null}>
+        <DshPanel key={`${dshPanel.sid}:${dshPanel.selection.target ?? ""}:${dshPanel.selection.query ?? ""}`}
+          sid={dshPanel.sid} selection={dshPanel.selection} api={dshApi}
+          state={state.runtimes[dshPanel.sid]?.dsh} onClose={() => setDshPanel(null)}
+          onOpenFile={(path, sid, line) => {
+            if (previewFileForSid(sid ?? dshPanel.sid, path, line)) setDshPanel(null);
+          }} onOpenSession={sid => {
+            const selected = state.sessions.find(session => session.session_id === sid);
+            if (selected && confirmArtifactDiscard()) { focusListedSession(selected); setDshPanel(null); }
+          }} />
+      </Suspense>}
       {/* Share the layout's selection: retained hidden chats reserve no space. */}
       {(() => {
         if (visibleRightPanel === "files" && fileBrowser) {

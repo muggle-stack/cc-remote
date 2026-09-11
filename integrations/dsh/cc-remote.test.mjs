@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { apply, snapshot, SNAPSHOT_PATH } from './cc-remote.mjs';
+import { apply, snapshot, producedFiles, SNAPSHOT_PATH } from './cc-remote.mjs';
 
 function fixture() {
   const calls = [];
@@ -81,4 +81,44 @@ test('a provider failure is private and always releases the lease', async () => 
   assert.equal(response.status, 503);
   assert.equal((await response.text()).includes('secret'), false);
   assert.equal(calls.at(-1), 'dispose');
+});
+
+
+test('full-text hit selects its native cursor and releases the cold read lease', async () => {
+  const { ctx, calls } = fixture();
+  ctx.sessionQuery.searchEvents = async request => {
+    assert.deepEqual(request, { sessionId: 'test-session', query: 'needle', limit: 20,
+      filters: [{ kind: 'type', values: ['user/message', 'assistant/message'] }, { kind: 'surface', values: ['current'] }] });
+    return { items: [
+      { sessionId: 'test-session', seq: 10, surface: 'retired', type: 'assistant/message' },
+      { sessionId: 'other-session', seq: 8, surface: 'current', type: 'assistant/message' },
+      { sessionId: 'test-session', seq: 3, surface: 'current', type: 'user/message' },
+    ] };
+  };
+  const response = await snapshot(ctx, new Request('http://127.0.0.1/api/cc-remote.snapshot?sessionId=test-session&query=needle'));
+  assert.equal(response.status, 200);
+  assert.equal(calls[1].args.request.beforeSeq, 4);
+  assert.equal(calls.at(-1), 'dispose');
+});
+
+test('an expired search match cannot silently display the latest unrelated page', async () => {
+  const { ctx, calls } = fixture();
+  ctx.sessionQuery.searchEvents = async () => ({ items: [] });
+  const response = await snapshot(ctx, new Request('http://127.0.0.1/api/cc-remote.snapshot?sessionId=test-session&query=needle'));
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error, 'search_match_changed');
+  assert.equal(calls.at(-1), 'dispose');
+  assert.equal(calls.some(call => call?.method === 'page'), false);
+});
+
+test('produced files include successful writes and explicit deliverables, excluding failed reads and future events', () => {
+  const call = (seq, name, args) => ({ type: 'tool/call', seq, data: { callId: String(seq), name, arguments: JSON.stringify(args) } });
+  const result = (seq, callId, isError = false) => ({ type: 'tool/result', seq, data: { message: { content: [{ type: 'tool-result', toolCallId: String(callId), isError }] } } });
+  assert.deepEqual(producedFiles([
+    call(1, 'write', { file_path: 'report.md' }), result(2, 1),
+    call(3, 'write', { file_path: 'failed.md' }), result(4, 3, true),
+    call(5, 'read', { file_path: 'secret.md' }), result(6, 5),
+    { type: 'deliverables/presented', seq: 7, data: { files: [{ path: 'book.xlsx', description: 'Workbook' }] } },
+    { type: 'deliverables/presented', seq: 8, data: { files: [{ path: 'later.md' }] } },
+  ], 7), [{ path: 'book.xlsx', label: 'Workbook' }, { path: 'report.md', label: '创建或修改的文件' }]);
 });

@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+- Add native DSH archive, full-text search, references, subagent controls, jobs,
+  plan review, produced files, session ZIP export and diagnostics (protocol v64).
+- Open directory links in the file browser and preview XLSX sheets with saved
+  cell values and original downloads on macOS, Linux and mobile browsers.
 - Add DeepSeek Harness 0.1.5-rc.2 as an optional Code engine (protocol v61):
   native Agent Presets, models/effort, permission presets, goals, commands,
   questions/approvals, attachments, steering, queued prompts, cancellation and
