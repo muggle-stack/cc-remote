@@ -1637,6 +1637,10 @@ def _apply_codex_process_witness(
     because a bounded scan may have skipped a large record or started mid-turn.
     """
     image_turns: set[str] = set()
+    for native_id, segment_index in witness.offset_by_native_segment:
+        if native_id in page.native_turn_ids:
+            page.source_segment_counts[native_id] = max(
+                page.source_segment_counts.get(native_id, 0), segment_index + 1)
     for turn in page.turns:
         current_started = turn.get("processStartedTs")
         current_done = turn.get("processDoneTs")
@@ -3943,6 +3947,7 @@ class WrapperMachine:
         return _apply_codex_process_witness(page, CodexHistoryNativeWitness(
             process_by_visible_id=witness.process_by_visible_id,
             process_by_native_segment=witness.process_by_native_segment,
+            offset_by_native_segment=witness.offset_by_native_segment,
         ))
 
     def _codex_rollout_history_active(self, sid: str) -> bool:
@@ -15368,6 +15373,7 @@ class WrapperMachine:
         before: str | None,
         limit: int | None,
         _identity_retry: bool = True,
+        _minimum_user_segments: dict[str, int] | None = None,
     ) -> History:
         """Build one summary page from Codex's persisted app-server turns.
 
@@ -15457,6 +15463,8 @@ class WrapperMachine:
             }
             if aliases.has_aliases else {}
         )
+        if _minimum_user_segments:
+            alias_kwargs["minimum_user_segments"] = _minimum_user_segments
         known_client_ids = {
             *aliases.native_messages.values(),
             *aliases.segments.values(),
@@ -15691,6 +15699,28 @@ class WrapperMachine:
                 "stable rollout contains turns omitted by official history")
         if projection_outcome == "mismatch":
             projection_outcome = "inconclusive"
+
+        projected_counts: dict[str, int] = {}
+        for native_id, segment_index in page.native_segment_by_visible_id.values():
+            projected_counts[native_id] = max(
+                projected_counts.get(native_id, 0), segment_index + 1)
+        missing_segments = {
+            native_id: count for native_id, count in page.source_segment_counts.items()
+            if count > max(1, projected_counts.get(native_id, 0))
+        }
+        if missing_segments:
+            if _minimum_user_segments is not None:
+                raise CodexHistoryInvalidResponse(
+                    "Codex user segments changed during history recovery")
+            # The existing metadata pass already found exact native task/steer
+            # boundaries. Hydrate only collapsed rows, even beyond the newest
+            # page or after the small active-turn cache has been evicted. Repeat
+            # projection so timing, attachments and detail locators bind to the
+            # restored segments, never the first user plus the last answer.
+            return await self._build_official_codex_history(
+                sid, before=before, limit=limit, _identity_retry=_identity_retry,
+                _minimum_user_segments=missing_segments,
+            )
 
         _apply_codex_process_clocks(page.turns, process_clocks)
 

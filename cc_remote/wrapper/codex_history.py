@@ -100,6 +100,9 @@ class CodexHistoryPage:
     ] = field(default_factory=dict)
     file_change_offsets_by_visible_id: dict[str, tuple[int, ...]] = field(default_factory=dict)
     file_changes_truncated: set[str] = field(default_factory=set)
+    # Positive source evidence only. A bounded scan can prove more users, but
+    # cannot prove their absence. Never publish a summary that drops these steers.
+    source_segment_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -675,6 +678,7 @@ class CodexOfficialHistory:
             dict[tuple[str, int], str] | None
         ) = None,
         source: HistorySourceFingerprint | None = None,
+        minimum_user_segments: dict[str, int] | None = None,
     ) -> CodexHistoryPage:
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
             raise ValueError("Codex history limit must be between 1 and 200")
@@ -936,6 +940,15 @@ class CodexOfficialHistory:
                     }
                     self._native_full_turns.move_to_end(
                         (thread_id, native_id))
+            minimum_segments = (minimum_user_segments or {}).get(native_id, 0)
+            if sum(item.get("type") == "userMessage" for item in turn["items"]) < minimum_segments:
+                turn = await self._restore_steered_turn(
+                    thread_id, turn, locator, minimum_segments)
+                if active_turn:
+                    turn.update(status="inProgress", completedAt=None, durationMs=None)
+                self._remember(self._native_full_turns, (thread_id, native_id), dict(turn))
+                while len(self._native_full_turns) > _MAX_ACTIVE_TURN_CACHE_ENTRIES:
+                    self._native_full_turns.popitem(last=False)
             if self._recover_user is not None or self._recover_users is not None:
                 copied_items = None
                 user_index = 0
@@ -1229,6 +1242,39 @@ class CodexOfficialHistory:
             size = self._detail_event_bytes.pop(oldest, 0)
             self._detail_cache_bytes = max(
                 0, self._detail_cache_bytes - size)
+
+    async def _restore_steered_turn(
+        self,
+        thread_id: str,
+        summary: dict[str, Any],
+        locator: _TurnLocator,
+        minimum_segments: int,
+    ) -> dict[str, Any]:
+        """Hydrate an exact source-proven collapsed turn, including older pages.
+
+        Keep the native cursor family and item identities. If both bounded APIs
+        fail, fail the page read instead of authoritatively deleting prompts or
+        feeding an official cursor to the rollout pagination family.
+        """
+        turn = summary
+        try:
+            turn = await self._full_turn(thread_id, locator)
+        except CodexRpcRejected as exc:
+            if not _unsupported(exc):
+                raise
+        except CodexRpcResponseTooLarge:
+            pass
+        if sum(item.get("type") == "userMessage" for item in turn["items"]) < minimum_segments:
+            try:
+                items = await self._items_for_turn(thread_id, locator.native_turn_id)
+            except (CodexHistoryUnsupported, CodexRpcResponseTooLarge) as exc:
+                raise CodexHistoryInvalidResponse(
+                    "Codex summary omits source-proven user segments") from exc
+            turn = {**summary, "itemsView": "full", "items": items}
+        if sum(item.get("type") == "userMessage" for item in turn["items"]) < minimum_segments:
+            raise CodexHistoryInvalidResponse(
+                "Codex item projection omits source-proven user segments")
+        return turn
 
     async def _items_for_turn(
         self,
