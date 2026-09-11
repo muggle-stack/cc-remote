@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+- Align the Codex context gauge with native compaction estimates (protocol v62).
+  Match bounded local log reads to the account, thread and latest rollout sample;
+  invalidate estimates after compaction and show recent request usage without a
+  percentage when no matching estimate is available. Refresh active visible sessions.
 - Set a per-session maximum usable Codex context (protocol v60), validated against
   the native model catalog. A 300k setting means a 300,000-token window, with
   compaction near 95% subject to native limits. Preserve existing saved numbers,

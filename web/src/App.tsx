@@ -4257,12 +4257,21 @@ export default function App() {
         || focusedSession?.tag === "archived"
         || state.connState !== "connected" || !state.wrapperOnline) return;
     const contextRuntime = stateRef.current.runtimes[focusedSid];
-    if (contextRuntime?.contextRequestId) return;
     const deferred = contextRuntime?.contextRefreshDeferred === true;
-    if (deferred
-        && (focusedEngine !== "claude"
-          || contextRuntime?.state !== "idle")) return;
-    sendContextRequestTo(focusedSid, deferred);
+    if (!contextRuntime?.contextRequestId
+        && (!deferred || focusedEngine === "claude" && contextRuntime?.state === "idle")) {
+      sendContextRequestTo(focusedSid, deferred);
+    }
+    // A long Codex turn can compact before TurnEnd. These visible-session
+    // reads are bounded and never invoke a model or resume an engine.
+    if (focusedEngine !== "codex") return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible"
+          && stateRef.current.runtimes[focusedSid]?.state === "running") {
+        sendContextRequestTo(focusedSid, false);
+      }
+    }, 5000);
+    return () => window.clearInterval(timer);
   }, [
     authed,
     focusedEngine,

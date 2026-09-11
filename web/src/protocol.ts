@@ -657,8 +657,8 @@ export interface ContextReport extends Base {
   percentage: number;
   /** False when the engine has not emitted an authoritative tokenUsage yet. */
   available?: boolean | null;
-  /** Provenance of a Claude context reading; omitted means exact/control. */
-  source?: "control" | "cached_control" | "recent_turn" | null;
+  /** Distinguish native context estimates from recent model-request usage. */
+  source?: "control" | "cached_control" | "recent_turn" | "native_estimate" | null;
   /** Work-only conversation growth after the fresh-session startup baseline. */
   session_tokens?: number | null;
   /** Work-only startup zero point; raw total_tokens remains authoritative. */
@@ -709,7 +709,7 @@ export type ServerEvent = FilesListed | CodexContext
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 60;
+export const PROTOCOL_VERSION = 62;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

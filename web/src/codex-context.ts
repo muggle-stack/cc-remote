@@ -1,6 +1,3 @@
-export const CODEX_CONTEXT_USAGE_NOTE =
-  "用量为最近一次模型返回值；自动压缩按 Codex 内部上下文估算触发，可能早于页面数字。";
-
 export function parseContextCapacity(value: string): number | null | undefined {
   const text = value.trim().toLowerCase();
   if (["default", "inherit", "auto"].includes(text)) return null;

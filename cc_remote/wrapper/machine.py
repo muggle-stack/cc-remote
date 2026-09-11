@@ -20965,6 +20965,9 @@ class WrapperMachine:
                     total_tokens=used, max_tokens=win,
                     percentage=(used / win * 100.0) if win else 0.0,
                     available=False if not available else None,
+                    source=("native_estimate" if usage.get("source") == "native_estimate"
+                            else "recent_turn"),
+                    auto_compact_threshold_tokens=usage.get("auto_compact_threshold_tokens"),
                     model=ctx.sdk.model, is_auto_compact_enabled=None,
                     categories=[], **work_fields)
                 await self._emit(ctx, event)

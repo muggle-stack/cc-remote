@@ -4,7 +4,7 @@
 
 自托管 · 双引擎 · 多会话 · 实时过程 · 响应式 Web
 
-**当前版本：v3.0.0** · Wire protocol v60
+**当前版本：v3.0.0** · Wire protocol v62
 
 [English](README_en.md) ·
 [5 分钟上手](#本地快速开始一台机器5-分钟) ·
@@ -47,8 +47,9 @@ Code / Work 双空间，并重新设计历史投影、原生客户端协同、�
 
 Codex Code 可用 `/autocompact 300k` 或上下文用量面板设置当前会话的最大可用上下文。
 300k 表示窗口为 300,000 tokens，接近 95% 时自动压缩，以 Codex 原生限制为准；
-当前原生比例下约在 284,211 tokens 触发。页面用量是最近一次模型返回值，
-与原生压缩估算不同。`/autocompact default` 恢复 Codex 默认行为。
+当前原生比例下约在 284,211 tokens 触发。进度条使用与最新用量记录匹配的原生
+压缩估算；估算不可用时仅显示最近请求用量，不显示百分比。运行中的可见会话
+每 5 秒刷新一次，读取不会调用模型。`/autocompact default` 恢复 Codex 默认行为。
 可设置上限读取当前账号的原生模型目录，设置仅影响该会话；调低设置也会缩小窗口。
 运行中可保存，空闲且其他客户端不再保留该会话时生效；界面会区分待应用与已应用。
 暂不支持 Work 和临时侧聊。切换到容量更小的模型前，须先恢复默认上下文设置。
@@ -71,7 +72,7 @@ v3 把 cc-remote 从“能在网页控制 CLI”推进为一个本地优先、�
 | **原生 App / CLI 协同** | Claude CLI/Desktop/Agent View 与 Codex shared daemon/App/CLI 使用各自的所有权模型。v3 对齐 running、只读、打断、steer、compact、turn binding 和终止状态，避免兄弟会话误锁、历史回合串到尾部或留下“假思考中”。 |
 | **多设备隔离** | Device Center 提供一次性配对、独立可撤销的机器凭据和在线状态；relay 按用户允许的 `machine_id` 路由。设备、Code / Work、引擎、连接 generation 和会话归属分别隔离，延迟帧不能污染当前视图。 |
 | **移动端与文件体验** | 历史到顶继续拉取时保留滚动锚点；图片按需加载，支持灯箱、再次点击收起和双指缩放；Markdown、源码、HTML、PDF 与 Office 预览仍在本机安全边界内完成。工作目录外的精确文件会先在请求它的会话中确认，只授权当前文件身份；用户确认的 Markdown 保持只读，只有本会话成功写入的文件才可保存。PWA 图标、窄屏弹层、错误提示和过程时间线也统一收敛。 |
-| **可回滚发布** | 产品版本统一为 v3.0.0，wire protocol 为 v60。构建和部署同时校验产品版本与协议版本；VPS 使用不可变 release、独立 venv、原子 `current` 切换和失败回滚，避免直接覆盖正在运行的目录。 |
+| **可回滚发布** | 产品版本统一为 v3.0.0，wire protocol 为 v62。构建和部署同时校验产品版本与协议版本；VPS 使用不可变 release、独立 venv、原子 `current` 切换和失败回滚，避免直接覆盖正在运行的目录。 |
 
 > **信任边界没有改变：**模型账号、API key、会话源文件和工具执行仍留在
 > wrapper 所在机器；VPS relay 不保存对话或 Artifact。浏览历史只读取本地
@@ -231,7 +232,7 @@ daemon 时严格校验当前官方 managed CLI，并只把它的 `current` 入�
 登录、配置、rollout、socket 和 daemon 进程仍各自隔离。已有自定义安装或不明确的
 目录绝不会被覆盖。
 配置中必须且只能有一个 `default: true`。Relay 和 Web 只收到 Profile id、标签与
-可用状态，不会收到 `CODEX_HOME` 路径或凭据。修改后需重启 wrapper；protocol v60
+可用状态，不会收到 `CODEX_HOME` 路径或凭据。修改后需重启 wrapper；protocol v62
 必须让 wrapper、relay 和 Web 同批升级。
 Profile id 调整、单账号与多账号切换会按 `CODEX_HOME` 的真实路径迁移本地控制和
 恢复状态；迁移被异常中断时，请保持同一份目标配置并重启 wrapper 继续完成。为避免
@@ -546,12 +547,12 @@ npm --prefix web run build   # 产出 web/dist/
 
 > 现在网页**不再把 token 烤进 JS**：登录改为向中继 POST 口令换取短期会话 token。所以构建不需要任何 `VITE_*` 变量。
 
-> **升级到协议 v60**：线协议会严格拒绝版本不一致。请在同一次维护窗口部署
+> **升级到协议 v62**：线协议会严格拒绝版本不一致。请在同一次维护窗口部署
 > `cc_remote/` 和新的 `web/dist/`，然后依次重启 relay、wrapper；不要新旧版本滚动混跑。
 > 升级期间已有 WebSocket 会短暂重连，relay 重启也会要求浏览器重新登录。已打开的
 > 旧版页面必须做一次**硬刷新**（重新加载新的带 hash 静态资源），仅重新登录不够。
-> 手工发布时先停本机 wrapper，再停服更新 relay + web，最后启动 v60 relay 和
-> v60 wrapper；这样旧 wrapper 不会占住同一 `machine_id` 的连接槽。若从 v34 以前的
+> 手工发布时先停本机 wrapper，再停服更新 relay + web，最后启动 v62 relay 和
+> v62 wrapper；这样旧 wrapper 不会占住同一 `machine_id` 的连接槽。若从 v34 以前的
 > 版本跨级升级，仍须执行 v34 引入的 Work SQLite 迁移保护：启动新 wrapper 前用
 > `deploy/work_registry_snapshot.py snapshot` 保存两个注册表。回滚时先停新版本、恢复
 > 该快照，再切回旧代码；不要在 wrapper 运行时只复制主 `.sqlite3` 文件而漏掉 WAL。
@@ -608,7 +609,7 @@ sudo bash ~/cc-remote-upload/deploy/setup-vps.sh \
 脚本会：装 `python3-venv` + Caddy、建 `ccremote` 系统用户、创建不可变 release
 和 release-local venv、合并 Caddy 配置、原子切换 `current`，再重启 relay。若新
 relay 重启或健康检查失败，`current`、Caddyfile、systemd unit 会作为一个事务全部
-恢复，并验证旧 release 的 `/healthz`。成功后再启动 v60 wrapper。
+恢复，并验证旧 release 的 `/healthz`。成功后再启动 v62 wrapper。
 
 验证：
 
