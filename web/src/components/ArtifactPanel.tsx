@@ -161,7 +161,7 @@ function ImageArtifactPreview({ data, mediaType, title }: {
 }) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [decodeError, setDecodeError] = useState<string | null>(null);
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const svg = useSanitizedSvgUrl(data, mediaType);
 
   useEffect(() => {
@@ -193,12 +193,15 @@ function ImageArtifactPreview({ data, mediaType, title }: {
 
   const resolvedUrl = mediaType === "image/svg+xml" ? svg.url : objectUrl;
   const resolvedError = mediaType === "image/svg+xml" ? svg.error : error;
-  useEffect(() => setDecodeError(null), [resolvedUrl]);
+  // A cached decode can fail before passive effects run. Associate the error
+  // with its URL so a source-change effect cannot clear that new failure.
+  const decodeError = resolvedUrl && failedUrl === resolvedUrl
+    ? "图片无法解码或格式不受支持" : null;
   if (resolvedError || decodeError) return <div className="preview-error"><Icon name="read" size={18} />{resolvedError || decodeError}</div>;
   if (!resolvedUrl) return <div className="diff-empty"><span className="thinking"><span/><span/><span/></span> 正在准备预览…</div>;
   return <div className="artifact-image-stage"><img src={resolvedUrl} alt={title}
-    onLoad={() => setDecodeError(null)}
-    onError={() => setDecodeError("图片无法解码或格式不受支持")} /></div>;
+    onLoad={() => setFailedUrl(current => current === resolvedUrl ? null : current)}
+    onError={() => setFailedUrl(resolvedUrl)} /></div>;
 }
 
 function SourceFile({ content, targetLine, artifactKey }: {
