@@ -324,6 +324,32 @@ async function mockRightPanelRelay(
   return { commands, emit: (message: PanelRelayEvent) => emit(message) };
 }
 
+for (const running of [false, true]) {
+  test(`path-prefixed prompts send verbatim as ${running ? "steering" : "a new message"}`, async ({ page }) => {
+    const relay = await mockRightPanelRelay(page, { retained: false });
+    await page.goto("/");
+    const input = page.locator(".composer textarea");
+    await expect(input).toBeVisible();
+    await expect.poll(() => relay.commands.some((command) =>
+      command.type === "get_history" && command.session_id === "layout-parent",
+    )).toBe(true);
+    if (running) {
+      relay.emit({ type: "state", sid: "layout-parent", state: "running" });
+      await expect(input).toHaveAttribute("placeholder", /引导/);
+    }
+    const prompt = "/Users/Tester/workspace/unitree-go2这里有双目的，看看我们的大脑是否能接入？";
+    await input.fill(prompt);
+    if (running) await input.press("Enter");
+    else await page.locator(".composer .sendbtn").click();
+    await expect.poll(() => relay.commands.filter((command) =>
+      command.type === (running ? "steer" : "query") && command.prompt === prompt,
+    ).length).toBe(1);
+    await expect(input).toHaveValue("");
+    await expect(page.locator(".composer-notice")).toHaveCount(0);
+    expect(relay.commands.some((command) => command.type === "browse_files")).toBe(false);
+  });
+}
+
 for (const browsing of [false, true]) {
   test(`turn regressions App keeps painted history on post-send alias revision (${browsing ? "browsing" : "live"})`, async ({ page }, testInfo) => {
     const sid = "layout-parent";

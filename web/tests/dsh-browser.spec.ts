@@ -94,6 +94,23 @@ async function openDsh(page: Page, options = {}) {
   return relay;
 }
 
+for (const running of [false, true]) {
+  test(`DSH path-prefixed prompts send verbatim as ${running ? "steering" : "a new message"}`, async ({ page }) => {
+    const relay = await openDsh(page, { running });
+    const input = page.locator(".composer textarea");
+    const prompt = "/Users/Tester/workspace/unitree-go2这里有双目的，看看我们的大脑是否能接入？";
+    await input.fill(prompt);
+    if (running) await input.press("Enter");
+    else await page.locator(".composer .sendbtn").click();
+    await expect.poll(() => relay.commands.filter(command =>
+      command.type === (running ? "steer" : "query") && command.prompt === prompt,
+    ).length).toBe(1);
+    await expect(input).toHaveValue("");
+    await expect(page.locator(".composer-notice")).toHaveCount(0);
+    expect(relay.commands.some(command => command.type === "set_dsh_control")).toBe(false);
+  });
+}
+
 test("DSH context reports remain visible without a Codex estimate and clear unavailable readings", async ({ page }, info) => {
   const relay = await openDsh(page, { running: true });
   const ring = page.getByRole("button", { name: "上下文占用", exact: true });

@@ -62,6 +62,7 @@ import {
 } from "../src/completion-badges.ts";
 import { imageDimensions } from "../src/img.ts";
 import "./presentation-state.test.ts";
+import "./slash-command.test.ts";
 import {
   historyImageDisplaySource,
   TurnImagePreviewCache,
