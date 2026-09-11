@@ -1,6 +1,8 @@
 """Validated local Claude account/profile registry.
 
-Each profile is a complete ``CLAUDE_CONFIG_DIR`` boundary.  Local paths stay
+Each profile selects a complete native account boundary. The per-user
+``~/.claude`` root retains Claude's unset-``CLAUDE_CONFIG_DIR`` layout;
+other roots use an explicit ``CLAUDE_CONFIG_DIR``. Local paths stay
 private; the browser receives only stable ids and labels.  A single profile
 keeps native Claude session ids for compatibility, while multiple profiles use
 ``<profile>@<native-id>`` routing so identical UUIDs cannot cross accounts.

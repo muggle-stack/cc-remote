@@ -69,8 +69,11 @@ a separate choice; sharing alone does not authorize them.
   Text deltas still stream live via `StreamEvent`.
 - **Claude only — don't set `setting_sources=[]` for Code**: single-account Code
   intentionally loads the user's native settings. Explicit multi-account
-  profiles keep their own `CLAUDE_CONFIG_DIR` and load only the selected user
-  settings source. Project/local settings cannot replace the selected model
+  profiles load only the selected user settings source. The per-user `~/.claude`
+  profile leaves `CLAUDE_CONFIG_DIR` unset so native `~/.claude.json` and keychain
+  identity are preserved; other directories set it explicitly. Inherited account
+  selectors are cleared in either case. Project/local settings cannot replace
+  the selected model
   link, and the complete user file is never promoted through `--settings`.
   Single-account Code retains Claude's normal source precedence. Work remains
   isolated with one wrapper-owned settings policy and `setting_sources=[]`.
@@ -95,7 +98,7 @@ a separate choice; sharing alone does not authorize them.
   `useLayoutEffect` is deliberately dependency-free — late virtualizer/image
   measurements settle without a React render, and constraining it to its read
   set reintroduces a full-viewport jump on touch release.
-- **Protocol version gate**: current wire protocol v61 is declared by
+- **Protocol version gate**: current wire protocol v63 is declared by
   `PROTOCOL_VERSION` in both `protocol.py` and `web/src/protocol.ts`.
   `deserialize` hard-rejects a version mismatch, and
   `_Base` is `extra="forbid"`, so ANY protocol change must be deployed to all

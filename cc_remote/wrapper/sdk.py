@@ -94,6 +94,24 @@ def normalize_claude_model_selection(model: str | None) -> str | None:
     normalized = model.strip()
     return _CLAUDE_1M_MODEL_PINS.get(normalized.lower(), normalized)
 
+
+def same_claude_model_selection(left: str | None, right: str | None) -> bool:
+    """Do two ids name the same selection once curated pins are applied?
+
+    Reconciliation reads a model from one of two places -- what Remote
+    selected, and what a transcript or ``/context`` row reports -- and has to
+    decide whether they agree. Comparing the raw strings would call a curated
+    id and its pinned ``[1m]`` form different when they are the same
+    selection, so both sides go through the same normalization first. Both
+    must also be present: "no selection" never agrees with anything.
+    """
+    normalized_left = normalize_claude_model_selection(left)
+    normalized_right = normalize_claude_model_selection(right)
+    return (
+        normalized_left is not None
+        and normalized_left == normalized_right
+    )
+
 # Work keeps the file primitives needed for documents and other deliverables,
 # plus first-party web research.  Deliberately omit Agent/Task, Skill,
 # NotebookEdit and the coding-only planning tools: the private Work workspace
@@ -720,15 +738,21 @@ class SdkHandle:
                 # promote a merely observed native/Work base model: Code owns
                 # explicit model selection while Work keeps Claude's policy.
                 current_model = valid_claude_model(self.model)
-                if (
-                    current_model is not None
-                    and current_model.lower().endswith("[1m]")
-                    and normalize_claude_model_selection(current_model)
-                        == normalize_claude_model_selection(selected_model)
-                ):
-                    self.model = normalize_claude_model_selection(current_model)
-                else:
-                    self.model = selected_model
+                if (current_model is None
+                        or same_claude_model_selection(current_model,
+                                                       selected_model)):
+                    if current_model is not None and current_model.lower(
+                            ).endswith("[1m]"):
+                        self.model = normalize_claude_model_selection(
+                            current_model)
+                    else:
+                        self.model = selected_model
+                # Otherwise a gateway reports its own upstream id here (e.g.
+                # ``glm-5.2``) while the user selected a Claude alias. That
+                # reading describes the provider, not this session's selection,
+                # so it must not replace one: ``self.model`` stays untouched.
+                # A session with no selection yet takes the branch above, which
+                # is how a fresh session learns its provider-selected model.
         auto_threshold = usage.get("autoCompactThreshold")
         self.effective_auto_compact_threshold_tokens = (
             auto_threshold

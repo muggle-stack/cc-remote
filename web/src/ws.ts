@@ -302,6 +302,10 @@ export class RelayWs {
     return this.queryAcceptance.pendingMessageId(sid);
   }
 
+  queryReceiptFor(sid: string, messageId: string) {
+    return this.queryAcceptance.receiptFor(sid, messageId);
+  }
+
   private touchReplay(sid: string): void {
     this.replayOrder = this.replayOrder.filter((known) => known !== sid);
     this.replayOrder.push(sid);
@@ -1232,16 +1236,16 @@ export class RelayWs {
     });
   }
 
-  sendSetGoal(objective: string | null, status: GoalStatus | null, tokenBudget: number | null): void {
-    const obj: Record<string, unknown> = { v: PROTOCOL_VERSION, type: "set_goal", ts: nowTs(), ...this.sidObj() };
+  sendSetGoal(objective: string | null, status: GoalStatus | null, tokenBudget: number | null, sid?: string): string | null {
+    const obj: Record<string, unknown> = { v: PROTOCOL_VERSION, type: "set_goal", ts: nowTs(), ...(sid ? { sid } : this.sidObj()) };
     if (objective !== null) obj.objective = objective;
     if (status !== null) obj.status = status;
     if (tokenBudget !== null) obj.token_budget = tokenBudget;
-    this.send(obj);
+    return this.sendTracked(obj);
   }
 
-  sendClearGoal(): void {
-    this.send({ v: PROTOCOL_VERSION, type: "clear_goal", ts: nowTs(), ...this.sidObj() });
+  sendClearGoal(sid?: string): string | null {
+    return this.sendTracked({ v: PROTOCOL_VERSION, type: "clear_goal", ts: nowTs(), ...(sid ? { sid } : this.sidObj()) });
   }
 
   sendDismissGoalTo(sid: string, goalId: string): string | null {

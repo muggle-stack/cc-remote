@@ -19,6 +19,7 @@ import type {
 import { presentLegacyExternalControl, presentSessionControl } from "../session-control-ui";
 import type { ConnState } from "../ws";
 import { Icon } from "../icons";
+import { AttachmentPicker } from "./AttachmentPicker";
 import { parseContextCapacity } from "../codex-context";
 const CodexContextControl = lazy(() => import("./CodexContextControl"));
 import {
@@ -27,8 +28,8 @@ import {
   modelsFor, effortNameForDisplay, permsFor,
   permissionProfileLabel, type Catalog,
 } from "../data";
-import { CommandSheet } from "./CommandSheet";
-import { attachmentBytes } from "../img";
+const CommandSheet = lazy(() => import("./CommandSheet").then(m => ({ default: m.CommandSheet })));
+import { attachmentBytes, snapshotAttachmentFiles } from "../img";
 import {
   readClipboardImport, resolveClipboardImport, insertClipboardText,
   type ClipboardImport,
@@ -43,7 +44,6 @@ import {
   isSettlingStopDisabled,
   type SendMode,
 } from "../composer-submit";
-import { workContextMetrics } from "../work-context";
 import type { ComposerDraft, ComposerDraftStore } from "../composer-drafts";
 import {
   composePastePrompt,
@@ -144,9 +144,6 @@ interface Props {
   onOpenArtifacts?: () => void;
   contextReport: ContextReport | null;
   contextExactReport?: ContextReport | null;
-  contextLoading?: boolean;
-  contextDeferred?: boolean;
-  contextError?: string | null;
   statusReport?: StatusReport | null;
   rateLimits?: StatusRateLimit[];
   statusError?: string | null;
@@ -209,8 +206,6 @@ export function Composer(p: Props) {
   const taRef = useRef<HTMLTextAreaElement>(null);
   const imeSubmitRef = useRef(new ImeSubmitGuard());
   const buttonSendTimerRef = useRef<number | null>(null);
-  const photoRef = useRef<HTMLInputElement>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
   const requestedSkillScopeRef = useRef<string | null>(null);
   const pickFilesRef = useRef<(files: FileList | File[] | null) => Promise<void>>(
     async () => {});
@@ -398,7 +393,7 @@ export function Composer(p: Props) {
       const [{ pickFiles }, imported] = await Promise.all([
         import("../attachment-import"),
         clipboard ? resolveClipboardImport(clipboard)
-          : Promise.resolve({ files: fl ? Array.from(fl) : null, errors: [] }),
+          : Promise.resolve(snapshotAttachmentFiles(fl, images.length + files.length)),
       ]);
       const batch = await pickFiles(
         imported.files, images.length + files.length, attachmentBytes(images, files));
@@ -457,7 +452,7 @@ export function Composer(p: Props) {
   // Keep the native textarea for reliable selection/undo/IME. Large text is
   // retained privately by the draft and represented only by an editable card.
   const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
-    const clipboard = readClipboardImport(e.clipboardData);
+    const clipboard = readClipboardImport(e.clipboardData, images.length + files.length);
     const { text } = clipboard;
     const attachments = clipboard.files.length || clipboard.images.length
       || clipboard.errors.length;
@@ -770,19 +765,18 @@ export function Composer(p: Props) {
     ? (p.dsh?.permissions ?? []).map(option => ({ id: option.value, name: option.name, short: option.name, ds: option.description, ic: "shield", danger: option.value === "danger-full-access" }))
     : permsFor(p.engine);
   const workSurface = p.surface === "work";
-  const contextAvailable = p.contextReport?.available !== false;
-  const currentContextExact = !!p.contextReport && contextAvailable
-    && p.contextReport.source !== "recent_turn";
-  const lastExactContextReport = currentContextExact
-    ? p.contextReport : p.contextExactReport ?? null;
-  const exactContextReport = lastExactContextReport?.available !== false
-    ? lastExactContextReport : null;
-  const contextHasCapacity = (exactContextReport?.max_tokens ?? 0) > 0;
-  const contextRingHasCapacity = contextAvailable
-    && (p.contextReport?.max_tokens ?? 0) > 0;
-  const workContext = workSurface && exactContextReport
-    ? workContextMetrics(exactContextReport)
-    : null;
+  const currentContextReport = p.contextReport?.available !== false ? p.contextReport : null;
+  const retainedContextReport = p.contextExactReport?.available !== false ? p.contextExactReport : null;
+  // A background read may temporarily return billing usage or no estimate.
+  // Keep the last native reading until another arrives. Runtime invalidation
+  // already clears both reports when the session's model or capacity changes.
+  const exactContextReport = currentContextReport?.source !== "recent_turn" && currentContextReport
+    ? currentContextReport : retainedContextReport ?? currentContextReport;
+  const codexEstimate = p.engine !== "codex"
+    || exactContextReport?.source === "native_estimate";
+  const contextHasCapacity = codexEstimate && (exactContextReport?.max_tokens ?? 0) > 0;
+  const contextRingHasCapacity = contextHasCapacity;
+  const workContext = workSurface ? exactContextReport : null;
   const autoCompactSelection = normalizeAutoCompactSelection(
     p.autoCompact?.mode ?? "inherit",
     p.autoCompact?.threshold_tokens ?? null,
@@ -965,12 +959,6 @@ export function Composer(p: Props) {
           </div>
         )}
 
-        <input ref={photoRef} type="file" accept="image/*" multiple hidden
-          aria-label="添加照片"
-          onChange={(e) => { void onPickFiles(e.target.files); e.target.value = ""; }} />
-        <input ref={fileRef} type="file" multiple hidden aria-label="添加文件"
-          onChange={(e) => { void onPickFiles(e.target.files); e.target.value = ""; }} />
-
         {workSurface ? (
           <div className="work-compose-card">
             <div className="work-compose-caption">
@@ -983,11 +971,10 @@ export function Composer(p: Props) {
               {sendControl}
             </div>
             <div className="work-compose-foot">
-              <button type="button" className="work-compose-tool"
-                onClick={() => fileRef.current?.click()} disabled={locked || importing}
-                aria-label="添加资料" title="添加资料">
+              <AttachmentPicker key={p.draftKey} className="work-compose-tool"
+                onPick={onPickFiles} disabled={locked || importing} label="添加资料">
                 <Icon name="plus" size={15} /><span>添加资料</span>
-              </button>
+              </AttachmentPicker>
               {!!p.workArtifactCount && (
                 <button type="button" className="work-compose-tool"
                   onClick={p.onOpenArtifacts}
@@ -1032,18 +1019,15 @@ export function Composer(p: Props) {
                       setCtxOpen((o) => !o);
                     }}>
                     <span>会话上下文</span><b>{workContext && contextHasCapacity
-                        ? `${workContext.sessionPercentage.toFixed(0)}%`
-                        : workContext
-                          ? `${workContext.sessionTokens.toLocaleString()} tokens`
+                        ? `${(workContext.session_percentage ?? workContext.percentage).toFixed(0)}%`
+                        : workContext && codexEstimate
+                          ? `${(workContext.session_tokens ?? workContext.total_tokens).toLocaleString()} tokens`
                           : "查看"}</b>
                   </button>
                   {ctxOpen && (
-                    <Suspense fallback={<div className="ctx-pop work-ctx-pop">
-                      <div className="ctx-pop-loading">正在读取真实上下文…</div>
-                    </div>}>
+                    <Suspense fallback={null}>
                       <ContextPopover report={exactContextReport}
-                        loading={p.contextLoading} deferred={p.contextDeferred}
-                        error={p.contextError} work={workContext} />
+                        work codex={p.engine === "codex"} />
                     </Suspense>
                   )}
                   {p.engine === "claude" && autoCompactOpen && (
@@ -1061,9 +1045,7 @@ export function Composer(p: Props) {
           </div>
         ) : (<>
           <div className="inrow">
-            <button className="cmdbtn" onClick={() => photoRef.current?.click()}
-              aria-label="添加照片" title="添加照片"
-              disabled={locked || importing}><Icon name="plus" size={19} /></button>
+            <AttachmentPicker key={p.draftKey} onPick={onPickFiles} disabled={locked || importing} />
             {inputControl(p.engine === "codex" || p.engine === "dsh"
               ? "输入 / 命令，$ Skill"
               : "输入 / 命令")}
@@ -1151,7 +1133,7 @@ export function Composer(p: Props) {
             )}
             <button
               className={"hint-ring"
-                + (contextAvailable ? "" : " unavailable")}
+                + (contextRingHasCapacity ? "" : " unavailable")}
               aria-expanded={ctxOpen}
               aria-label="上下文占用"
               title="上下文占用"
@@ -1166,24 +1148,20 @@ export function Composer(p: Props) {
             >
               <svg viewBox="0 0 36 36" width="20" height="20" aria-hidden="true">
                 <circle className="hr-track" cx="18" cy="18" r="15" />
-                <circle
+                {contextRingHasCapacity ? <circle
                   className="hr-fill"
                   cx="18" cy="18" r="15"
                   strokeDasharray="94.25"
-                  strokeDashoffset={94.25 * (1 - Math.min(
-                    contextRingHasCapacity
-                      ? p.contextReport?.percentage ?? 0 : 0, 100) / 100)}
+                  strokeDashoffset={94.25 * (1 - Math.min(exactContextReport?.percentage ?? 0, 100) / 100)}
                   transform="rotate(-90 18 18)"
-                />
+                /> : null}
               </svg>
             </button>
             {ctxOpen && (
-              <Suspense fallback={<div className="ctx-pop">
-                <div className="ctx-pop-loading">正在读取真实上下文…</div>
-              </div>}>
+              <Suspense fallback={null}>
                 <ContextPopover report={exactContextReport}
-                  loading={p.contextLoading} deferred={p.contextDeferred}
-                  error={p.contextError} codexContext={p.engine === "codex" ? p.codexContext : null}
+                  codex={p.engine === "codex"}
+                  codexContext={p.engine === "codex" ? p.codexContext : null}
                   onAutoCompact={p.engine === "codex" && p.onSetCodexContext
                     ? () => { setCtxOpen(false); setAutoCompactOpen(true); } : undefined} />
               </Suspense>
@@ -1211,7 +1189,7 @@ export function Composer(p: Props) {
         <p>{dshResult.text}</p>
       </details>}
       {p.engine === "dsh" && p.dsh?.error && <div className="dsh-connection-note" role="status">{p.dsh.error}</div>}
-      <CommandSheet
+      {sheetKind !== null && <Suspense fallback={null}><CommandSheet
         open={sheetKind !== null}
         kind={sheetKind ?? "models"}
         engine={p.engine}
@@ -1232,7 +1210,7 @@ export function Composer(p: Props) {
         onPickPermissionProfile={p.onSetPermissionProfile}
         currentWebSearch={p.webSearch}
         onPickWebSearch={p.onSetWebSearch}
-      />
+      /></Suspense>}
 
       {dragOver && (
         <div className="drop-overlay" aria-hidden="true">

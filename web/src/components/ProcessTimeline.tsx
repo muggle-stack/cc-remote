@@ -802,8 +802,14 @@ export function ProcessTimeline({ blocks, done, active, outcome, problem, durati
   const releaseInteractionFrame = useRef<number | null>(null);
 
   useEffect(() => {
-    if (!manuallyToggled.current) setUncontrolledOpen(!terminalComplete);
-  }, [terminalComplete]);
+    // A steer or a history refresh may settle a visible segment before its
+    // native items finish updating. Auto-close once; later activity updates
+    // content, never reopens the disclosure or overrides a manual choice.
+    if (!terminalComplete || !uncontrolledOpen || openOverride != null
+        || manuallyToggled.current) return;
+    setUncontrolledOpen(false);
+    onOpenChange?.(false);
+  }, [terminalComplete, uncontrolledOpen, openOverride, onOpenChange]);
   useEffect(() => {
     if (detailLoading || !needsAuthoritativeDetail) {
       setLocalDetailError(null);
@@ -871,28 +877,16 @@ export function ProcessTimeline({ blocks, done, active, outcome, problem, durati
   // duration until at least one displayable second is available.
   const elapsed = rawElapsed != null && rawElapsed >= 500
     ? rawElapsed : null;
-  const requestDetail = () => {
+  const requestDetail = (load = onLoadDetail) => {
     setLocalDetailError(null);
-    if (onLoadDetail?.() === false) {
-      setLocalDetailError(DETAIL_REQUEST_ERROR);
-    }
-  };
-  const retryDetail = () => {
-    setLocalDetailError(null);
-    if ((onRetryDetail ?? onLoadDetail)?.() === false) {
+    if (load?.() === false) {
       setLocalDetailError(DETAIL_REQUEST_ERROR);
     }
   };
   const toggle = () => {
     manuallyToggled.current = true;
-    if (needsAuthoritativeDetail) {
-      const next = !open;
-      if (next && !detailLoading) requestDetail();
-      setUncontrolledOpen(next);
-      onOpenChange?.(next);
-      return;
-    }
     const next = !open;
+    if (next && needsAuthoritativeDetail && !detailLoading) requestDetail();
     setUncontrolledOpen(next);
     onOpenChange?.(next);
   };
@@ -1000,7 +994,7 @@ export function ProcessTimeline({ blocks, done, active, outcome, problem, durati
             <button type="button" disabled={detailLoading}
               onClick={(event) => {
                 event.stopPropagation();
-                retryDetail();
+                requestDetail(onRetryDetail ?? onLoadDetail);
               }}>
               重试
             </button>

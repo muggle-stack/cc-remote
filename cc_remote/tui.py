@@ -11,9 +11,9 @@ This is NOT the native `claude` TUI; it's a cc-remote client rendered in the
 terminal. That's the trade for true two-way sync (see the design discussion).
 
 Env:
-  RELAY_URL       default ws://127.0.0.1:8765/ws
+  RELAY_URL       defaults to the active same-user relay, then loopback:8765
   LOGIN_USERNAME  required only when relay multi-user login is enabled
-  LOGIN_PASSWORD  optional; if omitted the TUI prompts without echo
+  LOGIN_PASSWORD  optional locally; remote connections prompt without echo
   PUBLIC_ORIGIN   optional WebSocket Origin override (normally derived from URL)
   ENGINE          claude | codex   (which store to list / which backend for /new)
   ALLOW_INSECURE_HTTP  1/true to allow a non-loopback RELAY_URL to stay ws://
@@ -49,10 +49,11 @@ import time
 import uuid
 from http.cookies import SimpleCookie
 from typing import Optional
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 import cc_remote.config  # noqa: F401  (import side-effect: loads .env)
+from cc_remote.config import valid_machine_id
 from cc_remote.log import logger, setup
 from cc_remote.protocol import (
     Hello, Query, Interrupt, SetModel, SetEffort, GetContext,
@@ -60,6 +61,9 @@ from cc_remote.protocol import (
     Ping, is_reliable_command, serialize,
 )
 from cc_remote.relay.auth import SESSION_COOKIE_NAME
+from cc_remote.tui_local import (
+    discover_local_relay, is_loopback_url, same_local_endpoint,
+)
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
@@ -70,7 +74,7 @@ RELAY_URL = os.environ.get("RELAY_URL", "ws://127.0.0.1:8765/ws")
 LOGIN_PASSWORD = os.environ.get("LOGIN_PASSWORD", "")
 LOGIN_USERNAME = os.environ.get("LOGIN_USERNAME", "")
 PUBLIC_ORIGIN = os.environ.get("PUBLIC_ORIGIN", "")
-ENGINE = os.environ.get("ENGINE", "claude")
+ENGINE = os.environ.get("ENGINE", "codex")
 # Same opt-in escape hatch as the relay/wrapper: lets RELAY_URL stay ws://
 # against a non-loopback host instead of requiring wss://. Off by default.
 ALLOW_INSECURE_HTTP = os.environ.get("ALLOW_INSECURE_HTTP", "").strip().lower() in {
@@ -80,6 +84,13 @@ TUI_OUTBOX_CAP = 256
 TUI_OUTBOX_BYTES = 32 * 1024 * 1024
 TUI_MAX_FRAME_BYTES = 16 * 1024 * 1024
 MAX_REPLAY_SESSIONS = 128
+# Top-level modules supplied by requirements-tui.txt and its dependencies.
+# Do not hide missing cc_remote modules or broken imports within a package.
+OPTIONAL_TUI_MODULES = frozenset({
+    "textual", "textual_image", "rich", "markdown_it", "mdit_py_plugins",
+    "linkify_it", "uc_micro", "mdurl", "pygments", "platformdirs",
+    "typing_extensions", "PIL",
+})
 
 # Terminal control input is a security boundary: model/tool/transcript text is
 # untrusted even though the relay itself is authenticated.  Keep ordinary LF so
@@ -94,7 +105,7 @@ _BIDI_CONTROLS = frozenset({
 })
 _HISTORY_NARRATIVE_TYPES = frozenset({
     "user_msg", "turn_steered", "assistant_msg_start", "delta", "tool_use",
-    "tool_result", "assistant_msg_end",
+    "tool_result", "tool_delta", "assistant_msg_end",
 })
 
 
@@ -199,10 +210,15 @@ def _login_cookie(ws_url: str, password: str, username: str = "") -> str:
 
 class Tui:
     def __init__(self, url: str, password: str, origin: str, engine: str,
-                 want_sid: Optional[str], username: str = ""):
+                 want_sid: Optional[str], username: str = "",
+                 machine_id: str = "default"):
         self.url = _validate_relay_url(url)
+        if not valid_machine_id(machine_id):
+            raise ValueError("Invalid relay machine id")
         self.username = username
+        self.machine_id = machine_id
         self.password = password
+        self.local_login = False
         self.origin = _ws_origin(url, origin)
         self.cookie = ""
         self.engine = engine
@@ -268,11 +284,6 @@ class Tui:
     # ---- lifecycle ----
 
     async def run(self) -> None:
-        if not self.password:
-            self.password = await asyncio.to_thread(getpass.getpass, "Access password: ")
-        if not self.password:
-            print(RED("No password provided — cannot authenticate."))
-            return
         try:
             await self._authenticate()
         except Exception as e:  # noqa: BLE001 — concise login failure for an interactive client
@@ -288,6 +299,25 @@ class Tui:
                 self._stdin_task.cancel()
 
     async def _authenticate(self) -> None:
+        if self.local_login or (not self.password and is_loopback_url(self.url)):
+            local = await asyncio.to_thread(discover_local_relay)
+            if (local is not None and same_local_endpoint(self.url, local.url)
+                    and (not self.username or self.username == local.username)):
+                self.password = local.password
+                self.username = local.username
+                self.local_login = True
+                self.url = local.url
+                self.origin = local.origin
+            else:
+                raise ValueError(
+                    "Local relay authentication is unavailable. Start the same-user "
+                    "cc-remote-relay.service or configure LOGIN_PASSWORD explicitly."
+                )
+        if not self.password:
+            self.password = await asyncio.to_thread(
+                getpass.getpass, "Remote relay password: ")
+        if not self.password:
+            raise ValueError("No password provided")
         self.cookie = await asyncio.to_thread(
             _login_cookie, self.url, self.password, self.username)
 
@@ -308,7 +338,10 @@ class Tui:
         auth_retry_used = False
         while not self._quitting:
             try:
-                async with connect(self.url, additional_headers={"Cookie": self.cookie},
+                socket_url = self.url + "?" + urlencode(
+                    {"machine": self.machine_id}
+                )
+                async with connect(socket_url, additional_headers={"Cookie": self.cookie},
                                    origin=self.origin,
                                    max_size=32 * 1024 * 1024, close_timeout=3, open_timeout=30) as ws:
                     self.ws = ws
@@ -355,9 +388,16 @@ class Tui:
         recv = asyncio.create_task(self._receiver(ws))
         cmd = asyncio.create_task(self._cmd_consumer(ws))
         hb = asyncio.create_task(self._heartbeat(ws))
-        _, pending = await asyncio.wait({recv, cmd, hb}, return_when=asyncio.FIRST_COMPLETED)
-        for t in pending:
-            t.cancel()
+        tasks = {recv, cmd, hb}
+        try:
+            done, _ = await asyncio.wait(
+                tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _heartbeat(self, ws) -> None:
         # Same half-open guard as the web client. If the WS silently dies (dead TCP,
@@ -473,6 +513,7 @@ class Tui:
         cursors, generations = self._replay_state()
         if not await self._send(Hello(
             role="client", client_id=self.client_id,
+            machine_id=self.machine_id,
             cursors=cursors or None, generations=generations or None)):
             return
         queued: list[tuple[str, str, Optional[str]]] = []
@@ -501,7 +542,7 @@ class Tui:
             engine = self.session_engines.get(
                 sid, self.attached_engine if sid == self.attached_sid else "claude")
             if not await self._send_raw(serialize(SwitchSession(
-                    session_id=sid, engine=engine))):
+                    session_id=sid, engine=engine, space=self._session_space(sid)))):
                 return
             for cmd_id, raw, command_sid in queued:
                 if command_sid != sid:
@@ -570,6 +611,12 @@ class Tui:
 
     # ---- commands ----
 
+    def _session_space(self, sid: str) -> str:
+        return "code"
+
+    def _history_backed(self, sid: str) -> bool:
+        return True
+
     async def _attach(self, sid: str, engine: Optional[str] = None) -> None:
         self._pending_new_request = None
         previous = self.attached_sid
@@ -581,7 +628,7 @@ class Tui:
         # switch_session makes it resident (spawns/resumes) so queries land; then
         # pull its history from the transcript like the web client does.
         if not await self._send(SwitchSession(
-                session_id=sid, engine=self.attached_engine)):
+                session_id=sid, engine=self.attached_engine, space=self._session_space(sid))):
             self.attached_sid = previous
             self.attached_engine = previous_engine
             return
@@ -758,6 +805,7 @@ class Tui:
             self._touch_replay(sid)
         refreshing_replay = (
             isinstance(sid, str) and t == "replay_start"
+            and self._history_backed(sid)
             and bool(d.get("rebuild") or d.get("truncated")
                      or generation_changed
                      or sid in self._history_refresh_after_replay)
@@ -781,10 +829,12 @@ class Tui:
             self._rebuilding_sessions.discard(sid)
         if t == "replay_end" and isinstance(sid, str) and isinstance(d.get("to_seq"), int):
             replay_to_seq = d["to_seq"]
-            if d.get("truncated") or sid in self._history_refresh_after_replay:
+            if (self._history_backed(sid)
+                    and (d.get("truncated") or sid in self._history_refresh_after_replay)):
                 self._history_refresh_after_replay.discard(sid)
                 self._history_refresh_now.add(sid)
         elif (generation_changed and self.attached_sid
+              and self._history_backed(self.attached_sid)
               and t != "replay_start"):
             # Snapshot or wrapper_reconnected can be the first proof of a fresh
             # process when the target was not resident during Hello replay.
@@ -820,6 +870,7 @@ class Tui:
             self._rebuilding_sessions.discard(sid)
             self._history_replay_suppressed.discard(sid)
 
+        self._on_event(d)
         if t == "session_list":
             self._render_sessions(d.get("sessions") or [])
         elif t == "history":
@@ -981,6 +1032,9 @@ class Tui:
             self._line(GREEN("[wrapper back]"))
         # snapshot / dir_list / diff_report / replay_* / pong: quietly ignored
 
+    def _on_event(self, event: dict) -> None:
+        """Projection hook after replay deduplication, before line rendering."""
+
     def _render_sessions(self, sessions: list[dict]) -> None:
         # hide archived; keep order (wrapper sorts by recency)
         self.sessions = [s for s in sessions if s.get("tag") != "archived"]
@@ -1089,17 +1143,89 @@ class Tui:
 
 
 def main() -> None:
-    want_sid = sys.argv[1] if len(sys.argv) > 1 else None
+    import argparse
+
+    parser = argparse.ArgumentParser(description="cc-remote terminal client")
+    parser.add_argument("session_id", nargs="?")
+    parser.add_argument("--line-mode", action="store_true")
+    parser.add_argument("--demo", action="store_true",
+                        help="offline full-screen interaction preview")
+    parser.add_argument("--url", default=os.environ.get("RELAY_URL"))
+    parser.add_argument("--engine", choices=("claude", "codex"))
+    parser.add_argument("--machine", default="default")
+    parser.add_argument("--space", choices=("code", "work"))
+    parser.add_argument("--config", help="full-screen TUI shortcut TOML file")
+    parser.add_argument("--list-keys", nargs="?", const="", metavar="SEARCH",
+                        help="print effective shortcut index without connecting")
+    parser.add_argument("--json", action="store_true",
+                        help="emit --list-keys as machine-readable JSON")
+    args = parser.parse_args()
+    if args.demo and args.line_mode:
+        parser.error("--demo requires the full-screen workspace")
     try:
-        tui = Tui(
-            RELAY_URL,
-            LOGIN_PASSWORD,
-            PUBLIC_ORIGIN,
-            ENGINE if ENGINE in ("claude", "codex") else "claude",
-            want_sid,
-            username=LOGIN_USERNAME,
+        if args.list_keys is not None:
+            from cc_remote.tui_keys import load_keys
+
+            keys = load_keys(args.config)
+            rows = keys.index(args.list_keys)
+            if args.json:
+                print(json.dumps(rows, ensure_ascii=False, indent=2))
+            else:
+                for row in rows:
+                    print(f"{row['id']:32} {row['display']:24} "
+                          f"{row['description']} ({row['scope']})")
+            return
+        if args.json:
+            parser.error("--json requires --list-keys")
+        engine = args.engine or os.environ.get("ENGINE") or ENGINE
+        if engine not in {"codex", "claude"}:
+            parser.error("ENGINE must be 'codex' or 'claude'; or pass --engine")
+        url = args.url
+        password, origin, username = LOGIN_PASSWORD, PUBLIC_ORIGIN, LOGIN_USERNAME
+        local_login = False
+        if not args.demo and (url is None or is_loopback_url(url)):
+            local = discover_local_relay()
+            if local is not None and (url is None or same_local_endpoint(url, local.url)):
+                url = local.url
+                origin = local.origin
+                if not password and not username:
+                    password, username = local.password, local.username
+                    local_login = True
+        url = url or RELAY_URL
+        if args.line_mode:
+            client_type = Tui
+            if args.space not in (None, "code") or args.config:
+                parser.error("--space/--config require the full-screen workspace")
+        else:
+            try:
+                from cc_remote.tui_app import WorkspaceClient, run_workspace
+            except ModuleNotFoundError as exc:
+                if exc.name not in OPTIONAL_TUI_MODULES:
+                    raise
+                parser.exit(1, "Install requirements-tui.txt, or use --line-mode.\n")
+            client_type = WorkspaceClient
+        tui = client_type(
+            url,
+            password,
+            origin,
+            engine,
+            args.session_id,
+            username=username,
+            machine_id=args.machine,
         )
-        asyncio.run(tui.run())
+        tui.local_login = local_login
+        if args.line_mode:
+            asyncio.run(tui.run())
+        else:
+            from cc_remote.tui_keys import load_keys
+
+            tui.keys = load_keys(args.config)
+            tui.space = args.space or "code"
+            tui.explicit_engine = (
+                args.engine is not None or bool(os.environ.get("ENGINE"))
+            )
+            tui.explicit_space = args.space is not None
+            run_workspace(tui, demo=args.demo)
     except ValueError as exc:
         print(RED(f"Invalid configuration: {exc}"))
     except KeyboardInterrupt:

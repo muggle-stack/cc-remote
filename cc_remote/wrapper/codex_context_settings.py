@@ -77,9 +77,20 @@ class NativeContextSettings:
         self.applied_effective_window: int | None = None
         self.applied_model: str | None = None
         self.pending = False
+        self.apply_attempted = False
         self.error: str | None = None
         self.lock = asyncio.Lock()
-        self.reloaded = False
+
+    @property
+    def needs_apply(self) -> bool:
+        # Pending describes confirmation, not permission to detach again.
+        return self.pending and not self.apply_attempted
+
+    def mark_attempted(self) -> None:
+        """Consume the automatic attempt without claiming native acceptance."""
+        self.apply_attempted = True
+        if self.pending:
+            self.error = "设置已保存，但尚未确认原生会话已应用。可重新应用以重试。"
 
     async def confirm_applied(self, handle) -> None:
         """Keep capacity from the accepted configuration separate from old usage.
@@ -122,6 +133,7 @@ class NativeContextSettings:
         # Recalculate against this account's model before submitting any config.
         self.threshold = None
         self.pending = selected or max_tokens is not None
+        self.apply_attempted = False
 
     def config(self) -> dict:
         if self.max_tokens is None or self.threshold is None or self.window is None:
@@ -149,6 +161,7 @@ class NativeContextSettings:
             # capacity. Lowering it must also lower the window at safe reload.
             self.window, self.threshold = window, threshold
             self.pending = True
+            self.apply_attempted = False
         return self.config()
 
     async def select(self, handle, max_tokens: int | None) -> None:
@@ -160,16 +173,21 @@ class NativeContextSettings:
         self.max_tokens, self.window = max_tokens, window
         self.threshold = bounds.compact_limit(window) if window is not None else None
         self.pending = True
+        self.apply_attempted = False
         self.error = None
 
     async def apply(self, handle) -> bool:
         """Resubscribe with config and let native guards reload an idle thread.
 
         A subscribed thread silently ignores resume config (verified on 0.153.4).
-        Another client retaining this thread must leave the change pending.
+        Shared resume has no request-bound context configuration receipt, so
+        even an apparent reload must leave the change pending. Only a connect
+        path that can prove it accepted these settings may clear pending.
+        Each selection gets one automatic attempt; an unconfirmable or failed
+        attempt must not repeatedly detach at idle/query boundaries.
         """
         async with self.lock:
-            if not self.pending or handle.turn_active or handle.turn_start_pending:
+            if not self.needs_apply or handle.turn_active or handle.turn_start_pending:
                 return False
             sid = handle.thread_id
             if not sid or handle.work_mode or handle._ephemeral_thread_id:
@@ -189,13 +207,22 @@ class NativeContextSettings:
             status = result.get("thread", {}).get("status", {})
             if status.get("type") != "idle":
                 return False
-            await handle._request("thread/unsubscribe", {"threadId": sid})
-            # Native resume atomically replaces an idle cache entry only when
-            # no subscribers remain. Its notLoaded -> idle notifications prove
-            # replacement; loaded/list alone cannot distinguish that case.
+            # Once detachment starts, even a lost response is an uncertain
+            # result. Keep pending, but require an explicit save to retry.
+            self.mark_attempted()
+            try:
+                await handle._request("thread/unsubscribe", {"threadId": sid})
+            except Exception:
+                # A timed-out unsubscribe may already have detached us while
+                # leaving the transport open. Restore event delivery once;
+                # subsequent turns must not use an unsubscribed connection.
+                await handle.force_reconnect(sid, reason="restore context subscription")
+                raise
+            # Native may replace an idle cache entry when no subscribers remain,
+            # but status notifications cannot distinguish our reload from a
+            # competing client's. Reconnect must independently confirm config.
             await handle.force_reconnect(sid, reason="session context settings")
             if not self.pending:
                 self.error = None
                 return True
-            self.error = "其他客户端仍连接此会话；设置已保存，待会话可重新加载时应用"
             return False

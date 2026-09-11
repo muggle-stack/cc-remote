@@ -1,4 +1,4 @@
-import { isValidElement, useCallback, useEffect, useMemo, useRef, useState,
+import { lazy, Suspense, isValidElement, useCallback, useEffect, useMemo, useRef, useState,
   type ComponentPropsWithoutRef, type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
@@ -71,6 +71,9 @@ function MarkdownPreviewCode({
   }
   return <code className={className}>{children}</code>;
 }
+
+const ArtifactDownload = lazy(() => import("./ArtifactDownload"));
+const SpreadsheetPreview = lazy(() => import("./SpreadsheetPreview"));
 
 function HtmlArtifactPreview({ content, theme }: {
   content: string;
@@ -158,7 +161,7 @@ function ImageArtifactPreview({ data, mediaType, title }: {
 }) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [decodeError, setDecodeError] = useState<string | null>(null);
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const svg = useSanitizedSvgUrl(data, mediaType);
 
   useEffect(() => {
@@ -190,12 +193,15 @@ function ImageArtifactPreview({ data, mediaType, title }: {
 
   const resolvedUrl = mediaType === "image/svg+xml" ? svg.url : objectUrl;
   const resolvedError = mediaType === "image/svg+xml" ? svg.error : error;
-  useEffect(() => setDecodeError(null), [resolvedUrl]);
+  // A cached decode can fail before passive effects run. Associate the error
+  // with its URL so a source-change effect cannot clear that new failure.
+  const decodeError = resolvedUrl && failedUrl === resolvedUrl
+    ? "图片无法解码或格式不受支持" : null;
   if (resolvedError || decodeError) return <div className="preview-error"><Icon name="read" size={18} />{resolvedError || decodeError}</div>;
   if (!resolvedUrl) return <div className="diff-empty"><span className="thinking"><span/><span/><span/></span> 正在准备预览…</div>;
   return <div className="artifact-image-stage"><img src={resolvedUrl} alt={title}
-    onLoad={() => setDecodeError(null)}
-    onError={() => setDecodeError("图片无法解码或格式不受支持")} /></div>;
+    onLoad={() => setFailedUrl(current => current === resolvedUrl ? null : current)}
+    onError={() => setFailedUrl(resolvedUrl)} /></div>;
 }
 
 function SourceFile({ content, targetLine, artifactKey }: {
@@ -527,7 +533,7 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
   ]);
 
   const title = artifact.file.split("/").pop()
-    || (["md", "file", "html", "image", "pdf", "audio"].includes(artifact.kind) ? "文件预览" : "改动");
+    || (["md", "file", "html", "image", "pdf", "audio", "spreadsheet"].includes(artifact.kind) ? "文件预览" : "改动");
   const renderedArtifact = ["image", "pdf", "audio"].includes(artifact.kind)
     || (artifact.kind === "html" && mode === "preview");
 
@@ -563,11 +569,17 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
         </button>}
         {artifact.kind === "md" && artifact.saveStatus === "saved" && !dirty
           && <span className="markdown-save-state ok">已保存</span>}
+        {!loading && !artifact.error && !artifact.authorization && !artifact.truncated
+          && ["md", "file", "html", "image", "pdf"].includes(artifact.kind)
+          && (artifact.data != null || artifact.content != null) && <Suspense fallback={null}>
+            <ArtifactDownload id={artifactKey} file={artifact.file} data={artifact.data}
+              content={artifact.content} converted={artifact.convertedFrom} />
+          </Suspense>}
         {artifact.convertedFrom && <span className="artifact-converted"
           title="由 nono 本机沙箱临时转换，VPS 不保存文件">
           {artifact.convertedFrom.toUpperCase()} → PDF
         </span>}
-        {["md", "file", "html", "image", "pdf", "audio"].includes(artifact.kind) && <button className="iconbtn"
+        {["md", "file", "html", "image", "pdf", "audio", "spreadsheet"].includes(artifact.kind) && <button className="iconbtn"
           onClick={() => onRefresh?.(artifact.file, artifact.line)}
           aria-label="刷新文件" title="重新读取文件"><Icon name="refresh" size={17} /></button>}
         <button className="iconbtn" onClick={leavePanel} aria-label="收起"><Icon name="chevrons-right" /></button>
@@ -581,7 +593,7 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
             authorization={artifact.authorization}
             onDecision={onAuthorizePreview} />
         ) : loading ? (
-          <div className="diff-empty"><span className="thinking"><span/><span/><span/></span> {["md", "file", "html", "image", "pdf", "audio"].includes(artifact.kind) ? "正在读取文件…" : "正在读取 diff…"}</div>
+          <div className="diff-empty"><span className="thinking"><span/><span/><span/></span> {["md", "file", "html", "image", "pdf", "audio", "spreadsheet"].includes(artifact.kind) ? "正在读取文件…" : "正在读取 diff…"}</div>
         ) : artifact.error ? (
           <div className="preview-error"><Icon name="read" size={18} />{artifact.error}</div>
         ) : artifact.kind === "gitdiff" ? (
@@ -632,6 +644,8 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
           mode === "source"
             ? <SourceFile content={artifact.content || ""} artifactKey={artifactKey} />
             : <HtmlArtifactPreview content={artifact.content || ""} theme={theme} />
+        ) : artifact.kind === "spreadsheet" ? (
+          <Suspense fallback={<div className="diff-empty">读取表格…</div>}><SpreadsheetPreview key={artifactKey} content={artifact.content || ""} data={artifact.data} title={title} /></Suspense>
         ) : artifact.kind === "image" ? (
           <ImageArtifactPreview data={artifact.data} mediaType={artifact.mediaType}
             title={title} />

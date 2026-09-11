@@ -1,0 +1,15 @@
+.spreadsheet-preview{display:flex;flex-direction:column;min-height:0;height:100%;font-size:13px;color:var(--text)}
+.spreadsheet-toolbar{display:flex;justify-content:space-between;align-items:center;padding:10px 16px;color:var(--dim);gap:12px}
+.spreadsheet-toolbar a{color:var(--accent-ink);white-space:nowrap;text-decoration:none}
+.spreadsheet-preview nav{display:flex;gap:4px;padding:0 12px 10px;overflow-x:auto;flex-shrink:0}
+.spreadsheet-preview nav button{border:0;padding:8px 11px;border-radius:6px;font:inherit;white-space:nowrap;background:transparent;color:var(--dim);cursor:pointer}
+.spreadsheet-preview nav button[aria-selected=true]{background:var(--accent-weak);color:var(--accent-ink)}
+.spreadsheet-scroll{overflow:auto;flex:1;min-height:100px;overscroll-behavior:contain;border-block:1px solid var(--border);background:var(--surface)}
+.spreadsheet-scroll table{border-collapse:separate;border-spacing:0;min-width:100%;font-size:13px;margin:0}
+.spreadsheet-scroll td,.spreadsheet-scroll th{border-right:1px solid var(--border);border-bottom:1px solid var(--border);padding:7px 10px;min-width:100px;max-width:350px;white-space:pre-wrap;overflow-wrap:anywhere;text-align:left;vertical-align:top}
+.spreadsheet-scroll thead th{position:sticky;top:0;background:var(--raised);text-align:center;color:var(--dim);font-weight:500;z-index:2}
+.spreadsheet-scroll tbody th,.spreadsheet-scroll thead th:first-child{position:sticky;left:0;background:var(--raised);color:var(--dim);font-weight:400;min-width:44px;text-align:right;z-index:1}
+.spreadsheet-scroll thead th:first-child{z-index:3}
+.spreadsheet-note{margin:0;padding:10px 16px;color:var(--dim);font-size:12px;line-height:1.5}
+.spreadsheet-note strong{font-weight:500;color:var(--accent-ink)}
+.spreadsheet-empty{padding:30px;text-align:center;color:var(--dim)}

@@ -60,6 +60,7 @@ export interface QueryImg { media_type: "image/png" | "image/jpeg" | "image/jpg"
 export interface QueryFile { filename: string; data: string }
 export interface Query extends Base { type: "query"; prompt: string; msg_id: string; images?: QueryImg[] | null; files?: QueryFile[] | null; delivery?: "immediate" | "queue" | "replace" }
 export interface CancelQueuedQuery extends Base { type: "cancel_queued_query"; sid: string; msg_id: string; cmd_id: string; client_id: string }
+export interface ReorderQueuedQueries extends Base { type: "reorder_queued_queries"; sid: string; cmd_id: string; client_id: string; expected: string[]; order: string[] }
 export interface GetQueuedQuery extends Base { type: "get_queued_query"; sid: string; msg_id: string; cmd_id: string; client_id: string }
 export interface QueuedQueryDetail extends Base {
   type: "queued_query_detail";
@@ -464,13 +465,14 @@ export interface GetContext extends Base {
 export interface GetDiff extends Base { type: "get_diff"; file: string; theme?: DiffTheme; turn_id?: string | null; revision?: string | null; engine?: Engine | null }
 export interface DiffReport extends Base { type: "diff_report"; file: string; diff: string; request_id?: string }
 export interface GetFilePreview extends Base { type: "get_file_preview"; path: string; request_id: string }
-export interface FilePreview extends Base { type: "file_preview"; path: string; request_id: string; format: "markdown" | "text" | "html" | "image" | "pdf" | "audio"; content: string; media_type?: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "image/svg+xml" | "application/pdf" | "audio/wav" | "audio/mpeg" | "audio/mp4" | "audio/aac" | "audio/flac" | "audio/ogg" | "audio/webm" | null; data?: string | null; converted_from?: string | null; size: number; truncated: boolean; mtime_ns: string; revision?: string | null; writable?: boolean; error?: string | null }
+export interface FilePreview extends Base {
+  directory?: boolean; type: "file_preview"; path: string; request_id: string; format: "markdown" | "text" | "html" | "image" | "pdf" | "audio" | "spreadsheet"; content: string; media_type?: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "image/svg+xml" | "application/pdf" | "audio/wav" | "audio/mpeg" | "audio/mp4" | "audio/aac" | "audio/flac" | "audio/ogg" | "audio/webm" | null; data?: string | null; converted_from?: string | null; size: number; truncated: boolean; mtime_ns: string; revision?: string | null; writable?: boolean; error?: string | null }
 export interface SaveMarkdown extends Base { type: "save_markdown"; path: string; request_id: string; content: string; expected_size: number; expected_mtime_ns: string; expected_revision: string }
 export interface FileSaveResult extends Base { type: "file_save_result"; path: string; request_id: string; status: "saved" | "conflict" | "error"; size: number; mtime_ns: string; revision?: string | null; error?: string | null }
 export interface GetPreviewAsset extends Base { type: "get_preview_asset"; path: string; preview_id: string; request_id: string }
 export interface PreviewAsset extends Base { type: "preview_asset"; path: string; preview_id: string; request_id: string; media_type?: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "image/svg+xml" | null; data?: string | null; error?: string | null }
 export type PreviewAuthorizationOperation = "file_preview" | "preview_asset";
-export interface PreviewAuthorizationRequired extends Base { type: "preview_authorization_required"; authorization_id: string; request_id: string; operation: PreviewAuthorizationOperation; path: string; resolved_path: string; format: "markdown" | "text" | "html" | "image" | "pdf" | "audio"; preview_id?: string | null }
+export interface PreviewAuthorizationRequired extends Base { type: "preview_authorization_required"; authorization_id: string; request_id: string; operation: PreviewAuthorizationOperation; path: string; resolved_path: string; format: "markdown" | "text" | "html" | "image" | "pdf" | "audio" | "spreadsheet"; preview_id?: string | null }
 export interface AuthorizePreview extends Base { type: "authorize_preview"; authorization_id: string; request_id: string; decision: "allow" | "deny" }
 export interface PreviewAuthorizationResult extends Base { type: "preview_authorization_result"; authorization_id: string; request_id: string; operation?: PreviewAuthorizationOperation | null; path?: string | null; status: "granted" | "denied" | "expired" | "changed" | "error"; preview_id?: string | null; error?: string | null }
 // On-demand bulk history: fetched once when a session is opened (like a web
@@ -666,8 +668,8 @@ export interface ContextReport extends Base {
   percentage: number;
   /** False when the engine has not emitted an authoritative tokenUsage yet. */
   available?: boolean | null;
-  /** Provenance of a Claude context reading; omitted means exact/control. */
-  source?: "control" | "cached_control" | "recent_turn" | null;
+  /** Distinguish native context estimates from recent model-request usage. */
+  source?: "control" | "cached_control" | "recent_turn" | "native_estimate" | null;
   /** Work-only conversation growth after the fresh-session startup baseline. */
   session_tokens?: number | null;
   /** Work-only startup zero point; raw total_tokens remains authoritative. */
@@ -718,7 +720,7 @@ export type ServerEvent = FilesListed | CodexContext
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 61;
+export const PROTOCOL_VERSION = 63;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

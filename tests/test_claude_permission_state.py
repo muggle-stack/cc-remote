@@ -11,6 +11,7 @@ from claude_agent_sdk.types import AssistantMessage, TextBlock
 from cc_remote.config import WrapperConfig
 from cc_remote.protocol import (
     ContextReport,
+    ERR_INTERNAL,
     GetContext,
     GetModels,
     Hello,
@@ -22,7 +23,7 @@ from cc_remote.protocol import (
 from cc_remote.wrapper import machine as machine_module
 from cc_remote.wrapper import sdk as sdk_module
 from cc_remote.wrapper.sdk import CLAUDE_DEFAULT_MODEL, SdkHandle
-from cc_remote.wrapper.claude_controls import ClaudeControls
+from cc_remote.wrapper.claude_controls import ClaudeControls, ClaudeControlStore
 from cc_remote.workspaces import WorkStores
 from tests.test_multisession import _mk_ctx, _mk_machine
 
@@ -189,6 +190,188 @@ def test_claude_context_observation_does_not_promote_native_base_model():
     )
 
     assert handle.model == "claude-fable-5-1"
+
+
+def test_claude_context_report_never_leaks_a_proxy_upstream_id():
+    """The chip must not show a gateway's raw id when nothing selected it.
+
+    ``_claude_context_model``'s contract is "a user-facing Claude alias, never
+    a proxy upstream id". With no Remote-owned selection in force, the /context
+    reading is an *observation* and may not supply one; a session that selected
+    the id itself still reports it.
+    """
+    def context_model(sdk_model, announced, usage_model):
+        ctx = SimpleNamespace(sdk=SimpleNamespace(model=sdk_model),
+                              announced_model=announced)
+        return machine_module.WrapperMachine._claude_context_model(
+            ctx, {"model": usage_model})
+
+    # No selection anywhere: the upstream name must not become the answer.
+    assert context_model(None, None, "glm-5.2") is None
+    assert context_model(None, None, "openai/gpt-5") is None
+    # A Remote-owned selection is a real answer, provider-native or not.
+    assert context_model("glm-5.2", None, "glm-5.2") == "glm-5.2"
+    assert context_model(None, "glm-5.2", "glm-5.2") == "glm-5.2"
+    # A Claude-branded observation is still adopted, including Vertex forms.
+    assert context_model(None, None, "claude-opus-4-6") == "claude-opus-4-6"
+    assert context_model(None, None, "claude-sonnet-4-5@20250929") == (
+        "claude-sonnet-4-5@20250929")
+
+
+def test_same_claude_model_selection_compares_through_the_pins():
+    """Agreement is decided on normalized ids, and "no selection" agrees with
+    nothing -- so a reading can never be mistaken for an established choice.
+
+    Both reconciliation sites share this predicate; comparing raw strings would
+    call a curated id and its pinned ``[1m]`` form different when they are the
+    same selection.
+    """
+    same = sdk_module.same_claude_model_selection
+
+    # A curated id and its pinned spelling are one selection.
+    assert same("claude-fable-5-1", "claude-fable-5-1[1m]")
+    assert same("claude-fable-5-1[1m]", "claude-fable-5-1")
+    # Surrounding space is never part of the identity.
+    assert same("  claude-fable-5-1  ", "claude-fable-5-1[1m]")
+    # Case folds through the pin table, which is keyed lowercase.
+    assert same("opus", CLAUDE_DEFAULT_MODEL)
+    assert same("OPUS", CLAUDE_DEFAULT_MODEL)
+    assert same("CLAUDE-FABLE-5-1", "claude-fable-5-1[1m]")
+    # An unpinned id keeps its casing -- only the pin lookup folds. A mixed-case
+    # selection therefore reads as *disagreeing* with a lowercase observation of
+    # the same id, which is the conservative direction: the selection is kept.
+    assert not same("Claude-Opus-4-6", "claude-opus-4-6")
+    # Genuinely different selections, including provider-native ids.
+    assert not same("claude-opus-4-6", "claude-3-7-sonnet@20250219")
+    assert not same("glm-5.2", "claude-opus-4-6")
+    assert not same("glm-5.2", "openai/gpt-5")
+    # Nothing established: never agreement, whichever side is missing.
+    assert not same(None, "claude-opus-4-6")
+    assert not same("claude-opus-4-6", None)
+    assert not same(None, None)
+
+
+def test_claude_context_upstream_id_never_overwrites_explicit_selection():
+    """Requirement: transcript/context metadata cannot replace a selection.
+
+    A gateway reports its own upstream id in context usage even though the
+    Claude alias the user picked is what was actually requested. That reading
+    must not become this session's model -- and must not suppress the rest of
+    the reading, which the auto-compact/chip paths depend on.
+    """
+    for selection in ["claude-opus-4-6", "claude-opus-4-6[1m]"]:
+        handle = SdkHandle(WrapperConfig())
+        handle.model = selection
+
+        handle._record_context_usage(
+            {"model": "glm-5.2", "totalTokens": 10,
+             "autoCompactThreshold": 500_000, "rawMaxTokens": 1_000_000},
+            update_model=True,
+        )
+
+        assert handle.model == selection
+        # The same reading still lands its non-model fields.
+        assert handle.effective_auto_compact_threshold_tokens == 500_000
+        assert handle.raw_context_max_tokens == 1_000_000
+
+
+def test_claude_context_work_baseline_survives_upstream_id_observation():
+    """The Work baseline is captured even when the model reading is refused."""
+    handle = SdkHandle(WrapperConfig())
+    handle.work_mode = True
+    handle.model = "claude-opus-4-6"
+
+    handle._record_context_usage(
+        {"model": "glm-5.2", "totalTokens": 4_242},
+        update_model=True,
+        capture_work_baseline=True,
+    )
+
+    assert handle.model == "claude-opus-4-6"
+    assert handle.work_context_baseline_tokens == 4_242
+
+
+def test_provider_native_selection_persists_and_survives_reconnect(
+    monkeypatch, tmp_path,
+):
+    """Requirement 1: an explicit provider-native model is accepted, handed
+    to Claude Code, and preserved across a reconnect."""
+
+    async def go():
+        _FakeClaudeClient.created = []
+        monkeypatch.setattr(
+            sdk_module, "ClaudeSDKClient", _FakeClaudeClient)
+        handle = SdkHandle(WrapperConfig())
+        await handle.connect(cwd="/tmp")
+
+        await handle.set_model("glm-5.2")
+        assert _FakeClaudeClient.created[-1].model_calls == ["glm-5.2"]
+        assert handle.model == "glm-5.2"
+
+        await handle.force_reconnect(None, "/tmp", reason="test reconnect")
+        assert _FakeClaudeClient.created[-1].options.model == "glm-5.2"
+        await handle.disconnect()
+
+    asyncio.run(go())
+
+
+def test_provider_native_selection_roundtrips_the_private_store(tmp_path):
+    """Requirement 1: the durable record keeps the provider-native id, so a
+    cold resume restores it rather than falling back to a Claude default."""
+    store = ClaudeControlStore(tmp_path)
+    saved = store.update(
+        "11111111-1111-4111-8111-111111111111",
+        model="glm-5.2",
+        effort="max",
+        permission_mode="bypassPermissions",
+    )
+
+    assert saved.model == "glm-5.2"
+    # A fresh store instance reading the same directory -- i.e. a cold resume
+    # in a new wrapper process -- must recover the same selection.
+    assert ClaudeControlStore(tmp_path).get(
+        "11111111-1111-4111-8111-111111111111").model == "glm-5.2"
+
+
+def test_failed_model_switch_keeps_the_prior_selection(monkeypatch):
+    """Requirement 4: a rejected switch reports failure and does not damage
+    the selection already in force."""
+    machine, transport = _mk_machine()
+
+    class RejectingHandle:
+        is_claude_broker = False
+        control_plane_failed = False
+        model = "claude-mythos-5"
+        effort = "max"
+        permission_mode = "bypassPermissions"
+
+        async def set_model(self, _model):
+            raise RuntimeError("provider rejected the model id")
+
+    async def go():
+        ctx = _mk_ctx("claude-bad-model", "claude-bad-model")
+        ctx.engine = "claude"
+        ctx.sdk = RejectingHandle()
+        ctx.announced_model = ctx.sdk.model
+        machine.sessions[ctx.key] = ctx
+
+        async def control_ready(*_args, **_kwargs):
+            return None
+
+        machine._runtime_control_preflight = control_ready
+
+        result = await machine._handle_set_model(SetModel(
+            sid=ctx.key, model="glm-5.2"))
+
+        assert getattr(result, "code", None) == ERR_INTERNAL
+        # The rejected switch must not have damaged what was already in force.
+        assert ctx.sdk.model == "claude-mythos-5"
+        assert not any(getattr(event, "type", None) == "model"
+                       for event in transport.sent)
+        assert any(getattr(event, "code", None) == ERR_INTERNAL
+                   for event in transport.sent)
+
+    asyncio.run(go())
 
 
 def test_claude_work_launch_does_not_promote_native_base_model(monkeypatch):

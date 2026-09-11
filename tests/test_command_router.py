@@ -19,6 +19,7 @@ from tests.test_multisession import _mk_machine
 EXPECTED_COMMAND_HANDLERS = {
     "query": "_handle_query",
     "cancel_queued_query": "_handle_cancel_queued_query",
+    "reorder_queued_queries": "_handle_reorder_queued_queries",
     "get_queued_query": "_handle_get_queued_query",
     "update_queued_query": "_handle_update_queued_query",
     "steer": "_handle_steer",

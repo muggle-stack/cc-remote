@@ -10,6 +10,34 @@
   forks. Keep authentication local, cold history non-activating, and durable
   message ownership stable across retries, steering and reconnects. Include
   desktop/mobile themes and an isolated zero-provider native acceptance runner.
+- Accept provider-native Claude model ids (e.g. `glm-5.2` behind a custom
+  `ANTHROPIC_BASE_URL` gateway) as explicit model selections: they are handed
+  to Claude Code, persisted in the private session store, and restored across
+  reconnect and cold resume. A model id merely *observed* in transcript or
+  `/context` metadata still cannot replace an explicit selection, so a
+  gateway's raw upstream name never masquerades as the model the user chose.
+  Claude-branded observations keep working, including Vertex/enterprise forms
+  such as `claude-sonnet-4-5@20250929`. Official `claude-*` selections and
+  native takeover are unchanged.
+- Add atomic server-owned queue reordering (protocol v67), with configurable
+  TUI editing, cancellation and ordering controls. Reject stale queue snapshots
+  and changes while a message is starting. Deploy Relay, Web, Wrapper and TUI
+  together; protocol v66 clients cannot connect to protocol v67 services.
+- Backport shared improvements from the DSH branch without adding a third
+  engine (protocol v66): rounded Claude/Codex Goal dialogs with native save
+  confirmation and mobile keyboard recovery; directory links open `/open`, and
+  XLSX previews show saved cells, sheet tabs and original-file downloads.
+- Keep streamed replies updating after steering, preserve manually expanded
+  process details, and support Enter/Shift+Enter/Escape in assistant questions.
+  Retain valid context readings during transient refresh failures, use a compact
+  custom engine menu, and allow failed Skills reads to retry.
+- Reorganize the bilingual setup documentation around source deployment and
+  document shared Codex App, CLI and Wrapper daemons on macOS and Linux.
+
+- Align the Codex context gauge with native compaction estimates (protocol v62).
+  Match bounded local log reads to the account, thread and latest rollout sample;
+  invalidate estimates after compaction and show recent request usage without a
+  percentage when no matching estimate is available. Refresh active visible sessions.
 - Set a per-session maximum usable Codex context (protocol v60), validated against
   the native model catalog. A 300k setting means a 300,000-token window, with
   compaction near 95% subject to native limits. Preserve existing saved numbers,

@@ -406,12 +406,12 @@ export const CODEX_PROMPTS: Record<string, string> = {
 };
 
 // The command "token" the user is typing after "/", up to the first space.
-// null when the input isn't an in-progress slash command (no leading "/", or a
-// space already started the arguments). Drives the palette's show/hide.
+// null when the input isn't an in-progress slash command (no leading "/", a
+// path separator, or arguments already started). Drives the palette's show/hide.
 export function slashToken(input: string): string | null {
   if (!input.startsWith("/")) return null;
   const after = input.slice(1);
-  if (/\s/.test(after)) return null; // a space => choosing args, not the command
+  if (/[\s/\\]/.test(after)) return null;
   return after;
 }
 
@@ -455,6 +455,8 @@ export function matchCommands(token: string, engine?: string,
 export function parseSlash(input: string): { slash: string; args: string } | null {
   if (!input.startsWith("/")) return null;
   const m = input.slice(1).match(/^(\S+)\s*([\s\S]*)$/);
-  if (!m) return null;
+  // A leading filesystem path is prompt text. Separators in command arguments
+  // remain valid, for example "/open /Users/Tester/My Project".
+  if (!m || /[/\\]/.test(m[1])) return null;
   return { slash: m[1].toLowerCase(), args: m[2].trim() };
 }

@@ -67,7 +67,7 @@ def test_audio_preview_rejects_video_riff_and_does_not_truncate(tmp_path):
         WrapperMachine._read_file_preview(str(tmp_path), path.name)
 
 
-def test_audio_preview_retains_external_file_authorization_for_symlink_escapes(tmp_path):
+def test_work_audio_preview_retains_external_file_authorization_for_symlink_escapes(tmp_path):
     root = tmp_path / "project"
     root.mkdir()
     outside = tmp_path / "private.wav"
@@ -79,6 +79,7 @@ def test_audio_preview_retains_external_file_authorization_for_symlink_escapes(t
     async def run():
         machine, transport = _mk_machine()
         ctx = _mk_ctx("session-a", session_id="session-a")
+        ctx.space = "work"
         ctx.cwd = str(root)
         machine.sessions[ctx.key] = ctx
         response = await machine._handle_get_file_preview(GetFilePreview(

@@ -9389,3 +9389,28 @@ def test_codex_steer_fence_drains_old_backlog_before_new_user_boundary():
         ]
 
     asyncio.run(run())
+
+
+def test_codex_goal_pause_keeps_current_auto_turn_visible_and_confirms_exact_request():
+    async def run():
+        machine, transport = _mk_machine()
+        ctx = _mk_ctx("goal-pause", "goal-pause")
+        ctx.engine = "codex"
+        ctx.state = "running"
+        ctx.codex_spontaneous_turn_id = "live-auto-turn"
+        calls = []
+        async def set_goal(**kwargs):
+            calls.append(kwargs)
+            return {"threadId": ctx.session_id, "objective": "ship", "engine": "codex",
+                "status": kwargs["status"], "tokensUsed": 123, "timeUsedSeconds": 3, "tokenBudget": 1000}
+        ctx.sdk = SimpleNamespace(set_goal=set_goal)
+        machine.sessions[ctx.key] = ctx
+        for status in ["paused", "complete"]:
+            result = await machine._handle_set_goal(SimpleNamespace(sid=ctx.key, client_id="viewer",
+                cmd_id="change-" + status, objective=None, token_budget=None, status=status))
+            assert isinstance(result, GoalState) and result.goal.status == status
+            assert result.request_id == "change-" + status
+            assert ctx.state == "running" and ctx.codex_spontaneous_turn_id == "live-auto-turn"
+        assert calls == [{"status": "paused"}, {"status": "complete"}]
+        assert not any(isinstance(frame, (TurnEnd, Error)) for frame in transport.sent)
+    asyncio.run(run())

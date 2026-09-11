@@ -82,9 +82,12 @@ attachment and optional App-control MCP tools are separate user choices.
   Text deltas still stream live via `StreamEvent`.
 - **Claude only — don't set `setting_sources=[]` for Code**: legacy single-account
   Code intentionally loads `~/.claude/settings.json`. Explicit account profiles
-  keep the real HOME, select their native storage boundary with
-  `CLAUDE_CONFIG_DIR`, clear ambient provider variables, and use
-  `setting_sources=["user"]`. Project/local settings may contain provider env or
+  keep the real HOME, clear ambient account selectors, and use
+  `setting_sources=["user"]`. A profile rooted at the real per-user `~/.claude`
+  must leave `CLAUDE_CONFIG_DIR` unset, retaining `~/.claude.json` and native
+  keychain identity; other roots set it explicitly. Setting it to `~/.claude`
+  changes the account file to `~/.claude/.claude.json`. Project/local settings
+  may contain provider env or
   auth helpers and must not participate in an account-isolated child. Never pass
   the selected profile's complete settings file through `--settings`: that
   promotes every user setting above project/local precedence. Never parse or
@@ -100,7 +103,7 @@ attachment and optional App-control MCP tools are separate user choices.
   transport, never the caller's Origin. Uvicorn trusts forwarded transport
   metadata only from loopback Caddy. Never put tokens in URLs or protocol
   message bodies; logging redacts token/password fields.
-- **Protocol version gate**: current wire protocol v61 is declared by
+- **Protocol version gate**: current wire protocol v63 is declared by
   `PROTOCOL_VERSION` in both `protocol.py` and `web/src/protocol.ts`.
   `deserialize` hard-rejects a version mismatch, and
   `_Base` is `extra="forbid"`, so ANY protocol change must be deployed to all

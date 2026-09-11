@@ -62,6 +62,7 @@ import {
 } from "../src/completion-badges.ts";
 import { imageDimensions } from "../src/img.ts";
 import "./presentation-state.test.ts";
+import "./slash-command.test.ts";
 import {
   historyImageDisplaySource,
   TurnImagePreviewCache,
@@ -860,6 +861,37 @@ assert.equal(parallelLanes.accept(
   false);
 
 const parallelMutationStarts: string[] = [];
+function testFailedSkillReads() {
+  const failedReadStarts: string[] = [];
+  const failedReadLanes = new SkillCatalogRequestCoordinator((request) => {
+    failedReadStarts.push(request.key);
+    return `failed-read-${failedReadStarts.length}`;
+  });
+  assert.equal(failedReadLanes.request(parallelSkillsRequest), true);
+  assert.equal(failedReadLanes.request(capabilityRequest(
+    "next-repo", "/repo/b", true)), false);
+  assert.equal(failedReadLanes.fail("unrelated-request"), null,
+    "an unrelated error must not release a pending Skills read");
+  assert.equal(failedReadLanes.fail("failed-read-1")?.key, repoSkillKey);
+  assert.deepEqual(failedReadStarts, [repoSkillKey, "next-repo"],
+    "a failed Skills read releases its lane and starts the queued repository read");
+  assert.equal(failedReadLanes.hasPendingRead(repoSkillKey, true), false);
+  assert.equal(failedReadLanes.accept(
+    capabilityResponse("failed-read-1", "/repo/a", true)), null,
+    "a delayed response to a failed read must not replace the current catalog");
+  assert.equal(failedReadLanes.accept(
+    capabilityResponse("failed-read-2", "/repo/b", true))?.request.key, "next-repo");
+  assert.equal(failedReadLanes.request(parallelSkillsRequest), true,
+    "the failed repository can be retried after draining the queue");
+  failedReadLanes.reset();
+  assert.equal(failedReadLanes.trackMutation("failed-mutation", parallelFullRequest), true);
+  assert.equal(failedReadLanes.request(parallelSkillsRequest), false);
+  assert.equal(failedReadLanes.fail("failed-mutation")?.key, repoSkillKey);
+  assert.equal(failedReadStarts.length, 4,
+    "a failed capability mutation must also release queued reads");
+}
+testFailedSkillReads();
+
 const parallelMutation = new SkillCatalogRequestCoordinator((_request) => {
   const requestId = `parallel-mutation-read-${parallelMutationStarts.length + 1}`;
   parallelMutationStarts.push(requestId);
@@ -5058,8 +5090,9 @@ try {
   assert.equal(firstSteeredTurns[0].durationMs, undefined,
     "a steer fence without one authoritative clock domain has unknown duration");
   assert.equal(firstSteeredTurns[0].doneTs, 11_000);
-  assert.ok(firstSteeredTurns[0].blocks.every((block: Block) => block.done),
-    "closing the old segment also settles every open block it owned");
+  assert.ok(firstSteeredTurns[0].blocks.every((block: Block) =>
+    block.kind === "text" ? !block.done : block.done),
+    "the old process segment settles while native text continues to its own end");
   assert.equal(firstSteeredTurns[1].images?.[0]?.data, "steered-image");
   assert.deepEqual(firstSteeredTurns[1].files, [{
     filename: "steered.txt", data: "",
@@ -10804,7 +10837,7 @@ try {
     assert.match(markup, /accept="image\/\*"/);
     assert.match(markup, /multiple=""/);
     assert.equal(
-      (markup.match(/<button[^>]+aria-label="添加照片"/g) ?? []).length, 1);
+      (markup.match(/<button[^>]+aria-label="添加附件"/g) ?? []).length, 1);
     assert.equal(
       (markup.match(/<button[^>]+aria-label="添加文件"/g) ?? []).length, 0);
     assert.match(markup, />开始</);
@@ -10816,16 +10849,14 @@ try {
   assert.match(newChatMarkup, /本机默认 · Mythos 5\.1/);
   assert.match(newChatMarkup, /默认 · max/);
   assert.match(codexNewChatMarkup, /本机默认 · GPT Future/);
-  assert.match(codexNewChatMarkup, /dynamic catalog model/,
-    "new-session selectors render the live Codex catalog when available");
   const codexNewChatControls = codexNewChatMarkup.match(
     /<div class="newchat-ctls">([\s\S]*?)<\/div>/,
   )?.[1] ?? "";
   assert.doesNotMatch(codexNewChatControls, /不询问|Plan|标准/,
     "the compact footer must not duplicate controls that live in its sheet");
   assert.match(codexNewChatMarkup, /class="newchat-access"/);
-  assert.match(codexNewChatMarkup, /权限与执行环境/);
-  assert.match(codexNewChatMarkup, /Full Access/);
+  assert.doesNotMatch(codexNewChatMarkup, /role="dialog"/,
+    "closed selection surfaces are mounted only when opened");
   assert.doesNotMatch(newChatMarkup, /class="newchat-access"/);
   for (const markup of [newChatMarkup, codexNewChatMarkup]) {
     assert.doesNotMatch(markup, /class="newchat-context"/,
@@ -10841,7 +10872,7 @@ try {
   assert.match(multiProfileNewChatMarkup, /aria-label="选择 Codex 账号"/);
   assert.match(multiProfileNewChatMarkup, />nyx · Stack</);
   assert.match(multiProfileWorkMarkup, /aria-label="选择 Codex 账号"/);
-  assert.match(multiProfileWorkMarkup, />nyx · Stack · 目录暂不可用</);
+  assert.match(multiProfileWorkMarkup, />nyx · Stack</);
   assert.match(multiProfileWorkMarkup, /会话列表暂不可用/,
     "a transient catalog error warns without removing the Work account");
   assert.match(removedProfileWorkMarkup, />已移除账号</);
@@ -18010,7 +18041,6 @@ assert.match(appSource, /draftKey=\{focusedComposerDraftKey\}/);
 assert.match(appSource, /composerDraftsRef\.current\.rekey/,
   "temp session id capture must retain the focused composer draft");
 assert.match(appSource, /\{space === "work" \? "Work" : "Code"\}/);
-assert.match(appSource, /<select className="engine-toggle" value=\{engine\}[\s\S]{0,120}onChange=\{event => toggleEngine/);
 assert.match(appSource, /setNewChatAutoFocus\(false\)/,
   "switching engines must not summon the new-chat keyboard");
 assert.match(appSource, /prepareSurfaceSwitch\(nextEngine, nextSpace\)/,
@@ -18217,23 +18247,24 @@ assert.match(composerSource, /<PendingImageAttachments/,
   "session drafts must expose the shared interactive image preview");
 assert.match(composerSource, /workSurface \? \(/);
 assert.match(composerSource, /p\.draftStore\.get\(p\.draftKey\)/);
-assert.match(composerSource, /accept="image\/\*" multiple/);
-assert.match(composerSource, /aria-label="添加照片"/);
-assert.match(composerSource, /aria-label="添加文件"/);
+const attachmentPickerSource = readFileSync(resolve("src/components/AttachmentPicker.tsx"), "utf8");
+assert.match(composerSource, /<AttachmentPicker/);
+assert.match(attachmentPickerSource, /accept="image\/\*" multiple/);
+assert.match(attachmentPickerSource, /aria-label="添加照片"/);
+assert.match(attachmentPickerSource, /aria-label="添加文件"/);
 assert.match(composerSource, /className="work-compose-card"/);
 assert.match(composerSource, /Artifacts · \{p\.workArtifactCount\}/);
 assert.doesNotMatch(composerSource, /交付物/);
 assert.doesNotMatch(composerSource, /项目与资料/);
 assert.match(composerSource, /工作设置/);
 assert.match(contextPopoverSource, /会话新增上下文/);
-assert.match(composerSource, /workContext\.sessionPercentage\.toFixed\(0\)/);
+assert.match(composerSource, /workContext\.session_percentage \?\? workContext\.percentage/,
+  "the Work summary uses the report's precomputed session percentage; details load on demand");
 assert.match(contextPopoverSource,
   /usage\(p\.report\.total_tokens, p\.report\.percentage\)/,
   "Code must render the last native engine-total context reading");
-assert.match(composerSource, /contextAvailable = p\.contextReport\?\.available !== false/,
-  "an absent tokenUsage report must not be rendered as a real zero");
-assert.match(contextPopoverSource, /正在读取真实上下文/,
-  "the context popover must explain that its native reading is still loading");
+assert.doesNotMatch(contextPopoverSource, /正在读取真实上下文/,
+  "background context refreshes must not flash a loading notice");
 assert.match(composerSource, /ref=\{workSettingsRef\}/);
 assert.match(composerSource, /document\.addEventListener\("pointerdown", onPointerDown\)/);
 assert.match(composerSource, /disabled=\{locked\}[\s\S]*?: "选择模型"/,

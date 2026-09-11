@@ -307,3 +307,45 @@ def test_tracker_keeps_only_file_evidence_and_archive_bounds_running_revisions(t
     assert store.get("sid", turn, final["revision"]) is None
     store.drop("primary@sid")
     assert store.get("primary@sid", turn, final["revision"]) is None
+
+
+def test_archive_reuses_freed_pages_even_when_legacy_file_exceeds_cap(monkeypatch, tmp_path):
+    from cc_remote.wrapper import turn_changes as module
+
+    store = TurnChangeArchive(tmp_path)
+    cap = store.path.stat().st_size + 8192
+    large = project_turn_changes(edit("large", patch("a", "b" * 70000)))
+    small = project_turn_changes(edit("small", patch("a", "b")))
+    store.put("old", "turn", large, final=True)
+    oversized = store.path.stat().st_size
+    assert oversized > cap
+    monkeypatch.setattr(module, "MAX_ARCHIVE", cap)
+    store.drop("old")
+    assert store.path.stat().st_size == oversized
+    # Reopening must also recover: capacity is not an in-memory counter.
+    reopened = TurnChangeArchive(tmp_path)
+    with reopened._connect() as db:
+        assert db.execute("PRAGMA freelist_count").fetchone()[0] > 0
+    reopened.put("new", "turn", small, final=True)
+    assert reopened.latest_final("new", "turn") == small
+    assert reopened.latest_final("old", "turn") is None
+    assert reopened.path.stat().st_size == oversized
+
+
+def test_archive_quota_rejects_whole_write_and_preserves_existing_revisions(monkeypatch, tmp_path):
+    from cc_remote.wrapper import turn_changes as module
+
+    store = TurnChangeArchive(tmp_path)
+    small = project_turn_changes(edit("small", patch("a", "b")))
+    large = project_turn_changes(edit("large", patch("a", "b" * 70000)))
+    store.put("sid", "turn", small)
+    monkeypatch.setattr(module, "MAX_ARCHIVE", store.path.stat().st_size + 8192)
+    with pytest.raises(ValueError, match="archive full"):
+        store.put("sid", "turn", large, final=True)
+    assert store.get("sid", "turn", small["revision"]) == small
+    assert store.get("sid", "turn", large["revision"]) is None
+    with store._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM turn_changes").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM turn_change_files").fetchone()[0] == 1
+    store.put("sid", "turn", small, final=True)
+    assert store.latest_final("sid", "turn") == small

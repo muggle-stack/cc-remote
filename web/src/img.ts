@@ -4,6 +4,8 @@ import type { QueryImg, QueryFile } from "./protocol";
 // sequentially and committed as one batch so Enter can never race a FileReader.
 export const IMG_MAX_EDGE = 1568;
 export const MAX_ATTACHMENT_COUNT = 8;
+export const ATTACHMENT_LIMIT_NOTICE =
+  `一次消息最多 ${MAX_ATTACHMENT_COUNT} 个附件，其余文件未导入`;
 export const MAX_SINGLE_ATTACHMENT_BYTES = 6 * 1024 * 1024;
 export const MAX_TOTAL_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 export const MAX_IMAGE_SOURCE_BYTES = 20 * 1024 * 1024;
@@ -22,6 +24,25 @@ export const decodedSize = (base64: string): number => {
 
 export function attachmentBytes(images: QueryImg[], files: QueryFile[]): number {
   return [...images, ...files].reduce((sum, item) => sum + decodedSize(item.data), 0);
+}
+
+/** Snapshot before the picker is cleared or the drop event returns. Never
+ * enumerate a whole selection just to enforce the attachment limit later. */
+export function snapshotAttachmentFiles(
+  list: FileList | File[] | null,
+  existingCount = 0,
+): { files: File[]; errors: string[] } {
+  const files: File[] = [];
+  if (!list) return { files, errors: [] };
+  const length = list.length;
+  const remaining = Math.max(0, MAX_ATTACHMENT_COUNT - existingCount);
+  for (let index = 0; index < Math.min(length, remaining); index++) {
+    files.push(list[index]);
+  }
+  return {
+    files,
+    errors: length > remaining ? [ATTACHMENT_LIMIT_NOTICE] : [],
+  };
 }
 
 function asciiAt(bytes: Uint8Array, offset: number, text: string): boolean {

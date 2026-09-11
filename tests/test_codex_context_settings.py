@@ -180,8 +180,9 @@ async def test_lowering_capacity_also_lowers_window_despite_old_usage(astra_cata
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("save_fails", [False, True])
+@pytest.mark.parametrize("previous_pending", [False, True])
 async def test_capacity_command_saves_session_limit_and_preserves_live_configuration(
-    astra_catalog, monkeypatch, save_fails,
+    astra_catalog, monkeypatch, save_fails, previous_pending,
 ):
     from cc_remote.wrapper.machine import WrapperMachine
 
@@ -190,6 +191,10 @@ async def test_capacity_command_saves_session_limit_and_preserves_live_configura
     handle.model, handle.context_settings = "gpt-6-astra", settings
     await settings.select(handle, 400000)
     await settings.confirm_applied(handle)
+    if previous_pending:
+        await settings.select(handle, 400000)
+        assert not await settings.apply(handle)
+        handle.force_reconnect.reset_mock()
     if save_fails:
         def fail(*args):
             raise OSError("storage unavailable")
@@ -209,7 +214,7 @@ async def test_capacity_command_saves_session_limit_and_preserves_live_configura
     assert result.limit_tokens == 828400
     if save_fails:
         assert (settings.max_tokens, settings.window, settings.threshold) == (400000, 421053, 378947)
-        assert result.error == "storage unavailable" and not result.pending
+        assert result.error == "storage unavailable" and result.pending is previous_pending
         assert store.get("primary@one").context_max_tokens is None
     else:
         assert result.max_context_tokens == 300000 and result.pending
@@ -218,6 +223,7 @@ async def test_capacity_command_saves_session_limit_and_preserves_live_configura
         assert store.get("other@one").context_max_tokens is None
     machine._apply_codex_context.assert_not_called()
     handle.force_reconnect.assert_not_called()
+    assert settings.needs_apply is (not save_fails)
 
 
 @pytest.mark.asyncio
@@ -248,8 +254,98 @@ async def test_other_client_keeps_setting_pending_and_our_subscription_restored(
     await settings.select(handle, 12000)
     assert not await settings.apply(handle)
     assert settings.pending and settings.applied_threshold is None
-    assert "其他客户端" in settings.error
+    assert "尚未确认原生会话已应用" in settings.error
     handle.force_reconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capacity", [12000, None], ids=["set-limit", "reset-limit"])
+@pytest.mark.parametrize("reconnect_fails", [False, True])
+async def test_unconfirmed_context_is_not_reloaded_at_each_turn_boundary(
+    catalog, capacity, reconnect_fails,
+):
+    from cc_remote.wrapper.machine import WrapperMachine
+
+    settings, handle = NativeContextSettings(), handle_for(catalog)
+    handle.context_settings = settings
+    if reconnect_fails:
+        handle.force_reconnect.side_effect = RuntimeError("connection lost")
+    ctx = SimpleNamespace(
+        sdk=handle, engine="codex", session_id="one", space="code", btw=False,
+        state="running", query_lock=asyncio.Lock(), queued_query_wakeup=asyncio.Event(),
+        auto_compact_apply_task=None,
+    )
+    machine = SimpleNamespace(_emit=AsyncMock(), _is_resident_context=lambda _ctx: True)
+    machine._publish_codex_context = lambda ctx: WrapperMachine._publish_codex_context(machine, ctx)
+    machine._apply_codex_context = lambda ctx: WrapperMachine._apply_codex_context(machine, ctx)
+    machine._settle_codex_context = lambda ctx: WrapperMachine._settle_codex_context(machine, ctx)
+    await settings.select(handle, capacity)
+    handle.turn_active = True
+    await machine._apply_codex_context(ctx)
+    handle._request.assert_not_called()
+    handle.turn_active = False
+
+    for turn in range(3):
+        await WrapperMachine._set_state(machine, ctx, "idle")
+        task = ctx.auto_compact_apply_task
+        if turn == 0:
+            assert task is not None
+        else:
+            assert task is None
+        if task is not None:
+            await task
+            await asyncio.sleep(0)  # Run the task's completion callback.
+        # The immediate-query path runs this same hook before the next turn.
+        await machine._apply_codex_context(ctx)
+        await WrapperMachine._set_state(machine, ctx, "running")
+
+    handle.force_reconnect.assert_awaited_once()
+    assert [call.args[0] for call in handle._request.call_args_list] == [
+        "thread/read", "thread/unsubscribe",
+    ]
+    event = await machine._publish_codex_context(ctx)
+    assert event.pending and event.applied_max_context_tokens is None
+    assert event.max_context_tokens == capacity
+    if reconnect_fails:
+        assert event.error == "connection lost"
+    else:
+        assert "尚未确认原生会话已应用" in event.error
+    # An explicit save, including reselecting the same value, permits one retry.
+    await settings.select(handle, capacity)
+    await machine._apply_codex_context(ctx)
+    await machine._apply_codex_context(ctx)
+    assert handle.force_reconnect.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_native_busy_context_attempt_waits_without_consuming_retry(catalog):
+    settings, handle = NativeContextSettings(), handle_for(catalog)
+    await settings.select(handle, 12000)
+    handle._request.return_value = {"thread": {"status": {"type": "active"}}}
+    assert not await settings.apply(handle)
+    handle.force_reconnect.assert_not_called()
+    handle._request.return_value = {"thread": {"status": {"type": "idle"}}}
+    assert not await settings.apply(handle)
+    assert not await settings.apply(handle)
+    handle.force_reconnect.assert_awaited_once()
+    assert [call.args[0] for call in handle._request.call_args_list] == [
+        "thread/read", "thread/read", "thread/unsubscribe",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_lost_unsubscribe_response_restores_subscription_without_retry_loop(catalog):
+    settings, handle = NativeContextSettings(), handle_for(catalog)
+    await settings.select(handle, 12000)
+    handle._request.side_effect = [
+        {"thread": {"status": {"type": "idle"}}}, RuntimeError("response lost"),
+    ]
+    with pytest.raises(RuntimeError, match="response lost"):
+        await settings.apply(handle)
+    assert not await settings.apply(handle)
+    assert settings.pending and settings.applied_effective_window is None
+    assert handle._request.await_count == 2
+    handle.force_reconnect.assert_awaited_once_with("one", reason="restore context subscription")
 
 
 @pytest.mark.asyncio
@@ -280,18 +376,142 @@ async def test_pending_reset_cannot_bypass_applied_model_window(catalog):
 
 
 @pytest.mark.asyncio
-async def test_resume_rebuild_receipt_is_exact_thread_scoped():
-    from cc_remote.wrapper.codex_handle import CodexHandle
+@pytest.mark.parametrize("scenario", [
+    "concurrent_subscriber", "early_receipt", "late_receipt", "sibling_receipt",
+    "same_thread_unloaded", "same_thread_reloaded", "native_reload", "cold_resume",
+    "new_thread", "private_resume", "fork_without_context",
+])
+@pytest.mark.parametrize("capacity", [300000, None], ids=["set-limit", "reset-limit"])
+async def test_context_connect_needs_more_than_shared_reload_notifications(
+    monkeypatch, astra_catalog, scenario, capacity,
+):
+    from cc_remote.wrapper import codex_handle as module
+    from cc_remote.wrapper.machine import WrapperMachine
     from tests.test_codex_controls import _Cfg
-    handle = CodexHandle(_Cfg(), daemon_mode="never")
-    handle.thread_id = "target"
-    handle._context_resume_thread_id = "target"
-    await handle._dispatch({"method": "thread/status/changed", "params": {
-        "threadId": "sibling", "status": {"type": "notLoaded"}}})
-    assert not handle.context_settings.reloaded
-    await handle._dispatch({"method": "thread/status/changed", "params": {
-        "threadId": "target", "status": {"type": "notLoaded"}}})
-    assert handle.context_settings.reloaded
+
+    manager = SimpleNamespace(
+        strict_shared_affinity=True, mode="auto", invalidate=lambda: None,
+        proxy_args=AsyncMock(return_value=["/unused/codex", "app-server", "proxy"]),
+    )
+    handle = module.CodexHandle(_Cfg(), codex_home=str(astra_catalog),
+                               daemon_mode="off" if scenario == "private_resume" else "auto",
+                               daemon_manager=manager)
+    handle.model = "gpt-6-astra"
+    settings = handle.context_settings
+    settings.applied_model = handle.model
+    # A reset must also preserve the old applied capacity and threshold until
+    # confirmed; a notification cannot be evidence of clearing an override.
+    previous_window = 315790 if capacity is None else 272000
+    previous_capacity = previous_window * 95 // 100
+    previous_threshold = previous_window * 90 // 100
+    settings.applied_window = previous_window
+    settings.applied_effective_window = previous_capacity
+    settings.applied_threshold = previous_threshold
+    await settings.select(handle, capacity)
+    desired_window = settings.window or 272000
+    native_window = previous_window
+    methods = []
+    resumes = 0
+
+    async def status(thread_id="target", *, idle=True):
+        await handle._dispatch({"method": "thread/status/changed", "params": {
+            "threadId": thread_id, "status": {"type": "notLoaded"}}})
+        if idle:
+            await handle._dispatch({"method": "thread/status/changed", "params": {
+                "threadId": thread_id, "status": {"type": "idle"}}})
+
+    async def open_process(_argv, _bin, *, daemon_proxy):
+        handle.proc = SimpleNamespace(returncode=None)
+        handle._using_daemon_proxy = daemon_proxy
+        handle._dead = False
+
+    async def send(frame):
+        nonlocal resumes, native_window
+        method = frame["method"]
+        methods.append(method)
+        if method == "initialized":
+            return
+        if method == "initialize":
+            if scenario == "early_receipt":
+                await status()
+            result = {"userAgent": "codex_cli_rs/0.154.0 (fixture)"}
+        elif method in {"thread/resume", "thread/start", "thread/fork"}:
+            resumes += 1
+            config = frame["params"].get("config", {})
+            if capacity is not None and method != "thread/fork":
+                assert config["model_context_window"] == desired_window
+                assert config["model_auto_compact_token_limit"] == 284211
+                assert config["model_auto_compact_token_limit_scope"] == "total"
+            else:
+                assert "model_context_window" not in config
+            if scenario in {"new_thread", "private_resume", "native_reload", "cold_resume"}:
+                native_window = desired_window
+            if scenario in {"same_thread_unloaded", "same_thread_reloaded", "native_reload"}:
+                # The other client's reload and our own reload produce identical
+                # notifications. In the concurrent-client cases the native
+                # thread still has its OLD config when our resume rejoins it.
+                assert not handle._pending[frame["id"]].done()
+                await status(idle=scenario != "same_thread_unloaded")
+                assert not handle._pending[frame["id"]].done()
+            elif scenario == "sibling_receipt":
+                await status("other")
+            result = {"thread": {"id": "target"}, "model": handle.model}
+        elif method == "config/read":
+            assert capacity is None and scenario in {"new_thread", "private_resume"}
+            result = {"config": {"model_context_window": None}}
+        elif method == "thread/read":
+            result = {"thread": {"status": {"type": "idle"}}}
+        elif method == "thread/unsubscribe":
+            result = {}
+        else:
+            raise AssertionError(method)
+        await handle._dispatch({"id": frame["id"], "result": result})
+        if method == "thread/resume" and scenario == "late_receipt":
+            # A sibling reload may also arrive after the response but before
+            # connect's awaiting coroutine gets its next slice of execution.
+            await status()
+
+    async def reconnect(sid, **_kwargs):
+        handle.proc = None
+        await handle.connect(resume_id=sid, cwd=str(astra_catalog), preserve_controls=True)
+
+    monkeypatch.setattr(module, "_resolve_codex_bin", lambda: "/unused/codex")
+    monkeypatch.setattr(module, "_newer_private_core_for_oversized_resume", lambda *_a: None)
+    monkeypatch.setattr(module, "_oversized_desktop_openai_resume_requires_http", lambda *_a: False)
+    monkeypatch.setattr(module, "_profile_codex_env", lambda *_a: {})
+    handle._open_process, handle._send = open_process, send
+    handle._update_thread_settings = AsyncMock()
+    handle.force_reconnect = reconnect
+    await handle.connect(resume_id=None if scenario == "new_thread" else "target",
+                         fork=scenario == "fork_without_context", cwd=str(astra_catalog))
+    confirmed = scenario in {"new_thread", "private_resume"}
+    assert settings.pending is not confirmed
+    assert handle.context_window == (desired_window * 95 // 100 if confirmed else previous_capacity)
+    assert settings.applied_effective_window == handle.context_window
+    expected_threshold = (
+        (284211 if capacity is not None else None) if confirmed else previous_threshold)
+    assert settings.applied_threshold == expected_threshold
+    if not confirmed:
+        if scenario not in {"native_reload", "cold_resume"}:
+            assert native_window == previous_window
+        # Verify the payload consumed by the UI, not just internal flags.
+        machine = SimpleNamespace(_emit=AsyncMock())
+        ctx = SimpleNamespace(sdk=handle, engine="codex", space="code", btw=False)
+        event = await WrapperMachine._publish_codex_context(machine, ctx)
+        assert event.max_context_tokens == capacity and event.pending
+        assert event.applied_max_context_tokens == previous_capacity
+        assert event.applied_threshold_tokens == previous_threshold
+        if scenario != "fork_without_context":
+            # The resume already attempted the setting. Idle/query boundaries
+            # must not detach again merely because confirmation is unavailable.
+            assert not await settings.apply(handle)
+            assert settings.pending and handle.context_window == previous_capacity
+            assert settings.applied_threshold == previous_threshold
+            assert "尚未确认原生会话已应用" in settings.error
+            assert resumes == 1
+            assert "thread/unsubscribe" not in methods
+    assert not any(method.startswith("turn/") for method in methods)
+    handle.proc = None
 
 
 @pytest.mark.asyncio

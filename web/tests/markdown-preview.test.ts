@@ -46,6 +46,11 @@ const nativeReply: Turn = { id: "reply-turn", done: false, blocks: [],
 const presentation = presentAsyncQuestionReplies([nativeQuestion, nativeReply]);
 assert.deepEqual(presentation.replies.get(nativeReply.id), [{ question: "用的什么手势？", answer: "三指拖拽\n第二行也要保留" }]);
 assert.equal(presentation.answered.has("question-message"), true);
+assert.equal(presentAsyncQuestionReplies([nativeQuestion, nativeReply], nativeReply.id).answered.size, 0,
+  "an optimistic reply does not mark the question answered before native acceptance");
+assert.equal(presentAsyncQuestionReplies([nativeQuestion,
+  { ...nativeReply, clientMsgId: "pending-client" }], "pending-client").answered.size, 0,
+  "a pending reply's native alias also waits for acceptance");
 assert.equal(presentAsyncQuestionReplies([nativeReply]).replies.size, 0, "never guess from a prefix without the native question");
 assert.equal(presentAsyncQuestionReplies([nativeReply, nativeQuestion]).replies.size, 0, "a future question cannot own this reply");
 const repeatedQuestion = { ...nativeQuestion, id: "after-compaction" };
@@ -778,7 +783,7 @@ $$`,
   assert.match(newChatMarkup, /aria-label="添加照片"/);
   assert.match(newChatMarkup, /aria-label="添加文件"/);
   assert.equal(
-    (newChatMarkup.match(/<button[^>]+aria-label="添加照片"/g) ?? []).length, 1);
+    (newChatMarkup.match(/<button[^>]+aria-label="添加附件"/g) ?? []).length, 1);
   assert.equal(
     (newChatMarkup.match(/<button[^>]+aria-label="添加文件"/g) ?? []).length, 0);
   assert.match(newChatMarkup, /type="file"[^>]*accept="image\/\*"[^>]*multiple/,

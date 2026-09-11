@@ -1,0 +1,3 @@
+# Optional full-screen terminal UI (relay/wrapper do not need Textual).
+textual==6.12.0
+textual-image==0.13.2

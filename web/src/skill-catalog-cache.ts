@@ -217,6 +217,23 @@ export class SkillCatalogRequestCoordinator {
     ) || this.queued.has(readKey);
   }
 
+  fail(requestId: string): SkillCatalogRequest | null {
+    for (const [lane, read] of this.active) {
+      if (read.requestId !== requestId) continue;
+      this.active.delete(lane);
+      this.drain();
+      return read;
+    }
+    const mutation = this.mutations.get(requestId);
+    if (!mutation) return null;
+    this.mutations.delete(requestId);
+    if (!this.hasPendingMutation(mutation.key)) {
+      this.latestMutationByScope.delete(mutation.key);
+    }
+    this.drain();
+    return mutation;
+  }
+
   hasPendingMutation(key: string): boolean {
     for (const mutation of this.mutations.values()) {
       if (mutation.key === key) return true;

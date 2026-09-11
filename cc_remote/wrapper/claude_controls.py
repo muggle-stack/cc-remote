@@ -34,7 +34,19 @@ CLAUDE_DEFAULT_AUTO_COMPACT_MODE = "inherit"
 _V3_FORCED_AUTO_COMPACT_TOKENS = 500_000
 _NATIVE_AUTO_COMPACT_POLICY = "native"
 
-_MODEL_ID = re.compile(r"^claude-[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,254}$")
+# The body of any model id the local broker accepts -- same character class as
+# ``claude_broker/session.py``'s ``_MODEL_VALUE_RE``, bounded to 256. A model
+# *selection* may name any provider: a gateway is free to expose ids such as
+# ``glm-5.2`` or ``openai/gpt-5``.
+_MODEL_BODY = r"[A-Za-z0-9][A-Za-z0-9._:+/@\[\]-]{0,255}"
+_MODEL_ID = re.compile(rf"^{_MODEL_BODY}$")
+# An *observation* is a transcript/context row. Those describe whatever the
+# provider answered with, which is not evidence of a Remote-owned selection.
+# Only a Claude-branded alias may be adopted from them, so a gateway's raw
+# upstream name (``glm-5.2``) can never masquerade as the model the user picked.
+# ``valid_claude_alias`` first validates the complete id as a selection, which
+# keeps observation ids inside the broker's 256-byte selection boundary.
+_MODEL_ALIAS_PREFIX = re.compile(r"^claude-[A-Za-z0-9]")
 _MAX_ENTRIES = 4096
 _MAX_FILE_BYTES = 1024 * 1024
 _MAX_RECORD_BYTES = 16 * 1024 * 1024
@@ -202,10 +214,19 @@ def _canonical_session_id(value: object) -> str:
 
 
 def valid_claude_model(value: object) -> str | None:
+    """Validate a model *selection*, which may name any provider."""
     if not isinstance(value, str):
         return None
     value = value.strip()
     return value if _MODEL_ID.fullmatch(value) else None
+
+
+def valid_claude_alias(value: object) -> str | None:
+    """Validate a model *observation* from transcript or context metadata."""
+    candidate = valid_claude_model(value)
+    if candidate is None or _MODEL_ALIAS_PREFIX.match(candidate) is None:
+        return None
+    return candidate
 
 
 def valid_claude_effort(value: object) -> str | None:
@@ -728,7 +749,12 @@ def last_completed_assistant_controls(
             if message.get("stop_reason") not in _COMPLETED_STOP_REASONS:
                 continue
             selected = turn
-            selected_model = valid_claude_model(message.get("model"))
+            # An observed row may only contribute a Claude-branded alias. A
+            # gateway's raw upstream id (e.g. ``glm-5.2``) proves the provider,
+            # not a Remote-owned selection, so it must not be adopted here --
+            # and must not fall back to an older turn's alias either, which
+            # would assert a selection this session is no longer using.
+            selected_model = valid_claude_alias(message.get("model"))
             break
         if selected is not None:
             break

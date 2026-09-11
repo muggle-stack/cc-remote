@@ -136,6 +136,96 @@ def test_codex_process_clock_overlay_requires_exact_logical_and_native_owner(
     assert "processStartedTs" not in turns[2]
 
 
+def test_codex_process_clock_cannot_resurrect_exact_empty_steer(tmp_path):
+    rollout = tmp_path / "empty-steer.jsonl"
+    rollout.write_text('{"type":"session_meta"}\n')
+    machine, _transport = _mk_machine()
+    machine._codex_process_clocks.observe_start(
+        rollout, "accepted-during-compaction", "native-turn", 30_000)
+    empty = _empty_summary_turn(
+        "native-user", client_message_id="accepted-during-compaction",
+    )
+
+    mm._apply_codex_process_clocks(
+        [empty], machine._codex_process_clocks.get(rollout))
+
+    assert empty["processDetailState"] == "none"
+    assert empty["detailReasons"] == []
+    assert empty["detailEventCount"] == 0
+    assert "processStartedTs" not in empty
+
+
+@pytest.mark.parametrize("intervening_process", [False, True])
+def test_codex_process_clock_waits_for_native_steer_input(
+    tmp_path, intervening_process,
+):
+    from cc_remote.wrapper.codex_handle import CodexSteerUserIdentityProof
+
+    async def run():
+        rollout = tmp_path / "queued-steers.jsonl"
+        rollout.write_text('{"type":"session_meta"}\n')
+        machine, _transport = _mk_machine()
+        machine._codex_rollout_for_wire = lambda _sid: str(rollout)
+        machine._schedule_history_refresh = lambda *_args, **_kwargs: None
+        ctx = _mk_ctx("thread", "thread")
+        ctx.engine = "codex"
+        ctx.sdk = SimpleNamespace(thread_id="thread", _generation=1)
+        machine.sessions[ctx.key] = ctx
+        await machine._emit(ctx, TurnBinding(
+            msg_id="original", turn_id="native-turn", ts=10))
+
+        for index, msg_id in enumerate(("latest", "flash")):
+            accepted = TurnSteered(
+                msg_id=msg_id, turn_id="native-turn", prompt=msg_id,
+                ts=20 + index,
+            )
+            machine._remember_codex_published_steer(ctx, accepted)
+            await machine._emit(ctx, accepted)
+        # Acknowledged inputs have not yet entered the native stream. The old
+        # turn's compaction/tool work still belongs to the original message.
+        await machine._emit(ctx, ProcessEvent(
+            item_id="compact", kind="compaction", phase="end",
+            status="succeeded", title="Compacted", turn_id="native-turn", ts=30))
+        clocks = machine._codex_process_clocks.get(rollout)
+        assert clocks.resolve("original", "native-turn") == 30_000
+        assert clocks.resolve("latest", "native-turn") is None
+        assert clocks.resolve("flash", "native-turn") is None
+
+        def proof(msg_id):
+            return CodexSteerUserIdentityProof(
+                thread_id="thread", expected_turn_id="native-turn",
+                native_turn_id="native-turn", native_message_id="user-" + msg_id,
+                client_message_id=msg_id, generation=1,
+            )
+
+        assert await machine._apply_codex_steer_user_identity(ctx, proof("latest"))
+        if intervening_process:
+            await machine._emit(ctx, Delta(
+                message_id="latest-work", channel="commentary", text="working",
+                turn_id="native-turn", ts=40))
+        assert await machine._apply_codex_steer_user_identity(ctx, proof("flash"))
+        # Retrying alias persistence for an older proof must not rewind timing.
+        assert await machine._apply_codex_steer_user_identity(ctx, proof("latest"))
+        await machine._emit(ctx, Delta(
+            message_id="flash-work", channel="commentary", text="checking Flash",
+            turn_id="native-turn", ts=50))
+        clocks = machine._codex_process_clocks.get(rollout)
+        assert clocks.resolve("latest", "native-turn") == (
+            40_000 if intervening_process else None)
+        assert clocks.resolve("flash", "native-turn") == 50_000
+
+        await machine._emit(ctx, TurnEnd(
+            turn_id="native-turn", result=TurnResult(
+                subtype="success", is_error=False, duration_ms=40_000),
+        ))
+        assert ctx.codex_process_clock_owner is None
+        ctx.codex_published_steers["late-unused"] = "native-turn"
+        assert await machine._apply_codex_steer_user_identity(ctx, proof("late-unused"))
+        assert ctx.codex_process_clock_owner is None
+
+    asyncio.run(run())
+
+
 def test_live_codex_process_clock_starts_only_on_first_visible_process(
     tmp_path,
 ):

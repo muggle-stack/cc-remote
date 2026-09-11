@@ -174,6 +174,11 @@ class SessionContext:
     # native owner. This in-memory marker only suppresses repeated sidecar reads
     # for commentary deltas; it never participates in running/idle ownership.
     codex_process_clock_binding: Optional[tuple[str, str]] = None
+    # RPC acceptance is not the point at which a steer enters the model. Keep
+    # process timing on the last materialized input until its native user item
+    # proves the next owner, independently of the optimistic visible boundary.
+    codex_process_clock_owner: Optional[tuple[str, str]] = None
+    codex_materialized_steers: dict[str, None] = field(default_factory=dict)
     # Interrupt must wake a consumer that is already blocked in queue.get().  The
     # absolute monotonic deadline prevents each subsequent queue item from
     # restarting the drain timeout.

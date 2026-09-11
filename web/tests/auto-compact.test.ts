@@ -69,8 +69,8 @@ assert.doesNotMatch(appSource,
   "reopening an idle popover must retry a previously deferred native read");
 assert.match(composerSource, /contextExactReport/,
   "the popover must retain its last exact report while a native refresh loads");
-assert.match(contextPopoverSource, /正在读取真实上下文/,
-  "the lazy popover must expose a native-read loading state");
+assert.doesNotMatch(contextPopoverSource, /正在读取真实上下文/,
+  "native context reads must refresh without a loading notice");
 assert.doesNotMatch(composerSource + contextPopoverSource,
   /最近一轮|最近一次|容量未知/,
   "transcript estimates must not masquerade as the popover's real context");

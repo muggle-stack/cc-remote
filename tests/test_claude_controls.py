@@ -54,7 +54,9 @@ def test_missing_session_record_delegates_autocompact_to_claude(
     assert saved.applied_auto_compact_threshold_tokens is None
 
 
-def test_remote_control_store_drops_untrusted_values(tmp_path):
+def test_remote_control_store_keeps_provider_native_model_and_drops_bad_controls(
+    tmp_path,
+):
     store = ClaudeControlStore(tmp_path)
     saved = store.update(
         SESSION_ID,
@@ -63,10 +65,36 @@ def test_remote_control_store_drops_untrusted_values(tmp_path):
         permission_mode="owner",
     )
 
+    # A provider-native selection is a real, Remote-owned choice and must
+    # survive; only the unrecognized effort/permission values are dropped.
     assert saved.as_dict() == {
+        "model": "glm-5.2",
         "auto_compact_mode": "inherit",
         "applied_auto_compact_mode": "inherit",
     }
+    assert store.get(SESSION_ID) == saved
+
+
+def test_remote_control_store_still_rejects_an_invalid_model(tmp_path):
+    """The store wiring, not just the standalone validator, must refuse ids.
+
+    A saved id is replayed into the child's ``--model`` on the next cold
+    resume, so a value the grammar rejects has to be dropped at the write.
+    """
+    store = ClaudeControlStore(tmp_path)
+    for bad in ["@leading/at", "has space", "", "   "]:
+        saved = store.update(
+            SESSION_ID,
+            model=bad,
+            effort="max",
+            permission_mode="bypassPermissions",
+        )
+        assert saved.model is None, bad
+        assert "model" not in saved.as_dict(), bad
+        # The recognized controls in the same write still land, proving the
+        # model was filtered rather than the whole update being discarded.
+        assert saved.effort == "max", bad
+        assert store.get(SESSION_ID).model is None, bad
     assert store.get(SESSION_ID) == saved
 
 
@@ -566,3 +594,57 @@ def test_handoff_never_falls_back_to_older_model_for_proxy_upstream(
 
     assert controls.model is None
     assert controls.effort == "max"
+
+
+def test_handoff_observes_only_claude_branded_model_aliases():
+    """A transcript row may assert a Claude alias, never a provider id."""
+    for observed in [
+        "claude-opus-4-6[1m]",
+        # Vertex/enterprise catalog entries are Claude-branded and must stay
+        # observable; a narrower class rejected them, so a resumed session
+        # could not recover the model actually in force.
+        "claude-sonnet-4-5@20250929",
+        "claude-opus-4-5@20251101",
+        "claude-3-7-sonnet@20250219",
+    ]:
+        assert controls_module.valid_claude_alias(observed) == observed
+    # Not Claude-branded, so still unobservable even though each is a valid
+    # *selection* that the broker would accept.
+    for rejected in [
+        "glm-5.2", "openai/gpt-5", "model+plus",
+        "claude", "claude-", "claude--bad", "Claude-opus-4-6", "@leading/at",
+    ]:
+        assert controls_module.valid_claude_alias(rejected) is None
+
+
+def test_observation_class_stays_within_the_selection_class():
+    """Observed aliases are a strict subset of valid model selections."""
+    max_model = "a" * 256
+    too_long_model = max_model + "a"
+    max_alias = "claude-" + "a" * (256 - len("claude-"))
+    too_long_alias = max_alias + "a"
+
+    assert controls_module.valid_claude_model(max_model) == max_model
+    assert controls_module.valid_claude_model(too_long_model) is None
+    assert len(max_alias) == 256
+    assert controls_module.valid_claude_alias(max_alias) == max_alias
+    assert controls_module.valid_claude_model(max_alias) == max_alias
+    assert controls_module.valid_claude_alias(too_long_alias) is None
+    assert controls_module.valid_claude_model(too_long_alias) is None
+
+
+def test_selection_accepts_provider_native_ids_a_broker_could_send():
+    """A selection is wider than an observation, and matches the broker."""
+    for selected in [
+        "glm-5.2", "openai/gpt-5", "claude-opus-4-6[1m]",
+        "model+plus", "claude-sonnet-4-5@20250929",
+    ]:
+        assert controls_module.valid_claude_model(selected) == selected
+    # Surrounding whitespace is stripped, not rejected.
+    assert controls_module.valid_claude_model("  glm-5.2  ") == "glm-5.2"
+    for rejected in ["", "   ", "@cf/meta/llama-3-8b", "-leading-dash"]:
+        # A leading ``@`` or ``-`` and a blank value are not ids in any
+        # provider; nor are non-string values.
+        assert controls_module.valid_claude_model(rejected) is None
+    for non_string in [None, True, 5, b"glm-5.2"]:
+        assert controls_module.valid_claude_model(non_string) is None

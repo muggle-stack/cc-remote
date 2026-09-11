@@ -5,6 +5,7 @@ import {
 } from "../data";
 import { Icon } from "../icons";
 import type { DshState, PermissionProfileInfo } from "../protocol";
+import { CenteredSheet } from "./CenteredSheet";
 
 interface Props {
   dsh?: DshState;
@@ -68,11 +69,8 @@ export function CommandSheet({
     : isEffortMode ? "选择思考强度" : "选择模型";
 
   return (
-    <>
-      <div className={"scrim" + (open ? " show" : "")} onClick={onClose} />
-      <div className={"sheet" + (isPermMode ? " permission-sheet" : "") + (open ? " show" : "")} role="dialog" aria-label={title}>
-        <div className="sheet-grip" />
-        <div className="sheet-title">{isCmdMode ? (filter ? `/${filter}` : "命令面板") : title}</div>
+    <CenteredSheet open={open} label={isCmdMode && filter ? `/${filter}` : title}
+      onClose={onClose} className={isPermMode ? "permission-sheet" : ""}>
         <div className="sheet-scroll">
           {isCmdMode ? (
             visible.map((g, gi) => (
@@ -198,7 +196,6 @@ export function CommandSheet({
             ))
           )}
         </div>
-      </div>
-    </>
+    </CenteredSheet>
   );
 }

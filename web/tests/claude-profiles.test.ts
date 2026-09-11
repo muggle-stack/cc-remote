@@ -91,7 +91,8 @@ try {
     onSend: () => true,
   }));
   assert.match(newChatMarkup, /aria-label="选择 Claude 账号"/);
-  assert.match(newChatMarkup, />default · Personal</);
+  assert.doesNotMatch(newChatMarkup, /<select/,
+    "the account trigger opens our shared picker instead of a native select");
   assert.match(newChatMarkup, />nyx · Company</);
 
   const sidebarMarkup = renderToStaticMarkup(createElement(SessionsSidebar, {

@@ -1,5 +1,17 @@
 # Desktop App tools on a shared Codex host (experimental, macOS)
 
+First inspect the installed App's native `codex-app-tools` plugin and catalog;
+recent builds can bundle it directly. Do not add a duplicate custom MCP merely
+because the App now shares a daemon. This page describes the separate macOS
+adapter, not a prerequisite for ordinary App/CLI/cc-remote sharing.
+
+Linux App attachment is covered by the [Linux runbook](codex-desktop-linux.md).
+The verified Linux App build 26.908.40834 includes a native App-tools plugin;
+native catalog discovery was checked, but this repository's adapter has no
+Linux discovery/signature implementation. Preserve the installed native
+approval policy, verify the actual tools on that build, and report unavailable
+tools rather than copying macOS-only commands or inventing tool permissions.
+
 This optional adapter connects the **installed official** `codex_app` MCP to an
 existing shared app-server. It forwards the official tool catalog, arguments,
 native thread/turn metadata, results and cancellations. It does not implement
