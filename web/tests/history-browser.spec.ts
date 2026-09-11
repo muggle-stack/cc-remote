@@ -1700,7 +1700,7 @@ test("async question history restores a nonblocking card and replies through the
   await expect(card.getByLabel("其他回答（填写后替代选项）")).toBeVisible();
   await card.getByLabel("其他回答（填写后替代选项）").fill("Mac 浏览器");
   await card.getByLabel("你的回答", { exact: true }).fill("三指拖拽");
-  await card.getByLabel("你的回答", { exact: true }).press("Enter");
+  await card.getByLabel("你的回答", { exact: true }).press("Shift+Enter");
   expect(relay.commands.filter((c) => c.type === "query")).toHaveLength(0);
   await card.getByRole("button", { name: "发送回答" }).click();
   await expect.poll(() => relay.commands.filter((c) => c.type === "query").length).toBe(1);
@@ -1753,11 +1753,137 @@ test("async question live delivery preserves running state and uses steer instea
   await expect(card).toContainText("补充会发送给当前任务，不会中断执行");
   await expect(card).not.toContainText("发送后将开始新一轮对话");
   await card.getByLabel("你的回答", { exact: true }).fill("三指拖拽");
-  await card.getByRole("button", { name: "发送回答" }).click();
+  await card.getByLabel("你的回答", { exact: true }).press("Enter");
   await expect.poll(() => relay.commands.filter((c) => c.type === "steer").length).toBe(1);
   expect(relay.commands.find((c) => c.type === "steer")?.sid).toBe(sid);
   expect(relay.commands.filter((c) => ["interrupt", "answer_question", "query"].includes(String(c.type))))
     .toHaveLength(0);
+});
+
+test("async question reply keeps an in-flight answer streaming across the steer fence", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { historyReply: () => null });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
+  const sid = "layout-parent";
+  let seq = 0;
+  const emit = (event: PanelRelayEvent) => relay.emit({ ...event, seq: ++seq });
+  emit({ type: "user_msg", sid, msg_id: "stream-user", prompt: "检查当前结果" });
+  emit({ type: "turn_binding", sid, msg_id: "stream-user", turn_id: "stream-task" });
+  emit({ type: "state", sid, state: "running", msg_id: "stream-user" });
+  emit({ type: "assistant_msg_start", sid, message_id: "stream-question", channel: "final" });
+  emit({ type: "delta", sid, message_id: "stream-question", channel: "final", text: "要检查哪一项？" });
+  emit({ type: "assistant_msg_end", sid, message_id: "stream-question", channel: "final",
+    delivery: "async", questions: [{ title: "要检查哪一项？", options: null }] });
+  emit({ type: "assistant_msg_start", sid, message_id: "stream-answer", channel: "final" });
+  emit({ type: "delta", sid, message_id: "stream-answer", channel: "final", text: "检查结果：周期约 **1" });
+  const oldRow = page.locator('.turn[data-turn-id="stream-user"]');
+  await expect(oldRow).toContainText("检查结果：周期约");
+  const dialog = await openAsyncQuestion(page);
+  await dialog.getByLabel("你的回答", { exact: true }).fill("再检查输入");
+  await dialog.getByLabel("你的回答", { exact: true }).press("Enter");
+  await expect.poll(() => relay.commands.filter(c => c.type === "steer").length).toBe(1);
+  const steer = relay.commands.find(c => c.type === "steer")!;
+  emit({ type: "turn_steered", sid, msg_id: String(steer.msg_id),
+    turn_id: "stream-task", prompt: String(steer.prompt) });
+  emit({ type: "delta", sid, message_id: "stream-answer", channel: "final", text: " ms**，" });
+  await expect(oldRow.locator("strong")).toHaveText("1 ms");
+  emit({ type: "delta", sid, message_id: "stream-answer", channel: "final", text: "输出仍会完整显示。" });
+  emit({ type: "assistant_msg_end", sid, message_id: "stream-answer", channel: "final" });
+  await expect(oldRow).toContainText("检查结果：周期约 1 ms，输出仍会完整显示。");
+  emit({ type: "assistant_msg_start", sid, message_id: "next-answer", turn_id: "stream-task", channel: "final" });
+  emit({ type: "delta", sid, message_id: "next-answer", turn_id: "stream-task", channel: "final", text: "继续检查输入。" });
+  const newRow = page.locator(`.turn[data-turn-id="${String(steer.msg_id)}"]`);
+  await expect(newRow).toContainText("继续检查输入。");
+  await expect(newRow).not.toContainText("输出仍会完整显示。");
+  expect(relay.commands.filter(c => ["query", "interrupt"].includes(String(c.type)))).toHaveLength(0);
+});
+
+test("async question process disclosure stays settled through late updates after a steer", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { historyReply: () => null });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
+  const sid = "layout-parent";
+  let seq = 0;
+  const emit = (event: PanelRelayEvent) => relay.emit({ ...event, seq: ++seq });
+  emit({ type: "user_msg", sid, msg_id: "process-user", prompt: "检查处理过程" });
+  emit({ type: "turn_binding", sid, msg_id: "process-user", turn_id: "process-task" });
+  emit({ type: "state", sid, state: "running", msg_id: "process-user" });
+  emit({ type: "process", sid, item_id: "check-process", turn_id: "process-task",
+    kind: "command", phase: "start", status: "running", title: "检查日志" });
+  const head = page.locator('.turn[data-turn-id="process-user"] .turn-process-head');
+  await expect(head).toHaveAttribute("aria-expanded", "true");
+  emit({ type: "turn_steered", sid, msg_id: "next-process-user",
+    turn_id: "process-task", prompt: "只检查输入" });
+  await expect(head).toHaveAttribute("aria-expanded", "false");
+  // Native item activity belongs to its old row even after the visible input
+  // fence. Content can keep changing, but must not repeatedly reopen the UI.
+  for (let i = 0; i < 2; i++) {
+    emit({ type: "process", sid, item_id: "check-process", turn_id: "process-task",
+      kind: "command", phase: "update", status: "running", title: "检查日志", output: `后续输出 ${i}` });
+    await expect(head).toContainText("正在处理");
+    await expect(head).toHaveAttribute("aria-expanded", "false");
+    emit({ type: "process", sid, item_id: "check-process", turn_id: "process-task",
+      kind: "command", phase: "end", status: "succeeded", title: "检查日志" });
+    await expect(head).toContainText("已处理");
+    await expect(head).toHaveAttribute("aria-expanded", "false");
+  }
+  await head.click();
+  await expect(head).toHaveAttribute("aria-expanded", "true");
+  emit({ type: "process", sid, item_id: "check-process", turn_id: "process-task",
+    kind: "command", phase: "update", status: "running", title: "检查日志", output: "最后的输出" });
+  emit({ type: "process", sid, item_id: "check-process", turn_id: "process-task",
+    kind: "command", phase: "end", status: "succeeded", title: "检查日志" });
+  await expect(head).toContainText("已处理");
+  await expect(head).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator('.turn[data-turn-id="process-user"] .process-timeline')).toContainText("检查日志");
+});
+
+test("async question keyboard sends with Enter, keeps Shift+Enter newlines and dismisses unanswered drafts with Escape", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  const input = dialog.getByLabel("你的回答", { exact: true });
+  await input.fill("第一行");
+  await input.press("Shift+Enter");
+  await page.keyboard.insertText("第二行");
+  await expect(input).toHaveValue("第一行\n第二行");
+  expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
+  await input.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".async-question-card")).toContainText("待回答");
+  await openAsyncQuestion(page);
+  await expect(input).toHaveValue("第一行\n第二行");
+  await input.press("Enter");
+  await expect(dialog).toHaveCount(0);
+  await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
+  const query = relay.commands.find(c => c.type === "query")!;
+  expect(query.prompt).toContain("回答：第一行\n第二行");
+  expect(query.sid).toBe("layout-parent");
+  expect(relay.commands.filter(c => ["interrupt", "answer_question", "steer"].includes(String(c.type)))).toHaveLength(0);
+});
+
+test("async question keyboard leaves IME confirmation and repeated Enter out of the send path", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  const input = dialog.getByLabel("你的回答", { exact: true });
+  await input.fill("中文输入");
+  await input.dispatchEvent("compositionstart", { data: "输入" });
+  // Some WebKit IME keys omit isComposing; the composition lifecycle still owns them.
+  await input.press("Enter");
+  await input.press("Escape");
+  await expect(dialog).toBeVisible();
+  expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
+  await input.dispatchEvent("compositionend", { data: "输入" });
+  await input.dispatchEvent("keydown", { key: "Enter", code: "Enter", isComposing: true });
+  await input.dispatchEvent("keydown", { key: "Enter", code: "Enter", keyCode: 229 });
+  await input.dispatchEvent("keydown", { key: "Enter", code: "Enter", repeat: true });
+  await expect(dialog).toBeVisible();
+  expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
+  await input.press("Enter");
+  await expect(dialog).toHaveCount(0);
+  await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
+  expect(relay.commands.find(c => c.type === "query")?.prompt).toContain("回答：中文输入");
 });
 
 test("async question completion updates reply mode while preserving a collapsed draft", async ({ page }) => {

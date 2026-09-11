@@ -1619,14 +1619,15 @@ function finishOpenBlocks(
   isError: boolean,
   preserveOpenPlans = false,
   preserveBackground = false,
+  preserveOpenText = false,
 ): void {
   finishOpenBlockList(
     mutableTurnBlocks(turn), status, isError,
-    preserveOpenPlans, preserveBackground);
+    preserveOpenPlans, preserveBackground, preserveOpenText);
   if (turn.detailProjection) {
     finishOpenBlockList(
       turn.detailProjection.blocks, status, isError,
-      preserveOpenPlans, preserveBackground);
+      preserveOpenPlans, preserveBackground, preserveOpenText);
   }
 }
 
@@ -1641,7 +1642,8 @@ function finishCompletedTurnChildren(
     ? "interrupted" : turn.error ? "failed" : "succeeded";
   finishOpenBlocks(
     turn, status, status !== "succeeded",
-    preserveOpenPlans, preserveBackground);
+    preserveOpenPlans, preserveBackground,
+    preserveOpenPlans && status === "succeeded");
 }
 
 /** Close only one newly-installed detail projection. A completed turn may have
@@ -1666,10 +1668,11 @@ function finishOpenBlockList(
   isError: boolean,
   preserveOpenPlans = false,
   preserveBackground = false,
+  preserveOpenText = false,
 ): void {
   for (const block of blocks) {
     if (block.kind === "text") {
-      block.done = true;
+      if (!preserveOpenText) block.done = true;
     } else if (block.kind === "process" && !block.done) {
       if ((preserveOpenPlans && block.processKind === "plan")
           || (preserveBackground && block.background === true)) continue;
@@ -1749,7 +1752,11 @@ function finishTurnAtSteerFence(
     turn.forkPointId = undefined;
   }
   turn.liveTaskId = undefined;
-  finishOpenBlocks(turn, "succeeded", false);
+  // Accepting input advances the visible conversation, but Codex can still
+  // stream the predecessor's current message. Only its native item end (or an
+  // authoritative terminal) closes that text; otherwise Delta treats the
+  // locally closed prefix as immutable and silently drops the remaining reply.
+  finishOpenBlocks(turn, "succeeded", false, false, false, true);
 }
 
 function reconcileAcceptedSteerHistory(
@@ -3139,9 +3146,9 @@ export function reduce(state: AppState, action: Action): AppState {
           }
           if (action.turns.length) {
             replaceWithBoundedTurns(rt, cloneTurns(action.turns).map((turn) => (
-              // Cache paint has no current lifecycle authority. Keep a Plan
-              // provisionally open until the first accepted History page says
-              // whether the enclosing native task is still running.
+              // Cache paint has no current lifecycle authority. Keep native
+              // text and Plans open until the first accepted History page
+              // says whether the enclosing task is still running.
               finishCompletedTurnChildren(turn, true),
               !turn.forkPointId && turn.codexTurnId
                 ? { ...turn, forkPointId: turn.codexTurnId }
@@ -4407,10 +4414,10 @@ function reduceEvent(
             .find((candidate): candidate is Turn => !!candidate);
           if (!detail) return turn;
           const merged = mergeAuthoritativeTurnDetail(turn, detail, built.turns);
-          // A completed row may be the neutral-steer segment whose Plan spans
-          // the following clarification, but only a current running History
+          // A completed row may be the neutral-steer segment whose text or
+          // Plan spans the clarification, but only a current running History
           // (or a newer live frame which raced this page) may keep it open. An
-          // exact idle page must settle stale cache/detail Plan state too.
+          // exact idle page must settle stale cache/detail children too.
           finishCompletedTurnChildren(
             merged, preserveProjectionOpenPlans, isClaudeHistory);
           return merged;

@@ -5082,8 +5082,9 @@ try {
   assert.equal(firstSteeredTurns[0].durationMs, undefined,
     "a steer fence without one authoritative clock domain has unknown duration");
   assert.equal(firstSteeredTurns[0].doneTs, 11_000);
-  assert.ok(firstSteeredTurns[0].blocks.every((block: Block) => block.done),
-    "closing the old segment also settles every open block it owned");
+  assert.ok(firstSteeredTurns[0].blocks.every((block: Block) =>
+    block.kind === "text" ? !block.done : block.done),
+    "the old process segment settles while native text continues to its own end");
   assert.equal(firstSteeredTurns[1].images?.[0]?.data, "steered-image");
   assert.deepEqual(firstSteeredTurns[1].files, [{
     filename: "steered.txt", data: "",
