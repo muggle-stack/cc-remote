@@ -393,6 +393,10 @@ try {
     "无法连接本机 DSH，请检查服务后重试。");
   assert.equal(presentCommandProblem({ code: "dsh_auth_expired", message: hiddenDiagnostic }),
     "DSH 本机配对不可用，请重新配对。");
+  assert.equal(presentCommandProblem({ code: "dsh_unsupported", message: hiddenDiagnostic }),
+    "DSH 暂不支持此操作。");
+  assert.equal(presentCommandProblem({ code: "dsh_gateway/not-found", message: hiddenDiagnostic }),
+    "DSH 接口不兼容，请检查 DSH 版本。");
   for (const [raw, expected, heading] of [
     ["Codex 已自动更新，当前回合在更新时中断；为避免重复执行工具，"
       + "本次任务未自动重试。请确认已有结果后重新发送。",
