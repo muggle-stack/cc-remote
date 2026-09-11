@@ -1,3 +1,6 @@
+import type { DshRead } from "../dsh-api";
+import type { DshItem } from "../protocol";
+import { useDshReferences } from "./DshReferences";
 import type { DshState, DshCommandResult } from "../protocol";
 import {
   useCallback,
@@ -60,11 +63,14 @@ import {
   type AutoCompactSelection,
 } from "../auto-compact";
 
+const DshReferences = lazy(() => import("./DshReferenceList"));
 const AutoCompactControl = lazy(() => import("./AutoCompactControl"));
 const ContextPopover = lazy(() => import("./ContextPopover"));
 
 interface Props {
   dsh?: DshState;
+  dshSid?: string;
+  readDsh?: DshRead;
   dshCommandResult?: DshCommandResult;
   onDshCommand?: (line: string, images?: QueryImg[], files?: QueryFile[]) => string | null;
   draftKey: string;
@@ -206,6 +212,16 @@ export function Composer(p: Props) {
   const [dragDepth, setDragDepth] = useState(0);
   const dragOver = dragDepth > 0;
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const [referenceCaret, setReferenceCaret] = useState(0);
+  const refs = useDshReferences(p.readDsh, p.dshSid, input, referenceCaret, p.engine === "dsh" && !p.archived);
+  const pickReference = (item: DshItem) => {
+    if (!refs.token || !item.mention) return;
+    const replacement = item.mention + (item.state === "directory" ? "" : " ");
+    const next = input.slice(0, refs.token.start) + replacement + input.slice(refs.token.end);
+    const caret = refs.token.start + replacement.length;
+    setInput(next); setReferenceCaret(caret);
+    requestAnimationFrame(() => { taRef.current?.focus(); taRef.current?.setSelectionRange(caret, caret); });
+  };
   const imeSubmitRef = useRef(new ImeSubmitGuard());
   const buttonSendTimerRef = useRef<number | null>(null);
   const photoRef = useRef<HTMLInputElement>(null);
@@ -833,13 +849,16 @@ export function Composer(p: Props) {
       value={input}
       placeholder={importing ? "正在安全导入附件…"
         : offline ? "机器离线 — 等待重连…"
-        : p.archived ? "会话已归档 — 取消归档后可继续对话"
+        : p.archived ? p.engine === "dsh" ? "会话已归档 · 历史可查看" : "会话已归档 — 取消归档后可继续对话"
         : (controlUi?.placeholder
           ?? (busy && (p.engine ?? "claude") === "codex"
             ? "输入以引导当前任务，或选择排队…"
             : placeholder))}
       disabled={locked}
-      onChange={(e) => onInput(e.target.value)}
+      onChange={(e) => { onInput(e.target.value); setReferenceCaret(e.target.selectionStart); }}
+      onSelect={(e) => setReferenceCaret(e.currentTarget.selectionStart)}
+      aria-controls={refs.open ? "dsh-reference-list" : undefined}
+      aria-activedescendant={refs.open && refs.items.length ? `dsh-reference-${refs.selected}` : undefined}
       onCompositionStart={() => imeSubmitRef.current.startComposition()}
       onCompositionEnd={(e) => {
         imeSubmitRef.current.endComposition();
@@ -847,6 +866,15 @@ export function Composer(p: Props) {
       }}
       onPaste={onPaste}
       onKeyDown={(e) => {
+        if (refs.open && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) {
+          if (e.key === "Escape") { e.preventDefault(); refs.dismiss(); return; }
+          if (refs.items.length && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+            e.preventDefault(); refs.setSelected((refs.selected + (e.key === "ArrowDown" ? 1 : -1) + refs.items.length) % refs.items.length); return;
+          }
+          if (refs.items.length && (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey))) {
+            e.preventDefault(); pickReference(refs.items[refs.selected] ?? refs.items[0]); return;
+          }
+        }
         if (e.key === "Escape" && suggestionOpen) {
           setInput(""); resetTaHeight(); return;
         }
@@ -1060,6 +1088,7 @@ export function Composer(p: Props) {
             </div>
           </div>
         ) : (<>
+          {refs.open && <Suspense fallback={null}><DshReferences value={refs} onPick={pickReference} /></Suspense>}
           <div className="inrow">
             <button className="cmdbtn" onClick={() => photoRef.current?.click()}
               aria-label="添加照片" title="添加照片"
@@ -1107,6 +1136,12 @@ export function Composer(p: Props) {
               title={deferredClaudeControls
                 ? `Remote 接管后思考强度：${effortName ?? "读取中"}；不是${externalClaudeOwner}当前强度`
                 : "思考强度"}>{effortName ?? "强度读取中"}</button>
+            {p.engine === "dsh" && p.dsh?.plan_active != null && <button type="button"
+              className={`hint-ctl collaboration-chip${p.dsh.plan_active ? " plan" : ""}`}
+              disabled={locked || p.dsh.plan_pending} title={p.dsh.plan_active ? "退出计划模式" : "进入计划模式"}
+              onClick={() => p.onDshCommand?.(p.dsh?.plan_active ? "/plan off" : "/plan on")}>
+              <Icon name="plan" size={13} />{p.dsh.plan_pending ? p.dsh.plan_active ? "正在退出计划" : "正在进入计划" : p.dsh.plan_active ? "计划模式" : "计划"}
+            </button>}
             {p.engine === "codex" && p.collaborationMode === "plan" && (
               <button
                 className="hint-ctl collaboration-chip plan"

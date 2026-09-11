@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+- Add native DSH archive, full-text search, references, subagent controls, jobs,
+  plan review, produced files, session ZIP export and diagnostics (protocol v64).
+- Open directory links in the file browser and preview XLSX sheets with saved
+  cell values and original downloads on macOS, Linux and mobile browsers.
+
 - Repair process ownership and empty details when steering during Codex compaction, including refresh and session reload.
 - Align the Codex context gauge with native compaction estimates (protocol v63).
   Match bounded local log reads to the account, thread and latest rollout sample;

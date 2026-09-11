@@ -19,10 +19,20 @@ Add this entry to an operator-owned DSH patch file, using the **absolute path**
 to the bridge from this checkout or the Wrapper release:
 
 ```yaml
+- id: session-query-sqlite
+  config:
+    path: ':memory:'
+    openAt: first-search
 - insert:
     - id: cc-remote-history
       name: /absolute/path/to/cc-remote/integrations/dsh/cc-remote.mjs
 ```
+
+The `session-query-sqlite` override enables native full-text search on its first
+use. DSH 0.1.5 defaults to `openAt: never`; without this opt-in, title/path
+filtering still works and content search explains that it is unavailable. The
+Web default index stays in memory, on the Wrapper host; no transcript is indexed
+on the relay. Keep a configured durable index path if the installation has one.
 
 Start DSH with its Web profile and that patch:
 
@@ -76,13 +86,42 @@ it does not stop native Agents. The Stop button explicitly calls native cancel.
   previews and existing exact-file authorization. Current Git diff is available;
   DSH does not supply cc-remote's per-turn file checkpoint archive.
 
-Work, `/btw`, worktree/cwd migration, archive/delete and Codex token-budget or
+Work, `/btw`, worktree/cwd migration, unarchive/delete and Codex token-budget or
 account-quota controls are not DSH capabilities in this adapter. Work shows a
 disabled lock; the other unsupported controls are hidden.
 Agent Presets apply when creating a session; they are not changed on existing
 sessions. DSH context usage reports native estimates and model capacity, including
 compaction updates. No model turn is started to read these values. The
 Codex per-session context-window override does not apply to DSH.
+
+## Session tools
+
+- Archive an idle session from its sidebar menu. Native workspace state survives
+  restart; archived sessions remain available for history and export. DSH does
+  not yet provide unarchive or permanent deletion. Running/queued sessions cannot
+  be archived from cc-remote.
+- Sidebar search includes native message-content matches. Open a result to read
+  its matching context without activating the session. Earlier messages paginate.
+- Type `@` in the composer for native file and session references. Quoted paths
+  and canonical `dsh-session:` mentions are preserved in the submitted prompt.
+- **Settings → Session tools** shows the native subagent tree, child messages,
+  background jobs, produced files and read-only version/plugin diagnostics.
+  Continuable children expose queue, steer and stop only when their parent is
+  available; delivery validates the exact parent/child identity again.
+- Plan mode uses the native projection, including pending transitions. Native
+  plan review displays the Markdown plan and returns the selected native answer.
+- Export includes the native complete session ZIP with descendant sessions and
+  attachments. It uses private, requester-scoped chunks, never replay/history.
+  Exports are capped at 128 MiB, at most two at once. Cancellation and Wrapper
+  shutdown stop packaging; abandoned temporary ZIPs expire after five idle
+  minutes. The phone gets
+  an explicit **Save ZIP** link after preparation.
+- Clicking directories in messages uses `/open` browsing; regular files use the
+  preview panel, preserving line numbers. XLSX previews work on macOS and Linux
+  without Office: worksheet tabs, saved cell values and an original-file download.
+  No formulas or external links execute. Preview bounds are 8 MiB compressed,
+  64 MiB expanded, 64 sheets, 500 rows/100 columns per sheet, and 10,000 cells
+  total. Truncation is visible; charts and complex formatting stay in the original.
 
 ## History and release boundaries
 
@@ -99,7 +138,7 @@ to a pre-steer question stays under that question, including after refresh.
 Autonomous goal rounds get their own rows. Disconnects preserve the unfinished
 state with a connection notice until the native terminal is known.
 
-The Web, relay and Wrapper must all run **protocol v63**. Wrapper release bundles
+The Web, relay and Wrapper must all run **protocol v64**. Wrapper release bundles
 include this bridge; DSH and its patch/configuration are independently managed.
 Use [the repository release procedure](../../deploy/README.md) for deployment.
 

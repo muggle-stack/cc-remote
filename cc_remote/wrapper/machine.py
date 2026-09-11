@@ -1967,7 +1967,7 @@ class WrapperMachine:
     }
     SAFE_RETRY_COMMANDS = frozenset({
         "list_sessions", "get_history", "get_turn_detail", "get_agent_detail",
-        "get_history_image",
+        "get_history_image", "read_dsh",
         "get_models", "get_permission_profiles", "get_engine_capabilities",
         "get_context", "get_status", "get_diff", "get_turn_file_changes", "get_file_preview",
         "get_preview_asset", "get_goal", "dismiss_goal",
@@ -1985,7 +1985,7 @@ class WrapperMachine:
         "set_service_tier", "set_collaboration_mode", "open_btw", "close_btw",
         "sync_btw",
         "set_perm", "get_permission_profiles", "set_permission_profile",
-        "set_web_search", "set_dsh_control",
+        "set_web_search", "set_dsh_control", "read_dsh", "act_dsh_subagent", "download_dsh",
         "get_context", "get_status", "consume_rate_limit_reset_credit",
         "get_diff", "get_turn_file_changes", "get_file_preview", "save_markdown", "browse_files",
         "get_preview_asset", "authorize_preview",
@@ -23886,6 +23886,21 @@ class WrapperMachine:
             return response
 
         try:
+            # Links in prose can name directories as well as files. Resolve
+            # directories through the same no-symlink boundary as /open.
+            candidate = os.path.join(ctx.cwd, os.path.expanduser(cmd.path))
+            if await asyncio.to_thread(os.path.isdir, candidate):
+                from cc_remote.wrapper.workspace_browser import browse_workspace
+
+                target = await asyncio.to_thread(
+                    browse_workspace, ctx.cwd, cmd.path, limit=1,
+                    confine_to_cwd=ctx.space != "code")
+                if target["kind"] == "directory":
+                    response = FilePreview(
+                        path=target["path"], request_id=cmd.request_id,
+                        directory=True, writable=False, to=client_id)
+                    await self._emit(ctx, response)
+                    return response
             suffix = os.path.splitext(cmd.path)[1].lower()
             external_paths = self._preview_capabilities(ctx)
             if suffix in self.OFFICE_PREVIEW_SUFFIXES:
@@ -24859,6 +24874,15 @@ class WrapperMachine:
         is persisted by the relay/VPS.
         """
         suffix = os.path.splitext(path)[1].lower()
+        if suffix == ".xlsx":
+            from cc_remote.wrapper.spreadsheet_preview import spreadsheet_preview
+
+            relative, data, file_stat, _ = cls._read_session_file(
+                cwd, path, allowed_suffixes=frozenset({".xlsx"}),
+                max_bytes=ARTIFACT_PREVIEW_MAX_BYTES, allow_truncate=False,
+                allowed_external_paths=allowed_external_paths)
+            return {"path": relative, "format": "spreadsheet", "content": spreadsheet_preview(data),
+                    "data": data, "size": file_stat.st_size, "mtime_ns": file_stat.st_mtime_ns}
         if suffix in cls.OFFICE_PREVIEW_SUFFIXES:
             return cls._convert_office_preview(
                 cwd, path, allowed_external_paths)
@@ -25308,6 +25332,8 @@ class WrapperMachine:
             return "markdown"
         if suffix in cls.HTML_PREVIEW_SUFFIXES:
             return "html"
+        if suffix == ".xlsx":
+            return "spreadsheet"
         if suffix in cls.OFFICE_PREVIEW_SUFFIXES or suffix == ".pdf":
             return "pdf"
         if suffix in cls.PREVIEW_ASSET_MEDIA_TYPES:

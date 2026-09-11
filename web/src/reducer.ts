@@ -165,14 +165,14 @@ export interface PreviewAuthorizationState {
   operation: PreviewAuthorizationOperation;
   path: string;
   resolvedPath: string;
-  format: "markdown" | "text" | "html" | "image" | "pdf" | "audio";
+  format: "markdown" | "text" | "html" | "image" | "pdf" | "audio" | "spreadsheet";
   previewId?: string;
   status: "required" | "submitting" | "granted";
 }
 
 export interface Artifact {
   file: string;
-  kind: "diff" | "md" | "file" | "gitdiff" | "html" | "image" | "pdf" | "audio";
+  kind: "diff" | "md" | "file" | "gitdiff" | "html" | "image" | "pdf" | "audio" | "spreadsheet";
   sid?: string | null;
   requestId?: string;
   diff?: DiffLine[];
@@ -4947,6 +4947,8 @@ function reduceEvent(
       });
     }
     case "turn_file_changes_page":
+    case "dsh_read_result":
+    case "dsh_download_chunk":
     case "files_listed":
     case "agent_detail":
       // Agent detail is a requester-correlated side panel projection. App owns
@@ -5053,7 +5055,7 @@ function reduceEvent(
         kind: "gitdiff", sections: parseGitDiff(e.diff),
       } };
     case "file_preview":
-      if (!state.artifact || !["md", "file", "html", "image", "pdf", "audio"].includes(state.artifact.kind)
+      if (!state.artifact || !["md", "file", "html", "image", "pdf", "audio", "spreadsheet"].includes(state.artifact.kind)
           || state.artifact.requestId !== e.request_id
           || state.artifact.sid !== (e.sid ?? state.focusedSid)) return state;
       return { ...state, artifact: {

@@ -88,7 +88,7 @@ export function withoutForkFocusPlaceholder(
 export function sessionMenuCapabilities(session: SessionInfo): SessionMenuCapabilities {
   return {
     rename: true,
-    archive: session.engine !== "dsh",
+    archive: session.engine !== "dsh" || session.tag !== "archived",
     forkWorktree: session.engine === "codex" && session.tag !== "archived",
     migrate: session.engine === "codex" && session.space !== "work"
       && session.tag !== "archived",

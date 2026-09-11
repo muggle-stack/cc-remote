@@ -6,6 +6,7 @@
  * bridge obtains the cursor using the public Session Query lease and delegates
  * pagination to the official Gateway, without following or resuming an Agent.
  */
+import { createRequire } from 'node:module';
 export const name = 'cc-remote-history';
 export const inject = ['connection', 'sessionQuery', 'typertGateway'];
 export const SNAPSHOT_PATH = '/api/cc-remote.snapshot';
@@ -23,12 +24,15 @@ export function apply(ctx) {
 
 export async function snapshot(ctx, request) {
   const params = new URL(request.url).searchParams;
-  const allowed = new Set(['sessionId', 'beforeSeq', 'throughSeq', 'maxMessages']);
+  const allowed = new Set(['sessionId', 'beforeSeq', 'throughSeq', 'maxMessages', 'query', 'deliverables']);
   if ([...params.keys()].some(key => !allowed.has(key) || params.getAll(key).length !== 1)) {
     return failure(400, 'invalid_request');
   }
   const sessionId = params.get('sessionId');
   if (!SESSION_ID.test(sessionId ?? '')) return failure(400, 'invalid_session');
+  const query = params.get('query');
+  if (query !== null && (!query.trim() || query.length > 1000)) return failure(400, 'invalid_query');
+  if (params.has('deliverables') && params.get('deliverables') !== '1') return failure(400, 'invalid_request');
   let beforeSeq, throughSeq, maxMessages;
   try {
     beforeSeq = integer(params, 'beforeSeq', 0, Number.MAX_SAFE_INTEGER);
@@ -48,6 +52,18 @@ export async function snapshot(ctx, request) {
     }
     const cursor = throughSeq ?? source.cursor;
     if (cursor > source.cursor) return failure(409, 'stale_cursor');
+    if (query && beforeSeq === undefined) {
+      // Use the same native index and current surface as sidebar search. A
+      // substring scan disagrees with native tokenization and retired surfaces.
+      const matches = await ctx.sessionQuery.searchEvents({ sessionId, query,
+        filters: [{ kind: 'type', values: ['user/message', 'assistant/message'] },
+          { kind: 'surface', values: ['current'] }], limit: 20 });
+      const match = matches.items.find(event => event.sessionId === sessionId
+        && event.seq <= cursor && event.surface === 'current'
+        && ['user/message', 'assistant/message'].includes(event.type));
+      if (!match) return failure(409, 'search_match_changed');
+      beforeSeq = match.seq + 1;
+    }
     const page = await ctx.typertGateway.invoke({
       namespace: 'session', method: 'page',
       args: { request: {
@@ -69,6 +85,8 @@ export async function snapshot(ctx, request) {
     }
     const body = JSON.stringify({
       contract: 1, header: source.header, cursor, ...page,
+      version: nativeVersion(),
+      ...(params.has('deliverables') ? { deliverables: producedFiles(source.events, cursor) } : {}),
       projections: source.projections ?? { asOfSeq: source.cursor, values: {} },
     });
     if (Buffer.byteLength(body) > MAX_RESPONSE_BYTES) return failure(413, 'page_too_large');
@@ -81,6 +99,46 @@ export async function snapshot(ctx, request) {
   } finally {
     source?.[Symbol.dispose]();
   }
+}
+
+function nativeVersion() {
+  try {
+    const value = createRequire(process.argv[1])('@deepseek-ai/dsh/package.json').version;
+    return typeof value === 'string' && value.length < 100 ? value : null;
+  } catch { return null; }
+}
+
+export function producedFiles(events, cursor) {
+  const calls = new Map();
+  const files = new Map();
+  for (const event of events) {
+    if (event.seq > cursor || (event.surfaceOp && typeof event.surfaceOp === 'object')) continue;
+    const data = event.data;
+    if (event.type === 'tool/call') {
+      let args;
+      try { args = typeof data.arguments === 'string' ? JSON.parse(data.arguments) : data.arguments; } catch { continue; }
+      if (!args || typeof args !== 'object') continue;
+      const path = ['write', 'edit'].includes(data.name) ? args.file_path
+        : data.name === 'str_replace_editor' && ['create', 'str_replace', 'insert'].includes(args.command) ? args.path : null;
+      if (typeof path === 'string' && path.trim() && path.length <= 4096) calls.set(String(data.callId), path);
+    }
+    if (event.type === 'tool/result') {
+      for (const block of data.message?.content ?? []) {
+        const path = calls.get(String(block.toolCallId ?? data.message?.source?.callId));
+        if (block.type === 'tool-result' && !block.isError && !data.error && path) {
+          files.delete(path); files.set(path, { path, label: '创建或修改的文件' });
+        }
+      }
+    }
+    if (event.type === 'deliverables/presented') {
+      for (const file of data.files ?? []) {
+        if (typeof file.path === 'string' && file.path.trim() && file.path.length <= 4096) {
+          files.delete(file.path); files.set(file.path, { path: file.path, label: String(file.description ?? '交付文件').slice(0, 4096) });
+        }
+      }
+    }
+  }
+  return [...files.values()].slice(-256).reverse();
 }
 
 function integer(params, key, min, max) {

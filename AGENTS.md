@@ -50,7 +50,9 @@ attachment and optional App-control MCP tools are separate user choices.
   identities own output across steering, attempt retries and autonomous goal
   rounds. Wrapper queues wait for physical native turn completion. Goals use
   native rounds/activation, not Codex token budgets. Keep unsupported Work,
-  BTW, archive/delete and worktree/migration actions hidden.
+  BTW, unarchive/delete and worktree/migration actions hidden. Archival uses
+  native workspace state and is one-way; archived histories remain readable.
+  Full-text search requires the native index opt-in (`openAt: first-search`).
 - **Drain footgun**: after `ClaudeSDKClient.interrupt()`, the SDK does NOT kill
   the session — the current turn's stream still emits a terminal
   `ResultMessage(subtype="error_during_execution")`. You MUST keep consuming
@@ -100,7 +102,7 @@ attachment and optional App-control MCP tools are separate user choices.
   transport, never the caller's Origin. Uvicorn trusts forwarded transport
   metadata only from loopback Caddy. Never put tokens in URLs or protocol
   message bodies; logging redacts token/password fields.
-- **Protocol version gate**: current wire protocol v63 is declared by
+- **Protocol version gate**: current wire protocol v64 is declared by
   `PROTOCOL_VERSION` in both `protocol.py` and `web/src/protocol.ts`.
   `deserialize` hard-rejects a version mismatch, and
   `_Base` is `extra="forbid"`, so ANY protocol change must be deployed to all

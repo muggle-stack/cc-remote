@@ -38,9 +38,11 @@ _RPC_ENDPOINTS = frozenset({
     "session/page", "session/attachment", "session/updateQueue",
     "session/rename", "session/fork", "agentPresets/list",
     "commands/list", "commands/execute", "skills/list", "$events/result",
-    "fileUploads/upload", "goals/get",
+    "fileUploads/upload", "goals/get", "session/search", "fileReferences/list",
+    "sessionReferenceResolver/candidates", "subagents/list", "subagents/prompt",
+    "subagents/interruptByParent", "workspace/archiveSession", "pluginInventory/list",
 })
-_STREAM_ENDPOINTS = frozenset({"session/follow", "session/control", "$events"})
+_STREAM_ENDPOINTS = frozenset({"session/follow", "session/control", "workspace/follow", "$events"})
 
 
 class DshError(RuntimeError):
@@ -152,7 +154,14 @@ def _remote_error(value: object) -> DshError:
     code = value.get("code") if isinstance(value, dict) else None
     if not isinstance(code, str) or not re.fullmatch(r"[a-zA-Z0-9/_-]{1,100}", code):
         code = "invalid_response"
+    if (isinstance(value, dict) and code == "gateway/internal"
+            and "session search is disabled" in str(value.get("message", ""))):
+        return DshError("search_disabled", "DSH 尚未开启全文搜索，请启用会话索引。")
     messages = {
+        "subagent/parent-unavailable": "父会话尚未运行，当前只能查看子代理记录。",
+        "subagent/not-resumable": "该子代理当前只支持查看。",
+        "subagent/unauthorized": "该子代理不属于当前会话。",
+        "subagent/delivery-unavailable": "子代理暂时无法接收消息，请稍后重试。",
         "session/not-found": "DSH 会话不存在，请刷新会话列表。",
         "session/model-unavailable": "所选 DSH 模型当前不可用，请在 DSH 中检查模型配置。",
         "session/agent-busy": "DSH 会话正忙，请稍后重试。",
@@ -239,6 +248,7 @@ class DshClient:
     async def history_snapshot(
         self, session_id: str, *, before_seq: int | None = None,
         through_seq: int | None = None, max_messages: int = 16,
+        query: str | None = None, deliverables: bool = False,
     ) -> dict:
         """Obtain an exact cold page via the optional read-only Host plugin.
 
@@ -256,6 +266,12 @@ class DshClient:
             if value is not None and (type(value) is not int or not lower <= value <= upper):
                 raise DshError("invalid_page", "DSH 历史分页参数无效。")
         params = {"sessionId": native, "maxMessages": max_messages}
+        if query:
+            if len(query) > 1000:
+                raise DshError("invalid_query", "搜索内容过长。")
+            params["query"] = query
+        if deliverables:
+            params["deliverables"] = "1"
         if before_seq is not None:
             params["beforeSeq"] = before_seq
         if through_seq is not None:
@@ -266,6 +282,8 @@ class DshClient:
                     raise DshError("history_bridge_required", "DSH 尚未加载 cc-remote 的只读历史插件。")
                 if response.status_code in {401, 403}:
                     raise DshError("auth_required", "DSH 本机认证失败，请重新配对。")
+                if response.status_code == 409 and query:
+                    raise DshError("search_match_changed", "搜索结果已变化，请重新搜索后打开。")
                 if response.status_code != 200:
                     raise DshError("history_unavailable", "DSH 历史暂不可读取，请刷新后重试。")
                 raw = bytearray()
@@ -368,6 +386,29 @@ class DshClient:
                     queue.put_nowait((failure, 0))
             with suppress(Exception):
                 await socket.close()
+
+    async def export_session(self, sid: str, filename: str, limit: int) -> int:
+        """Spool the official authenticated ZIP route without buffering it."""
+        size = 0
+        try:
+            async with self._http.stream("GET", "/api/session.export", params={
+                    "sessionId": native_session_id(sid), "includeDescendants": "true"}, timeout=120) as response:
+                if response.status_code in {401, 403}:
+                    raise DshError("auth_required", "DSH 本机认证失败，请重新配对。")
+                if response.status_code != 200:
+                    raise DshError("export_unavailable", "DSH 无法导出此会话，请检查导出插件。")
+                with open(filename, "wb") as output:
+                    async for chunk in response.aiter_bytes(chunk_size=256 * 1024):
+                        size += len(chunk)
+                        if size > limit:
+                            raise DshError("export_too_large", "导出超过 128 MiB，请在本机 DSH 下载完整会话。")
+                        output.write(chunk)
+        except httpx.HTTPError:
+            raise DshError("export_disconnected", "导出连接中断，请重试。") from None
+        with open(filename, "rb") as source:
+            if source.read(2) != b"PK":
+                raise DshError("export_invalid", "DSH 返回的导出文件不是 ZIP。")
+        return size
 
     async def stream(self, endpoint: str, args: dict | None = None) -> AsyncIterator[object]:
         if endpoint not in _STREAM_ENDPOINTS:

@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 63
+PROTOCOL_VERSION = 64
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -1794,6 +1794,83 @@ class DshGoal(BaseModel):
     activation: Optional[Literal["armed", "disarmed"]] = None
 
 
+class DshJob(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(max_length=256)
+    label: str = Field(max_length=2048)
+    status: Literal["running", "stopping", "completed", "killed", "failed"]
+    detail: str = Field(default="", max_length=4096)
+
+
+class DshItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(max_length=256)
+    title: str = Field(default="", max_length=2048)
+    detail: str = Field(default="", max_length=65536)
+    sid: Optional[WireId] = None
+    path: Optional[str] = Field(default=None, max_length=4096)
+    mention: Optional[str] = Field(default=None, max_length=8192)
+    state: str = Field(default="", max_length=128)
+    mode: Optional[Literal["one-shot", "continuable"]] = None
+    has_children: bool = False
+    controllable: bool = False
+
+
+DshReadKind = Literal["search", "references", "subagents", "conversation", "deliverables", "diagnostics"]
+
+
+class ReadDsh(_Command):
+    cmd_id: WireId
+    type: Literal["read_dsh"] = "read_dsh"
+    sid: WireId
+    kind: DshReadKind
+    query: str = Field(default="", max_length=1000)
+    target_sid: Optional[WireId] = None
+    before_seq: Optional[int] = Field(default=None, ge=0)
+
+
+class DshReadResult(_Base):
+    """Private, bounded feature reads. Never part of chat replay or history."""
+    type: Literal["dsh_read_result"] = "dsh_read_result"
+    request_id: WireId
+    kind: DshReadKind
+    items: list[DshItem] = Field(default_factory=list, max_length=256)
+    next_seq: Optional[int] = Field(default=None, ge=0)
+    has_more: bool = False
+    available: bool = True
+    error: Optional[str] = Field(default=None, max_length=512)
+
+
+class ActDshSubagent(_Command):
+    cmd_id: WireId
+    type: Literal["act_dsh_subagent"] = "act_dsh_subagent"
+    sid: WireId
+    target_sid: WireId
+    action: Literal["queue", "steer", "stop"]
+    prompt: str = Field(default="", max_length=65536)
+
+
+class DownloadDsh(_Command):
+    cmd_id: WireId
+    type: Literal["download_dsh"] = "download_dsh"
+    sid: WireId
+    export_id: Optional[WireId] = None
+    offset: int = Field(default=0, ge=0, le=134217728)
+    cancel: bool = False
+
+
+class DshDownloadChunk(_Base):
+    """Pull-driven export bytes for one requester; never sequenced/replayed."""
+    type: Literal["dsh_download_chunk"] = "dsh_download_chunk"
+    request_id: WireId
+    export_id: Optional[WireId] = None
+    offset: int = Field(default=0, ge=0)
+    total: int = Field(default=0, ge=0, le=134217728)
+    data: str = Field(default="", max_length=349528)
+    done: bool = False
+    error: Optional[str] = Field(default=None, max_length=512)
+
+
 class DshState(_Base):
     """Native DSH controls. Replaced as a whole, never merged across sessions."""
     type: Literal["dsh_state"] = "dsh_state"
@@ -1804,6 +1881,9 @@ class DshState(_Base):
     permissions: list[DshPermissionOption] = Field(default_factory=list, max_length=64)
     permission: Optional[str] = Field(default=None, max_length=256)
     goal: Optional[DshGoal] = None
+    plan_active: Optional[bool] = None
+    plan_pending: bool = False
+    jobs: list[DshJob] = Field(default_factory=list, max_length=64)
 
 
 class DshCommandResult(_Base):
@@ -2365,9 +2445,10 @@ class FilePreview(_Base):
     wrapper host and report their original extension in ``converted_from``.
     """
     type: Literal["file_preview"] = "file_preview"
+    directory: bool = False
     path: PreviewPath
     request_id: WireId
-    format: Literal["markdown", "text", "html", "image", "pdf", "audio"] = "text"
+    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "spreadsheet"] = "text"
     content: PreviewContent = ""
     media_type: Optional[Literal[
         "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
@@ -2444,7 +2525,7 @@ class PreviewAuthorizationRequired(_Base):
     operation: Literal["file_preview", "preview_asset"]
     path: PreviewPath
     resolved_path: PreviewPath
-    format: Literal["markdown", "text", "html", "image", "pdf", "audio"] = "text"
+    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "spreadsheet"] = "text"
     preview_id: Optional[WireId] = None
 
 
@@ -2889,6 +2970,7 @@ class CompletionState(_Base):
 
 
 AnyMessage = Union[
+    ReadDsh, DshReadResult, ActDshSubagent, DownloadDsh, DshDownloadChunk,
     BrowseFiles, FilesListed, SetCodexContext, CodexContext,
     GetTurnFileChanges, TurnFileChangesPage,
     Hello, Query, CancelQueuedQuery, GetQueuedQuery, QueuedQueryDetail, UpdateQueuedQuery, QueuedQueryUpdated, QueryQueueState, Steer, Interrupt, Takeover, TakeoverState, SessionControl, SetModel, SetEffort, SetAutoCompact, SetServiceTier, SetCollaborationMode, SetPerm, GetPermissionProfiles, SetPermissionProfile, SetWebSearch, Fast, CollaborationMode, OpenBtw, CloseBtw, SyncBtw, BtwOpened, BtwSync, BtwClosed, GetContext, GetStatus, ConsumeRateLimitResetCredit, GetDiff, GetFilePreview, SaveMarkdown, GetPreviewAsset, AuthorizePreview, GetHistory, GetTurnDetail, GetAgentDetail, GetHistoryImage, GetModels, GetEngineCapabilities, ManageEnginePlugin, ManageEngineSkill, ManageEngineHook, ListSessions, SwitchSession, NewSession, DeleteWorkSession, DeleteSession, RollbackSession, RollbackResult, CompactSession, StartReview, GetWorkDashboard, CreateWorkProject, DeleteWorkProject, AddWorkSource, DeleteWorkSource, CreateWorkPlugin, DeleteWorkPlugin, CreateWorkSchedule, DeleteWorkSchedule, GetWorkArtifacts, ListDir, Ping, Pong, CommandAck,
@@ -2969,6 +3051,11 @@ _TYPE_MAP: dict[str, type[BaseModel]] = {
     "get_history_image": GetHistoryImage,
     "get_models": GetModels,
     "models": Models,
+    "read_dsh": ReadDsh,
+    "dsh_read_result": DshReadResult,
+    "act_dsh_subagent": ActDshSubagent,
+    "download_dsh": DownloadDsh,
+    "dsh_download_chunk": DshDownloadChunk,
     "dsh_state": DshState,
     "dsh_command_result": DshCommandResult,
     "set_dsh_control": SetDshControl,

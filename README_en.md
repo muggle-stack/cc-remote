@@ -4,7 +4,7 @@
 
 Self-hosted · Multi-engine · Multi-session · Live process · Responsive Web
 
-**Current release: v3.0.0** · Wire protocol v63
+**Current release: v3.0.0** · Wire protocol v64
 
 Optional **DeepSeek Harness 0.1.5-rc.2** support adds a Code engine with native
 Agent Presets, model/effort selection, permissions, goals and commands, using
@@ -85,7 +85,7 @@ with the previous public release, the major changes are:
 | **Native App / CLI coordination** | Claude CLI/Desktop/Agent View and Codex shared daemon/App/CLI retain engine-specific ownership models. v3 reconciles running, read-only, interrupt, steer, compact, turn binding, and terminal state so sibling sessions do not lock each other, old turns do not move to the tail, and interrupted work does not leave ghost activity. |
 | **Multi-device isolation** | Device Center adds single-use pairing, independently revocable machine credentials, and presence. The relay routes only an account's allowed `machine_id` values. Device, Code / Work, engine, connection generation, and session ownership are isolated so delayed frames cannot mutate the active view. |
 | **Mobile and artifact UX** | Loading older history preserves the scroll anchor. Images load on demand and support a lightbox, tap-to-close, and pinch zoom. Markdown, source, HTML, PDF, and Office previews remain within the local security boundary. Exact files outside cwd require confirmation in the requesting session and are bound to that file identity; user-approved Markdown stays read-only, while only files successfully written by the session can be saved. PWA icons, narrow-screen sheets, error presentation, and process timelines are also aligned. |
-| **Rollback-safe releases** | The product version is v3.0.0 and the wire protocol is v63. Builds and deployments validate both values. The VPS uses immutable releases, release-local virtual environments, an atomic `current` switch, and rollback instead of overwriting a live directory. |
+| **Rollback-safe releases** | The product version is v3.0.0 and the wire protocol is v64. Builds and deployments validate both values. The VPS uses immutable releases, release-local virtual environments, an atomic `current` switch, and rollback instead of overwriting a live directory. |
 
 > **The trust boundary has not changed:** model accounts, API keys, session
 > sources, and tool execution stay on the wrapper machine. The VPS relay stores
@@ -283,7 +283,7 @@ an existing custom or ambiguous layout is never replaced. Exactly one profile
 must set `default: true`. Relay and Web receive only
 the public profile id, label, and availability—not the local path or credentials.
 Restart the wrapper after changing the registry, and deploy wrapper, relay, and
-Web together for protocol v63.
+Web together for protocol v64.
 Profile-id changes and single/multi-profile transitions migrate local controls
 and recovery state by the resolved `CODEX_HOME`. If that migration is
 interrupted, keep the same target registry and restart the wrapper to resume it.
@@ -655,14 +655,14 @@ npm --prefix web run build   # produces web/dist/
 
 > The web client no longer bakes any token into the JS: login POSTs the password to the relay for a short-lived session token. So the build needs no `VITE_*` variables.
 
-> **Upgrading to protocol v63:** the wire gate rejects mixed versions. Deploy
+> **Upgrading to protocol v64:** the wire gate rejects mixed versions. Deploy
 > `cc_remote/` and the new `web/dist/` in one maintenance window, then restart the
 > relay and wrapper; do not run a rolling mixture. Existing sockets reconnect
 > briefly, and a relay restart intentionally requires browsers to log in again.
 > Any already-open older page also needs one **hard refresh** to load the new hashed
 > assets; logging in again inside the old JavaScript bundle isn't sufficient.
 > For a manual release, stop the local wrapper first, stop and update relay + web,
-> then start the v63 relay and v63 wrapper so the old wrapper cannot occupy the
+> then start the v64 relay and v64 wrapper so the old wrapper cannot occupy the
 > slot for the same `machine_id`. When upgrading from a pre-v34 release, retain
 > the Work SQLite migration protection introduced by v34: a manual release must
 > run `deploy/work_registry_snapshot.py snapshot` before the new wrapper starts.
@@ -725,7 +725,7 @@ The script installs `python3-venv` + Caddy, creates the `ccremote` service user,
 builds an immutable release and its venv, merges Caddy configuration, atomically
 switches `current`, and restarts the relay. If restart/readiness fails, `current`,
 the Caddyfile, and the systemd unit roll back as one transaction and the previous
-release's `/healthz` is verified. Start the v63 wrapper after success.
+release's `/healthz` is verified. Start the v64 wrapper after success.
 
 Verify:
 

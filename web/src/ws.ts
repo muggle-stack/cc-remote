@@ -8,7 +8,7 @@
 // no cursor reset, no re-hello (background turns keep streaming). All outbound
 // commands that target a session stamp `sid: focusedSid`.
 import type {
-  AutoCompactMode, DiffTheme, Engine, GoalStatus, QueryFile,
+  AutoCompactMode, DiffTheme, DshReadKind, Engine, GoalStatus, QueryFile,
   QueryImg, ServerEvent, SessionControl, Space,
 } from "./protocol.ts";
 import {
@@ -775,6 +775,18 @@ export class RelayWs {
 
   sendDshControl(sid: string, kind: "permission" | "effort" | "command", value: string, images?: QueryImg[], files?: QueryFile[]): string | null {
     return this.sendTracked({ v: PROTOCOL_VERSION, type: "set_dsh_control", ts: nowTs(), sid, kind, value, ...(images?.length ? { images } : {}), ...(files?.length ? { files } : {}) });
+  }
+
+  sendReadDsh(sid: string, kind: DshReadKind, fields: { query?: string; target_sid?: string; before_seq?: number }): string | null {
+    return this.sendTracked({ v: PROTOCOL_VERSION, type: "read_dsh", ts: nowTs(), sid, kind, ...fields });
+  }
+
+  sendActDshSubagent(sid: string, target_sid: string, action: "queue" | "steer" | "stop", prompt: string): string | null {
+    return this.sendTracked({ v: PROTOCOL_VERSION, type: "act_dsh_subagent", ts: nowTs(), sid, target_sid, action, prompt });
+  }
+
+  sendDownloadDsh(sid: string, export_id?: string, offset = 0, cancel = false): string | null {
+    return this.sendTracked({ v: PROTOCOL_VERSION, type: "download_dsh", ts: nowTs(), sid, export_id, offset, cancel });
   }
 
   sendSetEffort(effort: string): void {

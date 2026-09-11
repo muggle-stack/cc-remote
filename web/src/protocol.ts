@@ -464,13 +464,13 @@ export interface GetContext extends Base {
 export interface GetDiff extends Base { type: "get_diff"; file: string; theme?: DiffTheme; turn_id?: string | null; revision?: string | null; engine?: Engine | null }
 export interface DiffReport extends Base { type: "diff_report"; file: string; diff: string; request_id?: string }
 export interface GetFilePreview extends Base { type: "get_file_preview"; path: string; request_id: string }
-export interface FilePreview extends Base { type: "file_preview"; path: string; request_id: string; format: "markdown" | "text" | "html" | "image" | "pdf" | "audio"; content: string; media_type?: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "image/svg+xml" | "application/pdf" | "audio/wav" | "audio/mpeg" | "audio/mp4" | "audio/aac" | "audio/flac" | "audio/ogg" | "audio/webm" | null; data?: string | null; converted_from?: string | null; size: number; truncated: boolean; mtime_ns: string; revision?: string | null; writable?: boolean; error?: string | null }
+export interface FilePreview extends Base { type: "file_preview"; directory?: boolean; path: string; request_id: string; format: "markdown" | "text" | "html" | "image" | "pdf" | "audio" | "spreadsheet"; content: string; media_type?: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "image/svg+xml" | "application/pdf" | "audio/wav" | "audio/mpeg" | "audio/mp4" | "audio/aac" | "audio/flac" | "audio/ogg" | "audio/webm" | null; data?: string | null; converted_from?: string | null; size: number; truncated: boolean; mtime_ns: string; revision?: string | null; writable?: boolean; error?: string | null }
 export interface SaveMarkdown extends Base { type: "save_markdown"; path: string; request_id: string; content: string; expected_size: number; expected_mtime_ns: string; expected_revision: string }
 export interface FileSaveResult extends Base { type: "file_save_result"; path: string; request_id: string; status: "saved" | "conflict" | "error"; size: number; mtime_ns: string; revision?: string | null; error?: string | null }
 export interface GetPreviewAsset extends Base { type: "get_preview_asset"; path: string; preview_id: string; request_id: string }
 export interface PreviewAsset extends Base { type: "preview_asset"; path: string; preview_id: string; request_id: string; media_type?: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "image/svg+xml" | null; data?: string | null; error?: string | null }
 export type PreviewAuthorizationOperation = "file_preview" | "preview_asset";
-export interface PreviewAuthorizationRequired extends Base { type: "preview_authorization_required"; authorization_id: string; request_id: string; operation: PreviewAuthorizationOperation; path: string; resolved_path: string; format: "markdown" | "text" | "html" | "image" | "pdf" | "audio"; preview_id?: string | null }
+export interface PreviewAuthorizationRequired extends Base { type: "preview_authorization_required"; authorization_id: string; request_id: string; operation: PreviewAuthorizationOperation; path: string; resolved_path: string; format: "markdown" | "text" | "html" | "image" | "pdf" | "audio" | "spreadsheet"; preview_id?: string | null }
 export interface AuthorizePreview extends Base { type: "authorize_preview"; authorization_id: string; request_id: string; decision: "allow" | "deny" }
 export interface PreviewAuthorizationResult extends Base { type: "preview_authorization_result"; authorization_id: string; request_id: string; operation?: PreviewAuthorizationOperation | null; path?: string | null; status: "granted" | "denied" | "expired" | "changed" | "error"; preview_id?: string | null; error?: string | null }
 // On-demand bulk history: fetched once when a session is opened (like a web
@@ -518,7 +518,15 @@ export interface DshCommandInfo { name: string; description: string; input_hint?
 export interface DshPermissionOption { value: string; name: string; description: string }
 export interface DshGoal { id: string; revision: number; objective: string; phase: "active" | "paused" | "blocked" | "complete"; rounds: number; max_rounds: number; blocked_reason?: string | null; activation?: "armed" | "disarmed" | null }
 export interface DshCommandResult extends Base { type: "dsh_command_result"; request_id: string; status: "success" | "error" | "unknown"; text: string }
-export interface DshState extends Base { type: "dsh_state"; connected: boolean; error?: string | null; agent_preset?: string | null; commands: DshCommandInfo[]; permissions: DshPermissionOption[]; permission?: string | null; goal?: DshGoal | null }
+export type DshReadKind = "search" | "references" | "subagents" | "conversation" | "deliverables" | "diagnostics";
+export interface ReadDsh extends Base { type: "read_dsh"; cmd_id: string; sid: string; kind: DshReadKind; query?: string; target_sid?: string | null; before_seq?: number | null }
+export interface ActDshSubagent extends Base { type: "act_dsh_subagent"; cmd_id: string; sid: string; target_sid: string; action: "queue" | "steer" | "stop"; prompt?: string }
+export interface DownloadDsh extends Base { type: "download_dsh"; cmd_id: string; sid: string; export_id?: string | null; offset?: number; cancel?: boolean }
+export interface DshJob { id: string; label: string; status: "running" | "stopping" | "completed" | "killed" | "failed"; detail: string }
+export interface DshItem { id: string; title: string; detail: string; sid?: string | null; path?: string | null; mention?: string | null; state: string; mode?: "one-shot" | "continuable" | null; has_children: boolean; controllable?: boolean }
+export interface DshReadResult extends Base { type: "dsh_read_result"; request_id: string; kind: DshReadKind; items: DshItem[]; next_seq?: number | null; has_more: boolean; available: boolean; error?: string | null }
+export interface DshDownloadChunk extends Base { type: "dsh_download_chunk"; request_id: string; export_id?: string | null; offset: number; total: number; data: string; done: boolean; error?: string | null }
+export interface DshState extends Base { type: "dsh_state"; plan_active?: boolean | null; plan_pending?: boolean; jobs?: DshJob[]; connected: boolean; error?: string | null; agent_preset?: string | null; commands: DshCommandInfo[]; permissions: DshPermissionOption[]; permission?: string | null; goal?: DshGoal | null }
 export interface SetDshControl extends Base { type: "set_dsh_control"; sid: string; kind: "permission" | "effort" | "command"; value: string; images?: QueryImg[]; files?: QueryFile[] }
 export interface Models extends Base { dsh_presets?: DshPreset[]; error?: string | null; type: "models"; engine: string; models: CatalogModel[]; default_model?: string | null; default_effort?: string | null; cwd?: string | null; claude_profile_id?: string | null; codex_profile_id?: string | null }
 export interface GetEngineCapabilities extends Base { type: "get_engine_capabilities"; engine: Engine; space?: Space; client_id?: string | null; cwd?: string | null; skills_only?: boolean; claude_profile_id?: string | null; codex_profile_id?: string | null }
@@ -710,7 +718,7 @@ export interface CodexContext extends Base {
 
 export type ServerEvent = FilesListed | CodexContext
   | TurnFileChangesPage
-  | Pong | CommandAck | ReplayStart | ReplayEnd | Snapshot | StateEvent | QueryQueueState | QueuedQueryDetail | QueuedQueryUpdated | Model | Effort | AutoCompact | Fast | CollaborationMode | BtwOpened | BtwSync | BtwClosed | Perm | PermissionProfiles | PermissionProfile | WebSearch | ContextReport | DiffReport | FilePreview | FileSaveResult | PreviewAsset | PreviewAuthorizationRequired | PreviewAuthorizationResult | History | TurnDetail | AgentDetail | HistoryImage | HistoryInvalidated | ArtifactInvalidated | Models | DshState | DshCommandResult | EngineCapabilities | TakeoverState | SessionControl
+  | Pong | CommandAck | ReplayStart | ReplayEnd | Snapshot | StateEvent | QueryQueueState | QueuedQueryDetail | QueuedQueryUpdated | Model | Effort | AutoCompact | Fast | CollaborationMode | BtwOpened | BtwSync | BtwClosed | Perm | PermissionProfiles | PermissionProfile | WebSearch | ContextReport | DiffReport | FilePreview | FileSaveResult | PreviewAsset | PreviewAuthorizationRequired | PreviewAuthorizationResult | History | TurnDetail | AgentDetail | HistoryImage | HistoryInvalidated | ArtifactInvalidated | Models | DshState | DshCommandResult | DshReadResult | DshDownloadChunk | EngineCapabilities | TakeoverState | SessionControl
   | AskUser | AskUserSync | AskUserClosed | GoalState | CompletionState | StatusReport | RateLimitResetResult | Notice | RateLimitUpdate | RollbackResult
   | SessionList | SessionListInvalidated | SessionActivity | SessionFocus | SessionRekey | SessionForked | SessionMigrated | WorkDashboard | WorkArtifacts
   | DirList
@@ -718,7 +726,7 @@ export type ServerEvent = FilesListed | CodexContext
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 63;
+export const PROTOCOL_VERSION = 64;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

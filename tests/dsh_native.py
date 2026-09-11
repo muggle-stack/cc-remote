@@ -22,12 +22,13 @@ import signal
 import socket
 import subprocess
 import tempfile
+from types import SimpleNamespace
 
 from cc_remote.protocol import (
-    AnswerQuestion, BrowseFiles, ForkSession, GetContext, GetFilePreview, GetHistory,
+    ArchiveSession, ReadDsh, DownloadDsh, AnswerQuestion, BrowseFiles, ForkSession, GetContext, GetFilePreview, GetHistory,
     GetHistoryImage, Interrupt, NewSession, Query, SetDshControl, SetModel, Steer,
 )
-from cc_remote.wrapper.dsh_client import DshClient, TESTED_DSH_VERSION, exchange_launch_url
+from cc_remote.wrapper.dsh_client import DshClient, TESTED_DSH_VERSION, exchange_launch_url, native_session_id
 from tests.test_attachments import _complete_png
 from tests.test_multisession import _mk_machine
 
@@ -46,7 +47,7 @@ async def exercise(installation: Path, root: Path):
     assert json.loads(package.read_text())["version"] == TESTED_DSH_VERSION
     shutil.copyfile(REPO / "tests/fixtures/dsh/scripted-adapter.mjs", root / "scripted-adapter.mjs")
     patch = root / "patch.yml"
-    patch.write_text("- id: llm-deepseek\n  disabled: true\n- id: llm-pi-ai\n  disabled: true\n- insert:\n"
+    patch.write_text("- id: session-query-sqlite\n  config:\n    path: ':memory:'\n    openAt: first-search\n- id: llm-deepseek\n  disabled: true\n- id: llm-pi-ai\n  disabled: true\n- insert:\n"
         f"    - id: cc-remote-history\n      name: {json.dumps(str(REPO / 'integrations/dsh/cc-remote.mjs'))}\n"
         f"    - id: offline-model\n      name: {json.dumps(str(root / 'scripted-adapter.mjs'))}\n")
     with socket.socket() as listener:
@@ -158,6 +159,28 @@ async def exercise(installation: Path, root: Path):
         await machine._handle(SetDshControl(sid=ctx.key, kind="command", value="/goal clear", cmd_id="goal-clear", client_id="native-test"))
         await eventually(lambda: ctx.sdk.state.goal is None, "clear goal")
         print("PASS native command attachments and goal lifecycle", flush=True)
+
+        for kind, query in [("search", "compatibility"), ("references", "reference"),
+                            ("subagents", ""), ("diagnostics", ""), ("conversation", "compatibility"), ("deliverables", "")]:
+            result = await machine._handle(ReadDsh(sid=ctx.key, kind=kind, query=query,
+                cmd_id="native-read-" + kind, client_id="native-test"))
+            assert result.type == "dsh_read_result" and not result.error, (kind, result)
+            if kind in {"search", "references", "conversation"}:
+                assert result.items, (kind, result)
+            if kind == "diagnostics":
+                assert next(i.detail for i in result.items if i.id == "version") == TESTED_DSH_VERSION
+        preview = await machine._handle(GetFilePreview(sid=ctx.key, path=str(root), request_id="directory-link", client_id="native-test"))
+        assert preview.directory and not preview.error
+        export = await machine._handle(DownloadDsh(sid=ctx.key, cmd_id="native-export", client_id="native-test"))
+        assert export.type == "dsh_download_chunk" and not export.error and base64.b64decode(export.data).startswith(b"PK")
+        await machine._handle(DownloadDsh(sid=ctx.key, cmd_id="native-export-cancel", client_id="native-test", export_id=export.export_id, cancel=True))
+        await machine._handle(ArchiveSession(session_id=cold, engine="dsh", archived=True, cmd_id="native-archive", client_id="native-test"))
+        assert native_session_id(cold) in runtime.archived
+        archived = await runtime.handle_list_sessions(SimpleNamespace(cmd_id="native-list", client_id="native-test"))
+        assert next(item for item in archived.sessions if item.session_id == cold).tag == "archived"
+        assert (await machine._handle(GetHistory(session_id=cold, detail="summary", client_id="native-test"))).authoritative
+        print("PASS native search, references, subagents, export, archive, diagnostics and directory links", flush=True)
+
     except BaseException:
         shutil.copyfile(log_path, installation / "native-test-last-error.log")
         os.chmod(installation / "native-test-last-error.log", 0o600)

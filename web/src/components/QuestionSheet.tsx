@@ -1,3 +1,4 @@
+import { MessageBlock } from "./MessageBlock";
 import { useState } from "react";
 import type { AskOption } from "../protocol";
 import { Icon } from "../icons";
@@ -37,7 +38,7 @@ export function QuestionSheet({
           {header || "助手想确认一下"}
         </div>
         <div className="sheet-scroll">
-          <div className="qa-question">{question}</div>
+          <div className="qa-question">{header === "计划确认" ? <MessageBlock text={question} done /> : question}</div>
           <div className="qa-options">
             {options.map((o, i) => (
               <button key={i}

@@ -14,8 +14,9 @@ const nativeState: Omit<DshState, "v" | "ts"> = { type: "dsh_state", sid, connec
     rounds: 3, max_rounds: 32, activation: "disarmed" },
 };
 
-async function mockDshRelay(page: Page, { running = false, commandSuccess = false } = {}) {
+async function mockDshRelay(page: Page, { running = false, commandSuccess = false, features = false } = {}) {
   const commands: Record<string, unknown>[] = [];
+  let archived = false;
   const context = { type: "context_report", sid, total_tokens: 24000,
     max_tokens: 64000, percentage: 37.5, available: true,
     source: "recent_turn", categories: [] };
@@ -35,7 +36,7 @@ async function mockDshRelay(page: Page, { running = false, commandSuccess = fals
     const snapshot = () => {
       emit({ type: "snapshot", sid, cc_session_id: sid, state: running ? "running" : "idle",
         tail_text: "", cwd: "/tmp/dsh-test", generation: "dsh-generation" });
-      emit(nativeState);
+      emit({ ...nativeState, ...(features ? { plan_active: false, plan_pending: false, jobs: [{ id: "job-1", label: "构建任务", status: "running", detail: "正在编译" }] } : {}) });
       emit({ type: "model", sid, model: "dsh:deepseek-official:deepseek-flash" });
       emit({ type: "effort", sid, effort: "off" });
       emit({ type: "perm", sid, mode: "read-only" });
@@ -59,13 +60,20 @@ async function mockDshRelay(page: Page, { running = false, commandSuccess = fals
           code: "dsh_unsupported", request_id: cmd.cmd_id, message: "DSH 目前支持 Code。" });
         else emit({ type: "session_list", engine: cmd.engine ?? "claude", space: cmd.space ?? "code", request_id: cmd.cmd_id,
           sessions: cmd.engine === "dsh" ? [{ session_id: sid, engine: "dsh", space: "code", cwd: "/tmp/dsh-test",
-            summary: "DSH 原生会话", state: running ? "running" : "idle", last_modified: "100" }] : [] });
+            summary: "DSH 原生会话", state: running ? "running" : "idle", last_modified: "100", tag: archived ? "archived" : null }] : [] });
+      }
+      if (features && cmd.type === "archive_session") {
+        archived = true;
+        emit({ type: "session_list_invalidated", engine: "dsh" });
       }
       if (cmd.type === "switch_session") { emit({ type: "session_focus", session_id: cmd.session_id }); snapshot(); }
       if (cmd.type === "get_history") emit({ type: "history", sid, session_id: sid, revision: "dsh-history",
         generation: "dsh-generation", detail: "summary", events: [], turns: [{ id: "native-prompt", clientMsgId: "native-prompt",
           prompt: "验证图片、引导与原生控件", done: !running, forkPointId: "dsh-seq-5", blocks: [
-            { kind: "text", message_id: "answer", text: "DSH 已准备好。", channel: "final", done: true },
+            ...(features ? [{ kind: "tool", message_id: "present", tool_use_id: "present-file", tool: "present",
+              input: { files: [{ path: "/tmp/dsh-test/report.xlsx", description: "路线图" }] },
+              result: { content: "Presented", is_error: false }, done: true }] : []),
+            { kind: "text", message_id: "answer", text: features ? "[项目目录](/tmp/dsh-test/dir) 和 [文件行号](/tmp/dsh-test/README.md:7)" : "DSH 已准备好。", channel: "final", done: true },
           ] }], has_more: false });
       if (cmd.type === "set_dsh_control") emit({ type: "dsh_command_result", sid, request_id: cmd.cmd_id,
         status: commandSuccess ? "success" : "error", text: commandSuccess ? "命令已执行" : "当前目标不能替换，请使用 /goal edit" });
@@ -78,6 +86,34 @@ async function mockDshRelay(page: Page, { running = false, commandSuccess = fals
         else emit({ type: "engine_capabilities", sid, engine: "dsh", space: "code", cwd: "/tmp/dsh-test",
           request_id: cmd.cmd_id, skills_only: cmd.skills_only, items: [{ kind: "skill", id: "review", name: "review", description: "审查变更", enabled: true, actions: [] }] });
       }
+      if (features && cmd.type === "read_dsh") {
+        const items = cmd.kind === "search" ? [{ id: "hit", sid, title: "DSH 原生会话", detail: `匹配 ${cmd.query}` }]
+          : cmd.kind === "references" ? [
+            { id: "file", title: "report notes.md", path: "report notes.md", state: "file", mention: '@"report notes.md"' },
+            { id: "session", sid, title: "相关会话", state: "session", mention: "@[相关会话](dsh-session:native-session)" }]
+          : cmd.kind === "subagents" ? [{ id: "child", sid: "dsh@child", title: "检查构建", detail: "", mode: "continuable", state: "running", has_children: true, controllable: true }]
+          : cmd.kind === "conversation" ? [{ id: "message", title: "DSH", detail: `已经检查构建 ${cmd.query ?? ""}`, state: "message" }]
+          : cmd.kind === "deliverables" ? [{ id: "file", title: "report.xlsx", path: "/tmp/dsh-test/report.xlsx", detail: "交付文件" }]
+          : [{ id: "version", title: "DSH 版本", detail: "0.1.5-rc.2", state: "active" }];
+        emit({ type: "dsh_read_result", sid: cmd.sid, request_id: cmd.cmd_id, kind: cmd.kind, items, available: true, has_more: false });
+      }
+      if (features && cmd.type === "act_dsh_subagent") emit({ type: "dsh_command_result", sid: cmd.sid,
+        request_id: cmd.cmd_id, status: "success", text: cmd.action === "stop" ? "已请求停止子代理" : "已加入子代理队列" });
+      if (features && cmd.type === "download_dsh") emit({ type: "dsh_download_chunk", sid: cmd.sid, request_id: cmd.cmd_id,
+        export_id: cmd.export_id ?? cmd.cmd_id, offset: 0, total: cmd.cancel ? 0 : 4, data: cmd.cancel ? "" : "UEsDBA==", done: true });
+      if (features && cmd.type === "get_file_preview") {
+        if (String(cmd.path).endsWith("/dir")) emit({ type: "file_preview", sid: cmd.sid, request_id: cmd.request_id, path: cmd.path, directory: true, format: "text", content: "", size: 0 });
+        else if (String(cmd.path).endsWith(".xlsx")) emit({ type: "file_preview", sid: cmd.sid, request_id: cmd.request_id, path: cmd.path,
+          format: "spreadsheet", content: JSON.stringify({ sheets: [
+            { name: "路线图", cells: [{ r: 1, c: 1, v: "本周进展" }, { r: 1, c: 2, v: "42", f: "SUM(B2:B3)" }], truncated: false },
+            { name: "进展", cells: [{ r: 1, c: 1, v: "<script>bad()</script>" }], truncated: false }], truncated: false }),
+          data: "UEsDBA==", size: 4, mtime_ns: "1", truncated: false });
+        else emit({ type: "file_preview", sid: cmd.sid, request_id: cmd.request_id, path: cmd.path,
+          format: "text", content: "first\nsecond\nthird\nfourth\nfifth\nsixth\nseventh", size: 42, mtime_ns: "1", truncated: false });
+      }
+      if (features && cmd.type === "browse_files") emit({ type: "files_listed", sid: cmd.sid, request_id: cmd.request_id,
+        root: "/tmp/dsh-test", path: cmd.path, parent: "/tmp/dsh-test", kind: "directory", revision: "dir-1", next_offset: null,
+        entries: [{ name: "README.md", path: "/tmp/dsh-test/dir/README.md", kind: "file" }] });
       if (cmd.type === "ping") emit({ type: "pong", n: cmd.n });
       if (cmd.cmd_id) emit({ type: "command_ack", client_id: cmd.client_id, cmd_id: cmd.cmd_id });
     });
@@ -334,4 +370,123 @@ test("DSH loading and harness switches only prefetch supported session surfaces"
     expect(dshLists().map(cmd => cmd.space ?? "code")).not.toContain("work");
     await expect(page.locator(".banner")).toHaveCount(0);
   }
+});
+
+async function openDshTools(page: Page) {
+  await page.getByRole("button", { name: "更多设置", exact: true }).click();
+  await page.getByRole("button", { name: "会话工具" }).click();
+  await expect(page.getByRole("dialog", { name: "DSH 会话工具" })).toBeVisible();
+}
+
+test("DSH native directory links open the file browser and retain file previews", async ({ page }) => {
+  const relay = await openDsh(page, { features: true });
+  await page.getByRole("button", { name: "在 Remote 中打开 /tmp/dsh-test/dir", exact: true }).click();
+  await expect(page.locator(".file-browser-shell")).toBeVisible();
+  await expect(page.getByRole("button", { name: "README.md", exact: true })).toBeVisible();
+  expect(relay.commands.find(c => c.type === "browse_files")?.path).toBe("/tmp/dsh-test/dir");
+  await page.getByRole("button", { name: "README.md", exact: true }).click();
+  await expect(page.locator(".artifact-panel")).toContainText("seventh");
+  await expect(page.getByRole("button", { name: "返回目录", exact: true })).toBeVisible();
+  const downloadEvent = page.waitForEvent("download");
+  await page.getByRole("link", { name: "下载原文件", exact: true }).click();
+  expect((await downloadEvent).suggestedFilename()).toBe("README.md");
+});
+
+test("DSH archived sessions remain readable without unarchive or delete controls", async ({ page }) => {
+  const relay = await openDsh(page, { features: true });
+  if (!await page.locator(".shell.sidebar-open").count()) await page.getByRole("button", { name: "Code", exact: true }).click();
+  await page.getByRole("button", { name: "更多操作", exact: true }).click();
+  await page.getByRole("button", { name: "归档", exact: true }).click();
+  await expect.poll(() => relay.commands.some(c => c.type === "archive_session" && c.session_id === sid && c.engine === "dsh")).toBe(true);
+  await page.getByText("已归档", { exact: true }).click();
+  await page.getByRole("button", { name: "更多操作", exact: true }).click();
+  await expect(page.getByRole("button", { name: "取消归档", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "删除会话", exact: true })).toHaveCount(0);
+  await expect(page.locator(".composer textarea")).toBeDisabled();
+});
+
+test("DSH references insert the native quoted file and session syntax", async ({ page }) => {
+  const relay = await openDsh(page, { features: true });
+  const input = page.locator(".composer textarea");
+  await input.fill("检查 @report");
+  await expect(page.getByRole("option", { name: "文件 report notes.md" })).toBeVisible();
+  await input.press("Enter");
+  await expect(input).toHaveValue('检查 @"report notes.md" ');
+  expect(relay.commands.some(c => c.type === "query")).toBe(false);
+  await input.fill("关联 @session");
+  await page.getByRole("option", { name: "会话 相关会话" }).click();
+  await expect(input).toHaveValue("关联 @[相关会话](dsh-session:native-session) ");
+  await input.press("Enter");
+  await expect.poll(() => relay.commands.filter(c => c.type === "query" && c.prompt === "关联 @[相关会话](dsh-session:native-session)").length).toBe(1);
+});
+
+test("DSH subagent controls, jobs, diagnostics and complete export share a compact panel", async ({ page }, info) => {
+  const relay = await openDsh(page, { features: true });
+  await openDshTools(page);
+  const panel = page.getByRole("dialog", { name: "DSH 会话工具" });
+  await panel.getByRole("button", { name: "检查构建", exact: true }).click();
+  await expect(panel).toContainText("已经检查构建");
+  await panel.getByRole("textbox", { name: "子代理消息" }).fill("继续检查");
+  await panel.getByRole("button", { name: "排队发送", exact: true }).click();
+  await expect(panel).toContainText("已加入子代理队列");
+  const act = relay.commands.find(c => c.type === "act_dsh_subagent");
+  expect(act?.sid).toBe(sid); expect(act?.target_sid).toBe("dsh@child");
+  await panel.getByRole("button", { name: "后台任务", exact: true }).click();
+  await expect(panel).toContainText("构建任务");
+  await expect(panel).toContainText("运行中");
+  await panel.getByRole("button", { name: "连接诊断", exact: true }).click();
+  await expect(panel).toContainText("0.1.5-rc.2");
+  await panel.getByRole("button", { name: "导出完整会话", exact: true }).click();
+  await expect(panel.getByRole("link", { name: "保存 ZIP" })).toBeVisible();
+  const downloadEvent = page.waitForEvent("download");
+  await panel.getByRole("link", { name: "保存 ZIP" }).click();
+  expect((await downloadEvent).suggestedFilename()).toBe("dsh-session-native-session.zip");
+  await page.screenshot({ path: info.outputPath("dsh-tools.png") });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+});
+
+test("DSH produced XLSX files preview multiple sheets and preserve the original download", async ({ page }, info) => {
+  await openDsh(page, { features: true });
+  await openDshTools(page);
+  const panel = page.getByRole("dialog", { name: "DSH 会话工具" });
+  await panel.getByRole("button", { name: "产出文件", exact: true }).click();
+  await panel.getByRole("button", { name: "report.xlsx", exact: true }).click();
+  const sheet = page.getByRole("region", { name: "表格预览" });
+  await expect(sheet).toContainText("本周进展");
+  await expect(sheet.getByRole("cell", { name: "42", exact: true })).toHaveAttribute("title", "=SUM(B2:B3)");
+  await sheet.getByRole("tab", { name: "进展", exact: true }).click();
+  await expect(sheet).toContainText("<script>bad()</script>");
+  expect(await sheet.locator("script").count()).toBe(0);
+  const downloadEvent = page.waitForEvent("download");
+  await sheet.getByRole("link", { name: "下载原文件" }).click();
+  expect((await downloadEvent).suggestedFilename()).toBe("report.xlsx");
+  await page.screenshot({ path: info.outputPath("dsh-spreadsheet.png") });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+});
+
+test("DSH native present exposes generated files beneath the answer", async ({ page }) => {
+  await openDsh(page, { features: true });
+  await page.locator('.dsh-produced').getByRole("button", { name: "report.xlsx", exact: true }).click();
+  await expect(page.getByRole("region", { name: "表格预览" })).toContainText("本周进展");
+});
+
+test("DSH full text search opens matching context without sending a prompt", async ({ page }) => {
+  const relay = await openDsh(page, { features: true });
+  if (!await page.locator(".shell.sidebar-open").count()) await page.getByRole("button", { name: "Code", exact: true }).click();
+  await page.getByRole("textbox", { name: "搜索会话", exact: true }).fill("needle");
+  const results = page.getByRole("region", { name: "全文搜索结果" });
+  await expect(results).toContainText("匹配 needle");
+  await results.getByRole("button", { name: /DSH 原生会话/ }).click();
+  await expect(page.getByRole("dialog", { name: "DSH 会话工具" })).toContainText("已经检查构建 needle");
+  expect(relay.commands.some(c => c.type === "query" || c.type === "steer")).toBe(false);
+});
+
+test("DSH plan mode shows native pending and settled states", async ({ page }) => {
+  const relay = await openDsh(page, { features: true, commandSuccess: true });
+  await page.getByRole("button", { name: "计划", exact: true }).click();
+  await expect.poll(() => relay.commands.some(c => c.type === "set_dsh_control" && c.value === "/plan on")).toBe(true);
+  relay.emit({ ...nativeState, plan_active: false, plan_pending: true });
+  await expect(page.getByRole("button", { name: "正在进入计划", exact: true })).toBeDisabled();
+  relay.emit({ ...nativeState, plan_active: true, plan_pending: false });
+  await expect(page.getByRole("button", { name: "计划模式", exact: true })).toBeEnabled();
 });

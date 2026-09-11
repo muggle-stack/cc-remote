@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from cc_remote.protocol import (
-    DshCommandResult, DshGoal, DshState, Effort, EngineCapabilities, Error, History, HistoryImage, Model,
+    DshCommandResult, DshGoal, DshState, Effort, EngineCapabilities, Error, FilePreview, FilesListed, History, HistoryImage, Model,
     Models, Perm, Query, SessionActivity, SessionFocus, SessionForked, SessionInfo,
     SessionList, SessionListInvalidated, StateEvent, TurnBinding, TurnDetail,
     TurnEnd, UserMsg,
@@ -28,6 +28,7 @@ from cc_remote.wrapper.dsh_stream import DshProjection, history_events, identity
 from cc_remote.wrapper.history_store import group_history_events, materialize_history_turns
 from cc_remote.wrapper.ringbuffer import RingBuffer
 from cc_remote.wrapper.session_ctx import ActiveTurnBinding, SessionContext
+from cc_remote.wrapper.dsh_features import DshFeatures
 
 _COMMON = frozenset({
     "hello", "ping", "list_dir", "get_file_preview", "browse_files", "save_markdown",
@@ -85,6 +86,11 @@ class DshRuntime:
         self.image_refs: OrderedDict[tuple[str, str], str] = OrderedDict()
         self.builds: dict[str, int] = {}
         self.closed = False
+        self.features = DshFeatures(self)
+        self.workspace_task: asyncio.Task | None = None
+        self.workspace_ready = asyncio.Event()
+        self.archived: set[str] = set()
+        self.jobs: dict[str, list] = {}
 
     async def connection(self) -> DshClient:
         async with self.lock:
@@ -106,6 +112,8 @@ class DshRuntime:
                 self.events_task = asyncio.create_task(self._events(), name="dsh-events")
             if self.control_task is None or self.control_task.done():
                 self.control_task = asyncio.create_task(self._control(), name="dsh-control")
+            if self.workspace_task is None or self.workspace_task.done():
+                self.workspace_task = asyncio.create_task(self._workspaces(), name="dsh-workspaces")
         return self.client
 
     def targets(self, cmd) -> bool:
@@ -131,6 +139,15 @@ class DshRuntime:
                 native_session_id(sid)
             except DshError as exc:
                 return await self.error(cmd, exc)
+        if cmd.type in {"get_file_preview", "browse_files"} and sid and sid not in self.machine.sessions:
+            try:
+                await self.connection()
+                await self.ctx(sid)
+            except DshError as exc:
+                response = (FilePreview if cmd.type == "get_file_preview" else FilesListed)(
+                    sid=sid, path=cmd.path, request_id=cmd.request_id, to=cmd.client_id, error=str(exc))
+                await self.machine.transport.send(response)
+                return response
         if cmd.type in _COMMON:
             return UNHANDLED_COMMAND
         try:
@@ -394,6 +411,11 @@ class DshRuntime:
         return result
 
     async def handle_list_sessions(self, cmd):
+        if self.workspace_task is not None:
+            try:
+                await asyncio.wait_for(self.workspace_ready.wait(), 10)
+            except TimeoutError:
+                raise DshError("workspace_unavailable", "DSH 归档状态暂不可读取，请重试。") from None
         items = await self.client.list_sessions()
         rows = []
         pins = self.machine._session_pins.ids("dsh") if self.machine._session_pins else set()
@@ -403,6 +425,7 @@ class DshRuntime:
             row = SessionInfo(session_id=sid, native_session_id=item["sessionId"],
                               engine="dsh", summary=values.get("title"), cwd=item.get("cwd"),
                               state="running" if item["running"] else "idle", pinned=sid in pins,
+                              tag="archived" if item["sessionId"] in self.archived else None,
                               last_modified=datetime.fromtimestamp(item["updatedAt"]/1000, timezone.utc).isoformat(),
                               forked_from_id=wire_session_id(item["parentSessionId"]) if item.get("parentSessionId") else None)
             if self.machine._session_presentation:
@@ -415,6 +438,33 @@ class DshRuntime:
                              to=getattr(cmd, "client_id", None))
         await self.machine.transport.send(result)
         return result
+
+    async def handle_archive_session(self, cmd):
+        if not cmd.archived:
+            raise DshError("archive_one_way", "当前 DSH 暂不支持取消归档，历史仍可查看。")
+        native = native_session_id(cmd.session_id)
+        ctx = await self.ctx(cmd.session_id)
+        if ctx.query_lock.locked():
+            raise DshError("archive_busy", "会话正在处理请求，请稍后归档。")
+        async with ctx.query_lock:
+            items = await self.client.list_sessions()
+            row = next((x for x in items if x["sessionId"] == native), None)
+            if row is None:
+                raise DshError("not_found", "DSH 会话不存在。")
+            if row.get("running") or ctx.state != "idle" or ctx.queued_queries:
+                raise DshError("archive_busy", "请先停止任务并清空排队，再归档会话。")
+            value = await self.client.rpc("workspace/archiveSession", {"request": {"sessionId": native}})
+            self.archived.update(value["archivedSessionIds"])
+        await self.invalidate()
+
+    async def handle_read_dsh(self, cmd):
+        return await self.features.read(cmd)
+
+    async def handle_act_dsh_subagent(self, cmd):
+        return await self.features.act(cmd)
+
+    async def handle_download_dsh(self, cmd):
+        return await self.features.download(cmd)
 
     async def handle_switch_session(self, cmd):
         ctx = await self.ctx(cmd.session_id)
@@ -472,9 +522,19 @@ class DshRuntime:
         if not handle.connected:
             raise DshError("disconnected", handle.state.error or "DSH 连接中断。")
 
+    async def ensure_unarchived(self, sid):
+        if self.workspace_task is not None:
+            try:
+                await asyncio.wait_for(self.workspace_ready.wait(), 10)
+            except TimeoutError as exc:
+                raise DshError("workspace_unavailable", "暂时无法确认会话归档状态，请重试。") from exc
+        if native_session_id(sid) in self.archived:
+            raise DshError("archived", "该会话已归档，仍可查看历史和导出记录。")
+
     async def query(self, ctx, cmd, *, steer=False, launch_receipt=None):
         try:
             await self.connection()
+            await self.ensure_unarchived(ctx.key)
             await self.activate(ctx)
             if not steer and ctx.state != "idle":
                 raise DshError("busy", "DSH 正在运行，请使用引导或排队。")
@@ -552,6 +612,7 @@ class DshRuntime:
             raise DshError("invalid_effort", "所选推理强度不适用于此模型。")
 
     async def select_model(self, ctx, selected, effort=None):
+        await self.ensure_unarchived(ctx.key)
         await self.read_catalog()
         self.validate_model(selected, effort)
         await self.activate(ctx)
@@ -568,6 +629,7 @@ class DshRuntime:
 
     async def handle_set_dsh_control(self, cmd):
         ctx = await self.ctx(cmd.sid)
+        await self.ensure_unarchived(ctx.key)
         await self.activate(ctx)
         if cmd.kind == "effort":
             return await self.select_model(ctx, ctx.sdk.model or self.default_model, cmd.value)
@@ -703,9 +765,14 @@ class DshRuntime:
         if "title" in values:
             self.machine._remember_notification_title(ctx.key, values["title"])
             await self.invalidate()
-        if values and not {"agentPreset", "permissions", "modelSelection", "contextPressure", "goal"}.intersection(values):
+        if values and not {"agentPreset", "permissions", "modelSelection", "contextPressure", "goal", "plan"}.intersection(values):
             return
         state = handle.state.model_copy(deep=True)
+        state.jobs = self.jobs.get(handle.native_id, [])
+        if "plan" in values:
+            plan = values["plan"]
+            state.plan_active = bool(plan["active"]) if isinstance(plan, dict) else None
+            state.plan_pending = bool(plan.get("pending")) if isinstance(plan, dict) else False
         if "agentPreset" in values:
             state.agent_preset = values["agentPreset"]
         if "permissions" in values and values["permissions"] is not None:
@@ -854,6 +921,12 @@ class DshRuntime:
             try:
                 async for frame in self.client.stream("session/control"):
                     if frame.get("type") == "baseline":
+                        self.jobs = {}
+                        for sid, rows in frame["value"].get("jobs", {}).items():
+                            await self.update_jobs(sid, rows)
+                        for ctx in list(self.machine.sessions.values()):
+                            if ctx.engine == "dsh" and ctx.sdk.native_id not in self.jobs:
+                                await self.update_jobs(ctx.sdk.native_id, [])
                         for sid, projection in frame["value"].get("projections", {}).items():
                             ctx = self.machine.sessions.get(wire_session_id(sid))
                             if ctx:
@@ -862,10 +935,39 @@ class DshRuntime:
                         ctx = self.machine.sessions.get(wire_session_id(frame["sessionId"]))
                         if ctx:
                             await self.projections(ctx, {frame["key"]: frame.get("value")}, seq=frame.get("seq"))
+                    elif frame.get("type") == "jobs":
+                        await self.update_jobs(frame["sessionId"], frame.get("jobs", []))
             except asyncio.CancelledError:
                 raise
             except Exception:
                 await asyncio.sleep(2)
+
+    async def update_jobs(self, sid, rows):
+        from cc_remote.protocol import DshJob
+        jobs = [DshJob(id=str(row["id"])[:256], label=str(row.get("label") or row.get("kind") or "后台任务")[:2048],
+            status=row["status"], detail=str(row.get("detail") or "")[:4096]) for row in rows[:64]]
+        self.jobs[sid] = jobs
+        ctx = self.machine.sessions.get(wire_session_id(sid))
+        if ctx:
+            ctx.sdk.state.jobs = jobs
+            await self.machine._emit(ctx, ctx.sdk.state.model_copy(deep=True))
+
+    async def _workspaces(self):
+        while not self.closed:
+            try:
+                async for frame in self.client.stream("workspace/follow"):
+                    values = frame.get("value", {}) if frame.get("type") == "baseline" else frame
+                    if frame.get("type") in {"baseline", "archived"}:
+                        # Archival is monotonic in this official release; a
+                        # delayed stream baseline cannot undo a mutation echo.
+                        self.archived.update(values.get("archivedSessionIds", []))
+                        self.workspace_ready.set()
+                        await self.invalidate()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if not self.closed:
+                    await asyncio.sleep(2)
 
     async def _events(self):
         while not self.closed:
@@ -953,12 +1055,13 @@ class DshRuntime:
                     async with ctx.ask_lock:
                         for index, q in enumerate(request.get("questions", [])):
                             options = [{"label": o["label"], "ds": o.get("description", "")} for o in q.get("options", [])]
-                            question = q["question"] + ("\n" + q["detail"] if q.get("detail") else "")
+                            plan_review = q.get("intent", {}).get("kind") == "plan-review"
+                            question = ("是否批准以下计划并开始执行？" if plan_review else q["question"]) + ("\n\n" + q["detail"] if q.get("detail") else "")
                             if len(options) > 5:
                                 question += "\n其余选项可在回答框填写：\n" + "\n".join(o["label"] + ": " + o["ds"] for o in options[5:])
                             answer = await self.machine._on_ask_locked(
                                 ctx, question,
-                                options[:5], header=q.get("header"), allow_text=True,
+                                options[:5], header="计划确认" if plan_review else q.get("header"), allow_text=True,
                                 multi_select=q.get("multiSelect", False),
                                 ask_id=identity(f"{client_id}:{event_id}:{index}", "dsh-ask"))
                             selected = answer if isinstance(answer, list) else [answer]
@@ -980,9 +1083,10 @@ class DshRuntime:
 
     async def close(self):
         self.closed = True
+        await self.features.close()
         await asyncio.gather(*(ctx.sdk.disconnect() for ctx in self.machine.sessions.values()
                                if ctx.engine == "dsh"), return_exceptions=True)
-        tasks = [task for task in (self.events_task, self.control_task, *self.questions.values()) if task]
+        tasks = [task for task in (self.events_task, self.control_task, self.workspace_task, *self.questions.values()) if task]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
