@@ -1161,6 +1161,7 @@ export function Composer(p: Props) {
               <Suspense fallback={null}>
                 <ContextPopover report={exactContextReport}
                   codex={p.engine === "codex"}
+                  dsh={p.engine === "dsh"}
                   codexContext={p.engine === "codex" ? p.codexContext : null}
                   onAutoCompact={p.engine === "codex" && p.onSetCodexContext
                     ? () => { setCtxOpen(false); setAutoCompactOpen(true); } : undefined} />

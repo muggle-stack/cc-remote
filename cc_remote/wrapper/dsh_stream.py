@@ -104,6 +104,8 @@ class DshProjection:
         self.effort: str | None = None
         self.capacity: int | None = None
         self.tokens: int | None = None
+        self.context_estimated = False
+        self.context_projection_seq = -1
         self.image_refs: dict[str, list[dict]] = {}
         self.fork_seqs: dict[str, int] = {}
 
@@ -127,8 +129,30 @@ class DshProjection:
         return ContextReport(
             total_tokens=self.tokens or 0, max_tokens=self.capacity or 0,
             percentage=round(100 * self.tokens / self.capacity, 2) if available else 0,
-            available=available, model=self.model, source="recent_turn",
+            available=available, model=self.model,
+            source="native_estimate" if self.context_estimated else "recent_turn",
         )
+
+    def context_pressure(self, pressure: dict | None, *, seq: int | None = None) -> ContextReport:
+        """Use DSH's provider-anchored projection, including compaction deltas.
+
+        The native projection is a full value, not a patch. Missing capacity
+        or usage must clear the old reading instead of reusing another route.
+        Control projections and usage records travel on independent streams;
+        their source sequence prevents a delayed record from undoing a refresh.
+        """
+        if type(seq) is int:
+            if seq < self.context_projection_seq:
+                return self.context()
+            self.context_projection_seq = seq
+        pressure = pressure if isinstance(pressure, dict) else {}
+        capacity = pressure.get("contextWindow")
+        projected = pressure.get("projectedTokens")
+        self.context_estimated = type(projected) is int and projected >= 0
+        tokens = projected if self.context_estimated else pressure.get("pressureTokens")
+        self.capacity = capacity if type(capacity) is int and capacity > 0 else None
+        self.tokens = tokens if type(tokens) is int and tokens >= 0 else None
+        return self.context()
 
     def record(self, event: dict) -> list:
         seq = event.get("seq")
@@ -224,9 +248,10 @@ class DshProjection:
             return []
         if kind == "request/context":
             self.owner_for({"turn": self.turn, "step": self.step})
+            if seq <= self.context_projection_seq:
+                return []
             capacity = data.get("contextWindow")
-            if type(capacity) is int and capacity > 0:
-                self.capacity = capacity
+            self.capacity = capacity if type(capacity) is int and capacity > 0 else None
             return [self.context()]
         if kind in {"assistant/message", "assistant/attempt"}:
             opening = self.autonomous(data["turn"])
@@ -240,8 +265,9 @@ class DshProjection:
             else:
                 content = data.get("message", {}).get("content", [])
                 result = self._replace_text(data, owner, content)
-                if isinstance(data.get("usage"), dict):
+                if isinstance(data.get("usage"), dict) and seq > self.context_projection_seq:
                     self.tokens = input_tokens(data["usage"])
+                    self.context_estimated = False
                     result.append(self.context())
             if self.attempt and (self.attempt.turn, self.attempt.step) == (data["turn"], data["step"]):
                 self.attempt.settled = True

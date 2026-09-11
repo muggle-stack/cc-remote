@@ -53,6 +53,27 @@ def test_cold_history_and_live_stream_have_same_final_identity_and_text():
     assert summaries[0][0]["blocks"] == summaries[1][0]["blocks"]
 
 
+def test_context_without_a_route_capacity_does_not_reuse_the_previous_models_window():
+    p = DshProjection()
+    p.context_pressure({"contextWindow": 1000000, "projectedTokens": 593, "pressureTokens": 550})
+    record(p, "request/context", {"provider": "legacy", "model": "unknown"})
+    assert not p.context().available and p.context().max_tokens == 0
+    report = p.context_pressure({"contextWindow": 1000000, "pressureTokens": 550})
+    assert report.source == "recent_turn" and report.total_tokens == 550
+
+
+def test_delayed_usage_stream_cannot_overwrite_a_newer_native_context_projection():
+    p = DshProjection(cursor=39)
+    p.context_pressure({"contextWindow": 1000000, "projectedTokens": 593}, seq=42)
+    record(p, "request/context", {"contextWindow": 64000})
+    record(p, "assistant/message", {"turn": 1, "step": 1,
+        "message": {"content": []}, "usage": {"inputTokens": 9000}})
+    assert p.context().source == "native_estimate"
+    assert p.context().total_tokens == 593 and p.context().max_tokens == 1000000
+    p.context_pressure({"contextWindow": 64000, "pressureTokens": 9000}, seq=41)
+    assert p.context().total_tokens == 593
+
+
 def record(p, kind, data, **extra):
     return p.record({"type": kind, "data": data, "seq": p.cursor+1,
                      "time": (p.cursor+2)*1000, **extra})

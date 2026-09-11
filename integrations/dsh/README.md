@@ -2,8 +2,11 @@
 
 cc-remote supports `@deepseek-ai/dsh@0.1.5-rc.2` as an optional **Code** engine.
 Use the DSH entry in the header to discover sessions on the selected device or
-create one with a native Agent Preset. Models, reasoning levels (including
-`off`), permission presets, commands and Skills come from that DSH installation.
+create one with a native Agent Preset. The model picker offers only **DeepSeek
+V4.1 Flash** (native route `deepseek-official` / `deepseek-flash`); new sessions
+explicitly select it even when DSH or a preset defaults to another model.
+Reasoning levels (including `off`), permission presets, commands and Skills come
+from that DSH installation.
 An unavailable engine shows a connection explanation and an empty model list.
 
 ## Connect a local DSH
@@ -74,9 +77,11 @@ it does not stop native Agents. The Stop button explicitly calls native cancel.
   DSH does not supply cc-remote's per-turn file checkpoint archive.
 
 Work, `/btw`, worktree/cwd migration, archive/delete and Codex token-budget or
-account-quota controls are not DSH capabilities in this adapter and are hidden.
+account-quota controls are not DSH capabilities in this adapter. Work shows a
+disabled lock; the other unsupported controls are hidden.
 Agent Presets apply when creating a session; they are not changed on existing
-sessions. DSH context usage reports native estimates and model capacity; the
+sessions. DSH context usage reports native estimates and model capacity, including
+compaction updates. No model turn is started to read these values. The
 Codex per-session context-window override does not apply to DSH.
 
 ## History and release boundaries

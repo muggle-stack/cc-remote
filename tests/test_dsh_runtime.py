@@ -4,7 +4,7 @@ import asyncio
 import pytest
 
 from cc_remote.protocol import (
-    DshState, GetHistory, GetHistoryImage, GetTurnDetail, Hello, Models, NewSession, Query, SetDshControl,
+    DshState, GetContext, GetHistory, GetHistoryImage, GetTurnDetail, Hello, Models, NewSession, Query, SetDshControl,
     SwitchSession, TurnEnd, TurnResult, deserialize, is_downstream, serialize,
 )
 from cc_remote.wrapper.dsh_client import DshError
@@ -17,6 +17,14 @@ class Client:
     def __init__(self):
         self.calls = []
         self.cursor = -1
+        self.catalog = {"default": {"provider": "deepseek-official", "model": "deepseek-v4-pro",
+                                    "reasoningEffort": "max"}, "groups": [
+            {"id": "deepseek-official", "models": [
+                {"id": "deepseek-flash", "name": "DeepSeek-V41-Flash",
+                 "reasoning": {"efforts": [{"id": "off", "name": "Off"}], "defaultEffort": "off"}},
+                {"id": "deepseek-v4-pro"}, {"id": "deepseek-v4-flash"},
+                {"id": "deepseek-v4-flash-vision-exp"}]},
+            {"id": "custom", "models": [{"id": "deepseek-flash"}]}]}
 
     async def history_snapshot(self, sid, **options):
         self.calls.append(("snapshot", sid, options))
@@ -27,8 +35,11 @@ class Client:
     async def rpc(self, endpoint, args=None):
         self.calls.append((endpoint, args))
         if endpoint == "session/modelCatalog":
-            return {"default": {"provider": "custom", "model": "test"}, "groups": [{"id": "custom", "models": [{
-                "id": "test", "reasoning": {"efforts": [{"id": "off", "name": "Off"}]}}]}]}
+            return self.catalog
+        if endpoint == "session/create":
+            return {"sessionId": "created"}
+        if endpoint == "session/selectModel":
+            return {"selected": {k: v for k, v in args["request"].items() if k != "sessionId"}}
         if endpoint == "agentPresets/list":
             return {"presets": [{"id": "standard", "isDefault": True}]}
         if endpoint == "commands/execute":
@@ -98,11 +109,71 @@ async def test_model_catalog_keeps_off_and_does_not_invent_presets():
     _, _, runtime, _ = setup_runtime()
     await runtime.read_catalog()
     result = Models(engine="dsh", models=runtime.catalog, dsh_presets=runtime.presets)
-    assert result.models[0]["efforts"] == ["off"]
-    runtime.validate_model(model_id("custom", "test"), "off")
+    assert len(result.models) == 1 and result.models[0]["efforts"] == ["off"]
+    assert runtime.default_model == model_id("deepseek-official", "deepseek-flash")
+    assert runtime.default_effort == "off"
+    runtime.validate_model(runtime.default_model, "off")
     with pytest.raises(DshError):
-        runtime.validate_model(model_id("custom", "test"), "max")
+        runtime.validate_model(runtime.default_model, "max")
+    for provider, model in [("deepseek-official", "deepseek-v4-pro"), ("custom", "deepseek-flash")]:
+        with pytest.raises(DshError):
+            runtime.validate_model(model_id(provider, model), None)
     assert result.dsh_presets[0].id == "standard"
+
+
+@pytest.mark.asyncio
+async def test_new_session_selects_flash_even_when_the_native_default_is_another_model():
+    machine, _, runtime, client = setup_runtime()
+    async def activate(_ctx):
+        pass
+    runtime.activate = activate
+    await machine._handle(NewSession(engine="dsh", cwd="/tmp", dsh_agent_preset="standard"))
+    selected = next(call[1] for call in client.calls if call[0] == "session/selectModel")
+    assert selected == {"request": {"sessionId": "created", "provider": "deepseek-official",
+                                    "model": "deepseek-flash", "reasoningEffort": "off"}}
+    assert machine._focused_ctx().sdk.model == runtime.default_model
+
+
+@pytest.mark.asyncio
+async def test_unavailable_flash_and_unoffered_models_never_create_a_session():
+    machine, _, runtime, client = setup_runtime()
+    rejected = await machine._handle(NewSession(engine="dsh", cwd="/tmp",
+        model=model_id("deepseek-official", "deepseek-v4-pro")))
+    assert rejected.code == "dsh_invalid_model"
+    client.catalog["groups"] = []
+    rejected = await machine._handle(NewSession(engine="dsh", cwd="/tmp"))
+    assert rejected.code == "dsh_invalid_model"
+    assert runtime.catalog == [] and runtime.default_model is None
+    assert all(call[0] in {"session/modelCatalog", "agentPresets/list"} for call in client.calls)
+    assert not machine.sessions
+
+
+@pytest.mark.asyncio
+async def test_cold_context_uses_native_projection_and_compaction_without_starting_an_agent():
+    machine, _, runtime, client = setup_runtime()
+    snapshot = await client.history_snapshot("dsh@session")
+    snapshot.update(cursor=40, projections={"asOfSeq": 40, "values": {
+        "contextPressure": {"pressureTokens": 550, "projectedTokens": 593, "contextWindow": 1000000},
+        "modelSelection": {"next": {"provider": "deepseek-official", "model": "deepseek-flash"}},
+    }})
+    async def read(*args, **kwargs):
+        client.calls.append(("snapshot",))
+        return snapshot
+    client.history_snapshot = read
+    report = await machine._handle(GetContext(sid="dsh@session", client_id="viewer", cmd_id="context-1"))
+    assert report.available and report.total_tokens == 593 and report.max_tokens == 1000000
+    assert report.source == "native_estimate" and report.percentage == .06
+    assert report.model == model_id("deepseek-official", "deepseek-flash")
+    assert report.to == "viewer" and report.request_id == "context-1"
+    ctx = machine.sessions["dsh@session"]
+    await runtime.projections(ctx, {"contextPressure": {
+        "pressureTokens": 550, "projectedTokens": 0, "contextWindow": 1000000}}, seq=41)
+    stale = await machine._handle(GetContext(sid=ctx.key))
+    assert stale.available and stale.total_tokens == 0  # old snapshot cannot undo compaction
+    await runtime.projections(ctx, {"contextPressure": None}, seq=42)
+    cleared = await machine._handle(GetContext(sid=ctx.key))
+    assert not cleared.available and cleared.max_tokens == 0
+    assert ctx.sdk.watch is None and all(call[0] == "snapshot" for call in client.calls)
 
 
 @pytest.mark.asyncio

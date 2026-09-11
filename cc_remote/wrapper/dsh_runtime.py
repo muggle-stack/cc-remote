@@ -372,10 +372,15 @@ class DshRuntime:
             "description": model.get("description", ""),
             "efforts": [e["id"] for e in model.get("reasoning", {}).get("efforts", [])],
             "default_effort": model.get("reasoning", {}).get("defaultEffort"),
-        } for group in catalog["groups"] for model in group["models"]]
+        } for group in catalog["groups"] if group["id"] == "deepseek-official"
+          for model in group["models"] if model["id"] == "deepseek-flash"]
         default = catalog.get("default") or {}
-        self.default_model = model_id(default["provider"], default["model"]) if default else None
-        self.default_effort = default.get("reasoningEffort")
+        self.default_model = self.catalog[0]["id"] if self.catalog else None
+        self.default_effort = self.catalog[0]["default_effort"] if self.catalog else None
+        if (self.catalog and default.get("provider") == "deepseek-official"
+                and default.get("model") == "deepseek-flash"
+                and default.get("reasoningEffort") in self.catalog[0]["efforts"]):
+            self.default_effort = default["reasoningEffort"]
         self.presets = [{"id": p["id"], "name": p.get("name") or p["id"],
                          "description": p.get("description", ""), "is_default": p.get("isDefault", False),
                          "available": not bool(p.get("broken"))} for p in presets["presets"]]
@@ -431,15 +436,19 @@ class DshRuntime:
         cwd = str(Path(cmd.cwd or self.machine.cfg.cc_cwd).expanduser())
         if not Path(cwd).is_absolute() or not Path(cwd).is_dir():
             raise DshError("invalid_cwd", "工作目录不存在。")
-        if cmd.model:
-            self.validate_model(cmd.model, cmd.dsh_effort or cmd.effort)
+        selected = cmd.model or self.default_model
+        effort = cmd.dsh_effort or cmd.effort or self.default_effort
+        if not selected:
+            raise DshError("invalid_model", "DSH 当前未提供 DeepSeek V4.1 Flash，请检查本机模型配置。")
+        self.validate_model(selected, effort)
         value = await self.client.rpc("session/create", {"request": {
             "cwd": cwd, **({"agentPreset": preset} if preset else {})}})
         sid = wire_session_id(value["sessionId"])
         ctx = await self.ctx(sid)
         await self.activate(ctx)
-        if cmd.model or cmd.dsh_effort or cmd.effort:
-            await self.select_model(ctx, cmd.model or self.default_model, cmd.dsh_effort or cmd.effort)
+        # A native default or Agent Preset may still select another model.
+        # Always establish the offered model before admitting the first prompt.
+        await self.select_model(ctx, selected, effort)
         self.machine.focused_sid = sid
         await self.machine.transport.send(SessionFocus(
             session_id=sid, cwd=ctx.cwd, request_id=cmd.request_id, to=cmd.client_id))
@@ -714,14 +723,13 @@ class DshRuntime:
         if model:
             handle.model = model_id(model["provider"], model["model"])
             handle.effort = model.get("reasoningEffort")
+            handle.projection.model = handle.model
+            handle.projection.effort = handle.effort
             await self.machine._emit(ctx, Model(model=handle.model))
             if handle.effort:
                 await self.machine._emit(ctx, Effort(effort=handle.effort))
-        pressure = values.get("contextPressure")
-        if isinstance(pressure, dict):
-            handle.projection.capacity = pressure.get("contextWindow")
-            handle.projection.tokens = pressure.get("projectedTokens", pressure.get("pressureTokens"))
-            await self.machine._emit(ctx, handle.projection.context())
+        if "contextPressure" in values:
+            await self.machine._emit(ctx, handle.projection.context_pressure(values["contextPressure"], seq=seq))
         if "goal" in values:
             native = values["goal"]
             goal = native.get("goal") if isinstance(native, dict) else None
