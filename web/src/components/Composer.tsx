@@ -1183,6 +1183,7 @@ export function Composer(p: Props) {
                 <ContextPopover report={exactContextReport}
                   loading={p.contextLoading} deferred={p.contextDeferred}
                   codex={p.engine === "codex"}
+                  dsh={p.engine === "dsh"}
                   error={p.contextError} codexContext={p.engine === "codex" ? p.codexContext : null}
                   onAutoCompact={p.engine === "codex" && p.onSetCodexContext
                     ? () => { setCtxOpen(false); setAutoCompactOpen(true); } : undefined} />

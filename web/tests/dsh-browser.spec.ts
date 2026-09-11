@@ -36,7 +36,7 @@ async function mockDshRelay(page: Page, { running = false, commandSuccess = fals
       emit({ type: "snapshot", sid, cc_session_id: sid, state: running ? "running" : "idle",
         tail_text: "", cwd: "/tmp/dsh-test", generation: "dsh-generation" });
       emit(nativeState);
-      emit({ type: "model", sid, model: "dsh:local:deepseek-flash" });
+      emit({ type: "model", sid, model: "dsh:deepseek-official:deepseek-flash" });
       emit({ type: "effort", sid, effort: "off" });
       emit({ type: "perm", sid, mode: "read-only" });
       emit(context);
@@ -47,8 +47,8 @@ async function mockDshRelay(page: Page, { running = false, commandSuccess = fals
       commands.push(cmd);
       if (cmd.type === "hello") snapshot();
       if (cmd.type === "get_models") emit({ type: "models", engine: cmd.engine, models: cmd.engine === "dsh" ? [
-        { id: "dsh:local:deepseek-flash", display_name: "DeepSeek Flash", efforts: ["off", "low"], default_effort: "low" },
-      ] : [], default_model: "dsh:local:deepseek-flash", default_effort: "low", dsh_presets: [
+        { id: "dsh:deepseek-official:deepseek-flash", display_name: "DeepSeek-V41-Flash", efforts: ["off", "low"], default_effort: "low" },
+      ] : [], default_model: "dsh:deepseek-official:deepseek-flash", default_effort: "low", dsh_presets: [
         { id: "standard", name: "标准", description: "文件、命令与交互工具", available: true, is_default: true },
         { id: "ptc", name: "代码编排", description: "通过代码组织工具调用", available: true, is_default: false },
       ] });
@@ -78,6 +78,7 @@ async function openDsh(page: Page, options = {}) {
   await page.goto("/");
   await expect(page.locator(".engine-toggle")).toHaveValue("dsh");
   await expect(page.locator(".composer textarea")).toBeVisible();
+  await expect(page.getByText("验证图片、引导与原生控件", { exact: true })).toBeVisible();
   return relay;
 }
 
@@ -99,8 +100,79 @@ test("DSH context reports remain visible without a Codex estimate and clear unav
   relay.emit({ type: "context_report", sid, source: "recent_turn", available: false,
     total_tokens: 0, max_tokens: 0, percentage: 0, categories: [] });
   await expect(popover.locator(".ctx-pop-nums")).toHaveCount(0);
+  await expect(popover).toContainText("DSH 暂未返回上下文用量。");
   await expect(ring.locator(".hr-fill")).toHaveCount(0);
   expect(relay.commands.some(c => c.type === "query" || c.type === "steer")).toBe(false);
+});
+
+test("DSH native context shows small readings and updates after compaction", async ({ page }) => {
+  const relay = await openDsh(page);
+  await page.getByRole("button", { name: "上下文占用", exact: true }).click();
+  const popover = page.getByRole("dialog", { name: "上下文占用", exact: true });
+  relay.emit({ type: "context_report", sid, source: "native_estimate", available: true,
+    total_tokens: 593, max_tokens: 1000000, percentage: .06, categories: [] });
+  await expect(popover).toContainText("593 / 1,000,000 (<1%)");
+  await expect(popover).toContainText("按 DSH 原生估算显示");
+  relay.emit({ type: "context_report", sid, source: "native_estimate", available: true,
+    total_tokens: 100, max_tokens: 1000000, percentage: .01, categories: [] });
+  await expect(popover).toContainText("100 / 1,000,000 (<1%)");
+  await expect(popover.locator(".ctx-pop-bar i")).toHaveAttribute("style", "width: 0.01%;");
+  expect(relay.commands.some(c => ["query", "steer", "compact_session"].includes(String(c.type)))).toBe(false);
+});
+
+test("DSH harness switch fits its label and Work is visibly locked", async ({ page }) => {
+  await openDsh(page);
+  const selector = page.locator(".engine-selector");
+  expect((await selector.boundingBox())!.width).toBeLessThan(65);
+  await page.locator(".surface-head-title").click();
+  const work = page.getByRole("tab", { name: "Work", exact: true });
+  await expect(work).toBeDisabled();
+  await expect(work.locator(".space-lock")).toBeVisible();
+  await expect(work).toHaveAttribute("title", "DSH 暂不支持 Work");
+  await page.locator(".s-head").getByRole("button", { name: "收起", exact: true }).click();
+  await page.locator(".engine-toggle").selectOption("claude");
+  await expect(page.locator(".engine-label")).toHaveText("✳ Claude");
+  expect((await selector.boundingBox())!.width).toBeLessThan(100);
+  await page.locator(".engine-toggle").selectOption("dsh");
+  await expect(page.locator(".engine-label")).toHaveText("DSH");
+  await expect(page.getByRole("tab", { name: "Code", exact: true })).toHaveAttribute("aria-selected", "true");
+});
+
+test("DSH completion spark replays on click and settles at rest", async ({ page }) => {
+  await openDsh(page);
+  const spark = page.locator(".turn-done-mark").getByRole("button", { name: "DSH", exact: true });
+  await expect(spark).toBeVisible();
+  await expect(page.locator(".turn-working")).toHaveCount(0);
+  const resting = await spark.locator("svg").innerHTML();
+  await page.clock.install();
+  await spark.click();
+  await expect.poll(() => spark.locator("svg").innerHTML()).not.toBe(resting);
+  await page.clock.runFor(850);
+  await expect.poll(() => spark.locator("svg").innerHTML()).toBe(resting);
+  await spark.click();
+  await expect.poll(() => spark.locator("svg").innerHTML()).not.toBe(resting);
+});
+
+test("DSH working spark animates while a native turn runs", async ({ page }) => {
+  await page.clock.install();
+  const relay = await openDsh(page, { running: true });
+  relay.emit({ type: "turn_binding", sid, msg_id: "native-prompt", turn_id: "dsh-seq-5" });
+  const working = page.locator(".turn-working svg");
+  await expect(working).toBeVisible();
+  await expect(page.locator(".turn-done-mark")).toHaveCount(0);
+  const initial = await working.innerHTML();
+  await page.clock.runFor(180);
+  await expect.poll(() => working.innerHTML()).not.toBe(initial);
+});
+
+test("DSH model picker offers Flash only and preserves native reasoning levels", async ({ page }) => {
+  await openDsh(page);
+  await page.getByTitle("选择模型", { exact: true }).click();
+  const models = page.getByRole("dialog", { name: "选择模型", exact: true });
+  await expect(models.locator(".cmd-nm")).toHaveText(["DeepSeek-V41-Flash"]);
+  await models.locator(".cmd").click();
+  await page.getByTitle("思考强度", { exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "选择思考强度", exact: true }).locator(".cmd")).toHaveCount(2);
 });
 
 test("DSH native controls remain usable while running and preserve command drafts", async ({ page }) => {
@@ -125,6 +197,7 @@ test("DSH native controls remain usable while running and preserve command draft
 
 for (const theme of ["light", "dark"] as const) {
 test(`DSH native progress distinguishes inactive continuation and fits the viewport (${theme})`, async ({ page }, info) => {
+  if (info.project.name === "chromium") await page.setViewportSize({ width: 1440, height: 900 });
   await page.addInitScript(theme => localStorage.setItem("cc_remote_theme", theme), theme);
   const relay = await openDsh(page);
   const goal = page.locator(".dsh-goal");

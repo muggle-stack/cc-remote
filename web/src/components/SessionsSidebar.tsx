@@ -467,8 +467,10 @@ export function SessionsSidebar({ open, engine, space,
           <div className="space-switch" role="tablist" aria-label="切换工作空间">
             <button role="tab" aria-selected={space === "work"}
               className={space === "work" ? "active" : ""}
-              onClick={() => onSpaceChange("work")} disabled={engine === "dsh"}>
+              onClick={() => onSpaceChange("work")} disabled={engine === "dsh"}
+              title={engine === "dsh" ? "DSH 暂不支持 Work" : undefined}>
               <Icon name="work" size={17} />Work
+              {engine === "dsh" && <span className="space-lock" aria-hidden="true"><Icon name="lock" size={13} /></span>}
             </button>
             <button role="tab" aria-selected={space === "code"}
               className={space === "code" ? "active" : ""}

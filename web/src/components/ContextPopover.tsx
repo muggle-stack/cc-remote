@@ -13,6 +13,7 @@ interface Props {
   onAutoCompact?: () => void;
   codexContext?: CodexContext | null;
   codex?: boolean;
+  dsh?: boolean;
 }
 
 
@@ -27,7 +28,7 @@ export default function ContextPopover(p: Props) {
       ? "会话正在工作，结束后自动更新。"
       : p.error || "";
   const usage = (tokens: number, percentage: number) => hasCapacity
-    ? `${tokens.toLocaleString()} / ${p.report!.max_tokens.toLocaleString()} (${percentage.toFixed(0)}%)`
+    ? `${tokens.toLocaleString()} / ${p.report!.max_tokens.toLocaleString()} (${p.dsh && percentage > 0 && percentage < 1 ? "<1" : percentage.toFixed(0)}%)`
     : `${tokens.toLocaleString()} tokens`;
   const statusNode = status && (
     <div className={"ctx-pop-status" + (p.error ? " error" : "")}
@@ -35,7 +36,7 @@ export default function ContextPopover(p: Props) {
   );
   const loadingNode = (
     <div className="ctx-pop-loading" role={p.error ? "alert" : undefined}>
-      {status || "正在读取真实上下文…"}
+      {status || (p.dsh ? "DSH 暂未返回上下文用量。" : "正在读取真实上下文…")}
     </div>
   );
 
@@ -75,7 +76,7 @@ export default function ContextPopover(p: Props) {
         </>
       ) : (
         <>
-          <div className="ctx-pop-row"><span>{recentCodex ? "最近请求用量" : p.codex ? "上下文估算" : "上下文窗口"}</span>
+          <div className="ctx-pop-row"><span>{recentCodex ? "最近请求用量" : p.codex || (p.dsh && p.report.source === "native_estimate") ? "上下文估算" : "上下文窗口"}</span>
             <span className="ctx-pop-nums">
               {usage(p.report.total_tokens, p.report.percentage)}
             </span>
@@ -105,6 +106,9 @@ export default function ContextPopover(p: Props) {
       ) : loadingNode}
       {recentCodex && p.report && <div className="ctx-pop-foot">
         压缩估算暂不可用，此用量不代表距离压缩的进度。
+      </div>}
+      {p.dsh && p.report?.source === "native_estimate" && <div className="ctx-pop-foot">
+        按 DSH 原生估算显示，随新增内容和上下文压缩更新。
       </div>}
       {p.codexContext && <>
         <div className="ctx-pop-row"><span>生效压缩阈值</span>

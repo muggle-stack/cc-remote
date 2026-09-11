@@ -704,8 +704,13 @@
 .dsh-preset-row p { margin: 8px 0 0; line-height: 1.6; }
 .dsh-connection-note { padding: 8px 12px; color: var(--dim); font-size: 12px; line-height: 1.5; }
 .engine-selector { display: inline-flex; position: relative; flex: none; }
-.engine-selector > svg { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); color: var(--dim); pointer-events: none; }
-.engine-toggle { max-width: 100px; appearance: none; -webkit-appearance: none; padding-right: 24px; cursor: pointer; }
+.engine-selector .engine-toggle { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.engine-label { display: inline-flex; align-items: center; gap: 5px; padding: 6px 8px; min-height: 31px;
+  font: 600 11px var(--mono); letter-spacing: .02em; white-space: nowrap; pointer-events: none;
+  color: var(--accent-ink); background: var(--accent-weak); border: 1px solid var(--accent-line); border-radius: 9px; }
+.engine-label svg { color: var(--dim); }
+.engine-toggle:focus-visible + .engine-label { outline: 2px solid var(--accent); outline-offset: 2px; }
+.engine-selector:hover .engine-label { border-color: var(--accent); }
 .dsh-goal { margin: 8px 20px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
 .dsh-goal > summary { display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; list-style: none; }
 .dsh-goal > summary::-webkit-details-marker { display: none; }

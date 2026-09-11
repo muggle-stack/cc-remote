@@ -101,21 +101,20 @@ export function ClaudeMark({ size = 16, className }: { size?: number; className?
 
 // A clickable Claude spark that sits under a finished reply: static at rest,
 // and on click it plays ONE loop of the working morph, then settles back.
-export function ClaudeSpark({ size = 22, className }: { size?: number; className?: string }) {
+export function ClaudeSpark({ size = 22, className, label = "Claude" }: {
+  size?: number; className?: string; label?: string;
+}) {
   const [frame, setFrame] = useState(-1); // -1 = static
-  const play = () => {
-    if (frame >= 0) return; // already playing
-    let i = 0;
-    setFrame(0);
-    const id = window.setInterval(() => {
-      i += 1;
-      if (i >= WORK_FRAMES.length) { window.clearInterval(id); setFrame(-1); }
-      else setFrame(i);
-    }, 110);
-  };
+  useEffect(() => {
+    if (frame < 0) return;
+    const id = window.setTimeout(() => setFrame(frame + 1 < WORK_FRAMES.length ? frame + 1 : -1), 110);
+    return () => window.clearTimeout(id);
+  }, [frame]);
+  const play = () => { if (frame < 0) setFrame(0); };
   const [a, b] = frame >= 0 ? WORK_FRAMES[frame] : [0.9, 0.42];
   return (
-    <button type="button" className={"spark-btn" + (className ? " " + className : "")} onClick={play} aria-label="Claude">
+    <button type="button" className={"spark-btn" + (className ? " " + className : "")} onClick={play} aria-label={label}
+      title="重播完成动画">
       <svg viewBox="0 0 24 24" width={size} height={size} fill="currentColor" aria-hidden="true">
         {b > 0 && <path d={SPARK} transform={sparkTransform(b, 45)} opacity={frame >= 0 ? 0.8 : 0.55} />}
         {a > 0 && <path d={SPARK} transform={sparkTransform(a)} />}

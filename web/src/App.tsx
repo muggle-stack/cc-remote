@@ -5651,7 +5651,10 @@ export default function App() {
             <option value="claude">✳ Claude</option>
             <option value="codex">◇ Codex</option>
             <option value="dsh">DSH</option>
-          </select><Icon name="chev" size={12} /></span>
+          </select><span className="engine-label" aria-hidden="true">
+            {engine === "dsh" ? "DSH" : engine === "codex" ? "◇ Codex" : "✳ Claude"}
+            <Icon name="chev" size={12} />
+          </span></span>
           <HeaderMenu
             engine={engine}
             theme={theme}

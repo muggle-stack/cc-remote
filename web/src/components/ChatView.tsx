@@ -3047,7 +3047,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                   <Suspense fallback={null}><PagePreviewLinks turn={t} sid={sid} /></Suspense>
                 </div>}
                 {showCompletionFooter && !terminalProblem && ti === turns.length - 1
-                  && <div className="turn-done-mark">{engine === "dsh" ? <span aria-label="DSH"><Icon name="spark" size={22} /></span> : <ClaudeSpark size={22} />}</div>}
+                  && <div className="turn-done-mark"><ClaudeSpark size={22} label={engine === "dsh" ? "DSH" : undefined} /></div>}
               </>
             )}
               {(showStandaloneDetail

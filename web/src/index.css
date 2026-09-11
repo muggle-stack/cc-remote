@@ -53,7 +53,7 @@ textarea,input{font:inherit}
    indigo (dark) when data-engine="codex". cc (claude) is untouched. Same
    palette we locked in the design mock. Higher specificity than the base
    theme blocks so it wins in both light and dark. ===== */
-:root:is([data-engine="codex"],[data-engine="dsh"])[data-theme="light"]{
+:root[data-engine="codex"][data-theme="light"]{
   --bg:#FBFCFE; --surface:#FFFFFF; --sidebar:#EFF3FA; --raised:#ECF2FB;
   --text:#111726; --dim:#57627A; --faint:#93A0B8;
   --border:#E4EAF3; --border-strong:#D4DDEC; --divider:#EAEFF7;
@@ -66,7 +66,7 @@ textarea,input{font:inherit}
   --shadow-lg:0 12px 48px -10px rgba(20,45,110,.26), 0 2px 8px -3px rgba(20,45,110,.12);
   --r-panel:14px; --r-card:12px; --r-field:11px; --r-btn:9px; --r-chip:7px;
 }
-:root:is([data-engine="codex"],[data-engine="dsh"])[data-theme="dark"]{
+:root[data-engine="codex"][data-theme="dark"]{
   --bg:#0D0E15; --surface:#16171F; --sidebar:#090A10; --raised:#1D1E28;
   --text:#ECEDF3; --dim:#9A9BB0; --faint:#61627A;
   --border:#232430; --border-strong:#31323F; --divider:#20212B;
@@ -80,11 +80,40 @@ textarea,input{font:inherit}
   --r-panel:14px; --r-card:12px; --r-field:11px; --r-btn:9px; --r-chip:7px;
 }
 /* pre-effect flash guard: engine set but theme not yet stamped -> use light codex */
-:root:is([data-engine="codex"],[data-engine="dsh"]):not([data-theme]){
+:root[data-engine="codex"]:not([data-theme]){
   --bg:#FBFCFE; --surface:#FFFFFF; --sidebar:#EFF3FA; --raised:#ECF2FB;
   --text:#111726; --dim:#57627A; --faint:#93A0B8;
   --border:#E4EAF3; --border-strong:#D4DDEC; --divider:#EAEFF7;
   --accent:#2E6FF0; --accent-ink:#1B54D1; --accent-weak:rgba(46,111,240,.10); --accent-line:rgba(46,111,240,.28);
+}
+
+/* DSH keeps the shared interaction language while carrying a distinct,
+   low-saturation deep-water skin instead of inheriting Claude's warm paper. */
+:root[data-engine="dsh"][data-theme="light"],:root[data-engine="dsh"]:not([data-theme]){
+  --bg:#F5F9FA; --surface:#FFFFFF; --sidebar:#EAF3F5; --raised:#EEF7F8;
+  --text:#14272B; --dim:#60777B; --faint:#91A5A8;
+  --border:#DDE9EB; --border-strong:#CADDE0; --divider:#E4EEF0;
+  --accent:#147D8A; --accent-ink:#0D6570; --accent-weak:rgba(20,125,138,.10); --accent-line:rgba(20,125,138,.28);
+  --ok:#287F68; --ok-weak:rgba(40,127,104,.10);
+  --warn:#98701C; --warn-weak:rgba(152,112,28,.10);
+  --danger:#B94E4A; --danger-weak:rgba(185,78,74,.09);
+  --shadow-sm:0 1px 2px rgba(17,73,82,.06);
+  --shadow:0 2px 6px -2px rgba(17,73,82,.10),0 12px 34px -16px rgba(17,73,82,.22);
+  --shadow-lg:0 12px 48px -10px rgba(8,55,64,.28),0 2px 8px -3px rgba(8,55,64,.12);
+  --r-panel:16px; --r-card:13px; --r-field:12px; --r-btn:10px; --r-chip:8px;
+}
+:root[data-engine="dsh"][data-theme="dark"]{
+  --bg:#07171B; --surface:#0E2227; --sidebar:#091B20; --raised:#143039;
+  --text:#E5F1F2; --dim:#93AAAE; --faint:#587378;
+  --border:#19363D; --border-strong:#29505A; --divider:#132C32;
+  --accent:#4EC3CF; --accent-ink:#79D7DF; --accent-weak:rgba(78,195,207,.14); --accent-line:rgba(78,195,207,.30);
+  --ok:#62BE9D; --ok-weak:rgba(98,190,157,.12);
+  --warn:#D1A74F; --warn-weak:rgba(209,167,79,.12);
+  --danger:#E17268; --danger-weak:rgba(225,114,104,.12);
+  --shadow-sm:0 1px 2px rgba(0,0,0,.38);
+  --shadow:0 2px 8px -2px rgba(0,0,0,.48),0 14px 38px -16px rgba(0,0,0,.72);
+  --shadow-lg:0 16px 54px -10px rgba(0,0,0,.76),0 2px 10px -3px rgba(0,0,0,.54);
+  --r-panel:16px; --r-card:13px; --r-field:12px; --r-btn:10px; --r-chip:8px;
 }
 
 body{
@@ -1748,7 +1777,9 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
   display:flex; align-items:center; justify-content:center; gap:8px; color:var(--dim);
   font-size:14px; font-weight:500; transition:background .14s,color .14s,border-color .14s; }
 .space-switch button svg{ flex:none; }
-.space-switch button:hover{ color:var(--text); }
+.space-switch button:disabled{ color:var(--faint); cursor:not-allowed; }
+.space-lock{ display:inline-flex; margin-left:2px; }
+.space-switch button:hover:not(:disabled){ color:var(--text); }
 .space-switch button:focus-visible{ outline:2px solid var(--accent); outline-offset:-3px; }
 .space-switch button.active{ color:var(--text); background:var(--surface);
   border-color:color-mix(in srgb,var(--accent) 55%,transparent); }
@@ -2131,6 +2162,3 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 @media (max-width:540px){
   .dp{ max-width:100%; max-height:min(88vh,calc(var(--app-height,100dvh) - 24px)); border-radius:16px; }
 }
-
-:root[data-engine="dsh"][data-theme="light"],:root[data-engine="dsh"]:not([data-theme]) { --accent:#4D6BFE; --accent-ink:#3556DC; --accent-weak:#EDF0FF; --accent-line:#BBC6FF; }
-:root[data-engine="dsh"][data-theme="dark"] { --accent:#8C9AFF; --accent-ink:#ACB6FF; --accent-weak:#252B4A; --accent-line:#46548F; }
