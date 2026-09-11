@@ -545,18 +545,11 @@ export default function App() {
         request.skillsOnly,
         request.codexProfileId,
         request.claudeProfileId,
+        request.sid,
       ) ?? null,
     );
   }
-  const focusedSkillScopeRef = useRef<{
-    key: string;
-    engine: Engine;
-    space: Space;
-    cwd: string;
-    skillsOnly: boolean;
-    claudeProfileId?: string | null;
-    codexProfileId?: string | null;
-  } | null>(null);
+  const focusedSkillScopeRef = useRef<SkillCatalogRequest | null>(null);
   const historyRequestsRef = useRef(new HistoryRequestCoordinator());
   const turnFileRequestsRef = useRef(new TurnFilePageRequests());
   const terminalHistoryRepairRef = useRef<Map<
@@ -1148,7 +1141,7 @@ export default function App() {
   );
   const focusedSkillCatalogKey = skillCatalogKey(
     machineId, focusedEngine, space, capabilityCwd,
-    focusedCodexProfileId, focusedClaudeProfileId);
+    focusedCodexProfileId, focusedClaudeProfileId, focusedSid);
   focusedSkillScopeRef.current = {
     key: focusedSkillCatalogKey,
     engine: focusedEngine,
@@ -1157,6 +1150,7 @@ export default function App() {
     skillsOnly: true,
     claudeProfileId: focusedClaudeProfileId,
     codexProfileId: focusedCodexProfileId,
+    sid: focusedSid,
   };
   const activeBtwDraftKey = composerDraftKey(
     machineId, space,
@@ -1385,6 +1379,12 @@ export default function App() {
     request: SkillCatalogRequest,
     force = false,
   ) => {
+    // DSH skills belong to a native session, including when another browser
+    // owns the wrapper's global focus. A new-chat draft has no catalog yet.
+    if (request.engine === "dsh" && !request.sid?.startsWith("dsh@")) {
+      setCapabilitiesLoading(false);
+      return false;
+    }
     const cached = skillCatalogsRef.current[request.key];
     if (request.skillsOnly && !force && skillCatalogFresh(cached)) return false;
     return skillCatalogRequestsRef.current?.request(request) ?? false;
@@ -1645,6 +1645,7 @@ export default function App() {
   // `engine` selects the backend (Claude Code / Codex): the whole UI re-skins via
   // data-engine, and the sidebar re-lists that engine's own sessions.
   const engineRef = useRef(engine);
+  const harnessPointerSelectionRef = useRef(false);
   engineRef.current = engine;
   const spaceRef = useRef(space);
   spaceRef.current = space;
@@ -3969,6 +3970,7 @@ export default function App() {
       skillsOnly: true,
       claudeProfileId: focusedClaudeProfileId,
       codexProfileId: focusedCodexProfileId,
+      sid: focusedSid,
     });
   }, [
     authed,
@@ -4000,6 +4002,7 @@ export default function App() {
       skillsOnly: false,
       claudeProfileId: focusedClaudeProfileId,
       codexProfileId: focusedCodexProfileId,
+      sid: focusedSid,
     }, true);
   }, [
     authed,
@@ -4009,6 +4012,7 @@ export default function App() {
     focusedEngine,
     focusedCodexProfileId,
     focusedSkillCatalogKey,
+    focusedSid,
     requestSkillCatalog,
     space,
     state.connState,
@@ -6001,6 +6005,7 @@ export default function App() {
               skillsOnly: false,
               claudeProfileId: focusedClaudeProfileId,
               codexProfileId: focusedCodexProfileId,
+              sid: focusedSid,
             }, true);
           }}
           skills={skillCatalogs[focusedSkillCatalogKey]?.items}
@@ -6013,6 +6018,7 @@ export default function App() {
               skillsOnly: true,
               claudeProfileId: focusedClaudeProfileId,
               codexProfileId: focusedCodexProfileId,
+              sid: focusedSid,
             });
           }}
           workArtifactCount={space === "work" ? currentWorkArtifacts.length : 0}
@@ -6307,6 +6313,7 @@ export default function App() {
             skillsOnly: false,
             claudeProfileId: focusedClaudeProfileId,
             codexProfileId: focusedCodexProfileId,
+            sid: focusedSid,
           }, true);
         }}
         onManagePlugin={(item, action) => {

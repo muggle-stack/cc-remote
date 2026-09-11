@@ -626,7 +626,7 @@ class DshRuntime:
     async def handle_get_engine_capabilities(self, cmd):
         ctx = await self.ctx(getattr(cmd, "sid", None))
         value = await self.client.rpc("skills/list", {"request": {"sessionId": ctx.sdk.native_id}})
-        result = EngineCapabilities(engine="dsh", space="code", cwd=ctx.cwd,
+        result = EngineCapabilities(engine="dsh", space="code", cwd=ctx.cwd, sid=ctx.key,
                                     request_id=cmd.cmd_id, to=cmd.client_id, skills_only=cmd.skills_only,
                                     items=[{"kind": "skill", "id": s["name"], "name": s["name"],
                                             "description": s.get("description", ""), "enabled": True,

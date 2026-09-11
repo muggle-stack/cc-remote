@@ -21,6 +21,7 @@ export interface SkillCatalogRequest {
   skillsOnly: boolean;
   claudeProfileId?: string | null;
   codexProfileId?: string | null;
+  sid?: string | null;
 }
 
 export interface SkillCatalogReadIdentity extends SkillCatalogRequest {
@@ -48,6 +49,7 @@ export const skillCatalogKey = (
   cwd: string,
   codexProfileId?: string | null,
   claudeProfileId?: string | null,
+  sid?: string | null,
 ): string => [
   machineId,
   engine,
@@ -56,7 +58,7 @@ export const skillCatalogKey = (
     ? (codexProfileId || "__default__")
     : engine === "claude"
       ? (claudeProfileId || "__default__")
-      : "",
+      : (sid || "__new__"),
   cwd || ".",
 ].join("\u0000");
 
@@ -77,6 +79,7 @@ export const skillCatalogResponseMatches = (
   // before the request. Explicit cwd scopes still require exact equality.
   && (!read.cwd || response.cwd === read.cwd)
   && response.skills_only === read.skillsOnly
+  && (read.engine !== "dsh" || response.sid === read.sid)
   && (read.engine !== "codex"
     || (response.codex_profile_id ?? null)
       === (read.codexProfileId ?? null))
