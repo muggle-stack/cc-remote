@@ -15,5 +15,33 @@
   <body>
     <div id="root"><div style="padding:24px;color:#A29B88;font-family:system-ui,sans-serif">加载中…</div></div>
     <script type="module" src="/src/main.tsx"></script>
-  </body>
+  <link rel="stylesheet" href="/katex/katex.min.css">
+<script defer src="/katex/katex.min.js"></script>
+<script defer src="/katex/auto-render.min.js"></script>
+<script>
+// KaTeX math auto-render patch (cc-remote v3.0.0)
+window.addEventListener('load', function () {
+  var OPTS = {
+    delimiters: [
+      { left: '$$', right: '$$', display: true },
+      { left: '\\[', right: '\\]', display: true },
+      { left: '\\(', right: '\\)', display: false },
+      { left: '$', right: '$', display: false }
+    ],
+    ignoredClasses: ['katex', 'katex-display'],
+    throwOnError: false
+  };
+  function render(el) {
+    if (window.renderMathInElement) { try { renderMathInElement(el, OPTS); } catch (e) {} }
+  }
+  var t = null;
+  var mo = new MutationObserver(function () {
+    clearTimeout(t);
+    t = setTimeout(function () { render(document.body); }, 120);
+  });
+  mo.observe(document.body, { childList: true, subtree: true, characterData: true });
+  render(document.body);
+});
+</script>
+</body>
 </html>
