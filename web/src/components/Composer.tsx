@@ -2,6 +2,7 @@ import type { DshRead } from "../dsh-api";
 import type { DshItem } from "../protocol";
 import { useDshReferences } from "./DshReferences";
 import type { DshState, DshCommandResult } from "../protocol";
+import { dshCommandMatches } from "../dsh-commands";
 import {
   useCallback,
   useEffect,
@@ -67,6 +68,7 @@ import {
 const DshReferences = lazy(() => import("./DshReferenceList"));
 const AutoCompactControl = lazy(() => import("./AutoCompactControl"));
 const ContextPopover = lazy(() => import("./ContextPopover"));
+const DshCommandFeedback = lazy(() => import("./DshCommandFeedback"));
 
 interface Props {
   dsh?: DshState;
@@ -367,8 +369,7 @@ export function Composer(p: Props) {
   const cmdToken = slashToken(input);
   const cmdMatches = cmdToken !== null
     ? [...matchCommands(cmdToken, p.engine, p.surface ?? "code"), ...(p.engine === "dsh"
-      ? (p.dsh?.commands ?? []).filter(c => c.name.startsWith(cmdToken)
-        && !clientSlashesFor("dsh").has(c.name)).map(c => ({ slash: c.name, name: c.name, ds: c.description, ic: "terminal" })) : [])] : [];
+      ? dshCommandMatches(cmdToken, p.dsh) : [])] : [];
   const currentSkillToken = p.engine === "codex" || p.engine === "dsh" ? skillToken(input) : null;
   const skillMatches = currentSkillToken !== null && p.skills
     ? matchSkills(currentSkillToken, p.skills) : [];
@@ -694,6 +695,8 @@ export function Composer(p: Props) {
   // Pick a command from the palette. Client commands run now; cc skills
   // (/code-review …) fill the composer so the user can add args, then send.
   const pickCommand = (slash: string) => {
+    const command = cmdMatches.find(c => c.slash === slash);
+    if (command?.unavailable) { flash(command.ds); return; }
     // Autocompact is intentionally command-only: choosing its suggestion fills
     // the composer, and only an explicit send may apply a value or open the UI.
     if (slash === "autocompact") {
@@ -703,6 +706,7 @@ export function Composer(p: Props) {
       return;
     }
     if (clientSlashesFor(p.engine).has(slash)) { runClientSlash(slash, ""); focusTa(); return; }
+    if (p.engine === "dsh" && slash === "goal") { runClientSlash(slash, ""); return; }
     setInput("/" + slash + " ");
     focusTa(); growTa();
   };
@@ -728,6 +732,9 @@ export function Composer(p: Props) {
         flash(`此 DSH 会话没有 /${parsed.slash} 命令`); return;
       }
       const command = p.dsh?.commands.find(command => command.name === parsed.slash);
+      if (parsed.slash === "goal" && !parsed.args && !hasAttachments && !pastes.length && command) {
+        runClientSlash("goal", ""); return;
+      }
       if (hasAttachments && command && !command.attachments) { flash(`/${parsed.slash} 不接受附件`); return; }
       if (dshPendingRef.current) { flash("正在等待 DSH 确认命令"); return; }
       const composed = composePastePrompt(pastes, raw);
@@ -913,7 +920,7 @@ export function Composer(p: Props) {
           }
             data-lock-horizontal-swipe="true">
             {currentSkillToken === null ? cmdMatches.map((c) => (
-              <button key={c.slash} type="button" className="cmd" onClick={() => pickCommand(c.slash)}>
+              <button key={c.slash} type="button" className="cmd" disabled={c.unavailable} onClick={() => pickCommand(c.slash)}>
                 <span className="cmd-ic"><Icon name={c.ic} size={17} /></span>
                 <span className="cmd-tx">
                   <span className="cmd-nm"><span className="slash">/{c.slash}</span></span>
@@ -939,6 +946,8 @@ export function Composer(p: Props) {
           </div>
         )}
         {notice && <div className="composer-notice">{notice}</div>}
+        {p.engine === "dsh" && <Suspense fallback={null}><DshCommandFeedback
+          scope={p.draftKey} state={p.dsh} result={dshResult} /></Suspense>}
         {(p.queue.length > 0 || p.pendingSend || p.failedDeferred.length > 0) && (
           <div className="queued show">
             {[
@@ -1118,12 +1127,6 @@ export function Composer(p: Props) {
               title={deferredClaudeControls
                 ? `Remote 接管后思考强度：${effortName ?? "读取中"}；不是${externalClaudeOwner}当前强度`
                 : "思考强度"}>{effortName ?? "强度读取中"}</button>
-            {p.engine === "dsh" && p.dsh?.plan_active != null && <button type="button"
-              className={`hint-ctl collaboration-chip${p.dsh.plan_active ? " plan" : ""}`}
-              disabled={locked || p.dsh.plan_pending} title={p.dsh.plan_active ? "退出计划模式" : "进入计划模式"}
-              onClick={() => p.onDshCommand?.(p.dsh?.plan_active ? "/plan off" : "/plan on")}>
-              <Icon name="plan" size={13} />{p.dsh.plan_pending ? p.dsh.plan_active ? "正在退出计划" : "正在进入计划" : p.dsh.plan_active ? "计划模式" : "计划"}
-            </button>}
             {p.engine === "codex" && p.collaborationMode === "plan" && (
               <button
                 className="hint-ctl collaboration-chip plan"
@@ -1220,10 +1223,6 @@ export function Composer(p: Props) {
         </>)}
       </div>
 
-      {p.engine === "dsh" && dshResult?.text && <details className={`dsh-command-result ${dshResult.status}`} open={dshResult.status !== "success"}>
-        <summary>{dshResult.status === "success" ? "命令已完成" : dshResult.status === "unknown" ? "命令结果待确认" : "命令未执行成功"}</summary>
-        <p>{dshResult.text}</p>
-      </details>}
       {p.engine === "dsh" && p.dsh?.error && <div className="dsh-connection-note" role="status">{p.dsh.error}</div>}
       {sheetKind !== null && <Suspense fallback={null}><CommandSheet
         open={sheetKind !== null}

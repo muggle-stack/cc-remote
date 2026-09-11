@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+- Redesign Goal dialogs with rounded, engine-specific controls: Codex Token budgets,
+  Claude completion checks and DSH native round caps. Confirm mutations against
+  native state and preserve edits on errors or stale revisions (protocol v65).
+
 - Add native DSH archive, full-text search, references, subagent controls, jobs,
   plan review, produced files, session ZIP export and diagnostics (protocol v64).
 - Open directory links in the file browser and preview XLSX sheets with saved

@@ -680,3 +680,10 @@
 .engine-menu-item:hover { background: var(--raised); }
 .engine-menu-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 @media (pointer: coarse) { .engine-menu-item { min-height: 44px; } }
+.dsh-command-result { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); font-size: 12px; color: var(--dim); }
+.dsh-command-result > svg { flex: none; margin-top: 2px; }
+.dsh-command-result p { flex: 1; min-width: 0; margin: 0; max-height: 160px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dsh-command-result button { flex: none; display: grid; place-items: center; border: 0; background: transparent; color: var(--dim); padding: 3px; cursor: pointer; }
+.dsh-command-result.error, .dsh-command-result.unknown { color: var(--warn); }
+.dsh-plan-state { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; color: var(--accent); font-size: 12px; }
+.cmd:disabled { cursor: default; opacity: .6; }

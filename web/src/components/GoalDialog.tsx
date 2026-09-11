@@ -44,7 +44,7 @@ export function GoalSheet({ engine, title, status, scopeRef, onClose, children, 
   // Geometry updates during keyboard/layout changes must not steal input focus.
   }, [hasGeometry]);
   if (!geometry) return null;
-  const name = engine === "codex" ? "Codex" : "Claude";
+  const name = engine === "codex" ? "Codex" : engine === "dsh" ? "DSH" : "Claude";
   return <>
     <div className="scrim show goal-scrim" onClick={onClose} />
     <section ref={dialogRef} tabIndex={-1} className={`sheet show goal-sheet goal-card goal-card-${engine}`}
@@ -74,21 +74,22 @@ export function GoalObjective({ value, onChange, hint, disabled = false }: {
   </div>;
 }
 
-export function GoalLimit({ value, onChange, allowUnlimited = true, disabled = false }: {
-  value: string; onChange: (value: string) => void;
+export function GoalLimit({ kind, value, onChange, allowUnlimited = true, disabled = false }: {
+  kind: "tokens" | "rounds"; value: string; onChange: (value: string) => void;
   allowUnlimited?: boolean; disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const id = useId();
-  const label = "Token 预算";
-  const valid = value === "" ? allowUnlimited : /^[0-9]+$/.test(value)
+  const isRounds = kind === "rounds";
+  const label = isRounds ? "轮次上限" : "Token 预算";
+  const valid = value === "" ? !isRounds && allowUnlimited : /^[0-9]+$/.test(value)
     && Number.isSafeInteger(Number(value)) && Number(value) > 0;
-  const presets = [50000, 100000, 250000, 500000];
+  const presets = isRounds ? [32, 64, 128, 256] : [50000, 100000, 250000, 500000];
   return <div className="goal-limit">
     <button type="button" className="goal-limit-trigger" disabled={disabled} aria-expanded={open}
       aria-controls={id} onClick={() => setOpen(!open)}>
-      <Icon name="cpu" size={16} />
-      预算 · {!valid ? "自定义" : value ? goalTokens(Number(value)) : "不限"}
+      <Icon name={isRounds ? "refresh" : "cpu"} size={16} />
+      {isRounds ? "轮次上限" : "预算"} · {!valid ? "自定义" : value ? isRounds ? value : goalTokens(Number(value)) : "不限"}
       <Icon name="chev" size={14} />
     </button>
     {open && <div className="goal-limit-picker" id={id} onKeyDown={event => {
@@ -97,12 +98,12 @@ export function GoalLimit({ value, onChange, allowUnlimited = true, disabled = f
       }
     }}>
       <label>{label}<input aria-label={label} type="text" inputMode="numeric" value={value}
-        aria-invalid={!valid} placeholder="不限"
+        aria-invalid={!valid} placeholder={isRounds ? "256" : "不限"}
         onChange={event => onChange(event.target.value)} /></label>
       <div className="goal-limit-presets">
-        {allowUnlimited && <button type="button" onClick={() => { onChange(""); setOpen(false); }}>不限</button>}
+        {!isRounds && allowUnlimited && <button type="button" onClick={() => { onChange(""); setOpen(false); }}>不限</button>}
         {presets.map(n => <button type="button" key={n} onClick={() => { onChange(String(n)); setOpen(false); }}>
-          {goalTokens(n)}
+          {isRounds ? n : goalTokens(n)}
         </button>)}
       </div>
       {!valid && <small role="alert">请输入大于 0 的整数</small>}
@@ -111,12 +112,14 @@ export function GoalLimit({ value, onChange, allowUnlimited = true, disabled = f
   </div>;
 }
 
-export function GoalMeter({ label, used, total }: {
-  label: string; used: number; total: number;
+export function GoalMeter({ label, used, total, rounds = false }: {
+  label: string; used: number; total: number; rounds?: boolean;
 }) {
+  const format = rounds ? (v: number) => v.toLocaleString() : goalTokens;
   return <div className="goal-budget">
-    <div><span>{label}</span><b>{goalTokens(used)} <em>/ {goalTokens(total)}</em></b></div>
+    <div><span>{label}</span><b>{format(used)} <em>/ {format(total)}</em></b></div>
     <progress value={used} max={total} aria-label={label} />
+    {rounds && <small>剩余 {Math.max(0, total - used).toLocaleString()} 轮</small>}
   </div>;
 }
 

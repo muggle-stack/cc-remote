@@ -3,7 +3,8 @@
 import { LlmAdapter } from '@deepseek-ai/dsh-llm';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 export const name = 'cc-remote-scripted-model';
-export const inject = ['llm', 'tools', 'approval'];
+export const inject = ['llm', 'tools', 'approval', 'connection', 'agents'];
+const telemetry = { modelCalls: 0 };
 class ScriptedAdapter extends LlmAdapter {
   async listModels(provider) { return [await this.resolveModel(provider, 'deepseek-flash')]; }
   async resolveModel(provider, id) {
@@ -12,11 +13,19 @@ class ScriptedAdapter extends LlmAdapter {
       reasoning: { efforts: [{ id: 'off', name: 'Off' }, { id: 'low', name: 'Low' }], defaultEffort: 'low' } };
   }
   async *stream(options) {
+    telemetry.modelCalls++;
     options.signal?.throwIfAborted();
     const input = options.messages.filter(m => m.role === 'user').flatMap(m => m.content)
       .filter(b => b.type === 'text' && b.text.startsWith('compatibility:')).at(-1)?.text ?? '';
     const userIndex = options.messages.findLastIndex(m => m.role === 'user' && m.content.some(b => b.type === 'text' && b.text.startsWith('compatibility:')));
     const answered = options.messages.slice(userIndex + 1).some(m => m.content.some(b => b.type === 'tool-result'));
+    if (!answered && input === 'compatibility:plan') {
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' };
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'fixture-plan-review',
+        name: 'exit_plan_mode', arguments: JSON.stringify({ plan: '# Offline plan\n\n1. Validate the control channel.' }) } };
+      yield { type: 'finish', reason: { kind: 'tool-calls' } };
+      return;
+    }
     if (!answered && (input === 'compatibility:ask' || input === 'compatibility:approval')) {
       const call = { type: 'tool-call', id: 'fixture-interaction',
         name: input.endsWith(':ask') ? 'ask_user_question' : 'cc_remote_test_approval',
@@ -43,6 +52,9 @@ class ScriptedAdapter extends LlmAdapter {
   }
 }
 export function apply(ctx) {
+  ctx.connection.fetch.register({ path: '/api/cc-remote.test-state', methods: ['GET'], requestBody: 'buffered',
+    fetch: () => Response.json({ ...telemetry, agents: ctx.agents.roots().map(agent => agent.id) }),
+  });
   ctx.llm.registerAdapter(['deepseek-official'], new ScriptedAdapter());
   ctx.tools.register(defineTool({ name: 'cc_remote_test_approval', description: 'Offline approval contract fixture', parameters: {},
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },

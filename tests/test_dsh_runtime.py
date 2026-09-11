@@ -30,7 +30,10 @@ class Client:
         self.calls.append(("snapshot", sid, options))
         return {"contract": 1, "header": {"version": 3, "id": sid[4:], "cwd": "/tmp"},
                 "cursor": -1, "records": [], "hasMore": False,
-                "projections": {"asOfSeq": -1, "values": {}}}
+                "projections": {"asOfSeq": -1, "values": {}},
+                **({"commands": [{"name": "goal", "description": "Native goal"},
+                                 {"name": "plan", "description": "Native plan"}]}
+                   if options.get("commands") else {})}
 
     async def rpc(self, endpoint, args=None):
         self.calls.append((endpoint, args))
@@ -76,6 +79,9 @@ async def test_cold_history_and_switch_do_not_follow_or_activate_agent():
     assert machine.focused_sid == "dsh@cold"
     assert machine.sessions["dsh@cold"].sdk.watch is None
     assert all(call[0] in {"snapshot", "list"} for call in client.calls)
+    assert [c.name for c in machine.sessions["dsh@cold"].sdk.state.commands] == ["goal", "plan"]
+    assert any(frame.type == "dsh_state" and {c.name for c in frame.commands} == {"goal", "plan"}
+               for frame in transport.sent)
     assert all(frame.to in {None, "viewer"} for frame in transport.sent)
     await runtime.close()
 
@@ -344,3 +350,65 @@ async def test_history_page_fence_excludes_live_events_arriving_during_read():
     client.history_snapshot = concurrent_read
     result = await machine._handle(GetHistory(session_id=ctx.key, detail="summary"))
     assert result.live_seq == before and ctx.seq > before
+
+
+@pytest.mark.parametrize("action", ["create", "edit", "pause", "resume", "complete", "clear"])
+@pytest.mark.asyncio
+async def test_goal_actions_forward_native_round_caps_and_exact_client_ref(action):
+    from cc_remote.protocol import ActDshGoal
+    machine, _, runtime, client = setup_runtime()
+    ctx = await runtime.ctx("dsh@session")
+    ctx.sdk.commands = [{"name": "goal"}]
+    async def activate(_ctx):
+        pass
+    runtime.activate = activate
+    fields = {"objective": "finish tests", "max_rounds": 64} if action in {"create", "edit"} else {}
+    if action != "create":
+        fields.update(goal_id="shown-goal", revision=3)
+    command = ActDshGoal(sid=ctx.key, action=action, cmd_id="goal-action", client_id="viewer", **fields)
+    result = await machine._handle(command)
+    assert result.type == "dsh_command_result" and result.status == "success"
+    assert result.request_id == command.cmd_id and result.to == "viewer"
+    expected = {"agentId": "session"}
+    if action != "create":
+        expected["ref"] = {"id": "shown-goal", "revision": 3}
+    if action in {"create", "edit"}:
+        expected["request"] = {"objective": "finish tests", "maxGoalRounds": 64}
+    assert ("goals/" + action, expected) in client.calls
+    assert not any(call[0] == "commands/execute" for call in client.calls)
+
+
+@pytest.mark.asyncio
+async def test_goal_action_stale_ref_is_not_retried_or_replaced():
+    from cc_remote.protocol import ActDshGoal
+    machine, _, runtime, client = setup_runtime()
+    ctx = await runtime.ctx("dsh@session")
+    ctx.sdk.commands = [{"name": "goal"}]
+    async def activate(_ctx):
+        pass
+    runtime.activate = activate
+    writes = []
+    async def fail(endpoint, args):
+        writes.append((endpoint, args))
+        raise DshError("GOAL_STALE_REF", "目标已更新，请重新查看后编辑。")
+    client.rpc = fail
+    result = await machine._handle(ActDshGoal(sid=ctx.key, action="edit", goal_id="old", revision=1,
+        objective="keep this draft", max_rounds=128, cmd_id="edit", client_id="viewer"))
+    assert result.type == "dsh_command_result" and result.status == "error"
+    assert result.to == "viewer" and result.request_id == "edit"
+    assert len(writes) == 1 and writes[0][1]["ref"] == {"id": "old", "revision": 1}
+
+
+@pytest.mark.parametrize("fields", [
+    {"action": "create", "objective": "x", "revision": 1},
+    {"action": "create", "objective": " "},
+    {"action": "edit", "objective": "x"},
+    {"action": "edit", "goal_id": "g", "revision": 1},
+    {"action": "pause", "goal_id": "g", "revision": 1, "max_rounds": 32},
+    {"action": "create", "objective": "x", "max_rounds": True},
+    {"action": "create", "objective": "x", "max_rounds": 0},
+])
+def test_goal_action_rejects_invalid_native_mutation_shapes(fields):
+    from cc_remote.protocol import ActDshGoal
+    with pytest.raises(ValueError):
+        ActDshGoal(sid="dsh@s", cmd_id="a", **fields)

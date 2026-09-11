@@ -8,6 +8,7 @@ const nativeState: Omit<DshState, "v" | "ts"> = { type: "dsh_state", sid, connec
   permissions: [{ value: "read-only", name: "只读", description: "仅查看文件" },
     { value: "workspace-write", name: "工作区写入", description: "修改当前工作目录" }],
   commands: [{ name: "goal", description: "设置并管理目标", attachments: true },
+    { name: "plan", description: "进入计划模式；/plan off 退出", attachments: true },
     { name: "permission", description: "权限预设", attachments: false },
     { name: "compact", description: "压缩上下文", attachments: false }],
   goal: { id: "native-goal", revision: 2, objective: "完成 DSH 适配并验证手机界面", phase: "active",
@@ -17,6 +18,7 @@ const nativeState: Omit<DshState, "v" | "ts"> = { type: "dsh_state", sid, connec
 async function mockDshRelay(page: Page, { running = false, commandSuccess = false, features = false } = {}) {
   const commands: Record<string, unknown>[] = [];
   let archived = false;
+  let currentGoal = nativeState.goal;
   const context = { type: "context_report", sid, total_tokens: 24000,
     max_tokens: 64000, percentage: 37.5, available: true,
     source: "recent_turn", categories: [] };
@@ -32,7 +34,10 @@ async function mockDshRelay(page: Page, { running = false, commandSuccess = fals
     devices: [{ machine_id: "dsh-machine", label: "Development", online: true }],
   } }));
   await page.routeWebSocket(/\/ws(?:\?|$)/, socket => {
-    emit = event => socket.send(JSON.stringify({ v: PROTOCOL_VERSION, ts: Date.now() / 1000, ...event }));
+    emit = event => {
+      if (event.type === "dsh_state" && "goal" in event) currentGoal = event.goal as DshState["goal"];
+      socket.send(JSON.stringify({ v: PROTOCOL_VERSION, ts: Date.now() / 1000, ...event }));
+    };
     const snapshot = () => {
       emit({ type: "snapshot", sid, cc_session_id: sid, state: running ? "running" : "idle",
         tail_text: "", cwd: "/tmp/dsh-test", generation: "dsh-generation" });
@@ -78,6 +83,21 @@ async function mockDshRelay(page: Page, { running = false, commandSuccess = fals
       if (cmd.type === "set_dsh_control") emit({ type: "dsh_command_result", sid, request_id: cmd.cmd_id,
         status: commandSuccess ? "success" : "error", text: commandSuccess ? "命令已执行" : "当前目标不能替换，请使用 /goal edit" });
       if (cmd.type === "get_context") emit({ ...context, request_id: cmd.cmd_id });
+      if (cmd.type === "act_dsh_goal") {
+        if (commandSuccess) {
+          const next = cmd.action === "clear" ? null : cmd.action === "create" ? {
+            id: "created-goal", revision: 1, objective: String(cmd.objective), phase: "active" as const,
+            rounds: 0, max_rounds: Number(cmd.max_rounds), activation: "armed" as const,
+          } : { ...currentGoal!, revision: currentGoal!.revision + 1,
+            ...(cmd.action === "edit" ? { objective: String(cmd.objective ?? currentGoal!.objective), max_rounds: Number(cmd.max_rounds ?? currentGoal!.max_rounds) }
+              : { phase: cmd.action === "resume" ? "active" : cmd.action === "pause" ? "paused" : "complete",
+                activation: cmd.action === "resume" ? "armed" : "disarmed" }),
+          };
+          emit({ ...nativeState, goal: next });
+        }
+        emit({ type: "dsh_command_result", sid: cmd.sid, request_id: cmd.cmd_id,
+          status: commandSuccess ? "success" : "error", text: commandSuccess ? "" : "目标已更新，请重新打开编辑后提交。" });
+      }
       if (cmd.type === "get_engine_capabilities") {
         // Another browser may still own the wrapper's Codex focus. Only an
         // explicit DSH session target can safely read this native catalog.
@@ -323,13 +343,13 @@ for (const theme of ["light", "dark"] as const) {
 test(`DSH native progress distinguishes inactive continuation and fits the viewport (${theme})`, async ({ page }, info) => {
   if (info.project.name === "chromium") await page.setViewportSize({ width: 1440, height: 900 });
   await page.addInitScript(theme => localStorage.setItem("cc_remote_theme", theme), theme);
-  const relay = await openDsh(page);
-  const goal = page.locator(".dsh-goal");
+  const relay = await openDsh(page, { commandSuccess: true });
+  await page.getByRole("button", { name: /查看 DSH Goal/ }).click();
+  const goal = page.getByRole("dialog", { name: "DSH Goal" });
   await expect(goal).toContainText("等待继续");
-  await goal.locator("summary").click();
   await expect(goal).toContainText("3 / 32");
   await goal.getByRole("button", { name: "继续目标", exact: true }).click();
-  await expect.poll(() => relay.commands.some(c => c.type === "set_dsh_control" && c.value === "/goal resume")).toBe(true);
+  await expect.poll(() => relay.commands.some(c => c.type === "act_dsh_goal" && c.action === "resume")).toBe(true);
   await page.screenshot({ path: info.outputPath("dsh-controls.png") });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
   relay.emit({ ...nativeState, connected: false, error: "DSH 连接中断，正在重新连接。" });
@@ -360,13 +380,16 @@ test("DSH cold command admission and failed goal editing retain the user's text"
   await input.press("Enter");
   await expect.poll(() => relay.commands.some(c => c.type === "set_dsh_control" && c.value === "/goal 冷会话目标")).toBe(true);
   await expect(input).toHaveValue("/goal 冷会话目标");
-  const goal = page.locator(".dsh-goal");
-  await goal.locator("summary").click();
-  await goal.getByRole("button", { name: "编辑", exact: true }).click();
-  await goal.getByLabel("编辑目标").fill("保存失败也保留这段文字");
-  await goal.getByRole("button", { name: "保存", exact: true }).click();
-  await expect(page.getByText("当前目标不能替换，请使用 /goal edit", { exact: true })).toBeVisible();
-  await expect(goal.getByLabel("编辑目标")).toHaveValue("保存失败也保留这段文字");
+  // Explicit command admission establishes native follow, which publishes its
+  // actual command catalog before the existing goal's controls become usable.
+  relay.emit({ ...nativeState });
+  await page.getByRole("button", { name: /查看 DSH Goal/ }).click();
+  const goal = page.getByRole("dialog", { name: "DSH Goal" });
+  await goal.getByRole("button", { name: "编辑目标", exact: true }).click();
+  await goal.getByLabel("目标内容").fill("保存失败也保留这段文字");
+  await goal.getByRole("button", { name: "保存修改", exact: true }).click();
+  await expect(goal.getByRole("alert")).toContainText("目标已更新");
+  await expect(goal.getByLabel("目标内容")).toHaveValue("保存失败也保留这段文字");
 });
 
 test("DSH preset picker uses the native roster and carries the selected preset", async ({ page }) => {
@@ -514,12 +537,124 @@ test("DSH full text search opens matching context without sending a prompt", asy
   expect(relay.commands.some(c => c.type === "query" || c.type === "steer")).toBe(false);
 });
 
-test("DSH plan mode shows native pending and settled states", async ({ page }) => {
+test("DSH plan command uses native syntax and shows pending and settled states without a toolbar button", async ({ page }) => {
   const relay = await openDsh(page, { features: true, commandSuccess: true });
-  await page.getByRole("button", { name: "计划", exact: true }).click();
-  await expect.poll(() => relay.commands.some(c => c.type === "set_dsh_control" && c.value === "/plan on")).toBe(true);
+  await expect(page.getByRole("button", { name: "计划", exact: true })).toHaveCount(0);
+  const input = page.locator(".composer textarea");
+  await input.fill("/pla");
+  await page.getByRole("listbox", { name: "命令", exact: true }).getByRole("button", { name: /\/plan/ }).click();
+  await input.press("Enter");
+  await expect.poll(() => relay.commands.some(c => c.type === "set_dsh_control" && c.value === "/plan")).toBe(true);
+  expect(relay.commands.some(c => c.type === "query" || c.type === "steer" || c.value === "/plan on")).toBe(false);
+  await expect(page.getByRole("status", { name: "DSH 计划状态" })).toHaveCount(0);
   relay.emit({ ...nativeState, plan_active: false, plan_pending: true });
-  await expect(page.getByRole("button", { name: "正在进入计划", exact: true })).toBeDisabled();
+  await expect(page.getByRole("status", { name: "DSH 计划状态" })).toHaveText("进入计划待生效");
   relay.emit({ ...nativeState, plan_active: true, plan_pending: false });
-  await expect(page.getByRole("button", { name: "计划模式", exact: true })).toBeEnabled();
+  await expect(page.getByRole("status", { name: "DSH 计划状态" })).toHaveText("计划模式");
+  await input.fill("/plan off");
+  await input.press("Enter");
+  await expect.poll(() => relay.commands.some(c => c.type === "set_dsh_control" && c.value === "/plan off")).toBe(true);
+  relay.emit({ ...nativeState, plan_active: false, plan_pending: false });
+  await expect(page.getByRole("status", { name: "DSH 计划状态" })).toHaveCount(0);
+});
+
+test("DSH cold goal and plan discovery refreshes the open menu and explains minimal capabilities", async ({ page }) => {
+  const relay = await openDsh(page);
+  const input = page.locator(".composer textarea");
+  relay.emit({ ...nativeState, commands: [], goal: null });
+  await input.fill("/goa");
+  const menu = page.getByRole("listbox", { name: "命令", exact: true });
+  await expect(menu.getByRole("button", { name: /\/goal/ })).toBeDisabled();
+  relay.emit({ ...nativeState, goal: null });
+  await expect(menu.getByRole("button", { name: /\/goal/ })).toBeEnabled();
+  await menu.getByRole("button", { name: /\/goal/ }).click();
+  const dialog = page.getByRole("dialog", { name: "DSH Goal" });
+  await expect(dialog).toBeVisible();
+  expect(relay.commands.some(c => c.type === "act_dsh_goal" || (c.type === "set_dsh_control" && c.value === "/goal"))).toBe(false);
+  await dialog.getByRole("button", { name: "关闭", exact: true }).click();
+  relay.emit({ ...nativeState, agent_preset: "minimal", commands: nativeState.commands.filter(c => c.name === "permission"), goal: null });
+  for (const prefix of ["/goa", "/pla"]) {
+    await input.fill(prefix);
+    await expect(menu.getByRole("button")).toBeDisabled();
+    await expect(menu).toContainText("minimal 未启用");
+  }
+  expect(relay.commands.some(c => c.type === "query" || c.type === "steer")).toBe(false);
+});
+
+test("DSH command errors are dismissible above the input and preserve the draft", async ({ page }, info) => {
+  const relay = await openDsh(page);
+  const input = page.locator(".composer textarea");
+  await input.fill("/goal 保留我的目标");
+  await input.press("Enter");
+  const notice = page.locator(".composer-in .dsh-command-result");
+  await expect(notice).toContainText("当前目标不能替换");
+  await expect(page.locator("details.dsh-command-result")).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath("dsh-command-error.png") });
+  await notice.getByRole("button", { name: "关闭命令提示" }).click();
+  await expect(notice).toHaveCount(0);
+  await expect(input).toHaveValue("/goal 保留我的目标");
+  relay.emit({ ...nativeState, plan_active: false });
+  await expect(notice).toHaveCount(0);
+});
+
+test("DSH Goal form creates native round cap, pauses, edits and resumes", async ({ page }, info) => {
+  const relay = await openDsh(page, { commandSuccess: true });
+  relay.emit({ ...nativeState, goal: null });
+  const input = page.locator(".composer textarea");
+  await input.fill("/goal");
+  await input.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "DSH Goal" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("button", { name: /轮次上限 · 256/ })).toBeVisible();
+  expect(relay.commands.some(c => c.type === "act_dsh_goal")).toBe(false);
+  await dialog.getByLabel("目标内容").fill("完成 DSH 适配并验证手机界面");
+  await dialog.getByRole("button", { name: /轮次上限/ }).click();
+  await dialog.getByRole("button", { name: "64", exact: true }).click();
+  await page.screenshot({ path: info.outputPath("dsh-create.png") });
+  await dialog.getByRole("button", { name: "开始目标", exact: true }).click();
+  await expect(dialog.getByRole("progressbar", { name: "轮次用量" })).toHaveAttribute("max", "64");
+  const created = relay.commands.find(c => c.type === "act_dsh_goal")!;
+  expect(created).toMatchObject({ sid, action: "create", max_rounds: 64, objective: "完成 DSH 适配并验证手机界面" });
+  expect(created.goal_id).toBeUndefined();
+  await dialog.getByRole("button", { name: "暂停续行", exact: true }).click();
+  await expect(dialog).toContainText("已暂停");
+  await dialog.getByRole("button", { name: "编辑目标", exact: true }).click();
+  await dialog.getByLabel("目标内容").fill("保留目标，增加轮次");
+  await dialog.getByRole("button", { name: /轮次上限/ }).click();
+  await dialog.getByRole("button", { name: "128", exact: true }).click();
+  await dialog.getByRole("button", { name: "保存修改", exact: true }).click();
+  await expect(dialog.getByRole("progressbar")).toHaveAttribute("max", "128");
+  expect(relay.commands.find(c => c.type === "act_dsh_goal" && c.action === "edit"))
+    .toMatchObject({ goal_id: "created-goal", revision: 2, max_rounds: 128 });
+  await expect(dialog).toContainText("已暂停");
+  await dialog.getByRole("button", { name: "继续目标", exact: true }).click();
+  await expect(dialog).toContainText("自动续行");
+  await dialog.getByRole("button", { name: "更多目标操作", exact: true }).click();
+  await dialog.getByRole("button", { name: "清除目标", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".dsh-goal")).toHaveCount(0);
+});
+
+test("DSH Goal live updates preserve edit and its original revision; exhausted goals require a higher cap", async ({ page }) => {
+  const relay = await openDsh(page);
+  await page.getByRole("button", { name: /查看 DSH Goal/ }).click();
+  const dialog = page.getByRole("dialog", { name: "DSH Goal" });
+  await dialog.getByRole("button", { name: "编辑目标", exact: true }).click();
+  await dialog.getByLabel("目标内容").fill("不能被实时更新覆盖");
+  relay.emit({ ...nativeState, goal: { ...nativeState.goal, revision: 3, rounds: 32, phase: "blocked", activation: "disarmed" } });
+  await expect(dialog.getByLabel("目标内容")).toHaveValue("不能被实时更新覆盖");
+  await dialog.getByRole("button", { name: "保存修改", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("目标已更新");
+  expect(relay.commands.find(c => c.type === "act_dsh_goal")).toMatchObject({ goal_id: "native-goal", revision: 2 });
+  await expect(dialog.getByLabel("目标内容")).toHaveValue("不能被实时更新覆盖");
+  await dialog.getByRole("button", { name: "保留输入，使用最新版本", exact: true }).click();
+  expect(relay.commands.filter(c => c.type === "act_dsh_goal")).toHaveLength(1);
+  await expect(dialog.getByLabel("目标内容")).toHaveValue("不能被实时更新覆盖");
+  await dialog.getByRole("button", { name: "保存修改", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("目标已更新");
+  expect(relay.commands.filter(c => c.type === "act_dsh_goal").at(-1))
+    .toMatchObject({ goal_id: "native-goal", revision: 3, objective: "不能被实时更新覆盖" });
+  await dialog.getByRole("button", { name: "取消", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "继续目标", exact: true })).toBeDisabled();
+  await expect(dialog).toContainText("可编辑上限后继续");
 });

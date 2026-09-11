@@ -1,4 +1,4 @@
-import type { DshCommandResult, DshDownloadChunk, DshReadKind, DshReadResult, ServerEvent } from "./protocol";
+import type { DshCommandResult, DshDownloadChunk, DshGoalAction, DshReadKind, DshReadResult, ServerEvent } from "./protocol";
 import type { RelayWs } from "./ws";
 
 type Reply = DshReadResult | DshCommandResult | DshDownloadChunk;
@@ -38,6 +38,12 @@ export class DshApi {
   act(sid: string, target: string, action: "queue" | "steer" | "stop", prompt = "") {
     return this.request<DshCommandResult>(sid,
       () => this.transport()?.sendActDshSubagent(sid, target, action, prompt) ?? null);
+  }
+
+  async goal(sid: string, action: DshGoalAction) {
+    const result = await this.request<DshCommandResult>(sid,
+      () => this.transport()?.sendActDshGoal(sid, action) ?? null);
+    if (result.status !== "success") throw new Error(result.text || "操作结果未确认，请刷新目标后重试。");
   }
 
   async download(sid: string, progress: (value: number) => void, signal: AbortSignal): Promise<Blob> {

@@ -25,8 +25,8 @@ import tempfile
 from types import SimpleNamespace
 
 from cc_remote.protocol import (
-    ArchiveSession, ReadDsh, DownloadDsh, AnswerQuestion, BrowseFiles, ForkSession, GetContext, GetFilePreview, GetHistory,
-    GetHistoryImage, Interrupt, NewSession, Query, SetDshControl, SetModel, Steer,
+    ActDshGoal, ArchiveSession, ReadDsh, DownloadDsh, AnswerQuestion, BrowseFiles, ForkSession, GetContext, GetFilePreview, GetHistory,
+    GetHistoryImage, Interrupt, NewSession, Query, SetDshControl, SetModel, Steer, SwitchSession,
 )
 from cc_remote.wrapper.dsh_client import DshClient, TESTED_DSH_VERSION, exchange_launch_url, native_session_id
 from tests.test_attachments import _complete_png
@@ -59,13 +59,15 @@ async def exercise(installation: Path, root: Path):
     shutil.copyfile(REPO / "tests/fixtures/dsh/migration.mjs", root / "migration.mjs")
     await asyncio.to_thread(subprocess.run, [node, str(root / "migration.mjs")],
                             cwd=root, check=True, timeout=30)
-    with log_path.open("wb") as log:
-        os.chmod(log_path, 0o600)
-        process = subprocess.Popen([node, str(installation / "node_modules/.bin/dsh"),
-            "--profile", "web", "--patch", str(patch), "--port", str(port), "--no-open"],
-            cwd=root, env={"PATH": os.environ["PATH"], "HOME": str(Path.home()),
-                "DSH_HOME": str(root / "home"), "LANG": "en_US.UTF-8"},
-            stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+    def start_server():
+        with log_path.open("wb") as log:
+            os.chmod(log_path, 0o600)
+            return subprocess.Popen([node, str(installation / "node_modules/.bin/dsh"),
+                "--profile", "web", "--patch", str(patch), "--port", str(port), "--no-open"],
+                cwd=root, env={"PATH": os.environ["PATH"], "HOME": str(Path.home()),
+                    "DSH_HOME": str(root / "home"), "LANG": "en_US.UTF-8"},
+                stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+    process = start_server()
     machine, transport = _mk_machine()
     runtime = machine._dsh
     try:
@@ -74,13 +76,41 @@ async def exercise(installation: Path, root: Path):
             return re.search(r"http://[^\s]+", log_path.read_text(errors="replace"))
         match = await eventually(launch_url, "native startup")
         runtime.client = DshClient(await exchange_launch_url(match.group()))
-        # The native create method creates durable storage without promoting an Agent.
-        created = await runtime.client.rpc("session/create", {"request": {"cwd": str(root), "agentPreset": "standard"}})
+        async def native_state():
+            response = await runtime.client._http.get('/api/cc-remote.test-state')
+            response.raise_for_status()
+            return response.json()
+        # Native create also creates a resident Agent. Restart this isolated
+        # server before testing cold discovery, so no resident scope can mask it.
+        seeded = {preset: await runtime.client.rpc("session/create", {"request": {"cwd": str(root), "agentPreset": preset}})
+                  for preset in ("standard", "ptc", "minimal")}
+        await runtime.client.close()
+        os.killpg(process.pid, signal.SIGTERM)
+        await asyncio.to_thread(process.wait, timeout=5)
+        process = start_server()
+        match = await eventually(launch_url, "cold native startup")
+        runtime.client = DshClient(await exchange_launch_url(match.group()))
+        created = seeded["standard"]
         cold = "dsh@" + created["sessionId"]
         await machine._handle(GetHistory(session_id=cold, detail="summary", client_id="native-test"))
         assert cold not in machine.sessions
         assert not next(item for item in await runtime.client.list_sessions() if item["sessionId"] == created["sessionId"])["running"]
         print("PASS native cold history", flush=True)
+
+        before_discovery = await native_state()
+        for preset in ("standard", "ptc", "minimal"):
+            item = seeded[preset]
+            target = "dsh@" + item["sessionId"]
+            result = await machine._handle(SwitchSession(session_id=target, engine="dsh", client_id="native-test"))
+            assert result is None, result
+            handle = machine.sessions[target].sdk
+            names = {c.name for c in handle.state.commands}
+            assert "permission" in names, (preset, names)
+            assert ({"goal", "plan"} <= names) == (preset != "minimal"), (preset, names)
+            assert handle.watch is None
+        after_discovery = await native_state()
+        assert after_discovery == before_discovery, ('command discovery activated an Agent or model', before_discovery, after_discovery)
+        print("PASS native cold command discovery: standard/PTC/minimal; no Agent or model activation", flush=True)
 
         await machine._handle(NewSession(engine="dsh", cwd=str(root), dsh_agent_preset="standard",
             prompt="compatibility:simple", msg_id="native-1", client_id="native-test", request_id="create-1"))
@@ -149,16 +179,79 @@ async def exercise(installation: Path, root: Path):
             assert not ctx.pending_asks
         print("PASS native questions and one-shot approvals", flush=True)
 
+        before_plan = await native_state()
+        for line, active in [("/plan", True), ("/plan off", False), ("/goal", False)]:
+            result = await machine._handle(SetDshControl(sid=ctx.key, kind="command", value=line,
+                cmd_id="native-control-" + line.replace("/", "").replace(" ", "-"), client_id="native-test"))
+            assert result.type == "dsh_command_result" and result.status == "success", result
+            await eventually(lambda: ctx.sdk.state.plan_active == active and not ctx.sdk.state.plan_pending, line)
+        assert await native_state() == before_plan, 'bare plan/goal controls submitted model input'
+        for answer, stays_active in [("Keep planning", True), ("Approve", False)]:
+            count = len(ends())
+            result = await machine._handle(SetDshControl(sid=ctx.key, kind="command", value="/plan compatibility:plan",
+                cmd_id="native-review-" + str(stays_active), client_id="native-test"))
+            assert result.status == "success", result
+            await eventually(lambda: ctx.pending_asks, 'native plan review')
+            ask_id = next(iter(ctx.pending_asks))
+            assert "# Offline plan" in ctx.pending_asks[ask_id].event.question
+            await machine._handle(AnswerQuestion(sid=ctx.key, ask_id=ask_id, answer=answer, client_id="native-test"))
+            await eventually(lambda: len(ends()) > count and ctx.state == "idle", 'plan review completion')
+            assert ctx.sdk.state.plan_active == stays_active
+            assert not ctx.pending_asks
+        print("PASS native plan entry/exit without model input; plan review, keep-planning and approval", flush=True)
+
         command = await machine._handle(SetDshControl(sid=ctx.key, kind="command", value="/goal compatibility goal",
             images=[image], files=files, cmd_id="goal-create", client_id="native-test"))
         assert command.type == "dsh_command_result" and command.status == "success", str(command)
         await eventually(lambda: ctx.sdk.state.goal, "goal projection")
         await machine._handle(SetDshControl(sid=ctx.key, kind="command", value="/goal pause", cmd_id="goal-pause", client_id="native-test"))
         await eventually(lambda: ctx.sdk.state.goal.phase == "paused", "pause goal")
+        await eventually(lambda: ctx.state == "idle", "paused goal turn completes")
+        paused_rounds = ctx.sdk.state.goal.rounds
+        before_resume = await native_state()
+        resumed = await machine._handle(SetDshControl(sid=ctx.key, kind="command", value="/goal resume", cmd_id="goal-resume", client_id="native-test"))
+        assert resumed.status == "success", resumed
+        await eventually(lambda: ctx.sdk.state.goal.phase == "active", "resume goal")
+        await eventually(lambda: ctx.sdk.state.goal.rounds >= paused_rounds + 2, "autonomous goal rounds")
+        assert (await native_state())["modelCalls"] > before_resume["modelCalls"]
+        edited = await machine._handle(SetDshControl(sid=ctx.key, kind="command", value="/goal edit revised compatibility goal", cmd_id="goal-edit", client_id="native-test"))
+        assert edited.status == "success", edited
+        await eventually(lambda: ctx.sdk.state.goal.objective == "revised compatibility goal", "edit goal")
+        await machine._handle(SetDshControl(sid=ctx.key, kind="command", value="/goal pause", cmd_id="goal-pause-final", client_id="native-test"))
         await machine._handle(Interrupt(sid=ctx.key))
         await machine._handle(SetDshControl(sid=ctx.key, kind="command", value="/goal clear", cmd_id="goal-clear", client_id="native-test"))
         await eventually(lambda: ctx.sdk.state.goal is None, "clear goal")
-        print("PASS native command attachments and goal lifecycle", flush=True)
+        print("PASS native command attachments, goal lifecycle and autonomous continuation", flush=True)
+
+        await eventually(lambda: ctx.state == "idle", "goal test idle")
+        created = await machine._handle(ActDshGoal(sid=ctx.key, action="create", objective="round cap acceptance",
+            max_rounds=2, cmd_id="structured-goal", client_id="native-test"))
+        assert created.type == "dsh_command_result" and created.status == "success", created
+        await eventually(lambda: ctx.sdk.state.goal and ctx.sdk.state.goal.rounds == 2
+            and ctx.sdk.state.goal.phase == "blocked" and ctx.state == "idle", "native two-round cap")
+        current = ctx.sdk.state.goal
+        ref = {"goal_id": current.id, "revision": current.revision}
+        assert current.max_rounds == 2
+        revised = await machine._handle(ActDshGoal(sid=ctx.key, action="edit", **ref, max_rounds=4,
+            cmd_id="raise-round-cap", client_id="native-test"))
+        assert revised.status == "success", revised
+        await eventually(lambda: ctx.sdk.state.goal.max_rounds == 4, "native updated cap")
+        stale = await machine._handle(ActDshGoal(sid=ctx.key, action="edit", **ref, max_rounds=8,
+            cmd_id="stale-goal-ref", client_id="native-test"))
+        assert stale.status == "error", stale
+        assert ctx.sdk.state.goal.max_rounds == 4
+        current = ctx.sdk.state.goal
+        resumed = await machine._handle(ActDshGoal(sid=ctx.key, action="resume", goal_id=current.id,
+            revision=current.revision, cmd_id="resume-raised-cap", client_id="native-test"))
+        assert resumed.status == "success", resumed
+        await eventually(lambda: ctx.sdk.state.goal.rounds == 4 and ctx.sdk.state.goal.phase == "blocked"
+            and ctx.state == "idle", "native raised cap exhaustion")
+        current = ctx.sdk.state.goal
+        cleared = await machine._handle(ActDshGoal(sid=ctx.key, action="clear", goal_id=current.id,
+            revision=current.revision, cmd_id="clear-structured-goal", client_id="native-test"))
+        assert cleared.status == "success", cleared
+        await eventually(lambda: ctx.sdk.state.goal is None, "structured goal cleared")
+        print("PASS native Goal form: exact round caps, stale edit rejection, resume and cap exhaustion", flush=True)
 
         for kind, query in [("search", "compatibility"), ("references", "reference"),
                             ("subagents", ""), ("diagnostics", ""), ("conversation", "compatibility"), ("deliverables", "")]:

@@ -11,7 +11,7 @@ function duration(seconds: number) {
 
 export default function EngineGoalDialog({ engine, goal, loading, disabled, scopeRef, onClose, onSave,
   onClear, onStatus, children }: {
-  engine: "codex" | "claude"; goal: ThreadGoal | null; loading?: boolean; disabled?: boolean;
+  engine: "codex" | "claude" | "dsh"; goal: ThreadGoal | null; loading?: boolean; disabled?: boolean;
   scopeRef: RefObject<HTMLElement | null>; onClose: () => void;
   onSave: (objective: string, status: GoalStatus, budget: number | null) => void | Promise<void>;
   onClear: () => void | Promise<void>; onStatus?: (status: GoalStatus) => void | Promise<void>;
@@ -37,7 +37,7 @@ export default function EngineGoalDialog({ engine, goal, loading, disabled, scop
     finally { setPending(false); }
   };
   const footer = editing ? <>
-    {codex && <GoalLimit value={budget} onChange={setBudget}
+    {codex && <GoalLimit kind="tokens" value={budget} onChange={setBudget}
       allowUnlimited={!goal?.tokenBudget} disabled={locked} />}
     <button type="button" className="goal-cancel" onClick={() => goal ? setEditing(false) : onClose()}>取消</button>
     <button type="button" className="goal-primary" disabled={locked || !valid}

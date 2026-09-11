@@ -8,7 +8,7 @@
 // no cursor reset, no re-hello (background turns keep streaming). All outbound
 // commands that target a session stamp `sid: focusedSid`.
 import type {
-  AutoCompactMode, DiffTheme, DshReadKind, Engine, GoalStatus, QueryFile,
+  AutoCompactMode, DiffTheme, DshGoalAction, DshReadKind, Engine, GoalStatus, QueryFile,
   QueryImg, ServerEvent, SessionControl, Space,
 } from "./protocol.ts";
 import {
@@ -787,6 +787,10 @@ export class RelayWs {
 
   sendActDshSubagent(sid: string, target_sid: string, action: "queue" | "steer" | "stop", prompt: string): string | null {
     return this.sendTracked({ v: PROTOCOL_VERSION, type: "act_dsh_subagent", ts: nowTs(), sid, target_sid, action, prompt });
+  }
+
+  sendActDshGoal(sid: string, action: DshGoalAction): string | null {
+    return this.sendTracked({ v: PROTOCOL_VERSION, type: "act_dsh_goal", ts: nowTs(), sid, ...action });
   }
 
   sendDownloadDsh(sid: string, export_id?: string, offset = 0, cancel = false): string | null {

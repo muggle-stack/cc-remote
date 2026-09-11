@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { apply, snapshot, producedFiles, SNAPSHOT_PATH } from './cc-remote.mjs';
+import { apply, snapshot, commandCatalog, producedFiles, SNAPSHOT_PATH } from './cc-remote.mjs';
 
 function fixture() {
   const calls = [];
@@ -55,7 +55,7 @@ test('pagination keeps the original cut while later events have arrived', async 
   assert.equal(calls[1].args.request.beforeSeq, 4);
 });
 
-for (const suffix of ['&unknown=yes', '&sessionId=other', '&maxMessages=101', '&beforeSeq=-1', '&throughSeq=1.5', '&maxMessages=00']) {
+for (const suffix of ['&unknown=yes', '&sessionId=other', '&maxMessages=101', '&beforeSeq=-1', '&throughSeq=1.5', '&maxMessages=00', '&commands=true']) {
   test(`invalid request is rejected before observing history: ${suffix}`, async () => {
     const { ctx, calls } = fixture();
     const response = await snapshot(ctx, new Request('http://127.0.0.1/api/cc-remote.snapshot?sessionId=test-session' + suffix));
@@ -63,6 +63,29 @@ for (const suffix of ['&unknown=yes', '&sessionId=other', '&maxMessages=101', '&
     assert.equal(calls.length, 0);
   });
 }
+
+test('cold commands come from the recorded preset without activating an agent', async () => {
+  const { ctx, source, calls } = fixture();
+  source.header.agentPreset = 'minimal';
+  source.projections.values.agentPreset = 'ptc';
+  const scope = { agentPreset: 'ptc' };
+  ctx.agents = { get: id => { assert.equal(id, 'test-session'); } };
+  ctx.agentPresets = { async standingKeyFor(id) { assert.equal(id, 'ptc'); return scope; } };
+  ctx.commands = { list: value => { assert.equal(value, scope); return [{ name: 'goal', description: 'Native goal' }]; } };
+  const response = await snapshot(ctx, new Request('http://127.0.0.1/api/cc-remote.snapshot?sessionId=test-session&commands=1'));
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).commands, [{ name: 'goal', description: 'Native goal' }]);
+  assert.equal(calls.filter(c => c?.method).every(c => c.method === 'page'), true);
+  assert.equal(calls.at(-1), 'dispose');
+});
+
+test('live command discovery retains the exact agent generation and scoped overrides', async () => {
+  const live = { id: 'test-session' };
+  const source = { header: { id: live.id }, projections: { values: { agentPreset: 'ptc' } } };
+  const ctx = { agents: { get: () => live }, commands: { list: value => { assert.equal(value, live); return []; } },
+    agentPresets: { standingKeyFor: () => { throw new Error('must not replace live composition'); } } };
+  assert.deepEqual(await commandCatalog(ctx, source), []);
+});
 
 test('unsupported format and stale cursor release the lease', async () => {
   const { ctx, source, calls } = fixture();

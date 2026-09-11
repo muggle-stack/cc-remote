@@ -4,7 +4,7 @@
 
 Self-hosted · Multiple sessions and devices · Live tool activity · Code / Work · PWA
 
-**Product version: v3.0.0** · Wire protocol v64
+**Product version: v3.0.0** · Wire protocol v65
 
 Optional **DeepSeek Harness 0.1.5-rc.2** support adds a Code engine with native
 Agent Presets, model/effort selection, permissions, goals and commands, using
