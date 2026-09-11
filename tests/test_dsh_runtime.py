@@ -4,7 +4,7 @@ import asyncio
 import pytest
 
 from cc_remote.protocol import (
-    DshState, GetContext, GetHistory, GetHistoryImage, GetTurnDetail, Hello, Models, NewSession, Query, SetDshControl,
+    DshState, GetContext, GetEngineCapabilities, GetHistory, GetHistoryImage, GetTurnDetail, Hello, Models, NewSession, Query, SetDshControl,
     SwitchSession, TurnEnd, TurnResult, deserialize, is_downstream, serialize,
 )
 from cc_remote.wrapper.dsh_client import DshError
@@ -44,6 +44,8 @@ class Client:
             return {"presets": [{"id": "standard", "isDefault": True}]}
         if endpoint == "commands/execute":
             return {"commandId": "command", "result": {"kind": "success"}}
+        if endpoint == "skills/list":
+            return {"skills": [{"name": args["request"]["sessionId"] + "-skill"}]}
         return {"accepted": True}
 
     async def list_sessions(self):
@@ -85,6 +87,30 @@ async def test_engine_mismatch_never_falls_through_to_claude():
     assert result.type == "error" and result.code == "dsh_invalid_session"
     assert client.calls == [] and not machine.sessions
     assert transport.sent == [result]
+
+
+@pytest.mark.asyncio
+async def test_skills_read_targets_cold_dsh_session_without_changing_other_clients_focus():
+    machine, transport, runtime, client = setup_runtime()
+    other = _mk_ctx("codex-other", "codex-other")
+    other.engine = "codex"
+    machine.sessions[other.key] = other
+    machine.focused_sid = other.key
+    result = await machine._handle(GetEngineCapabilities(
+        engine="dsh", space="code", sid="dsh@cold", cwd="/tmp", skills_only=True,
+        cmd_id="skills-read", client_id="viewer",
+    ))
+    assert result.type == "engine_capabilities"
+    assert result.sid == "dsh@cold" and result.to == "viewer"
+    assert result.request_id == "skills-read"
+    assert [item.name for item in result.items] == ["cold-skill"]
+    assert machine.focused_sid == other.key
+    assert machine.sessions["dsh@cold"].sdk.watch is None
+    assert client.calls == [("snapshot", "dsh@cold", {"max_messages": 8}),
+                            ("skills/list", {"request": {"sessionId": "cold"}})]
+    assert transport.sent[-1] == result
+    assert all(frame.sid == "dsh@cold" for frame in transport.sent)
+    await runtime.close()
 
 
 @pytest.mark.asyncio

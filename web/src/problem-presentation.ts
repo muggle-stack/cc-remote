@@ -111,6 +111,24 @@ export function presentCommandProblem(
   error: Pick<ErrorMsg, "code" | "message">,
 ): string {
   switch (error.code) {
+    case "dsh_invalid_session":
+      return "DSH 会话尚未选定或已失效，请重新选择会话。";
+    case "dsh_session/not-found":
+      return "DSH 会话不存在，请刷新会话列表。";
+    case "dsh_not_paired":
+    case "dsh_auth_required":
+    case "dsh_auth_expired":
+    case "dsh_invalid_connection":
+      return "DSH 本机配对不可用，请重新配对。";
+    case "dsh_disconnected":
+    case "dsh_unavailable":
+    case "dsh_closed":
+      return "无法连接本机 DSH，请检查服务后重试。";
+    case "dsh_history_bridge_required":
+      return "DSH 尚未加载 cc-remote 的只读历史插件。";
+    case "dsh_unsupported":
+    case "dsh_gateway/not-found":
+      return "当前 DSH 版本不支持此操作，请检查版本和插件。";
     case "wrapper_offline":
       return "设备正在重新连接…";
     case "invalid_cwd":

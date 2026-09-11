@@ -21,6 +21,7 @@ export interface SkillCatalogRequest {
   skillsOnly: boolean;
   claudeProfileId?: string | null;
   codexProfileId?: string | null;
+  sid?: string | null;
 }
 
 export interface SkillCatalogReadIdentity extends SkillCatalogRequest {
@@ -48,6 +49,7 @@ export const skillCatalogKey = (
   cwd: string,
   codexProfileId?: string | null,
   claudeProfileId?: string | null,
+  sid?: string | null,
 ): string => [
   machineId,
   engine,
@@ -56,7 +58,7 @@ export const skillCatalogKey = (
     ? (codexProfileId || "__default__")
     : engine === "claude"
       ? (claudeProfileId || "__default__")
-      : "",
+      : (sid || "__new__"),
   cwd || ".",
 ].join("\u0000");
 
@@ -77,6 +79,7 @@ export const skillCatalogResponseMatches = (
   // before the request. Explicit cwd scopes still require exact equality.
   && (!read.cwd || response.cwd === read.cwd)
   && response.skills_only === read.skillsOnly
+  && (read.engine !== "dsh" || response.sid === read.sid)
   && (read.engine !== "codex"
     || (response.codex_profile_id ?? null)
       === (read.codexProfileId ?? null))
@@ -215,6 +218,23 @@ export class SkillCatalogRequestCoordinator {
         && skillCatalogReadKey(active.key, active.skillsOnly)
           === readKey
     ) || this.queued.has(readKey);
+  }
+
+  fail(requestId: string): SkillCatalogRequest | null {
+    for (const [lane, read] of this.active) {
+      if (read.requestId !== requestId) continue;
+      this.active.delete(lane);
+      this.drain();
+      return read;
+    }
+    const mutation = this.mutations.get(requestId);
+    if (!mutation) return null;
+    this.mutations.delete(requestId);
+    if (!this.hasPendingMutation(mutation.key)) {
+      this.latestMutationByScope.delete(mutation.key);
+    }
+    this.drain();
+    return mutation;
   }
 
   hasPendingMutation(key: string): boolean {

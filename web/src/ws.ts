@@ -1071,12 +1071,14 @@ export class RelayWs {
                             cwd?: string | null,
                             skillsOnly = false,
                             codexProfileId?: string | null,
-                            claudeProfileId?: string | null): string | null {
+                            claudeProfileId?: string | null,
+                            sid?: string | null): string | null {
     const frame: Record<string, unknown> = {
       v: PROTOCOL_VERSION, type: "get_engine_capabilities", engine, space,
       client_id: this.clientId, skills_only: skillsOnly, ts: nowTs(),
     };
     if (cwd) frame.cwd = cwd;
+    if (sid) frame.sid = sid;
     if (engine === "codex" && codexProfileId) {
       frame.codex_profile_id = codexProfileId;
     }

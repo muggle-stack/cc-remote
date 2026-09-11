@@ -64,8 +64,14 @@ async function mockDshRelay(page: Page, { running = false, commandSuccess = fals
       if (cmd.type === "set_dsh_control") emit({ type: "dsh_command_result", sid, request_id: cmd.cmd_id,
         status: commandSuccess ? "success" : "error", text: commandSuccess ? "命令已执行" : "当前目标不能替换，请使用 /goal edit" });
       if (cmd.type === "get_context") emit({ ...context, request_id: cmd.cmd_id });
-      if (cmd.type === "get_engine_capabilities") emit({ type: "engine_capabilities", sid, engine: "dsh", space: "code", cwd: "/tmp/dsh-test",
-        request_id: cmd.cmd_id, skills_only: cmd.skills_only, items: [{ kind: "skill", id: "review", name: "review", description: "审查变更", enabled: true, actions: [] }] });
+      if (cmd.type === "get_engine_capabilities") {
+        // Another browser may still own the wrapper's Codex focus. Only an
+        // explicit DSH session target can safely read this native catalog.
+        if (cmd.sid !== sid) emit({ type: "error", code: "dsh_invalid_session",
+          request_id: cmd.cmd_id, message: "请选择 DSH 会话。" });
+        else emit({ type: "engine_capabilities", sid, engine: "dsh", space: "code", cwd: "/tmp/dsh-test",
+          request_id: cmd.cmd_id, skills_only: cmd.skills_only, items: [{ kind: "skill", id: "review", name: "review", description: "审查变更", enabled: true, actions: [] }] });
+      }
       if (cmd.type === "ping") emit({ type: "pong", n: cmd.n });
       if (cmd.cmd_id) emit({ type: "command_ack", client_id: cmd.client_id, cmd_id: cmd.cmd_id });
     });
@@ -136,6 +142,31 @@ test("DSH harness switch fits its label and Work is visibly locked", async ({ pa
   await page.locator(".engine-toggle").selectOption("dsh");
   await expect(page.locator(".engine-label")).toHaveText("DSH");
   await expect(page.getByRole("tab", { name: "Code", exact: true })).toHaveAttribute("aria-selected", "true");
+});
+
+test("DSH Skills reads carry the selected session and show completion without a focus error", async ({ page }) => {
+  const relay = await openDsh(page);
+  await expect.poll(() => relay.commands.filter(cmd => cmd.type === "get_engine_capabilities").length).toBeGreaterThan(0);
+  expect(relay.commands.filter(cmd => cmd.type === "get_engine_capabilities").every(cmd => cmd.sid === sid)).toBe(true);
+  const composer = page.locator(".composer textarea");
+  await composer.fill("$rev");
+  await expect(page.getByText("审查变更", { exact: true })).toBeVisible();
+  await expect(page.getByText("DSH 会话尚未选定或已失效，请重新选择会话。", { exact: true })).toHaveCount(0);
+});
+
+test("DSH harness selection clears pointer focus but retains the keyboard focus indicator", async ({ page }) => {
+  await openDsh(page);
+  const select = page.locator(".engine-toggle");
+  await select.focus();
+  await select.dispatchEvent("pointerdown", { pointerType: "touch" });
+  await select.selectOption("codex");
+  await expect(select).not.toBeFocused();
+  await expect(page.locator(".engine-label")).toHaveCSS("outline-style", "none");
+  await select.focus();
+  await select.press("ArrowDown");
+  await select.selectOption("dsh");
+  await expect(select).toBeFocused();
+  await expect(page.locator(".engine-label")).toHaveCSS("outline-style", "solid");
 });
 
 test("DSH completion spark replays on click and settles at rest", async ({ page }) => {

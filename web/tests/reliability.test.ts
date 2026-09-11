@@ -772,6 +772,29 @@ const skillResponse = {
   skills_only: true,
 } satisfies EngineCapabilities;
 assert.equal(skillCatalogResponseMatches(skillRead, skillResponse), true);
+function testDshSkillCatalog() {
+  const dshSkillKey = skillCatalogKey("machine-a", "dsh", "code", "/repo/a", null, null, "dsh@one");
+  const dshOtherKey = skillCatalogKey("machine-a", "dsh", "code", "/repo/a", null, null, "dsh@two");
+  assert.notEqual(dshSkillKey, dshOtherKey, "DSH catalogs belong to the exact native session");
+  const dshSkillRead = { ...skillRead, engine: "dsh" as const, key: dshSkillKey, sid: "dsh@one" };
+  const dshSkillResponse = { ...skillResponse, engine: "dsh" as const, sid: "dsh@one" };
+  assert.equal(skillCatalogResponseMatches(dshSkillRead, dshSkillResponse), true);
+  assert.equal(skillCatalogResponseMatches(dshSkillRead, { ...dshSkillResponse, sid: "dsh@two" }), false);
+  const failedSkillStarts: string[] = [];
+  const failedSkillReads = new SkillCatalogRequestCoordinator(request => {
+    failedSkillStarts.push(request.key);
+    return `failure-test-${failedSkillStarts.length}`;
+  });
+  assert.equal(failedSkillReads.request(dshSkillRead), true);
+  assert.equal(failedSkillReads.request({ ...dshSkillRead, key: dshOtherKey, sid: "dsh@two" }), false);
+  assert.equal(failedSkillReads.fail("unrelated"), null);
+  assert.equal(failedSkillReads.fail("failure-test-1")?.sid, "dsh@one");
+  assert.deepEqual(failedSkillStarts, [dshSkillKey, dshOtherKey], "an error releases the next session's read");
+  assert.equal(failedSkillReads.hasPendingRead(dshSkillKey, true), false);
+  assert.equal(failedSkillReads.accept({ ...dshSkillResponse, sid: "dsh@two", request_id: "failure-test-2" })?.request.sid, "dsh@two");
+  assert.equal(failedSkillReads.request(dshSkillRead), true, "a failed catalog can be retried");
+}
+testDshSkillCatalog();
 assert.equal(skillCatalogResponseMatches(
   skillRead, { ...skillResponse, request_id: "replayed-old-request" }), false,
   "a replayed capability response must not complete a newer read",
@@ -17976,6 +17999,14 @@ assert.equal(
 );
 
 const appSource = readFileSync(resolve(process.cwd(), "src/App.tsx"), "utf8");
+function testDshCapabilitiesRouting() {
+  assert.ok(socket);
+  relay.sendGetEngineCapabilities("dsh", "code", "/tmp/project", true, null, null, "dsh@selected");
+  const dshSkillsFrame = JSON.parse(socket.sent.at(-1) ?? "{}");
+  assert.equal(dshSkillsFrame.sid, "dsh@selected");
+  assert.equal(dshSkillsFrame.engine, "dsh");
+}
+testDshCapabilitiesRouting();
 assert.doesNotMatch(appSource, /<Suspense fallback=\{null\}>[\s\S]{0,120}<GoalPanel/,
   "Goal lazy loading must keep a stable chip placeholder");
 assert.match(appSource,
@@ -18010,7 +18041,7 @@ assert.match(appSource, /draftKey=\{focusedComposerDraftKey\}/);
 assert.match(appSource, /composerDraftsRef\.current\.rekey/,
   "temp session id capture must retain the focused composer draft");
 assert.match(appSource, /\{space === "work" \? "Work" : "Code"\}/);
-assert.match(appSource, /<select className="engine-toggle" value=\{engine\}[\s\S]{0,120}onChange=\{event => toggleEngine/);
+assert.match(appSource, /<select className="engine-toggle" value=\{engine\}[\s\S]{0,500}onChange=\{event => \{\s*toggleEngine/);
 assert.match(appSource, /setNewChatAutoFocus\(false\)/,
   "switching engines must not summon the new-chat keyboard");
 assert.match(appSource, /prepareSurfaceSwitch\(nextEngine, nextSpace\)/,

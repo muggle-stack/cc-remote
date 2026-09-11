@@ -535,18 +535,11 @@ export default function App() {
         request.skillsOnly,
         request.codexProfileId,
         request.claudeProfileId,
+        request.sid,
       ) ?? null,
     );
   }
-  const focusedSkillScopeRef = useRef<{
-    key: string;
-    engine: Engine;
-    space: Space;
-    cwd: string;
-    skillsOnly: boolean;
-    claudeProfileId?: string | null;
-    codexProfileId?: string | null;
-  } | null>(null);
+  const focusedSkillScopeRef = useRef<SkillCatalogRequest | null>(null);
   const historyRequestsRef = useRef(new HistoryRequestCoordinator());
   const turnFileRequestsRef = useRef(new TurnFilePageRequests());
   const terminalHistoryRepairRef = useRef<Map<
@@ -1137,7 +1130,7 @@ export default function App() {
   );
   const focusedSkillCatalogKey = skillCatalogKey(
     machineId, focusedEngine, space, capabilityCwd,
-    focusedCodexProfileId, focusedClaudeProfileId);
+    focusedCodexProfileId, focusedClaudeProfileId, focusedSid);
   focusedSkillScopeRef.current = {
     key: focusedSkillCatalogKey,
     engine: focusedEngine,
@@ -1146,6 +1139,7 @@ export default function App() {
     skillsOnly: true,
     claudeProfileId: focusedClaudeProfileId,
     codexProfileId: focusedCodexProfileId,
+    sid: focusedSid,
   };
   const activeBtwDraftKey = composerDraftKey(
     machineId, space,
@@ -1374,6 +1368,12 @@ export default function App() {
     request: SkillCatalogRequest,
     force = false,
   ) => {
+    // DSH skills belong to a native session, including when another browser
+    // owns the wrapper's global focus. A new-chat draft has no catalog yet.
+    if (request.engine === "dsh" && !request.sid?.startsWith("dsh@")) {
+      setCapabilitiesLoading(false);
+      return false;
+    }
     const cached = skillCatalogsRef.current[request.key];
     if (request.skillsOnly && !force && skillCatalogFresh(cached)) return false;
     return skillCatalogRequestsRef.current?.request(request) ?? false;
@@ -1634,6 +1634,7 @@ export default function App() {
   // `engine` selects the backend (Claude Code / Codex): the whole UI re-skins via
   // data-engine, and the sidebar re-lists that engine's own sessions.
   const engineRef = useRef(engine);
+  const harnessPointerSelectionRef = useRef(false);
   engineRef.current = engine;
   const spaceRef = useRef(space);
   spaceRef.current = space;
@@ -2355,6 +2356,14 @@ export default function App() {
               return next;
             });
           } else if (msg.type === "error" && msg.request_id) {
+            const coordinator = skillCatalogRequestsRef.current;
+            const failedSkills = msg.code === "wrapper_offline"
+              ? null : coordinator?.fail(msg.request_id);
+            if (failedSkills && failedSkills.key === focusedSkillScopeRef.current?.key
+                && !coordinator?.hasPendingRead(failedSkills.key, false)
+                && !coordinator?.hasPendingMutation(failedSkills.key)) {
+              setCapabilitiesLoading(false);
+            }
             const failedMigration =
               goalDismissMigrationByRequestRef.current.get(msg.request_id);
             if (failedMigration && msg.code !== "wrapper_offline") {
@@ -3938,6 +3947,7 @@ export default function App() {
       skillsOnly: true,
       claudeProfileId: focusedClaudeProfileId,
       codexProfileId: focusedCodexProfileId,
+      sid: focusedSid,
     });
   }, [
     authed,
@@ -3969,6 +3979,7 @@ export default function App() {
       skillsOnly: false,
       claudeProfileId: focusedClaudeProfileId,
       codexProfileId: focusedCodexProfileId,
+      sid: focusedSid,
     }, true);
   }, [
     authed,
@@ -3978,6 +3989,7 @@ export default function App() {
     focusedEngine,
     focusedCodexProfileId,
     focusedSkillCatalogKey,
+    focusedSid,
     requestSkillCatalog,
     space,
     state.connState,
@@ -5646,7 +5658,13 @@ export default function App() {
             <span>{activeDevice?.label ?? machineId}</span><i />
           </button>
           <span className="engine-selector"><select className="engine-toggle" value={engine}
-            onChange={event => toggleEngine(event.target.value as Engine)}
+            onPointerDown={() => { harnessPointerSelectionRef.current = true; }}
+            onKeyDown={() => { harnessPointerSelectionRef.current = false; }}
+            onBlur={() => { harnessPointerSelectionRef.current = false; }}
+            onChange={event => {
+              toggleEngine(event.target.value as Engine);
+              if (harnessPointerSelectionRef.current) event.currentTarget.blur();
+            }}
             aria-label="切换新会话引擎" title="新建会话使用的引擎">
             <option value="claude">✳ Claude</option>
             <option value="codex">◇ Codex</option>
@@ -5973,6 +5991,7 @@ export default function App() {
               skillsOnly: false,
               claudeProfileId: focusedClaudeProfileId,
               codexProfileId: focusedCodexProfileId,
+              sid: focusedSid,
             }, true);
           }}
           skills={skillCatalogs[focusedSkillCatalogKey]?.items}
@@ -5985,6 +6004,7 @@ export default function App() {
               skillsOnly: true,
               claudeProfileId: focusedClaudeProfileId,
               codexProfileId: focusedCodexProfileId,
+              sid: focusedSid,
             });
           }}
           workArtifactCount={space === "work" ? currentWorkArtifacts.length : 0}
@@ -6282,6 +6302,7 @@ export default function App() {
             skillsOnly: false,
             claudeProfileId: focusedClaudeProfileId,
             codexProfileId: focusedCodexProfileId,
+            sid: focusedSid,
           }, true);
         }}
         onManagePlugin={(item, action) => {
