@@ -51,6 +51,7 @@ import type { HookDraft, SkillDraft } from "./components/CapabilitiesSheet";
 import { TerminalControl } from "./components/TerminalControl";
 import { DeviceSheet, type PairingState, type RemoteDevice } from "./components/DeviceSheet";
 import { HeaderMenu } from "./components/HeaderMenu";
+import { EngineSelector } from "./components/EngineSelector";
 import {
   claudeProfileIdForSession,
   claudeProfilePresentation,
@@ -1640,7 +1641,6 @@ export default function App() {
   // `engine` selects the backend (Claude Code / Codex): the whole UI re-skins via
   // data-engine, and the sidebar re-lists that engine's own sessions.
   const engineRef = useRef(engine);
-  const harnessPointerSelectionRef = useRef(false);
   engineRef.current = engine;
   const spaceRef = useRef(space);
   spaceRef.current = space;
@@ -5684,22 +5684,7 @@ export default function App() {
             <Icon name="devices" size={18} />
             <span>{activeDevice?.label ?? machineId}</span><i />
           </button>
-          <span className="engine-selector"><select className="engine-toggle" value={engine}
-            onPointerDown={() => { harnessPointerSelectionRef.current = true; }}
-            onKeyDown={() => { harnessPointerSelectionRef.current = false; }}
-            onBlur={() => { harnessPointerSelectionRef.current = false; }}
-            onChange={event => {
-              toggleEngine(event.target.value as Engine);
-              if (harnessPointerSelectionRef.current) event.currentTarget.blur();
-            }}
-            aria-label="切换新会话引擎" title="新建会话使用的引擎">
-            <option value="claude">✳ Claude</option>
-            <option value="codex">◇ Codex</option>
-            <option value="dsh">DSH</option>
-          </select><span className="engine-label" aria-hidden="true">
-            {engine === "dsh" ? "DSH" : engine === "codex" ? "◇ Codex" : "✳ Claude"}
-            <Icon name="chev" size={12} />
-          </span></span>
+          <EngineSelector engine={engine} onChange={toggleEngine} />
           <HeaderMenu
             engine={engine}
             theme={theme}
@@ -6046,9 +6031,6 @@ export default function App() {
           }}
           contextReport={rt.contextReport}
           contextExactReport={rt.contextExactReport}
-          contextLoading={rt.contextRequestId !== null}
-          contextDeferred={rt.contextRefreshDeferred}
-          contextError={rt.contextError}
           statusReport={rt.statusReport}
           rateLimits={rt.rateLimits}
           statusError={rt.statusError}

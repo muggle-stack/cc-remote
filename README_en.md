@@ -57,7 +57,9 @@ In Codex Code, use `/autocompact 300k` or the context usage popover to set the
 session's maximum usable context to 300,000 tokens. Compaction targets 95% of that
 capacity, subject to Codex's native ceiling (currently about 284,211 tokens).
 The gauge uses native compaction estimates matched to the latest usage record.
-If no estimate is available, it shows recent request usage without a percentage.
+Background refresh failures retain the last valid reading for the same session
+and model without loading notices. Before a native estimate arrives, recent
+request usage is shown without a percentage.
 Visible running sessions refresh every five seconds without model calls.
 `/autocompact default` restores native defaults. Limits come from the
 account's native model catalog. Lowering the setting also reduces this session's window.
@@ -68,7 +70,9 @@ before selecting a model with a smaller context window.
 Use More → Session files or `/open [path]` to browse directories. Code starts in
 the session directory and supports parent directories, absolute paths, and `~`;
 Work stays within its workspace. Files open in the preview sidebar; returning
-preserves the directory listing. External files retain per-file preview authorization.
+preserves the directory listing. Code opens files with the process user's OS read
+permission, regardless of owner, without a second confirmation outside the session
+directory. External files are read-only by default.
 Directory reads are paged and non-recursive; symlinks and special files cannot be opened.
 
 ## What changed in v3
@@ -84,7 +88,7 @@ with the previous public release, the major changes are:
 | **Large Codex rollouts** | Codex history is read backward by turn while preserving app-server-native resume and compaction state; cc-remote never re-uploads the entire rollout to the model. A tightly guarded official HTTP compatibility path is used only for a specific oversized Codex Desktop + OpenAI resume case. |
 | **Native App / CLI coordination** | Claude CLI/Desktop/Agent View and Codex shared daemon/App/CLI retain engine-specific ownership models. v3 reconciles running, read-only, interrupt, steer, compact, turn binding, and terminal state so sibling sessions do not lock each other, old turns do not move to the tail, and interrupted work does not leave ghost activity. |
 | **Multi-device isolation** | Device Center adds single-use pairing, independently revocable machine credentials, and presence. The relay routes only an account's allowed `machine_id` values. Device, Code / Work, engine, connection generation, and session ownership are isolated so delayed frames cannot mutate the active view. |
-| **Mobile and artifact UX** | Loading older history preserves the scroll anchor. Images load on demand and support a lightbox, tap-to-close, and pinch zoom. Markdown, source, HTML, PDF, and Office previews remain within the local security boundary. Exact files outside cwd require confirmation in the requesting session and are bound to that file identity; user-approved Markdown stays read-only, while only files successfully written by the session can be saved. PWA icons, narrow-screen sheets, error presentation, and process timelines are also aligned. |
+| **Mobile and artifact UX** | Loading older history preserves the scroll anchor. Images load on demand and support a lightbox, tap-to-close, and pinch zoom. Markdown, source, HTML, PDF, and Office previews run locally. Code opens clicked files using OS read permission; external files are identity-bound and read-only by default, while Markdown successfully written by the session can be saved. Work and embedded resources retain their access boundaries. The compact engine menu includes icons and follows the light or dark theme. |
 | **Rollback-safe releases** | The product version is v3.0.0 and the wire protocol is v64. Builds and deployments validate both values. The VPS uses immutable releases, release-local virtual environments, an atomic `current` switch, and rollback instead of overwriting a live directory. |
 
 > **The trust boundary has not changed:** model accounts, API keys, session

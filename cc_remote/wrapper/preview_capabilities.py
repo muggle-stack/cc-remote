@@ -61,8 +61,8 @@ class PreviewCapability:
             and file_stat.st_dev == self.device
             and file_stat.st_ino == self.inode
             and getattr(file_stat, "st_uid", -1) == self.uid
-            and self.uid == os.geteuid()
-            and (not require_write or self.mode == "read_write")
+            and (not require_write or (
+                self.mode == "read_write" and self.uid == os.geteuid()))
         )
 
 
@@ -589,8 +589,9 @@ class PreviewCapabilityStore:
             os.close(descriptor)
         if not stat.S_ISREG(file_stat.st_mode):
             raise PreviewCapabilityError("预览目标必须是普通文件")
-        if getattr(file_stat, "st_uid", -1) != os.geteuid():
-            raise PreviewCapabilityError("只允许预览当前用户拥有的文件")
+        # os.open already enforces the process user's read permission, including
+        # groups and ACLs. Readable project files may be owned by root or another
+        # account (for example container-generated files).
         return file_stat
 
     def _persist_grant(
@@ -744,6 +745,8 @@ class PreviewCapabilityStore:
             raise PreviewCapabilityError("预览权限来源无效")
         canonical = self._canonical_path(path)
         file_stat = self._inspect_regular_file(canonical)
+        if mode == "read_write" and file_stat.st_uid != os.geteuid():
+            raise PreviewCapabilityError("只允许编辑当前用户拥有的文件")
         return PreviewCapability(
             engine=engine,
             space=space,

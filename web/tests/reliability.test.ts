@@ -18042,7 +18042,6 @@ assert.match(appSource, /draftKey=\{focusedComposerDraftKey\}/);
 assert.match(appSource, /composerDraftsRef\.current\.rekey/,
   "temp session id capture must retain the focused composer draft");
 assert.match(appSource, /\{space === "work" \? "Work" : "Code"\}/);
-assert.match(appSource, /<select className="engine-toggle" value=\{engine\}[\s\S]{0,500}onChange=\{event => \{\s*toggleEngine/);
 assert.match(appSource, /setNewChatAutoFocus\(false\)/,
   "switching engines must not summon the new-chat keyboard");
 assert.match(appSource, /prepareSurfaceSwitch\(nextEngine, nextSpace\)/,
@@ -18263,10 +18262,8 @@ assert.match(composerSource, /workContext\.session_percentage \?\? workContext\.
 assert.match(contextPopoverSource,
   /usage\(p\.report\.total_tokens, p\.report\.percentage\)/,
   "Code must render the last native engine-total context reading");
-assert.match(composerSource, /contextAvailable = p\.contextReport\?\.available !== false/,
-  "an absent tokenUsage report must not be rendered as a real zero");
-assert.match(contextPopoverSource, /正在读取真实上下文/,
-  "the context popover must explain that its native reading is still loading");
+assert.doesNotMatch(contextPopoverSource, /正在读取真实上下文/,
+  "background context refreshes must not flash a loading notice");
 assert.match(composerSource, /ref=\{workSettingsRef\}/);
 assert.match(composerSource, /document\.addEventListener\("pointerdown", onPointerDown\)/);
 assert.match(composerSource, /disabled=\{locked\}[\s\S]*?: "选择模型"/,

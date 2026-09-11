@@ -334,6 +334,8 @@ export interface SessionRuntime {
   ccSessionId?: string;
   pendingQuestion: { ask_id: string; header?: string | null; question: string; options: { label: string; ds?: string }[]; allow_text?: boolean; secret?: boolean; multi_select?: boolean } | null;
   contextReport: ContextReport | null;
+  // Last usable native reading, or the latest billing reading until native
+  // context has arrived. Transient refresh failures must not clear the ring.
   contextExactReport: ContextReport | null;
   contextRequestId: string | null;
   contextRefreshDeferred: boolean;
@@ -2497,7 +2499,8 @@ export function reduce(state: AppState, action: Action): AppState {
       return patch(state, state.focusedSid, (rt) => {
         rt.contextReport = action.report;
         if (action.report.available !== false
-            && action.report.source !== "recent_turn") {
+            && (action.report.source !== "recent_turn"
+              || !rt.contextExactReport || rt.contextExactReport.source === "recent_turn")) {
           rt.contextExactReport = action.report;
         }
       });
@@ -5510,7 +5513,8 @@ function reduceEvent(
     case "context_report":
       return patch(state, e.sid, (rt) => {
         rt.contextReport = e;
-        if (e.available !== false && e.source !== "recent_turn") {
+        if (e.available !== false && (e.source !== "recent_turn"
+            || !rt.contextExactReport || rt.contextExactReport.source === "recent_turn")) {
           rt.contextExactReport = e;
         }
         // Reports are broadcast so every viewer benefits from the fresh value,

@@ -9592,11 +9592,11 @@ class WrapperMachine:
     async def _observe_preview_path_event(self, ctx: SessionContext, msg) -> None:
         """Grant an exact capability only at a live successful-write boundary.
 
-        Normal previews remain cwd-confined. Claude/Codex can, however, be
-        explicitly asked to create a deliverable elsewhere (for example
-        ``/tmp/test.md``). The live ToolUse + successful ToolResult pair is an
-        auditable capability for the exact file identity inspected at that
-        moment; replaying the same pair from history is not.
+        Claude/Codex can be asked to create a deliverable elsewhere (for
+        example ``/tmp/test.md``). The live ToolUse + successful ToolResult
+        pair permits editing that exact file; an ordinary Code preview only
+        grants read access. Replaying the write pair from history must not
+        authorize a replacement file or its neighbors.
         """
         if isinstance(msg, ToolUse):
             raw_paths = self._normalize_preview_write_event(msg)
@@ -23888,7 +23888,8 @@ class WrapperMachine:
         try:
             # Links in prose can name directories as well as files. Resolve
             # directories through the same no-symlink boundary as /open.
-            candidate = os.path.join(ctx.cwd, os.path.expanduser(cmd.path))
+            requested_path = os.path.expanduser(cmd.path)
+            candidate = os.path.join(ctx.cwd, requested_path)
             if await asyncio.to_thread(os.path.isdir, candidate):
                 from cc_remote.wrapper.workspace_browser import browse_workspace
 
@@ -23901,22 +23902,29 @@ class WrapperMachine:
                         directory=True, writable=False, to=client_id)
                     await self._emit(ctx, response)
                     return response
-            suffix = os.path.splitext(cmd.path)[1].lower()
+            resolved_path = os.path.realpath(candidate)
+            inside_root = self._path_is_below(
+                os.path.realpath(ctx.cwd), resolved_path)
+            # In Code, opening a file is already an explicit browser request.
+            # Bind only that file, using the OS read permission and its current
+            # identity. Embedded resources and Work retain their own boundary.
+            if ctx.space == "code" and client_id and not inside_root:
+                await self._run_preview_capability_mutation(
+                    self._preview_capability_store.grant_path,
+                    ctx.engine, ctx.space, self._ctx_wire_sid(ctx),
+                    resolved_path, mode="read", source="user_approved",
+                    persist=not ctx.btw)
+            suffix = os.path.splitext(requested_path)[1].lower()
             external_paths = self._preview_capabilities(ctx)
             if suffix in self.OFFICE_PREVIEW_SUFFIXES:
                 async with self._preview_conversion_limit:
                     preview = await asyncio.to_thread(
-                        self._read_file_preview, ctx.cwd, cmd.path,
+                        self._read_file_preview, ctx.cwd, requested_path,
                         external_paths)
             else:
                 preview = await asyncio.to_thread(
-                    self._read_file_preview, ctx.cwd, cmd.path,
+                    self._read_file_preview, ctx.cwd, requested_path,
                     external_paths)
-            resolved_path = os.path.realpath(
-                cmd.path if os.path.isabs(cmd.path)
-                else os.path.join(ctx.cwd, cmd.path))
-            inside_root = self._path_is_below(
-                os.path.realpath(ctx.cwd), resolved_path)
             external_capability = external_paths.get(resolved_path)
             response = FilePreview(
                 path=preview["path"],

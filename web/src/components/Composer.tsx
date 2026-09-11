@@ -149,9 +149,6 @@ interface Props {
   onOpenArtifacts?: () => void;
   contextReport: ContextReport | null;
   contextExactReport?: ContextReport | null;
-  contextLoading?: boolean;
-  contextDeferred?: boolean;
-  contextError?: string | null;
   statusReport?: StatusReport | null;
   rateLimits?: StatusRateLimit[];
   statusError?: string | null;
@@ -785,19 +782,17 @@ export function Composer(p: Props) {
     ? (p.dsh?.permissions ?? []).map(option => ({ id: option.value, name: option.name, short: option.name, ds: option.description, ic: "shield", danger: option.value === "danger-full-access" }))
     : permsFor(p.engine);
   const workSurface = p.surface === "work";
-  const contextAvailable = p.contextReport?.available !== false;
-  const currentContextExact = !!p.contextReport && contextAvailable
-    && p.contextReport.source !== "recent_turn";
-  const lastExactContextReport = p.engine === "codex" || p.engine === "dsh" || currentContextExact
-    ? p.contextReport : p.contextExactReport ?? null;
-  const exactContextReport = lastExactContextReport?.available !== false
-    ? lastExactContextReport : null;
+  const currentContextReport = p.contextReport?.available !== false ? p.contextReport : null;
+  const retainedContextReport = p.contextExactReport?.available !== false ? p.contextExactReport : null;
+  // A background read may temporarily return billing usage or no estimate.
+  // Keep the last native reading until another arrives. Runtime invalidation
+  // already clears both reports when the session's model or capacity changes.
+  const exactContextReport = currentContextReport?.source !== "recent_turn" && currentContextReport
+    ? currentContextReport : retainedContextReport ?? currentContextReport;
   const codexEstimate = p.engine !== "codex"
-    || p.contextReport?.source === "native_estimate";
+    || exactContextReport?.source === "native_estimate";
   const contextHasCapacity = codexEstimate && (exactContextReport?.max_tokens ?? 0) > 0;
-  const contextRingHasCapacity = contextAvailable
-    && codexEstimate
-    && (p.contextReport?.max_tokens ?? 0) > 0;
+  const contextRingHasCapacity = contextHasCapacity;
   const workContext = workSurface ? exactContextReport : null;
   const autoCompactSelection = normalizeAutoCompactSelection(
     p.autoCompact?.mode ?? "inherit",
@@ -1066,12 +1061,9 @@ export function Composer(p: Props) {
                           : "查看"}</b>
                   </button>
                   {ctxOpen && (
-                    <Suspense fallback={<div className="ctx-pop work-ctx-pop">
-                      <div className="ctx-pop-loading">正在读取真实上下文…</div>
-                    </div>}>
+                    <Suspense fallback={null}>
                       <ContextPopover report={exactContextReport}
-                        loading={p.contextLoading} deferred={p.contextDeferred}
-                        error={p.contextError} work codex={p.engine === "codex"} />
+                        work codex={p.engine === "codex"} />
                     </Suspense>
                   )}
                   {p.engine === "claude" && autoCompactOpen && (
@@ -1186,7 +1178,7 @@ export function Composer(p: Props) {
             )}
             <button
               className={"hint-ring"
-                + (contextAvailable && codexEstimate ? "" : " unavailable")}
+                + (contextRingHasCapacity ? "" : " unavailable")}
               aria-expanded={ctxOpen}
               aria-label="上下文占用"
               title="上下文占用"
@@ -1205,21 +1197,17 @@ export function Composer(p: Props) {
                   className="hr-fill"
                   cx="18" cy="18" r="15"
                   strokeDasharray="94.25"
-                  strokeDashoffset={94.25 * (1 - Math.min(p.contextReport?.percentage ?? 0, 100) / 100)}
+                  strokeDashoffset={94.25 * (1 - Math.min(exactContextReport?.percentage ?? 0, 100) / 100)}
                   transform="rotate(-90 18 18)"
-                /> : <text x="18" y="24" textAnchor="middle" fontSize="18"
-                  fill="currentColor" stroke="none">?</text>}
+                /> : null}
               </svg>
             </button>
             {ctxOpen && (
-              <Suspense fallback={<div className="ctx-pop">
-                <div className="ctx-pop-loading">正在读取真实上下文…</div>
-              </div>}>
+              <Suspense fallback={null}>
                 <ContextPopover report={exactContextReport}
-                  loading={p.contextLoading} deferred={p.contextDeferred}
                   codex={p.engine === "codex"}
                   dsh={p.engine === "dsh"}
-                  error={p.contextError} codexContext={p.engine === "codex" ? p.codexContext : null}
+                  codexContext={p.engine === "codex" ? p.codexContext : null}
                   onAutoCompact={p.engine === "codex" && p.onSetCodexContext
                     ? () => { setCtxOpen(false); setAutoCompactOpen(true); } : undefined} />
               </Suspense>

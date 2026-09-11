@@ -9,6 +9,7 @@ import stat
 import threading
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,6 +34,95 @@ from cc_remote.protocol import (
 from cc_remote.wrapper.git_diff import read_git_diff
 from cc_remote.wrapper.preview_capabilities import PreviewCapabilityStore
 from tests.test_multisession import _mk_ctx, _mk_machine
+
+
+@pytest.mark.parametrize("engine", ["claude", "codex", "dsh"])
+@pytest.mark.parametrize("foreign_owner", [False, True])
+def test_code_open_reads_os_readable_files_outside_session(
+        tmp_path, monkeypatch, engine, foreign_owner):
+    root = tmp_path / "session"
+    root.mkdir()
+    target = tmp_path / "CLAUDE.md"
+    target.write_text("# readable project instructions", encoding="utf-8")
+    real_fstat = os.fstat
+    target_stat = target.stat()
+
+    def file_stat(fd):
+        result = real_fstat(fd)
+        if foreign_owner and result.st_ino == target_stat.st_ino:
+            values = {key: getattr(result, key) for key in dir(result)
+                      if key.startswith("st_")}
+            values["st_uid"] = os.geteuid() + 1
+            return SimpleNamespace(**values)
+        return result
+
+    monkeypatch.setattr(os, "fstat", file_stat)
+
+    async def run():
+        machine, transport = _mk_machine()
+        ctx = _mk_ctx("session-1", session_id="session-1")
+        ctx.cwd = str(root)
+        ctx.engine = engine
+        ctx.space = "code"
+        machine.sessions[ctx.key] = ctx
+        for path in [str(target), "../CLAUDE.md"]:
+            response = await machine._handle_get_file_preview(GetFilePreview(
+                sid=ctx.key, client_id="client-1", path=path,
+                request_id="open-file"))
+            assert isinstance(response, FilePreview)
+            assert response.error is None
+            assert response.content == "# readable project instructions"
+            assert response.writable is False
+            assert response.to == "client-1"
+            assert response.sid == ctx.key
+        assert not any(isinstance(event, PreviewAuthorizationRequired)
+                       for event in transport.sent)
+        assert ctx.buffer.tail_seq == 0
+        capability = machine._preview_capabilities(ctx)[str(target)]
+        with target.open("rb") as handle:
+            assert capability.matches(os.fstat(handle.fileno()))
+            assert not capability.matches(
+                os.fstat(handle.fileno()), require_write=True)
+        assert len(machine._preview_capabilities(ctx)) == 1
+        if foreign_owner:
+            with pytest.raises(preview_capabilities.PreviewCapabilityError,
+                               match="只允许编辑"):
+                machine._preview_capability_store.grant_path(
+                    engine, "code", ctx.key, str(target),
+                    mode="read_write", source="user_approved")
+
+    asyncio.run(run())
+
+
+def test_code_open_reports_os_permission_denial(tmp_path, monkeypatch):
+    root = tmp_path / "session"
+    root.mkdir()
+    target = tmp_path / "private.md"
+    target.write_text("private", encoding="utf-8")
+    original_open = os.open
+
+    def deny_target(path, *args, **kwargs):
+        if str(path) == str(target):
+            raise PermissionError("denied by operating system")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", deny_target)
+
+    async def run():
+        machine, _ = _mk_machine()
+        ctx = _mk_ctx("session-1", session_id="session-1")
+        ctx.cwd = str(root)
+        ctx.space = "code"
+        machine.sessions[ctx.key] = ctx
+        response = await machine._handle_get_file_preview(GetFilePreview(
+            sid=ctx.key, client_id="client-1", path=str(target),
+            request_id="denied-file"))
+        assert isinstance(response, FilePreview)
+        assert response.error == "没有权限读取该文件"
+        assert response.content == ""
+        assert machine._preview_capabilities(ctx) == {}
+
+    asyncio.run(run())
 
 
 def test_markdown_preview_reads_utf8_and_normalizes_paths(tmp_path):
@@ -356,14 +446,15 @@ def test_successful_write_grants_exact_cross_cwd_preview_and_edit(tmp_path):
         assert preview.path == str(outside.resolve())
         assert preview.content == "# created"
 
-        required = await machine._handle_get_file_preview(GetFilePreview(
+        neighbor_preview = await machine._handle_get_file_preview(GetFilePreview(
             sid=ctx.key,
             client_id="client-1",
             path=str(neighbor),
             request_id="preview-neighbor",
         ))
-        assert isinstance(required, PreviewAuthorizationRequired)
-        assert required.resolved_path == str(neighbor.resolve())
+        assert isinstance(neighbor_preview, FilePreview)
+        assert neighbor_preview.content == "secret"
+        assert neighbor_preview.writable is False
 
         saved = await machine._handle_save_markdown(SaveMarkdown(
             sid=ctx.key,
@@ -420,6 +511,7 @@ def test_history_write_replay_never_rebinds_a_replaced_external_file(tmp_path):
     outside.write_text("# original", encoding="utf-8")
     machine, _ = _mk_machine()
     ctx = _mk_ctx("session-1", session_id="session-1")
+    ctx.space = "work"
     ctx.cwd = str(root)
     machine.sessions[ctx.key] = ctx
 
@@ -472,7 +564,7 @@ def test_history_write_replay_never_rebinds_a_replaced_external_file(tmp_path):
     asyncio.run(require_confirmation())
 
 
-def test_unknown_external_preview_requires_explicit_read_only_authorization(
+def test_work_external_preview_requires_explicit_read_only_authorization(
         tmp_path):
     root = tmp_path / "root"
     root.mkdir()
@@ -482,6 +574,7 @@ def test_unknown_external_preview_requires_explicit_read_only_authorization(
     async def run():
         machine, transport = _mk_machine()
         ctx = _mk_ctx("session-1", session_id="session-1")
+        ctx.space = "work"
         ctx.cwd = str(root)
         machine.sessions[ctx.key] = ctx
         machine.focused_sid = ctx.key
@@ -554,8 +647,10 @@ def test_preview_authorization_is_client_session_and_identity_bound(tmp_path):
     async def run():
         machine, _ = _mk_machine()
         first = _mk_ctx("session-1", session_id="session-1")
+        first.space = "work"
         first.cwd = str(root)
         second = _mk_ctx("session-2", session_id="session-2")
+        second.space = "work"
         second.cwd = str(root)
         machine.sessions[first.key] = first
         machine.sessions[second.key] = second
@@ -633,6 +728,7 @@ def test_preview_authorization_expires_and_deny_never_inspects_file(
     async def run():
         machine, _ = _mk_machine()
         ctx = _mk_ctx("session-1", session_id="session-1")
+        ctx.space = "work"
         ctx.cwd = str(root)
         machine.sessions[ctx.key] = ctx
         store = machine._preview_capability_store
@@ -705,6 +801,7 @@ def test_preview_authorization_ttl_uses_a_monotonic_clock(
     async def run():
         machine, _ = _mk_machine()
         ctx = _mk_ctx("session-1", session_id="session-1")
+        ctx.space = "work"
         ctx.cwd = str(root)
         machine.sessions[ctx.key] = ctx
         required = await machine._handle_get_file_preview(GetFilePreview(
@@ -739,6 +836,7 @@ def test_authorize_preview_duplicate_replays_granted_result(tmp_path):
     async def run():
         machine, transport = _mk_machine()
         ctx = _mk_ctx("session-1", session_id="session-1")
+        ctx.space = "work"
         ctx.cwd = str(root)
         machine.sessions[ctx.key] = ctx
         required = await machine._handle_get_file_preview(GetFilePreview(
@@ -1242,10 +1340,11 @@ def test_machine_preview_rekey_and_delete_migrate_then_clear_state(tmp_path):
     async def run():
         machine, _ = _mk_machine()
         ctx = _mk_ctx("temp-session", session_id=None)
+        ctx.space = "work"
         ctx.cwd = str(root)
         machine.sessions[ctx.key] = ctx
         machine._preview_capability_store.grant_path(
-            "claude", "code", ctx.key, str(outside),
+            "claude", "work", ctx.key, str(outside),
             mode="read", source="user_approved",
         )
 
@@ -1263,7 +1362,7 @@ def test_machine_preview_rekey_and_delete_migrate_then_clear_state(tmp_path):
         old_key = ctx.key
         await machine._capture_session_id(ctx, "real-session")
         assert machine._preview_capability_store.snapshot(
-            "claude", "code", old_key,
+            "claude", "work", old_key,
         ) == {}
         assert str(outside.resolve()) in machine._preview_capabilities(ctx)
         assert machine._preview_challenges[
@@ -1274,6 +1373,7 @@ def test_machine_preview_rekey_and_delete_migrate_then_clear_state(tmp_path):
         # runtime for the same durable sid must retain its exact capabilities.
         machine.sessions.pop(ctx.key)
         resumed = _mk_ctx("real-session", session_id="real-session")
+        resumed.space = "work"
         resumed.cwd = str(root)
         machine.sessions[resumed.key] = resumed
         assert str(outside.resolve()) in machine._preview_capabilities(resumed)

@@ -124,10 +124,16 @@ async function mockDshRelay(page: Page, { running = false, commandSuccess = fals
 async function openDsh(page: Page, options = {}) {
   const relay = await mockDshRelay(page, options);
   await page.goto("/");
-  await expect(page.locator(".engine-toggle")).toHaveValue("dsh");
+  await expect(page.locator(".engine-label")).toHaveText("DSH");
   await expect(page.locator(".composer textarea")).toBeVisible();
   await expect(page.getByText("验证图片、引导与原生控件", { exact: true })).toBeVisible();
   return relay;
+}
+
+async function chooseEngine(page: Page, engine: string) {
+  await page.locator(".engine-toggle").click();
+  await page.getByRole("menuitemradio", { name: engine === "dsh" ? "DSH" : engine === "codex" ? "Codex" : "Claude", exact: true }).click();
+  await expect(page.getByRole("menu", { name: "会话引擎" })).toHaveCount(0);
 }
 
 for (const running of [false, true]) {
@@ -147,7 +153,7 @@ for (const running of [false, true]) {
   });
 }
 
-test("DSH context reports remain visible without a Codex estimate and clear unavailable readings", async ({ page }, info) => {
+test("DSH context reports retain their last reading during temporary failures", async ({ page }, info) => {
   const relay = await openDsh(page, { running: true });
   const ring = page.getByRole("button", { name: "上下文占用", exact: true });
   await ring.click();
@@ -164,9 +170,15 @@ test("DSH context reports remain visible without a Codex estimate and clear unav
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
   relay.emit({ type: "context_report", sid, source: "recent_turn", available: false,
     total_tokens: 0, max_tokens: 0, percentage: 0, categories: [] });
-  await expect(popover.locator(".ctx-pop-nums")).toHaveCount(0);
-  await expect(popover).toContainText("DSH 暂未返回上下文用量。");
+  await expect(popover).toContainText("6,400 / 64,000 (10%)");
+  await expect(popover.locator(".ctx-pop-status")).toHaveCount(0);
+  await expect(ring.locator(".hr-fill")).toHaveCount(1);
+  await expect(ring.locator("text")).toHaveCount(0);
+  relay.emit({ type: "model", sid, model: "different-model" });
+  await expect(popover).not.toContainText("6,400");
+  await expect(popover.locator(".ctx-pop-nums")).toHaveText("—");
   await expect(ring.locator(".hr-fill")).toHaveCount(0);
+  await expect(ring.locator("text")).toHaveCount(0);
   expect(relay.commands.some(c => c.type === "query" || c.type === "steer")).toBe(false);
 });
 
@@ -177,7 +189,7 @@ test("DSH native context shows small readings and updates after compaction", asy
   relay.emit({ type: "context_report", sid, source: "native_estimate", available: true,
     total_tokens: 593, max_tokens: 1000000, percentage: .06, categories: [] });
   await expect(popover).toContainText("593 / 1,000,000 (<1%)");
-  await expect(popover).toContainText("按 DSH 原生估算显示");
+  await expect(popover.locator(".ctx-pop-status")).toHaveCount(0);
   relay.emit({ type: "context_report", sid, source: "native_estimate", available: true,
     total_tokens: 100, max_tokens: 1000000, percentage: .01, categories: [] });
   await expect(popover).toContainText("100 / 1,000,000 (<1%)");
@@ -185,20 +197,33 @@ test("DSH native context shows small readings and updates after compaction", asy
   expect(relay.commands.some(c => ["query", "steer", "compact_session"].includes(String(c.type)))).toBe(false);
 });
 
-test("DSH harness switch fits its label and Work is visibly locked", async ({ page }) => {
+test("DSH harness switch fits its label and Work is visibly locked", async ({ page }, info) => {
   await openDsh(page);
   const selector = page.locator(".engine-selector");
-  expect((await selector.boundingBox())!.width).toBeLessThan(65);
+  expect((await selector.boundingBox())!.width).toBeLessThan(90);
+  await page.locator(".engine-toggle").click();
+  const menu = page.getByRole("menu", { name: "会话引擎" });
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole("menuitemradio")).toHaveCount(3);
+  await expect(menu.getByRole("menuitemradio", { name: "DSH", exact: true }).locator("svg")).toHaveCount(2);
+  await expect(menu.getByRole("menuitemradio", { name: "DSH", exact: true })).toHaveAttribute("aria-checked", "true");
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
+    await page.screenshot({ path: info.outputPath(`harness-menu-${theme}.png`), animations: "disabled" });
+    expect((await menu.boundingBox())!.x).toBeGreaterThanOrEqual(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+  }
   await page.locator(".surface-head-title").click();
   const work = page.getByRole("tab", { name: "Work", exact: true });
   await expect(work).toBeDisabled();
   await expect(work.locator(".space-lock")).toBeVisible();
   await expect(work).toHaveAttribute("title", "DSH 暂不支持 Work");
   await page.locator(".s-head").getByRole("button", { name: "收起", exact: true }).click();
-  await page.locator(".engine-toggle").selectOption("claude");
-  await expect(page.locator(".engine-label")).toHaveText("✳ Claude");
+  await expect(menu).toHaveCount(0);
+  await chooseEngine(page, "claude");
+  await expect(page.locator(".engine-label")).toHaveText("Claude");
   expect((await selector.boundingBox())!.width).toBeLessThan(100);
-  await page.locator(".engine-toggle").selectOption("dsh");
+  await chooseEngine(page, "dsh");
   await expect(page.locator(".engine-label")).toHaveText("DSH");
   await expect(page.getByRole("tab", { name: "Code", exact: true })).toHaveAttribute("aria-selected", "true");
 });
@@ -216,16 +241,25 @@ test("DSH Skills reads carry the selected session and show completion without a 
 test("DSH harness selection clears pointer focus but retains the keyboard focus indicator", async ({ page }) => {
   await openDsh(page);
   const select = page.locator(".engine-toggle");
-  await select.focus();
-  await select.dispatchEvent("pointerdown", { pointerType: "touch" });
-  await select.selectOption("codex");
+  await chooseEngine(page, "codex");
   await expect(select).not.toBeFocused();
-  await expect(page.locator(".engine-label")).toHaveCSS("outline-style", "none");
+  await expect(select).toHaveCSS("outline-style", "none");
   await select.focus();
   await select.press("ArrowDown");
-  await select.selectOption("dsh");
+  const selected = page.getByRole("menuitemradio", { name: "Codex", exact: true });
+  await expect(selected).toBeFocused();
+  await selected.press("ArrowDown");
+  await expect(page.getByRole("menuitemradio", { name: "DSH", exact: true })).toBeFocused();
+  await page.keyboard.press("Enter");
   await expect(select).toBeFocused();
-  await expect(page.locator(".engine-label")).toHaveCSS("outline-style", "solid");
+  await expect(select).toHaveCSS("outline-style", "solid");
+  await expect(page.locator(".engine-label")).toHaveText("DSH");
+  await select.press("ArrowUp");
+  await page.keyboard.press("Home");
+  await expect(page.getByRole("menuitemradio", { name: "Claude", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(select).toBeFocused();
+  await expect(page.getByRole("menu", { name: "会话引擎" })).toHaveCount(0);
 });
 
 test("DSH completion spark replays on click and settles at rest", async ({ page }) => {
@@ -357,14 +391,13 @@ test("DSH loading and harness switches only prefetch supported session surfaces"
   expect(dshLists().map(cmd => cmd.space ?? "code")).not.toContain("work");
   await expect(page.locator(".banner")).toHaveCount(0);
 
-  const selector = page.locator(".engine-toggle");
   for (const engine of ["codex", "claude"]) {
     const switches = relay.commands.filter(cmd => cmd.type === "switch_session").length;
-    await selector.selectOption(engine);
+    await chooseEngine(page, engine);
     // Supported engines still warm Work; the DSH guard must not disable this.
     await expect.poll(() => relay.commands.some(cmd => cmd.type === "list_sessions"
       && (cmd.engine ?? "claude") === engine && cmd.space === "work")).toBe(true);
-    await selector.selectOption("dsh");
+    await chooseEngine(page, "dsh");
     await expect.poll(() => relay.commands.filter(cmd => cmd.type === "switch_session").length).toBeGreaterThan(switches);
     await expect(page.getByText("验证图片、引导与原生控件", { exact: true })).toBeVisible();
     expect(dshLists().map(cmd => cmd.space ?? "code")).not.toContain("work");

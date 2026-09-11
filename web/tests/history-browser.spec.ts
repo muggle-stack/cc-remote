@@ -659,11 +659,26 @@ test("session workspace distinguishes 300k capacity from native usage and compac
     expect(await popover.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
     await page.screenshot({ path: testInfo.outputPath(`context-300k-usage-${theme}.png`), animations: "disabled" });
   }
-  // A missing native reading must not revive the cached pre-compaction 95%.
+  // Background read failures retain the last native estimate without UI noise.
   relay.emit(report);
-  await expect(popover).toContainText("245,325 tokens");
-  await expect(popover).not.toContainText("95%");
-  await expect(ring.locator(".hr-fill")).toHaveCount(0);
+  await expect(popover).toContainText("284,793 / 300,000 (95%)");
+  const oldHeight = (await popover.boundingBox())!.height;
+  const oldOffset = await ring.locator(".hr-fill").getAttribute("stroke-dashoffset");
+  relay.emit({ ...report, available: false, total_tokens: 0, percentage: 0 });
+  await expect(popover).toContainText("284,793 / 300,000 (95%)");
+  const requestCount = relay.commands.filter(c => c.type === "get_context").length;
+  await ring.click();
+  await ring.click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "get_context").length).toBeGreaterThan(requestCount);
+  const refresh = relay.commands.filter(c => c.type === "get_context").at(-1)!;
+  relay.emit({ type: "error", sid: "layout-parent", request_id: String(refresh.cmd_id),
+    code: "invalid_command", message: "无法读取上下文，请稍后重试" });
+  await expect(popover).not.toContainText("正在读取");
+  await expect(page.getByText("无法读取上下文，请稍后重试", { exact: true })).toHaveCount(0);
+  await expect(popover.locator(".ctx-pop-status")).toHaveCount(0);
+  await expect(ring.locator("text")).toHaveCount(0);
+  await expect(ring.locator(".hr-fill")).toHaveAttribute("stroke-dashoffset", oldOffset!);
+  expect((await popover.boundingBox())!.height).toBe(oldHeight);
   relay.emit({ ...nativeReport, total_tokens: 33824, percentage: 11.27467 });
   await expect(popover).toContainText("33,824 / 300,000 (11%)");
   expect(relay.commands.some((c) => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
