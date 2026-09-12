@@ -406,7 +406,7 @@ test(`DSH native progress distinguishes inactive continuation and fits the viewp
 test("DSH command attachments wait for acceptance before clearing", async ({ page }) => {
   const relay = await openDsh(page, { commandSuccess: true });
   const input = page.locator(".composer textarea");
-  await page.locator('.composer input[type="file"][accept*="image"]').setInputFiles({
+  await page.locator('.composer').getByLabel("添加照片", { exact: true }).setInputFiles({
     name: "portrait.png", mimeType: "image/png", buffer: staticPng(90, 180),
   });
   await expect(page.locator(".composer .attach img")).toBeVisible();
