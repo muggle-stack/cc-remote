@@ -1,11 +1,180 @@
 import { expect, test } from "@playwright/test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { pngChunk, staticPng } from "./fixtures/png";
 import { PROTOCOL_VERSION, type ServerEvent } from "../src/protocol";
 import {
   GITHUB_README_ATTACHMENT_URL, GITHUB_README_IMAGE_URL,
   MARKDOWN_HTML_HEADER_SVG, MARKDOWN_HTML_LOCAL_README,
 } from "./fixtures/markdown-html";
+
+async function scrollRegressionToMiddle(page: import("@playwright/test").Page, projectName: string) {
+  await scrollThreadToEdge(page, "start", projectName);
+  if (isMobileWebKitProject(projectName)) await dispatchTouchGesture(page, -60);
+  else await page.locator(".thread").dispatchEvent("wheel", { deltaY: 500 });
+  await page.locator(".thread").evaluate((node) => {
+    node.scrollTop = 500;
+    node.dispatchEvent(new Event("scroll"));
+  });
+  await waitForScrollIdle(page);
+}
+
+test("turn regressions preserve history on send and stream, but follow at bottom", async ({ page }, testInfo) => {
+  await page.goto("/tests/history-browser.html?turn-regressions=1");
+  const scroll = page.locator(".thread");
+  await expect(page.getByTestId("regression-send")).toBeVisible();
+  await scrollRegressionToMiddle(page, testInfo.project.name);
+  await page.waitForTimeout(150);
+  const before = await scroll.evaluate((node) => node.scrollTop);
+  await page.getByTestId("regression-send").click();
+  await page.getByTestId("regression-stream").click();
+  await page.waitForTimeout(200);
+  expect(Math.abs(await scroll.evaluate((node) => node.scrollTop) - before)).toBeLessThan(3);
+  await page.getByRole("button", { name: "滚动到底部", exact: true }).click();
+  await expect.poll(() => scroll.evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop)).toBeLessThan(3);
+  await page.getByTestId("regression-stream").click();
+  await expect.poll(() => scroll.evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop)).toBeLessThan(3);
+});
+
+test("turn regressions copy action follows visible block and copies its entire content", async ({ page }, testInfo) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+      writeText: (value: string) => { (window as unknown as { copiedText: string }).copiedText = value; return Promise.resolve(); },
+    } });
+  });
+  await page.goto("/tests/history-browser.html?turn-regressions=1");
+  const scroll = page.locator(".thread");
+  const first = page.locator(".message-code-block").first();
+  await expect(first).toBeAttached();
+  await scrollRegressionToMiddle(page, testInfo.project.name);
+  await page.waitForTimeout(150);
+  const blockRect = await first.boundingBox();
+  const button = first.getByRole("button", { name: "复制代码" });
+  const buttonRect = await button.boundingBox();
+  const scrollRect = await scroll.boundingBox();
+  expect(blockRect!.y).toBeLessThan(scrollRect!.y);
+  expect(blockRect!.y + blockRect!.height).toBeGreaterThan(scrollRect!.y + 100);
+  expect(buttonRect!.y).toBeGreaterThanOrEqual(scrollRect!.y);
+  expect(buttonRect!.y + buttonRect!.height).toBeLessThan(blockRect!.y + blockRect!.height);
+  await button.click();
+  const copied = await page.evaluate(() => (window as unknown as { copiedText: string }).copiedText);
+  expect(copied).toContain("Copy entire block line 0");
+  expect(copied).toContain("Copy entire block line 89");
+  expect(copied).not.toContain("Second block");
+});
+
+test("turn regressions keep changes collapsed per turn and remove the empty spark gap", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?turn-regressions=1");
+  await expect(page.locator(".turn-changes-toggle")).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator(".turn-changes-files")).toHaveCount(0);
+  await expect(page.locator(".page-meta")).toHaveCount(0);
+  const gap = await page.locator(".turn-working").last().evaluate((node) =>
+    node.getBoundingClientRect().top - node.previousElementSibling!.getBoundingClientRect().bottom);
+  expect(gap).toBeLessThan(24);
+  await page.locator(".turn-changes-toggle").click();
+  await page.getByRole("button", { name: "src/code.py", exact: true }).click();
+  await expect(page.getByTestId("regression-opened")).toHaveText("history-one:immutable-one:src/code.py");
+  await page.getByTestId("regression-send").click();
+  await expect(page.locator(".turn-changes-toggle")).toHaveAttribute("aria-expanded", "true");
+});
+
+test("turn regressions show typed historical files after refresh and session switch", async ({ page }, testInfo) => {
+  await page.goto("/tests/history-browser.html?historical-files=1");
+  const toggles = page.locator(".turn-changes-toggle");
+  await expect(toggles).toHaveCount(2);
+  await expect(toggles.first()).toHaveAttribute("aria-expanded", "false");
+  await toggles.first().click();
+  const list = page.locator(".turn-changes-files").first();
+  await expect(list.locator(".turn-change-file")).toHaveCount(7);
+  await expect(list.getByRole("img", { name: "Python", exact: true })).toHaveCount(2);
+  await expect(list.getByRole("img", { name: "JSON", exact: true })).toBeVisible();
+  await expect(list.getByRole("img", { name: "Docker", exact: true })).toBeVisible();
+  await expect(list.getByRole("button", { name: "预览当前文件" })).toBeEnabled();
+  const oldPath = "/workspace/robot-viewer/src/perception/camera.py";
+  await list.getByRole("button", { name: oldPath, exact: true }).click();
+  await expect(page.getByTestId("historical-file-opened")).toHaveText(`history-1:revision-1:${oldPath}`);
+  await page.getByRole("button", { name: "刷新历史", exact: true }).click();
+  await expect(toggles).toHaveCount(2);
+  await page.getByRole("button", { name: "切换会话", exact: true }).click();
+  await expect(toggles).toHaveCount(0);
+  await page.getByRole("button", { name: "切换会话", exact: true }).click();
+  await expect(toggles).toHaveCount(2);
+  if (await toggles.first().getAttribute("aria-expanded") === "false") await toggles.first().click();
+  await list.getByRole("button", { name: oldPath, exact: true }).click();
+  await expect(page.getByTestId("historical-file-opened")).toHaveText(`history-1:revision-1:${oldPath}`);
+  expect(await list.evaluate((node) => node.scrollWidth - node.clientWidth)).toBeLessThan(2);
+  await page.screenshot({ path: testInfo.outputPath("historical-files-light.png") });
+  await page.getByRole("button", { name: "切换主题", exact: true }).click();
+  await page.screenshot({ path: testInfo.outputPath("historical-files-dark.png") });
+});
+
+test("turn regressions page all files and retry without losing the loaded list", async ({ page }) => {
+  let calls = 0;
+  await page.route("**/fixture-turn-files?**", async (route) => {
+    calls += 1;
+    if (calls === 1) { await route.fulfill({ status: 503, body: "unavailable" }); return; }
+    const params = new URL(route.request().url()).searchParams;
+    const offset = Number(params.get("offset"));
+    const files = Array.from({ length: Math.min(64, 130 - offset) }, (_, index) => ({
+      path: `/workspace/robot-viewer/src/file-${offset + index}.py`, state: "available", additions: 1, deletions: 1,
+    }));
+    await route.fulfill({ json: { type: "turn_file_changes_page", engine: "codex",
+      turn_id: params.get("turn"), revision: params.get("revision"), offset, files,
+      total_files: 130, next_offset: offset + files.length < 130 ? offset + files.length : null } });
+  });
+  await page.goto("/tests/history-browser.html?historical-files=1&many-files=1");
+  const toggle = page.locator(".turn-changes-toggle").first();
+  await expect(toggle).toContainText("130 个文件");
+  await expect(toggle).not.toContainText("部分记录");
+  await toggle.click();
+  const list = page.locator(".turn-changes-files").first();
+  await expect(list.locator(".turn-change-file")).toHaveCount(64);
+  await list.getByRole("button", { name: "加载更多", exact: true }).click();
+  await expect(list.getByRole("alert")).toBeVisible();
+  await expect(list.locator(".turn-change-file")).toHaveCount(64);
+  await list.getByRole("button", { name: "重试加载", exact: true }).click();
+  await expect(list.locator(".turn-change-file")).toHaveCount(128);
+  await list.getByRole("button", { name: "加载更多", exact: true }).click();
+  await expect(list.locator(".turn-change-file")).toHaveCount(130);
+  await expect(list.locator(".turn-changes-more")).toHaveCount(0);
+  const path = "/workspace/robot-viewer/src/file-129.py";
+  await list.getByRole("button", { name: path, exact: true }).click();
+  await expect(page.getByTestId("historical-file-opened")).toHaveText(`history-1:revision-1-0:${path}`);
+  await toggle.click();
+  await toggle.click();
+  await expect(list.locator(".turn-change-file")).toHaveCount(130);
+  expect(calls).toBe(3);
+});
+
+test("turn regressions discard pending file pages after revision and session changes", async ({ page }) => {
+  const pending: Array<() => Promise<void>> = [];
+  await page.route("**/fixture-turn-files?**", (route) => {
+    const params = new URL(route.request().url()).searchParams;
+    pending.push(() => route.fulfill({ json: {
+      type: "turn_file_changes_page", engine: "codex", turn_id: params.get("turn"),
+      revision: params.get("revision"), offset: 64, total_files: 130, next_offset: 128,
+      files: Array.from({ length: 64 }, (_, i) => ({
+        path: `/workspace/robot-viewer/src/file-${64 + i}.py`, state: "available", additions: 1, deletions: 1,
+      })),
+    } }).catch(() => {}));
+  });
+  await page.goto("/tests/history-browser.html?historical-files=1&many-files=1");
+  const toggle = page.locator(".turn-changes-toggle").first();
+  await toggle.click();
+  await page.getByRole("button", { name: "加载更多", exact: true }).click();
+  await expect.poll(() => pending.length).toBe(1);
+  await page.getByRole("button", { name: "刷新历史", exact: true }).click();
+  await pending.shift()!();
+  await expect(page.locator(".turn-change-file")).toHaveCount(64);
+  await page.getByRole("button", { name: "加载更多", exact: true }).click();
+  await expect.poll(() => pending.length).toBe(1);
+  await page.getByRole("button", { name: "切换会话", exact: true }).click();
+  await pending.shift()!();
+  await expect(page.locator(".turn-change-file")).toHaveCount(0);
+  await page.getByRole("button", { name: "切换会话", exact: true }).click();
+  if (await toggle.getAttribute("aria-expanded") === "false") await toggle.click();
+  await expect(page.locator(".turn-change-file")).toHaveCount(64);
+});
 
 type PanelRelayEvent<T = ServerEvent> = T extends ServerEvent
   ? Omit<T, "v" | "ts"> : never;
@@ -15,7 +184,7 @@ type PanelRelayEvent<T = ServerEvent> = T extends ServerEvent
 async function mockRightPanelRelay(
   page: import("@playwright/test").Page,
   { visible = false, retained = true, engine = "codex", seedTurns = [],
-    secondParent = false, btwReadOnly = false, imageAssets = false, imageData, externalPreview }: {
+    secondParent = false, btwReadOnly = false, imageAssets = false, imageData, externalPreview, historyReply }: {
     visible?: boolean;
     retained?: boolean;
     engine?: "codex" | "claude";
@@ -25,6 +194,7 @@ async function mockRightPanelRelay(
     imageAssets?: boolean;
     imageData?: { data: string; width: number; height: number };
     externalPreview?: "allow" | "replace";
+    historyReply?: (command: Record<string, unknown>) => PanelRelayEvent<Extract<ServerEvent, { type: "history" }>> | null;
   } = {},
 ) {
   const parentSid = "layout-parent";
@@ -91,10 +261,11 @@ async function mockRightPanelRelay(
         emit({ type: "session_focus", session_id: String(command.session_id) });
         snapshot(String(command.session_id));
       } else if (command.type === "get_history") {
-        emit({ type: "history", session_id: String(command.session_id),
+        const response = historyReply ? historyReply(command) : { type: "history" as const, session_id: String(command.session_id),
           sid: String(command.session_id),
           revision: "layout-history", generation: "layout-generation",
-          detail: "summary", events: [], turns: seedTurns, has_more: false });
+          detail: "summary" as const, events: [], turns: seedTurns, has_more: false };
+        if (response) emit(response);
       } else if (externalPreview && (command.type === "get_file_preview" || command.type === "get_preview_asset")) {
         const requestId = String(command.request_id);
         const path = String(command.path);
@@ -143,6 +314,9 @@ async function mockRightPanelRelay(
       } else if (command.type === "get_diff") {
         emit({ type: "diff_report", sid: String(command.sid),
           request_id: String(command.cmd_id), file: "", diff: "" });
+      } else if (command.type === "get_goal") {
+        emit({ type: "goal_state", sid: String(command.sid),
+          request_id: String(command.cmd_id), goal: null });
       } else if (command.type === "ping") {
         emit({ type: "pong", n: Number(command.n) });
       }
@@ -153,21 +327,543 @@ async function mockRightPanelRelay(
   return { commands, emit: (message: PanelRelayEvent) => emit(message) };
 }
 
+for (const running of [false, true]) {
+  test(`path-prefixed prompts send verbatim as ${running ? "steering" : "a new message"}`, async ({ page }) => {
+    const relay = await mockRightPanelRelay(page, { retained: false });
+    await page.goto("/");
+    const input = page.locator(".composer textarea");
+    await expect(input).toBeVisible();
+    await expect.poll(() => relay.commands.some((command) =>
+      command.type === "get_history" && command.session_id === "layout-parent",
+    )).toBe(true);
+    if (running) {
+      relay.emit({ type: "state", sid: "layout-parent", state: "running" });
+      await expect(input).toHaveAttribute("placeholder", /引导/);
+    }
+    const prompt = "/Users/Tester/workspace/unitree-go2这里有双目的，看看我们的大脑是否能接入？";
+    await input.fill(prompt);
+    if (running) await input.press("Enter");
+    else await page.locator(".composer .sendbtn").click();
+    await expect.poll(() => relay.commands.filter((command) =>
+      command.type === (running ? "steer" : "query") && command.prompt === prompt,
+    ).length).toBe(1);
+    await expect(input).toHaveValue("");
+    await expect(page.locator(".composer-notice")).toHaveCount(0);
+    expect(relay.commands.some((command) => command.type === "browse_files")).toBe(false);
+  });
+}
+
+for (const browsing of [false, true]) {
+  test(`turn regressions App keeps painted history on post-send alias revision (${browsing ? "browsing" : "live"})`, async ({ page }, testInfo) => {
+    const sid = "layout-parent";
+    const oldTurns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = Array.from({ length: 4 }, (_, i) => ({
+      id: `old-${i}`, prompt: `old question ${i}`, done: true, durationMs: 71_000,
+      ts: 1000 + i * 2000, doneTs: 2000 + i * 2000,
+      blocks: [{ kind: "text", message_id: `answer-${i}`, done: true, channel: "final",
+        text: `Retained answer ${i}\n\n${"Content already shown must not disappear. ".repeat(18)}` }],
+    }));
+    let head: PanelRelayEvent<Extract<ServerEvent, { type: "history" }>> = {
+      type: "history", sid, session_id: sid, revision: "layout-history",
+      continuity_revision: "layout-history", generation: "layout-generation",
+      build_seq: 1, live_seq: 0, detail: "summary", events: [], turns: oldTurns,
+      has_more: true, oldest_id: "old-0", newest_id: "old-3", in_progress: false,
+    };
+    let olderReads = 0;
+    const relay = await mockRightPanelRelay(page, { retained: false, historyReply: (command) => {
+      if (!command.before) return { ...head, request_id: String(command.cmd_id) };
+      olderReads++;
+      if (olderReads === 2) return null; // hold a stale in-flight pagination request
+      const turnId = olderReads === 1 ? "older-page" : "earlier-page";
+      return { ...head, before: String(command.before), request_id: String(command.cmd_id),
+        turns: [{ ...oldTurns[0], id: turnId, prompt: `${turnId} question` }],
+        oldest_id: turnId, newest_id: turnId, has_more: olderReads === 1 };
+    } });
+    await page.goto("/");
+    const thread = page.locator(".thread");
+    await expect(page.locator('[data-turn-id="old-3"]')).toBeAttached();
+    if (browsing) {
+      await scrollThreadToEdge(page, "start", testInfo.project.name);
+      await expect(page.locator('[data-turn-id="older-page"]')).toBeAttached();
+      // The prepend keeps the original row anchored, so the header can be
+      // above the viewport again. Start a fresh scroll gesture for page two.
+      if (olderReads < 2) await scrollThreadToEdge(page, "start", testInfo.project.name);
+      await expect.poll(() => olderReads).toBe(2);
+    }
+    // Read mid-history, safely away from the top-trigger and the live edge.
+    if (isMobileWebKitProject(testInfo.project.name)) await dispatchTouchGesture(page, browsing ? -60 : 60);
+    else await thread.dispatchEvent("wheel", { deltaY: browsing ? 100 : -100 });
+    await thread.evaluate((node) => {
+      node.scrollTop = 500;
+      node.dispatchEvent(new Event("scroll"));
+    });
+    await waitForScrollIdle(page);
+    const anchorId = browsing ? "older-page" : "old-0";
+    const anchor = page.locator(`[data-turn-id="${anchorId}"]`);
+    await expect(anchor).toBeAttached();
+    await page.locator(".composer textarea").fill("new question after history");
+    const beforeSend = await thread.evaluate((node) => node.scrollTop);
+    await page.locator(".composer").getByRole("button", { name: "发送", exact: true }).click();
+    await expect.poll(() => relay.commands.some((c) => c.type === "query")).toBe(true);
+    const query = relay.commands.find((c) => c.type === "query")!;
+    relay.emit({ type: "user_msg", sid, seq: 1, msg_id: "native-new",
+      client_msg_id: String(query.msg_id), prompt: "new question after history" });
+    relay.emit({ type: "state", sid, seq: 2, state: "running", msg_id: "native-new" });
+    head = { ...head, revision: "layout-alias-1", build_seq: 2, live_seq: 2, in_progress: true,
+      turns: [{ id: "native-new", clientMsgId: String(query.msg_id), prompt: "new question after history",
+        blocks: [], done: false, ts: Date.now() }], has_more: true, oldest_id: "native-new", newest_id: "native-new" };
+    relay.emit(head);
+    await expect(anchor).toBeAttached();
+    await page.waitForTimeout(250);
+    expect(Math.abs(await thread.evaluate((node) => node.scrollTop) - beforeSend)).toBeLessThan(4);
+    await expect(thread).toContainText("Retained answer");
+
+    const pending = relay.commands.filter((command) => command.type === "get_history" && command.before).at(-1);
+    if (browsing) {
+      expect(pending).toBeDefined();
+      // A late old-version response must not exit the preserved browse window.
+      relay.emit({ ...head, revision: "layout-history", request_id: String(pending!.cmd_id),
+        before: String(pending!.before), turns: [], authoritative: false, error: "stale read" });
+      await page.waitForTimeout(100);
+      await expect(anchor).toBeAttached();
+      expect(Math.abs(await thread.evaluate((node) => node.scrollTop) - beforeSend)).toBeLessThan(4);
+      await scrollThreadToEdge(page, "start", testInfo.project.name);
+      await expect(page.locator('[data-turn-id="earlier-page"]')).toBeAttached();
+      const latestRead = relay.commands.filter((command) => command.type === "get_history" && command.before).at(-1)!;
+      expect(latestRead.before).toBe("older-page");
+    }
+    if (!browsing) {
+      await page.getByRole("button", { name: "滚动到底部", exact: true }).click();
+      await expect(page.getByText("new question after history", { exact: true })).toBeVisible();
+      await expect.poll(() => thread.evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop)).toBeLessThan(4);
+    }
+  });
+}
+
+test("session workspace harness menu clears pointer focus and preserves keyboard navigation", async ({ page }) => {
+  await mockRightPanelRelay(page, { retained: false });
+  await page.goto("/");
+  const select = page.locator(".engine-toggle");
+  await select.click();
+  await page.getByRole("menuitemradio", { name: "Claude", exact: true }).click();
+  await expect(select).not.toBeFocused();
+  await expect(select).toHaveCSS("outline-style", "none");
+  await expect(page.locator(".engine-label")).toHaveText("Claude");
+  await select.focus();
+  await select.press("ArrowDown");
+  const selected = page.getByRole("menuitemradio", { name: "Claude", exact: true });
+  await expect(selected).toBeFocused();
+  await selected.press("ArrowDown");
+  await expect(page.getByRole("menuitemradio", { name: "Codex", exact: true })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(select).toBeFocused();
+  await expect(select).toHaveCSS("outline-style", "solid");
+  await expect(page.locator(".engine-label")).toHaveText("Codex");
+  await select.press("ArrowUp");
+  await page.keyboard.press("Home");
+  await expect(page.getByRole("menuitemradio", { name: "Claude", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(select).toBeFocused();
+  await expect(page.getByRole("menu", { name: "会话引擎" })).toHaveCount(0);
+});
+
+test("session workspace directory links open the browser and keep original downloads", async ({ page }) => {
+  const path = "/tmp/layout/dir";
+  const relay = await mockRightPanelRelay(page, { retained: false, seedTurns: [{
+    id: "directory-link", prompt: "查看目录", done: true,
+    blocks: [{ kind: "text", message_id: "directory-answer", channel: "final", done: true,
+      text: `[目录](${path})` }],
+  }] });
+  await page.goto("/");
+  await page.getByRole("button", { name: `在 Remote 中打开 ${path}`, exact: true }).click();
+  await expect.poll(() => relay.commands.some(c => c.type === "get_file_preview")).toBe(true);
+  const request = relay.commands.find(c => c.type === "get_file_preview")!;
+  relay.emit({ type: "file_preview", sid: "layout-parent", request_id: String(request.request_id),
+    path, directory: true, format: "text", content: "", size: 0 });
+  await expect.poll(() => relay.commands.some(c => c.type === "browse_files")).toBe(true);
+  const browse = relay.commands.find(c => c.type === "browse_files")!;
+  expect(browse.path).toBe(path);
+  expect(browse.sid).toBe("layout-parent");
+  relay.emit({ type: "files_listed", sid: "layout-parent", request_id: String(browse.request_id),
+    root: "/tmp/layout", path, parent: "/tmp/layout", kind: "directory", revision: "dir-1",
+    next_offset: null, entries: [{ name: "README.md", path: `${path}/README.md`, kind: "file" }] });
+  await expect(page.locator(".file-browser-shell")).toBeVisible();
+  await page.getByRole("button", { name: "README.md", exact: true }).click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "get_file_preview").length).toBe(2);
+  const preview = relay.commands.filter(c => c.type === "get_file_preview").at(-1)!;
+  relay.emit({ type: "file_preview", sid: "layout-parent", request_id: String(preview.request_id),
+    path: `${path}/README.md`, format: "text", content: "Directory preview", size: 17, writable: false });
+  await expect(page.locator(".artifact-panel")).toContainText("Directory preview");
+  const downloadEvent = page.waitForEvent("download");
+  await page.getByRole("link", { name: "下载原文件", exact: true }).click();
+  expect((await downloadEvent).suggestedFilename()).toBe("README.md");
+  await page.getByRole("button", { name: "返回目录", exact: true }).click();
+  await expect(page.getByRole("button", { name: "README.md", exact: true })).toBeVisible();
+  expect(relay.commands.some(c => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
+});
+
+test("session workspace XLSX previews sheets and downloads the original on mobile", async ({ page }, info) => {
+  const path = "/tmp/layout/report.xlsx";
+  const relay = await mockRightPanelRelay(page, { retained: false, seedTurns: [{
+    id: "spreadsheet-link", prompt: "查看表格", done: true,
+    blocks: [{ kind: "text", message_id: "spreadsheet-answer", channel: "final", done: true,
+      text: `[表格](${path})` }],
+  }] });
+  await page.goto("/");
+  await page.getByRole("button", { name: `在 Remote 中打开 ${path}`, exact: true }).click();
+  await expect.poll(() => relay.commands.some(c => c.type === "get_file_preview")).toBe(true);
+  const request = relay.commands.find(c => c.type === "get_file_preview")!;
+  relay.emit({ type: "file_preview", sid: "layout-parent", request_id: String(request.request_id),
+    path, format: "spreadsheet", content: JSON.stringify({ sheets: [
+      { name: "路线图", cells: [{ r: 1, c: 1, v: "本周进展" }, { r: 1, c: 2, v: "42", f: "SUM(B2:B3)" }], truncated: false },
+      { name: "进展", cells: [{ r: 1, c: 1, v: "<script>bad()</script>" }], truncated: false }], truncated: false }),
+    data: "UEsDBA==", size: 4, mtime_ns: "1", truncated: false });
+  const sheet = page.getByRole("region", { name: "表格预览" });
+  await expect(sheet).toContainText("本周进展");
+  await expect(sheet.getByRole("cell", { name: "42", exact: true })).toHaveAttribute("title", "=SUM(B2:B3)");
+  await sheet.getByRole("tab", { name: "进展", exact: true }).click();
+  await expect(sheet).toContainText("<script>bad()</script>");
+  await expect(sheet.locator("script")).toHaveCount(0);
+  const downloadEvent = page.waitForEvent("download");
+  await sheet.getByRole("link", { name: "下载原文件" }).click();
+  expect((await downloadEvent).suggestedFilename()).toBe("report.xlsx");
+  await page.screenshot({ path: info.outputPath("spreadsheet-preview.png") });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+});
+
+test("session workspace opens files in the sidebar and returns to its directory", async ({ page }, testInfo) => {
+  if (testInfo.project.name === "chromium") await page.setViewportSize({ width: 1440, height: 950 });
+  const relay = await mockRightPanelRelay(page, { retained: false });
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "更多设置", exact: true })).toBeVisible();
+  await expect(page.locator(".c-head").getByRole("button", { name: "打开会话文件", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "更多设置", exact: true }).click();
+  await page.getByRole("button", { name: "打开会话文件", exact: true }).click();
+  await expect.poll(() => relay.commands.filter((c) => c.type === "browse_files").length).toBe(1);
+  const request = relay.commands.find((c) => c.type === "browse_files")!;
+  expect(request.sid).toBe("layout-parent");
+  const result: PanelRelayEvent<Extract<ServerEvent, { type: "files_listed" }>> = {
+    type: "files_listed", sid: "layout-parent", request_id: String(request.request_id),
+    root: "/tmp/layout", path: "/tmp/layout", kind: "directory", parent: null,
+    revision: "one", next_offset: null, entries: [{ name: "README.md", path: "/tmp/layout/README.md", kind: "file" }],
+  };
+  relay.emit({ ...result, request_id: "stale-request" });
+  await expect(page.getByRole("button", { name: "README.md", exact: true })).toHaveCount(0);
+  relay.emit(result);
+  const bounds = await page.locator(".file-browser-shell").boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+  await page.getByRole("button", { name: "README.md", exact: true }).click();
+  await expect.poll(() => relay.commands.some((c) => c.type === "get_file_preview")).toBe(true);
+  const preview = relay.commands.find((c) => c.type === "get_file_preview")!;
+  relay.emit({ type: "file_preview", sid: "layout-parent", request_id: String(preview.request_id),
+    path: String(preview.path), format: "markdown", content: "# Workspace preview", size: 20, writable: false });
+  await expect(page.getByRole("heading", { name: "Workspace preview" })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("workspace-preview.png"), animations: "disabled" });
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  await page.screenshot({ path: testInfo.outputPath("workspace-preview-dark.png"), animations: "disabled" });
+  await page.evaluate(() => { document.documentElement.dataset.theme = "light"; });
+  await page.getByRole("button", { name: "返回目录", exact: true }).click();
+  await expect(page.getByRole("button", { name: "README.md", exact: true })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("workspace-directory.png"), animations: "disabled" });
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  await page.screenshot({ path: testInfo.outputPath("workspace-directory-dark.png"), animations: "disabled" });
+  await page.evaluate(() => { document.documentElement.dataset.theme = "light"; });
+  expect(relay.commands.filter((c) => c.type === "browse_files")).toHaveLength(1);
+  await page.getByRole("button", { name: "关闭文件浏览", exact: true }).click();
+  const input = page.locator("textarea").first();
+  await input.fill("/open README.md");
+  await input.press("Enter");
+  await expect.poll(() => relay.commands.filter((c) => c.type === "browse_files").length).toBe(2);
+  const direct = relay.commands.filter((c) => c.type === "browse_files").at(-1)!;
+  expect(direct.path).toBe("README.md");
+  relay.emit({ ...result, request_id: String(direct.request_id), kind: "file", path: "/tmp/layout/README.md" });
+  await expect.poll(() => relay.commands.filter((c) => c.type === "get_file_preview").length).toBe(2);
+  expect(relay.commands.some((c) => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
+});
+
+test("session workspace browses outside cwd and never shows an old directory after navigation fails", async ({ page }, testInfo) => {
+  const relay = await mockRightPanelRelay(page, { retained: false });
+  await page.goto("/");
+  await page.getByRole("button", { name: "更多设置", exact: true }).click();
+  await page.getByRole("button", { name: "打开会话文件", exact: true }).click();
+  const requests = () => relay.commands.filter((c) => c.type === "browse_files");
+  await expect.poll(() => requests().length).toBe(1);
+  const listing: PanelRelayEvent<Extract<ServerEvent, { type: "files_listed" }>> = {
+    type: "files_listed", sid: "layout-parent", request_id: String(requests()[0].request_id),
+    root: "/", path: "/tmp/layout", kind: "directory", parent: "/tmp",
+    revision: "one", next_offset: null,
+    entries: [{ name: "README.md", path: "/tmp/layout/README.md", kind: "file" }],
+  };
+  relay.emit(listing);
+  const panel = page.locator(".workspace-files");
+  const path = panel.getByRole("textbox", { name: "文件或目录路径", exact: true });
+  await expect(panel.locator(".artifact-path")).toHaveText("/tmp/layout");
+  await expect(panel.getByRole("button", { name: "上级目录", exact: true })).toBeEnabled();
+  await panel.getByRole("button", { name: "上级目录", exact: true }).click();
+  await expect.poll(() => requests().length).toBe(2);
+  expect(requests()[1].path).toBe("/tmp");
+  await expect(panel.getByRole("button", { name: "README.md", exact: true })).toHaveCount(0);
+  relay.emit({ ...listing, request_id: String(requests()[1].request_id),
+    path: "/tmp", parent: "/", entries: [{ name: "layout", path: "/tmp/layout", kind: "directory" }] });
+  await expect(path).toHaveValue("/tmp");
+  await expect(panel.locator(".artifact-path")).toHaveText("/tmp");
+
+  await path.fill("/home/example");
+  await panel.getByRole("button", { name: "打开", exact: true }).click();
+  await expect.poll(() => requests().length).toBe(3);
+  expect(requests()[2].path).toBe("/home/example");
+  relay.emit({ ...listing, request_id: String(requests()[2].request_id),
+    path: "", parent: null, entries: [], error: "没有权限读取该目录" });
+  await expect(panel.getByRole("alert")).toHaveText("没有权限读取该目录");
+  await expect(path).toHaveValue("/home/example");
+  await expect(panel.locator(".workspace-entry")).toHaveCount(0);
+  await expect(panel.locator(".artifact-path")).toHaveText("");
+  await panel.getByRole("button", { name: "刷新目录", exact: true }).click();
+  await expect.poll(() => requests().length).toBe(4);
+  expect(requests()[3].path).toBe("/home/example");
+  relay.emit(listing); // A late old response must not restore the project list.
+  await expect(panel.locator(".workspace-entry")).toHaveCount(0);
+  relay.emit({ ...listing, request_id: String(requests()[3].request_id),
+    path: "/home/example", parent: "/home",
+    entries: [{ name: "notes.md", path: "/home/example/notes.md", kind: "file" }] });
+  await expect(panel.getByRole("alert")).toHaveCount(0);
+  await expect(panel.locator(".artifact-path")).toHaveText("/home/example");
+  await expect(panel.getByRole("button", { name: "notes.md", exact: true })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("workspace-external-directory.png") });
+  expect(relay.commands.some((c) => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
+});
+
+test("session workspace Codex capacity rejects oversize and sends a session preference", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { retained: false });
+  await page.goto("/");
+  await expect(page.locator(".scard.active .scard-title")).toHaveText("Layout parent");
+  const input = page.locator("textarea").first();
+  await input.fill("/autocompact ");
+  await input.press("Enter");
+  relay.emit({ type: "codex_context", sid: "layout-parent", model: "fixture",
+    max_context_tokens: null, applied_max_context_tokens: null, applied_threshold_tokens: null, model_max_tokens: 20000,
+    context_window_tokens: null, limit_tokens: 19000, pending: false, mutable: true, error: null });
+  const setting = page.getByRole("dialog", { name: "Codex 上下文上限", exact: true });
+  await expect(setting).toBeVisible();
+  await setting.getByLabel("上下文上限（tokens）").fill("20k");
+  await setting.getByRole("button", { name: "应用", exact: true }).click();
+  await expect(setting.getByRole("alert")).toContainText("19,000");
+  expect(relay.commands.some((c) => c.type === "set_codex_context")).toBe(false);
+  await setting.getByLabel("上下文上限（tokens）").fill("12k");
+  await setting.getByRole("button", { name: "应用", exact: true }).click();
+  await expect.poll(() => relay.commands.some((c) => c.type === "set_codex_context")).toBe(true);
+  const request = relay.commands.find((c) => c.type === "set_codex_context")!;
+  expect([request.sid, request.max_context_tokens]).toEqual(["layout-parent", 12000]);
+  relay.emit({ type: "codex_context", sid: "layout-parent", model: "fixture",
+    max_context_tokens: 12000, applied_max_context_tokens: null, applied_threshold_tokens: null, model_max_tokens: 20000,
+    context_window_tokens: 12632, limit_tokens: 19000, pending: true, mutable: true, error: null });
+  await expect(setting.getByRole("status")).toContainText("已保存上限 12,000");
+  await setting.getByRole("button", { name: "恢复 Codex 默认值" }).click();
+  await expect.poll(() => relay.commands.filter((c) => c.type === "set_codex_context").length).toBe(2);
+  expect(relay.commands.filter((c) => c.type === "set_codex_context").at(-1)?.max_context_tokens).toBeNull();
+  expect(relay.commands.some((c) => c.type === "query")).toBe(false);
+});
+
+test("session workspace context ring refreshes applied capacity and distinguishes pending capacities", async ({ page }, testInfo) => {
+  const relay = await mockRightPanelRelay(page, { retained: false });
+  await page.goto("/");
+  const ring = page.getByRole("button", { name: "上下文占用", exact: true });
+  await expect(ring).toBeVisible();
+  await expect.poll(() => relay.commands.some((c) => c.type === "get_history")).toBe(true);
+  const setting: PanelRelayEvent<Extract<ServerEvent, { type: "codex_context" }>> = {
+    type: "codex_context", sid: "layout-parent", model: "fixture",
+    max_context_tokens: 400000, applied_max_context_tokens: null, applied_threshold_tokens: null, model_max_tokens: 872000,
+    context_window_tokens: 421053, limit_tokens: 828400, pending: true, mutable: true, error: null,
+  };
+  const report: PanelRelayEvent<Extract<ServerEvent, { type: "context_report" }>> = {
+    type: "context_report", sid: "layout-parent", total_tokens: 142045,
+    max_tokens: 258400, percentage: 55, model: "fixture", categories: [], source: "native_estimate",
+  };
+  relay.emit(setting);
+  relay.emit(report);
+  await ring.click();
+  const popover = page.getByRole("dialog", { name: "上下文占用", exact: true });
+  await expect(popover).toContainText("142,045 / 258,400 (55%)");
+  await expect(popover).toContainText("已保存上限 400,000，等待生效");
+  relay.emit({ ...setting, applied_max_context_tokens: 400000, applied_threshold_tokens: 378947, pending: false });
+  await expect(popover).not.toContainText("258,400");
+  const request = relay.commands.filter((c) => c.type === "get_context").at(-1)!;
+  relay.emit({ ...report, request_id: String(request.cmd_id), max_tokens: 400000, percentage: 35.51125 });
+  await expect(popover).toContainText("142,045 / 400,000 (36%)");
+  await expect(popover.locator(".ctx-pop-row").filter({ hasText: "生效压缩阈值" })).toContainText("378,947");
+  await expect(popover).not.toContainText("等待生效");
+  await page.screenshot({ path: testInfo.outputPath("applied-context-capacity.png") });
+  expect(relay.commands.some((c) => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
+});
+
+test("session workspace distinguishes 300k capacity from native usage and compaction", async ({ page }, testInfo) => {
+  const relay = await mockRightPanelRelay(page, { retained: false });
+  await page.goto("/");
+  // Initial focus changes the draft scope. Type only after this session is
+  // selected, otherwise WebKit can fill the pre-focus draft and then lose it.
+  await expect(page.locator(".scard.active .scard-title")).toHaveText("Layout parent");
+  const input = page.locator("textarea").first();
+  await input.fill("/autocompact ");
+  await input.press("Enter");
+  const state: PanelRelayEvent<Extract<ServerEvent, { type: "codex_context" }>> = {
+    type: "codex_context", sid: "layout-parent", model: "gpt-6-astra",
+    max_context_tokens: 300000, applied_max_context_tokens: 400000, applied_threshold_tokens: 378947, model_max_tokens: 872000,
+    context_window_tokens: 315790, limit_tokens: 828400, pending: true, mutable: true, error: null,
+  };
+  relay.emit(state);
+  const setting = page.getByRole("dialog", { name: "Codex 上下文上限", exact: true });
+  await expect(setting).toContainText("可设置上限 828,400");
+  await expect(setting.getByRole("status")).toContainText("已保存上限 300,000");
+  await expect(setting.getByRole("status")).toContainText("当前生效上限：400,000");
+  await expect(setting).toContainText("进度按 Codex 原生上下文估算显示");
+
+  relay.emit({ ...state, applied_max_context_tokens: 300000,
+    applied_threshold_tokens: 284211, pending: false });
+  await expect(setting.getByRole("status")).toContainText("设定上限：300,000");
+  await expect(setting.getByRole("status")).toContainText("当前生效上限：300,000");
+  await expect(setting.getByRole("status")).toContainText("当前生效阈值：284,211");
+  await expect(setting).not.toContainText("400,000");
+  expect(await setting.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("context-300k-settings.png"), animations: "disabled" });
+
+  const report: PanelRelayEvent<Extract<ServerEvent, { type: "context_report" }>> = {
+    type: "context_report", sid: "layout-parent", total_tokens: 245325,
+    max_tokens: 300000, percentage: 81.775, model: "gpt-6-astra", categories: [], source: "recent_turn",
+  };
+  relay.emit(report);
+  await page.getByRole("button", { name: "上下文占用", exact: true }).click();
+  await expect(setting).not.toBeVisible();
+  const popover = page.getByRole("dialog", { name: "上下文占用", exact: true });
+  const request = relay.commands.filter((c) => c.type === "get_context").at(-1)!;
+  relay.emit({ ...report, request_id: String(request.cmd_id) });
+  await expect(popover).toContainText("最近请求用量");
+  await expect(popover).toContainText("245,325 tokens");
+  await expect(popover).not.toContainText("82%");
+  await expect(popover.locator(".ctx-pop-bar")).toHaveCount(0);
+  const ring = page.getByRole("button", { name: "上下文占用", exact: true });
+  await expect(ring.locator(".hr-fill")).toHaveCount(0);
+  // Same incident: billing usage was 245325, but Codex compacted at 284793.
+  const nativeReport = { ...report, source: "native_estimate" as const,
+    total_tokens: 284793, percentage: 94.931, auto_compact_threshold_tokens: 284211 };
+  relay.emit(nativeReport);
+  await expect(popover).toContainText("284,793 / 300,000 (95%)");
+  await expect(popover.locator(".ctx-pop-bar i")).toHaveCSS("width", /.+/);
+  expect(await popover.locator(".ctx-pop-bar i").evaluate(node => (node as HTMLElement).style.width)).toBe("94.931%");
+  expect(Number(await ring.locator(".hr-fill").getAttribute("stroke-dashoffset"))).toBeCloseTo(4.7775325);
+  await expect(popover.locator(".ctx-pop-row").filter({ hasText: "生效压缩阈值" })).toContainText("284,211");
+  await expect(popover).not.toContainText("正在读取真实上下文");
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
+    expect(await popover.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath(`context-300k-usage-${theme}.png`), animations: "disabled" });
+  }
+  // Background read failures retain the last native estimate without UI noise.
+  relay.emit(report);
+  await expect(popover).toContainText("284,793 / 300,000 (95%)");
+  const oldHeight = (await popover.boundingBox())!.height;
+  const oldOffset = await ring.locator(".hr-fill").getAttribute("stroke-dashoffset");
+  relay.emit({ ...report, available: false, total_tokens: 0, percentage: 0 });
+  await expect(popover).toContainText("284,793 / 300,000 (95%)");
+  const requestCount = relay.commands.filter(c => c.type === "get_context").length;
+  await ring.click();
+  await ring.click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "get_context").length).toBeGreaterThan(requestCount);
+  const refresh = relay.commands.filter(c => c.type === "get_context").at(-1)!;
+  relay.emit({ type: "error", sid: "layout-parent", request_id: String(refresh.cmd_id),
+    code: "invalid_command", message: "无法读取上下文，请稍后重试" });
+  await expect(popover).not.toContainText("正在读取");
+  await expect(page.getByText("无法读取上下文，请稍后重试", { exact: true })).toHaveCount(0);
+  await expect(popover.locator(".ctx-pop-status")).toHaveCount(0);
+  await expect(ring.locator("text")).toHaveCount(0);
+  await expect(ring.locator(".hr-fill")).toHaveAttribute("stroke-dashoffset", oldOffset!);
+  expect((await popover.boundingBox())!.height).toBe(oldHeight);
+  relay.emit({ ...nativeReport, total_tokens: 33824, percentage: 11.27467 });
+  await expect(popover).toContainText("33,824 / 300,000 (11%)");
+  expect(relay.commands.some((c) => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
+});
+
+test("session workspace refreshes native context during a running turn", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { retained: false });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_context")).toBe(true);
+  const report: PanelRelayEvent<Extract<ServerEvent, { type: "context_report" }>> = {
+    type: "context_report", sid: "layout-parent", total_tokens: 281362,
+    max_tokens: 300000, percentage: 93.78733, model: "fixture", categories: [], source: "native_estimate",
+  };
+  const first = relay.commands.filter(c => c.type === "get_context").at(-1)!;
+  relay.emit({ ...report, request_id: String(first.cmd_id) });
+  relay.emit({ type: "state", sid: "layout-parent", state: "running" });
+  const count = relay.commands.filter(c => c.type === "get_context").length;
+  await expect.poll(() => relay.commands.filter(c => c.type === "get_context").length,
+    { timeout: 8000 }).toBeGreaterThan(count);
+  const next = relay.commands.filter(c => c.type === "get_context").at(-1)!;
+  relay.emit({ ...report, request_id: String(next.cmd_id), total_tokens: 284793, percentage: 94.931 });
+  const ring = page.getByRole("button", { name: "上下文占用", exact: true });
+  await expect.poll(async () => Number(await ring.locator(".hr-fill").getAttribute("stroke-dashoffset")))
+    .toBeCloseTo(4.7775325);
+  expect(relay.commands.some(c => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
+});
+
+test("turn regressions App routes file pages by exact request and opens the archived diff", async ({ page }) => {
+  const files = Array.from({ length: 65 }, (_, i) => ({
+    path: `/tmp/layout/file-${i}.py`, state: "available" as const, additions: 1, deletions: 1,
+  }));
+  const relay = await mockRightPanelRelay(page, { retained: false, seedTurns: [{
+    id: "archived-turn", prompt: "many files", done: true, blocks: [],
+    fileChanges: { revision: "immutable", files: files.slice(0, 64), total_files: 65,
+      total_additions: 65, total_deletions: 65, next_offset: 64 },
+  }] });
+  await page.goto("/");
+  await page.locator(".turn-changes-toggle").click();
+  await page.getByRole("button", { name: "加载更多", exact: true }).click();
+  await expect.poll(() => relay.commands.some((command) => command.type === "get_turn_file_changes")).toBe(true);
+  const read = relay.commands.find((command) => command.type === "get_turn_file_changes")!;
+  expect([read.sid, read.engine, read.turn_id, read.revision, read.offset, read.limit]).toEqual([
+    "layout-parent", "codex", "archived-turn", "immutable", 64, 64,
+  ]);
+  const response: PanelRelayEvent<Extract<ServerEvent, { type: "turn_file_changes_page" }>> = {
+    type: "turn_file_changes_page", sid: String(read.sid), engine: "codex", turn_id: "archived-turn",
+    revision: "immutable", request_id: String(read.cmd_id), offset: 64, files: files.slice(64),
+    total_files: 65, next_offset: null,
+  };
+  relay.emit({ ...response, revision: "other-version" });
+  await expect(page.locator(".turn-change-file")).toHaveCount(64);
+  relay.emit(response);
+  await expect(page.locator(".turn-change-file")).toHaveCount(65);
+  await page.getByRole("button", { name: files[64].path, exact: true }).click();
+  await expect.poll(() => relay.commands.some((command) => command.type === "get_diff")).toBe(true);
+  const diff = relay.commands.find((command) => command.type === "get_diff")!;
+  expect([diff.sid, diff.engine, diff.turn_id, diff.revision, diff.file]).toEqual([
+    "layout-parent", "codex", "archived-turn", "immutable", files[64].path,
+  ]);
+  expect(relay.commands.some((command) => ["query", "steer", "new_session"].includes(String(command.type)))).toBe(false);
+});
+
 test("policy refusal remains specific through live delivery and history reload", async ({ page }, testInfo) => {
   const message = "上游模型因安全策略拒绝了本次请求（cyber_policy）。"
     + "这不是本地权限或网络错误；请核实并说明任务背景与授权范围，"
     + "若属误判请向服务提供方反馈。";
   const turns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = [];
-  const relay = await mockRightPanelRelay(page, { retained: false, seedTurns: turns });
+  // Keep live delivery isolated from a fabricated empty canonical page. Once
+  // the source has materialized, reload must use that exact canonical history.
+  const relay = await mockRightPanelRelay(page, { retained: false,
+    historyReply: (command) => turns.length === 0 ? null : {
+      type: "history", sid: String(command.session_id), session_id: String(command.session_id),
+      request_id: String(command.cmd_id), revision: "policy-history", generation: "layout-generation",
+      detail: "summary", events: [], turns, has_more: false,
+    },
+  });
   await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
   await expect(page.locator(".composer textarea")).toBeEnabled();
   relay.emit({ type: "user_msg", sid: "layout-parent", msg_id: "policy-user", prompt: "检查这段代码" });
+  relay.emit({ type: "turn_binding", sid: "layout-parent", msg_id: "policy-user", turn_id: "policy-turn" });
   relay.emit({ type: "state", sid: "layout-parent", state: "running", msg_id: "policy-user" });
   relay.emit({ type: "error", sid: "layout-parent", code: "cc_crash", message, msg_id: "policy-user" });
   relay.emit({ type: "turn_end", sid: "layout-parent", turn_id: "policy-turn",
     result: { subtype: "error", duration_ms: 20, is_error: true } });
   relay.emit({ type: "state", sid: "layout-parent", state: "idle" });
-  const problem = page.locator(".turn .note.interrupted");
+  const problem = page.locator(".turn .turn-problem");
   await expect(problem).toHaveText(message);
   await expect(page.locator(".composer textarea")).toBeEnabled();
   expect(relay.commands.filter(c => c.type === "query" || c.type === "steer")).toHaveLength(0);
@@ -181,13 +877,13 @@ test("policy refusal remains specific through live delivery and history reload",
   await expect(problem).toHaveCount(1);
   await expect(problem).toHaveText(message);
   await expect(page.locator('[data-turn-id="followup-user"]')).toContainText("日志说明已完成。");
-  await expect(page.locator('[data-turn-id="followup-user"] .note.interrupted')).toHaveCount(0);
+  await expect(page.locator('[data-turn-id="followup-user"] .turn-problem')).toHaveCount(0);
   for (const theme of ["light", "dark"]) {
     await page.evaluate(value => document.documentElement.setAttribute("data-theme", value), theme);
     await expect(problem).toBeVisible();
     expect(await problem.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
-    expect(await problem.evaluate(node => getComputedStyle(node, "::before").display)).toBe("none");
-    expect(await problem.evaluate(node => getComputedStyle(node, "::after").display)).toBe("none");
+    expect(["none", "normal"]).toContain(await problem.evaluate(node => getComputedStyle(node, "::before").content));
+    expect(["none", "normal"]).toContain(await problem.evaluate(node => getComputedStyle(node, "::after").content));
     await page.screenshot({ path: testInfo.outputPath(`policy-refusal-${theme}.png`) });
   }
 });
@@ -341,6 +1037,172 @@ test("generated image live snapshot renders outside collapsed process and duplic
   await expect(page.locator(".image-lightbox-image")).toBeVisible();
 });
 
+test("provider capacity failure stays local to its turn while the next reply continues", async ({ page }, testInfo) => {
+  // This case drives live packets; canonical history is covered below. Do not
+  // let the generic empty-history fixture erase the completed live failure.
+  const relay = await mockRightPanelRelay(page, { historyReply: () => null });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some((c) => c.type === "get_history")).toBe(true);
+  const sid = "layout-parent";
+  relay.emit({ type: "user_msg", sid, msg_id: "failed-request", prompt: "部署一下。" });
+  relay.emit({ type: "turn_binding", sid, msg_id: "failed-request", turn_id: "failed-native" });
+  relay.emit({ type: "process", sid, item_id: "build", kind: "command", phase: "end",
+    status: "succeeded", turn_id: "failed-native", title: "检查构建", duration_ms: 2000 });
+  relay.emit({ type: "error", sid, msg_id: "failed-request", code: "cc_crash",
+    message: "当前模型繁忙，请稍后重试或切换模型。" });
+  relay.emit({ type: "turn_end", sid, turn_id: "failed-native",
+    result: { subtype: "error", duration_ms: 337204, is_error: true } });
+  relay.emit({ type: "state", sid, state: "idle" });
+  const failed = page.locator('.turn[data-turn-id="failed-request"]');
+  await expect(failed.locator(".turn-process-head")).toContainText("回复未完成");
+  await expect(failed.locator(".turn-problem")).toContainText("当前模型繁忙，请稍后重试或切换模型。");
+  await expect(failed.locator(".turn-process-state.done, .note.interrupted")).toHaveCount(0);
+  await expect(page.locator(".turn-working")).toHaveCount(0);
+
+  relay.emit({ type: "user_msg", sid, msg_id: "followup-native", prompt: "" });
+  relay.emit({ type: "turn_binding", sid, msg_id: "followup-native", turn_id: "followup-native" });
+  relay.emit({ type: "state", sid, state: "running" });
+  relay.emit({ type: "process", sid, item_id: "verify", kind: "command", phase: "start",
+    status: "running", turn_id: "followup-native", title: "继续验证发布" });
+  const followup = page.locator('.turn[data-turn-id="followup-native"]');
+  await expect(followup.locator(".turn-process-head")).toContainText("正在处理");
+  await expect(failed.locator(".turn-problem-continuation")).toContainText("后续回复正在处理中");
+  await expect(failed.locator(".turn-problem")).not.toContainText("请稍后重试");
+  await expect(page.locator(".turn-working")).toHaveCount(1);
+  await expect(failed.locator(".turn-working")).toHaveCount(0);
+  await failed.locator(".turn-process-head").click();
+  await expect(failed).toContainText("检查构建");
+  await page.screenshot({ path: testInfo.outputPath("capacity-followup-light.png") });
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  await page.screenshot({ path: testInfo.outputPath("capacity-followup-dark.png") });
+  expect(await failed.locator(".turn-problem").evaluate(node => node.scrollWidth - node.clientWidth)).toBeLessThan(2);
+
+  relay.emit({ type: "turn_end", sid, turn_id: "followup-native",
+    result: { subtype: "success", duration_ms: 5000, is_error: false } });
+  relay.emit({ type: "state", sid, state: "idle" });
+  await expect(page.locator(".turn-working, .turn-problem-continuation")).toHaveCount(0);
+  await expect(failed.locator(".turn-process-head")).toContainText("回复未完成");
+  await expect(followup.locator(".turn-process-head")).toContainText("已处理");
+  expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toHaveLength(0);
+});
+
+test("provider capacity history keeps its cause after reload without a stuck progress indicator", async ({ page }) => {
+  await mockRightPanelRelay(page, { seedTurns: [{
+    id: "failed-history", prompt: "部署一下。", done: true, forkPointId: "failed-native",
+    error: "当前模型繁忙，请稍后重试或切换模型。", processDetailState: "present",
+    blocks: [{ kind: "process", item_id: "build", processKind: "command", phase: "end",
+      status: "succeeded", title: "检查构建", done: true, turn_id: "failed-native" }],
+  }, { id: "later-history", prompt: "", done: true, forkPointId: "followup-native",
+    blocks: [{ kind: "text", message_id: "finished", channel: "final", text: "已完成部署。", done: true }] }] });
+  await page.goto("/");
+  for (let iteration = 0; iteration < 2; iteration++) {
+    if (iteration) await page.reload();
+    await expect(page.locator(".turn-problem")).toHaveCount(1);
+    await expect(page.locator(".turn-problem")).toContainText("当前模型繁忙");
+    await expect(page.locator(".turn-process-head")).toContainText("回复未完成");
+    await expect(page.getByText("已完成部署。", { exact: true })).toBeVisible();
+    await expect(page.locator(".turn-working, .turn-problem-continuation, .note.interrupted")).toHaveCount(0);
+  }
+});
+
+test("turn regressions usage limit shows the native retry date without blocking the next turn", async ({ page }, testInfo) => {
+  const failure = "本轮使用的 Codex 账号额度已用完。可切换账号、补充额度，或等待恢复后重试。"
+    + "官方提示可于 2026-09-15 09:24（设备当地时间）重试。";
+  const relay = await mockRightPanelRelay(page, { historyReply: () => null });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
+  const sid = "layout-parent";
+  relay.emit({ type: "user_msg", sid, msg_id: "limited-request", prompt: "继续检查" });
+  relay.emit({ type: "turn_binding", sid, msg_id: "limited-request", turn_id: "limited-native" });
+  relay.emit({ type: "process", sid, item_id: "check", kind: "command", phase: "end",
+    status: "succeeded", turn_id: "limited-native", title: "检查已有结果", duration_ms: 1000 });
+  relay.emit({ type: "error", sid, msg_id: "limited-request", code: "cc_crash", message: failure });
+  relay.emit({ type: "turn_end", sid, turn_id: "limited-native",
+    result: { subtype: "error", duration_ms: 1000, is_error: true } });
+  relay.emit({ type: "state", sid, state: "idle" });
+  const failed = page.locator('.turn[data-turn-id="limited-request"]');
+  await expect(failed.locator(".turn-process-head")).toContainText("账号额度已用完");
+  await expect(failed.locator(".turn-problem")).toHaveText(failure);
+  await expect(page.locator(".turn-working, .note.interrupted")).toHaveCount(0);
+  expect(await failed.locator(".turn-problem").evaluate(node => node.scrollWidth - node.clientWidth)).toBeLessThan(2);
+  await page.screenshot({ path: testInfo.outputPath("quota-failure-light.png") });
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  await page.screenshot({ path: testInfo.outputPath("quota-failure-dark.png") });
+
+  relay.emit({ type: "user_msg", sid, msg_id: "quota-followup", prompt: "换个账号继续" });
+  relay.emit({ type: "turn_binding", sid, msg_id: "quota-followup", turn_id: "followup-native" });
+  relay.emit({ type: "state", sid, state: "running" });
+  relay.emit({ type: "assistant_msg_start", sid, message_id: "resumed-answer", channel: "final" });
+  relay.emit({ type: "delta", sid, message_id: "resumed-answer", text: "检查完成。", channel: "final" });
+  relay.emit({ type: "turn_end", sid, turn_id: "followup-native",
+    result: { subtype: "success", duration_ms: 1000, is_error: false } });
+  relay.emit({ type: "state", sid, state: "idle" });
+  await expect(page.locator('.turn[data-turn-id="quota-followup"] .turn-problem')).toHaveCount(0);
+  await expect(page.getByText("检查完成。", { exact: true })).toBeVisible();
+  await expect(page.locator(".turn-problem")).toHaveCount(1);
+  await expect(page.locator(".turn-working")).toHaveCount(0);
+  expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toHaveLength(0);
+});
+
+test("turn regressions usage limit history replaces an old generic cache and survives reload", async ({ page }) => {
+  const failure = "本轮使用的 Codex 账号额度已用完。可切换账号、补充额度，或等待恢复后重试。"
+    + "官方提示可于 2026-09-15 09:24（设备当地时间）重试。";
+  // Match the real zero-output failed turn: no tool timeline, only its error.
+  const seedTurns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = [{
+    id: "limited-history", prompt: "继续检查", done: true, forkPointId: "limited-native",
+    error: "该轮未正常结束", blocks: [],
+  }, { id: "quota-followup-history", prompt: "换个账号继续", done: true, forkPointId: "followup-native",
+    blocks: [{ kind: "text", message_id: "finished", channel: "final", text: "检查完成。", done: true }] }];
+  await mockRightPanelRelay(page, { seedTurns });
+  await page.goto("/");
+  await expect(page.locator(".turn-problem")).toHaveText("该轮未正常结束");
+  await expect.poll(() => page.evaluate(async () => {
+    const cache = await import("/src/cache.ts");
+    return (await cache.loadSession("layout-parent"))?.turns.find(turn => turn.id === "limited-history")?.error;
+  })).toBe("该轮未正常结束");
+  seedTurns[0] = { ...seedTurns[0], error: failure };
+  for (let iteration = 0; iteration < 2; iteration++) {
+    await page.reload();
+    await expect(page.locator(".turn-problem")).toHaveText(failure);
+    await expect(page.getByText("检查完成。", { exact: true })).toBeVisible();
+    await expect(page.locator(".turn-working, .note.interrupted")).toHaveCount(0);
+  }
+});
+
+test("turn regressions daemon update keeps its cause across native history refresh and reload", async ({ page }, testInfo) => {
+  const raw = "Codex 已自动更新，当前回合在更新时中断；为避免重复执行工具，"
+    + "本次任务未自动重试。请确认已有结果后重新发送。";
+  const expected = "Codex 自动更新时连接中断，本轮未确认完成。请检查已有结果后继续。";
+  const seedTurns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = [{
+    id: "interrupted-update", prompt: "修复问题", done: true,
+    forkPointId: "updated-native",
+    error: raw, processDetailState: "present", blocks: [],
+  }, { id: "continued-update", prompt: "继续", done: true,
+    blocks: [{ kind: "text", message_id: "continued-answer", channel: "final",
+      text: "继续核对已有结果。", done: true }] }];
+  const relay = await mockRightPanelRelay(page, { seedTurns });
+  await page.goto("/");
+  for (let iteration = 0; iteration < 2; iteration++) {
+    if (iteration) await page.reload();
+    await expect(page.locator(".turn-problem")).toHaveText(expected);
+    await expect(page.locator(".turn-process-head")).toContainText("Codex 自动升级，本轮中断");
+    await expect(page.getByText("继续核对已有结果。", { exact: true })).toBeVisible();
+    await expect(page.locator(".turn-working")).toHaveCount(0);
+    if (!iteration) {
+      await expect.poll(() => page.evaluate(async () => {
+        const cache = await import("/src/cache.ts");
+        const saved = await cache.loadSession("layout-parent");
+        return saved?.turns.find(turn => turn.id === "interrupted-update")?.error;
+      })).toBe(raw);
+      // app-server history carries the interruption, but not the updater's
+      // control-link explanation. The local observed cause must survive it.
+      seedTurns[0] = { ...seedTurns[0], error: undefined, interrupted: true };
+    }
+  }
+  await page.screenshot({ path: testInfo.outputPath("codex-update-interruption.png") });
+  expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toHaveLength(0);
+});
+
 test("async question first layout keeps optional notes visible with vertical choices and a separate send button", async ({ page }, testInfo) => {
   const title = "按这版目标开始可行性设计？先确认目标，再逐项验证哪些能做到。";
   const relay = await mockRightPanelRelay(page, { seedTurns: [{
@@ -465,7 +1327,7 @@ test("generated image canonical summary survives refresh and loads original with
   expect(relay.commands.filter(c => c.type === "get_history_image")).toHaveLength(reads.length);
 });
 
-test("generated image stays loaded when a new message renames the historical turn", async ({ page }) => {
+test("generated image stays loaded when a new message renames the historical turn and alias revision", async ({ page }) => {
   const turns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = [{
     id: "msg-old", forkPointId: "native-task", prompt: "画图", done: true, detailLoaded: true,
     blocks: [{ kind: "process", item_id: "image-old", processKind: "server_tool",
@@ -490,7 +1352,7 @@ test("generated image stays loaded when a new message renames the historical tur
     client_msg_id: String(query.msg_id), prompt: "继续" });
   relay.emit({ type: "state", sid: "layout-parent", state: "running", msg_id: "next-message" });
   relay.emit({ type: "history", sid: "layout-parent", session_id: "layout-parent",
-    revision: "layout-history", generation: "layout-generation",
+    revision: "layout-alias-1", continuity_revision: "layout-history", generation: "layout-generation",
     detail: "summary", events: [], turns, has_more: false });
   await expect(page.getByText("继续", { exact: true })).toBeVisible();
   await expect(image).toHaveCount(1);
@@ -615,6 +1477,38 @@ test("async question answered presentation survives refresh without rewriting or
     await card.getByRole("button", { name: "关闭助手询问" }).click();
   }
   expect(relay.commands.filter(c => ["query", "steer", "interrupt", "get_turn_detail"].includes(String(c.type)))).toHaveLength(0);
+});
+
+test("async question replay after compaction keeps one answered card in its original row", async ({ page }) => {
+  const prompt = "补充回答：\n\n问题：用的是什么手势？\n回答：已经退出";
+  const turns = [ASYNC_HISTORY_TURN, {
+    id: "answered-steer", prompt, done: false, blocks: [],
+  }, {
+    ...ASYNC_HISTORY_TURN, id: "compacted-continuation", prompt: "", done: false,
+    blocks: [...ASYNC_HISTORY_TURN.blocks, {
+      kind: "text", message_id: "after-compaction-answer", channel: "final",
+      text: "收到，继续执行。", done: true,
+    }],
+  }];
+  const relay = await mockRightPanelRelay(page, { seedTurns: turns });
+  await page.goto("/");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt) await page.reload();
+    const cards = page.locator(".async-question-card");
+    await expect(cards).toHaveCount(1);
+    await expect(cards).toContainText("已回答");
+    await expect(page.locator('[data-turn-id="async-user"] .async-question-card'))
+      .toHaveCount(1);
+    await expect(page.locator('[data-turn-id="compacted-continuation"] .async-question-card'))
+      .toHaveCount(0);
+    await expect(page.locator(".supplemental-answer")).toContainText("已经退出");
+    await expect(page.getByText("收到，继续执行。", { exact: true })).toBeVisible();
+    const dialog = await openAsyncQuestion(page);
+    await expect(dialog.locator(".async-question-answered")).toHaveText("已回答");
+    await dialog.getByRole("button", { name: "关闭助手询问" }).click();
+  }
+  expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type))))
+    .toHaveLength(0);
 });
 
 test("async question unanswered draft and choices survive repeated collapse without sending", async ({ page }) => {
@@ -776,6 +1670,61 @@ test("async question dialog retains an IME draft when control becomes read-only"
   expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
 });
 
+for (const staleProcess of [false, true]) {
+test(`turn regressions compaction steer clears phantom detail failure across history and reload (${staleProcess ? "foreign process" : "clock only"})`, async ({ page }, testInfo) => {
+  const seedTurns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = [{
+    id: "compact-original", prompt: "部署一下", done: true,
+    processDetailState: "present", detailReasons: ["process"], detailEventCount: 1,
+    blocks: [{ kind: "process", processKind: "compaction", item_id: "original-compact",
+      phase: "end", status: "succeeded", title: "上下文已压缩", done: true }],
+  }, {
+    id: "native-latest", clientMsgId: "latest", prompt: "最新的", done: true,
+    forkPointId: "compact-native-task",
+    blocks: [], processDetailState: "present", detailReasons: ["process"],
+    detailEventCount: 6, detailLoaded: true,
+    processStartedTs: 20_000, processDoneTs: 127_000,
+  }, {
+    id: "native-flash", clientMsgId: "flash", forkPointId: "compact-native-task",
+    prompt: "ds v4.1 flash适配了吗？", done: false,
+    blocks: [{ kind: "text", channel: "commentary", message_id: "flash-commentary",
+      text: "正在核对模型目录", done: false }],
+  }];
+  if (staleProcess) seedTurns[1].blocks = [...seedTurns[0].blocks];
+  let buildSeq = 1;
+  const historyReply = (): PanelRelayEvent<Extract<ServerEvent, { type: "history" }>> => ({
+    type: "history", session_id: "layout-parent", sid: "layout-parent",
+    revision: "layout-history", generation: "layout-generation", detail: "summary",
+    events: [], turns: seedTurns, has_more: false, in_progress: true, live_seq: 0,
+    newest_id: "native-flash", build_seq: buildSeq,
+  });
+  const relay = await mockRightPanelRelay(page, { historyReply });
+  await page.goto("/");
+  const latest = page.locator('[data-turn-id="native-latest"]');
+  await expect(latest.locator(".turn-process-head")).toBeVisible();
+  await latest.locator(".turn-process-head").click();
+  await expect(latest.getByText(staleProcess
+    ? "上下文已压缩" : "详细过程未完整返回，请重试")).toBeVisible();
+  seedTurns[1] = { ...seedTurns[1], processDetailState: "none", detailReasons: [],
+    detailEventCount: 0, detailLoaded: false, processStartedTs: undefined,
+    processDoneTs: undefined, forkPointId: undefined, blocks: [] };
+  buildSeq += 1;
+  relay.emit(historyReply());
+  for (let pass = 0; pass < 2; pass++) {
+    if (pass) await page.reload();
+    await expect(latest.getByText("最新的", { exact: true })).toBeVisible();
+    await expect(latest.locator(".turn-process-head")).toHaveCount(0);
+    await expect(page.getByText("详细过程未完整返回，请重试")).toHaveCount(0);
+    await expect(page.getByText("正在核对模型目录", { exact: true })).toBeVisible();
+    await expect(page.locator('[data-turn-id="native-flash"] .turn-process-head'))
+      .toContainText("正在处理");
+    await expect(page.locator('[data-turn-id="compact-original"] .turn-process-head')).toHaveCount(1);
+  }
+  await page.screenshot({ path: testInfo.outputPath("compaction-steer-repaired.png") });
+  expect(relay.commands.filter(command => ["query", "steer", "interrupt"].includes(String(command.type))))
+    .toHaveLength(0);
+});
+}
+
 for (const processDetailState of ["none", "unknown"] as const) {
   test(`direct reply summary has no empty detail entry across refresh (${processDetailState})`, async ({ page }) => {
     const relay = await mockRightPanelRelay(page, { seedTurns: [{
@@ -849,7 +1798,7 @@ test("async question history restores a nonblocking card and replies through the
   await expect(card.getByLabel("其他回答（填写后替代选项）")).toBeVisible();
   await card.getByLabel("其他回答（填写后替代选项）").fill("Mac 浏览器");
   await card.getByLabel("你的回答", { exact: true }).fill("三指拖拽");
-  await card.getByLabel("你的回答", { exact: true }).press("Enter");
+  await card.getByLabel("你的回答", { exact: true }).press("Shift+Enter");
   expect(relay.commands.filter((c) => c.type === "query")).toHaveLength(0);
   await card.getByRole("button", { name: "发送回答" }).click();
   await expect.poll(() => relay.commands.filter((c) => c.type === "query").length).toBe(1);
@@ -859,6 +1808,9 @@ test("async question history restores a nonblocking card and replies through the
   expect(query.prompt).toContain("回答：三指拖拽");
   expect(relay.commands.filter((c) => ["interrupt", "answer_question", "steer"].includes(String(c.type))))
     .toHaveLength(0);
+  await expect(card.getByRole("button", { name: "等待确认" })).toBeDisabled();
+  await expect(entry).toContainText("待回答");
+  relay.emit({ type: "user_msg", sid: String(query.sid), msg_id: String(query.msg_id), prompt: String(query.prompt) });
   await expect(card).toHaveCount(0);
 });
 
@@ -902,15 +1854,147 @@ test("async question live delivery preserves running state and uses steer instea
   await expect(card).toContainText("补充会发送给当前任务，不会中断执行");
   await expect(card).not.toContainText("发送后将开始新一轮对话");
   await card.getByLabel("你的回答", { exact: true }).fill("三指拖拽");
-  await card.getByRole("button", { name: "发送回答" }).click();
+  await card.getByLabel("你的回答", { exact: true }).press("Enter");
   await expect.poll(() => relay.commands.filter((c) => c.type === "steer").length).toBe(1);
   expect(relay.commands.find((c) => c.type === "steer")?.sid).toBe(sid);
   expect(relay.commands.filter((c) => ["interrupt", "answer_question", "query"].includes(String(c.type))))
     .toHaveLength(0);
 });
 
+test("async question reply keeps an in-flight answer streaming across the steer fence", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { historyReply: () => null });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
+  const sid = "layout-parent";
+  let seq = 0;
+  const emit = (event: PanelRelayEvent) => relay.emit({ ...event, seq: ++seq });
+  emit({ type: "user_msg", sid, msg_id: "stream-user", prompt: "检查当前结果" });
+  emit({ type: "turn_binding", sid, msg_id: "stream-user", turn_id: "stream-task" });
+  emit({ type: "state", sid, state: "running", msg_id: "stream-user" });
+  emit({ type: "assistant_msg_start", sid, message_id: "stream-question", channel: "final" });
+  emit({ type: "delta", sid, message_id: "stream-question", channel: "final", text: "要检查哪一项？" });
+  emit({ type: "assistant_msg_end", sid, message_id: "stream-question", channel: "final",
+    delivery: "async", questions: [{ title: "要检查哪一项？", options: null }] });
+  emit({ type: "assistant_msg_start", sid, message_id: "stream-answer", channel: "final" });
+  emit({ type: "delta", sid, message_id: "stream-answer", channel: "final", text: "检查结果：周期约 **1" });
+  const oldRow = page.locator('.turn[data-turn-id="stream-user"]');
+  await expect(oldRow).toContainText("检查结果：周期约");
+  const dialog = await openAsyncQuestion(page);
+  await dialog.getByLabel("你的回答", { exact: true }).fill("再检查输入");
+  await dialog.getByLabel("你的回答", { exact: true }).press("Enter");
+  await expect.poll(() => relay.commands.filter(c => c.type === "steer").length).toBe(1);
+  const steer = relay.commands.find(c => c.type === "steer")!;
+  emit({ type: "turn_steered", sid, msg_id: String(steer.msg_id),
+    turn_id: "stream-task", prompt: String(steer.prompt) });
+  emit({ type: "delta", sid, message_id: "stream-answer", channel: "final", text: " ms**，" });
+  await expect(oldRow.locator("strong")).toHaveText("1 ms");
+  emit({ type: "delta", sid, message_id: "stream-answer", channel: "final", text: "输出仍会完整显示。" });
+  emit({ type: "assistant_msg_end", sid, message_id: "stream-answer", channel: "final" });
+  await expect(oldRow).toContainText("检查结果：周期约 1 ms，输出仍会完整显示。");
+  emit({ type: "assistant_msg_start", sid, message_id: "next-answer", turn_id: "stream-task", channel: "final" });
+  emit({ type: "delta", sid, message_id: "next-answer", turn_id: "stream-task", channel: "final", text: "继续检查输入。" });
+  const newRow = page.locator(`.turn[data-turn-id="${String(steer.msg_id)}"]`);
+  await expect(newRow).toContainText("继续检查输入。");
+  await expect(newRow).not.toContainText("输出仍会完整显示。");
+  expect(relay.commands.filter(c => ["query", "interrupt"].includes(String(c.type)))).toHaveLength(0);
+});
+
+test("async question process disclosure stays settled through late updates after a steer", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { historyReply: () => null });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
+  const sid = "layout-parent";
+  let seq = 0;
+  const emit = (event: PanelRelayEvent) => relay.emit({ ...event, seq: ++seq });
+  emit({ type: "user_msg", sid, msg_id: "process-user", prompt: "检查处理过程" });
+  emit({ type: "turn_binding", sid, msg_id: "process-user", turn_id: "process-task" });
+  emit({ type: "state", sid, state: "running", msg_id: "process-user" });
+  emit({ type: "process", sid, item_id: "check-process", turn_id: "process-task",
+    kind: "command", phase: "start", status: "running", title: "检查日志" });
+  const head = page.locator('.turn[data-turn-id="process-user"] .turn-process-head');
+  await expect(head).toHaveAttribute("aria-expanded", "true");
+  emit({ type: "turn_steered", sid, msg_id: "next-process-user",
+    turn_id: "process-task", prompt: "只检查输入" });
+  await expect(head).toHaveAttribute("aria-expanded", "false");
+  // Native item activity belongs to its old row even after the visible input
+  // fence. Content can keep changing, but must not repeatedly reopen the UI.
+  for (let i = 0; i < 2; i++) {
+    emit({ type: "process", sid, item_id: "check-process", turn_id: "process-task",
+      kind: "command", phase: "update", status: "running", title: "检查日志", output: `后续输出 ${i}` });
+    await expect(head).toContainText("正在处理");
+    await expect(head).toHaveAttribute("aria-expanded", "false");
+    emit({ type: "process", sid, item_id: "check-process", turn_id: "process-task",
+      kind: "command", phase: "end", status: "succeeded", title: "检查日志" });
+    await expect(head).toContainText("已处理");
+    await expect(head).toHaveAttribute("aria-expanded", "false");
+  }
+  await head.click();
+  await expect(head).toHaveAttribute("aria-expanded", "true");
+  emit({ type: "process", sid, item_id: "check-process", turn_id: "process-task",
+    kind: "command", phase: "update", status: "running", title: "检查日志", output: "最后的输出" });
+  emit({ type: "process", sid, item_id: "check-process", turn_id: "process-task",
+    kind: "command", phase: "end", status: "succeeded", title: "检查日志" });
+  await expect(head).toContainText("已处理");
+  await expect(head).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator('.turn[data-turn-id="process-user"] .process-timeline')).toContainText("检查日志");
+});
+
+test("async question keyboard sends with Enter, keeps Shift+Enter newlines and dismisses unanswered drafts with Escape", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  const input = dialog.getByLabel("你的回答", { exact: true });
+  await input.fill("第一行");
+  await input.press("Shift+Enter");
+  await page.keyboard.insertText("第二行");
+  await expect(input).toHaveValue("第一行\n第二行");
+  expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
+  await input.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".async-question-card")).toContainText("待回答");
+  await openAsyncQuestion(page);
+  await expect(input).toHaveValue("第一行\n第二行");
+  await input.press("Enter");
+  await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
+  const query = relay.commands.find(c => c.type === "query")!;
+  await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
+  relay.emit({ type: "user_msg", sid: String(query.sid), msg_id: String(query.msg_id), prompt: String(query.prompt) });
+  await expect(dialog).toHaveCount(0);
+  expect(query.prompt).toContain("回答：第一行\n第二行");
+  expect(query.sid).toBe("layout-parent");
+  expect(relay.commands.filter(c => ["interrupt", "answer_question", "steer"].includes(String(c.type)))).toHaveLength(0);
+});
+
+test("async question keyboard leaves IME confirmation and repeated Enter out of the send path", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  const input = dialog.getByLabel("你的回答", { exact: true });
+  await input.fill("中文输入");
+  await input.dispatchEvent("compositionstart", { data: "输入" });
+  // Some WebKit IME keys omit isComposing; the composition lifecycle still owns them.
+  await input.press("Enter");
+  await input.press("Escape");
+  await expect(dialog).toBeVisible();
+  expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
+  await input.dispatchEvent("compositionend", { data: "输入" });
+  await input.dispatchEvent("keydown", { key: "Enter", code: "Enter", isComposing: true });
+  await input.dispatchEvent("keydown", { key: "Enter", code: "Enter", keyCode: 229 });
+  await input.dispatchEvent("keydown", { key: "Enter", code: "Enter", repeat: true });
+  await expect(dialog).toBeVisible();
+  expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
+  await input.press("Enter");
+  await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
+  const query = relay.commands.find(c => c.type === "query")!;
+  expect(query.prompt).toContain("回答：中文输入");
+  relay.emit({ type: "user_msg", sid: String(query.sid), msg_id: String(query.msg_id), prompt: String(query.prompt) });
+  await expect(dialog).toHaveCount(0);
+});
+
 test("async question completion updates reply mode while preserving a collapsed draft", async ({ page }) => {
-  const relay = await mockRightPanelRelay(page);
+  // This case is entirely live; an empty canonical history response after the
+  // terminal would incorrectly claim that the question never existed.
+  const relay = await mockRightPanelRelay(page, { historyReply: () => null });
   await page.goto("/");
   await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
   const sid = "layout-parent";
@@ -938,13 +2022,117 @@ test("async question completion updates reply mode while preserving a collapsed 
   await card.getByRole("button", { name: "发送回答" }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
   expect(relay.commands.filter(c => ["steer", "interrupt", "answer_question"].includes(String(c.type)))).toHaveLength(0);
+  await expect(card.getByRole("button", { name: "等待确认" })).toBeDisabled();
+  await card.getByRole("button", { name: "稍后回答", exact: true }).click();
   await expect(card.getByRole("textbox")).toHaveCount(0);
   // Submission locks input until native acceptance, not the view-only toggle.
   await openAsyncQuestion(page);
   await expect(card.getByRole("textbox")).toBeVisible();
   await expect(card.getByRole("textbox")).toBeDisabled();
-  await card.getByRole("button", { name: "稍后回答", exact: true }).click();
+  const query = relay.commands.find(c => c.type === "query")!;
+  relay.emit({ type: "user_msg", sid, msg_id: String(query.msg_id), prompt: String(query.prompt) });
+  await expect(card).toHaveCount(0);
+  await expect(page.locator(".async-question-card")).toContainText("已回答");
   expect(relay.commands.filter(c => c.type === "query")).toHaveLength(1);
+});
+
+test("async question rejected at turn completion keeps the answer and retries through a new query", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  const sid = "layout-parent";
+  relay.emit({ type: "state", sid, state: "running" });
+  await expect(dialog).toContainText("补充会发送给当前任务");
+  const input = dialog.getByLabel("你的回答", { exact: true });
+  await input.fill("项目在这台设备的工作目录里");
+  await input.press("Enter");
+  await expect.poll(() => relay.commands.filter(c => c.type === "steer").length).toBe(1);
+  const steer = relay.commands.find(c => c.type === "steer")!;
+  // A transport ACK and another message's rejection are not this answer's result.
+  relay.emit({ type: "command_ack", client_id: String(steer.client_id), cmd_id: String(steer.cmd_id) });
+  relay.emit({ type: "error", sid, msg_id: "different-answer", code: "not_steerable", message: "unrelated" });
+  await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
+  await expect(input).toHaveValue("项目在这台设备的工作目录里");
+  await expect(page.locator(".async-question-card")).toContainText("待回答");
+  relay.emit({ type: "state", sid, state: "idle" });
+  relay.emit({ type: "error", sid, msg_id: String(steer.msg_id), code: "not_steerable",
+    message: "Codex 任务已结束，本次引导未发送。" });
+  await expect(dialog.getByRole("status")).toHaveText("当前任务已结束，本次引导未发送。请重试以开始新一轮对话。");
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue("项目在这台设备的工作目录里");
+  await expect(page.locator(".async-question-card")).toContainText("待回答");
+  await input.press("Enter");
+  await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
+  const query = relay.commands.find(c => c.type === "query")!;
+  expect(query.prompt).toBe(steer.prompt);
+  expect(query.msg_id).not.toBe(steer.msg_id);
+  relay.emit({ type: "error", sid, msg_id: String(steer.msg_id), code: "not_steerable", message: "late old rejection" });
+  await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
+  relay.emit({ type: "user_msg", sid, msg_id: String(query.msg_id), prompt: String(query.prompt) });
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".async-question-card")).toContainText("已回答");
+  expect(relay.commands.filter(c => c.type === "steer")).toHaveLength(1);
+  expect(relay.commands.filter(c => c.type === "interrupt")).toHaveLength(0);
+});
+
+test("async question acceptance recovered from history closes the reopened pending editor", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  await dialog.getByLabel("你的回答", { exact: true }).fill("保留到确认收到");
+  await dialog.getByRole("button", { name: "发送回答" }).click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
+  const query = relay.commands.find(c => c.type === "query")!;
+  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  await openAsyncQuestion(page);
+  await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
+  await expect(dialog.getByLabel("你的回答", { exact: true })).toHaveValue("保留到确认收到");
+  relay.emit({ type: "history", sid: "layout-parent", session_id: "layout-parent",
+    revision: "layout-history", generation: "layout-generation", detail: "summary",
+    events: [], has_more: false, authoritative: true, in_progress: true,
+    turns: [ASYNC_HISTORY_TURN, { id: "native-recovered-reply", clientMsgId: String(query.msg_id),
+      prompt: String(query.prompt), done: false, blocks: [] }] });
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".async-question-card")).toContainText("已回答");
+  expect(relay.commands.filter(c => c.type === "query")).toHaveLength(1);
+});
+
+test("async question unknown steer outcome keeps the draft and prevents duplicate sends", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  relay.emit({ type: "state", sid: "layout-parent", state: "running" });
+  await expect(dialog).toContainText("补充会发送给当前任务");
+  await dialog.getByLabel("你的回答", { exact: true }).fill("只发一次");
+  await dialog.getByRole("button", { name: "发送回答" }).click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "steer").length).toBe(1);
+  const steer = relay.commands.find(c => c.type === "steer")!;
+  relay.emit({ type: "error", sid: "layout-parent", msg_id: String(steer.msg_id),
+    code: "steer_outcome_unknown", message: "private transport detail" });
+  await expect(dialog.getByRole("status")).toHaveText("引导已发出，Codex 尚未确认是否生效。请先查看后续结果。");
+  await expect(dialog.getByLabel("你的回答", { exact: true })).toHaveValue("只发一次");
+  await expect(dialog.getByRole("button", { name: "发送回答" })).toBeDisabled();
+  await dialog.getByRole("form").evaluate((form: HTMLFormElement) => form.requestSubmit());
+  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  await openAsyncQuestion(page);
+  await expect(dialog.getByRole("button", { name: "发送回答" })).toBeDisabled();
+  expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(1);
+});
+
+test("async question does not mistake a queued submission for a confirmed answer", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  relay.emit({ type: "query_queue", sid: "layout-parent", total_count: 1, total_bytes: 64,
+    items: [{ msg_id: "queued-work", kind: "queue", prompt_preview: "原有排队任务",
+      image_count: 0, file_count: 0, retained_bytes: 64 }] });
+  const input = dialog.getByLabel("你的回答", { exact: true });
+  await input.fill("这条回答不能被替换或重复排队");
+  await input.press("Enter");
+  await expect(dialog.getByRole("status")).toHaveText("当前会话暂不可写，回答已保留，请稍后重试。");
+  await expect(input).toHaveValue("这条回答不能被替换或重复排队");
+  await expect(page.locator(".async-question-card")).toContainText("待回答");
+  expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
 });
 
 test("async question from a hidden side chat never steals the main view", async ({ page }) => {
@@ -1003,6 +2191,8 @@ for (const sideChat of [false, true]) {
       form.requestSubmit();
     });
     await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
+    await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
+    await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
     await expect(dialog).toHaveCount(0);
     await openAsyncQuestion(page, 1);
     await expect(dialog.getByRole("button", { name: "发送回答" })).toBeDisabled();
@@ -1012,6 +2202,9 @@ for (const sideChat of [false, true]) {
     expect(query.sid).toBe(sideChat ? "btw-layout-child" : "layout-parent");
     expect(query.delivery).not.toBe("replace");
     expect(relay.commands.some((c) => c.type === "interrupt")).toBe(false);
+    relay.emit({ type: "user_msg", sid: String(query.sid), msg_id: String(query.msg_id), prompt: String(query.prompt) });
+    await expect(dialog.getByRole("button", { name: "发送回答" })).toBeEnabled();
+    await expect(dialog).toBeVisible(); // The first question's late receipt cannot close the second.
   });
 }
 
@@ -1578,6 +2771,62 @@ for (const cover of ["agent", "diff"] as const) {
   });
 }
 
+for (const parentState of ["running", "interrupting"] as const) {
+  test(`right panel layout retains completed side chat badge while parent is ${parentState}`, async ({
+    page,
+  }, testInfo) => {
+    const mobile = isMobileWebKitProject(testInfo.project.name);
+    if (!mobile) await page.setViewportSize({ width: 1568, height: 881 });
+    const relay = await mockRightPanelRelay(page, { visible: true });
+    await page.goto("/");
+    await expect(page.locator(".btw-panel")).toBeVisible();
+    relay.emit({ type: "state", sid: "layout-parent", state: parentState });
+    await page.getByRole("button", { name: "收起侧边对话", exact: true }).click();
+    await expect(page.locator(".btw-panel")).toHaveCount(0);
+    const parent = page.locator(".scard").filter({ hasText: "Layout parent" });
+    await expect(parent).toBeAttached();
+    if (!await page.locator(".sessions.show").count()) await page.keyboard.press("Control+b");
+    await expect(page.locator(".sessions")).toBeInViewport({ ratio: 1 });
+    await expect(parent).toBeInViewport();
+    await expect(parent.getByText(parentState === "running" ? "运行" : "中断", {
+      exact: true,
+    })).toBeVisible();
+
+    relay.emit({ type: "user_msg", sid: "btw-layout-child", seq: 1,
+      msg_id: "hidden-work", prompt: "后台侧聊任务" });
+    relay.emit({ type: "turn_end", sid: "btw-layout-child", seq: 2,
+      result: { subtype: "success", duration_ms: 1000, is_error: false } });
+    relay.emit({ type: "state", sid: "btw-layout-child", seq: 3, state: "idle" });
+    const badge = parent.getByText("BTW 完成", { exact: true });
+    await expect(badge).toBeVisible();
+    await expect(badge).toBeInViewport({ ratio: 1 });
+    const geometry = await parent.evaluate((card) => {
+      const badge = card.querySelector(".pill.completed")!.getBoundingClientRect();
+      const menu = card.querySelector(".scard-actions")!.getBoundingClientRect();
+      const title = card.querySelector(".scard-title")!.getBoundingClientRect();
+      return {
+        titleWidth: title.width,
+        badgeUnderMenu: badge.left < menu.right && badge.right > menu.left
+          && badge.top < menu.bottom && badge.bottom > menu.top,
+      };
+    });
+    expect(geometry.titleWidth).toBeGreaterThan(0);
+    expect(geometry.badgeUnderMenu).toBe(false);
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await expect(badge).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("btw-completed-parent-busy.png") });
+
+    if (mobile) await page.keyboard.press("Control+b");
+    await page.keyboard.press("Control+Shift+k");
+    await expect(page.locator(".btw-panel")).toBeVisible();
+    await expect(badge).toHaveCount(0);
+    await expect(parent.locator(`.pill.${parentState}`)).toHaveCount(1);
+    expect(relay.commands.some((command) =>
+      ["open_btw", "close_btw", "query", "steer", "interrupt"].includes(String(command.type))))
+      .toBe(false);
+  });
+}
+
 test("right panel visibility acknowledges only the selected side chat", async ({ page }) => {
   await page.setViewportSize({ width: 1568, height: 881 });
   const relay = await mockRightPanelRelay(page, { visible: true });
@@ -1869,6 +3118,96 @@ for (const fixture of ["artifact-svg", "artifact-markdown-svg"] as const) {
     await expect(image).toBeVisible();
   });
 }
+
+test("artifact-audio plays and seeks WAV under production CSP on desktop and mobile", async ({ page }, testInfo) => {
+  await gotoWithProductionCsp(page, "/tests/history-browser.html?artifact-audio=1");
+  const audio = page.getByLabel("reference.wav 播放器");
+  await expect(audio).toBeVisible();
+  await expect(audio).toHaveAttribute("controls", "");
+  await expect(audio).not.toHaveAttribute("autoplay");
+  await expect.poll(() => audio.evaluate((node) => (node as HTMLAudioElement).duration)).toBe(3);
+  expect(await audio.evaluate((node) => (node as HTMLAudioElement).paused)).toBe(true);
+  const box = await audio.boundingBox();
+  await audio.click({ position: { x: 24, y: box!.height / 2 } });
+  await expect.poll(() => audio.evaluate((node) => (node as HTMLAudioElement).currentTime)).toBeGreaterThan(0.1);
+  await audio.evaluate((node) => { const media = node as HTMLAudioElement; media.pause(); media.currentTime = 1.5; });
+  await expect.poll(() => audio.evaluate((node) => (node as HTMLAudioElement).currentTime)).toBe(1.5);
+  await page.getByLabel("播放速度").selectOption("1.5");
+  expect(await audio.evaluate((node) => (node as HTMLAudioElement).playbackRate)).toBe(1.5);
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("link", { name: "下载音频" }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe("reference.wav");
+  const bytes = readFileSync((await download.path())!);
+  expect(bytes.length).toBe(48044);
+  expect(bytes.subarray(8, 12).toString()).toBe("WAVE");
+  expect(await page.locator(".artifact-audio-card").evaluate((node) => node.scrollWidth - node.clientWidth)).toBeLessThan(2);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("audio-preview.png") });
+});
+
+test("artifact-audio stops and releases its source when refreshed or closed", async ({ page }) => {
+  await page.addInitScript(() => {
+    const revoke = URL.revokeObjectURL.bind(URL);
+    (window as unknown as { revokedAudioUrls: string[] }).revokedAudioUrls = [];
+    URL.revokeObjectURL = (url) => {
+      (window as unknown as { revokedAudioUrls: string[] }).revokedAudioUrls.push(url);
+      revoke(url);
+    };
+  });
+  await gotoWithProductionCsp(page, "/tests/history-browser.html?artifact-audio=1");
+  const audio = page.locator("audio");
+  await expect.poll(() => audio.evaluate((node) => (node as HTMLAudioElement).duration)).toBe(3);
+  const old = (await audio.elementHandle())!;
+  const oldUrl = await old.getAttribute("src");
+  const box = await audio.boundingBox();
+  await audio.click({ position: { x: 24, y: box!.height / 2 } });
+  await expect.poll(() => old.evaluate((node) => (node as HTMLAudioElement).paused)).toBe(false);
+  await page.getByRole("button", { name: "刷新文件", exact: true }).click();
+  await expect(page.getByLabel("second.wav 播放器")).toBeVisible();
+  expect(await old.evaluate((node) => (node as HTMLAudioElement).paused)).toBe(true);
+  expect(await old.getAttribute("src")).toBeNull();
+  await expect(audio).toHaveAttribute("src", /^blob:/);
+  const next = (await audio.elementHandle())!;
+  const nextUrl = await next.getAttribute("src");
+  expect(nextUrl).not.toBe(oldUrl);
+  await page.getByRole("button", { name: "收起", exact: true }).click();
+  await expect(page.getByTestId("audio-preview-closed")).toBeVisible();
+  expect(await next.evaluate((node) => (node as HTMLAudioElement).paused)).toBe(true);
+  expect(await next.getAttribute("src")).toBeNull();
+  const revoked = await page.evaluate(() => (window as unknown as { revokedAudioUrls: string[] }).revokedAudioUrls);
+  expect(revoked).toContain(oldUrl);
+  expect(revoked).toContain(nextUrl);
+});
+
+test("artifact-audio explains decoder errors and recovers on the next file", async ({ page }) => {
+  await gotoWithProductionCsp(page, "/tests/history-browser.html?artifact-audio=invalid");
+  await expect(page.getByRole("alert")).toContainText("无法播放该音频编码");
+  await expect(page.getByRole("link", { name: "下载音频" })).toBeVisible();
+  await page.getByRole("button", { name: "刷新文件", exact: true }).click();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect.poll(() => page.locator("audio").evaluate((node) => (node as HTMLAudioElement).duration)).toBe(3);
+});
+
+test("artifact-audio decodes an optional operator WAV sample without conversion", async ({ page }, testInfo) => {
+  const path = process.env.CC_REMOTE_AUDIO_TEST_FILE;
+  test.skip(!path, "No operator audio sample selected");
+  const bytes = readFileSync(path!);
+  await page.addInitScript((data) => {
+    (window as unknown as { audioFixture: { data: string; name: string } }).audioFixture = {
+      data, name: "operator-sample.wav",
+    };
+  }, bytes.toString("base64"));
+  await gotoWithProductionCsp(page, "/tests/history-browser.html?artifact-audio=1");
+  const audio = page.locator("audio");
+  await expect.poll(() => audio.evaluate((node) => (node as HTMLAudioElement).duration)).toBeGreaterThan(0);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("link", { name: "下载音频" }).click();
+  const downloaded = await downloadPromise;
+  expect(readFileSync((await downloaded.path())!)).toEqual(bytes);
+  await page.screenshot({ path: testInfo.outputPath("operator-audio-preview.png") });
+});
 
 test("artifact-pdf renders paged PDF content under the production CSP", async ({
   page,
@@ -5811,6 +7150,7 @@ test("goal editor stays inside the tablet visual viewport above the keyboard", a
     );
     window.dispatchEvent(new Event("resize"));
   }, { top: visualTop, height: visualHeight });
+  await dialog.getByRole("button", { name: "修改目标", exact: true }).click();
   await dialog.locator("textarea").focus();
 
   await expect.poll(async () => dialog.boundingBox()).not.toBeNull();
@@ -6876,6 +8216,302 @@ test("multi-line IME growth stays pinned during a Codex tool burst", async ({
   expect(result.worstDistance).toBeLessThanOrEqual(2);
 });
 
+for (const [target, source] of [
+  ["composer", "picker"],
+  ["composer", "drop"],
+  ["composer", "paste"],
+  ["new-chat controls", "picker"],
+  ["new-chat controls", "paste"],
+] as const) {
+  test(`${target} bounded attachment selection from ${source} survives event cleanup`, async ({ page }) => {
+    const alerts: string[] = [];
+    page.on("dialog", async (dialog) => {
+      alerts.push(dialog.message());
+      await dialog.accept();
+    });
+    await page.goto(target === "composer"
+      ? "/tests/history-browser.html?codex-live-burst=1&composer-live=1&composer-paste=1"
+      : "/tests/history-browser.html?newchat-controls=1");
+    const input = page.locator("textarea").first();
+    await input.fill("keep this draft");
+    const picker = page.getByLabel("添加文件", { exact: true });
+    await picker.setInputFiles([
+      { name: "existing.png", mimeType: "image/png", buffer: staticPng() },
+      ...Array.from({ length: 5 }, (_, index) => ({
+        name: `existing-${index}.txt`, mimeType: "text/plain", buffer: Buffer.from("existing"),
+      })),
+    ]);
+    await expect(page.locator(".attach-image-preview")).toHaveCount(1);
+    await expect(page.locator(".attach-file")).toHaveCount(5);
+    expect(await picker.inputValue()).toBe("");
+
+    // A huge lazy FileList exposes unbounded copying without allocating a huge
+    // fixture. Invalidate it when the event returns, as native drop stores do.
+    for (const remaining of [2, 0]) {
+      const reads = await picker.evaluate((node, { source, remaining }) => {
+        const element = node as HTMLInputElement;
+        const reads: number[] = [];
+        let expired = false;
+        const files = new Proxy({ length: 100_000 }, {
+          get(target, key) {
+            if (expired) throw new Error("selection accessed after event cleanup");
+            if (key === "length") return target.length;
+            if (key === Symbol.iterator) throw new Error("unbounded FileList iteration");
+            const index = Number(key);
+            if (!Number.isInteger(index) || index < 0 || index >= remaining) {
+              throw new Error("selection read beyond the remaining attachment allowance");
+            }
+            reads.push(index);
+            return new File([`added ${index}`], `added-${index}.txt`, { type: "text/plain" });
+          },
+        });
+        try {
+          if (source === "picker") {
+            Object.defineProperty(element, "files", { configurable: true, value: files });
+            element.dispatchEvent(new Event("change", { bubbles: true }));
+          } else {
+            const data = new DataTransfer();
+            Object.defineProperty(data, "files", { value: files });
+            if (source === "paste") {
+              data.setData("text/plain", ` pasted-${remaining}`);
+              Object.defineProperty(data, "items", { get() {
+                throw new Error("unbounded clipboard item access");
+              } });
+              const textarea = document.querySelector("textarea")!;
+              textarea.focus();
+              textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+              textarea.dispatchEvent(new ClipboardEvent("paste", {
+                bubbles: true, cancelable: true, clipboardData: data,
+              }));
+            } else {
+              Object.defineProperty(data, "types", { value: ["Files"] });
+              window.dispatchEvent(new DragEvent("drop", {
+                bubbles: true, cancelable: true, dataTransfer: data,
+              }));
+            }
+          }
+        } finally {
+          expired = true;
+          if (source === "picker") Reflect.deleteProperty(element, "files");
+        }
+        return reads;
+      }, { source, remaining });
+      expect(reads).toEqual(remaining ? [0, 1] : []);
+      await expect(page.locator(".attach-file")).toHaveCount(7);
+      await expect(page.locator(".attach-image-preview")).toHaveCount(1);
+      await expect(input).toHaveValue(source === "paste"
+        ? `keep this draft pasted-2${remaining ? "" : " pasted-0"}` : "keep this draft");
+      const overflow = "一次消息最多 8 个附件，其余文件未导入";
+      if (target === "composer") {
+        await expect(page.getByText(overflow, { exact: true })).toBeVisible();
+      } else {
+        await expect.poll(() => alerts.length).toBe(remaining ? 1 : 2);
+        expect(alerts.at(-1)).toBe(overflow);
+      }
+    }
+    await expect(page.locator(".attach-file")).toContainText([
+      "existing-0.txt", "existing-1.txt", "existing-2.txt", "existing-3.txt",
+      "existing-4.txt", "added-0.txt", "added-1.txt",
+    ]);
+  });
+}
+
+for (const target of ["composer", "new-chat controls"]) {
+  test(`${target === "composer" ? "long paste" : target} mixed clipboard keeps text and deduplicates supplied images`, async ({ page }) => {
+    const alerts: string[] = [];
+    page.on("dialog", async (dialog) => {
+      alerts.push(dialog.message());
+      await dialog.accept();
+    });
+    await page.goto(target === "composer"
+      ? "/tests/history-browser.html?codex-live-burst=1&composer-live=1&composer-paste=1"
+      : "/tests/history-browser.html?newchat-controls=1");
+    const input = page.locator("textarea").first();
+    await input.fill("before REPLACE after");
+    // One free slot must accept a clipboard File plus the same HTML image
+    // without treating those two representations as two new attachments.
+    await page.getByLabel("添加文件", { exact: true }).setInputFiles(
+      Array.from({ length: 7 }, (_, index) => ({
+        name: `existing-${index}.txt`, mimeType: "text/plain", buffer: Buffer.from("existing"),
+      })),
+    );
+    await expect(page.locator(".attach-file")).toHaveCount(7);
+    await input.evaluate((node) => {
+      const ta = node as HTMLTextAreaElement;
+      ta.focus(); ta.setSelectionRange(7, 14);
+      const canvas = document.createElement("canvas");
+      canvas.width = 40; canvas.height = 60;
+      canvas.getContext("2d")!.fillRect(0, 0, 40, 60);
+      const source = canvas.toDataURL();
+      const bytes = Uint8Array.from(atob(source.split(",")[1]), (c) => c.charCodeAt(0));
+      const data = new DataTransfer();
+      data.setData("text/plain", "pasted text");
+      data.setData("text/html", `<div>pasted text<img src="${source}"></div>`);
+      data.items.add(new File([bytes], "clipboard.png", { type: "image/png" }));
+      ta.dispatchEvent(new ClipboardEvent("paste", {
+        bubbles: true, cancelable: true, clipboardData: data,
+      }));
+    });
+    await expect(input).toHaveValue("before pasted text after");
+    await expect(page.locator(".attach-image-preview")).toHaveCount(1);
+    await expect(page.locator(".attach-file")).toHaveCount(7);
+    expect(alerts).toEqual([]);
+    await expect(page.getByText("一次消息最多 8 个附件，其余文件未导入", { exact: true }))
+      .toHaveCount(0);
+    if (target === "composer") {
+      await input.press("Enter");
+      await expect(page.getByTestId("composer-paste-output"))
+        .toHaveText("before pasted text after");
+      await expect(page.getByTestId("composer-image-count")).toHaveText("1");
+    }
+  });
+}
+
+test("long paste static PNG pixels and metadata survive preview and send", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?codex-live-burst=1&composer-live=1&composer-paste=1");
+  const input = page.locator("textarea").first();
+  const image = staticPng(400, 1600, [pngChunk("tEXt", Buffer.from("Comment\0static acTL"))]);
+  await input.evaluate((node, base64) => {
+    const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+    const data = new DataTransfer();
+    data.setData("text/plain", "截图测试文字");
+    data.items.add(new File([bytes], "image.png", { type: "image/png" }));
+    node.dispatchEvent(new ClipboardEvent("paste", {
+      bubbles: true, cancelable: true, clipboardData: data,
+    }));
+  }, image.toString("base64"));
+  await expect(input).toHaveValue("截图测试文字");
+  await expect(page.locator(".attach-image-preview")).toHaveCount(1);
+  const preview = page.locator(".attach-image-preview img");
+  await expect.poll(() => preview.evaluate((node) =>
+    [(node as HTMLImageElement).naturalWidth, (node as HTMLImageElement).naturalHeight],
+  )).toEqual([392, 1568]);
+  await input.press("Enter");
+  await expect(page.getByTestId("composer-paste-output")).toHaveText("截图测试文字");
+  await expect(page.getByTestId("composer-image-count")).toHaveText("1");
+});
+
+test("long paste rejected image headers explain the reason and retain text", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?codex-live-burst=1&composer-live=1&composer-paste=1");
+  const input = page.locator("textarea").first();
+  const warnings: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "warning") warnings.push(message.text());
+  });
+  const animation = Buffer.alloc(8);
+  animation.writeUInt32BE(1, 0);
+  for (const [image, expected, reason] of [
+    [staticPng(2, 1, [pngChunk("acTL", animation)]), "是动画图片，暂不支持", "animated"],
+    [Buffer.from("invalid header"), "图片格式无法识别", "invalid_header"],
+  ] as const) {
+    await input.fill("");
+    await input.evaluate((node, base64) => {
+      const data = new DataTransfer();
+      const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+      data.setData("text/plain", "保留这段文字");
+      data.items.add(new File([bytes], "private-name.png", { type: "image/png" }));
+      node.dispatchEvent(new ClipboardEvent("paste", {
+        bubbles: true, cancelable: true, clipboardData: data,
+      }));
+    }, image.toString("base64"));
+    await expect(page.getByText(expected, { exact: false })).toBeVisible();
+    await expect(input).toHaveValue("保留这段文字");
+    await expect(page.locator(".attach-image-preview")).toHaveCount(0);
+    expect(warnings.at(-1)).toContain(reason);
+    expect(warnings.at(-1)).not.toContain("private-name");
+    expect(warnings.at(-1)).not.toContain("保留这段文字");
+  }
+});
+
+test("long paste Feishu private image references report missing images without losing text", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?codex-live-burst=1&composer-live=1&composer-paste=1");
+  const input = page.locator("textarea").first();
+  await input.focus();
+  await input.evaluate((node) => {
+    const data = new DataTransfer();
+    data.setData("text/plain", "飞书测试文字");
+    data.setData("text/html", '<div data-line="true">飞书测试文字</div>'
+      + Array.from({ length: 3 }, (_, i) => `<div data-line="true"><img data-lark-image-uri="imkey://fixture-${i}" src="native-resource://sdk/image?resource_type=image&key=fixture-${i}"></div>`).join(""));
+    node.dispatchEvent(new ClipboardEvent("paste", {
+      bubbles: true, cancelable: true, clipboardData: data,
+    }));
+  });
+  await expect(input).toHaveValue("飞书测试文字");
+  await expect(page.getByText(/飞书的 3 张图片仅提供应用内引用/)).toBeVisible();
+  await expect(page.locator(".attach-image-preview")).toHaveCount(0);
+});
+
+test("long paste rich images remain in their original draft during asynchronous import", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?codex-live-burst=1&composer-live=1&composer-paste=1");
+  const input = page.locator("textarea").first();
+  await input.evaluate((node) => {
+    const original = File.prototype.arrayBuffer;
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => { release = resolve; });
+    (window as unknown as { finishClipboard: () => void }).finishClipboard = release;
+    File.prototype.arrayBuffer = async function () {
+      await ready; return original.call(this);
+    };
+    const canvas = document.createElement("canvas");
+    canvas.width = 50; canvas.height = 50;
+    const data = new DataTransfer();
+    data.setData("text/plain", "original draft text");
+    data.setData("text/html", `<img src="${canvas.toDataURL()}">`);
+    node.dispatchEvent(new ClipboardEvent("paste", {
+      bubbles: true, cancelable: true, clipboardData: data,
+    }));
+  });
+  await page.getByTestId("switch-composer-draft").click();
+  await expect(input).toHaveValue("");
+  await page.evaluate(() => (window as unknown as { finishClipboard: () => void }).finishClipboard());
+  await expect(input).not.toHaveAttribute("placeholder", /正在安全导入/);
+  await expect(page.locator(".attach-image-preview")).toHaveCount(0);
+  await page.getByTestId("switch-composer-draft").click();
+  await expect(input).toHaveValue("original draft text");
+  await expect(page.locator(".attach-image-preview")).toHaveCount(1);
+});
+
+test("canonical image reference keeps portrait and mixed rows aligned through send and reload", async ({ page }, testInfo) => {
+  await page.goto("/tests/history-browser.html?user-image-layout=1");
+  const turn = page.locator('[data-turn-id="user-image-layout"]');
+  const geometry = () => turn.evaluate((node) => {
+    const prompt = node.querySelector(".ubub")!.getBoundingClientRect();
+    const buttons = [...node.querySelectorAll(".ubub-image-trigger")].map((b) => {
+      const rect = b.getBoundingClientRect();
+      const img = b.querySelector("img")?.getBoundingClientRect();
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height,
+        right: rect.right, imageRight: img?.right ?? rect.right };
+    });
+    return { right: prompt.right, buttons };
+  });
+  const initial = await geometry();
+  expect(initial.buttons).toHaveLength(3);
+  for (const button of initial.buttons) {
+    expect(Math.abs(button.height - initial.buttons[0].height)).toBeLessThan(2);
+  }
+  expect(initial.buttons[0].height / initial.buttons[0].width).toBeCloseTo(3, 1);
+  for (const stage of ["loading", "ready", "error"]) {
+    await page.getByRole("button", { name: stage, exact: true }).click();
+    await expect.poll(async () => (await geometry()).buttons.length).toBe(3);
+    const current = await geometry();
+    current.buttons.forEach((button, i) => {
+      expect(Math.abs(button.width - initial.buttons[i].width)).toBeLessThan(2);
+      expect(Math.abs(button.height - initial.buttons[i].height)).toBeLessThan(2);
+      expect(Math.abs(button.right - initial.buttons[i].right)).toBeLessThan(2);
+      expect(Math.abs(button.imageRight - button.right)).toBeLessThan(2);
+    });
+    expect(Math.abs(current.buttons.at(-1)!.right - current.right)).toBeLessThan(2);
+  }
+  await page.getByRole("button", { name: "prompt length" }).click();
+  expect(Math.abs((await geometry()).buttons.at(-1)!.right - (await geometry()).right))
+    .toBeLessThan(2);
+  await page.reload();
+  await expect(turn.locator(".ubub-image-trigger")).toHaveCount(3);
+  expect((await geometry()).buttons.map((button) => button.width))
+    .toEqual(initial.buttons.map((button) => button.width));
+  await page.screenshot({ path: testInfo.outputPath("user-images.png"), fullPage: true });
+});
+
 test("long paste stays out of the textarea and remains editable before send", async ({
   page,
 }) => {
@@ -7809,4 +9445,171 @@ test("profile session card edges remain visible in dark theme", async ({
   const inactive = appearance.find((card) => !card.active)!;
   expect(active.background).not.toBe(inactive.background);
   expect(active.boxShadow).not.toBe("none");
+});
+
+for (const engine of ["codex", "claude"] as const) {
+  for (const theme of ["light", "dark"] as const) {
+    test(`Goal rounded ${engine} card supports native fields and preserves edits (${theme})`, async ({ page }, info) => {
+      await page.goto(`/tests/history-browser.html?goal-ui=1&engine=${engine}&theme=${theme}`);
+      await page.getByRole("button", { name: /查看 Goal/ }).click();
+      const dialog = page.getByRole("dialog", { name: `${engine === "codex" ? "Codex" : "Claude"} Goal` });
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByRole("textbox")).toHaveCount(0);
+      expect(await dialog.evaluate(node => parseFloat(getComputedStyle(node).borderRadius))).toBeGreaterThanOrEqual(28);
+      await expect(dialog.getByText("完成 protocol v30 发布并验证所有终端同步升级", { exact: true })).toHaveCount(1);
+      if (engine === "claude") {
+        await expect(dialog).toContainText("检查轮次");
+        await expect(dialog).toContainText("3 次");
+        await expect(dialog).toContainText("最近一次检查");
+        await expect(dialog.getByText("Token 预算", { exact: true })).toHaveCount(0);
+        await expect(dialog.getByRole("button", { name: "暂停续行" })).toHaveCount(0);
+      } else {
+        await expect(dialog.getByRole("progressbar", { name: "Token 预算用量" })).toHaveAttribute("value", "37000");
+      }
+      await page.screenshot({ path: info.outputPath(`${engine}-${theme}-active.png`) });
+      await dialog.getByRole("button", { name: "修改目标", exact: true }).click();
+      await dialog.getByLabel("目标内容").fill("修复引导后的输出中断，\n并通过回归测试。");
+      await page.evaluate(() => window.dispatchEvent(new Event("goal-fixture-refresh")));
+      await expect(dialog.getByLabel("目标内容")).toHaveValue("修复引导后的输出中断，\n并通过回归测试。");
+      await expect(dialog.getByText("完成 protocol v30 发布并验证所有终端同步升级", { exact: true })).toHaveCount(0);
+      if (engine === "codex") {
+        await dialog.getByRole("button", { name: /预算 ·/ }).click();
+        await dialog.getByLabel("Token 预算", { exact: true }).fill("0");
+        await expect(dialog.getByRole("button", { name: "保存修改", exact: true })).toBeDisabled();
+        await dialog.getByLabel("Token 预算", { exact: true }).fill("250000");
+        await dialog.getByRole("button", { name: "确定", exact: true }).click();
+      }
+      await page.screenshot({ path: info.outputPath(`${engine}-${theme}-editing.png`) });
+      await dialog.getByRole("button", { name: "保存修改", exact: true }).click();
+      await expect(dialog.getByRole("textbox")).toHaveCount(0);
+      await expect(dialog).toContainText("修复引导后的输出中断");
+      if (engine === "codex") await expect(dialog.getByRole("progressbar")).toHaveAttribute("max", "250000");
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    });
+  }
+}
+
+test("Goal creation uses optional Codex budget and shows native errors without discarding drafts", async ({ page }, info) => {
+  await page.goto("/tests/history-browser.html?goal-ui=1&goal-status=none&goal-open=1&theme=dark");
+  const dialog = page.getByRole("dialog", { name: "Codex Goal" });
+  await expect(dialog.getByRole("button", { name: "开始目标", exact: true })).toBeDisabled();
+  await dialog.getByLabel("目标内容").fill("完善 Goal 界面并通过桌面、手机回归。");
+  await expect(dialog.getByRole("button", { name: /预算 · 不限/ })).toBeVisible();
+  await page.screenshot({ path: info.outputPath("codex-create.png") });
+  await dialog.getByRole("button", { name: "开始目标", exact: true }).click();
+  await expect(dialog).toContainText("当前目标");
+  await expect(dialog.getByRole("progressbar")).toHaveCount(0);
+  await page.goto("/tests/history-browser.html?goal-ui=1&goal-fail=1");
+  await page.getByRole("button", { name: /查看 Goal/ }).click();
+  await dialog.getByRole("button", { name: "修改目标", exact: true }).click();
+  await dialog.getByLabel("目标内容").fill("失败后保留我的目标");
+  await dialog.getByRole("button", { name: "保存修改", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("输入已保留");
+  await expect(dialog.getByLabel("目标内容")).toHaveValue("失败后保留我的目标");
+});
+
+test("Goal completed state preserves actual budget usage and nested Escape only closes the budget picker", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?goal-ui=1&goal-status=complete");
+  const chip = page.getByRole("button", { name: /查看 Goal/ });
+  expect(await chip.locator(".goal-chip-ring").evaluate(node =>
+    parseFloat((node as HTMLElement).style.getPropertyValue("--goal-progress")))).toBeCloseTo(133.2);
+  await chip.click();
+  const dialog = page.getByRole("dialog", { name: "Codex Goal" });
+  await expect(dialog.getByRole("progressbar")).toHaveAttribute("value", "37000");
+  await dialog.getByRole("button", { name: "修改目标", exact: true }).click();
+  await dialog.getByRole("button", { name: /预算 ·/ }).click();
+  await dialog.getByLabel("Token 预算", { exact: true }).focus();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel("Token 预算", { exact: true })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+});
+
+for (const engine of ["codex", "claude"] as const) {
+  test(`Goal ${engine} editor stays usable through mobile keyboard open and close`, async ({ page }, info) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const relay = await mockRightPanelRelay(page, { retained: false, engine });
+    await page.goto("/");
+    const composer = page.locator(".composer textarea");
+    await composer.fill("/goal");
+    await composer.press("Enter");
+    const dialog = page.getByRole("dialog", { name: `${engine === "codex" ? "Codex" : "Claude"} Goal` });
+    const editor = dialog.getByLabel("目标内容");
+    await expect(editor).toBeVisible();
+    await editor.fill("键盘收起后保留目标，恢复完整编辑区。");
+    const originalHeight = (await dialog.boundingBox())!.height;
+    for (const { height, top } of [{ height: 350, top: 30 }, { height: 280, top: 12 }]) {
+      await editor.focus();
+      await page.evaluate(({ height, top }) => {
+        Object.defineProperties(window.visualViewport!, {
+          height: { configurable: true, value: height },
+          offsetTop: { configurable: true, value: top },
+        });
+        window.visualViewport!.dispatchEvent(new Event("resize"));
+      }, { height, top });
+      await expect.poll(async () => {
+        const visible = await dialog.locator(".goal-sheet-scroll").boundingBox();
+        return visible?.height ?? 0;
+      }).toBeGreaterThan(80);
+      await expect.poll(() => dialog.evaluate(node => {
+        const box = node.getBoundingClientRect();
+        const viewport = window.visualViewport!;
+        return box.top >= viewport.offsetTop - 1
+          && box.bottom <= viewport.offsetTop + viewport.height + 1;
+      })).toBe(true);
+      await expect(dialog.getByRole("button", { name: "开始目标", exact: true })).toBeInViewport();
+      await expect(editor).toBeFocused();
+      await expect(editor).toHaveValue("键盘收起后保留目标，恢复完整编辑区。");
+      await page.screenshot({ path: info.outputPath(`goal-${engine}-keyboard-${height}.png`) });
+      await editor.blur();
+      await page.evaluate(() => {
+        Object.defineProperties(window.visualViewport!, {
+          height: { configurable: true, value: window.innerHeight },
+          offsetTop: { configurable: true, value: 0 },
+        });
+        window.visualViewport!.dispatchEvent(new Event("resize"));
+      });
+      await expect.poll(async () => Math.abs((await dialog.boundingBox())!.height - originalHeight)).toBeLessThan(2);
+      await expect.poll(() => editor.evaluate(input => {
+        const editorBox = input.getBoundingClientRect();
+        const bodyBox = input.closest(".goal-sheet-scroll")!.getBoundingClientRect();
+        return editorBox.top >= bodyBox.top && editorBox.bottom <= bodyBox.bottom;
+      })).toBe(true);
+      await expect(editor).toHaveValue("键盘收起后保留目标，恢复完整编辑区。");
+    }
+    await page.screenshot({ path: info.outputPath(`goal-${engine}-restored.png`) });
+    expect(relay.commands.some(command => ["query", "set_goal", "interrupt"].includes(String(command.type)))).toBe(false);
+  });
+}
+
+test("Goal editor restores after a late keyboard viewport correction without another resize", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/tests/history-browser.html?goal-ui=1&goal-status=none&goal-open=1");
+  const dialog = page.getByRole("dialog", { name: "Codex Goal" });
+  const editor = dialog.getByLabel("目标内容");
+  await editor.fill("晚到的键盘恢复也不能隐藏这段草稿。");
+  const fullHeight = (await dialog.boundingBox())!.height;
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty("--app-height", "220px");
+    document.documentElement.style.setProperty("--app-offset-top", "20px");
+    window.dispatchEvent(new Event("resize"));
+  });
+  await expect.poll(async () => (await dialog.boundingBox())!.height).toBeLessThan(fullHeight - 80);
+  // A delayed viewport synchronization is allowed to arrive after the final
+  // native resize event. The fixture's chat box itself remains 100dvh tall.
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty("--app-height", `${window.innerHeight}px`);
+    document.documentElement.style.setProperty("--app-offset-top", "0px");
+  });
+  await expect.poll(async () => Math.abs((await dialog.boundingBox())!.height - fullHeight)).toBeLessThan(2);
+  await expect(editor).toBeFocused();
+  await expect(editor).toHaveValue("晚到的键盘恢复也不能隐藏这段草稿。");
+  await expect.poll(() => editor.evaluate(node => {
+    const editorBox = node.getBoundingClientRect();
+    const bodyBox = node.closest(".goal-sheet-scroll")!.getBoundingClientRect();
+    return editorBox.top >= bodyBox.top && editorBox.bottom <= bodyBox.bottom;
+  })).toBe(true);
 });

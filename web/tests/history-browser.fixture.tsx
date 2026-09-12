@@ -59,6 +59,7 @@ import { DirPicker } from "../src/components/DirPicker";
 import { HeaderMenu } from "../src/components/HeaderMenu";
 import { UsageActivitySheet } from "../src/components/UsageActivitySheet";
 import { displayHistoryProjection } from "../src/history-recovery";
+import { summaryHistoryTurns } from "../src/history-summary";
 import { Composer } from "../src/components/Composer";
 import { ComposerDraftStore } from "../src/composer-drafts";
 import { GoalPanel } from "../src/components/GoalPanel";
@@ -837,6 +838,8 @@ function CodexLiveBurstFixture() {
   const composerLive = params.has("composer-live");
   const composerPaste = params.has("composer-paste");
   const [lastComposerPrompt, setLastComposerPrompt] = useState<string | null>(null);
+  const [lastComposerImageCount, setLastComposerImageCount] = useState(0);
+  const [composerDraft, setComposerDraft] = useState("a");
   const [state, dispatch] = useReducer(
     reduce,
     undefined,
@@ -996,8 +999,12 @@ function CodexLiveBurstFixture() {
         onEdit={() => {}} onGetDiff={() => {}} />
       {composerLive && (
         <div data-testid="live-composer-shell">
+          {composerPaste && <button data-testid="switch-composer-draft"
+            onClick={() => setComposerDraft((value) => value === "a" ? "b" : "a")}>
+            Switch draft
+          </button>}
           <Composer
-            draftKey="fixture-codex-live-composer"
+            draftKey={`fixture-codex-live-composer-${composerDraft}`}
             draftStore={draftStoreRef.current}
             state={runtime.state}
             connState="connected"
@@ -1022,9 +1029,10 @@ function CodexLiveBurstFixture() {
             engine="codex"
             editPrompt={null}
             onEditConsumed={() => {}}
-            onSendQuery={(prompt) => {
+            onSendQuery={(prompt, images) => {
               if (!composerPaste) return false;
               setLastComposerPrompt(prompt);
+              setLastComposerImageCount(images?.length ?? 0);
               return true;
             }}
             onSteerQuery={() => false}
@@ -1046,6 +1054,9 @@ function CodexLiveBurstFixture() {
           />
           {composerPaste && <output data-testid="composer-paste-output">
             {lastComposerPrompt ?? ""}
+          </output>}
+          {composerPaste && <output data-testid="composer-image-count">
+            {lastComposerImageCount}
           </output>}
         </div>
       )}
@@ -2275,25 +2286,35 @@ function GoalUiFixture({ status, withPlan, hidden, longGoal, newerTurn,
   newerTurn: boolean;
   longPlan: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const params = new URLSearchParams(window.location.search);
+  const engine = params.get("engine") === "claude" ? "claude" : "codex";
+  const [open, setOpen] = useState(params.has("goal-open"));
   const [revealed, setRevealed] = useState(!hidden && status !== "none");
   const [planDetailRequests, setPlanDetailRequests] = useState(0);
   const loading = status === "loading";
   const goalStatus = status === "blocked" ? "blocked"
     : status === "complete" ? "complete" : "active";
-  const goal: ThreadGoal | null = loading || status === "none" ? null : {
+  const [goal, setGoal] = useState<ThreadGoal | null>(loading || status === "none" ? null : {
     threadId: "goal-fixture-thread",
     objective: longGoal
       ? "按照计划完成所有功能模块；每个模块验证无误后分别提交并推送，确保核心行为一致。".repeat(8)
       : "完成 protocol v30 发布并验证所有终端同步升级",
     status: goalStatus,
-    engine: "codex",
-    tokenBudget: 100_000,
+    engine,
+    iterations: engine === "claude" ? 3 : undefined,
+    tokenBudget: engine === "codex" ? 100_000 : null,
     tokensUsed: 37_000,
     timeUsedSeconds: 321,
     updatedAt: 1_800_000_000,
     lastReason: "已完成协议兼容性检查，正在验证三端同步状态。",
-  };
+  });
+  useEffect(() => {
+    document.documentElement.dataset.engine = engine;
+    document.documentElement.dataset.theme = new URLSearchParams(window.location.search).get("theme") ?? "light";
+    const refresh = () => setGoal(current => current ? { ...current, tokensUsed: current.tokensUsed + 1000, updatedAt: Date.now() / 1000 } : null);
+    window.addEventListener("goal-fixture-refresh", refresh);
+    return () => window.removeEventListener("goal-fixture-refresh", refresh);
+  }, [engine]);
   const plan: TurnPlanProgress | null = withPlan ? {
     turnId: "goal-fixture-turn",
     block: {
@@ -2339,12 +2360,18 @@ function GoalUiFixture({ status, withPlan, hidden, longGoal, newerTurn,
         <div data-testid="goal-fixture-content" style={{ flex: 1 }} />
       </div>
       <output data-testid="plan-detail-requests">{planDetailRequests}</output>
-      <GoalPanel engine="codex" goal={goal} revealed={revealed} open={open}
+      <GoalPanel engine={engine} goal={goal} revealed={revealed} open={open}
         loading={loading} completedGoalRetired={completedGoalRetired} plan={plan}
         onLoadPlanDetail={() => setPlanDetailRequests((value) => value + 1)}
         onOpen={() => setOpen(true)} onClose={() => setOpen(false)}
-        onDismiss={() => setRevealed(false)} onSave={() => setOpen(false)}
-        onClear={() => setRevealed(false)} />
+        onDismiss={() => setRevealed(false)} onSave={async (objective, nextStatus, budget) => {
+          if (params.has("goal-fail")) throw new Error("原生目标暂时无法更新，输入已保留。");
+          setGoal({ ...goal, threadId: "goal-fixture-thread", engine, objective, status: nextStatus,
+            tokenBudget: budget, tokensUsed: goal?.tokensUsed ?? 0, timeUsedSeconds: goal?.timeUsedSeconds ?? 0 });
+          setRevealed(true);
+        }}
+        onStatus={nextStatus => setGoal(current => current ? { ...current, status: nextStatus } : null)}
+        onClear={() => { setGoal(null); setRevealed(false); setOpen(false); }} />
       <div className="composer" data-testid="goal-fixture-composer"
         style={{ height: 48 }}>
         <div className="composer-in" />
@@ -2467,6 +2494,50 @@ function InlineImageEvictionFixture() {
   );
 }
 
+const USER_IMAGE_LAYOUT_SIZES = [[600, 1800], [1200, 650], [1000, 760]];
+
+function UserImageLayoutFixture() {
+  const [stage, setStage] = useState("optimistic");
+  const [shortPrompt, setShortPrompt] = useState(false);
+  const images = useMemo<QueryImg[]>(() => USER_IMAGE_LAYOUT_SIZES.map(([width, height], index) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = width; canvas.height = height;
+    const ctx = canvas.getContext("2d")!;
+    ctx.fillStyle = ["#dbeafe", "#ede9fe", "#dcfce7"][index];
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = "#334155";
+    ctx.font = "48px sans-serif";
+    ctx.fillText(`Screenshot ${index + 1}`, 24, 64);
+    return { media_type: "image/png", data: canvas.toDataURL().split(",")[1] };
+  }), []);
+  const turnId = "user-image-layout";
+  const refs = USER_IMAGE_LAYOUT_SIZES.map(([width, height], i) => ({
+    image_id: `image-${i}`, media_type: "image/png" as const,
+    width, height, byte_size: 1024,
+  }));
+  const assets = Object.fromEntries(refs.map((ref, i) => [
+    historyImageAssetKey(turnId, ref.image_id, "thumbnail"),
+    stage === "ready" ? { status: "ready" as const,
+      mediaType: "image/png", data: images[i].data }
+      : { status: "error" as const },
+  ]));
+  return <main style={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
+    <div>{["optimistic", "loading", "ready", "error"].map((value) =>
+      <button key={value} onClick={() => setStage(value)}>{value}</button>)}
+      <button onClick={() => setShortPrompt((value) => !value)}>prompt length</button>
+    </div>
+    <ChatView sid="image-layout-session" engine="codex"
+      historyRevision="image-layout-r1"
+      historyImageAssets={stage === "loading" ? {} : assets}
+      onLoadHistoryImage={() => true}
+      turns={[{ id: turnId, prompt: shortPrompt ? "看这三张图。"
+        : "请查看这些截图，文字与图片应共享右侧边界。".repeat(6),
+      ...(stage === "optimistic" ? { images } : { imageRefs: refs }),
+      blocks: [], done: true, ts: 1_000, doneTs: 2_000 }]}
+      onEdit={() => {}} onGetDiff={() => {}} />
+  </main>;
+}
+
 function HistoryImageFallbackErrorFixture() {
   const turnId = "history-fallback-error";
   const imageId = "history-fallback-image";
@@ -2535,6 +2606,43 @@ const UNSAFE_SVG = [
   '<rect id="safe-svg-rect" width="120" height="40" fill="#6256b4"/>',
   "</svg>",
 ].join("");
+
+function buildAudioFixture(): string {
+  const bytes = new Uint8Array(44 + 3 * 8000 * 2);
+  const view = new DataView(bytes.buffer);
+  const text = (at: number, value: string) => {
+    for (let index = 0; index < value.length; index++) bytes[at + index] = value.charCodeAt(index);
+  };
+  text(0, "RIFF"); view.setUint32(4, bytes.length - 8, true);
+  text(8, "WAVEfmt "); view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, 8000, true); view.setUint32(28, 16000, true);
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  text(36, "data"); view.setUint32(40, bytes.length - 44, true);
+  return window.btoa(Array.from(bytes, (value) => String.fromCharCode(value)).join(""));
+}
+
+function AudioPreviewFixture() {
+  const [revision, setRevision] = useState(0);
+  const [closed, setClosed] = useState(false);
+  const fixture = useMemo(() => {
+    const supplied = (window as unknown as {
+      audioFixture?: { data: string; name: string };
+    }).audioFixture;
+    return supplied ?? { data: buildAudioFixture(), name: "reference.wav" };
+  }, []);
+  const invalid = new URLSearchParams(location.search).get("artifact-audio") === "invalid";
+  return <main style={{ height: "100dvh" }}>
+    {closed ? <p data-testid="audio-preview-closed">已关闭</p> : <ArtifactPanel
+      artifact={{ kind: "audio", file: revision ? "second.wav" : fixture.name,
+        sid: "audio-session", requestId: `audio-request-${revision}`,
+        data: invalid && !revision ? window.btoa("RIFF0000WAVE") : fixture.data,
+        mediaType: "audio/wav", size: atob(fixture.data).length }}
+      active="diff" hasBtw={false} onTab={() => {}}
+      onRefresh={() => setRevision((value) => value + 1)}
+      onClose={() => setClosed(true)} />}
+  </main>;
+}
 
 function buildPdfFixture(): string {
   const firstPage = [
@@ -2710,6 +2818,89 @@ function ArtifactPreviewFixture({ kind }: {
   </main>;
 }
 
+function HistoricalFilesFixture() {
+  const manyFiles = new URLSearchParams(location.search).has("many-files");
+  const [other, setOther] = useState(false);
+  const [opened, setOpened] = useState("");
+  const [refresh, setRefresh] = useState(0);
+  const [dark, setDark] = useState(false);
+  useEffect(() => {
+    document.documentElement.dataset.engine = "codex";
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+  }, [dark]);
+  const paths = manyFiles ? Array.from({ length: 130 }, (_, index) => `src/file-${index}.py`)
+    : ["src/perception/camera.py", "tests/camera.py", "config/rig.json", "deploy/Dockerfile", "deploy/compose.yaml", "scripts/check.sh", "README.md"];
+  const wireTurns = [1, 2].map((number) => ({
+    id: `history-${number}`, prompt: number === 1 ? "完成相机预览相关修改" : "再调整一下相机配置",
+    done: true, ts: number, blocks: [{ kind: "text", done: true, message_id: `answer-${number}`,
+      channel: "final", text: number === 1 ? "已完成代码、配置和使用说明的调整。" : "相机配置已更新，上一轮的改动记录保持不变。" }],
+    fileChanges: { revision: manyFiles ? `revision-${number}-${refresh}` : `revision-${number}`,
+      ...(manyFiles && number === 1 ? { total_files: 130, total_additions: 130, total_deletions: 130, next_offset: 64 } : {}),
+      files: (number === 1 ? paths.slice(0, 64) : paths.slice(0, 1)).map((path, index) => ({
+      path: `/workspace/robot-viewer/${path}`,
+      state: index === 6 ? "unavailable" as const : "available" as const,
+      ...(index === 6 ? {} : { additions: 12 + index, deletions: index + 1 }),
+    })) },
+  }));
+  const turns = summaryHistoryTurns({ v: PROTOCOL_VERSION, ts: refresh, type: "history",
+    session_id: "historical-files", detail: "summary", turns: wireTurns, events: [], has_more: false }) ?? [];
+  return <main style={{ display: "flex", flexDirection: "column", height: "100dvh" }}>
+    <header style={{ padding: "12px 20px", flex: "none" }}>Code · 历史改动</header>
+    <ChatView sid={other ? "other-history" : "historical-files"} engine="codex"
+      turns={other ? [] : turns} activeTurnId={null}
+      onOpenArchivedDiff={(turn, revision, path) => setOpened(`${turn}:${revision}:${path}`)}
+      onLoadFilePage={async (turn, revision, offset, signal) => {
+        const response = await fetch(`/fixture-turn-files?turn=${turn}&revision=${revision}&offset=${offset}`, { signal });
+        if (!response.ok) throw new Error("文件清单加载失败，请重试。");
+        return response.json();
+      }}
+      onPreviewMarkdown={(path) => setOpened(`preview:${path}`)} />
+    <footer style={{ display: "flex", gap: 12, flexWrap: "wrap", padding: 12, flex: "none" }}>
+      <button onClick={() => setOther((value) => !value)}>切换会话</button>
+      <button onClick={() => setRefresh((value) => value + 1)}>刷新历史</button>
+      <button onClick={() => setDark((value) => !value)}>切换主题</button>
+      <output data-testid="historical-file-opened" style={{ overflowWrap: "anywhere", fontSize: 10 }}>{opened}</output>
+    </footer>
+  </main>;
+}
+
+function TurnRegressionFixture() {
+  const sid = "turn-regressions";
+  const [state, dispatch] = useReducer(reduce, {
+    ...initialState, focusedSid: sid, runtimes: { [sid]: {
+      ...createRuntime(), historyRevision: "stable", turns: [
+        { id: "history-one", prompt: "long copyable answer", done: true,
+          ts: 1, doneTs: 2, fileChanges: { revision: "immutable-one", files: [
+            { path: "src/code.py", state: "available", additions: 1, deletions: 1 },
+          ] }, blocks: [{ kind: "text", message_id: "long-answer", done: true, channel: "final",
+            text: "```text\n" + Array.from({ length: 90 }, (_, i) => `Copy entire block line ${i}`).join("\n") + "\n```\n\n"
+              + "```text\n" + Array.from({ length: 60 }, (_, i) => `Second block line ${i}`).join("\n") + "\n```" }] },
+        { id: "working", prompt: "continue work", done: false, blocks: [
+          { kind: "tool", tool_use_id: "command", message_id: "m", tool: "Bash", input: { command: "true" },
+            done: true, result: { content: "ok", is_error: false } },
+        ] },
+      ] as Turn[],
+    } },
+  });
+  const [opened, setOpened] = useState("");
+  const runtime = state.runtimes[sid];
+  return <main style={{ display: "flex", flexDirection: "column", height: "100dvh" }}>
+    <header style={{ height: 54, flex: "none" }}>Thread header</header>
+    <ChatView sid={sid} engine="codex" turns={runtime.turns} historyRevision="stable"
+      activeTurnId={runtime.acceptancePending ?? "working"}
+      onOpenArchivedDiff={(turn, revision, path) => setOpened(`${turn}:${revision}:${path}`)} />
+    <footer style={{ height: 60, flex: "none" }}>
+      <button data-testid="regression-send" onClick={() => dispatch({ type: "query_sent", sid,
+        msg_id: "new-question", prompt: "sent without scrolling", ts: 3 })}>Send</button>
+      <button data-testid="regression-stream" onClick={() => dispatch({ type: "event", event: {
+        v: PROTOCOL_VERSION, ts: 4, type: "delta", sid, turn_id: "new-question", message_id: "new-answer",
+        text: "streamed text\n".repeat(50), channel: "final",
+      } })}>Stream</button>
+      <output data-testid="regression-opened">{opened}</output>
+    </footer>
+  </main>;
+}
+
 function CodeCopyThemeFixture({ theme }: { theme: "light" | "dark" }) {
   useEffect(() => {
     const root = document.documentElement;
@@ -2808,7 +2999,9 @@ function CodexFileCitationFixture() {
 
 const rootParams = new URLSearchParams(window.location.search);
 createRoot(document.getElementById("root")!).render(
-  rootParams.has("artifact-html")
+  rootParams.has("artifact-audio")
+    ? <AudioPreviewFixture />
+    : rootParams.has("artifact-html")
     ? <ArtifactPreviewFixture kind="html" />
     : rootParams.has("artifact-pdf")
     ? <ArtifactPreviewFixture kind="pdf" />
@@ -2826,6 +3019,10 @@ createRoot(document.getElementById("root")!).render(
     ? <ArtifactPreviewFixture kind="markdown-github-html" />
     : rootParams.has("artifact-markdown-html")
     ? <ArtifactPreviewFixture kind="markdown-html" />
+    : rootParams.has("historical-files")
+    ? <HistoricalFilesFixture />
+    : rootParams.has("turn-regressions")
+    ? <TurnRegressionFixture />
     : rootParams.has("code-copy-theme")
     ? <CodeCopyThemeFixture
         theme={rootParams.get("theme") === "light" ? "light" : "dark"} />
@@ -2843,6 +3040,8 @@ createRoot(document.getElementById("root")!).render(
     ? <InlineImageEvictionFixture />
     : rootParams.has("history-image-fallback-error")
     ? <HistoryImageFallbackErrorFixture />
+    : rootParams.has("user-image-layout")
+    ? <UserImageLayoutFixture />
     : rootParams.has("reducer-pipeline")
     ? <ReducerHistoryBrowserFixture />
     : rootParams.has("codex-live-burst")

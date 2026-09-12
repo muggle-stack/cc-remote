@@ -15,6 +15,7 @@ import type {
   ToolBlock,
 } from "../domain/conversation";
 import { Icon } from "../icons";
+import { presentTurnOutcome } from "../problem-presentation";
 import { MessageBlock } from "./MessageBlock";
 import { PreviewAuthorizationPrompt } from "./PreviewAuthorizationPrompt";
 import { HistoryUserImage } from "./HistoryUserImage";
@@ -689,7 +690,7 @@ function isPayloadFreeUnfinishedCommandShell(block: Block): boolean {
   return !hasPayload;
 }
 
-export function ProcessTimeline({ blocks, done, active, durationMs, startTs, doneTs, onOpenFile,
+export function ProcessTimeline({ blocks, done, active, outcome, problem, durationMs, startTs, doneTs, onOpenFile,
   deferredCount = 0, detailLoading = false, detailError, onLoadDetail,
   onRetryDetail,
   canLoadEarlier = false, canLoadNewer = false,
@@ -704,6 +705,9 @@ export function ProcessTimeline({ blocks, done, active, durationMs, startTs, don
   done: boolean;
   /** Whether this process shell describes the turn's active live phase. */
   active?: boolean;
+  /** An enclosing terminal failure is separate from individual tool results. */
+  outcome?: "failed" | "interrupted";
+  problem?: string;
   durationMs?: number;
   startTs?: number;
   doneTs?: number;
@@ -784,8 +788,9 @@ export function ProcessTimeline({ blocks, done, active, durationMs, startTs, don
     block.kind === "process" && block.background === true
   )) : projectedItems;
   const terminalComplete = done && !processActive
-    && !hasActiveProcess(foregroundItems);
+    && (!!outcome || !hasActiveProcess(foregroundItems));
   const processSettled = !processActive;
+  const terminalOutcome = processSettled && done ? outcome : undefined;
   const [uncontrolledOpen, setUncontrolledOpen] = useState(!terminalComplete);
   const open = openOverride ?? uncontrolledOpen;
   const [localDetailError, setLocalDetailError] = useState<string | null>(null);
@@ -797,8 +802,14 @@ export function ProcessTimeline({ blocks, done, active, durationMs, startTs, don
   const releaseInteractionFrame = useRef<number | null>(null);
 
   useEffect(() => {
-    if (!manuallyToggled.current) setUncontrolledOpen(!terminalComplete);
-  }, [terminalComplete]);
+    // A steer or a history refresh may settle a visible segment before its
+    // native items finish updating. Auto-close once; later activity updates
+    // content, never reopens the disclosure or overrides a manual choice.
+    if (!terminalComplete || !uncontrolledOpen || openOverride != null
+        || manuallyToggled.current) return;
+    setUncontrolledOpen(false);
+    onOpenChange?.(false);
+  }, [terminalComplete, uncontrolledOpen, openOverride, onOpenChange]);
   useEffect(() => {
     if (detailLoading || !needsAuthoritativeDetail) {
       setLocalDetailError(null);
@@ -866,28 +877,16 @@ export function ProcessTimeline({ blocks, done, active, durationMs, startTs, don
   // duration until at least one displayable second is available.
   const elapsed = rawElapsed != null && rawElapsed >= 500
     ? rawElapsed : null;
-  const requestDetail = () => {
+  const requestDetail = (load = onLoadDetail) => {
     setLocalDetailError(null);
-    if (onLoadDetail?.() === false) {
-      setLocalDetailError(DETAIL_REQUEST_ERROR);
-    }
-  };
-  const retryDetail = () => {
-    setLocalDetailError(null);
-    if ((onRetryDetail ?? onLoadDetail)?.() === false) {
+    if (load?.() === false) {
       setLocalDetailError(DETAIL_REQUEST_ERROR);
     }
   };
   const toggle = () => {
     manuallyToggled.current = true;
-    if (needsAuthoritativeDetail) {
-      const next = !open;
-      if (next && !detailLoading) requestDetail();
-      setUncontrolledOpen(next);
-      onOpenChange?.(next);
-      return;
-    }
     const next = !open;
+    if (next && needsAuthoritativeDetail && !detailLoading) requestDetail();
     setUncontrolledOpen(next);
     onOpenChange?.(next);
   };
@@ -961,12 +960,14 @@ export function ProcessTimeline({ blocks, done, active, durationMs, startTs, don
             }
             toggle();
           }}>
-          <span className={`turn-process-state${processSettled ? " done" : " running"}`}>
+          <span className={`turn-process-state ${terminalOutcome ?? (processSettled ? "done" : "running")}`}>
             {detailLoading && !processActive
               ? <span className="process-spin" />
-              : <Icon name={processActive ? "spark" : "verify"} size={14} />}
+              : <Icon name={processActive ? "spark" : terminalOutcome === "failed"
+                ? "info" : terminalOutcome === "interrupted" ? "stop" : "verify"} size={14} />}
           </span>
-          <span>{processSettled ? "已处理" : "正在处理"}
+          <span>{terminalOutcome ? presentTurnOutcome(terminalOutcome, problem)
+            : processSettled ? "已处理" : "正在处理"}
             {elapsed == null ? null : ` ${durationLabel(elapsed)}`}</span>
           <span className="turn-process-count">{countLabel}</span>
           <Icon name="chev" size={15} />
@@ -993,7 +994,7 @@ export function ProcessTimeline({ blocks, done, active, durationMs, startTs, don
             <button type="button" disabled={detailLoading}
               onClick={(event) => {
                 event.stopPropagation();
-                retryDetail();
+                requestDetail(onRetryDetail ?? onLoadDetail);
               }}>
               重试
             </button>

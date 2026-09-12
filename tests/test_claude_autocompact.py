@@ -39,6 +39,7 @@ from cc_remote.protocol import (
 from cc_remote.wrapper.sdk import SdkHandle
 from cc_remote.wrapper.claude_errors import (
     classify_provider_request_too_large,
+    is_empty_system_content_error,
     is_provider_request_too_large,
 )
 from cc_remote.wrapper.stream import StreamTranslator
@@ -68,6 +69,14 @@ def test_nested_context_overflow_takes_precedence_over_outer_generic_413():
     outer.__cause__ = RuntimeError(
         "input token count exceeds the maximum allowed tokens")
     assert classify_provider_request_too_large(outer) == "context"
+
+
+def test_empty_system_content_400_is_not_mislabeled_as_context_overflow():
+    message = "API Error: 400 messages.1: system content must contain at least one block"
+    assert is_empty_system_content_error(message)
+    assert is_empty_system_content_error("system content must contain at least one block", 400)
+    assert not is_empty_system_content_error("API Error: 400 invalid token")
+    assert classify_provider_request_too_large(message) is None
 
 
 class _AutoCompactSdk:
@@ -1664,6 +1673,58 @@ def test_query_exception_413_is_not_retried_and_explains_known_cause(
     asyncio.run(run())
 
 
+def test_native_empty_system_result_drains_without_retry_model_change_or_history_write():
+    async def run():
+        class Client:
+            def __init__(self):
+                self.queue = asyncio.Queue()
+                self.queries = []
+
+            async def receive_messages(self):
+                while True:
+                    yield await self.queue.get()
+
+            async def query(self, prompt):
+                self.queries.append(prompt)
+                await self.queue.put(UserMessage(content=prompt, uuid=SESSION_ID))
+                await self.queue.put(ResultMessage(
+                    subtype="error_during_execution", duration_ms=1, duration_api_ms=1,
+                    is_error=True, num_turns=1, session_id=SESSION_ID, api_error_status=400,
+                    result="API Error: 400 messages.1: system content must contain at least one block",
+                ))
+
+        machine, transport = _mk_machine()
+        ctx = _mk_ctx(SESSION_ID, SESSION_ID)
+        sdk = ctx.sdk = SdkHandle(machine.cfg)
+        sdk.client = Client()
+        sdk.model = "claude-fable-5-1[1m]"
+        sdk.effort = sdk.applied_effort = "max"
+        sdk.set_auto_compact("custom", 400_000)
+        sdk.applied_auto_compact_mode = "custom"
+        sdk.applied_auto_compact_threshold_tokens = 400_000
+        machine.sessions[ctx.key] = ctx
+        machine._configure_claude_sdk_callbacks(ctx, sdk)
+        sdk._start_message_pump()
+        async def no_external_owner(_sid):
+            return False
+        machine._prime_claude_ownership = no_external_owner
+        machine._schedule_pending_claude_auto_compact = lambda _ctx: None
+        try:
+            await machine._handle_query(Query(sid=SESSION_ID, prompt="only once", msg_id="empty-system-query"))
+            await asyncio.wait_for(ctx.turn_task, 2)
+            assert sdk.client.queries == ["only once"]
+            assert sdk.model == "claude-fable-5-1[1m]"
+            assert ctx.state == "idle"
+            errors = [event for event in transport.sent if isinstance(event, Error)]
+            assert any("系统消息内容为空" in event.message for event in errors)
+            assert not any(event.code == "cc_crash" for event in errors)
+            assert any(isinstance(event, TurnEnd) and event.result.is_error for event in transport.sent)
+        finally:
+            sdk.release_background_messages()
+            await sdk._stop_message_pump()
+    asyncio.run(run())
+
+
 def test_deferred_query_survives_final_guard_and_retries_after_result():
     async def run():
         class Client:
@@ -1850,7 +1911,8 @@ def test_queued_query_waits_for_autonomous_claude_result_then_starts():
     asyncio.run(run())
 
 
-def test_terminal_task_update_without_notification_releases_task_but_holds_followup():
+@pytest.mark.parametrize("status", ["killed", "completed", "failed"])
+def test_terminal_task_update_without_notification_does_not_invent_followup(status):
     async def run():
         sdk = _AutoCompactSdk()
         machine, _transport, ctx = _machine_with_sdk(sdk)
@@ -1863,8 +1925,8 @@ def test_terminal_task_update_without_notification_releases_task_but_holds_follo
                 subtype="task_updated",
                 data={},
                 task_id="bash-task",
-                patch={"status": "killed"},
-                status="killed",
+                patch={"status": status},
+                status=status,
                 session_id=SESSION_ID,
                 uuid="task-killed",
             ),
@@ -1872,18 +1934,31 @@ def test_terminal_task_update_without_notification_releases_task_but_holds_follo
         )
 
         assert ctx.claude_active_tasks == set()
-        assert ctx.claude_background_followup_pending is True
-        assert machine._claude_has_background_work(ctx) is True
-
-        await machine._on_claude_background_message(ctx, ResultMessage(
-            subtype="success",
-            duration_ms=1,
-            duration_api_ms=1,
-            is_error=False,
-            num_turns=1,
-            session_id=SESSION_ID,
-        ), "autonomous-turn")
+        assert ctx.claude_background_followup_pending is False
         assert machine._claude_has_background_work(ctx) is False
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_stopped_task_only_retires_unstarted_followup(active):
+    async def run():
+        sdk = _AutoCompactSdk()
+        machine, _transport, ctx = _machine_with_sdk(sdk)
+        machine._claim_claude_followup_notification(ctx, "task-1")
+        if active:
+            machine._activate_claude_followup(ctx, UserMessage(
+                content="task finished",
+                origin={"kind": "task-notification", "taskId": "task-1"},
+            ))
+        ctx.state = "interrupting"
+        await machine._on_claude_background_message(ctx, TaskUpdatedMessage(
+            subtype="task_updated", data={}, task_id="task-1",
+            patch={"status": "killed"}, status="killed",
+        ), "origin-turn")
+        assert ctx.claude_background_followup_pending is active
+        assert ctx.state == ("interrupting" if active else "idle")
+        assert sdk.reconnects == []
 
     asyncio.run(run())
 

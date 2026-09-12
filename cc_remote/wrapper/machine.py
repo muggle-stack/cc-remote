@@ -99,6 +99,7 @@ from cc_remote.codex_daemon_restart import (
     restart_state_is_stale,
     restart_state_path,
 )
+from cc_remote.audio_preview import AUDIO_PREVIEW_MEDIA_TYPES, validate_audio_preview
 from cc_remote.log import logger
 from cc_remote.workspaces import (
     WORK_UPLOADS_MARKER,
@@ -133,7 +134,7 @@ from cc_remote.protocol import (
     State, TakeoverState, SessionControl,
     UserMsg, TurnSteered, Delta,
     ToolUse, ToolResult, ProcessEvent, TurnPlan, TurnBinding, TurnEnd,
-    TurnDiff,
+    TurnDiff, TurnFileChanges, TurnFileChangesPage,
     TurnNotificationContext,
     TurnResult, is_downstream,
     is_reliable_command,
@@ -172,7 +173,13 @@ from cc_remote.wrapper.claude_client_messages import (
     ClaudeClientMessageStore,
     ClaudeClientMessageStoreError,
 )
+from cc_remote.wrapper.claude_model_fallback import model_fallback_event
+from cc_remote.wrapper.turn_changes import (
+    TurnChangeArchive, TurnChangeTracker, change_summary, project_turn_changes,
+    turn_change_event_data, MAX_DIFF,
+)
 from cc_remote.wrapper.claude_errors import (
+    EMPTY_SYSTEM_CONTENT_MESSAGE, is_empty_system_content_error,
     classify_provider_request_too_large,
     is_provider_request_too_large,
     provider_request_too_large_message,
@@ -239,6 +246,7 @@ from cc_remote.wrapper.history_store import (
     history_source_extends,
     history_turn_snapshot_hash,
     materialize_history_turns,
+    group_history_events,
 )
 from cc_remote.wrapper.claude_agents import (
     AgentSourceTooLarge,
@@ -256,6 +264,7 @@ from cc_remote.wrapper.stream import (
     translate_history, last_assistant_model, transcript_compact_snapshot,
     transcript_compact_history_page,
     recover_claude_delayed_retry_tail,
+    recover_claude_native_metadata,
     transcript_internal_user_events,
     transcript_timestamps, transcript_path, transcript_presence,
     translate_subagent_history, merge_subagent_history,
@@ -299,6 +308,7 @@ from cc_remote.wrapper.codex_stream import (
     codex_history_user_images,
     codex_history_turn_users,
     codex_history_native_witness, codex_history_process_witnesses,
+    codex_history_file_changes,
     codex_history_process_append,
     codex_history_window_info,
     codex_native_rollback_turns,
@@ -1627,6 +1637,10 @@ def _apply_codex_process_witness(
     because a bounded scan may have skipped a large record or started mid-turn.
     """
     image_turns: set[str] = set()
+    for native_id, segment_index in witness.offset_by_native_segment:
+        if native_id in page.native_turn_ids:
+            page.source_segment_counts[native_id] = max(
+                page.source_segment_counts.get(native_id, 0), segment_index + 1)
     for turn in page.turns:
         current_started = turn.get("processStartedTs")
         current_done = turn.get("processDoneTs")
@@ -1647,6 +1661,11 @@ def _apply_codex_process_witness(
                     native_segment)
         if process is None:
             continue
+        if isinstance(visible_id, str):
+            if process.file_change_offsets:
+                page.file_change_offsets_by_visible_id[visible_id] = process.file_change_offsets
+            if process.file_changes_truncated:
+                page.file_changes_truncated.add(visible_id)
         if process.generated_images and isinstance(visible_id, str):
             image_turns.add(visible_id)
         if (turn.get("processDetailState") == "present"
@@ -1684,12 +1703,23 @@ def _apply_codex_process_clocks(
     """Overlay exact live starts without changing turn lifecycle.
 
     The browser alias and sidecar are both tied to the same rollout inode. A
-    clock therefore proves process presence and its earliest start, but never
-    proves that the turn is still running or that it reached a terminal.
+    clock can refine an opaque summary and its earliest start, but cannot
+    override an exact process-free source segment. Older wrappers could start
+    a steer's clock at RPC acceptance, before its native user item existed.
     """
     if not clocks.has_clocks:
         return
     for turn in turns:
+        if (
+            turn.get("processDetailState") == "none"
+            and turn.get("done") is True
+            and not turn.get("forkPointId")
+        ):
+            # A completed segment without the native terminal/fork belongs to
+            # a steer boundary. An acceptance-time clock cannot contradict its
+            # exact empty source projection. The enclosing task's own clock can
+            # still recover work omitted from an opaque/compacted history tail.
+            continue
         visible_id = turn.get("id")
         client_message_id = turn.get("clientMsgId")
         if not isinstance(client_message_id, str):
@@ -1802,6 +1832,12 @@ class _CodexHistoryProfiles:
 
     async def summary_page(self, thread_id: str, **kwargs):
         return await self._reader(thread_id).summary_page(thread_id, **kwargs)
+
+    def prefetch_summary_page(self, thread_id: str, before: str) -> None:
+        self._reader(thread_id).prefetch_summary_page(thread_id, before)
+
+    async def close(self) -> None:
+        await asyncio.gather(*(reader.close() for reader in self._readers.values()))
 
     def take_client_message_identities(self, thread_id: str):
         return self._reader(thread_id).take_client_message_identities(
@@ -1925,16 +1961,17 @@ class WrapperMachine:
     }
     ARTIFACT_PREVIEW_MEDIA_TYPES = {
         **PREVIEW_ASSET_MEDIA_TYPES,
+        **AUDIO_PREVIEW_MEDIA_TYPES,
         ".pdf": "application/pdf",
     }
     SAFE_RETRY_COMMANDS = frozenset({
         "list_sessions", "get_history", "get_turn_detail", "get_agent_detail",
         "get_history_image",
         "get_models", "get_permission_profiles", "get_engine_capabilities",
-        "get_context", "get_status", "get_diff", "get_file_preview",
+        "get_context", "get_status", "get_diff", "get_turn_file_changes", "get_file_preview",
         "get_preview_asset", "get_goal", "dismiss_goal",
         "acknowledge_completion",
-        "get_queued_query", "list_dir",
+        "get_queued_query", "list_dir", "browse_files",
         "get_work_dashboard", "sync_btw",
     })
     # Commands whose target is a runtime ``sid``.  A /btw runtime is private to
@@ -1943,13 +1980,13 @@ class WrapperMachine:
     BTW_SID_COMMANDS = frozenset({
         "query", "cancel_queued_query", "get_queued_query",
         "update_queued_query", "steer", "interrupt", "takeover",
-        "set_model", "set_effort", "set_auto_compact",
+        "set_model", "set_effort", "set_auto_compact", "set_codex_context",
         "set_service_tier", "set_collaboration_mode", "open_btw", "close_btw",
         "sync_btw",
         "set_perm", "get_permission_profiles", "set_permission_profile",
         "set_web_search",
         "get_context", "get_status", "consume_rate_limit_reset_credit",
-        "get_diff", "get_file_preview", "save_markdown",
+        "get_diff", "get_turn_file_changes", "get_file_preview", "save_markdown", "browse_files",
         "get_preview_asset", "authorize_preview",
         "answer_question", "get_goal", "set_goal", "clear_goal",
         "dismiss_goal", "acknowledge_completion",
@@ -2158,6 +2195,7 @@ class WrapperMachine:
         # over its authoritative transcript.  The per-process generation also
         # makes a crash after native rollback safe without another disk journal.
         self._history_revision_epochs: dict[str, int] = {}
+        self._history_continuity_revisions: dict[str, str] = {}
         # A stable official-page omission pins this routed sid to the bounded
         # rollout projection for the current History revision. The routed id
         # includes the Codex profile, so identical native UUIDs in two accounts
@@ -2313,6 +2351,11 @@ class WrapperMachine:
             tuple[str, str, int, str], asyncio.Task
         ] = {}
         self._history_refresh_dirty: set[tuple[str, str, int, str]] = set()
+        try:
+            self._turn_change_archive = TurnChangeArchive(cfg.state_dir)
+        except Exception as exc:
+            self._turn_change_archive = None
+            log.warning("turn diff archive unavailable", error_type=type(exc).__name__)
         # Rebuildable local projection of already-translated transcript pages.
         # Raw transcripts remain authoritative; exact source fingerprints make
         # the derived SQLite row a safe fast path rather than another history.
@@ -3738,6 +3781,7 @@ class WrapperMachine:
 
     def _bump_history_revision(self, sid: str) -> str:
         """Invalidate engine-neutral projections and advance the browser epoch."""
+        self._history_continuity_revisions.pop(sid, None)
         self._history_revision_epochs[sid] = (
             self._history_revision_epochs.get(sid, 0) + 1
         )
@@ -3752,7 +3796,9 @@ class WrapperMachine:
                 )
         return self._history_revision(sid)
 
-    def _bump_codex_projection_revision(self, sid: str) -> str:
+    def _bump_codex_projection_revision(
+        self, sid: str, *, aliases_only: bool = False,
+    ) -> str:
         """Advance a read-side Codex revision without losing source facts.
 
         This is only for projection-family or exact-alias changes which leave
@@ -3761,7 +3807,14 @@ class WrapperMachine:
         their revision-scoped volatile terminals fail closed.
         """
         previous_revision = self._history_revision(sid)
+        continuity = self._history_continuity_revisions.get(sid, previous_revision)
+        rollout_active = self._codex_rollout_history_active(sid)
         revision = self._bump_history_revision(sid)
+        if aliases_only:
+            self._history_continuity_revisions[sid] = continuity
+            # Learning a client ID does not change the selected page family.
+            if rollout_active:
+                self._codex_rollout_history_revisions[sid] = revision
         ledger = getattr(self, "_codex_terminal_ledger", None)
         if ledger is not None:
             try:
@@ -3894,6 +3947,7 @@ class WrapperMachine:
         return _apply_codex_process_witness(page, CodexHistoryNativeWitness(
             process_by_visible_id=witness.process_by_visible_id,
             process_by_native_segment=witness.process_by_native_segment,
+            offset_by_native_segment=witness.offset_by_native_segment,
         ))
 
     def _codex_rollout_history_active(self, sid: str) -> bool:
@@ -4258,17 +4312,28 @@ class WrapperMachine:
         ):
             return
         binding = ctx.active_turn_binding
-        if binding is None:
+        if (
+            ctx.codex_process_clock_owner is None
+            and binding is not None
+            and ctx.codex_published_steers.get(binding.msg_id) == binding.turn_id
+            and binding.msg_id not in ctx.codex_materialized_steers
+        ):
             return
+        owner = ctx.codex_process_clock_owner or (
+            (binding.msg_id, binding.turn_id) if binding is not None else None
+        )
+        if owner is None:
+            return
+        client_message_id, native_turn_id = owner
         msg_turn_id = getattr(msg, "turn_id", None)
         if (
             isinstance(msg_turn_id, str)
-            and msg_turn_id != binding.turn_id
+            and msg_turn_id != native_turn_id
         ):
             # A late item from another native turn must never start the active
             # browser message's presentation clock.
             return
-        binding_key = (binding.msg_id, binding.turn_id)
+        binding_key = owner
         if ctx.codex_process_clock_binding == binding_key:
             return
         raw_ts = getattr(msg, "ts", None)
@@ -4300,18 +4365,21 @@ class WrapperMachine:
             log.warning(
                 "Codex process-clock rollout lookup failed open",
                 session_id=sid,
-                turn_id=binding.turn_id,
+                turn_id=native_turn_id,
                 error_type=type(exc).__name__,
             )
             return
-        if ctx.active_turn_binding != binding:
+        if ctx.codex_process_clock_owner is not None:
+            if ctx.codex_process_clock_owner != owner:
+                return
+        elif ctx.active_turn_binding != binding:
             return
         if not source_path:
             return
         observation = await self._persist_codex_process_start(
             source_path,
-            binding.msg_id,
-            binding.turn_id,
+            client_message_id,
+            native_turn_id,
             started_ms,
         )
         # Store failure is presentation-only. Suppress one error per binding;
@@ -4323,7 +4391,7 @@ class WrapperMachine:
                 log.debug(
                     "retained earlier Codex process clock",
                     session_id=sid,
-                    turn_id=binding.turn_id,
+                    turn_id=native_turn_id,
                 )
 
     @staticmethod
@@ -4415,7 +4483,7 @@ class WrapperMachine:
             # Source fingerprints do not include metadata learned from the live
             # app-server. Discard an alias-free materialized page and advance
             # the browser revision before it can race this identity update.
-            self._bump_codex_projection_revision(session_id)
+            self._bump_codex_projection_revision(session_id, aliases_only=True)
         return inserted
 
     async def _remember_codex_initial_turn_alias(
@@ -4515,7 +4583,7 @@ class WrapperMachine:
                 )
                 continue
             if inserted:
-                self._bump_codex_projection_revision(sid)
+                self._bump_codex_projection_revision(sid, aliases_only=True)
 
     async def _apply_codex_steer_user_identity(
         self,
@@ -4585,6 +4653,19 @@ class WrapperMachine:
             and previous.client_message_id != proof.client_message_id
         ):
             return False
+        if (
+            proof.kind == "steer"
+            and proof.client_message_id not in ctx.codex_materialized_steers
+            and ctx.active_turn_binding is not None
+            and ctx.active_turn_binding.turn_id == proof.expected_turn_id
+        ):
+            ctx.codex_materialized_steers[proof.client_message_id] = None
+            while len(ctx.codex_materialized_steers) > self.CODEX_PUBLISHED_STEER_IDS:
+                oldest = next(iter(ctx.codex_materialized_steers))
+                ctx.codex_materialized_steers.pop(oldest)
+            ctx.codex_process_clock_owner = (
+                proof.client_message_id, proof.expected_turn_id,
+            )
         pending_identities[proof.native_message_id] = proof
         while len(pending_identities) > self.CODEX_PUBLISHED_STEER_IDS:
             pending_identities.pop(next(iter(pending_identities)))
@@ -6486,11 +6567,23 @@ class WrapperMachine:
 
         if terminal:
             ctx.claude_active_tasks.discard(task_id)
-            if (background
-                    and not (
-                        isinstance(message, TaskNotificationMessage)
-                        and message.status == "stopped"
-                    )):
+            stopped = message.status in {
+                "killed", "stopped", "cancelled", "interrupted",
+            }
+            if stopped:
+                key = self._claude_followup_origin_key({
+                    "kind": "task-notification", "taskId": task_id,
+                })
+                # Stopping a task may suppress its notification/response
+                # entirely. Drop only a not-yet-started claim, never a real
+                # injected turn: that owner still requires its exact Result.
+                if ctx.claude_background_followups.get(key) == "notified":
+                    ctx.claude_background_followups.pop(key, None)
+            elif background and isinstance(message, TaskNotificationMessage):
+                # A task_updated terminal is a task status, not evidence of a
+                # new model response. In particular killed tasks often emit no
+                # notification and no Result at all. Only a real notification
+                # can reserve the subsequent injected User/Result boundary.
                 overflowed = self._claim_claude_followup_notification(
                     ctx, task_id)
                 if overflowed:
@@ -7563,6 +7656,17 @@ class WrapperMachine:
                 web_search=getattr(
                     ctx.sdk, "web_search_override", None),
             )
+            settings = getattr(ctx.sdk, "context_settings", None)
+            if (settings is not None and not settings.pending
+                    and type(settings.max_tokens) is int
+                    and type(settings.window) is int):
+                saved = await asyncio.to_thread(self._codex_controls.get, route_sid)
+                if (saved.context_max_tokens == settings.max_tokens
+                        and saved.context_window_tokens != settings.window):
+                    # Persist a repaired legacy window only after native reload;
+                    # keep any newer saved capacity owned by another command.
+                    await asyncio.to_thread(self._codex_controls.set_context,
+                        route_sid, settings.max_tokens, settings.window)
         except Exception as exc:
             log.warning(
                 "Codex Remote controls could not be persisted",
@@ -8862,7 +8966,8 @@ class WrapperMachine:
                 if cmd.type == "list_sessions":
                     self._start_session_list_command(cmd)
                     continue
-                if cmd.type in {"get_history", "get_turn_detail", "get_agent_detail"}:
+                if (cmd.type in {"get_history", "get_turn_detail", "get_agent_detail", "get_turn_file_changes"}
+                        or (cmd.type == "get_diff" and getattr(cmd, "turn_id", None))):
                     self._start_history_command(cmd)
                     continue
                 if cmd.type == "get_models":
@@ -8960,6 +9065,9 @@ class WrapperMachine:
                 await asyncio.gather(*refresh_tasks, return_exceptions=True)
             self._history_refresh_tasks.clear()
             self._history_refresh_dirty.clear()
+            close_history = getattr(self._codex_history, "close", None)
+            if callable(close_history):
+                await close_history()
             if self._codex_session_list_refresh_task is not None:
                 self._codex_session_list_refresh_task.cancel()
                 await asyncio.gather(
@@ -9481,11 +9589,11 @@ class WrapperMachine:
     async def _observe_preview_path_event(self, ctx: SessionContext, msg) -> None:
         """Grant an exact capability only at a live successful-write boundary.
 
-        Normal previews remain cwd-confined. Claude/Codex can, however, be
-        explicitly asked to create a deliverable elsewhere (for example
-        ``/tmp/test.md``). The live ToolUse + successful ToolResult pair is an
-        auditable capability for the exact file identity inspected at that
-        moment; replaying the same pair from history is not.
+        Claude/Codex can be asked to create a deliverable elsewhere (for
+        example ``/tmp/test.md``). The live ToolUse + successful ToolResult
+        pair permits editing that exact file; an ordinary Code preview only
+        grants read access. Replaying the write pair from history must not
+        authorize a replacement file or its neighbors.
         """
         if isinstance(msg, ToolUse):
             raw_paths = self._normalize_preview_write_event(msg)
@@ -9891,6 +9999,20 @@ class WrapperMachine:
         if isinstance(msg, (TurnBinding, TurnSteered)):
             if msg.seq is None:
                 return
+            if ctx.engine == "codex":
+                accepted_remote_steer = (
+                    isinstance(msg, TurnSteered)
+                    and ctx.codex_published_steers.get(msg.msg_id) == msg.turn_id
+                    and msg.msg_id not in ctx.codex_materialized_steers
+                )
+                if not accepted_remote_steer:
+                    ctx.codex_process_clock_owner = (msg.msg_id, msg.turn_id)
+                elif (ctx.codex_process_clock_owner is None
+                      and ctx.active_turn_binding is not None):
+                    previous = ctx.active_turn_binding
+                    ctx.codex_process_clock_owner = (
+                        previous.msg_id, previous.turn_id,
+                    )
             ctx.active_turn_binding = ActiveTurnBinding(
                 msg_id=msg.msg_id,
                 turn_id=msg.turn_id,
@@ -9902,6 +10024,7 @@ class WrapperMachine:
             isinstance(msg, StateEvent) and msg.state == "idle"
         ):
             ctx.active_turn_binding = None
+            ctx.codex_process_clock_owner = None
 
     @staticmethod
     def _codex_terminal_fence_from_event(
@@ -10240,6 +10363,48 @@ class WrapperMachine:
             await self._emit_locked(
                 ctx, self._background_process_sync(ctx))
 
+    def _archive_turn_change_event(self, ctx: SessionContext, msg, source=None):
+        """Called under emit_lock, in a worker thread, after the source frame."""
+        if (not ctx.btw and isinstance(msg, (ToolUse, ToolResult, TurnDiff, TurnEnd, TurnSteered))
+                and getattr(self, "_turn_change_archive", None) is not None):
+            update = None
+            try:
+                if ctx.turn_change_tracker is None:
+                    ctx.turn_change_tracker = TurnChangeTracker(ctx.cwd)
+                data = {**turn_change_event_data(msg), **(source or {})}
+                if isinstance(msg, TurnEnd) and msg._changes_turn_id:
+                    data["turn_id"] = msg._changes_turn_id
+                if isinstance(msg, TurnSteered):
+                    # The engine task continues, but the previous visible
+                    # segment must retain its exact revision after later edits.
+                    # This is an archive pin, never a synthetic terminal frame.
+                    data = {"type": "turn_end", "turn_id": msg.turn_id}
+                update = ctx.turn_change_tracker.observe(data, ctx.active_msg_id)
+                if update is not None:
+                    turn_id, payload = update
+                    sid = self._ctx_wire_sid(ctx) or ctx.key
+                    if sid:
+                        archive_sid = f"{ctx.engine}:{sid}"
+                        self._turn_change_archive.put(archive_sid, turn_id, payload,
+                            final=isinstance(msg, (TurnEnd, TurnSteered)))
+                        if isinstance(msg, TurnEnd) and msg.checkpoint_id:
+                            self._turn_change_archive.put(archive_sid, msg.checkpoint_id,
+                                payload, final=True)
+                        if not isinstance(msg, TurnSteered):
+                            return TurnFileChanges(turn_id=turn_id, changes=change_summary(payload))
+            except Exception as exc:
+                log.warning("turn diff observation unavailable", error_type=type(exc).__name__)
+                if update is not None and not isinstance(msg, TurnSteered):
+                    turn_id, payload = update
+                    summary = change_summary(payload)
+                    summary["revision"] = "unavailable:" + summary["revision"]
+                    summary["next_offset"] = None
+                    summary["files"] = [{"path": row["path"], "state": "unavailable",
+                                         "reason": "本轮差异未能保存，暂不可查看"}
+                                        for row in summary["files"]]
+                    return TurnFileChanges(turn_id=turn_id, changes=summary)
+        return None
+
     async def _emit(self, ctx: SessionContext, msg) -> None:
         try:
             await self._observe_codex_process_clock(ctx, msg)
@@ -10254,8 +10419,18 @@ class WrapperMachine:
             )
         await self._observe_preview_image_event(ctx, msg)
         await self._observe_preview_path_event(ctx, msg)
+        # Do not retain the full native patches in the replay ring. The small
+        # source frame is published first; the archive sidecar consumes these
+        # local-only fields under the same emission lock.
+        source = getattr(msg, "_turn_change_source", None)
+        if isinstance(msg, (ToolUse, ToolResult)):
+            msg._turn_change_source = None
         async with ctx.emit_lock:
             await self._emit_locked(ctx, msg)
+            if isinstance(msg, (ToolUse, ToolResult, TurnDiff, TurnEnd, TurnSteered)):
+                update = await asyncio.to_thread(self._archive_turn_change_event, ctx, msg, source)
+                if update is not None:
+                    await self._emit_locked(ctx, update)
             if (
                 isinstance(msg, TurnEnd)
                 and not msg.result.is_error
@@ -11025,6 +11200,23 @@ class WrapperMachine:
         ctx.queued_query_wakeup.set()
         await self._emit(ctx, StateEvent(state=state))
         log.info("state transition", sid=ctx.session_id, state=state)
+        settings = getattr(ctx.sdk, "context_settings", None)
+        if state == "idle" and ctx.engine == "codex" and settings is not None and settings.needs_apply:
+            task = ctx.auto_compact_apply_task
+            if task is None or task.done():
+                task = asyncio.create_task(self._settle_codex_context(ctx))
+                ctx.auto_compact_apply_task = task
+                def finished(completed):
+                    if ctx.auto_compact_apply_task is completed:
+                        ctx.auto_compact_apply_task = None
+                    if not completed.cancelled():
+                        completed.exception()
+                task.add_done_callback(finished)
+
+    async def _settle_codex_context(self, ctx):
+        async with ctx.query_lock:
+            if self._is_resident_context(ctx) and ctx.state == "idle":
+                await self._apply_codex_context(ctx)
 
     async def _emit_current_state(
         self, ctx: SessionContext,
@@ -13630,6 +13822,38 @@ class WrapperMachine:
             except Exception:
                 log.exception("transcript watch loop error")
 
+    def _history_file_changes(
+        self, sid: str, engine: str, turns: list[dict] | tuple[dict, ...],
+        sources: dict[str, list[dict]], *, cwd: str | None,
+        incomplete: set[str] | frozenset[str] = frozenset(),
+    ) -> dict[str, dict]:
+        """Shared by official, rollout, Claude and full-page cache builders."""
+        archive = getattr(self, "_turn_change_archive", None)
+        if archive is None:
+            return {}
+        summaries = {}
+        for turn in turns:
+            rows = sources.get(turn["id"], [])
+            try:
+                summaries[turn["id"]] = archive.history_summary(
+                    f"{engine}:{sid}", turn, rows, cwd,
+                    incomplete=turn["id"] in incomplete,
+                )
+            except Exception as exc:
+                # Storage failure must not erase the file list or advertise
+                # an available revision that GetDiff cannot retrieve.
+                log.warning("history diff archival unavailable", error_type=type(exc).__name__)
+                summary = change_summary(project_turn_changes(rows, cwd))
+                summary["revision"] = "unavailable:" + summary["revision"]
+                summary["next_offset"] = None
+                summary["files"] = [
+                    {"path": row["path"], "state": "unavailable",
+                     "reason": "历史差异暂不可用"}
+                    for row in summary["files"]
+                ]
+                summaries[turn["id"]] = summary
+        return summaries
+
     async def _build_history(
         self, sid: str, before=None, limit=None, cwd_hint=None,
         detail: str = "full",
@@ -14282,7 +14506,14 @@ class WrapperMachine:
                         timestamps=timestamps,
                     )
                     return (
-                        messages,
+                        recover_claude_native_metadata(
+                            claude_native_sid or sid, messages,
+                            path=source_path, timestamps=timestamps,
+                            internal_events=internal_events,
+                            index_store=self._history_index,
+                            snapshot_size=(source_fingerprint.size
+                                           if source_fingerprint else None),
+                        ),
                         timestamps,
                         internal_events,
                         self._claude_history_client_message_ids(
@@ -14555,6 +14786,19 @@ class WrapperMachine:
                     _attach_claude_history_image_refs(
                         selected, image_assets)
                 )
+        def archive_changes():
+            turns, sources = [], {}
+            for group in selected:
+                rows = [event.model_dump(mode="json") for event in group]
+                projected = materialize_history_turns(rows)
+                if projected:
+                    turns.append(projected[0])
+                    sources[projected[0]["id"]] = [turn_change_event_data(event) for event in group]
+            return self._history_file_changes(
+                sid, "codex" if is_codex_hist else "claude", turns, sources,
+                cwd=ctx.cwd if ctx else watch.get("cwd"),
+            )
+        archived_changes = await asyncio.to_thread(archive_changes)
         history = make_history(selected, effective_start)
         margin = min(64 * 1024, max(1024, self.cfg.ws_max_size_bytes // 16))
         frame_budget = max(1024, self.cfg.ws_max_size_bytes - margin)
@@ -14577,9 +14821,13 @@ class WrapperMachine:
                 )
             )
             projected.turns = [
-                ConversationTurn.model_validate(turn)
+                ConversationTurn.model_validate({
+                    **turn, **({"fileChanges": archived_changes[turn["id"]]}
+                               if turn["id"] in archived_changes else {}),
+                })
                 for turn in summary_turns
             ]
+            summary_turns = tuple(turn.model_dump(exclude_none=True) for turn in projected.turns)
             projected.detail = "summary"
             projected.events = [
                 row for row in projected.events
@@ -14696,6 +14944,10 @@ class WrapperMachine:
                     include_live_detail=include_live_summary,
                 )
             )
+            detail_source_turns = tuple({
+                **turn, **({"fileChanges": archived_changes[turn["id"]]}
+                           if turn["id"] in archived_changes else {}),
+            } for turn in detail_source_turns)
 
             if frame_size > frame_budget:
                 for row in history.events:
@@ -14926,14 +15178,23 @@ class WrapperMachine:
                 while True:
                     self._history_refresh_dirty.discard(key)
                     scan_started = time.monotonic()
-                    history = await self._build_history(
-                        sid,
-                        before=before,
-                        limit=refresh_limit,
-                        cwd_hint=refresh_cwd,
-                        detail=detail,
-                        allow_stale=False,
-                    )
+                    if is_codex and detail == "summary":
+                        # Every published summary must use the same provider
+                        # as GetHistory; rollout cursors cannot be handed to
+                        # the official page reader on the next scroll.
+                        history = await self._build_requested_history(
+                            sid, before=before, limit=refresh_limit,
+                            cwd=refresh_cwd, detail=detail, _background=True,
+                        )
+                    else:
+                        history = await self._build_history(
+                            sid,
+                            before=before,
+                            limit=refresh_limit,
+                            cwd_hint=refresh_cwd,
+                            detail=detail,
+                            allow_stale=False,
+                        )
                     scan_elapsed = time.monotonic() - scan_started
                     if history.authoritative is not False:
                         history.sid = sid
@@ -15112,6 +15373,7 @@ class WrapperMachine:
         before: str | None,
         limit: int | None,
         _identity_retry: bool = True,
+        _minimum_user_segments: dict[str, int] | None = None,
     ) -> History:
         """Build one summary page from Codex's persisted app-server turns.
 
@@ -15201,6 +15463,8 @@ class WrapperMachine:
             }
             if aliases.has_aliases else {}
         )
+        if _minimum_user_segments:
+            alias_kwargs["minimum_user_segments"] = _minimum_user_segments
         known_client_ids = {
             *aliases.native_messages.values(),
             *aliases.segments.values(),
@@ -15229,6 +15493,7 @@ class WrapperMachine:
                 # reconciled. Hydrate both once; later mirrors reuse the
                 # generation-local bounded cache.
                 hydrate_recent=2 if before is None else 0,
+                source=source_before,
                 **alias_kwargs,
             )
         finally:
@@ -15435,6 +15700,28 @@ class WrapperMachine:
         if projection_outcome == "mismatch":
             projection_outcome = "inconclusive"
 
+        projected_counts: dict[str, int] = {}
+        for native_id, segment_index in page.native_segment_by_visible_id.values():
+            projected_counts[native_id] = max(
+                projected_counts.get(native_id, 0), segment_index + 1)
+        missing_segments = {
+            native_id: count for native_id, count in page.source_segment_counts.items()
+            if count > max(1, projected_counts.get(native_id, 0))
+        }
+        if missing_segments:
+            if _minimum_user_segments is not None:
+                raise CodexHistoryInvalidResponse(
+                    "Codex user segments changed during history recovery")
+            # The existing metadata pass already found exact native task/steer
+            # boundaries. Hydrate only collapsed rows, even beyond the newest
+            # page or after the small active-turn cache has been evicted. Repeat
+            # projection so timing, attachments and detail locators bind to the
+            # restored segments, never the first user plus the last answer.
+            return await self._build_official_codex_history(
+                sid, before=before, limit=limit, _identity_retry=_identity_retry,
+                _minimum_user_segments=missing_segments,
+            )
+
         _apply_codex_process_clocks(page.turns, process_clocks)
 
         # Official summary intentionally omits imageGeneration items. Only
@@ -15458,6 +15745,46 @@ class WrapperMachine:
                             if block.get("tool") != "image_generation"]
                 slots = max(0, 32 - len(existing))
                 turn["blocks"] = [*(images[-slots:] if slots else []), *existing]
+
+        # Summary/full official pages and rollout fallback must expose the same
+        # per-turn file list. Old native summaries omit fileChange items; use
+        # only exact mutation offsets already discovered by the process scan,
+        # never hydrate every tool/command just to paint this lightweight row.
+        change_sources: dict[str, list[dict]] = {}
+        for group in group_history_events(page.events):
+            projected = materialize_history_turns(group)
+            if projected:
+                change_sources[projected[0]["id"]] = group
+        incomplete_changes = set(page.file_changes_truncated)
+        if page.file_change_offsets_by_visible_id and source_before is not None:
+            try:
+                recovered, incomplete = await asyncio.to_thread(
+                    codex_history_file_changes, source_before.path,
+                    page.file_change_offsets_by_visible_id,
+                    end_offset=source_before.size,
+                )
+                change_source_after = await asyncio.to_thread(
+                    HistorySourceFingerprint.capture, source_before.path)
+            except OSError:
+                incomplete_changes.update(page.file_change_offsets_by_visible_id)
+            else:
+                if (self._history_revision(sid) == revision
+                        and history_source_extends(source_before, change_source_after)):
+                    for turn_id, rows in recovered.items():
+                        if rows:
+                            change_sources[turn_id] = rows
+                    incomplete_changes.update(incomplete)
+                else:
+                    projection_outcome = "inconclusive"
+                    incomplete_changes.update(page.file_change_offsets_by_visible_id)
+        changes = await asyncio.to_thread(
+            self._history_file_changes, sid, "codex", page.turns,
+            change_sources, cwd=ctx.cwd if ctx else watch.get("cwd"),
+            incomplete=incomplete_changes,
+        )
+        for turn in page.turns:
+            if turn["id"] in changes:
+                turn["fileChanges"] = changes[turn["id"]]
 
         control_rows: list[dict] = []
         if before is None and ctx is not None:
@@ -15512,6 +15839,7 @@ class WrapperMachine:
         limit: int | None,
         cwd: str | None,
         detail: str,
+        _background: bool = False,
     ) -> History:
         """Build one requester-neutral page shared by concurrent clients."""
         self._watch_session(sid)
@@ -15530,6 +15858,9 @@ class WrapperMachine:
             # Lifecycle is provider-neutral.  Whether content came from the
             # experimental official pagination API or the bounded rollout
             # adapter must not change how an exact terminal repairs a stale UI.
+            if is_codex and history.revision == self._history_revision(sid):
+                history.continuity_revision = self._history_continuity_revisions.get(
+                    sid, history.revision)
             if not is_codex or before is not None:
                 return history
             fences = await self._codex_terminal_snapshot(
@@ -15553,14 +15884,14 @@ class WrapperMachine:
                     limit=limit,
                     cwd_hint=cwd,
                     detail=detail,
-                    allow_stale=True,
+                    allow_stale=not _background,
                 )
                 return await with_terminal_snapshot(history)
             try:
                 history = await self._build_official_codex_history(
                     sid, before=before, limit=limit)
                 if (
-                    before is None
+                    not _background and before is None
                     and history.authoritative is False
                     and history.error is None
                 ):
@@ -15581,7 +15912,7 @@ class WrapperMachine:
                     limit=limit,
                     cwd_hint=cwd,
                     detail=detail,
-                    allow_stale=True,
+                    allow_stale=not _background,
                 )
                 return await with_terminal_snapshot(history)
             except CodexHistoryUnsupported:
@@ -15649,7 +15980,7 @@ class WrapperMachine:
                 return await with_terminal_snapshot(history)
         history = await self._build_history(
             sid, before=before, limit=limit, cwd_hint=cwd, detail=detail,
-            allow_stale=True)
+            allow_stale=not _background)
         return await with_terminal_snapshot(history)
 
     def _schedule_official_codex_history_refresh(
@@ -15660,46 +15991,8 @@ class WrapperMachine:
         cwd: str | None,
     ) -> None:
         """Retry a moving official snapshot without silently changing source."""
-        key = (sid, "", limit or 0, f"{cwd or ''}\0summary\0official")
-        current = self._history_refresh_tasks.get(key)
-        if current is not None and not current.done():
-            return
-
-        async def refresh() -> None:
-            try:
-                for delay in (0.25, 1.0):
-                    await asyncio.sleep(delay)
-                    history = await self._build_requested_history(
-                        sid,
-                        before=None,
-                        limit=limit,
-                        cwd=cwd,
-                        detail="summary",
-                    )
-                    if history.authoritative is False:
-                        if history.error is not None:
-                            return
-                        continue
-                    history.sid = sid
-                    await self.transport.send(history)
-                    return
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.warning(
-                    "official Codex history retry failed",
-                    session_id=sid,
-                    error_type=type(exc).__name__,
-                )
-
-        task = asyncio.create_task(refresh())
-        self._history_refresh_tasks[key] = task
-
-        def forget(done: asyncio.Task) -> None:
-            if self._history_refresh_tasks.get(key) is done:
-                self._history_refresh_tasks.pop(key, None)
-
-        task.add_done_callback(forget)
+        self._schedule_history_refresh(
+            sid, before=None, limit=limit, cwd=cwd, detail="summary")
 
     async def _history_page_singleflight(self, cmd, sid: str) -> History:
         before = getattr(cmd, "before", None)
@@ -15830,6 +16123,20 @@ class WrapperMachine:
                  has_more=hist.has_more, before=bool(hist.before),
                  external=hist.external, client_id=client_id,
                  elapsed_ms=round((time.perf_counter() - started_at) * 1000))
+        history_ctx = self._ctx_by_sid(sid)
+        codex_history = ((history_ctx is not None and history_ctx.engine == "codex")
+                         or (self._watch.get(sid) or {}).get("engine") == "codex")
+        if (codex_history and hist.detail == "summary" and hist.authoritative is not False
+                and hist.error is None and hist.has_more and hist.oldest_id
+                and not hist.in_progress
+                and not self._codex_rollout_history_active(sid)):
+            # Speculation never paints a page, learns aliases, opens an engine,
+            # or changes the cursor family. Only explicit browser reads schedule
+            # it; moving turns and watcher/terminal refreshes must not create
+            # repeated speculative scans competing with the live model stream.
+            prefetch = getattr(self._codex_history, "prefetch_summary_page", None)
+            if callable(prefetch):
+                prefetch(sid, hist.oldest_id)
         return hist
 
     async def _supplement_codex_history_image_views(
@@ -17464,6 +17771,13 @@ class WrapperMachine:
             if context_error is not None:
                 await self._emit(ctx, context_error)
                 return context_error
+        if ctx.engine == "codex":
+            await self._apply_codex_context(ctx)
+            if ctx.state != "idle" or getattr(ctx.sdk, "turn_active", False):
+                error = Error(code=ERR_BUSY, message="会话已开始新回合，请稍后重试或排队发送",
+                              msg_id=getattr(cmd, "msg_id", None))
+                await self._emit(ctx, error)
+                return error
         # All synchronous rejection paths have passed. A new conversation may
         # now finish before the next sidebar catalog read, so remember its first
         # accepted prompt under the temporary key; capture migrates it to the
@@ -17525,6 +17839,13 @@ class WrapperMachine:
                 request_id=getattr(cmd, "cmd_id", None),
                 to=getattr(cmd, "client_id", None),
                 sid=self._ctx_wire_sid(ctx) if ctx is not None else sid,
+            )
+            log.info(
+                "Codex steer not accepted",
+                session_id=error.sid,
+                msg_id=error.msg_id,
+                error_code=code,
+                reason=message,
             )
             # This is a correlated control rejection, not shared session
             # narrative. Buffering it would let a later client replay A's
@@ -19061,6 +19382,79 @@ class WrapperMachine:
         log.info("effort set", sid=ctx.session_id, effort=applied, engine=ctx.engine)
         return event
 
+    async def _publish_codex_context(self, ctx):
+        from cc_remote.protocol import CodexContext
+        from cc_remote.wrapper.codex_context_settings import model_context_bounds
+
+        settings = getattr(ctx.sdk, "context_settings", None)
+        if ctx.engine != "codex" or settings is None:
+            return None
+        bounds = await asyncio.to_thread(
+            model_context_bounds, ctx.sdk.model, ctx.sdk.codex_home)
+        event = CodexContext(
+            model=ctx.sdk.model or "",
+            max_context_tokens=settings.max_tokens,
+            applied_max_context_tokens=settings.applied_effective_window,
+            applied_threshold_tokens=settings.applied_threshold,
+            model_max_tokens=bounds.max_window if bounds else None,
+            limit_tokens=bounds.limit if bounds else None,
+            context_window_tokens=settings.window,
+            pending=settings.pending,
+            mutable=ctx.space == "code" and not ctx.btw,
+            error=settings.error)
+        await self._emit(ctx, event)
+        return event
+
+    async def _apply_codex_context(self, ctx):
+        settings = getattr(ctx.sdk, "context_settings", None)
+        if ctx.engine != "codex" or settings is None or not settings.needs_apply:
+            return
+        try:
+            applied = await settings.apply(ctx.sdk)
+        except Exception as exc:
+            settings.error = str(exc)[:1024]
+            applied = False
+        if applied:
+            await self._persist_codex_session_controls(ctx)
+            # Refresh an already-open context ring immediately after the
+            # native reload, without waiting for another model turn.
+            await self._handle_get_context_locked(ctx, None)
+            return
+        await self._publish_codex_context(ctx)
+
+    async def _handle_set_codex_context(self, cmd):
+        ctx = self._ctx_for(getattr(cmd, "sid", None))
+        if ctx is None:
+            return await self._missing_session_error(cmd, "设置上下文上限")
+        async with ctx.query_lock:
+            control_error = await self._runtime_control_preflight(
+                ctx, action="设置上下文上限", request_id=getattr(cmd, "cmd_id", None),
+                client_id=getattr(cmd, "client_id", None))
+            if control_error is not None:
+                return control_error
+            settings = getattr(ctx.sdk, "context_settings", None)
+            if ctx.engine != "codex" or ctx.space != "code" or ctx.btw or settings is None:
+                error = Error(code=ERR_PROTOCOL, message="此设置仅适用于 Codex Code 主会话",
+                              request_id=getattr(cmd, "cmd_id", None), to=getattr(cmd, "client_id", None))
+                await self._emit(ctx, error)
+                return error
+            previous = (settings.max_tokens, settings.threshold, settings.window,
+                        settings.pending, settings.apply_attempted, settings.error)
+            try:
+                await settings.select(ctx.sdk, cmd.max_context_tokens)
+                if self._codex_controls is None:
+                    raise ValueError("会话设置存储暂不可用")
+                await asyncio.to_thread(self._codex_controls.set_context,
+                    self._ctx_wire_sid(ctx), settings.max_tokens, settings.window)
+            except Exception as exc:
+                (settings.max_tokens, settings.threshold, settings.window,
+                 settings.pending, settings.apply_attempted, settings.error) = previous
+                settings.error = str(exc)[:1024]
+                return await self._publish_codex_context(ctx)
+            if ctx.state == "idle":
+                await self._apply_codex_context(ctx)
+            return await self._publish_codex_context(ctx)
+
     async def _handle_set_auto_compact(self, cmd):
         """Change Claude's per-session spawn-time compaction threshold safely."""
         ctx = self._ctx_for(getattr(cmd, "sid", None))
@@ -19716,13 +20110,13 @@ class WrapperMachine:
         if ctx is None:
             return await self._missing_session_error(
                 cmd, "切换执行环境")
-        if ctx.state != "idle":
-            error = Error(
-                code=ERR_BUSY,
-                message="Codex 正在处理回合，完成或中断后再切换执行环境。",
-            )
-            await self._emit(ctx, error)
-            return error
+        # Official thread/settings/update is a live control. Serialize the
+        # catalog check, apply and publication, without waiting on the turn's
+        # query lock or interrupting its stream.
+        async with ctx.permission_profile_lock:
+            return await self._set_permission_profile(ctx, cmd)
+
+    async def _set_permission_profile(self, ctx, cmd):
         control_error = await self._runtime_control_preflight(
             ctx, action="切换执行环境")
         if control_error is not None:
@@ -20362,6 +20756,8 @@ class WrapperMachine:
         *,
         prefer_cached_claude: bool = False,
     ):
+        if ctx.engine == "codex":
+            await self._publish_codex_context(ctx)
         try:
             context_source: Literal[
                 "control", "cached_control", "recent_turn"
@@ -20608,6 +21004,9 @@ class WrapperMachine:
                     total_tokens=used, max_tokens=win,
                     percentage=(used / win * 100.0) if win else 0.0,
                     available=False if not available else None,
+                    source=("native_estimate" if usage.get("source") == "native_estimate"
+                            else "recent_turn"),
+                    auto_compact_threshold_tokens=usage.get("auto_compact_threshold_tokens"),
                     model=ctx.sdk.model, is_auto_compact_enabled=None,
                     categories=[], **work_fields)
                 await self._emit(ctx, event)
@@ -20957,6 +21356,30 @@ class WrapperMachine:
                 await self._emit(target, update.model_copy(deep=True))
         return True
 
+    async def _observe_claude_model_fallback(self, ctx: SessionContext, message) -> None:
+        if not isinstance(message, SystemMessage):
+            return
+        event = model_fallback_event(message.data, turn_id=ctx.active_msg_id)
+        if event is None:
+            return
+        # The sole SDK reader applies the model change in source order. Do not
+        # overwrite a newer explicit user selection while this callback waits.
+        fallback = (event.input or {}).get("fallback_model")
+        if ((event.input or {}).get("scope") == "session"
+                and fallback == getattr(ctx.sdk, "model", None)):
+            if ctx.announced_model != fallback:
+                ctx.announced_model = fallback
+                await self._emit(ctx, Model(model=fallback))
+            await self._persist_claude_session_controls(ctx)
+        if event.item_id not in ctx.claude_model_fallback_notices:
+            if len(ctx.claude_model_fallback_notices) >= 64:
+                ctx.claude_model_fallback_notices.clear()
+            ctx.claude_model_fallback_notices.add(event.item_id)
+            await self._emit(ctx, Notice(
+                notice_id=event.item_id, severity="warning", category="runtime",
+                title="模型已回退", message=event.summary,
+            ))
+
     async def _on_claude_background_message(
         self, ctx: SessionContext, message, turn_id: str | None,
     ) -> None:
@@ -20972,6 +21395,7 @@ class WrapperMachine:
         """
         if await self._observe_claude_rate_limit_message(ctx, message):
             return
+        await self._observe_claude_model_fallback(ctx, message)
         is_result = isinstance(message, ResultMessage)
         followup_was_pending = self._claude_autonomous_followup_pending(ctx)
         self._observe_claude_task_lifecycle(
@@ -21017,6 +21441,12 @@ class WrapperMachine:
                         ctx.claude_background_translator = translator
                     for event in translator.feed(message):
                         if isinstance(event, TurnEnd):
+                            # Persist the real autonomous boundary without
+                            # inventing another visible main-turn completion.
+                            async with ctx.emit_lock:
+                                change = await asyncio.to_thread(self._archive_turn_change_event, ctx, event)
+                                if change is not None:
+                                    await self._emit_locked(ctx, change)
                             continue
                         if "background" in type(event).model_fields:
                             event = event.model_copy(
@@ -21053,6 +21483,14 @@ class WrapperMachine:
                     # been retired; both schedulers re-check the remaining ledger.
                     self._schedule_pending_claude_auto_compact(ctx)
                     self._schedule_query_queue_drain(ctx)
+            elif (followup_was_pending
+                    and not self._claude_autonomous_followup_pending(ctx)):
+                # A stopped task retired its unstarted notification claim.
+                # There is no autonomous Result left to wait for in this case.
+                ctx.claude_autonomous_interrupt_wakeup.set()
+                await self._settle_claude_lifecycle_if_quiescent(ctx)
+                self._schedule_pending_claude_auto_compact(ctx)
+                self._schedule_query_queue_drain(ctx)
 
     def _resident_agent_detail_revision(self, run) -> str:
         return (
@@ -22182,6 +22620,7 @@ class WrapperMachine:
                 await self._apply_codex_steer_user_identity(ctx, proof)
         ctx.codex_uncertain_steer = None
         ctx.codex_published_steers.clear()
+        ctx.codex_materialized_steers.clear()
         directories = ctx.codex_steer_attachment_dirs
         if not directories:
             return
@@ -22206,7 +22645,9 @@ class WrapperMachine:
         published.pop(event.msg_id, None)
         published[event.msg_id] = event.turn_id
         while len(published) > self.CODEX_PUBLISHED_STEER_IDS:
-            published.pop(next(iter(published)))
+            oldest = next(iter(published))
+            published.pop(oldest)
+            ctx.codex_materialized_steers.pop(oldest, None)
 
     async def _confirm_uncertain_codex_steer(
         self, ctx: SessionContext, raw: dict,
@@ -22867,9 +23308,14 @@ class WrapperMachine:
                     )
                     if isinstance(query_result, Error):
                         ctx.sdk.restore_goal_state(previous)
+                        query_result = query_result.model_copy(update={
+                            "request_id": getattr(cmd, "cmd_id", None),
+                            "to": getattr(cmd, "client_id", None),
+                        })
+                        await self._emit(ctx, query_result)
                         return query_result
                     ctx.goal_visible = True
-                    event = GoalState(goal=goal)
+                    event = GoalState(goal=goal, request_id=getattr(cmd, "cmd_id", None))
                     await self._emit(ctx, event)
                     return event
                 except Exception as exc:
@@ -22887,6 +23333,14 @@ class WrapperMachine:
             # cannot become a second writer. launch_lock also makes an immediate
             # interrupt wait until the authoritative automatic turn id is known.
             async with ctx.launch_lock:
+                if (ctx.state == "running" and ctx.codex_spontaneous_turn_id is not None
+                        and getattr(cmd, "objective", None) is None
+                        and getattr(cmd, "token_budget", None) is None
+                        and getattr(cmd, "status", None) in {"paused", "complete"}):
+                    goal = await ctx.sdk.set_goal(status=cmd.status)
+                    event = GoalState(goal=goal, request_id=getattr(cmd, "cmd_id", None))
+                    await self._emit(ctx, event)
+                    return event
                 if ctx.state != "idle":
                     # The browser may retry after receiving GoalState but before
                     # its CommandAck, or two taps may enqueue equivalent command
@@ -22895,7 +23349,7 @@ class WrapperMachine:
                     # false failure banner even though the Goal is active.
                     applied = self._codex_goal_update_already_applied(ctx, cmd)
                     if applied is not None:
-                        event = GoalState(goal=applied)
+                        event = GoalState(goal=applied, request_id=getattr(cmd, "cmd_id", None))
                         await self._emit(ctx, event)
                         return event
                     error = Error(
@@ -22938,7 +23392,7 @@ class WrapperMachine:
                     ctx.codex_goal_mutation = None
                     if ctx.state != "idle":
                         await self._set_idle_after_managed_turn(ctx)
-            event = GoalState(goal=goal)
+            event = GoalState(goal=goal, request_id=getattr(cmd, "cmd_id", None))
             await self._emit(ctx, event)
             return event
         except Exception as exc:
@@ -22947,7 +23401,7 @@ class WrapperMachine:
                 mutation = ctx.codex_goal_mutation
                 if mutation is not None:
                     mutation.applied = True
-                event = GoalState(goal=applied)
+                event = GoalState(goal=applied, request_id=getattr(cmd, "cmd_id", None))
                 await self._emit(ctx, event)
                 return event
             automatic_turn_live = bool(
@@ -22988,9 +23442,14 @@ class WrapperMachine:
                     )
                     if isinstance(query_result, Error):
                         ctx.sdk.restore_goal_state(previous)
+                        query_result = query_result.model_copy(update={
+                            "request_id": getattr(cmd, "cmd_id", None),
+                            "to": getattr(cmd, "client_id", None),
+                        })
+                        await self._emit(ctx, query_result)
                         return query_result
                     ctx.goal_visible = False
-                    event = GoalState(goal=None)
+                    event = GoalState(goal=None, request_id=getattr(cmd, "cmd_id", None))
                     await self._emit(ctx, event)
                     return event
                 except Exception as exc:
@@ -23020,15 +23479,62 @@ class WrapperMachine:
             if (ctx.codex_spontaneous_turn_id is not None
                     and ctx.state == "running"):
                 await self._handle_interrupt(Interrupt(sid=ctx.key))
-            event = GoalState(goal=None)
+            event = GoalState(goal=None, request_id=getattr(cmd, "cmd_id", None))
             await self._emit(ctx, event)
             return event
         except Exception as exc:
             log.warning("clear_goal failed", error_type=type(exc).__name__)
             return await self._emit_goal_error(ctx, cmd, "清除 Goal 失败")
 
+    async def _handle_get_turn_file_changes(self, cmd):
+        page = None
+        if self._turn_change_archive is not None:
+            try:
+                page = await asyncio.to_thread(
+                    self._turn_change_archive.page,
+                    f"{cmd.engine}:{self._resolve_session_alias(cmd.sid) or cmd.sid}",
+                    cmd.turn_id, cmd.revision, cmd.offset, cmd.limit)
+            except Exception as exc:
+                log.warning("turn file page unavailable", error_type=type(exc).__name__)
+        if page is None:
+            event = Error(code=ERR_INTERNAL,
+                          message="该版本的文件清单暂不可用，请刷新本轮后重试。",
+                          request_id=cmd.cmd_id, to=cmd.client_id)
+        else:
+            event = TurnFileChangesPage(engine=cmd.engine, turn_id=cmd.turn_id,
+                                        **page, request_id=cmd.cmd_id, to=cmd.client_id)
+        await self._emit_to_sid(cmd.sid, event)
+        return event
+
     async def _handle_get_diff(self, cmd) -> None:
         sid = getattr(cmd, "sid", None)
+        if getattr(cmd, "turn_id", None):
+            # Historical requests must never fall through to current git diff.
+            rows = []
+            if sid and cmd.revision and cmd.engine and self._turn_change_archive is not None:
+                try:
+                    identity = (f"{cmd.engine}:{self._resolve_session_alias(sid) or sid}",
+                                cmd.turn_id, cmd.revision)
+                    if cmd.file:
+                        row = await asyncio.to_thread(self._turn_change_archive.file, *identity, cmd.file)
+                        rows = [row] if row else []
+                    else:
+                        payload = await asyncio.to_thread(self._turn_change_archive.get, *identity)
+                        rows = (payload or {}).get("files", [])
+                except Exception as exc:
+                    log.warning("historical diff unavailable", error_type=type(exc).__name__)
+            if (not rows or any(row["state"] != "available" for row in rows)
+                    or sum(len(row.get("diff", "")) + 1 for row in rows) > MAX_DIFF):
+                event = Error(code=ERR_INTERNAL,
+                              message="本轮历史差异未完整保存；不会以当前文件替代。请展开后查看单个可用文件。",
+                              request_id=getattr(cmd, "cmd_id", None),
+                              to=getattr(cmd, "client_id", None))
+            else:
+                event = DiffReport(file=cmd.file, diff="\n".join(row.get("diff", "") for row in rows),
+                                   request_id=getattr(cmd, "cmd_id", None),
+                                   to=getattr(cmd, "client_id", None))
+            await self._emit_to_sid(sid, event)
+            return event
         ctx = self._ctx_for(sid)
         if ctx is None:
             error = Error(
@@ -23075,8 +23581,13 @@ class WrapperMachine:
             self._preview_challenges.popitem(last=False)
 
     async def _drop_preview_session(
-        self, engine: str, session_id: str,
+        self, engine: str, session_id: str, *, delete_history: bool = True,
     ) -> None:
+        if delete_history and self._turn_change_archive is not None:
+            try:
+                await asyncio.to_thread(self._turn_change_archive.drop, f"{engine}:{session_id}")
+            except Exception as exc:
+                log.warning("diff archive cleanup unavailable", error_type=type(exc).__name__)
         try:
             await self.viewer_pages.drop(engine, session_id)
         except (OSError, ValueError):
@@ -23100,6 +23611,12 @@ class WrapperMachine:
         old_key: str,
         session_id: str,
     ) -> None:
+        if self._turn_change_archive is not None:
+            try:
+                await asyncio.to_thread(self._turn_change_archive.rekey,
+                                        f"{ctx.engine}:{old_key}", f"{ctx.engine}:{session_id}")
+            except Exception as exc:
+                log.warning("diff archive rekey unavailable", error_type=type(exc).__name__)
         try:
             await self.viewer_pages.rekey(ctx.engine, ctx.space, old_key, session_id)
         except (OSError, ValueError):
@@ -23336,6 +23853,38 @@ class WrapperMachine:
         await self._emit(ctx, result)
         return result
 
+    async def _handle_browse_files(self, cmd):
+        from cc_remote.protocol import FilesListed
+        from cc_remote.wrapper.workspace_browser import browse_workspace
+
+        sid = getattr(cmd, "sid", None)
+        ctx = self._ctx_for(sid)
+        payload = {}
+        error = None
+        try:
+            if ctx is None:
+                raise ValueError("请先选择一个可用的会话")
+            payload = await asyncio.to_thread(
+                browse_workspace, ctx.cwd, cmd.path, offset=cmd.offset,
+                limit=cmd.limit, hidden=cmd.hidden, revision=cmd.revision,
+                confine_to_cwd=ctx.space != "code")
+        except ValueError as exc:
+            error = str(exc)
+        except FileNotFoundError:
+            error = "文件或目录不存在"
+        except PermissionError:
+            error = "没有权限读取该目录"
+        except OSError:
+            error = "无法打开该目录"
+        response = FilesListed(
+            request_id=cmd.request_id, to=getattr(cmd, "client_id", None),
+            error=error, **payload)
+        if ctx is None:
+            await self._emit_to_sid(sid, response)
+        else:
+            await self._emit(ctx, response)
+        return response
+
     async def _handle_get_file_preview(self, cmd):
         sid = getattr(cmd, "sid", None)
         client_id = getattr(cmd, "client_id", None)
@@ -23352,22 +23901,45 @@ class WrapperMachine:
             return response
 
         try:
-            suffix = os.path.splitext(cmd.path)[1].lower()
+            # Links in prose can name directories as well as files. Resolve
+            # directories through the same no-symlink boundary as /open.
+            requested_path = os.path.expanduser(cmd.path)
+            candidate = os.path.join(ctx.cwd, requested_path)
+            if await asyncio.to_thread(os.path.isdir, candidate):
+                from cc_remote.wrapper.workspace_browser import browse_workspace
+
+                target = await asyncio.to_thread(
+                    browse_workspace, ctx.cwd, cmd.path, limit=1,
+                    confine_to_cwd=ctx.space != "code")
+                if target["kind"] == "directory":
+                    response = FilePreview(
+                        path=target["path"], request_id=cmd.request_id,
+                        directory=True, writable=False, to=client_id)
+                    await self._emit(ctx, response)
+                    return response
+            resolved_path = os.path.realpath(candidate)
+            inside_root = self._path_is_below(
+                os.path.realpath(ctx.cwd), resolved_path)
+            # In Code, opening a file is already an explicit browser request.
+            # Bind only that file, using the OS read permission and its current
+            # identity. Embedded resources and Work retain their own boundary.
+            if ctx.space == "code" and client_id and not inside_root:
+                await self._run_preview_capability_mutation(
+                    self._preview_capability_store.grant_path,
+                    ctx.engine, ctx.space, self._ctx_wire_sid(ctx),
+                    resolved_path, mode="read", source="user_approved",
+                    persist=not ctx.btw)
+            suffix = os.path.splitext(requested_path)[1].lower()
             external_paths = self._preview_capabilities(ctx)
             if suffix in self.OFFICE_PREVIEW_SUFFIXES:
                 async with self._preview_conversion_limit:
                     preview = await asyncio.to_thread(
-                        self._read_file_preview, ctx.cwd, cmd.path,
+                        self._read_file_preview, ctx.cwd, requested_path,
                         external_paths)
             else:
                 preview = await asyncio.to_thread(
-                    self._read_file_preview, ctx.cwd, cmd.path,
+                    self._read_file_preview, ctx.cwd, requested_path,
                     external_paths)
-            resolved_path = os.path.realpath(
-                cmd.path if os.path.isabs(cmd.path)
-                else os.path.join(ctx.cwd, cmd.path))
-            inside_root = self._path_is_below(
-                os.path.realpath(ctx.cwd), resolved_path)
             external_capability = external_paths.get(resolved_path)
             response = FilePreview(
                 path=preview["path"],
@@ -24325,6 +24897,15 @@ class WrapperMachine:
         is persisted by the relay/VPS.
         """
         suffix = os.path.splitext(path)[1].lower()
+        if suffix == ".xlsx":
+            from cc_remote.wrapper.spreadsheet_preview import spreadsheet_preview
+
+            relative, data, file_stat, _ = cls._read_session_file(
+                cwd, path, allowed_suffixes=frozenset({".xlsx"}),
+                max_bytes=ARTIFACT_PREVIEW_MAX_BYTES, allow_truncate=False,
+                allowed_external_paths=allowed_external_paths)
+            return {"path": relative, "format": "spreadsheet", "content": spreadsheet_preview(data),
+                    "data": data, "size": file_stat.st_size, "mtime_ns": file_stat.st_mtime_ns}
         if suffix in cls.OFFICE_PREVIEW_SUFFIXES:
             return cls._convert_office_preview(
                 cwd, path, allowed_external_paths)
@@ -24368,7 +24949,7 @@ class WrapperMachine:
             cls._validate_rendered_preview(media_type, data)
             return {
                 "path": relative,
-                "format": "pdf" if media_type == "application/pdf" else "image",
+                "format": cls._preview_format(relative),
                 "media_type": media_type,
                 "data": data,
                 "size": file_stat.st_size,
@@ -24389,6 +24970,9 @@ class WrapperMachine:
 
     @staticmethod
     def _validate_rendered_preview(media_type: str, data: bytes) -> None:
+        if media_type.startswith("audio/"):
+            validate_audio_preview(media_type, data)
+            return
         if media_type == "image/svg+xml":
             WrapperMachine._validate_svg_preview(data)
             return
@@ -24771,10 +25355,14 @@ class WrapperMachine:
             return "markdown"
         if suffix in cls.HTML_PREVIEW_SUFFIXES:
             return "html"
+        if suffix == ".xlsx":
+            return "spreadsheet"
         if suffix in cls.OFFICE_PREVIEW_SUFFIXES or suffix == ".pdf":
             return "pdf"
         if suffix in cls.PREVIEW_ASSET_MEDIA_TYPES:
             return "image"
+        if suffix in AUDIO_PREVIEW_MEDIA_TYPES:
+            return "audio"
         return "text"
 
     @classmethod
@@ -34057,7 +34645,8 @@ class WrapperMachine:
                 ctx.preview_image_candidates.clear()
                 self._purge_preview_image_snapshots(
                     ctx.preview_snapshot_token)
-                await self._drop_preview_session(ctx.engine, sid)
+                await self._drop_preview_session(ctx.engine, sid, delete_history=False)
+                ctx.turn_change_tracker = None
                 await self._cleanup_codex_steer_attachments(ctx)
                 self._invalidate_codex_session_catalog()
                 await self._emit(ctx, ArtifactInvalidated(
@@ -34785,6 +35374,10 @@ class WrapperMachine:
             # resume response does not expose.
             if resume_id:
                 controls = saved_codex_controls
+                if space == "code" and hasattr(sdk, "context_settings"):
+                    sdk.context_settings.restore(
+                        controls.context_max_tokens, controls.context_window_tokens,
+                        controls.context_settings_set)
                 restored_control_profile = False
                 if (space != "work" and permission_mode is None
                         and controls.approval_policy
@@ -35744,6 +36337,12 @@ class WrapperMachine:
                     ),
                 ),
                 timestamps=timestamps,
+            )
+            msgs = await asyncio.to_thread(
+                recover_claude_native_metadata, session_id, msgs,
+                path=path, timestamps=timestamps, internal_events=internal_events,
+                index_store=self._history_index,
+                snapshot_size=(os.path.getsize(path) if path else None),
             )
         except Exception as e:
             log.warning("get_session_messages failed", session_id=session_id, error=str(e))
@@ -37372,6 +37971,7 @@ class WrapperMachine:
                 # cc-only path (the codex branch continues above). Only announce
                 # Claude-branded models so a cc-switch proxy's raw upstream name
                 # (e.g. glm-5.2) never replaces the user's Claude alias in the chip.
+                await self._observe_claude_model_fallback(ctx, msg)
                 mdl = extract_model(msg)
                 selected_mdl = (
                     mdl if mdl and mdl.startswith("claude-") else None)
@@ -37407,6 +38007,16 @@ class WrapperMachine:
                         ctx, native_user_id)
                 if isinstance(msg, ResultMessage) and msg.is_error:
                     result_detail = msg.result or "; ".join(msg.errors or [])
+                    if is_empty_system_content_error(result_detail or "", msg.api_error_status):
+                        # Structural diagnostics only: no raw provider request,
+                        # credentials, transcript contents or automatic retry.
+                        log.warning("Claude rejected empty system content",
+                                    session_id=self._ctx_wire_sid(ctx),
+                                    auto_compact=getattr(ctx.sdk, "applied_auto_compact_mode", None),
+                                    threshold=getattr(ctx.sdk, "applied_auto_compact_threshold_tokens", None))
+                        await self._emit(ctx, Error(code=ERR_INTERNAL,
+                                                  message=EMPTY_SYSTEM_CONTENT_MESSAGE,
+                                                  msg_id=ctx.active_msg_id))
                     too_large_kind = classify_provider_request_too_large(
                         result_detail or "",
                         status_code=msg.api_error_status,

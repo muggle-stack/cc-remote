@@ -106,6 +106,11 @@ export interface SessionControl extends Base {
 }
 export interface SetModel extends Base { type: "set_model"; model: string }
 export interface SetEffort extends Base { type: "set_effort"; effort: EffortLevel }
+export interface SetCodexContext extends Base { type: "set_codex_context"; max_context_tokens?: number | null }
+export interface BrowseFiles extends Base {
+  type: "browse_files"; request_id: string; path?: string; offset?: number;
+  limit?: number; hidden?: boolean; revision?: string | null;
+}
 export interface SetAutoCompact extends Base {
   type: "set_auto_compact";
   mode: AutoCompactMode;
@@ -220,6 +225,8 @@ export interface ToolResult extends Base {
   status?: ProcessStatus | null;
   summary?: string | null;
   diff?: string | null;
+  diff_source?: "native" | "fragment" | null;
+  diff_truncated?: boolean | null;
   exit_code?: number | null;
   duration_ms?: number | null;
 }
@@ -275,6 +282,11 @@ export interface BackgroundProcessSync extends Base {
 export interface PlanEntry { step: string; status: "pending" | "inProgress" | "completed" }
 export interface TurnPlan extends Base { type: "turn_plan"; item_id: string; turn_id?: string | null; explanation?: string | null; plan: PlanEntry[] }
 export interface TurnDiff extends Base { type: "turn_diff"; item_id: string; turn_id?: string | null; diff: string; truncated?: boolean | null }
+export interface TurnFileChange { path: string; state: "pending" | "available" | "unavailable"; additions?: number | null; deletions?: number | null; reason?: string | null }
+export interface TurnChangeSummary { revision: string; files: TurnFileChange[]; total_files?: number | null; total_additions?: number | null; total_deletions?: number | null; next_offset?: number | null; truncated?: boolean | null }
+export interface TurnFileChanges extends Base { type: "turn_file_changes"; turn_id: string; changes: TurnChangeSummary }
+export interface TurnFileChangesPage extends Base { type: "turn_file_changes_page"; engine: Engine; turn_id: string; revision: string; offset: number; files: TurnFileChange[]; total_files: number; next_offset?: number | null; request_id?: string | null }
+export interface GetTurnFileChanges extends Base { type: "get_turn_file_changes"; sid: string; engine: Engine; turn_id: string; revision: string; offset?: number; limit?: number }
 export interface TurnBinding extends Base { type: "turn_binding"; msg_id: string; turn_id: string }
 export interface TurnResult { subtype: string; duration_ms: number; is_error: boolean; total_cost_usd?: number | null; num_turns?: number | null }
 export interface TurnNotificationContext { engine: Engine; space: Space; display_name?: string | null; parent_session_id?: string | null }
@@ -447,16 +459,17 @@ export interface GetContext extends Base {
   type: "get_context";
   refresh?: boolean;
 }
-export interface GetDiff extends Base { type: "get_diff"; file: string; theme?: DiffTheme }
+export interface GetDiff extends Base { type: "get_diff"; file: string; theme?: DiffTheme; turn_id?: string | null; revision?: string | null; engine?: Engine | null }
 export interface DiffReport extends Base { type: "diff_report"; file: string; diff: string; request_id?: string }
 export interface GetFilePreview extends Base { type: "get_file_preview"; path: string; request_id: string }
-export interface FilePreview extends Base { type: "file_preview"; path: string; request_id: string; format: "markdown" | "text" | "html" | "image" | "pdf"; content: string; media_type?: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "image/svg+xml" | "application/pdf" | null; data?: string | null; converted_from?: string | null; size: number; truncated: boolean; mtime_ns: string; revision?: string | null; writable?: boolean; error?: string | null }
+export interface FilePreview extends Base {
+  directory?: boolean; type: "file_preview"; path: string; request_id: string; format: "markdown" | "text" | "html" | "image" | "pdf" | "audio" | "spreadsheet"; content: string; media_type?: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "image/svg+xml" | "application/pdf" | "audio/wav" | "audio/mpeg" | "audio/mp4" | "audio/aac" | "audio/flac" | "audio/ogg" | "audio/webm" | null; data?: string | null; converted_from?: string | null; size: number; truncated: boolean; mtime_ns: string; revision?: string | null; writable?: boolean; error?: string | null }
 export interface SaveMarkdown extends Base { type: "save_markdown"; path: string; request_id: string; content: string; expected_size: number; expected_mtime_ns: string; expected_revision: string }
 export interface FileSaveResult extends Base { type: "file_save_result"; path: string; request_id: string; status: "saved" | "conflict" | "error"; size: number; mtime_ns: string; revision?: string | null; error?: string | null }
 export interface GetPreviewAsset extends Base { type: "get_preview_asset"; path: string; preview_id: string; request_id: string }
 export interface PreviewAsset extends Base { type: "preview_asset"; path: string; preview_id: string; request_id: string; media_type?: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "image/svg+xml" | null; data?: string | null; error?: string | null }
 export type PreviewAuthorizationOperation = "file_preview" | "preview_asset";
-export interface PreviewAuthorizationRequired extends Base { type: "preview_authorization_required"; authorization_id: string; request_id: string; operation: PreviewAuthorizationOperation; path: string; resolved_path: string; format: "markdown" | "text" | "html" | "image" | "pdf"; preview_id?: string | null }
+export interface PreviewAuthorizationRequired extends Base { type: "preview_authorization_required"; authorization_id: string; request_id: string; operation: PreviewAuthorizationOperation; path: string; resolved_path: string; format: "markdown" | "text" | "html" | "image" | "pdf" | "audio" | "spreadsheet"; preview_id?: string | null }
 export interface AuthorizePreview extends Base { type: "authorize_preview"; authorization_id: string; request_id: string; decision: "allow" | "deny" }
 export interface PreviewAuthorizationResult extends Base { type: "preview_authorization_result"; authorization_id: string; request_id: string; operation?: PreviewAuthorizationOperation | null; path?: string | null; status: "granted" | "denied" | "expired" | "changed" | "error"; preview_id?: string | null; error?: string | null }
 // On-demand bulk history: fetched once when a session is opened (like a web
@@ -468,9 +481,9 @@ export interface GetHistory extends Base { type: "get_history"; session_id: stri
 export interface ConversationImageRef { image_id: string; media_type: QueryImg["media_type"]; width: number; height: number; byte_size: number }
 export type ProcessDetailState = "none" | "present" | "unknown";
 export type TurnDetailReason = "process" | "prompt_truncated" | "answer_truncated" | "image_deferred";
-export interface ConversationTurn { id: string; clientMsgId?: string | null; prompt: string; blocks: unknown[]; done: boolean; forkPointId?: string | null; checkpointId?: string | null; interrupted?: boolean | null; error?: string | null; images?: QueryImg[] | null; imageRefs?: ConversationImageRef[] | null; files?: QueryFile[] | null; ts?: number | null; doneTs?: number | null; durationMs?: number | null; processDetailState?: ProcessDetailState; detailReasons?: TurnDetailReason[]; processStartedTs?: number | null; processDoneTs?: number | null; detailEventCount: number; detailLoaded: boolean }
+export interface ConversationTurn { id: string; clientMsgId?: string | null; prompt: string; blocks: unknown[]; done: boolean; forkPointId?: string | null; checkpointId?: string | null; interrupted?: boolean | null; error?: string | null; images?: QueryImg[] | null; imageRefs?: ConversationImageRef[] | null; files?: QueryFile[] | null; ts?: number | null; doneTs?: number | null; durationMs?: number | null; processDetailState?: ProcessDetailState; detailReasons?: TurnDetailReason[]; processStartedTs?: number | null; processDoneTs?: number | null; detailEventCount: number; detailLoaded: boolean; fileChanges?: TurnChangeSummary | null }
 export interface CodexTerminalFence { turn_id: string; status: "completed" | "interrupted" | "failed"; duration_ms?: number | null; completed_at?: number | null }
-export interface History extends Base { type: "history"; session_id: string; revision: string; generation?: string | null; build_seq?: number; live_seq?: number | null; authoritative?: boolean; error?: string | null; events: ServerEvent[]; turns?: ConversationTurn[]; detail?: "summary" | "full"; has_more: boolean; oldest_id?: string | null; newest_id?: string | null; before?: string | null; control?: SessionControl | null; external?: boolean; takeover_pending?: boolean; in_progress?: boolean; compaction_continuation_turn_ids?: string[]; terminal_fences?: CodexTerminalFence[]; reset?: boolean }
+export interface History extends Base { type: "history"; session_id: string; revision: string; generation?: string | null; continuity_revision?: string | null; build_seq?: number; live_seq?: number | null; authoritative?: boolean; error?: string | null; events: ServerEvent[]; turns?: ConversationTurn[]; detail?: "summary" | "full"; has_more: boolean; oldest_id?: string | null; newest_id?: string | null; before?: string | null; control?: SessionControl | null; external?: boolean; takeover_pending?: boolean; in_progress?: boolean; compaction_continuation_turn_ids?: string[]; terminal_fences?: CodexTerminalFence[]; reset?: boolean }
 export interface GetTurnDetail extends Base { type: "get_turn_detail"; session_id: string; turn_id: string; client_id?: string | null; revision?: string | null; before?: string | null; limit?: number | null }
 export interface TurnDetail extends Base { type: "turn_detail"; session_id: string; turn_id: string; revision: string; authoritative?: boolean; error?: string | null; reset_required?: boolean; events: ServerEvent[]; has_more?: boolean; oldest_cursor?: string | null; has_newer?: boolean; newer_cursor?: string | null; before?: string | null }
 export interface GetAgentDetail extends Base { type: "get_agent_detail"; session_id: string; run_id: string; request_id: string; client_id?: string | null; revision?: string | null; detail_revision?: string | null; before?: string | null; limit?: number | null }
@@ -645,8 +658,8 @@ export interface ContextReport extends Base {
   percentage: number;
   /** False when the engine has not emitted an authoritative tokenUsage yet. */
   available?: boolean | null;
-  /** Provenance of a Claude context reading; omitted means exact/control. */
-  source?: "control" | "cached_control" | "recent_turn" | null;
+  /** Distinguish native context estimates from recent model-request usage. */
+  source?: "control" | "cached_control" | "recent_turn" | "native_estimate" | null;
   /** Work-only conversation growth after the fresh-session startup baseline. */
   session_tokens?: number | null;
   /** Work-only startup zero point; raw total_tokens remains authoritative. */
@@ -660,16 +673,44 @@ export interface ContextReport extends Base {
   categories: ContextCategory[];
 }
 
-export type ServerEvent =
+export interface FilesListed extends Base {
+  type: "files_listed";
+  request_id: string;
+  root: string;
+  path: string;
+  kind: "directory" | "file";
+  parent?: string | null;
+  entries: { name: string; path: string; kind: "directory" | "file" | "unsupported" }[];
+  revision?: string | null;
+  next_offset?: number | null;
+  error?: string | null;
+}
+
+export interface CodexContext extends Base {
+  type: "codex_context";
+  model: string;
+  max_context_tokens: number | null;
+  applied_max_context_tokens: number | null;
+  applied_threshold_tokens: number | null;
+  model_max_tokens: number | null;
+  limit_tokens: number | null;
+  context_window_tokens: number | null;
+  pending: boolean;
+  mutable: boolean;
+  error: string | null;
+}
+
+export type ServerEvent = FilesListed | CodexContext
+  | TurnFileChangesPage
   | Pong | CommandAck | ReplayStart | ReplayEnd | Snapshot | StateEvent | QueryQueueState | QueuedQueryDetail | QueuedQueryUpdated | Model | Effort | AutoCompact | Fast | CollaborationMode | BtwOpened | BtwSync | BtwClosed | Perm | PermissionProfiles | PermissionProfile | WebSearch | ContextReport | DiffReport | FilePreview | FileSaveResult | PreviewAsset | PreviewAuthorizationRequired | PreviewAuthorizationResult | History | TurnDetail | AgentDetail | HistoryImage | HistoryInvalidated | ArtifactInvalidated | Models | EngineCapabilities | TakeoverState | SessionControl
   | AskUser | AskUserSync | AskUserClosed | GoalState | CompletionState | StatusReport | RateLimitResetResult | Notice | RateLimitUpdate | RollbackResult
   | SessionList | SessionListInvalidated | SessionActivity | SessionFocus | SessionRekey | SessionForked | SessionMigrated | WorkDashboard | WorkArtifacts
   | DirList
   | UserMsg | TurnSteered | AssistantMsgStart | Delta | ToolUse | ToolDelta | ToolResult | AssistantMsgEnd
-  | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnBinding
+  | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 55;
+export const PROTOCOL_VERSION = 66;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

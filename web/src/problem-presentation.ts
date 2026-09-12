@@ -7,6 +7,22 @@ const PROVIDER_AUTH_TURN_FAILURE =
   "模型服务认证已失效或当前账号无权限，请检查当前服务的凭据或账号权限后重试。";
 const LEGACY_CODEX_AUTH_TURN_FAILURE =
   "Codex 登录已失效或当前账号无权限，请重新登录后重试。";
+const CODEX_UPDATE_INTERRUPTION =
+  "Codex 自动更新时连接中断，本轮未确认完成。请检查已有结果后继续。";
+const CODEX_CONNECTION_INTERRUPTION =
+  "与 Codex 的连接中断，本轮未确认完成。请检查已有结果后继续。";
+// Exact authored causes only; never expose an arbitrary upstream diagnostic.
+const STEER_REJECTION_MESSAGES = /^(?:该会话(?:未启动，无法引导当前任务|当前为只读状态，无法从 Remote 引导)|Claude 当前不支持无打断引导；请使用打断并发送或排队。|Codex (?:(?:自动压缩|Review|当前阶段)不支持引导，或任务已经切换；本次未发送。|正在核对当前回合归属，本次引导未发送；请稍后重试。|当前回合不支持引导，请等待后重试。)|消息内容为空，请输入内容或添加附件。|附件不符合要求，请调整后重试。)$/;
+const CODEX_USAGE_LIMIT_FAILURE =
+  "本轮使用的 Codex 账号额度已用完。可切换账号、补充额度，或等待恢复后重试。";
+const CODEX_USAGE_LIMIT_RETRY =
+  /^官方提示可于 ((?!0000)[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2})（设备当地时间）重试。$/;
+const CODEX_TRANSPORT_MESSAGES = new Map([
+  ["Codex 已自动更新，当前回合在更新时中断；为避免重复执行工具，"
+    + "本次任务未自动重试。请确认已有结果后重新发送。", CODEX_UPDATE_INTERRUPTION],
+  ["Codex 共享通道意外断开；为避免重复执行工具，本次任务未自动重试。"
+    + "请确认已有结果后重新发送。", CODEX_CONNECTION_INTERRUPTION],
+]);
 const SAFE_TURN_FAILURE_MESSAGES = new Set([
   // Keep the former network copy safe for replayed rows from an older wrapper.
   "网络异常，连接失败，请重新尝试。",
@@ -15,17 +31,51 @@ const SAFE_TURN_FAILURE_MESSAGES = new Set([
   "请求过于频繁或当前额度受限，请稍后重试。",
   "请求超时，请重新尝试。",
   "Codex 上游服务暂时不可用，请稍后重试。",
+  "当前模型繁忙，请稍后重试或切换模型。",
+  CODEX_UPDATE_INTERRUPTION,
+  CODEX_CONNECTION_INTERRUPTION,
   "上游模型因安全策略拒绝了本次请求（cyber_policy）。"
     + "这不是本地权限或网络错误；请核实并说明任务背景与授权范围，"
     + "若属误判请向服务提供方反馈。",
 ]);
+
+function isUsageLimitFailure(message: string): boolean {
+  if (message === CODEX_USAGE_LIMIT_FAILURE) return true;
+  if (!message.startsWith(CODEX_USAGE_LIMIT_FAILURE)) return false;
+  const match = CODEX_USAGE_LIMIT_RETRY.exec(message.slice(CODEX_USAGE_LIMIT_FAILURE.length));
+  if (!match) return false;
+  // Validate without browser-local timezone conversion (including DST gaps).
+  const iso = match[1].replace(" ", "T");
+  const date = new Date(iso + "Z");
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 16) === iso;
+}
 
 function safeTurnFailureMessage(message: string): string | null {
   const trimmed = message.trim();
   if (trimmed === LEGACY_CODEX_AUTH_TURN_FAILURE) {
     return PROVIDER_AUTH_TURN_FAILURE;
   }
-  return SAFE_TURN_FAILURE_MESSAGES.has(trimmed) ? trimmed : null;
+  const transportMessage = CODEX_TRANSPORT_MESSAGES.get(trimmed);
+  if (transportMessage) return transportMessage;
+  return SAFE_TURN_FAILURE_MESSAGES.has(trimmed) || isUsageLimitFailure(trimmed) ? trimmed : null;
+}
+
+/** Only reviewed, explicit transport causes may override an interruption label. */
+export function codexTransportInterruption(message?: string): "update" | "connection" | null {
+  const safe = message ? safeTurnFailureMessage(message) : null;
+  if (safe === CODEX_UPDATE_INTERRUPTION) return "update";
+  if (safe === CODEX_CONNECTION_INTERRUPTION) return "connection";
+  return null;
+}
+
+export function presentTurnOutcome(
+  outcome: "failed" | "interrupted", message?: string,
+): string {
+  const cause = codexTransportInterruption(message);
+  if (cause === "update") return "Codex 自动升级，本轮中断";
+  if (cause === "connection") return "连接中断，回复未完成";
+  if (outcome === "failed" && message && isUsageLimitFailure(message.trim())) return "账号额度已用完";
+  return outcome === "interrupted" ? "已打断" : "回复未完成";
 }
 
 function ownershipMessage(message: string): string | null {
@@ -83,12 +133,28 @@ export function presentCommandProblem(
       return "页面版本已更新，请刷新后重试。";
     case "fork_reconciling":
       return "正在确认派生结果，请稍候…";
+    case "not_steerable": {
+      const message = error.message.trim();
+      if (message === "当前没有可引导的 Codex 任务") {
+        return "当前没有可引导的任务，本次未发送。请在会话空闲后重试。";
+      }
+      if (message === "Codex 任务已结束，本次引导未发送。") {
+        return "当前任务已结束，本次引导未发送。请重试以开始新一轮对话。";
+      }
+      return STEER_REJECTION_MESSAGES.test(message) ? message
+        : "本次引导未发送，请稍后重试。";
+    }
+    case "steer_outcome_unknown":
+      return "引导已发出，Codex 尚未确认是否生效。请先查看后续结果。";
     default:
       return "操作未完成，请稍后重试。";
   }
 }
 
-export function presentHistoricalTurnProblem(message: string): string {
+export function presentHistoricalTurnProblem(message: string, continuing = false): string {
+  if (continuing && message.trim() === "当前模型繁忙，请稍后重试或切换模型。") {
+    return "当前模型繁忙，这次请求未完成。";
+  }
   const normalized = message.trim().toLowerCase();
   if (!normalized || normalized === "error") return "该轮未正常结束";
   return safeTurnFailureMessage(message) ?? "该轮未正常结束";

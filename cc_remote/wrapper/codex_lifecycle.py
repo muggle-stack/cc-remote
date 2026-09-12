@@ -13,7 +13,7 @@ degrade to an empty snapshot; none can manufacture a successful terminal.
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
@@ -220,7 +220,7 @@ class CodexTerminalLedger:
             raw = json.loads(raw_text)
             if (
                 not isinstance(raw, dict)
-                or raw.get("version") != _SCHEMA_VERSION
+                or raw.get("version") not in (1, _SCHEMA_VERSION)
                 or not isinstance(raw.get("sessions"), dict)
                 or len(raw["sessions"]) > _MAX_SESSIONS
             ):
@@ -235,7 +235,18 @@ class CodexTerminalLedger:
             self._profile_revision = profile_revision
             for session_id, value in raw["sessions"].items():
                 session_id = _safe_id(session_id)
-                sessions[session_id] = self._decode_session(value)
+                session = self._decode_session(value)
+                if raw["version"] == 1:
+                    # v1 could persist task_complete.error as a successful
+                    # terminal. Its source witness cannot distinguish that bug
+                    # from success. Keep failures/interrupts, but let native
+                    # history rebuild completion rather than fabricate success.
+                    session = replace(session, fences=tuple(
+                        fence for fence in session.fences
+                        if fence.status != "completed"
+                    ))
+                if session.fences:
+                    sessions[session_id] = session
         except FileNotFoundError:
             pass
         except Exception:

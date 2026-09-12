@@ -13,6 +13,7 @@ interface Props {
   onNotificationMode: (mode: NotificationMode) => Promise<boolean>;
   onOpenUsageActivity: () => void;
   onOpenViewer?: () => void;
+  onOpenFiles?: () => void;
   onToggleTheme: () => void;
   onLogout: () => void;
 }
@@ -37,6 +38,7 @@ export function HeaderMenu({
   onNotificationMode,
   onOpenUsageActivity,
   onOpenViewer,
+  onOpenFiles,
   onToggleTheme,
   onLogout,
 }: Props) {
@@ -156,7 +158,16 @@ export function HeaderMenu({
                     <span><b>远程预览</b><small>打开设备上的交互页面</small></span>
                     <Icon name="chevron-right" size={16} />
                   </button>}
-                  {engine === "codex" && <button ref={onOpenViewer ? undefined : firstRef} type="button"
+                  {onOpenFiles && <button ref={onOpenViewer ? undefined : firstRef} type="button"
+                    className="header-menu-item" aria-label="打开会话文件" onClick={() => {
+                      close();
+                      onOpenFiles();
+                    }}>
+                    <Icon name="folder-open" size={18} />
+                    <span><b>会话文件</b><small>浏览目录并预览文件</small></span>
+                    <Icon name="chevron-right" size={16} />
+                  </button>}
+                  {engine === "codex" && <button ref={onOpenViewer || onOpenFiles ? undefined : firstRef} type="button"
                     className="header-menu-item" onClick={() => {
                       close();
                       onOpenUsageActivity();
@@ -165,7 +176,7 @@ export function HeaderMenu({
                     <span><b>使用活动</b><small>每日 Token、峰值与连续使用记录</small></span>
                     <Icon name="chevron-right" size={16} />
                   </button>}
-                  <button ref={engine === "codex" || onOpenViewer ? undefined : firstRef}
+                  <button ref={engine === "codex" || onOpenViewer || onOpenFiles ? undefined : firstRef}
                     type="button" className="header-menu-item"
                     onClick={() => setPage("notifications")}>
                     <Icon name="notify" size={18} />

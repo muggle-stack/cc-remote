@@ -1,14 +1,22 @@
 // Icon paths lifted verbatim from design/prototype.html (the I dictionary).
 // One <Icon name="..."/> component renders the SVG; sizes via prop.
 import { useEffect, useState } from "react";
+import type { Engine } from "./protocol";
+
+export function EngineIcon({ engine, size = 16 }: { engine: Engine; size?: number }) {
+  return engine === "claude" ? <ClaudeMark size={size} /> : <Icon name={engine} size={size} />;
+}
 
 const PATHS: Record<string, string> = {
+  codex: '<path d="m12 3 9 9-9 9-9-9Z"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   back: '<path d="M15 18l-6-6 6-6"/>',
   dots: '<circle cx="12" cy="5" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="12" cy="19" r="1.4"/>',
   send: '<path d="M12 19V6M6 12l6-6 6 6"/>',
   stop: '<rect x="6" y="6" width="12" height="12" rx="2.5"/>',
+  pause: '<path d="M8 5v14M16 5v14"/>',
+  'arrow-right': '<path d="M5 12h14m-5-5 5 5-5 5"/>',
   bolt: '<path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z"/>',
   queue: '<path d="M4 7h16M4 12h16M4 17h10"/>',
   term: '<path d="M5 8l4 4-4 4M12 16h7"/>',
@@ -31,6 +39,7 @@ const PATHS: Record<string, string> = {
   review: '<path d="M2.5 12S6 5 12 5s9.5 7 9.5 7-3.5 7-9.5 7-9.5-7-9.5-7z"/><circle cx="12" cy="12" r="2.7"/>',
   shield: '<path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z"/><path d="M9.2 12l2 2 3.6-4"/>',
   verify: '<circle cx="12" cy="12" r="8.5"/><path d="M8.5 12.5l2.3 2.3 4.7-5"/>',
+  info: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v5M12 16h.01"/>',
   run: '<path d="M8 5.5v13l11-6.5-11-6.5z"/>',
   research: '<circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.5-4.5M11 8v6M8 11h6"/>',
   simplify: '<path d="M4 7h16M7 12h10M10 17h4"/>',
@@ -100,21 +109,20 @@ export function ClaudeMark({ size = 16, className }: { size?: number; className?
 
 // A clickable Claude spark that sits under a finished reply: static at rest,
 // and on click it plays ONE loop of the working morph, then settles back.
-export function ClaudeSpark({ size = 22, className }: { size?: number; className?: string }) {
+export function ClaudeSpark({ size = 22, className, label = "Claude" }: {
+  size?: number; className?: string; label?: string;
+}) {
   const [frame, setFrame] = useState(-1); // -1 = static
-  const play = () => {
-    if (frame >= 0) return; // already playing
-    let i = 0;
-    setFrame(0);
-    const id = window.setInterval(() => {
-      i += 1;
-      if (i >= WORK_FRAMES.length) { window.clearInterval(id); setFrame(-1); }
-      else setFrame(i);
-    }, 110);
-  };
+  useEffect(() => {
+    if (frame < 0) return;
+    const id = window.setTimeout(() => setFrame(frame + 1 < WORK_FRAMES.length ? frame + 1 : -1), 110);
+    return () => window.clearTimeout(id);
+  }, [frame]);
+  const play = () => { if (frame < 0) setFrame(0); };
   const [a, b] = frame >= 0 ? WORK_FRAMES[frame] : [0.9, 0.42];
   return (
-    <button type="button" className={"spark-btn" + (className ? " " + className : "")} onClick={play} aria-label="Claude">
+    <button type="button" className={"spark-btn" + (className ? " " + className : "")} onClick={play} aria-label={label}
+      title="重播完成动画">
       <svg viewBox="0 0 24 24" width={size} height={size} fill="currentColor" aria-hidden="true">
         {b > 0 && <path d={SPARK} transform={sparkTransform(b, 45)} opacity={frame >= 0 ? 0.8 : 0.55} />}
         {a > 0 && <path d={SPARK} transform={sparkTransform(a)} />}

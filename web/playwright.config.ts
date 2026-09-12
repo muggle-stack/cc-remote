@@ -1,15 +1,27 @@
 import { defineConfig, devices } from "@playwright/test";
 
 const NEW_CHAT_CONTROL_TESTS =
-  /new-chat controls|default permission picker|256-character profile id|Work multi-account controls/;
+  /session workspace|new-chat controls|default permission picker|256-character profile id|Work multi-account controls/;
 const WEBKIT_VIEWER_TESTS = /remote Viewer/;
 const WEBKIT_LIVE_INTERACTION_TESTS =
-  /async question|side chat scope|right panel layout|live append follows|scrolling a live-dirty history window|returning to a background-grown live turn|iOS pointercancel releases process interactions|switching sessions clears retained desktop text selection|nested process disclosures|stationary press opens|dragging a process header|dragging nested process|multi-line IME growth|long paste|oversized edited paste|multi-line composer growth|composer action growth|Codex controls stay on one row|queued messages expand|migration picker/;
+  /async question|side chat scope|right panel layout|live append follows|scrolling a live-dirty history window|returning to a background-grown live turn|iOS pointercancel releases process interactions|switching sessions clears retained desktop text selection|nested process disclosures|stationary press opens|dragging a process header|dragging nested process|multi-line IME growth|long paste|composer bounded attachment selection|oversized edited paste|multi-line composer growth|composer action growth|Codex controls stay on one row|queued messages expand|migration picker/;
 const WEBKIT_RENDERING_TESTS =
-  /generated image|external preview|Codex visualize output|Codex file citations|local Markdown file link|mounted message image|two visible images|HTML preview|artifact-(?:svg|markdown-svg|pdf|gif|invalid-gif)|mobile Markdown source editor|dark desktop code block|Codex settings|Claude settings|history page cache|instant session cache|session cache rejects|canonical image reference|fallback image preview|streaming rerenders|expanded tool batches|Mermaid|chat formulas|Markdown disclosures|real wide Robot|pending composer image|profile keycaps|profile session card (?:edges|manual unread)/;
+  /generated image|external preview|Codex visualize output|Codex file citations|local Markdown file link|mounted message image|two visible images|HTML preview|artifact-(?:audio|svg|markdown-svg|pdf|gif|invalid-gif)|mobile Markdown source editor|dark desktop code block|Codex settings|Claude settings|history page cache|instant session cache|session cache rejects|canonical image reference|fallback image preview|streaming rerenders|expanded tool batches|Mermaid|chat formulas|Markdown disclosures|real wide Robot|pending composer image|profile keycaps|profile session card (?:edges|manual unread)/;
 const WEBKIT_GOAL_PLAN_TESTS = /[Pp]lan|[Gg]oal/;
+const TURN_REGRESSION_TESTS = /turn regressions|provider capacity/;
 const WEBKIT_SELECTION_TESTS =
   /desktop (text selection|native selection|wheel scrolling)|extending a released native selection|late cached-newer page cannot evict an active text selection/;
+
+const WEBKIT_HISTORY_WINDOW_TESTS = /cached-newer|a page is pending|virtualization bounds/;
+const WEBKIT_GENERAL_EXCLUSIONS = [
+  NEW_CHAT_CONTROL_TESTS,
+  WEBKIT_VIEWER_TESTS,
+  WEBKIT_LIVE_INTERACTION_TESTS,
+  WEBKIT_RENDERING_TESTS,
+  WEBKIT_GOAL_PLAN_TESTS,
+  WEBKIT_SELECTION_TESTS,
+  TURN_REGRESSION_TESTS,
+];
 
 export default defineConfig({
   testDir: "./tests",
@@ -37,7 +49,7 @@ export default defineConfig({
     },
     {
       name: "webkit-desktop-selection",
-      grep: /desktop (text selection|native selection|wheel scrolling)/,
+      grep: /desktop (text selection|native selection|wheel scrolling)|turn regressions/,
       use: {
         ...devices["Desktop Safari"],
         viewport: { width: 900, height: 720 },
@@ -45,17 +57,18 @@ export default defineConfig({
     },
     {
       name: "webkit",
-      grepInvert: [
-        NEW_CHAT_CONTROL_TESTS,
-        WEBKIT_VIEWER_TESTS,
-        WEBKIT_LIVE_INTERACTION_TESTS,
-        WEBKIT_RENDERING_TESTS,
-        WEBKIT_GOAL_PLAN_TESTS,
-        WEBKIT_SELECTION_TESTS,
-      ],
+      grepInvert: [...WEBKIT_GENERAL_EXCLUSIONS, WEBKIT_HISTORY_WINDOW_TESTS],
       use: {
         ...devices["iPhone 15"],
       },
+    },
+    {
+      // Long-history cases have reached the 64-context WebKit churn boundary.
+      // Keep their complete assertions in a fresh browser, alongside general UI.
+      name: "webkit-history-window",
+      grep: WEBKIT_HISTORY_WINDOW_TESTS,
+      grepInvert: WEBKIT_GENERAL_EXCLUSIONS,
+      use: { ...devices["iPhone 15"] },
     },
     {
       // Viewer coverage must not push the general WebKit worker past its
@@ -102,6 +115,11 @@ export default defineConfig({
       use: {
         ...devices["iPhone 15"],
       },
+    },
+    {
+      name: "webkit-turn-regressions",
+      grep: TURN_REGRESSION_TESTS,
+      use: { ...devices["iPhone 15"] },
     },
   ],
 });

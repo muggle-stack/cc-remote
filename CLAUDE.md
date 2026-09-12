@@ -11,6 +11,22 @@ local `claude` or `codex` session through a WebSocket relay. Two independent lin
   Codex app-server ⇄ local CLI. Native CLI ownership is detected and mirrored
   separately.
 
+## Deployment
+
+For deployment, upgrade, verification or recovery, read the repository skill at
+[`.agents/skills/cc-remote-deploy/SKILL.md`](.agents/skills/cc-remote-deploy/SKILL.md)
+even if this client does not discover `.agents/skills` automatically. It routes
+to the maintained [`deploy/README.md`](deploy/README.md) automation contract,
+installation paths and shared-control acceptance; do not invent another flow.
+
+Codex Code acceptance requires the daily CLI and Wrapper to use the same
+official daemon for each account. An online Web UI alone is insufficient. Never
+kill an active CLI or force takeover to satisfy this check. After core checks,
+offer installed macOS Codex App users optional attachment to that account's
+shared daemon; do not change the App without consent. Declining or deferring
+this optional step does not block core deployment. App-control MCP tools require
+a separate choice; sharing alone does not authorize them.
+
 ## Critical constraints / traps
 - **Drain footgun**: after `ClaudeSDKClient.interrupt()`, the SDK does NOT kill
   the session — the current turn's stream still emits a terminal
@@ -69,7 +85,7 @@ local `claude` or `codex` session through a WebSocket relay. Two independent lin
   `useLayoutEffect` is deliberately dependency-free — late virtualizer/image
   measurements settle without a React render, and constraining it to its read
   set reintroduces a full-viewport jump on touch release.
-- **Protocol version gate**: current wire protocol v55 is declared by
+- **Protocol version gate**: current wire protocol v66 is declared by
   `PROTOCOL_VERSION` in both `protocol.py` and `web/src/protocol.ts`.
   `deserialize` hard-rejects a version mismatch, and
   `_Base` is `extra="forbid"`, so ANY protocol change must be deployed to all

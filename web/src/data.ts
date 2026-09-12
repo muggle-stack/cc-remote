@@ -11,6 +11,7 @@ import type {
 
 export interface CmdGroup { g: string }
 export interface Cmd { slash: string; name: string; ds: string; ic: string }
+const OPEN_FILES_COMMAND: Cmd = { slash: "open", name: "打开目录或文件", ds: "/open [路径] 浏览会话文件，点击文件在侧栏预览", ic: "folder-open" };
 export type Command = CmdGroup | Cmd;
 const COMPACT_COMMAND: Cmd = {
   slash: "compact", name: "压缩上下文", ds: "调用原生压缩", ic: "simplify",
@@ -44,6 +45,7 @@ export const COMMANDS: Command[] = [
   { slash: "btw", name: "侧边对话 (btw)", ds: "基于当前会话开一个临时 fork 侧聊,不影响主线", ic: "spark" },
   { slash: "diff", name: "查看改动", ds: "打开当前会话的 Git diff 侧栏", ic: "edit" },
   { slash: "preview", name: "预览文件", ds: "/preview <路径> 打开 Markdown 或 UTF-8 源文件", ic: "read" },
+  OPEN_FILES_COMMAND,
   { slash: "clear", name: "清空会话", ds: "开新会话，清空上下文", ic: "close" },
   { slash: "context", name: "上下文用量", ds: "查看 token 占用", ic: "cpu" },
   { slash: "autocompact", name: "自动压缩", ds: "/autocompact [数字]；不填打开设置", ic: "simplify" },
@@ -335,7 +337,7 @@ const CMD_LIST: Cmd[] = COMMANDS.filter(isCmd) as Cmd[];
 // /rewind stays reserved locally while its UI is hidden so manually typing it
 // cannot fall through to Claude's interactive-only slash layer.
 const EXTENSION_SLASHES = ["extensions", "skills", "plugins", "apps", "mcp", "hooks"];
-export const CLIENT_SLASHES = new Set(["model", "plan", "normal", "permissions", "clear", "context", "autocompact", "compact", "goal", "rewind", "btw", "diff", "preview", ...EXTENSION_SLASHES]);
+export const CLIENT_SLASHES = new Set(["model", "plan", "normal", "permissions", "clear", "context", "autocompact", "compact", "goal", "rewind", "btw", "diff", "preview", "open", ...EXTENSION_SLASHES]);
 
 // Codex engine command palette. Native app-server controls are handled locally
 // and never expanded into natural-language lookalikes. /context is the focused
@@ -368,13 +370,15 @@ export const CODEX_COMMANDS: Command[] = [
   { slash: "btw", name: "侧边对话 (btw)", ds: "基于当前会话开一个临时 fork 侧聊,不影响主线", ic: "spark" },
   { slash: "diff", name: "查看改动", ds: "打开当前会话的 Git diff 侧栏", ic: "edit" },
   { slash: "preview", name: "预览文件", ds: "/preview <路径> 打开 Markdown 或 UTF-8 源文件", ic: "read" },
+  OPEN_FILES_COMMAND,
   { slash: "status", name: "完整状态", ds: "线程 · 配置 · 账户 · 限额 · token", ic: "cpu" },
   { slash: "context", name: "上下文用量", ds: "查看 token 占用与容量", ic: "cpu" },
+  { slash: "autocompact", name: "上下文上限", ds: "/autocompact [300k | default] 设置当前会话的最大上下文", ic: "simplify" },
   COMPACT_COMMAND,
   { slash: "clear", name: "新会话", ds: "开新 codex 会话", ic: "close" },
 ];
 const CODEX_CMD_LIST: Cmd[] = CODEX_COMMANDS.filter(isCmd) as Cmd[];
-export const CODEX_CLIENT_SLASHES = new Set(["model", "plan", "normal", "clear", "context", "autocompact", "status", "permissions", "fast", "goal", "btw", "diff", "preview", "review", "compact", "rollback", ...EXTENSION_SLASHES]);
+export const CODEX_CLIENT_SLASHES = new Set(["model", "plan", "normal", "clear", "context", "autocompact", "status", "permissions", "fast", "goal", "btw", "diff", "preview", "open", "review", "compact", "rollback", ...EXTENSION_SLASHES]);
 const HIDDEN_CODE_ONLY_SLASHES = new Set(["rollback"]);
 export type CommandSurface = "code" | "work";
 export const commandsFor = (engine?: string, surface: CommandSurface = "code"): Command[] => (
@@ -401,12 +405,12 @@ export const CODEX_PROMPTS: Record<string, string> = {
 };
 
 // The command "token" the user is typing after "/", up to the first space.
-// null when the input isn't an in-progress slash command (no leading "/", or a
-// space already started the arguments). Drives the palette's show/hide.
+// null when the input isn't an in-progress slash command (no leading "/", a
+// path separator, or arguments already started). Drives the palette's show/hide.
 export function slashToken(input: string): string | null {
   if (!input.startsWith("/")) return null;
   const after = input.slice(1);
-  if (/\s/.test(after)) return null; // a space => choosing args, not the command
+  if (/[\s/\\]/.test(after)) return null;
   return after;
 }
 
@@ -450,6 +454,8 @@ export function matchCommands(token: string, engine?: string,
 export function parseSlash(input: string): { slash: string; args: string } | null {
   if (!input.startsWith("/")) return null;
   const m = input.slice(1).match(/^(\S+)\s*([\s\S]*)$/);
-  if (!m) return null;
+  // A leading filesystem path is prompt text. Separators in command arguments
+  // remain valid, for example "/open /Users/Tester/My Project".
+  if (!m || /[/\\]/.test(m[1])) return null;
   return { slash: m[1].toLowerCase(), args: m[2].trim() };
 }

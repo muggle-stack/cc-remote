@@ -20,6 +20,7 @@ import type {
   Block, ProcessBlock, TextBlock, Turn,
 } from "../domain/conversation";
 import type { Space } from "../protocol";
+import type { LoadTurnFilePage } from "../turn-file-pages";
 import { MessageBlock } from "./MessageBlock";
 import { Icon, ClaudeMark, ClaudeWorking, ClaudeSpark } from "../icons";
 import { canForkTurn } from "../session-worktree";
@@ -32,11 +33,11 @@ import {
   finalTextBlocks,
   generatedImageIdentity,
   generatedOutputImages,
+  modelFallbackNotices,
   hasActiveProcess,
   presentableProcessBlocks,
 } from "../process-blocks";
-import { isMarkdownPath } from "../preview-path";
-import { collectTurnFileChanges } from "../file-changes";
+import { TurnChangesPanel } from "./TurnChangesPanel";
 import type { InlineImageAsset } from "../inline-image-assets";
 import type { PreviewAuthorizationState } from "../reducer";
 import {
@@ -45,7 +46,7 @@ import {
   type HistoryImageVariant,
 } from "../history-image-assets";
 import { ImageLightbox } from "./ImageLightbox";
-import { presentHistoricalTurnProblem } from "../problem-presentation";
+import TurnProblem from "./TurnProblem";
 import { queryImageDimensions } from "../img";
 import {
   updateTurnKeySnapshot,
@@ -54,6 +55,7 @@ import {
 import { TurnImagePreviewCache } from "../turn-image-previews";
 import type { TextSelectionGuard } from "../history-selection-guard";
 import { HistoryUserImage } from "./HistoryUserImage";
+import { UserImageButton } from "./UserImageButton";
 import {
   HistoryAnchorController,
   HistoryPageActivityController,
@@ -80,7 +82,8 @@ import {
   HISTORY_REQUEST_TIMEOUT_MS,
 } from "../history-requests";
 import { mergeDetailWithLiveTail } from "../history-merge";
-import { asyncQuestionKey, presentAsyncQuestionReplies } from "../async-question-presentation";
+import { presentAsyncQuestionReplies } from "../async-question-presentation";
+import type { QueryAcceptanceResult } from "../outbox";
 
 const AsyncQuestionCard = lazy(() => import("./AsyncQuestionCard"));
 const AsyncQuestionHost = lazy(() => import("./AsyncQuestionDialog"));
@@ -354,7 +357,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
   historyCursor: incomingHistoryCursor = null,
   browseMode: incomingBrowseMode = false, hasNewer: incomingHasNewer = false,
   onLoadMore, onLoadNewer, onReturnLatest,
-  onLoadDetail, onEdit, onReplyAsyncQuestion, asyncReplyMode, onOpenTurnDiff, onPreviewMarkdown, onOpenFile,
+  onLoadDetail, onEdit, onReplyAsyncQuestion, asyncReplyMode, pendingReplyId, onOpenTurnDiff, onOpenArchivedDiff, onLoadFilePage, onPreviewMarkdown, onOpenFile,
   onOpenArtifacts, onFork, forkingPointId, imageAssets, onLoadImage,
   onAuthorizeImage,
   historyImageAssets, onLoadHistoryImage,
@@ -393,10 +396,13 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
     autoLoad?: boolean,
   ) => boolean;
   onEdit?: (prompt: string) => void;
-  onReplyAsyncQuestion?: (prompt: string) => boolean;
+  onReplyAsyncQuestion?: (prompt: string) => Promise<QueryAcceptanceResult> | null;
   asyncReplyMode?: "query" | "steer";
+  pendingReplyId?: string | null;
   onGetDiff?: (file: string) => void;
   onOpenTurnDiff?: (files: string[], diff: string) => void;
+  onOpenArchivedDiff?: (turnId: string, revision: string, path: string) => void;
+  onLoadFilePage?: LoadTurnFilePage;
   onPreviewMarkdown?: (file: string) => void;
   onOpenFile?: (file: string, line?: number) => void;
   onOpenArtifacts?: () => void;
@@ -506,7 +512,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
   const resolvedHistoryViewId = historyViewId ?? historyViewRevision ?? "";
   const incomingScrollScope = historyViewId == null
     ? `${historyScopeKey ?? ""}\u0000${sid ?? ""}\u0000${resolvedHistoryViewId}`
-    : `${historyScopeKey ?? ""}\u0000${sid ?? ""}\u0000${historyRevision ?? ""}\u0000${resolvedHistoryViewId}`;
+    : `${historyScopeKey ?? ""}\u0000${sid ?? ""}\u0000${historyViewRevision ?? historyRevision ?? ""}\u0000${resolvedHistoryViewId}`;
   const incomingHistoryPresentation: HistoryViewportPresentation = {
     sid,
     scope: incomingScrollScope,
@@ -564,7 +570,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
     hasNewer,
     windowEpoch: historyWindowEpoch,
   } = scopedPresentedHistory;
-  const supplemental = useMemo(() => presentAsyncQuestionReplies(turns), [turns]);
+  const supplemental = useMemo(() => presentAsyncQuestionReplies(turns, pendingReplyId), [turns, pendingReplyId]);
   const asyncQuestionScope = JSON.stringify([historyScopeKey ?? "", sid]);
   const [openAsyncQuestion, setOpenAsyncQuestion] = useState<{
     scope: string; messageId: string | null;
@@ -1340,7 +1346,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
       ? [
           requestScopeKey,
           sid ?? "",
-          historyRevision ?? "",
+          historyViewRevision ?? historyRevision ?? "",
           requestViewId,
         ].join("\u0000")
       : scrollScope;
@@ -2512,58 +2518,16 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
   };
   const aiText = (t: Turn) => finalTextBlocks(t.blocks).map((block) => block.text).join("\n\n");
 
-  // Collect engine-neutral file mutations. The helper also understands old
-  // Claude file_path and Codex changes payloads already stored in browser cache.
-  const fileChips = (t: Turn) => {
-    const changes = collectTurnFileChanges([
-      ...t.blocks,
-      ...(t.liveSpillBlocks ?? []),
-      ...(t.detailProjection?.blocks ?? []),
-    ]);
-    if (!changes.paths.length) return null;
-    const arr = changes.paths;
-    const canOpenSummary = surface !== "work"
-      ? !!changes.diff && !!onOpenTurnDiff
-      : (arr.length === 1 && !!onOpenFile) || !!onOpenArtifacts;
-    const openSummary = () => {
-      if (surface !== "work") {
-        if (changes.diff && onOpenTurnDiff) onOpenTurnDiff(arr, changes.diff);
-        return;
-      }
-      if (arr.length === 1 && onOpenFile) {
-        onOpenFile(arr[0]);
-        return;
-      }
-      onOpenArtifacts?.();
-    };
-    return (
-      <div className="turn-files">
-        <button className="turn-files-summary" onClick={openSummary}
-          disabled={!canOpenSummary}
-          title={surface === "work" ? "预览 Artifacts" : "查看本轮改动"}>
-          <Icon name={surface === "work" ? "folder" : "edit"} size={13} />{
-            surface === "work" ? `Artifacts · ${arr.length} 个文件` : `改动 ${arr.length} 个文件`
-          }
-        </button>
-        <div className="turn-files-list">
-          {arr.map((f) => {
-            const markdown = surface !== "work" && isMarkdownPath(f) && !!onPreviewMarkdown;
-            const canOpenFile = markdown || (!!changes.diff && !!onOpenTurnDiff);
-            return <button key={f} className={"turn-file-chip" + (markdown ? " markdown" : "")}
-              disabled={!canOpenFile}
-              onClick={() => markdown
-                ? onPreviewMarkdown(f)
-                : onOpenTurnDiff?.(arr, changes.diff)}
-              title={markdown ? `预览 ${f}`
-                : changes.diff ? "查看本轮原生 diff" : "本轮没有可用的原生 diff"}>
-              <Icon name={markdown ? "read" : "edit"} size={12} />
-              {f.split("/").pop()}
-              {markdown && <span className="turn-file-action">预览</span>}
-            </button>;
-          })}
-        </div>
-      </div>
-    );
+  const renderTurnChanges = (t: Turn) => {
+    const key = `${scrollScope}\u0000changes:${t.clientMsgId ?? t.id}`;
+    return <TurnChangesPanel key={key} turn={t} open={processDisclosureOpen[key] ?? false}
+      onToggle={() => {
+        pauseOutputFollow();
+        rememberProcessDisclosure(key, !(processDisclosureOpen[key] ?? false));
+      }} onOpenDiff={onOpenArchivedDiff} onOpenLegacyDiff={onOpenTurnDiff}
+      onLoadFilePage={onLoadFilePage} onBeforeLoad={pauseOutputFollow}
+      onPreviewMarkdown={onPreviewMarkdown} work={surface === "work"}
+      onOpenFile={onOpenFile} onOpenArtifacts={onOpenArtifacts} />;
   };
 
   const measuredVirtualItems = virtualizer.getVirtualItems();
@@ -2588,6 +2552,8 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
   // history alias. App passes those exact active candidates separately so an
   // idle, browsed, missing, or stale owner can never revive an arbitrary row.
   const ambiguousActiveTurnIdSet = new Set(ambiguousActiveTurnIds);
+  const activeTurnIndex = activeTurnId == null ? -1
+    : turns.findIndex((turn) => turn.id === activeTurnId);
   const fallbackWorkingTurnId = activeTurnId == null
       && ambiguousActiveTurnIdSet.size > 1
     ? [...turns].reverse().find((turn) => {
@@ -2734,8 +2700,11 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
             const activeProcess = hasActiveProcess(foregroundProcessItems);
             const activeTimeline = activeProcess
               || foregroundProcessItems.some((block) => !block.done);
-            const finalBlocks = finalTextBlocks(t.blocks);
+            const finalBlocks = finalTextBlocks(t.blocks).filter(block =>
+              block.delivery !== "async" || !block.questions?.length
+                || supplemental.questionOwners.get(block.message_id) === t.id);
             const generatedImages = generatedOutputImages(timelineBlocks);
+            const modelNotices = modelFallbackNotices(timelineBlocks);
             const followupBoundaries = backgroundFollowupBoundaries(
               finalBlocks, timelineBlocks);
             const enclosingTaskActive = activeTurnId === t.id;
@@ -2846,6 +2815,12 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
             if (historyImagesReady) {
               turnImagePreviewCacheRef.current.release(t.id);
             }
+            const imageSizes = t.images?.length
+              ? t.images.map((img) => queryImageDimensions(img) ?? [180, 180])
+              : t.imageRefs?.map((img) => [img.width, img.height]) ?? [];
+            const imageHeight = Math.max(96, Math.min(180,
+              ...imageSizes.map(([width, height]) =>
+                width > 0 && height > 0 ? 240 * height / width : 180)));
             return (
             <div className="turn" key={virtualItem.key}
               data-index={virtualItem.index} data-turn-id={t.id}
@@ -2880,13 +2855,9 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                       const src = `data:${img.media_type};base64,${img.data}`;
                       const [width, height] = queryImageDimensions(img)
                         ?? [180, 180];
-                      return <button key={i} type="button" className="ubub-image-trigger"
-                        style={{ aspectRatio: `${width} / ${height}` }}
-                        aria-label="预览用户发送的图片"
-                        onClick={() => setZoom({ kind: "data", src, alt: "用户发送的图片" })}>
-                        <img src={src} className="ubub-img" width={width}
-                          height={height} alt="用户发送的图片" />
-                      </button>;
+                      return <UserImageButton key={i} width={width} height={height}
+                        src={src} maxHeight={imageHeight}
+                        onClick={() => setZoom({ kind: "data", src, alt: "用户发送的图片" })} />;
                     })}
                   </div>
                 )}
@@ -2903,6 +2874,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                       return <HistoryUserImage key={image.image_id}
                         turnId={historyTurnId} imageId={image.image_id}
                         width={image.width} height={image.height}
+                        maxHeight={imageHeight}
                         asset={thumbnail} fallback={fallback}
                         onLoad={onLoadHistoryImage}
                         onPreview={() => {
@@ -2941,6 +2913,8 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
             {showProcessTimeline && (
               <ProcessTimeline blocks={timelineBlocks} done={t.done}
                 active={activePhase === "process"} engine={engine}
+                outcome={t.error ? "failed" : t.interrupted ? "interrupted" : undefined}
+                problem={t.error}
                 durationMs={engine === "codex" ? undefined : t.durationMs}
                 startTs={engine === "codex" ? t.processStartedTs : t.ts}
                 doneTs={engine === "codex" ? t.processDoneTs : t.doneTs}
@@ -2998,6 +2972,10 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                 )}
                 onPreviewImage={(src, alt) => setZoom({ kind: "data", src, alt })} />
             )}
+            {modelNotices.map((notice) => <div className="turn-model-notice" key={notice.item_id} role="note">
+              <Icon name="notify" size={15} />
+              <span>{notice.summary}</span>
+            </div>)}
             {generatedImages.length > 0 && <div className="generated-image-gallery">
               {generatedImages.map((block) => <GeneratedImagePreview key={generatedImageIdentity(block)}
                 block={block} imageAssets={imageAssets} onLoadImage={onLoadImage}
@@ -3009,7 +2987,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                   kind: "history", turnId, imageId, alt: "生成的图片",
                 })} />)}
             </div>}
-            {t.blocks.length > 0 && (
+            {(t.blocks.length > 0 || t.error) && (
               <>
                 {finalBlocks.map((block) => (
                   <div key={block.message_id} className="assistant-answer-segment">
@@ -3034,7 +3012,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                     {block.delivery === "async" && block.questions?.length
                       ? <Suspense fallback={<span className="async-question-hint">助手询问…</span>}>
                           <AsyncQuestionCard questions={block.questions}
-                            answered={supplemental.answered.has(asyncQuestionKey(t.id, block.message_id))}
+                            answered={supplemental.answered.has(block.message_id)}
                             onOpen={() => {
                               pauseOutputFollow();
                               setOpenAsyncQuestion({ scope: asyncQuestionScope, messageId: block.message_id });
@@ -3047,9 +3025,11 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                       onPreviewImage={(src, alt) => setZoom({ kind: "data", src, alt })} />}
                   </div>
                 ))}
-                {/* Late page metadata shares a stable slot; completion metadata
-                    still requires a real terminal, including after compaction. */}
-                <div className={`ubub-meta ${showCompletionFooter ? "ai-meta" : "page-meta"}`}>
+                {t.error && <TurnProblem message={t.error} continuing={activeTurnIndex > ti} />}
+                {/* Final metadata already has a stable row. While running,
+                    page discovery shares the existing working indicator below
+                    instead of reserving an empty 22px metadata row. */}
+                {showCompletionFooter && <div className="ubub-meta ai-meta">
                   {showCompletionFooter && t.doneTs && <span className="ubub-time">{formatTime(t.doneTs)}</span>}
                   {showCompletionFooter && finalBlocks.length > 0 && <button
                     className={"ubub-act" + (copiedId === t.id + "-ai" ? " copied" : "")}
@@ -3067,8 +3047,8 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                     </button>
                   )}
                   <Suspense fallback={null}><PagePreviewLinks turn={t} sid={sid} /></Suspense>
-                </div>
-                {showCompletionFooter && ti === turns.length - 1
+                </div>}
+                {showCompletionFooter && !terminalProblem && ti === turns.length - 1
                   && <div className="turn-done-mark"><ClaudeSpark size={22} /></div>}
               </>
             )}
@@ -3100,14 +3080,14 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                 <div className="turn-working" role="status" aria-live="polite">
                   <ClaudeWorking size={24} />
                   <span className="turn-working-tx">{workingLabel}</span>
+                  {!showCompletionFooter && <Suspense fallback={null}>
+                    <PagePreviewLinks turn={t} sid={sid} />
+                  </Suspense>}
                 </div>
               )}
-              {fileChips(t)}
+              {renderTurnChanges(t)}
               {t.done && t.interrupted && !t.error
                 && <div className="note interrupted">— 已打断 —</div>}
-              {t.error && <div className="note interrupted turn-failure">{
-                presentHistoricalTurnProblem(t.error)
-              }</div>}
             </div>
             );
           })}
@@ -3132,7 +3112,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
       {openAsyncQuestion?.scope === asyncQuestionScope && <Suspense fallback={null}>
         <AsyncQuestionHost key={asyncQuestionScope}
           messageId={openAsyncQuestion.messageId}
-          turns={turns} answeredKeys={supplemental.answered}
+          turns={turns} answeredMessageIds={supplemental.answered}
           replyMode={asyncReplyMode} onReply={onReplyAsyncQuestion}
           onClose={() => setOpenAsyncQuestion(q => q ? { ...q, messageId: null } : null)} />
       </Suspense>}

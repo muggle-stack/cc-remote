@@ -5,6 +5,14 @@ export function generatedImageIdentity(block: ProcessBlock): string {
   return typeof ref?.image_id === "string" ? ref.image_id : block.item_id;
 }
 
+export function modelFallbackNotices(blocks: readonly Block[]): ProcessBlock[] {
+  return [...new Map(blocks.flatMap((block) => (
+    block.kind === "process" && block.processKind === "model"
+      && block.tool === "model_refusal_fallback"
+      ? [[block.item_id, block] as const] : []
+  ))).values()];
+}
+
 /** Show distinct output images, not duplicate live/history views of the same
  * content. Every native activity stays in the timeline; only the gallery is
  * deduplicated. Prefer its live snapshot handle while available. */
@@ -63,6 +71,7 @@ export function processBlocks(blocks: Block[]): Block[] {
       ? [block.parent_id] : []
   )));
   return blocks.filter((block) => {
+    if (block.kind === "process" && block.tool === "model_refusal_fallback") return false;
     if (block.kind === "text") {
       return block.text.length > 0
         && block.delivery !== "async"

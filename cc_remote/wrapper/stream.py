@@ -39,6 +39,8 @@ from cc_remote.protocol import (
     TurnEnd, TurnResult, UserMsg,
 )
 from cc_remote.wrapper.sanitize import bounded_text, bounded_tool_input
+from cc_remote.wrapper.claude_model_fallback import FALLBACK_TOOL, model_fallback_event
+from cc_remote.wrapper.turn_changes import native_claude_diff
 
 _SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$")
 _SAFE_WIRE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$")
@@ -679,6 +681,7 @@ class StreamTranslator:
         # concatenating the complete text made long turns unbounded and O(n^2).
         self._emitted: dict[str, int] = {"thinking": 0, "text": 0}
         self._tool_diffs: dict[str, tuple[str, bool]] = {}
+        self._tool_paths: dict[str, str] = {}
         self._tool_names: dict[str, str] = {}
         self._tool_outputs: dict[str, str] = {}
         self._tool_delta_totals: dict[str, int] = {}
@@ -848,6 +851,10 @@ class StreamTranslator:
                     self.item_commands[tool_id] = safe_command
         diff, was_truncated = _tool_diff(
             block.name, block.input, self.tool_result_max)
+        if block.name.lower() in {"edit", "write", "multiedit"}:
+            path = block.input.get("file_path") or block.input.get("path")
+            if isinstance(path, str) and len(path) <= 4096:
+                self._tool_paths[tool_id] = path
         if diff:
             self._tool_diffs[tool_id] = (diff, was_truncated)
 
@@ -887,7 +894,8 @@ class StreamTranslator:
                           is_error: bool = False, summary: str | None = None,
                           duration_ms: int | None = None,
                           agent_terminal: bool | None = None,
-                          agent_status: str | None = None) -> None:
+                          agent_status: str | None = None,
+                          native_result: dict | None = None) -> None:
         self._ambiguous_final_mid = None
         tool_id = _wire_id(tool_use_id, "tool")
         # Fail closed for a result whose ToolUse was omitted/never observed. In
@@ -947,7 +955,9 @@ class StreamTranslator:
         content = _safe_result_content(self._tool_names.get(tool_id), content)
         text, was_truncated = bounded_text(content, self.tool_result_max)
         diff_info = self._tool_diffs.pop(tool_id, None)
-        diff = diff_info[0] if diff_info and not is_error else None
+        native_diff = (native_claude_diff(native_result, self._tool_paths.get(tool_id))
+                       if not is_error else None)
+        diff = native_diff or (diff_info[0] if diff_info and not is_error else None)
         truncated = bool(was_truncated or (diff_info and diff_info[1])) or None
         is_agent = (self._tool_names.get(tool_id) or "").lower() in {
             "agent", "task"}
@@ -961,6 +971,8 @@ class StreamTranslator:
             content=text, is_error=bool(is_error),
             truncated=truncated, status=result_status,
             summary=summary, diff=diff,
+            diff_source="native" if native_diff else "fragment" if diff else None,
+            diff_truncated=False if native_diff else bool(diff_info and diff_info[1]),
             background=self._background_for_turn(tool_turn),
         ))
         if is_agent and agent_terminal is not False:
@@ -977,6 +989,7 @@ class StreamTranslator:
         self._finish_tool_item(tool_id)
 
     def _finish_tool_item(self, tool_id: str) -> None:
+        self._tool_paths.pop(tool_id, None)
         self._finished_tool_items.add(tool_id)
         self._image_reads.pop(tool_id, None)
         self._tool_outputs.pop(tool_id, None)
@@ -1198,7 +1211,8 @@ class StreamTranslator:
                     bool(block.is_error), summary=summary,
                     duration_ms=duration_ms,
                     agent_terminal=not async_launched,
-                    agent_status=mapped_status if mapped_status != "unknown" else None)
+                    agent_status=mapped_status if mapped_status != "unknown" else None,
+                    native_result=result_meta)
             elif isinstance(block, ServerToolResultBlock):
                 self._emit_tool_result(events, block.tool_use_id, block.content)
         return events
@@ -1487,6 +1501,9 @@ class StreamTranslator:
                             TaskUpdatedMessage, TaskNotificationMessage)):
             return self._feed_task(msg)
         if isinstance(msg, SystemMessage):
+            fallback = model_fallback_event(msg.data, turn_id=self.turn_id)
+            if fallback is not None:
+                return [fallback]
             if msg.subtype in {"tool_progress", "bash_progress"}:
                 return self._feed_progress_system(msg)
             if msg.subtype == "tool_use_summary":
@@ -1505,14 +1522,16 @@ class StreamTranslator:
                     turn_id=self.turn_id, channel="final"))
             for tool_id in sorted({key[0] for key in self._tool_pending}):
                 events.extend(self._flush_tool_deltas(tool_id))
-            events.append(TurnEnd(result=TurnResult(
+            terminal = TurnEnd(result=TurnResult(
                 subtype=msg.subtype,
                 duration_ms=msg.duration_ms,
                 is_error=msg.is_error,
                 total_cost_usd=msg.total_cost_usd,
                 num_turns=msg.num_turns,
             ), turn_id=self._last_assistant_uuid,
-                checkpoint_id=self._last_user_uuid))
+                checkpoint_id=self._last_user_uuid)
+            terminal._changes_turn_id = self.turn_id
+            events.append(terminal)
             self._last_assistant_uuid = None
             self._last_user_uuid = None
             self._ambiguous_final_mid = None
@@ -1543,6 +1562,11 @@ def extract_session_id(msg) -> str | None:
 
 def extract_model(msg) -> str | None:
     """Pull the current model out of the init SystemMessage."""
+    if isinstance(msg, SystemMessage):
+        fallback = model_fallback_event(msg.data)
+        if (fallback is not None and fallback.input
+                and fallback.input.get("scope") == "session"):
+            return fallback.input["fallback_model"]
     if isinstance(msg, SystemMessage) and msg.subtype == "init":
         data = msg.data
         if isinstance(data, dict):
@@ -2234,6 +2258,83 @@ def recover_claude_delayed_retry_tail(
     return output
 
 
+def recover_claude_native_metadata(
+    session_id: str,
+    messages: list,
+    *,
+    path: str | None,
+    timestamps: dict[str, float],
+    internal_events: dict[str, ProcessEvent],
+    index_store=None,
+    snapshot_size: int | None = None,
+    max_record_bytes: int = _MAX_TRANSCRIPT_RECORD_CHARS,
+) -> list:
+    """Restore model notes and native tool results on the active ancestry only.
+
+    The SDK catalog omits these rows. These positional shells are solely a UI
+    projection, never a prompt sent back to Claude. Exact native tool results
+    additionally prove historical Edit/Write patches. Page boundaries, rewinds
+    and sidechains must not resurrect unrelated metadata.
+    """
+    if not path or not messages:
+        return messages
+    graph = _transcript_graph_index(
+        path, index_store=index_store, snapshot_size=snapshot_size,
+        max_record_bytes=max_record_bytes)
+    if graph is None:
+        return messages
+    leaf, rows, _ = graph
+    chain = _ordered_graph_chain(leaf, rows)
+    if chain is None:
+        return messages
+    visible = {getattr(message, "uuid", None) for message in messages}
+    by_id = {getattr(message, "uuid", None): message for message in messages}
+    insertions: dict[str, list[SimpleNamespace]] = {}
+    anchor = None
+    restored = 0
+    try:
+        with open(path, "rb") as source:
+            for uid in chain:
+                metadata = rows[uid]
+                if metadata[0] in {"user", "assistant"} and uid not in visible:
+                    anchor = None
+                if uid in visible:
+                    anchor = uid
+                    if metadata[0] == "user":
+                        row = _indexed_transcript_row(
+                            source, uid, metadata, max_record_bytes=max_record_bytes)
+                        result = row.get("toolUseResult") if row else None
+                        if isinstance(result, dict):
+                            by_id[uid].tool_use_result = result
+                if metadata[0:2] != ("system", FALLBACK_TOOL):
+                    continue
+                if anchor is None or restored >= 64:
+                    continue
+                row = _indexed_transcript_row(
+                    source, uid, metadata, max_record_bytes=max_record_bytes)
+                event = model_fallback_event(row)
+                if event is None or row is None:
+                    continue
+                internal_events[uid] = event
+                stamp = _transcript_epoch(row)
+                if stamp is not None:
+                    timestamps[uid] = stamp
+                if uid not in visible:
+                    insertions.setdefault(anchor, []).append(SimpleNamespace(
+                        type="system", uuid=uid, session_id=session_id,
+                        message={"role": "system", "content": ""},
+                        parent_tool_use_id=None,
+                    ))
+                restored += 1
+    except OSError:
+        return messages
+    output = []
+    for message in messages:
+        output.append(message)
+        output.extend(insertions.get(getattr(message, "uuid", None), ()))
+    return output
+
+
 def _load_compact_chain_messages(
     session_id: str,
     source_path: str,
@@ -2269,6 +2370,8 @@ def _load_compact_chain_messages(
                 internal = _internal_user_event_from_row(row, queued)
                 if internal is None:
                     internal = _compaction_event_from_row(row)
+                if internal is None:
+                    internal = model_fallback_event(row)
                 if internal is not None:
                     internal_events[uid] = internal
                 row_type = row.get("type")
@@ -2284,20 +2387,20 @@ def _load_compact_chain_messages(
                             row.get("parentToolUseID")
                             or row.get("parent_tool_use_id")
                         ),
+                        tool_use_result=row.get("toolUseResult"),
                     ))
-                elif row_type == "system" \
-                        and row.get("subtype") == "compact_boundary":
+                elif row_type == "system" and internal is not None:
                     # The SDK projection drops system rows. Preserve a tiny
                     # positional shell so translate_history can place the
                     # existing compaction ProcessEvent at the true boundary.
                     messages.append(SimpleNamespace(
                         type="system",
-                        subtype="compact_boundary",
+                        subtype=row.get("subtype"),
                         uuid=uid,
                         session_id=session_id,
                         message={
                             "role": "system",
-                            "content": row.get("content") or "",
+                            "content": "",
                         },
                         parent_tool_use_id=None,
                     ))
@@ -2947,6 +3050,8 @@ def translate_history(
                                 history_tool_names.get(tool_id), raw_result_content),
                             tool_result_max)
                         diff_info = history_tool_diffs.pop(tool_id, None)
+                        native_diff = (native_claude_diff(getattr(msg, "tool_use_result", None))
+                                       if not is_error else None)
                         truncated = bool(
                             was_truncated or (diff_info and diff_info[1])) or None
                         agent_result = (history_tool_names.get(tool_id) or "").lower() in {
@@ -2965,7 +3070,9 @@ def translate_history(
                             truncated=truncated,
                             status=("failed" if is_error else
                                     "running" if async_launched else "succeeded"),
-                            diff=diff_info[0] if diff_info and not is_error else None,
+                            diff=native_diff or (diff_info[0] if diff_info and not is_error else None),
+                            diff_source="native" if native_diff else "fragment",
+                            diff_truncated=False if native_diff else bool(diff_info and diff_info[1]),
                         ))
                         if agent_result:
                             events.append(ProcessEvent(

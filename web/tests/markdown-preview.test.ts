@@ -25,7 +25,7 @@ import {
 } from "../src/mermaid.ts";
 import type { ServerEvent } from "../src/protocol.ts";
 import type { Turn } from "../src/domain/conversation.ts";
-import { asyncQuestionKey, presentAsyncQuestionReplies, supplementalAnswerPrompt } from "../src/async-question-presentation.ts";
+import { presentAsyncQuestionReplies, supplementalAnswerPrompt } from "../src/async-question-presentation.ts";
 import { MARKDOWN_HTML_README } from "./fixtures/markdown-html.ts";
 import { previewImageDimension } from "../src/markdown-preview-html.ts";
 
@@ -45,10 +45,29 @@ const nativeReply: Turn = { id: "reply-turn", done: false, blocks: [],
   prompt: supplementalAnswerPrompt([{ question: "用的什么手势？", answer: "三指拖拽\n第二行也要保留" }]) };
 const presentation = presentAsyncQuestionReplies([nativeQuestion, nativeReply]);
 assert.deepEqual(presentation.replies.get(nativeReply.id), [{ question: "用的什么手势？", answer: "三指拖拽\n第二行也要保留" }]);
-assert.equal(presentation.answered.has(asyncQuestionKey(nativeQuestion.id, "question-message")), true);
+assert.equal(presentation.answered.has("question-message"), true);
+assert.equal(presentAsyncQuestionReplies([nativeQuestion, nativeReply], nativeReply.id).answered.size, 0,
+  "an optimistic reply does not mark the question answered before native acceptance");
+assert.equal(presentAsyncQuestionReplies([nativeQuestion,
+  { ...nativeReply, clientMsgId: "pending-client" }], "pending-client").answered.size, 0,
+  "a pending reply's native alias also waits for acceptance");
 assert.equal(presentAsyncQuestionReplies([nativeReply]).replies.size, 0, "never guess from a prefix without the native question");
 assert.equal(presentAsyncQuestionReplies([nativeReply, nativeQuestion]).replies.size, 0, "a future question cannot own this reply");
-assert.equal(presentAsyncQuestionReplies([nativeQuestion, { ...nativeQuestion, id: "ambiguous" }, nativeReply]).replies.size, 0);
+const repeatedQuestion = { ...nativeQuestion, id: "after-compaction" };
+for (const turns of [
+  [nativeQuestion, repeatedQuestion, nativeReply],
+  [nativeQuestion, nativeReply, repeatedQuestion],
+]) {
+  const restored = presentAsyncQuestionReplies(turns);
+  assert.equal(restored.replies.size, 1, "native question replay is not an ambiguous second question");
+  assert.equal(restored.questionOwners.get("question-message"), nativeQuestion.id);
+  assert.equal(restored.answered.has("question-message"), true,
+    "all row aliases agree that the same native question was answered");
+}
+const independentQuestion: Turn = { ...nativeQuestion, id: "independent-question",
+  blocks: nativeQuestion.blocks.map(block => ({ ...block, message_id: "other-question-message" })) };
+assert.equal(presentAsyncQuestionReplies([nativeQuestion, independentQuestion, nativeReply]).replies.size, 0,
+  "distinct native questions with equal titles remain ambiguous");
 assert.equal(presentAsyncQuestionReplies([nativeQuestion, { ...nativeReply, error: "rejected" }]).answered.size, 0);
 assert.equal(presentAsyncQuestionReplies([nativeQuestion, { ...nativeReply, prompt: "补充回答：\n\n问题：其他问题\n回答：保留原文" }]).replies.size, 0);
 const multiReply = { ...nativeReply, prompt: supplementalAnswerPrompt([
@@ -1428,6 +1447,36 @@ $$`,
   assert.match(pdfMarkup, /rendered-artifact-body/);
   assert.match(pdfMarkup, /PPTX → PDF/);
   assert.match(pdfMarkup, /正在准备预览/);
+
+  let audioState = reduce(initialState, {
+    type: "open_file_loading", file: "sample.wav", sid: "audio-session",
+    requestId: "audio-1", kind: "file",
+  });
+  const audioReply = { v: 58, type: "file_preview", ts: 4, sid: "audio-session",
+    path: "sample.wav", request_id: "audio-1", format: "audio", content: "",
+    media_type: "audio/wav", data: "UklGRg==", size: 4096,
+    truncated: false, mtime_ns: "1" } as ServerEvent;
+  const audioLoading = audioState;
+  assert.equal(reduce(audioState, { type: "event", event: {
+    ...audioReply, sid: "another-session",
+  } }), audioLoading, "audio bytes must stay in their requesting session");
+  audioState = reduce(audioState, { type: "event", event: audioReply });
+  assert.equal(audioState.artifact?.kind, "audio");
+  assert.equal(audioState.artifact?.mediaType, "audio/wav");
+  const audioMarkup = renderToStaticMarkup(createElement(ArtifactPanel, {
+    artifact: audioState.artifact!, active: "diff", hasBtw: false,
+    onTab: () => {}, onClose: () => {},
+  }));
+  assert.match(audioMarkup, /<audio[^>]*controls/);
+  assert.doesNotMatch(audioMarkup, /auto[Pp]lay/);
+  assert.match(audioMarkup, /刷新文件/);
+  audioState = reduce(audioState, {
+    type: "open_file_loading", file: "next.wav", sid: "audio-session",
+    requestId: "audio-2", kind: "file",
+  });
+  assert.equal(audioState.artifact?.data, undefined);
+  assert.equal(reduce(audioState, { type: "event", event: audioReply }), audioState,
+    "a late audio response cannot replace the newly selected file");
 
   const sandbox = buildSandboxDocument("<h1>safe</h1>");
   assert.match(sandbox, /Content-Security-Policy/);

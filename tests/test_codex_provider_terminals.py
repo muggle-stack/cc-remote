@@ -115,7 +115,8 @@ def test_policy_summary_accepts_only_the_reviewed_product_copy():
         assert _historical_turn_failure(raw) == "该轮未正常结束"
 
 
-def test_cached_policy_failure_is_rebuilt_once_without_changing_rollout(tmp_path):
+@pytest.mark.parametrize("old_version", [31, 32, 36])
+def test_cached_policy_failure_is_rebuilt_once_without_changing_rollout(tmp_path, old_version):
     path = tmp_path / "rollout.jsonl"
     raw = "".join(json.dumps(row) + "\n" for row in [
         _record("task_started"), _record("user_message", message="inspect code"),
@@ -136,7 +137,7 @@ def test_cached_policy_failure_is_rebuilt_once_without_changing_rollout(tmp_path
     assert store.put_page("session", "codex", source,
                           before=None, limit=4, page=page)
     with sqlite3.connect(store.path) as connection:
-        connection.execute("PRAGMA user_version=31")
+        connection.execute(f"PRAGMA user_version={old_version}")
     migrated = HistoryIndexStore(state)
     assert migrated.get_page("session", "codex", source,
                              before=None, limit=4) is None

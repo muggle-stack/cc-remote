@@ -33,30 +33,34 @@ function matchReply(prompt: string, questions: AsyncQuestionSpec[]): Supplementa
   return answers.length && supplementalAnswerPrompt(answers) === prompt ? answers : null;
 }
 
-export function asyncQuestionKey(turnId: string, messageId: string): string {
-  return JSON.stringify([turnId, messageId]);
-}
-
-export function presentAsyncQuestionReplies(turns: readonly Turn[]) {
-  const candidates: { key: string; questions: AsyncQuestionSpec[] }[] = [];
+export function presentAsyncQuestionReplies(turns: readonly Turn[], pendingReplyId?: string | null) {
+  // Compaction/replay can temporarily project one immutable native question in
+  // more than one row. A row alias is not a new question or a new answer slot.
+  const candidates = new Map<string, AsyncQuestionSpec[]>();
+  const questionOwners = new Map<string, string>();
   const replies = new Map<string, SupplementalAnswer[]>();
   const answered = new Set<string>();
   for (const turn of turns) {
     if (turn.prompt.startsWith("补充回答：\n\n")) {
-      const matches = candidates.flatMap(candidate => {
-        const answers = matchReply(turn.prompt, candidate.questions);
-        return answers ? [{ ...candidate, answers }] : [];
+      const matches = [...candidates].flatMap(([messageId, questions]) => {
+        const answers = matchReply(turn.prompt, questions);
+        return answers ? [{ messageId, answers }] : [];
       });
       if (matches.length === 1) {
         replies.set(turn.id, matches[0].answers);
-        if (!turn.error && !turn.interrupted) answered.add(matches[0].key);
+        if (!turn.error && !turn.interrupted && (!pendingReplyId
+            || (turn.id !== pendingReplyId && turn.clientMsgId !== pendingReplyId))) {
+          answered.add(matches[0].messageId);
+        }
       }
     }
     for (const block of turn.blocks) {
-      if (block.kind === "text" && block.delivery === "async" && block.questions?.length) {
-        candidates.push({ key: asyncQuestionKey(turn.id, block.message_id), questions: block.questions });
+      if (block.kind === "text" && block.delivery === "async" && block.questions?.length
+          && !candidates.has(block.message_id)) {
+        candidates.set(block.message_id, block.questions);
+        questionOwners.set(block.message_id, turn.id);
       }
     }
   }
-  return { replies, answered };
+  return { replies, answered, questionOwners };
 }

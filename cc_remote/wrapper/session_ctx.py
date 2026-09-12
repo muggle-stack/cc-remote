@@ -21,6 +21,7 @@ from cc_remote.protocol import AskUser, BackgroundProcessItem, State
 from cc_remote.wrapper.ringbuffer import RingBuffer
 from cc_remote.wrapper.sdk import SdkHandle
 from cc_remote.wrapper.stream import StreamTranslator
+from cc_remote.wrapper.turn_changes import TurnChangeTracker
 
 
 @dataclass
@@ -123,6 +124,8 @@ class SessionContext:
     # Claude's complete local account boundary. ``session_id`` remains the
     # native UUID while ``key`` is namespaced when multiple profiles exist.
     claude_profile_id: Optional[str] = None
+    claude_model_fallback_notices: set[str] = field(default_factory=set)
+    turn_change_tracker: TurnChangeTracker | None = None
     # Codex's complete local account boundary. ``session_id`` remains the
     # native app-server UUID while ``key`` is the browser-facing routing id
     # (namespaced for every profile when multiple profiles are configured).
@@ -171,6 +174,11 @@ class SessionContext:
     # native owner. This in-memory marker only suppresses repeated sidecar reads
     # for commentary deltas; it never participates in running/idle ownership.
     codex_process_clock_binding: Optional[tuple[str, str]] = None
+    # RPC acceptance is not the point at which a steer enters the model. Keep
+    # process timing on the last materialized input until its native user item
+    # proves the next owner, independently of the optimistic visible boundary.
+    codex_process_clock_owner: Optional[tuple[str, str]] = None
+    codex_materialized_steers: dict[str, None] = field(default_factory=dict)
     # Interrupt must wake a consumer that is already blocked in queue.get().  The
     # absolute monotonic deadline prevents each subsequent queue item from
     # restarting the drain timeout.
@@ -272,6 +280,7 @@ class SessionContext:
     codex_effort_resolve_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock)
     announced_perm: Optional[str] = None
+    permission_profile_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     announced_permission_profile: Optional[str] = None
     announced_web_search: Optional[str] = None
     announced_collaboration_mode: Optional[str] = None

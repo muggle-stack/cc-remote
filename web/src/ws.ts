@@ -8,7 +8,7 @@
 // no cursor reset, no re-hello (background turns keep streaming). All outbound
 // commands that target a session stamp `sid: focusedSid`.
 import type {
-  AutoCompactMode, DiffTheme, GoalStatus, QueryFile,
+  AutoCompactMode, DiffTheme, Engine, GoalStatus, QueryFile,
   QueryImg, ServerEvent, SessionControl, Space,
 } from "./protocol.ts";
 import {
@@ -68,6 +68,7 @@ export interface WsCallbacks {
   onConnState: (s: ConnState, detail?: string) => void;
   onAuthFail?: () => void;
   onCommandError?: (detail: string) => void;
+  onCommandCompleted?: (commandId: string) => void;
   onWrapperGenerationChanged?: () => void;
   onOutboxChanged?: (protectedSessionIds: string[]) => void;
 }
@@ -299,6 +300,10 @@ export class RelayWs {
 
   pendingQueryFor(sid: string): string | null {
     return this.queryAcceptance.pendingMessageId(sid);
+  }
+
+  queryReceiptFor(sid: string, messageId: string) {
+    return this.queryAcceptance.receiptFor(sid, messageId);
   }
 
   private touchReplay(sid: string): void {
@@ -841,8 +846,8 @@ export class RelayWs {
     });
   }
 
-  sendSetPermissionProfile(profile: string): void {
-    this.send({
+  sendSetPermissionProfile(profile: string): string | null {
+    return this.sendTracked({
       v: PROTOCOL_VERSION,
       type: "set_permission_profile",
       profile,
@@ -874,10 +879,18 @@ export class RelayWs {
     });
   }
 
-  sendGetDiff(file: string, theme: DiffTheme): string | null {
+  sendGetDiff(file: string, theme: DiffTheme, turnId?: string, revision?: string, engine?: Engine): string | null {
     return this.sendTracked({
       v: PROTOCOL_VERSION, type: "get_diff", file, theme,
+      ...(turnId ? { turn_id: turnId, revision, engine } : {}),
       ts: nowTs(), ...this.sidObj(),
+    });
+  }
+
+  sendGetTurnFileChanges(sid: string, engine: Engine, turnId: string, revision: string, offset: number): string | null {
+    return this.sendTracked({
+      v: PROTOCOL_VERSION, type: "get_turn_file_changes", sid, engine,
+      turn_id: turnId, revision, offset, limit: 64, ts: nowTs(),
     });
   }
 
@@ -891,6 +904,18 @@ export class RelayWs {
       ts: nowTs(), ...this.sidObj(targetSid),
     });
     return queued ? requestId : null;
+  }
+
+  sendBrowseFiles(sid: string, path: string, requestId: string,
+                  hidden = false, offset = 0, revision?: string | null): boolean {
+    return this.send({ v: PROTOCOL_VERSION, type: "browse_files", sid, path,
+      request_id: requestId, hidden, offset, limit: 100, revision, ts: nowTs() });
+  }
+
+  sendCodexContext(sid: string, maxTokens: number | null): boolean {
+    if (maxTokens !== null && (!Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > 100_000_000)) return false;
+    return !!this.sendTracked({ v: PROTOCOL_VERSION, type: "set_codex_context",
+      sid, max_context_tokens: maxTokens, ts: nowTs() });
   }
 
   sendSaveMarkdown(path: string, content: string, expectedSize: number,
@@ -1207,16 +1232,16 @@ export class RelayWs {
     });
   }
 
-  sendSetGoal(objective: string | null, status: GoalStatus | null, tokenBudget: number | null): void {
-    const obj: Record<string, unknown> = { v: PROTOCOL_VERSION, type: "set_goal", ts: nowTs(), ...this.sidObj() };
+  sendSetGoal(objective: string | null, status: GoalStatus | null, tokenBudget: number | null, sid?: string): string | null {
+    const obj: Record<string, unknown> = { v: PROTOCOL_VERSION, type: "set_goal", ts: nowTs(), ...(sid ? { sid } : this.sidObj()) };
     if (objective !== null) obj.objective = objective;
     if (status !== null) obj.status = status;
     if (tokenBudget !== null) obj.token_budget = tokenBudget;
-    this.send(obj);
+    return this.sendTracked(obj);
   }
 
-  sendClearGoal(): void {
-    this.send({ v: PROTOCOL_VERSION, type: "clear_goal", ts: nowTs(), ...this.sidObj() });
+  sendClearGoal(sid?: string): string | null {
+    return this.sendTracked({ v: PROTOCOL_VERSION, type: "clear_goal", ts: nowTs(), ...(sid ? { sid } : this.sidObj()) });
   }
 
   sendDismissGoalTo(sid: string, goalId: string): string | null {
@@ -1772,6 +1797,7 @@ export class RelayWs {
           this.completeInvalidatedSessionListRefresh(
             msg.cmd_id, socketGeneration);
           if (this.outbox.ack(msg.client_id, msg.cmd_id)) {
+            this.cb.onCommandCompleted?.(msg.cmd_id);
             this.cb.onOutboxChanged?.(this.pendingSessionIds());
           }
           return;

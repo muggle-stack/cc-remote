@@ -18,7 +18,7 @@ import type {
   StatusRateLimit, StatusRateWindow, SessionControl, PermissionProfileInfo,
   PreviewAuthorizationOperation, ClaudeProfileInfo, CodexProfileInfo,
   CodexTerminalFence, AutoCompact, AutoCompactMode,
-  BackgroundProcessItem,
+  BackgroundProcessItem, CodexContext,
 } from "./protocol";
 import type { SendMode } from "./composer-submit";
 import {
@@ -41,7 +41,7 @@ import {
 import {
   historyContainsTurn, installAuthoritativeTurnDetailPage,
   mergeAuthoritativeTurnDetail, mergeDetailWithLiveTail, mergeInitialHistory,
-  restoreCachedTurnDetails, restoreObservedLiveTurnDetails,
+  restoreCachedTurnDetails, restoreObservedLiveTurnDetails, restoreTurnInterruptionCauses,
 } from "./history-merge";
 import { reconcileBoundCompactionOrphanDetailed } from "./compaction-orphans.ts";
 import {
@@ -76,7 +76,7 @@ import type { HistoryDetailRequestContext } from "./history-requests";
 import { boundRuntimeTurns, pruneRuntimeMap } from "./runtime-bounds";
 import { bumpSessionActivity, setSessionPinned } from "./session-order";
 import { normalizeSessionList } from "./session-list";
-import { presentCommandProblem, presentTurnProblem } from "./problem-presentation";
+import { codexTransportInterruption, presentCommandProblem, presentTurnProblem } from "./problem-presentation";
 import {
   matchQueryAcceptanceHistory,
   queryAcceptanceDescriptor,
@@ -164,14 +164,14 @@ export interface PreviewAuthorizationState {
   operation: PreviewAuthorizationOperation;
   path: string;
   resolvedPath: string;
-  format: "markdown" | "text" | "html" | "image" | "pdf";
+  format: "markdown" | "text" | "html" | "image" | "pdf" | "audio" | "spreadsheet";
   previewId?: string;
   status: "required" | "submitting" | "granted";
 }
 
 export interface Artifact {
   file: string;
-  kind: "diff" | "md" | "file" | "gitdiff" | "html" | "image" | "pdf";
+  kind: "diff" | "md" | "file" | "gitdiff" | "html" | "image" | "pdf" | "audio" | "spreadsheet";
   sid?: string | null;
   requestId?: string;
   diff?: DiffLine[];
@@ -212,6 +212,7 @@ export interface SessionRuntime {
   model: string;
   effort: string;
   autoCompact: AutoCompact | null;
+  codexContext: CodexContext | null;
   perm: string;
   permissionProfile: string | null;
   permissionProfiles: PermissionProfileInfo[] | null;
@@ -229,6 +230,7 @@ export interface SessionRuntime {
   // Revision attached to the last authoritative non-pagination History and,
   // while a rollback barrier is pending, the exact revision allowed to clear it.
   historyRevision: string | null;
+  historyContinuityRevision?: string | null;
   pendingHistoryRevision: string | null;
   // Ordering watermark for newest-page History builds within one wrapper
   // generation. Pagination never advances it.
@@ -329,6 +331,8 @@ export interface SessionRuntime {
   ccSessionId?: string;
   pendingQuestion: { ask_id: string; header?: string | null; question: string; options: { label: string; ds?: string }[]; allow_text?: boolean; secret?: boolean; multi_select?: boolean } | null;
   contextReport: ContextReport | null;
+  // Last usable native reading, or the latest billing reading until native
+  // context has arrived. Transient refresh failures must not clear the ring.
   contextExactReport: ContextReport | null;
   contextRequestId: string | null;
   contextRefreshDeferred: boolean;
@@ -459,7 +463,7 @@ export function createRuntime(): SessionRuntime {
     backgroundProcesses: [],
     backgroundLevelEmpty: false,
     backgroundLevelTs: undefined,
-    model: "", effort: "", autoCompact: null, perm: "",
+    model: "", effort: "", autoCompact: null, codexContext: null, perm: "",
     permissionProfile: null, permissionProfiles: null, webSearch: null,
     collaborationMode: "default",
     fast: null,
@@ -468,6 +472,7 @@ export function createRuntime(): SessionRuntime {
     replaying: false, syncReady: false, truncated: false,
     historyInvalidated: false,
     historyRevision: null, pendingHistoryRevision: null,
+    historyContinuityRevision: null,
     historyGeneration: null, pendingHistoryGeneration: null,
     pendingHistoryCandidateBuildSeq: null,
     historyBuildSeq: 0, historyLiveSeq: 0,
@@ -822,6 +827,24 @@ function findTurnByEngineId(turns: Turn[], id: string | null | undefined): Turn 
       && block.turn_id === id));
 }
 
+function findMessageEventOwner(
+  turns: Turn[], messageId: string, turnId: string | null | undefined,
+): Turn | undefined {
+  const owner = findTurnOwningMessage(turns, messageId);
+  // A delayed item/completed or replay delta can name the same native task as
+  // a newer steer. Its immutable item id is the stronger ownership evidence.
+  if (owner) {
+    if (!turnId || findTurnByEngineId([owner], turnId)) return owner;
+    // The accepted steer deliberately retires its predecessor's live task and
+    // fork aliases. Retiring those controls must not retire item ownership.
+    if (!owner.liveTaskId && !owner.forkPointId && !owner.codexTurnId) return owner;
+    // Conflicting explicit ownership is not permission to copy an existing
+    // immutable item into another row.
+    return undefined;
+  }
+  return findTurnByEngineId(turns, turnId);
+}
+
 function boundedTerminalFences(
   values: readonly CodexTerminalFence[],
 ): CodexTerminalFence[] {
@@ -876,7 +899,7 @@ function applyTerminalFence(turn: Turn, fence: CodexTerminalFence): Turn {
     finishOpenBlocks(next, "succeeded", false);
   } else if (fence.status === "interrupted") {
     next.interrupted = true;
-    next.error = undefined;
+    next.error = codexTransportInterruption(turn.error) ? turn.error : undefined;
     next.terminalSource = "unexpected_interrupt";
     finishOpenBlocks(next, "interrupted", true);
   } else {
@@ -1069,7 +1092,9 @@ function activatePendingLiveBinding(
   }
   if (owner.forkPointId && owner.forkPointId !== binding.turnId
       && owner.liveTaskId !== binding.turnId) return undefined;
-  if (owner.done) {
+  // Resolving an owner for TurnEnd must not reactivate the row already closed
+  // by its preceding Error. Only live content may activate a pending binding.
+  if (owner.done && create) {
     owner.done = false;
     owner.doneTs = undefined;
     owner.durationMs = undefined;
@@ -1589,14 +1614,15 @@ function finishOpenBlocks(
   isError: boolean,
   preserveOpenPlans = false,
   preserveBackground = false,
+  preserveOpenText = false,
 ): void {
   finishOpenBlockList(
     mutableTurnBlocks(turn), status, isError,
-    preserveOpenPlans, preserveBackground);
+    preserveOpenPlans, preserveBackground, preserveOpenText);
   if (turn.detailProjection) {
     finishOpenBlockList(
       turn.detailProjection.blocks, status, isError,
-      preserveOpenPlans, preserveBackground);
+      preserveOpenPlans, preserveBackground, preserveOpenText);
   }
 }
 
@@ -1611,7 +1637,8 @@ function finishCompletedTurnChildren(
     ? "interrupted" : turn.error ? "failed" : "succeeded";
   finishOpenBlocks(
     turn, status, status !== "succeeded",
-    preserveOpenPlans, preserveBackground);
+    preserveOpenPlans, preserveBackground,
+    preserveOpenPlans && status === "succeeded");
 }
 
 /** Close only one newly-installed detail projection. A completed turn may have
@@ -1636,10 +1663,11 @@ function finishOpenBlockList(
   isError: boolean,
   preserveOpenPlans = false,
   preserveBackground = false,
+  preserveOpenText = false,
 ): void {
   for (const block of blocks) {
     if (block.kind === "text") {
-      block.done = true;
+      if (!preserveOpenText) block.done = true;
     } else if (block.kind === "process" && !block.done) {
       if ((preserveOpenPlans && block.processKind === "plan")
           || (preserveBackground && block.background === true)) continue;
@@ -1719,7 +1747,11 @@ function finishTurnAtSteerFence(
     turn.forkPointId = undefined;
   }
   turn.liveTaskId = undefined;
-  finishOpenBlocks(turn, "succeeded", false);
+  // Accepting input advances the visible conversation, but Codex can still
+  // stream the predecessor's current message. Only its native item end (or an
+  // authoritative terminal) closes that text; otherwise Delta treats the
+  // locally closed prefix as immutable and silently drops the remaining reply.
+  finishOpenBlocks(turn, "succeeded", false, false, false, true);
 }
 
 function reconcileAcceptedSteerHistory(
@@ -2368,19 +2400,12 @@ export function reduce(state: AppState, action: Action): AppState {
         };
       }
       const sessions = bumpSessionActivity(state.sessions, action.sid, action.ts);
-      const historyBrowse = state.historyBrowse?.sid === action.sid
-        ? null : state.historyBrowse;
-      const retainedHistoryBrowse =
-        state.retainedHistoryBrowse?.sid === action.sid
-          ? null : state.retainedHistoryBrowse;
-      if (runtimes === state.runtimes && sessions === state.sessions
-          && historyBrowse === state.historyBrowse
-          && retainedHistoryBrowse === state.retainedHistoryBrowse) {
+      // Sending changes the live runtime, not the user's reading viewport.
+      // Only an explicit return-to-latest/navigation action leaves history.
+      if (runtimes === state.runtimes && sessions === state.sessions) {
         return state;
       }
-      return {
-        ...state, runtimes, sessions, historyBrowse, retainedHistoryBrowse,
-      };
+      return { ...state, runtimes, sessions };
     }
     case "enqueue": {
       const targetSid = action.sid ?? state.focusedSid;
@@ -2393,20 +2418,9 @@ export function reduce(state: AppState, action: Action): AppState {
         queueKind: "queue",
         queueState: action.query.queueState ?? "submitting",
       };
-      const next = patch(state, targetSid, (rt) => {
+      return patch(state, targetSid, (rt) => {
         rt.queue = [...rt.queue, optimistic];
       });
-      if (!targetSid) return next;
-      const closesBrowse = next.historyBrowse?.sid === targetSid;
-      const dropsRetained = next.retainedHistoryBrowse?.sid === targetSid;
-      return closesBrowse || dropsRetained
-        ? {
-            ...next,
-            historyBrowse: closesBrowse ? null : next.historyBrowse,
-            retainedHistoryBrowse: dropsRetained
-              ? null : next.retainedHistoryBrowse,
-          }
-        : next;
     }
     case "dequeue_at": {
       const runtimes = reduceTargetedRuntime(
@@ -2438,19 +2452,8 @@ export function reduce(state: AppState, action: Action): AppState {
         replacesRetainedBytes:
           action.query.replacesRetainedBytes ?? replacesRetainedBytes,
       };
-      const next = patch(
+      return patch(
         state, targetSid, (rt) => { rt.pendingSend = optimistic; });
-      if (!targetSid) return next;
-      const closesBrowse = next.historyBrowse?.sid === targetSid;
-      const dropsRetained = next.retainedHistoryBrowse?.sid === targetSid;
-      return closesBrowse || dropsRetained
-        ? {
-            ...next,
-            historyBrowse: closesBrowse ? null : next.historyBrowse,
-            retainedHistoryBrowse: dropsRetained
-              ? null : next.retainedHistoryBrowse,
-          }
-        : next;
     }
     case "clear_pending": {
       const runtimes = reduceTargetedRuntime(
@@ -2498,7 +2501,8 @@ export function reduce(state: AppState, action: Action): AppState {
       return patch(state, state.focusedSid, (rt) => {
         rt.contextReport = action.report;
         if (action.report.available !== false
-            && action.report.source !== "recent_turn") {
+            && (action.report.source !== "recent_turn"
+              || !rt.contextExactReport || rt.contextExactReport.source === "recent_turn")) {
           rt.contextExactReport = action.report;
         }
       });
@@ -3137,9 +3141,9 @@ export function reduce(state: AppState, action: Action): AppState {
           }
           if (action.turns.length) {
             replaceWithBoundedTurns(rt, cloneTurns(action.turns).map((turn) => (
-              // Cache paint has no current lifecycle authority. Keep a Plan
-              // provisionally open until the first accepted History page says
-              // whether the enclosing native task is still running.
+              // Cache paint has no current lifecycle authority. Keep native
+              // text and Plans open until the first accepted History page
+              // says whether the enclosing task is still running.
               finishCompletedTurnChildren(turn, true),
               !turn.forkPointId && turn.codexTurnId
                 ? { ...turn, forkPointId: turn.codexTurnId }
@@ -3564,6 +3568,7 @@ function reduceEvent(
             historyInvalidated: mergedHistoryInvalidated,
             historyRevision:
               source.historyRevision ?? mergeTarget.historyRevision,
+            historyContinuityRevision: mergedHistoryRuntime.historyContinuityRevision,
             pendingHistoryRevision:
               source.pendingHistoryRevision ?? mergeTarget.pendingHistoryRevision,
             historyBuildSeq: source.historyRevision == null
@@ -3964,6 +3969,7 @@ function reduceEvent(
         rt.oldestId = null;
         rt.truncated = false;
         rt.historyInvalidated = true;
+        rt.historyContinuityRevision = null;
         rt.pendingHistoryRevision = e.revision;
         rt.historyNewestId = null;
         rt.historyHeadKnown = false;
@@ -4121,6 +4127,7 @@ function reduceEvent(
       if (e.detail === "summary" && Array.isArray(e.turns)) {
         built.turns = e.turns.map((turn) => ({
           ...turn,
+          fileChangesTurnId: turn.fileChanges ? turn.id : undefined,
           clientMsgId: turn.clientMsgId ?? undefined,
           blocks: turn.blocks as Turn["blocks"],
           forkPointId: turn.forkPointId ?? undefined,
@@ -4269,10 +4276,15 @@ function reduceEvent(
         && !acceptanceConfirmed;
       const acceptanceRuntime = { ...base };
       if (acceptanceConfirmed) clearAcceptance(acceptanceRuntime);
+      const aliasRevisionChanged = base.historyRevision !== e.revision
+        && !base.historyInvalidated && !e.reset
+        && e.generation != null && base.historyGeneration === e.generation
+        && e.continuity_revision != null
+        && e.continuity_revision === (base.historyContinuityRevision ?? base.historyRevision);
       const preserveStableHeadHistory = base.turns.length > 0
         && (base.hasLoadedOlderHistory || e.has_more === true)
         && !base.historyInvalidated
-        && base.historyRevision === e.revision
+        && (base.historyRevision === e.revision || aliasRevisionChanged)
         && (e.generation != null
           ? base.historyGeneration === e.generation
           : base.historyGeneration == null);
@@ -4382,7 +4394,7 @@ function reduceEvent(
         }
       }
       if (e.detail === "summary" && !base.historyInvalidated
-          && base.historyRevision === e.revision) {
+          && (base.historyRevision === e.revision || aliasRevisionChanged)) {
         const loadedDetail = new Map<string, Turn>();
         for (const turn of base.turns) {
           if (!turn.detailLoaded
@@ -4396,11 +4408,11 @@ function reduceEvent(
             .map((alias) => loadedDetail.get(alias))
             .find((candidate): candidate is Turn => !!candidate);
           if (!detail) return turn;
-          const merged = mergeAuthoritativeTurnDetail(turn, detail);
-          // A completed row may be the neutral-steer segment whose Plan spans
-          // the following clarification, but only a current running History
+          const merged = mergeAuthoritativeTurnDetail(turn, detail, built.turns);
+          // A completed row may be the neutral-steer segment whose text or
+          // Plan spans the clarification, but only a current running History
           // (or a newer live frame which raced this page) may keep it open. An
-          // exact idle page must settle stale cache/detail Plan state too.
+          // exact idle page must settle stale cache/detail children too.
           finishCompletedTurnChildren(
             merged, preserveProjectionOpenPlans, isClaudeHistory);
           return merged;
@@ -4428,11 +4440,16 @@ function reduceEvent(
       const liveDetailScopeMatches = e.detail === "summary"
         && !base.historyInvalidated
         && (base.historyRevision == null
-          || base.historyRevision === e.revision)
+          || base.historyRevision === e.revision || aliasRevisionChanged)
         && (e.generation != null
           ? base.historyGeneration == null
             || base.historyGeneration === e.generation
           : base.historyGeneration == null);
+      if (liveDetailScopeMatches) {
+        // Explanations are independent from heavyweight detail/cache paint.
+        // A later summary refresh must keep a previously restored exact cause.
+        turns = restoreTurnInterruptionCauses(turns, base.turns);
+      }
       if (liveDetailScopeMatches && base.liveDetailTurnIds.length > 0) {
         const observedIds = new Set(base.liveDetailTurnIds);
         turns = restoreObservedLiveTurnDetails(
@@ -4657,6 +4674,16 @@ function reduceEvent(
       }
       let historyBrowse = state.historyBrowse;
       let retainedHistoryBrowse = state.retainedHistoryBrowse;
+      if (aliasRevisionChanged && historyBrowse?.sid === sid
+          && historyBrowse.revision === base.historyRevision
+          && historyBrowse.generation === e.generation) {
+        // Only additive aliases changed. Keep rows and the reading lifetime,
+        // but revoke old in-flight page/detail work and use the new revision.
+        historyBrowse = {
+          ...historyBrowse, revision: e.revision,
+          windowEpoch: historyBrowse.windowEpoch + 1, latestDirty: true,
+        };
+      }
       if (historyBrowse?.sid === sid) {
         if (historyBrowse.revision !== e.revision
             || (e.generation != null
@@ -4710,6 +4737,8 @@ function reduceEvent(
               ? false : base.historyInvalidated,
             historyRevision: acceptsControlState
               ? e.revision : base.historyRevision,
+            historyContinuityRevision: acceptsControlState
+              ? e.continuity_revision ?? e.revision : base.historyContinuityRevision,
             pendingHistoryRevision: acceptsControlState
               ? null : base.pendingHistoryRevision,
             historyGeneration: nextHistoryGeneration,
@@ -4922,6 +4951,8 @@ function reduceEvent(
         reconcileAuthoritativeBackgroundProcessLevel(rt);
       });
     }
+    case "turn_file_changes_page":
+    case "files_listed":
     case "agent_detail":
       // Agent detail is a requester-correlated side panel projection. App owns
       // it separately so it can never mutate the parent conversation runtime.
@@ -5022,7 +5053,7 @@ function reduceEvent(
         kind: "gitdiff", sections: parseGitDiff(e.diff),
       } };
     case "file_preview":
-      if (!state.artifact || !["md", "file", "html", "image", "pdf"].includes(state.artifact.kind)
+      if (!state.artifact || !["md", "file", "html", "image", "pdf", "audio", "spreadsheet"].includes(state.artifact.kind)
           || state.artifact.requestId !== e.request_id
           || state.artifact.sid !== (e.sid ?? state.focusedSid)) return state;
       return { ...state, artifact: {
@@ -5348,6 +5379,20 @@ function reduceEvent(
       });
     case "effort":
       return patch(state, e.sid, (rt) => { rt.effort = e.effort; });
+    case "codex_context":
+      return patch(state, e.sid, (rt) => {
+        const previous = rt.codexContext;
+        rt.codexContext = e;
+        if ((previous != null && (
+          previous.applied_max_context_tokens !== e.applied_max_context_tokens
+          || previous.applied_threshold_tokens !== e.applied_threshold_tokens))
+            || (previous == null && !e.pending && e.applied_max_context_tokens != null
+              && rt.contextReport != null && rt.contextReport.max_tokens !== e.applied_max_context_tokens)) {
+          rt.contextReport = null;
+          rt.contextExactReport = null;
+          rt.contextError = null;
+        }
+      });
     case "auto_compact":
       return patch(state, e.sid, (rt) => {
         const previous = rt.autoCompact;
@@ -5463,7 +5508,8 @@ function reduceEvent(
     case "context_report":
       return patch(state, e.sid, (rt) => {
         rt.contextReport = e;
-        if (e.available !== false && e.source !== "recent_turn") {
+        if (e.available !== false && (e.source !== "recent_turn"
+            || !rt.contextExactReport || rt.contextExactReport.source === "recent_turn")) {
           rt.contextExactReport = e;
         }
         // Reports are broadcast so every viewer benefits from the fresh value,
@@ -6034,7 +6080,7 @@ function reduceEvent(
     case "assistant_msg_start":
       return patch(state, e.sid, (rt) => {
         const turns = cloneTurns(rt.turns);
-        const explicit = findTurnByEngineId(turns, e.turn_id);
+        const explicit = findMessageEventOwner(turns, e.message_id, e.turn_id);
         const t = explicit ?? (!e.turn_id
           ? findTurnOwningMessage(turns, e.message_id)
             ?? preSteerTurn(rt, turns)
@@ -6044,7 +6090,8 @@ function reduceEvent(
         // An explicit owner outside the materialized page must never fall
         // through to a newer live tail. Canonical History will restore it.
         if (!t) { rt.turns = turns; return; }
-        const detachedBackground = e.background === true && t.done;
+        const detachedBackground = t.done && (e.background === true
+          || (!!rt.liveOwner && !turnHasIdentityAlias(t, rt.liveOwner.turnId)));
         if (!detachedBackground) {
           markTurnAsLive(rt, t.id, boundCompletedTurns, e.seq);
         }
@@ -6076,7 +6123,7 @@ function reduceEvent(
     case "delta":
       return patch(state, e.sid, (rt) => {
         const turns = cloneTurns(rt.turns);
-        const explicit = findTurnByEngineId(turns, e.turn_id);
+        const explicit = findMessageEventOwner(turns, e.message_id, e.turn_id);
         const t = explicit ?? (!e.turn_id
           ? findTurnOwningMessage(turns, e.message_id)
             ?? preSteerTurn(rt, turns)
@@ -6084,7 +6131,8 @@ function reduceEvent(
               rt, turns, e.message_id, eventTimestampMs(e.ts), e.seq)
           : undefined);
         if (!t) { rt.turns = turns; return; }
-        const detachedBackground = e.background === true && t.done;
+        const detachedBackground = t.done && (e.background === true
+          || (!!rt.liveOwner && !turnHasIdentityAlias(t, rt.liveOwner.turnId)));
         if (!detachedBackground) {
           markTurnAsLive(rt, t.id, boundCompletedTurns, e.seq);
         }
@@ -6238,14 +6286,15 @@ function reduceEvent(
     case "assistant_msg_end":
       return patch(state, e.sid, (rt) => {
         const turns = cloneTurns(rt.turns);
-        const explicit = findTurnByEngineId(turns, e.turn_id);
+        const explicit = findMessageEventOwner(turns, e.message_id, e.turn_id);
         const candidates = e.turn_id ? [explicit] : turns;
         for (const t of candidates) {
           if (!t) continue;
           const b = mutableTurnBlocks(t).find((b) => b.kind === "text"
             && b.message_id === e.message_id) as TextBlock | undefined;
           if (b) {
-            const detachedBackground = e.background === true && t.done;
+            const detachedBackground = t.done && (e.background === true
+              || (!!rt.liveOwner && !turnHasIdentityAlias(t, rt.liveOwner.turnId)));
             if (!detachedBackground) {
               markTurnAsLive(rt, t.id, boundCompletedTurns, e.seq);
             }
@@ -6408,6 +6457,16 @@ function reduceEvent(
         }
         t.progress = undefined;
         if (boundCompletedTurns) limitTurnBlocks(t);
+        rt.turns = turns;
+      });
+    case "turn_file_changes":
+      return patch(state, e.sid, (rt) => {
+        const turns = cloneTurns(rt.turns);
+        const turn = findBoundLiveTaskOwner(rt, turns, e.turn_id, e.seq, true)
+          ?? findTurnByEngineId(turns, e.turn_id);
+        if (!turn) return;
+        turn.fileChanges = e.changes;
+        turn.fileChangesTurnId = e.turn_id;
         rt.turns = turns;
       });
     case "turn_diff":
@@ -6576,6 +6635,9 @@ function reduceEvent(
           t.progress = undefined;
           if (e.result.subtype === "error_during_execution") t.interrupted = true;
           if (e.result.is_error) {
+            if (e.result.subtype !== "error_during_execution") {
+              t.error ??= "本次回复未完成，请重试。";
+            }
             t.terminalSource = e.result.subtype === "error_during_execution"
               ? (rt.state === "interrupting" || rt.state === "draining")
                 ? "remote_interrupt"

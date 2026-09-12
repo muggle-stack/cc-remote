@@ -69,8 +69,8 @@ assert.doesNotMatch(appSource,
   "reopening an idle popover must retry a previously deferred native read");
 assert.match(composerSource, /contextExactReport/,
   "the popover must retain its last exact report while a native refresh loads");
-assert.match(contextPopoverSource, /正在读取真实上下文/,
-  "the lazy popover must expose a native-read loading state");
+assert.doesNotMatch(contextPopoverSource, /正在读取真实上下文/,
+  "native context reads must refresh without a loading notice");
 assert.doesNotMatch(composerSource + contextPopoverSource,
   /最近一轮|最近一次|容量未知/,
   "transcript estimates must not masquerade as the popover's real context");
@@ -222,6 +222,49 @@ try {
     ts: 10,
     ...body,
   } as ServerEvent);
+
+  const codexContextSid = "codex-applied-context";
+  const codexOldReport = event({ type: "context_report", sid: codexContextSid,
+    total_tokens: 142_045, max_tokens: 258_400, percentage: 55, categories: [] });
+  let codexContextState = reduce({
+    ...initialState,
+    focusedSid: codexContextSid,
+    runtimes: { [codexContextSid]: createRuntime() },
+  }, { type: "event", event: codexOldReport });
+  const codexSetting = event({ type: "codex_context", sid: codexContextSid,
+    max_context_tokens: 400_000, applied_max_context_tokens: null,
+    applied_threshold_tokens: null, pending: true });
+  codexContextState = reduce(codexContextState, { type: "event", event: codexSetting });
+  assert.equal(codexContextState.runtimes[codexContextSid].contextReport, codexOldReport);
+  codexContextState = reduce(codexContextState, { type: "event", event: {
+    ...codexSetting, applied_max_context_tokens: 400_000,
+    applied_threshold_tokens: 378_947, pending: false,
+  } as ServerEvent });
+  assert.equal(codexContextState.runtimes[codexContextSid].contextReport, null,
+    "accepted Codex settings clear the previous configuration's capacity");
+  const codexFreshReport = event({ ...codexOldReport, max_tokens: 400_000, percentage: 35.51 });
+  codexContextState = reduce(codexContextState, { type: "event", event: codexFreshReport });
+  assert.equal(codexContextState.runtimes[codexContextSid].contextReport, codexFreshReport);
+  codexContextState = reduce(codexContextState, { type: "event", event: {
+    ...codexSetting, max_context_tokens: null, applied_max_context_tokens: 400_000,
+    applied_threshold_tokens: 378_947, pending: true,
+  } as ServerEvent });
+  assert.equal(codexContextState.runtimes[codexContextSid].contextReport, codexFreshReport,
+    "a pending reset retains the still-applied capacity");
+  codexContextState = reduce(codexContextState, { type: "event", event: {
+    ...codexSetting, max_context_tokens: 300_000, applied_max_context_tokens: 300_000,
+    applied_threshold_tokens: 284_211, pending: false,
+  } as ServerEvent });
+  assert.equal(codexContextState.runtimes[codexContextSid].contextReport, null,
+    "lowering Codex capacity must clear the old larger window too");
+  const coldState = reduce({ ...initialState,
+    focusedSid: codexContextSid,
+    runtimes: { [codexContextSid]: { ...createRuntime(), contextReport: codexFreshReport } },
+  }, { type: "event", event: event({ ...codexSetting,
+    max_context_tokens: 300_000, applied_max_context_tokens: 300_000,
+    applied_threshold_tokens: 284_211, pending: false }) });
+  assert.equal(coldState.runtimes[codexContextSid].contextReport, null,
+    "the first accepted Codex capacity invalidates a larger cached report");
 
   assert.equal(createRuntime().autoCompact, null,
     "a session must not claim a mode before the wrapper reports it");

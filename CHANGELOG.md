@@ -4,6 +4,67 @@
 
 ## Unreleased
 
+- Backport shared improvements from the DSH branch without adding a third
+  engine (protocol v66): rounded Claude/Codex Goal dialogs with native save
+  confirmation and mobile keyboard recovery; directory links open `/open`, and
+  XLSX previews show saved cells, sheet tabs and original-file downloads.
+- Keep streamed replies updating after steering, preserve manually expanded
+  process details, and support Enter/Shift+Enter/Escape in assistant questions.
+  Retain valid context readings during transient refresh failures, use a compact
+  custom engine menu, and allow failed Skills reads to retry.
+- Reorganize the bilingual setup documentation around source deployment and
+  document shared Codex App, CLI and Wrapper daemons on macOS and Linux.
+
+- Align the Codex context gauge with native compaction estimates (protocol v62).
+  Match bounded local log reads to the account, thread and latest rollout sample;
+  invalidate estimates after compaction and show recent request usage without a
+  percentage when no matching estimate is available. Refresh active visible sessions.
+- Set a per-session maximum usable Codex context (protocol v60), validated against
+  the native model catalog. A 300k setting means a 300,000-token window, with
+  compaction near 95% subject to native limits. Preserve existing saved numbers,
+  report applied capacity separately from compaction, and apply window reductions
+  only when the native thread can safely reload without disconnecting other clients.
+- Add a session file browser through the folder button and `/open [path]`, with paged directories and the existing file preview sidebar.
+
+- Play linked audio directly in desktop and mobile file previews (protocol v58),
+  with native playback/seeking, speed selection, original-file download, and
+  playback cleanup on close or file changes. Preserve the existing 8 MiB limit,
+  exact-file authorization and requester-only transport; allow media Blob URLs
+  in the application CSP without expanding script or network permissions.
+- Speed up Codex history reads without changing wire/UI behavior: prefetch one
+  older summary page after an explicit idle-session read, reuse bounded pages
+  only while the exact rollout fingerprint is unchanged, and batch native
+  detail-cursor skips. Keep live heads fresh, discard changed/invalidated
+  snapshots, isolate accounts, and preserve normal errors on cache misses.
+- Keep already-painted Codex history and reading position when a send/steer
+  learns message-ID aliases. Separate additive projection continuity from
+  rollback/restart invalidation, revoke stale page requests without closing the
+  reading view, and route background summary refreshes through the same page
+  provider as explicit history reads so older-page cursors remain usable.
+- Restore per-turn changed-file summaries for idle and historical sessions across
+  official Codex pagination, native rollout fallback and cached full-history
+  reads. Recover both legacy patch records and current `FileChange` items without
+  reading the worktree or expanding tool details. Distinguish file types with
+  quiet badges, prominent filenames and shortened directory labels.
+- Page each turn's changed files in batches of 64 with scoped load-more/retry
+  actions and exact totals. Capture the native file index before tool-card
+  clipping, store per-file patches separately and read only the requested diff.
+  Session/version changes discard stale pages; later edits cannot alter a
+  completed turn's revision. Resource limits remain explicit (4096 indexed files
+  and bounded per-file/per-turn evidence), never fake load-more links.
+- Preserve Codex patch truncation through live and historical diff archives.
+  Never present clipped patches as complete; retain
+  valid native diffs when only tool output was clipped. Rebuild affected derived
+  caches and revalidate older per-tool captures without deleting native history,
+  images or immutable archive rows.
+- Add immutable, session-scoped per-turn file-diff revisions (protocol v57)
+  in a private Wrapper archive independent of the history cache. Fold each
+  turn's file list, compose repeated edits when native evidence is complete,
+  and label missing/truncated history without substituting the current worktree.
+  Preserve reading position on send, keep code-copy controls in the visible
+  block, and remove the empty working-footer gap. Correct Claude task-terminal
+  ownership and expose native model fallback notices in live and cached history.
+  Clarify empty-system-content 400 errors without changing transcripts or retrying.
 - Fix home-directory page discovery (protocol v55): explicitly referenced HTML
   and verified, user-owned Python static-server links become private session
   previews without per-project registration. Preserve manual publications,

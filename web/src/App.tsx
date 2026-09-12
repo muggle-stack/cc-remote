@@ -9,6 +9,7 @@ import {
   type TouchEvent,
 } from "react";
 import { RelayWs, sessionScopeKey, type EventOwnership } from "./ws";
+import type { QueryAcceptanceResult } from "./outbox";
 import { RemoteViewerContext, useRemoteViewerLinks } from "./remote-viewer-context";
 import { ViewerPagesProvider } from "./components/ViewerPagesProvider";
 import { MANUAL_UNREAD_STORAGE } from "./manual-unread-storage";
@@ -27,37 +28,36 @@ import {
 } from "./reducer";
 import type { Turn } from "./domain/conversation";
 import { uuid } from "./util";
+import { TurnFilePageRequests, type LoadTurnFilePage } from "./turn-file-pages";
 import { Icon } from "./icons";
 import { ChatView } from "./components/ChatView";
 import { Composer } from "./components/Composer";
-import {
-  QueuedQueryDialog,
-  type QueuedQueryEditor,
-} from "./components/QueuedQueryDialog";
+import type { QueuedQueryEditor } from "./components/QueuedQueryDialog";
 import { ReconnectBanner } from "./components/ReconnectBanner";
 import { NoticeStack } from "./components/NoticeStack";
 import { presentCommandProblem } from "./problem-presentation";
 import { LoginForm } from "./components/LoginForm";
-import { DirPicker } from "./components/DirPicker";
 import {
   compatibleNewChatEffort,
   newChatCatalogRequest,
-  NewChatView,
   reconcileNewChatSelection,
   resolveNewChatLocalDefaults,
-} from "./components/NewChatView";
+} from "./new-chat-selection";
+const NewChatView = lazy(() => import("./components/NewChatView").then(m => ({ default: m.NewChatView })));
 import { QuestionSheet } from "./components/QuestionSheet";
 import { WorkDashboardSheet } from "./components/WorkDashboardSheet";
 import type { HookDraft, SkillDraft } from "./components/CapabilitiesSheet";
 import { TerminalControl } from "./components/TerminalControl";
 import { DeviceSheet, type PairingState, type RemoteDevice } from "./components/DeviceSheet";
 import { HeaderMenu } from "./components/HeaderMenu";
+import { EngineSelector } from "./components/EngineSelector";
 import {
   claudeProfileIdForSession,
   claudeProfilePresentation,
   codexProfileIdForSession,
   codexProfilePresentation,
 } from "./codex-profile-presentation";
+import type { GoalApi } from "./goal-api";
 import { parseGoalCommand } from "./goal-command";
 import {
   BTW_PANEL_SCOPES_KEY, btwPanelScopeKey, readBtwPanelScopes,
@@ -70,6 +70,7 @@ import {
   goalUiScopeKey,
   readGoalUiPreferences,
   reconcileGoalUiPreference,
+  shouldRecoverGoalUi,
   rekeyGoalUiPreference,
   rememberGoalUi,
   resetGoalDismissMigrationTracking,
@@ -248,7 +249,7 @@ import {
   activeTurnCandidateIds,
   displayActiveTurnOwnerId,
 } from "./process-blocks";
-import type { AgentDetail } from "./protocol";
+import type { AgentDetail, FilesListed } from "./protocol";
 import type { AgentDetailSelection } from "./components/AgentDetailController";
 import type { RightPanelView } from "./components/PanelTabs";
 
@@ -263,6 +264,13 @@ const BtwPanel = lazy(() => import("./components/BtwPanel").then(
 ));
 const ArtifactPanel = lazy(() => import("./components/ArtifactPanel").then(
   ({ ArtifactPanel: Panel }) => ({ default: Panel }),
+));
+const SessionFilesPanel = lazy(() => import("./components/SessionFilesPanel"));
+const DirPicker = lazy(() => import("./components/DirPicker").then(
+  ({ DirPicker }) => ({ default: DirPicker }),
+));
+const QueuedQueryDialog = lazy(() => import("./components/QueuedQueryDialog").then(
+  ({ QueuedQueryDialog: Dialog }) => ({ default: Dialog }),
 ));
 const RemoteViewerPanel = lazy(() => import("./components/RemoteViewerPanel").then(
   ({ RemoteViewerPanel: Panel }) => ({ default: Panel }),
@@ -346,6 +354,14 @@ export default function App() {
   const [rightView, setRightView] = useState<RightPanelView>(
     btwPanelScopes.length ? "btw" : "diff");
   const [agentPanel, setAgentPanel] = useState<AgentDetailSelection | null>(null);
+  const [fileBrowser, setFileBrowser] = useState<{
+    sid: string; machineId: string; engine: string; space: string;
+    path: string; preview: boolean; id: string;
+  } | null>(null);
+  const filesListenerRef = useRef<((message: FilesListed) => void) | null>(null);
+  const listenFiles = useCallback((listener: ((message: FilesListed) => void) | null) => {
+    filesListenerRef.current = listener;
+  }, []);
   const [viewerSelections, setViewerSelections] = useState(() => readViewerSelections(sessionStorage));
   const [viewerUrl, setViewerUrl] = useState<{ key: string; href: string; openId: string } | null>(null);
   useEffect(() => writeViewerSelections(sessionStorage, viewerSelections), [viewerSelections]);
@@ -453,6 +469,15 @@ export default function App() {
   const stateRef = useRef(state);
   stateRef.current = state;
   const wsRef = useRef<RelayWs | null>(null);
+  const goalApiRef = useRef<GoalApi | null>(null);
+  const getGoalApi = useCallback(async () => {
+    const transport = wsRef.current;
+    const { GoalApi } = await import("./goal-api");
+    if (!transport || transport !== wsRef.current) throw new Error("连接已切换，请重试。");
+    return goalApiRef.current ??= new GoalApi(() => wsRef.current);
+  }, []);
+  const [permissionProfileRequests, setPermissionProfileRequests] =
+    useState<Record<string, string>>({});
   const archivedBrowseRef = useRef<string | null>(null);
   // Reducer state becomes visible after React commits. Keep the command id in a
   // synchronous ref as well so a close/reopen double click (or two idle frames
@@ -531,6 +556,7 @@ export default function App() {
     codexProfileId?: string | null;
   } | null>(null);
   const historyRequestsRef = useRef(new HistoryRequestCoordinator());
+  const turnFileRequestsRef = useRef(new TurnFilePageRequests());
   const terminalHistoryRepairRef = useRef<Map<
     string, TerminalHistoryRepairAttempt
   >>(new Map());
@@ -889,7 +915,11 @@ export default function App() {
   const selectViewer = (selection: ViewerSelection | null) => {
     if (viewerKey) setViewerSelections((current) => setViewerSelection(current, viewerKey, selection));
   };
+  const filesShowing = fileBrowser?.sid === visibleParentSid
+    && fileBrowser?.machineId === machineId && fileBrowser?.engine === engine
+    && fileBrowser?.space === space;
   const visibleRightPanel = viewerShowing ? "viewer" : agentPanel ? "agent"
+    : filesShowing ? "files"
     : rightView === "btw" && btwShowing ? "btw"
       : state.artifact ? "diff" : btwShowing ? "btw" : null;
   // Questions, hydration and completion receipts must agree with the rendered
@@ -944,6 +974,7 @@ export default function App() {
     }),
   ) as Record<string, CompletionBadgeKind>;
   const activeScopeKey = sessionScopeKey(machineId, engine, space);
+  useEffect(() => () => goalApiRef.current?.reset(), [activeScopeKey]);
   const activeWorkDashboard = workDashboardMachineId === machineId
     ? workDashboards[engine] ?? null
     : null;
@@ -1158,7 +1189,7 @@ export default function App() {
       ? {
           revealed: rt.goalDismissed ? false : storedGoalPreference.hiddenGoal
             ? !!rt.goal && storedGoalPreference.hiddenGoal !== storedGoalIdentity
-            : true,
+            : !!rt.goal || shouldRecoverGoalUi(storedGoalPreference),
           open: false,
           loading: !rt.goal,
         }
@@ -1202,6 +1233,8 @@ export default function App() {
     setGoalUiByScope((current) => {
       if (current[focusedGoalScopeKey]?.open) return current;
       const preference = goalUiPreferencesRef.current[focusedGoalScopeKey];
+      const runtime = stateRef.current.runtimes[focusedSid];
+      const goal = runtime?.goal;
       return {
         ...current,
         [focusedGoalScopeKey]: {
@@ -1209,9 +1242,12 @@ export default function App() {
           // authoritative non-null response reveals it unless the wrapper says
           // this exact generation was dismissed. Legacy local dismissals are
           // migrated when that response arrives.
-          revealed: !!preference?.known && !preference.hiddenGoal,
+          revealed: goal
+            ? !runtime.goalDismissed
+              && preference?.hiddenGoal !== goalStableIdentity(goal)
+            : shouldRecoverGoalUi(preference),
           open: false,
-          loading: true,
+          loading: !goal,
         },
       };
     });
@@ -2044,9 +2080,8 @@ export default function App() {
 
   // Engine and Work/Code switches are navigation. Each surface restores the
   // session that was last open there instead of silently starting a new one.
-  const toggleEngine = () => {
+  const toggleEngine = (nextEngine: Engine) => {
     cancelPendingNotificationTarget();
-    const nextEngine: Engine = engine === "codex" ? "claude" : "codex";
     const nextSpace = spacesByEngineRef.current[nextEngine];
     pendingCreateRef.current = null;
     setCreateError(null);
@@ -2080,10 +2115,13 @@ export default function App() {
   useEffect(() => {
     if (!authed) return;
     const historyRequests = historyRequestsRef.current;
+    const turnFileRequests = turnFileRequestsRef.current;
     const contextRequestLaunches = contextRequestLaunchesRef.current;
     const contextDeferredRetryAttempts =
       contextDeferredRetryAttemptsRef.current;
     const lifecycleEpoch = ++wsLifecycleEpochRef.current;
+    setPermissionProfileRequests((current) =>
+      Object.keys(current).length ? {} : current);
     didInitFocusRef.current = false;  // re-arm initial-focus for this connection lifecycle
     authoritativeSurfaceListsRef.current.delete(`${spaceRef.current}:${engineRef.current}`);
 
@@ -2159,6 +2197,8 @@ export default function App() {
       const ws = new RelayWs({
         onEvent: (msg, ownership) => {
           if (!acceptsLifecycle()) return;
+          if (turnFileRequestsRef.current.accept(msg)) return;
+          if (goalApiRef.current?.accept(msg)) return;
           const settlesContextRequest = !!(
             (msg.type === "context_report"
                 || (msg.type === "error" && msg.code !== "wrapper_offline"))
@@ -2324,6 +2364,14 @@ export default function App() {
               return next;
             });
           } else if (msg.type === "error" && msg.request_id) {
+            const coordinator = skillCatalogRequestsRef.current;
+            const failedSkills = msg.code === "wrapper_offline"
+              ? null : coordinator?.fail(msg.request_id);
+            if (failedSkills && failedSkills.key === focusedSkillScopeRef.current?.key
+                && !coordinator?.hasPendingRead(failedSkills.key, false)
+                && !coordinator?.hasPendingMutation(failedSkills.key)) {
+              setCapabilitiesLoading(false);
+            }
             const failedMigration =
               goalDismissMigrationByRequestRef.current.get(msg.request_id);
             if (failedMigration && msg.code !== "wrapper_offline") {
@@ -2686,7 +2734,13 @@ export default function App() {
               recoverableReads.complete(retryKey);
             }
             if (msg.before) {
-              if (completedHistory.stale.length > 0
+              if (completedHistory.stale.some((waiter) => {
+                const browse = stateRef.current.historyBrowse;
+                return browse?.sid === msg.session_id
+                  && browse.scopeKey === waiter.scopeKey
+                  && browse.viewId === waiter.viewId
+                  && browse.windowEpoch === waiter.windowEpoch;
+              })
                   && stateRef.current.focusedSid === msg.session_id) {
                 // The cursor came from an obsolete revision/generation. Exit
                 // that read-only browse lifetime and refresh the canonical head
@@ -3490,6 +3544,20 @@ export default function App() {
               || (msg.type === "error"
                 && msg.request_id === statusRuntimeBeforeEvent.statusRequestId)
             );
+          if (msg.type === "files_listed") {
+            filesListenerRef.current?.(msg);
+            return;
+          }
+          if (msg.type === "file_preview" && msg.directory && !msg.error) {
+            const current = stateRef.current;
+            const artifact = current.artifact;
+            if (artifact && msg.sid && artifact.sid === msg.sid && artifact.requestId === msg.request_id) {
+              dispatch({ type: "clear_artifact" });
+              setFileBrowser({ sid: msg.sid, machineId, engine: engineRef.current, space: spaceRef.current,
+                path: msg.path, preview: false, id: uuid() });
+            }
+            return;
+          }
           if (msg.type === "agent_detail") {
             agentDetailListenerRef.current?.(msg);
             // Requester-scoped details never belong in the conversation
@@ -3606,6 +3674,8 @@ export default function App() {
           if (!acceptsLifecycle()) return;
           dispatch({ type: "conn", connState: s, detail });
           if (s !== "connected") {
+            turnFileRequestsRef.current.clear();
+            goalApiRef.current?.reset();
             skillCatalogRequestsRef.current?.resetReads();
             // The fork result is authoritative only for this live connection.
             // A reconnect will obtain a fresh native SessionList, so do not
@@ -3644,6 +3714,7 @@ export default function App() {
         },
         onAuthFail: () => {
           if (!acceptsLifecycle()) return;
+          turnFileRequestsRef.current.clear();
           setAuthReady(false);
           clearLegacyAuthMarkers(localStorage);
           pendingCreateRef.current = null;
@@ -3703,8 +3774,17 @@ export default function App() {
           if (!acceptsLifecycle()) return;
           dispatch({ type: "prune_runtimes", protectedSids });
         },
+        onCommandCompleted: (commandId) => {
+          if (!acceptsLifecycle()) return;
+          setPermissionProfileRequests((current) =>
+            Object.values(current).includes(commandId)
+              ? Object.fromEntries(Object.entries(current)
+                .filter(([, id]) => id !== commandId))
+              : current);
+        },
         onWrapperGenerationChanged: () => {
           if (!acceptsLifecycle()) return;
+          turnFileRequestsRef.current.clear();
           setAgentPanel(null);
           agentDetailListenerRef.current = null;
           clearHistoryDetailRequests();
@@ -3755,6 +3835,7 @@ export default function App() {
       if (wsRef.current === effectWs) wsRef.current = null;
       historyRequests.clear();
       clearHistoryDetailRequests();
+      turnFileRequests.clear();
       recoverableReads.clear();
       contextRequestLaunches.clear();
       contextDeferredRetryAttempts.clear();
@@ -4206,12 +4287,21 @@ export default function App() {
         || focusedSession?.tag === "archived"
         || state.connState !== "connected" || !state.wrapperOnline) return;
     const contextRuntime = stateRef.current.runtimes[focusedSid];
-    if (contextRuntime?.contextRequestId) return;
     const deferred = contextRuntime?.contextRefreshDeferred === true;
-    if (deferred
-        && (focusedEngine !== "claude"
-          || contextRuntime?.state !== "idle")) return;
-    sendContextRequestTo(focusedSid, deferred);
+    if (!contextRuntime?.contextRequestId
+        && (!deferred || focusedEngine === "claude" && contextRuntime?.state === "idle")) {
+      sendContextRequestTo(focusedSid, deferred);
+    }
+    // A long Codex turn can compact before TurnEnd. These visible-session
+    // reads are bounded and never invoke a model or resume an engine.
+    if (focusedEngine !== "codex") return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible"
+          && stateRef.current.runtimes[focusedSid]?.state === "running") {
+        sendContextRequestTo(focusedSid, false);
+      }
+    }, 5000);
+    return () => window.clearInterval(timer);
   }, [
     authed,
     focusedEngine,
@@ -4557,15 +4647,12 @@ export default function App() {
       files,
       ts: Date.now(),
     });
-    if (stateRef.current.historyBrowse?.sid === focusedSid) {
-      dispatch({ type: "return_to_latest", sid: focusedSid });
-    }
     return true;
   };
   const replyAsyncQuestion = (
     sid: string, prompt: string,
     whenIdle: (text: string) => boolean, whenRunning: (text: string) => boolean,
-  ): boolean => {
+  ): Promise<QueryAcceptanceResult> | null => {
     const current = stateRef.current;
     const ws = wsRef.current;
     const runtime = current.runtimes[sid];
@@ -4573,10 +4660,14 @@ export default function App() {
     // cards. A second answer must not enter the composer's replace-query path.
     if (!ws || current.connState !== "connected" || !current.wrapperOnline
         || !runtime || ws.pendingQueryFor(sid) || runtime.acceptancePending
+        || (runtime.state === "idle" && (runtime.queue.length || runtime.pendingSend))
         || (runtime.control
-          ? sessionControlLocksInput(runtime.control) : runtime.external)) return false;
-    return runtime.state === "running" ? whenRunning(prompt)
+          ? sessionControlLocksInput(runtime.control) : runtime.external)) return null;
+    const sent = runtime.state === "running" ? whenRunning(prompt)
       : runtime.state === "idle" ? whenIdle(prompt) : false;
+    if (!sent) return null;
+    const messageId = ws.pendingQueryFor(sid);
+    return messageId ? ws.queryReceiptFor(sid, messageId) : null;
   };
   const loadOlderHistoryPage = (
     anchorTurnId?: string,
@@ -4876,7 +4967,12 @@ export default function App() {
     wsRef.current?.sendGetPermissionProfiles();
   };
   const setPermissionProfile = (profile: string) => {
-    wsRef.current?.sendSetPermissionProfile(profile);
+    const commandId = wsRef.current?.sendSetPermissionProfile(profile);
+    if (commandId && focusedSid) {
+      setPermissionProfileRequests((current) => ({
+        ...current, [JSON.stringify([machineId, space, focusedEngine, focusedSid])]: commandId,
+      }));
+    }
   };
   const setWebSearch = (mode: CodexWebSearchMode) => {
     wsRef.current?.sendSetWebSearch(mode);
@@ -5052,16 +5148,33 @@ export default function App() {
       file: files.length === 1 ? files[0] : `本轮改动 · ${files.length} 个文件`,
       sid: focusedSid,
       kind: "gitdiff",
-      sections: parseGitDiff(diff),
+      sections: parseGitDiff(diff).filter((section) => files.includes(section.file)),
     } });
+  };
+  const openArchivedDiff = (turnId: string, revision: string, file: string) => {
+    if (!confirmArtifactDiscard()) return;
+    const requestId = wsRef.current?.sendGetDiff(file, theme, turnId, revision, focusedEngine) ?? null;
+    if (!requestId) return;
+    closeViewer();
+    setRightView("diff");
+    dispatch({ type: "open_artifact_loading", file, sid: focusedSid, requestId });
+  };
+  const loadTurnFilePage: LoadTurnFilePage = (turnId, revision, offset, signal) => {
+    if (!focusedSid) return Promise.reject(new Error("请先选择会话。"));
+    return turnFileRequestsRef.current.request({
+      sid: focusedSid, engine: focusedEngine, turnId, revision, offset,
+    }, () => wsRef.current?.sendGetTurnFileChanges(
+      focusedSid, focusedEngine, turnId, revision, offset) ?? null, signal);
   };
   const previewFileForSid = (
     targetSid: string | null,
     file: string,
     line?: number,
+    fromBrowser = false,
   ): boolean => {
     if (!targetSid) return false;
     if (!confirmArtifactDiscard()) return false;
+    if (!fromBrowser) setFileBrowser(null);
     closeViewer();
     const requestId = uuid();
     if (!wsRef.current?.sendGetFilePreview(
@@ -5096,6 +5209,14 @@ export default function App() {
   const previewArtifactFile = (file: string, line?: number) =>
     previewFileForSid(state.artifact?.sid ?? focusedSid, file, line);
   const previewMarkdown = (file: string) => previewFile(file);
+  const openFiles = (path = ".") => {
+    if (!focusedSid || !confirmArtifactDiscard()) return;
+    closeViewer();
+    setAgentPanel(null);
+    dispatch({ type: "clear_artifact" });
+    setFileBrowser({ sid: focusedSid, machineId, engine, space,
+      path, preview: false, id: uuid() });
+  };
   const loadPreviewAsset = (file: string, previewId: string): boolean => {
     const targetSid = state.artifact?.sid ?? focusedSid;
     if (!targetSid) return false;
@@ -5296,6 +5417,8 @@ export default function App() {
   };
   // Header tab switch between the two right-slot views (opening the target lazily).
   const switchRight = (v: RightPanelView) => {
+    if (fileBrowser && !confirmArtifactDiscard()) return;
+    setFileBrowser(null);
     if (v === "diff") {
       setRightView("diff");
       if (!state.artifact) getDiff("");
@@ -5483,7 +5606,7 @@ export default function App() {
         onForkWorktree={openForkWorktree}
         onMigrate={openSessionMigration}
       /></Suspense>
-      <DirPicker
+      {dirPickerOpen && <Suspense fallback={null}><DirPicker
         open={dirPickerOpen}
         path={state.dirPicker?.path ?? null}
         parent={state.dirPicker?.parent ?? null}
@@ -5492,8 +5615,8 @@ export default function App() {
         onBrowse={(p) => wsRef.current?.sendListDir(p) ?? null}
         onConfirm={(cwd) => { if (state.newChat) dispatch({ type: "set_new_chat_cwd", cwd, cwdSource: "explicit" }); setDirPickerOpen(false); }}
         onClose={() => setDirPickerOpen(false)}
-      />
-      <DirPicker
+      /></Suspense>}
+      {migrateSession !== null && <Suspense fallback={null}><DirPicker
         key={`migration-${migrateSession?.session_id ?? "closed"}-${migrateSession?.cwd ?? "unset"}`}
         open={migrateSession !== null}
         path={state.dirPicker?.path ?? null}
@@ -5509,7 +5632,7 @@ export default function App() {
         onBrowse={(p) => wsRef.current?.sendListDir(p) ?? null}
         onConfirm={submitSessionMigration}
         onClose={closeSessionMigration}
-      />
+      /></Suspense>}
       <section className={`pane ${space}-pane`}>
         <header className={`c-head ${space}-head`}>
           <div className="titlewrap">
@@ -5547,8 +5670,7 @@ export default function App() {
             <Icon name="devices" size={18} />
             <span>{activeDevice?.label ?? machineId}</span><i />
           </button>
-          <button className="engine-toggle" onClick={toggleEngine} aria-label="切换新会话引擎"
-            title="新建会话使用的引擎">{engine === "codex" ? "◇ Codex" : "✳ Claude"}</button>
+          <EngineSelector engine={engine} onChange={toggleEngine} />
           <HeaderMenu
             engine={engine}
             theme={theme}
@@ -5558,6 +5680,7 @@ export default function App() {
             onNotificationMode={updateNotificationMode}
             onOpenUsageActivity={openUsageActivity}
             onOpenViewer={visibleParentSid ? () => openViewer() : undefined}
+            onOpenFiles={visibleParentSid && !archivedBrowse && state.wrapperOnline ? () => openFiles() : undefined}
             onToggleTheme={toggleTheme}
             onLogout={() => void logout()}
           />
@@ -5580,7 +5703,7 @@ export default function App() {
             <span className="loading-tx">正在恢复会话</span>
           </div>
         ) : state.newChat ? (
-          <NewChatView cwd={state.newChat.cwd}
+          <Suspense fallback={null}><NewChatView cwd={state.newChat.cwd}
             controlScopeKey={`${activeScopeKey}\u0000${newChatProfileId ?? "__default__"}`}
             space={space}
             createError={createError}
@@ -5623,7 +5746,7 @@ export default function App() {
               wsRef.current?.sendGetPermissionProfiles(
                 cwd, newChatCodexProfileId);
             }}
-            onSend={sendFirstMessage} />
+            onSend={sendFirstMessage} /></Suspense>
         ) : (
           <>
             <ChatView key={`${activeScopeKey}\u0000${focusedSid ?? ""}`}
@@ -5651,6 +5774,7 @@ export default function App() {
                 ? undefined : (prompt) => setEditPrompt(prompt)}
               asyncReplyMode={rt.state === "running" ? "steer"
                 : rt.state === "idle" ? "query" : undefined}
+              pendingReplyId={rt.acceptancePending}
               onReplyAsyncQuestion={focusedEngine !== "codex"
                 || historyView.recovering || !state.wrapperOnline
                 || state.connState !== "connected"
@@ -5660,12 +5784,14 @@ export default function App() {
                 ? undefined : (prompt) => {
                   const current = stateRef.current;
                   if (!focusedSid || current.focusedSid !== focusedSid
-                      || previousMachineRef.current !== machineId) return false;
+                      || previousMachineRef.current !== machineId) return null;
                   return replyAsyncQuestion(focusedSid, prompt, sendQuery, sendSteer);
                 }}
               onGetDiff={historyView.recovering ? undefined : getDiff}
               onOpenTurnDiff={historyView.recovering
                 ? undefined : openTurnDiff}
+              onOpenArchivedDiff={historyView.recovering ? undefined : openArchivedDiff}
+              onLoadFilePage={historyView.recovering ? undefined : loadTurnFilePage}
               onPreviewMarkdown={historyView.recovering
                 ? undefined : previewMarkdown}
               onOpenFile={historyView.recovering ? undefined : previewFile}
@@ -5707,6 +5833,7 @@ export default function App() {
               <GoalPanel engine={focusedEngine} goal={rt.goal}
                 revealed={!archivedBrowse && !!goalUi?.revealed}
                 open={!archivedBrowse && !!goalUi?.open}
+                key={focusedGoalScopeKey}
                 loading={!!goalUi?.loading}
                 completedGoalRetired={completedGoalRetired}
                 plan={planProgress}
@@ -5740,17 +5867,17 @@ export default function App() {
                   }
                   setGoalUi({ revealed: false, open: false, loading: false });
                 }}
-                onSave={(objective, status, budget) => {
+                disabled={!state.wrapperOnline || state.connState !== "connected"}
+                onStatus={async status => (await getGoalApi()).save(focusedSid!, null, status, null)}
+                onSave={async (objective, status, budget) => {
                   rememberFocusedGoalUi();
-                  wsRef.current?.sendSetGoal(
-                    objective, status,
+                  await (await getGoalApi()).save(focusedSid!, objective,
+                    focusedEngine === "claude" ? "active" : status,
                     focusedEngine === "codex" ? budget : null);
-                  setGoalUi({ revealed: true, open: false, loading: false });
                 }}
-                onClear={() => {
+                onClear={async () => {
                   rememberFocusedGoalUi();
-                  wsRef.current?.sendClearGoal();
-                  setGoalUi({ revealed: false, open: false, loading: false });
+                  await (await getGoalApi()).clear(focusedSid!);
                 }} />
             </Suspense>
 
@@ -5778,6 +5905,8 @@ export default function App() {
           autoCompact={rt.autoCompact}
           perm={rt.perm}
           permissionProfile={rt.permissionProfile}
+          permissionProfilePending={!!permissionProfileRequests[
+            JSON.stringify([machineId, space, focusedEngine, focusedSid])]}
           permissionProfiles={rt.permissionProfiles}
           webSearch={rt.webSearch}
           collaborationMode={rt.collaborationMode}
@@ -5825,6 +5954,10 @@ export default function App() {
           onOpenBtw={openBtw}
           onDiff={() => getDiff("")}
           onPreview={previewMarkdown}
+          onOpenFiles={openFiles}
+          codexContext={rt.codexContext}
+          onSetCodexContext={focusedSid && space === "code" && focusedEngine === "codex"
+            ? (maxTokens) => wsRef.current?.sendCodexContext(focusedSid, maxTokens) ?? false : undefined}
           onGoal={runGoal}
           onStatus={openStatus}
           onRefreshUsage={refreshStatus}
@@ -5871,9 +6004,6 @@ export default function App() {
           }}
           contextReport={rt.contextReport}
           contextExactReport={rt.contextExactReport}
-          contextLoading={rt.contextRequestId !== null}
-          contextDeferred={rt.contextRefreshDeferred}
-          contextError={rt.contextError}
           statusReport={rt.statusReport}
           rateLimits={rt.rateLimits}
           statusError={rt.statusError}
@@ -5885,6 +6015,32 @@ export default function App() {
       </section>
       {/* Share the layout's selection: retained hidden chats reserve no space. */}
       {(() => {
+        if (visibleRightPanel === "files" && fileBrowser) {
+          const closeFiles = () => {
+            if (!confirmArtifactDiscard()) return;
+            setFileBrowser(null);
+            dispatch({ type: "clear_artifact" });
+          };
+          return <Suspense fallback={<div className="artifact-panel" role="status">加载目录…</div>}>
+            <SessionFilesPanel key={fileBrowser.id} showingPreview={fileBrowser.preview}
+              browser={{ sid: fileBrowser.sid, initialPath: fileBrowser.path, ws: wsRef.current,
+                hidden: fileBrowser.preview, onListen: listenFiles, onClose: closeFiles,
+                onOpenFile: (path) => {
+                  if (previewFileForSid(fileBrowser.sid, path, undefined, true))
+                    setFileBrowser({ ...fileBrowser, preview: true });
+                } }}
+              onBack={() => {
+                if (!confirmArtifactDiscard()) return;
+                dispatch({ type: "clear_artifact" });
+                setFileBrowser({ ...fileBrowser, preview: false });
+              }}
+              preview={{ artifact: state.artifact, theme,
+                onRefresh: (path, line) => { previewFileForSid(fileBrowser.sid, path, line, true); },
+                onOpenFile: (path, line) => { previewFileForSid(fileBrowser.sid, path, line, true); },
+                onLoadPreviewAsset: loadPreviewAsset, onAuthorizePreview: authorizePreview,
+                onSaveMarkdown: saveMarkdown, onDirtyChange: setArtifactDirty, onClose: closeFiles }} />
+          </Suspense>;
+        }
         if (visibleRightPanel === "viewer" && visibleParentSid && viewerKey) {
           return <Suspense fallback={<div className="artifact-panel empty" role="status"><p>加载预览…</p></div>}>
             <RemoteViewerPanel key={`${viewerKey}:${viewerUrl?.key === viewerKey ? viewerUrl.openId : ""}`}
@@ -5938,7 +6094,7 @@ export default function App() {
               ? undefined : (prompt) => {
                 if (!activeBtwSid || stateRef.current.newChat
                     || stateRef.current.focusedSid !== visibleParentSid
-                    || previousMachineRef.current !== machineId) return false;
+                    || previousMachineRef.current !== machineId) return null;
                 return replyAsyncQuestion(activeBtwSid, prompt, sendBtw, steerBtw);
               }}
             onInterrupt={() => {
@@ -6005,7 +6161,7 @@ export default function App() {
           </Suspense>;
         return null;
       })()}
-      <QueuedQueryDialog
+      {queuedQueryEditor && <Suspense fallback={null}><QueuedQueryDialog
         key={queuedQueryEditor
           ? `${queuedQueryEditor.sid}:${queuedQueryEditor.msgId}`
           : "closed"}
@@ -6014,7 +6170,7 @@ export default function App() {
           if (!queuedQueryEditor?.saving) setQueuedQueryEditor(null);
         }}
         onSave={updateQueuedQuery}
-        onRetry={retryQueuedQuery} />
+        onRetry={retryQueuedQuery} /></Suspense>}
       {rt.pendingQuestion && !activeBtwQuestionVisible && (
         <QuestionSheet
           key={rt.pendingQuestion.ask_id}

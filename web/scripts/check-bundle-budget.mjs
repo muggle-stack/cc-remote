@@ -16,8 +16,21 @@ const DIST = resolve(import.meta.dirname, "../dist");
 // import-map compilation remain lazy. Keep gzip and request-count gates fixed.
 // First-paint page metadata restoration and correlated image errors add <2 KiB.
 // Manual unread stays in the lazy sidebar; no new startup dependency/request.
-const MAX_ENTRY_BYTES = 528 * 1024;
-const MAX_INITIAL_BYTES = 926 * 1024;
+// Folded per-turn changes and persistent model-fallback notes add <2 KiB.
+// No new runtime dependency; gzip and initial request budgets stay fixed.
+// Typed file badges and shared-prefix path labels add <2 KiB of local UI code.
+// Entry, gzip and request-count caps remain unchanged; no icon dependency.
+// Bounded file pagination, scoped request correlation and retry UI add <4 KiB.
+// No new dependencies; gzip and initial request-count caps remain unchanged.
+// Steer item ownership, explicit Goal recovery and shared clipboard/UI state
+// add <2 KiB at startup. Attachment decoding and clipboard byte imports load
+// on demand; retain the compressed-size and initial request-count limits.
+// Provider-capacity copy and terminal outcome labels add <1 KiB of startup JS.
+// The card has no new dependencies; gzip and initial request caps stay unchanged.
+// Quota failure copy and validated native retry dates add <1 KiB at startup.
+// Keep entry, compressed-size, and request-count caps unchanged.
+const MAX_ENTRY_BYTES = 537 * 1024;
+const MAX_INITIAL_BYTES = 937 * 1024;
 const MAX_INITIAL_GZIP_BYTES = 280 * 1024;
 const MAX_INITIAL_JS_FILES = 4;
 

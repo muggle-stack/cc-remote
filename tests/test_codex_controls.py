@@ -7362,13 +7362,14 @@ def test_permission_profiles_are_codex_only_and_broadcast_after_apply():
             "codex").permission_profile == ":danger-full-access"
 
         codex.state = "running"
-        rejected = await machine._handle_set_permission_profile(
+        applied = await machine._handle_set_permission_profile(
             SetPermissionProfile(
                 sid="codex", profile=":workspace"))
-        assert isinstance(rejected, Error)
-        assert rejected.code == "busy"
+        assert isinstance(applied, PermissionProfile)
+        assert applied.profile == ":workspace"
+        assert codex.state == "running"
         assert codex.sdk.permission_profile_calls == [
-            ":danger-full-access",
+            ":danger-full-access", ":workspace",
         ]
         codex.state = "idle"
 
@@ -7387,6 +7388,118 @@ def test_permission_profiles_are_codex_only_and_broadcast_after_apply():
         assert isinstance(rejected, Error)
         assert rejected.code == "auth"
         assert work.sdk.permission_profile_calls == []
+
+    asyncio.run(run())
+
+
+def test_running_permission_switches_publish_in_request_order():
+    async def run():
+        machine, transport = _mk_machine()
+        ctx = _control_ctx("ordered-permissions", "codex")
+        ctx.state = "running"
+        machine.sessions = {ctx.key: ctx}
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+
+        async def apply(profile):
+            calls.append(profile)
+            if profile == ":workspace":
+                started.set()
+                await release.wait()
+            ctx.sdk.permission_profile = profile
+
+        ctx.sdk.set_permission_profile = apply
+        first = asyncio.create_task(machine._handle_set_permission_profile(
+            SetPermissionProfile(sid=ctx.key, profile=":workspace")))
+        await started.wait()
+        second = asyncio.create_task(machine._handle_set_permission_profile(
+            SetPermissionProfile(sid=ctx.key, profile=":danger-full-access")))
+        await asyncio.sleep(0)
+        assert calls == [":workspace"]
+        release.set()
+        await asyncio.gather(first, second)
+        assert [event.profile for event in transport.sent
+                if isinstance(event, PermissionProfile)] == [
+                    ":workspace", ":danger-full-access"]
+        assert ctx.state == "running"
+        assert machine._codex_controls.get(
+            ctx.session_id).permission_profile == ":danger-full-access"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("disconnect", [False, True])
+def test_live_permission_profile_timeout_does_not_claim_success(monkeypatch, disconnect):
+    async def run():
+        handle = CodexHandle(_Cfg(), cwd="/tmp")
+        handle.thread_id = "permission-timeout"
+        handle.permission_profile = ":workspace"
+        handle._reader = asyncio.current_task()
+        monkeypatch.setattr(
+            codex_handle_module, "_THREAD_SETTINGS_NOTIFY_TIMEOUT", 0.01)
+
+        async def request(method, params=None):
+            if method == "permissionProfile/list":
+                return {"data": [{"id": ":danger-full-access", "allowed": True}]}
+            if disconnect:
+                handle._reader = None
+            return {}
+
+        handle._request = request
+        with pytest.raises(RuntimeError, match="did not confirm"):
+            await handle.set_permission_profile(":danger-full-access")
+        assert handle.permission_profile == ":workspace"
+
+    asyncio.run(run())
+
+
+def test_permission_profile_catalog_cannot_cross_a_cwd_change():
+    async def run():
+        handle = CodexHandle(_Cfg(), cwd="/tmp/original")
+        handle.thread_id = "permission-scope"
+        updates = []
+
+        async def request(method, params=None):
+            if method == "permissionProfile/list":
+                handle._cwd = "/tmp/moved"
+                return {"data": [{"id": ":custom", "allowed": True}]}
+            updates.append(method)
+            return {}
+
+        handle._request = request
+        with pytest.raises(RuntimeError, match="scope changed"):
+            await handle.set_permission_profile(":custom")
+        assert updates == []
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("changed", ["_cwd", "thread_id", "_generation"])
+def test_waiting_permission_profile_cannot_update_a_changed_scope(changed):
+    async def run():
+        handle = CodexHandle(_Cfg(), cwd="/tmp/original")
+        handle.thread_id = "permission-scope"
+        catalog_read = asyncio.Event()
+        updates = []
+
+        async def request(method, params=None):
+            if method == "permissionProfile/list":
+                catalog_read.set()
+                return {"data": [{"id": ":custom", "allowed": True}]}
+            updates.append(params)
+            return {}
+
+        handle._request = request
+        async with handle._thread_settings_lock:
+            pending = asyncio.create_task(handle.set_permission_profile(":custom"))
+            await catalog_read.wait()
+            assert not pending.done()
+            value = getattr(handle, changed)
+            setattr(handle, changed, value + 1 if isinstance(value, int) else value + "-moved")
+        with pytest.raises(RuntimeError, match="scope changed"):
+            await pending
+        assert updates == []
 
     asyncio.run(run())
 
@@ -9275,4 +9388,29 @@ def test_codex_steer_fence_drains_old_backlog_before_new_user_boundary():
             ("turn_end", None),
         ]
 
+    asyncio.run(run())
+
+
+def test_codex_goal_pause_keeps_current_auto_turn_visible_and_confirms_exact_request():
+    async def run():
+        machine, transport = _mk_machine()
+        ctx = _mk_ctx("goal-pause", "goal-pause")
+        ctx.engine = "codex"
+        ctx.state = "running"
+        ctx.codex_spontaneous_turn_id = "live-auto-turn"
+        calls = []
+        async def set_goal(**kwargs):
+            calls.append(kwargs)
+            return {"threadId": ctx.session_id, "objective": "ship", "engine": "codex",
+                "status": kwargs["status"], "tokensUsed": 123, "timeUsedSeconds": 3, "tokenBudget": 1000}
+        ctx.sdk = SimpleNamespace(set_goal=set_goal)
+        machine.sessions[ctx.key] = ctx
+        for status in ["paused", "complete"]:
+            result = await machine._handle_set_goal(SimpleNamespace(sid=ctx.key, client_id="viewer",
+                cmd_id="change-" + status, objective=None, token_budget=None, status=status))
+            assert isinstance(result, GoalState) and result.goal.status == status
+            assert result.request_id == "change-" + status
+            assert ctx.state == "running" and ctx.codex_spontaneous_turn_id == "live-auto-turn"
+        assert calls == [{"status": "paused"}, {"status": "complete"}]
+        assert not any(isinstance(frame, (TurnEnd, Error)) for frame in transport.sent)
     asyncio.run(run())

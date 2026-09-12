@@ -13,6 +13,7 @@ export interface HistoryRuntimeState {
   oldestId?: string | null;
   historyInvalidated: boolean;
   historyRevision: string | null;
+  historyContinuityRevision?: string | null;
   historyGeneration: string | null;
   historyBuildSeq: number;
   pendingHistoryRevision: string | null;
@@ -73,7 +74,8 @@ export function beginHistoryRecovery(
     hasMore: retained?.hasMore ?? !!runtime.hasMore,
     oldestId: retained?.oldestId ?? runtime.oldestId ?? null,
     viewRevision: retained?.viewRevision
-      ?? (current?.sid === sid ? current.viewRevision : runtime.historyRevision),
+      ?? (current?.sid === sid ? current.viewRevision
+        : runtime.historyContinuityRevision ?? runtime.historyRevision),
     expectedGeneration: generation ?? retained?.expectedGeneration
       ?? runtime.pendingHistoryGeneration ?? null,
     // Replay gaps start at null because a History build may already be in
@@ -254,7 +256,7 @@ export function displayHistoryProjection(
       hasMore: retainedBrowse.hasOlder,
       pagingReady: false,
       oldestId: retainedBrowse.olderCursor,
-      viewRevision: retainedBrowse.revision,
+      viewRevision: runtime.historyContinuityRevision ?? retainedBrowse.revision,
       generation: retainedBrowse.generation,
       recovering: true,
       browsing: true,
@@ -298,7 +300,7 @@ export function displayHistoryProjection(
       hasMore: browse.hasOlder,
       pagingReady: true,
       oldestId: browse.olderCursor,
-      viewRevision: browse.revision,
+      viewRevision: runtime.historyContinuityRevision ?? browse.revision,
       generation: browse.generation,
       recovering: false,
       browsing: true,
@@ -318,7 +320,7 @@ export function displayHistoryProjection(
     hasMore: !!runtime.hasMore,
     pagingReady: !runtime.historyInvalidated,
     oldestId: runtime.oldestId ?? null,
-    viewRevision: committed?.viewRevision ?? runtime.historyRevision,
+    viewRevision: committed?.viewRevision ?? runtime.historyContinuityRevision ?? runtime.historyRevision,
     generation: runtime.historyGeneration,
     recovering: false,
     browsing: false,

@@ -5,6 +5,7 @@ import asyncio
 import ctypes
 import json
 import os
+import select
 import shutil
 import sqlite3
 import subprocess
@@ -321,12 +322,18 @@ def test_darwin_kernel_payload_preserves_spaced_profile_home():
         [
             sys.executable,
             "-c",
-            "import time; time.sleep(30)",
+            "import time; print('ready', flush=True); time.sleep(30)",
             argument,
         ],
         env=environment,
+        stdout=subprocess.PIPE,
     )
     try:
+        # Popen may return before macOS exposes the post-exec identity. Read
+        # only after this fixture is running, without weakening PID validation.
+        assert child.stdout is not None
+        assert select.select([child.stdout], [], [], 5)[0]
+        assert child.stdout.readline() == b"ready\n"
         identity = process_identity(child.pid)
         assert identity is not None
         complete, args, value = process_command_environment_value(
@@ -986,6 +993,16 @@ def test_turn_marker_parser_bounds_terminal_wire_metadata():
     for turn_id in ("valid-terminal", "oversized-terminal"):
         assert by_id[turn_id].duration_ms is None
         assert by_id[turn_id].completed_at is None
+
+
+def test_task_complete_with_provider_error_is_a_failed_terminal():
+    parsed = parse_turn_markers((json.dumps({"type": "event_msg", "payload": {
+        "type": "task_complete", "turn_id": "capacity-failed", "duration_ms": 337204,
+        "error": {"codex_error_info": "server_overloaded"},
+    }}) + "\n").encode())
+    assert parsed.finished == {"capacity-failed"}
+    assert parsed.terminals[0].status == "failed"
+    assert parsed.terminals[0].duration_ms == 337204
 
 
 def test_turn_marker_parser_reports_visible_user_message_without_turn_id():

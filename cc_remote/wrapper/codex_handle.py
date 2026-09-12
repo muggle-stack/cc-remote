@@ -52,6 +52,7 @@ from cc_remote.wrapper.codex_daemon import (
     codex_daemon_mode,
     default_codex_daemon_manager,
 )
+from cc_remote.wrapper.codex_context_settings import NativeContextSettings, model_context_bounds
 from cc_remote.wrapper.codex_sessions import (
     codex_approval,
     codex_context_window,
@@ -77,6 +78,7 @@ from cc_remote.wrapper.work_prompt import (
     WORK_DEVELOPER_INSTRUCTIONS,
 )
 from cc_remote.wrapper.work_context import recover_codex_context_usage
+from cc_remote.wrapper.codex_context_usage import read_codex_context_estimate
 
 log = logger("cc_remote.wrapper.codex_handle")
 
@@ -1597,6 +1599,7 @@ class CodexHandle:
         self._reader: Optional[asyncio.Task] = None
         self._stderr_task: Optional[asyncio.Task] = None
         self._thread_settings_updated = asyncio.Event()
+        self._thread_settings_lock = asyncio.Lock()
         self._thread_delete_target: Optional[str] = None
         self._thread_deleted_ids: Optional[list[str]] = None
         self.thread_delete_notifications_overflowed = False
@@ -1642,6 +1645,7 @@ class CodexHandle:
         self._http_provider_repair_tasks: set[asyncio.Task] = set()
         self._http_provider_repair_stop = asyncio.Event()
         self.last_token_usage: Optional[dict] = None
+        self._context_usage_turn_id: Optional[str] = None
         self.context_window: Optional[int] = None
         self._rollout_context_recovery_attempted = False
         self.app_server_version: Optional[str] = None
@@ -1734,6 +1738,7 @@ class CodexHandle:
         # applied through config.web_search on start/resume/fork and retained
         # locally so controlled reconnects preserve it.
         self.web_search_override: Optional[str] = None
+        self.context_settings = NativeContextSettings()
         self.web_search: str = (
             "cached" if self.work_mode else (
                 codex_web_search() if self.codex_home is None
@@ -2039,6 +2044,7 @@ class CodexHandle:
         self._compaction_continuation_turn_id = None
         self._discard_managed_compaction_continuation()
         self.last_token_usage = None
+        self._context_usage_turn_id = None
         self.context_window = None
         self._rollout_context_recovery_attempted = False
         self._configured_default_effort = None
@@ -2311,6 +2317,7 @@ class CodexHandle:
         if not connected:  # pragma: no cover - the attempt list is never empty
             raise RuntimeError("unable to start Codex app-server transport")
         bound_thread_id: Optional[str] = None
+        context_config = await self.context_settings.validated_config(self) if not self.work_mode else {}
         try:
             if control_only:
                 log.info("codex control connection established", cwd=self._cwd)
@@ -2397,6 +2404,9 @@ class CodexHandle:
                 )
                 if preserve_controls:
                     resume_params["approvalPolicy"] = preserved_approval
+                    if self.context_settings.pending and self.model:
+                        resume_params["model"] = self.model
+                        resume_params["serviceTier"] = self.service_tier
                     if preserve_permission_profile and preserved_profile:
                         resume_params["permissions"] = preserved_profile
                 if http_only_resume:
@@ -2417,6 +2427,12 @@ class CodexHandle:
                     )
                     if code_config is not None:
                         resume_params["config"] = code_config
+                    if context_config:
+                        resume_params.setdefault("config", {}).update(context_config)
+                    elif self.context_settings.pending and self.context_settings.max_tokens is None:
+                        # Some({}) deliberately requests a fresh native config.
+                        # Omitting config only rejoins and retains the old override.
+                        resume_params.setdefault("config", {})
                 if _supports_lightweight_resume(self.app_server_version):
                     # Since Codex 0.144.6, excludeTurns is the official way for
                     # clients with a paged history UI to resume a live thread.
@@ -2464,6 +2480,8 @@ class CodexHandle:
                     params["config"] = {
                         "web_search": self.web_search_override,
                     }
+                if context_config:
+                    params.setdefault("config", {}).update(context_config)
                 if self.work_mode:
                     params.update({
                         "baseInstructions": WORK_BASE_INSTRUCTIONS,
@@ -2582,6 +2600,29 @@ class CodexHandle:
                 return
             await self.disconnect()
             raise
+        # Shared resume can silently retain a cached configuration. Neither a
+        # loaded/list snapshot nor thread status notifications prove that THIS
+        # request applied its overrides: another client's same-thread reload can
+        # emit even a complete notLoaded -> idle cycle while our RPC is pending.
+        # The native resume response exposes no context configuration receipt,
+        # so shared resumes stay pending even after an apparent cold reload.
+        # Start and fresh private resume have no competing cache entry; fork
+        # does not submit context_config and cannot confirm it either.
+        if not (fork and resume_id) and self.context_settings.pending and (
+            self.context_settings.max_tokens is None or context_config
+        ):
+            if not resume_id or not daemon_proxy:
+                await self.context_settings.confirm_applied(self)
+                self.context_window = self.context_settings.applied_effective_window
+            else:
+                # This resume submitted the preference, including on a cold
+                # attach. Lack of a receipt must not trigger another reload at
+                # every idle/query boundary. A new explicit save can retry.
+                self.context_settings.mark_attempted()
+        if (self.context_settings.applied_model is not None
+                and self.context_settings.applied_model == self.model
+                and self.context_window is None):
+            self.context_window = self.context_settings.applied_effective_window
         log.info("codex connected", thread_id=self.thread_id, cwd=self._cwd,
                  resume=bool(resume_id), fork=fork)
 
@@ -4566,6 +4607,19 @@ class CodexHandle:
         self.approval_policy: Any = value
 
     async def _update_thread_settings(
+        self, *, wait_for_notification: bool = False,
+        _expected_scope: Optional[tuple[object, ...]] = None, **settings: Any,
+    ) -> bool:
+        # All live controls share one notification event. A second request must
+        # not clear/consume the first request's authoritative snapshot.
+        async with self._thread_settings_lock:
+            if _expected_scope is not None and _expected_scope != (
+                    self.thread_id, self._cwd, self._generation):
+                raise RuntimeError("Codex permission scope changed before update")
+            return await self._update_thread_settings_serialized(
+                wait_for_notification=wait_for_notification, **settings)
+
+    async def _update_thread_settings_serialized(
         self, *, wait_for_notification: bool = False, **settings: Any,
     ) -> bool:
         if not self.thread_id:
@@ -4753,6 +4807,12 @@ class CodexHandle:
     async def set_model(self, model: str) -> None:
         if not isinstance(model, str) or not model:
             raise ValueError("Codex model must be non-empty")
+        configured_window = max(self.context_settings.window or 0,
+                                self.context_settings.applied_window or 0)
+        if configured_window:
+            bounds = await asyncio.to_thread(model_context_bounds, model, self.codex_home)
+            if bounds is None or configured_window > bounds.max_window:
+                raise ValueError("当前会话的上下文配置超过目标模型上限；请先恢复默认上下文设置")
         authoritative = await self._update_thread_settings(
             model=model, wait_for_notification=True)
         if not authoritative:
@@ -4851,15 +4911,24 @@ class CodexHandle:
         if self.work_mode:
             raise ValueError(
                 "Codex Work permission profile is fixed to cc_remote_work")
+        scope = (self.thread_id, self._cwd, self._generation)
         catalog = await self.list_permission_profiles()
+        if scope != (self.thread_id, self._cwd, self._generation):
+            raise RuntimeError("Codex permission scope changed during catalog read")
         selected = next(
             (item for item in catalog if item["id"] == profile), None)
         if selected is None or not selected["allowed"]:
             raise ValueError(
                 "Codex permission profile is unavailable for this cwd")
+        had_reader = self._reader is not None
         authoritative = await self._update_thread_settings(
-            permissions=profile, wait_for_notification=True)
+            permissions=profile, wait_for_notification=True,
+            _expected_scope=scope)
+        if scope != (self.thread_id, self._cwd, self._generation):
+            raise RuntimeError("Codex permission scope changed during update")
         if not authoritative:
+            if had_reader:
+                raise RuntimeError("Codex did not confirm the permission profile")
             self.permission_profile = profile
         log.info(
             "codex permission profile set",
@@ -5433,11 +5502,14 @@ class CodexHandle:
             )
 
     async def get_context_usage(self) -> dict:
+        configured_capacity = (
+            self.context_settings.applied_model is not None
+            and self.context_settings.applied_model == self.model)
         # Real shape (verified, gpt-5.5): tokenUsage = {last:{totalTokens,…},
         # total:{totalTokens,…}, modelContextWindow}. `last.totalTokens` is the most
-        # recent turn's full token count ≈ current context depth (what the codex TUI
-        # gauges); `total` is the cumulative session sum (over-counts context). Use
-        # `last` for the "context full?" reading, falling back to `total`.
+        # recent model response's usage, not the native compaction estimator.
+        # Read the native estimate separately, matched to this sample. Never
+        # substitute the cumulative session sum in `total` for context depth.
         if (self.thread_id and self.last_token_usage is None
                 and not self._rollout_context_recovery_attempted):
             recovery_thread_id = self.thread_id
@@ -5458,7 +5530,9 @@ class CodexHandle:
                     and isinstance(recovered, dict)):
                 self.last_token_usage = recovered
                 window = recovered.get("modelContextWindow")
-                if isinstance(window, int) and not isinstance(window, bool):
+                if (isinstance(window, int) and not isinstance(window, bool)
+                        and self.context_window is None
+                        and not configured_capacity):
                     self.context_window = window
             elif (self.last_token_usage is None
                     and self.thread_id == recovery_thread_id
@@ -5471,19 +5545,35 @@ class CodexHandle:
                 self._rollout_context_recovery_attempted = False
         u = self.last_token_usage if isinstance(self.last_token_usage, dict) else {}
         last = u.get("last") if isinstance(u.get("last"), dict) else {}
-        total = u.get("total") if isinstance(u.get("total"), dict) else {}
         used = _nonnegative_int(last.get("totalTokens"))
-        if used is None:
-            used = _nonnegative_int(total.get("totalTokens"))
         # server value (captured in _dispatch) wins; else the config-declared window.
         win = _nonnegative_int(self.context_window)
-        if not win:
+        if not win and not configured_capacity:
             win = _nonnegative_int(u.get("modelContextWindow"))
-        win = win or (
+        win = win or (0 if configured_capacity else (
             codex_context_window() if self.codex_home is None
             else codex_context_window(codex_home=self.codex_home)
-        )
-        return {"used_tokens": used, "context_window": win, "raw": u}
+        ))
+        source = "recent_turn"
+        threshold = None
+        if self.thread_id and used is not None and win:
+            identity = (self._generation, self.thread_id, self.model, self.context_window)
+            estimate = await asyncio.to_thread(
+                read_codex_context_estimate, self.thread_id,
+                codex_home=self.codex_home, last=last, window=win,
+                turn_id=self._context_usage_turn_id,
+            )
+            if (identity != (self._generation, self.thread_id, self.model, self.context_window)
+                    or self.last_token_usage is not u):
+                # A newer sample, compaction or reconnect won the read. Do not
+                # publish either old counter into that new context generation.
+                return {"used_tokens": None, "context_window": self.context_window or 0,
+                        "raw": {}, "source": "recent_turn"}
+            if estimate is not None:
+                used, threshold = estimate.used_tokens, estimate.threshold_tokens
+                source = "native_estimate"
+        return {"used_tokens": used, "context_window": win, "raw": u,
+                "source": source, "auto_compact_threshold_tokens": threshold}
 
     async def reconcile_turn_start(
         self,
@@ -7042,6 +7132,12 @@ class CodexHandle:
             method == "thread/compacted"
             or self._notification_is_context_compaction(m)
         ):
+            self.last_token_usage = None
+            self._context_usage_turn_id = None
+            # Wait for a post-compaction notification. The rollout can still
+            # be flushing, and recovering its old tail would revive the high
+            # pre-compaction gauge immediately after the context was reset.
+            self._rollout_context_recovery_attempted = True
             # This notification has already passed exact thread/turn routing.
             # Freeze its native owner now; a later different turn cannot inherit
             # the continuation right.
@@ -7160,6 +7256,7 @@ class CodexHandle:
             tu = (m.get("params") or {}).get("tokenUsage")
             if isinstance(tu, dict):
                 self.last_token_usage = tu
+                self._context_usage_turn_id = _notification_turn_id(m)
                 # modelContextWindow is the SERVER-authoritative window (e.g. 258400);
                 # keep the last non-null value so get_context_usage always has it.
                 mcw = tu.get("modelContextWindow")

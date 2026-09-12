@@ -7,6 +7,7 @@ import {
   type SetStateAction,
 } from "react";
 import { ChatView } from "./ChatView";
+import type { QueryAcceptanceResult } from "../outbox";
 import { CommandSheet } from "./CommandSheet";
 import { Icon } from "../icons";
 import { PanelTabs, type RightPanelView } from "./PanelTabs";
@@ -30,7 +31,7 @@ import { canEnqueueQuery, type QueueCapacity } from "../runtime-drain";
 import {
   effortNameForDisplay, modelsFor, parseSlash, type Catalog,
 } from "../data";
-import { QueuedQueryChip } from "./QueuedQueryDialog";
+import { QueuedQueryChip } from "./QueuedQueryChip";
 import type { InlineImageAsset } from "../inline-image-assets";
 import {
   composePastePrompt,
@@ -82,7 +83,7 @@ interface Props {
   onCloseChat: (sid: string) => void;
   onSend: (prompt: string) => boolean;
   onSteer: (prompt: string) => boolean;
-  onReplyAsyncQuestion?: (prompt: string) => boolean;
+  onReplyAsyncQuestion?: (prompt: string) => Promise<QueryAcceptanceResult> | null;
   onInterrupt: () => void;
   onSetSendMode: (mode: SendMode) => void;
   onEnqueue: (query: PendingQuery) => boolean;
@@ -233,9 +234,15 @@ export function BtwPanel(p: Props) {
   const submit = (value = taRef.current?.value ?? input) => {
     if (awaitingFirstChat || !p.sid || inputLockedRef.current) return;
     const command = parseSlash(value.trim());
+    if (command?.slash === "open") {
+      flash("请在主会话打开文件目录。");
+      setInput("");
+      resetTaHeight();
+      return;
+    }
     if (command?.slash === "autocompact") {
       if (p.engine === "codex") {
-        flash("自动压缩阈值仅适用于 Claude 会话。");
+        flash("请在 Codex 主会话设置压缩阈值。");
         setInput("");
         resetTaHeight();
         return;
@@ -420,6 +427,7 @@ export function BtwPanel(p: Props) {
                 onAuthorizeImage={p.onAuthorizeImage}
                 asyncReplyMode={runtimeState === "running" ? "steer"
                   : runtimeState === "idle" ? "query" : undefined}
+                pendingReplyId={p.rt?.acceptancePending}
                 onReplyAsyncQuestion={p.engine !== "codex" || !p.sid
                   || acceptancePending
                   || (p.rt?.control ? sessionControlLocksInput(p.rt.control) : p.rt?.external)

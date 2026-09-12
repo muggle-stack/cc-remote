@@ -62,6 +62,7 @@ import {
 } from "../src/completion-badges.ts";
 import { imageDimensions } from "../src/img.ts";
 import "./presentation-state.test.ts";
+import "./slash-command.test.ts";
 import {
   historyImageDisplaySource,
   TurnImagePreviewCache,
@@ -111,6 +112,7 @@ import {
   reconcileGoalUiPreference,
   rekeyGoalUiPreference,
   rememberGoalUi,
+  shouldRecoverGoalUi,
   writeGoalUiPreferences,
 } from "../src/scoped-goal-ui.ts";
 import {
@@ -395,6 +397,26 @@ assert.doesNotMatch(
   "Goal objective text must never be persisted in UI preferences",
 );
 assert.deepEqual(readGoalUiPreferences(goalStorage), goalPreferences);
+function verifyGoalRecoveryPreferences() {
+  const absentGoal = reconcileGoalUiPreference(
+    discoveredGoal.preferences, goalScopeA, null, 30);
+  assert.equal(shouldRecoverGoalUi(absentGoal.preferences[goalScopeA]), false,
+    "authoritative absence survives refocus without a recovery flash");
+  writeGoalUiPreferences(goalStorage, absentGoal.preferences);
+  assert.equal(shouldRecoverGoalUi(readGoalUiPreferences(goalStorage)[goalScopeA]), false,
+    "authoritative absence also survives a browser reload");
+  assert.equal(shouldRecoverGoalUi({ known: true, seenAt: 1 }), false,
+    "legacy visit markers are refreshed silently instead of reviving old Goals");
+  assert.equal(shouldRecoverGoalUi(discoveredGoal.preferences[goalScopeA]), true);
+  assert.equal(shouldRecoverGoalUi(reconcileGoalUiPreference(
+    discoveredGoal.preferences, goalScopeA, { ...persistedGoal, status: "complete" },
+  ).preferences[goalScopeA]), false,
+  "a completed Goal cannot reappear as an active recovery after reload");
+  assert.equal(reconcileGoalUiPreference(absentGoal.preferences, goalScopeA,
+    { ...persistedGoal, createdAt: 102 }).revealed, true,
+  "a new Goal still reveals itself after an authoritative absent response");
+}
+verifyGoalRecoveryPreferences();
 const rekeyedGoalPreferences = rekeyGoalUiPreference(
   goalPreferences,
   goalScopeA,
@@ -839,6 +861,37 @@ assert.equal(parallelLanes.accept(
   false);
 
 const parallelMutationStarts: string[] = [];
+function testFailedSkillReads() {
+  const failedReadStarts: string[] = [];
+  const failedReadLanes = new SkillCatalogRequestCoordinator((request) => {
+    failedReadStarts.push(request.key);
+    return `failed-read-${failedReadStarts.length}`;
+  });
+  assert.equal(failedReadLanes.request(parallelSkillsRequest), true);
+  assert.equal(failedReadLanes.request(capabilityRequest(
+    "next-repo", "/repo/b", true)), false);
+  assert.equal(failedReadLanes.fail("unrelated-request"), null,
+    "an unrelated error must not release a pending Skills read");
+  assert.equal(failedReadLanes.fail("failed-read-1")?.key, repoSkillKey);
+  assert.deepEqual(failedReadStarts, [repoSkillKey, "next-repo"],
+    "a failed Skills read releases its lane and starts the queued repository read");
+  assert.equal(failedReadLanes.hasPendingRead(repoSkillKey, true), false);
+  assert.equal(failedReadLanes.accept(
+    capabilityResponse("failed-read-1", "/repo/a", true)), null,
+    "a delayed response to a failed read must not replace the current catalog");
+  assert.equal(failedReadLanes.accept(
+    capabilityResponse("failed-read-2", "/repo/b", true))?.request.key, "next-repo");
+  assert.equal(failedReadLanes.request(parallelSkillsRequest), true,
+    "the failed repository can be retried after draining the queue");
+  failedReadLanes.reset();
+  assert.equal(failedReadLanes.trackMutation("failed-mutation", parallelFullRequest), true);
+  assert.equal(failedReadLanes.request(parallelSkillsRequest), false);
+  assert.equal(failedReadLanes.fail("failed-mutation")?.key, repoSkillKey);
+  assert.equal(failedReadStarts.length, 4,
+    "a failed capability mutation must also release queued reads");
+}
+testFailedSkillReads();
+
 const parallelMutation = new SkillCatalogRequestCoordinator((_request) => {
   const requestId = `parallel-mutation-read-${parallelMutationStarts.length + 1}`;
   parallelMutationStarts.push(requestId);
@@ -1183,7 +1236,7 @@ assert.match(historyAppSource,
   /displayRecoveryMatches[\s\S]{0,240}runtimeRecoveryMatches[\s\S]{0,240}buildIsCurrent[\s\S]{0,500}allowSessionCache/,
   "the first matching recovery build must remain behind both cache barriers");
 assert.match(historyAppSource,
-  /historyRequestsRef\.current\.complete\(msg\)[\s\S]{0,4000}historyNeedsConfirmationRequest\([\s\S]{0,500}requestHistory\(\s*msg\.session_id,\s*undefined,\s*HISTORY_INITIAL_PAGE,\s*msg\.generation/,
+  /historyRequestsRef\.current\.complete\(msg\)[\s\S]{0,5000}historyNeedsConfirmationRequest\([\s\S]{0,500}requestHistory\(\s*msg\.session_id,\s*undefined,\s*HISTORY_INITIAL_PAGE,\s*msg\.generation/,
   "a candidate must release coordinator dedupe before requesting its generation-bound confirmation");
 assert.match(historyAppSource,
   /msg\.error == null && !msg\.before[\s\S]{0,180}HISTORY_PROVISIONAL_WATCHDOG_MS[\s\S]{0,600}recoverableReads\.retry\([\s\S]{0,700}retryDelay\)/,
@@ -5037,8 +5090,9 @@ try {
   assert.equal(firstSteeredTurns[0].durationMs, undefined,
     "a steer fence without one authoritative clock domain has unknown duration");
   assert.equal(firstSteeredTurns[0].doneTs, 11_000);
-  assert.ok(firstSteeredTurns[0].blocks.every((block: Block) => block.done),
-    "closing the old segment also settles every open block it owned");
+  assert.ok(firstSteeredTurns[0].blocks.every((block: Block) =>
+    block.kind === "text" ? !block.done : block.done),
+    "the old process segment settles while native text continues to its own end");
   assert.equal(firstSteeredTurns[1].images?.[0]?.data, "steered-image");
   assert.deepEqual(firstSteeredTurns[1].files, [{
     filename: "steered.txt", data: "",
@@ -9064,14 +9118,14 @@ try {
   const successfulQueuedBrowse = reduce(orderedHistory, {
     type: "enqueue", sid: orderedHistorySid, query: { prompt: "later" },
   });
-  assert.equal(successfulQueuedBrowse.historyBrowse, null,
-    "a successfully accepted queued send atomically returns to latest");
+  assert.equal(successfulQueuedBrowse.historyBrowse, orderedHistory.historyBrowse,
+    "a queued send preserves the current history reading view");
   const successfulPendingBrowse = reduce(orderedHistory, {
     type: "set_pending", sid: orderedHistorySid,
     query: { prompt: "interrupt after drain" },
   });
-  assert.equal(successfulPendingBrowse.historyBrowse, null,
-    "a successfully accepted interrupt-send atomically returns to latest");
+  assert.equal(successfulPendingBrowse.historyBrowse, orderedHistory.historyBrowse,
+    "an interrupt-send preserves the current history reading view");
   assert.equal(
     successfulPendingBrowse.runtimes[orderedHistorySid].pendingSend?.prompt,
     "interrupt after drain");
@@ -9098,11 +9152,17 @@ try {
     type: "query_sent", sid: orderedHistorySid,
     prompt: "new live question", msg_id: "new-live-question", ts: 100,
   });
-  assert.equal(directSendBrowse.historyBrowse, null);
+  assert.equal(directSendBrowse.historyBrowse, orderedHistory.historyBrowse,
+    "sending installs live work without changing the reading viewport");
   assert.equal(
     directSendBrowse.runtimes[orderedHistorySid].turns.at(-1)?.id,
     "new-live-question",
-    "the same reducer commit installs the optimistic turn and exits browse");
+    "the same reducer commit installs the optimistic turn without exiting browse");
+  const steeredBrowse = reduce(orderedHistory, {
+    type: "steer_sent", sid: orderedHistorySid,
+    prompt: "supplement", msg_id: "supplement", ts: 101,
+  });
+  assert.equal(steeredBrowse.historyBrowse, orderedHistory.historyBrowse);
 
   const detailRequestedBrowse = reduce(orderedHistory, {
     type: "history_browse_detail_requested",
@@ -9398,6 +9458,108 @@ try {
   assert.equal(pagedHead.historyBrowse?.hasOlder, false);
   assert.equal(pagedHead.historyBrowse?.olderCursor, "history-floor");
   assert.equal(pagedHead.historyBrowse?.latestDirty, true);
+
+  // Learning browser/native message aliases changes the read revision, not
+  // transcript contents. A tiny post-send head must retain already-painted
+  // history, including the separate older-page reading lifetime.
+  const testSendAliasContinuity = () => {
+  const aliasSid = "send-alias-continuity";
+  const aliasRows = Array.from({ length: 4 }, (_, i) => ({
+    id: `alias-history-${i}`, prompt: `old prompt ${i}`, done: true,
+    ts: 1000 + i * 1000, doneTs: 1500 + i * 1000,
+    durationMs: 500,
+    detailLoaded: true,
+    blocks: [{ kind: "text", message_id: `answer-${i}`,
+      text: `old answer ${i}`, done: true, channel: "final" }],
+    fileChanges: { revision: `diff-${i}`, files: [{
+      path: "src/main.py", state: "available", additions: 1, deletions: 0,
+    }] },
+  }));
+  let aliasState = reduce({ ...initialState, focusedSid: aliasSid }, {
+    type: "event", event: event({
+      type: "history", sid: aliasSid, session_id: aliasSid,
+      revision: "alias-0", continuity_revision: "alias-0",
+      generation: "alias-generation", build_seq: 1, live_seq: 0,
+      in_progress: false, detail: "summary", turns: aliasRows, events: [],
+      has_more: true, oldest_id: "alias-history-0", newest_id: "alias-history-3",
+    }),
+  });
+  const aliasOriginal = aliasState;
+  aliasState = reduce(aliasState, {
+    type: "query_sent", sid: aliasSid, msg_id: "new-browser-message", prompt: "new question", ts: 6000,
+  });
+  const aliasHead = event({
+    type: "history", sid: aliasSid, session_id: aliasSid,
+    revision: "alias-1", continuity_revision: "alias-0",
+    generation: "alias-generation", build_seq: 2, live_seq: 1,
+    in_progress: true, detail: "summary", events: [],
+    turns: [{ id: "native-new", clientMsgId: "new-browser-message",
+      prompt: "new question", done: false, blocks: [], ts: 6000 }],
+    has_more: true, oldest_id: "native-new", newest_id: "native-new",
+  });
+  aliasState = reduce(aliasState, { type: "event", event: aliasHead });
+  assert.equal(aliasState.runtimes[aliasSid].turns.length, 5,
+    "post-send identity revision cannot replace all old messages with the newest prompt");
+  assert.deepEqual(aliasState.runtimes[aliasSid].turns.slice(0, 4).map(
+    (turn: Turn) => [turn.prompt, turn.durationMs, turn.fileChanges?.revision]),
+  aliasRows.map((turn) => [turn.prompt, 500, turn.fileChanges.revision]));
+  assert.equal(aliasState.runtimes[aliasSid].oldestId, "alias-history-0");
+  assert.equal(displayHistoryProjection(null, aliasSid,
+    aliasState.runtimes[aliasSid]).viewRevision, "alias-0",
+  "an alias update keeps the scroll scope while actual read authority advances");
+  assert.equal(aliasState.runtimes[aliasSid].historyRevision, "alias-1");
+
+  let aliasBrowse = reduce(aliasOriginal, {
+    type: "begin_history_browse", sid: aliasSid,
+    scopeKey: "device:code:codex", revision: "alias-0",
+    generation: "alias-generation", viewId: "reading-before-send", basePageKey: "head",
+  });
+  aliasBrowse = reduce(aliasBrowse, {
+    type: "install_history_browse_page", sid: aliasSid,
+    scopeKey: "device:code:codex", revision: "alias-0",
+    generation: "alias-generation", viewId: "reading-before-send",
+    windowEpoch: aliasBrowse.historyBrowse!.windowEpoch, before: "alias-history-0",
+    page: { pageKey: "older", turns: [{ id: "older", prompt: "older prompt", blocks: [], done: true }],
+      hasOlder: true, olderCursor: "older", newerPageKey: "head" },
+  });
+  const aliasViewBefore = aliasBrowse.historyBrowse!;
+  aliasBrowse = reduce(aliasBrowse, { type: "event", event: aliasHead });
+  assert.equal(aliasBrowse.historyBrowse?.turns, aliasViewBefore.turns);
+  assert.equal(aliasBrowse.historyBrowse?.viewId, aliasViewBefore.viewId);
+  assert.equal(aliasBrowse.historyBrowse?.revision, "alias-1");
+  assert.equal(aliasBrowse.historyBrowse?.windowEpoch, aliasViewBefore.windowEpoch + 1);
+  assert.equal(displayHistoryProjection(null, aliasSid,
+    aliasBrowse.runtimes[aliasSid], aliasBrowse.historyBrowse).viewRevision, "alias-0");
+  const rebasedAliasView = aliasBrowse.historyBrowse;
+  aliasBrowse = reduce(aliasBrowse, {
+    type: "install_history_browse_page", sid: aliasSid,
+    scopeKey: aliasViewBefore.scopeKey, revision: aliasViewBefore.revision,
+    generation: aliasViewBefore.generation, viewId: aliasViewBefore.viewId,
+    windowEpoch: aliasViewBefore.windowEpoch, before: "older",
+    page: { pageKey: "late-old-page", turns: [], hasOlder: false, olderCursor: null },
+  });
+  assert.equal(aliasBrowse.historyBrowse, rebasedAliasView,
+    "a late response from before the alias update cannot close or rewrite the rebased view");
+  aliasBrowse = reduce(aliasBrowse, { type: "event", event: {
+    ...aliasHead, revision: "alias-2", build_seq: 3,
+  } });
+  assert.equal(aliasBrowse.historyBrowse?.turns, aliasViewBefore.turns,
+    "continuity survives more than one additive alias revision");
+
+  for (const invalidation of [
+    { continuity_revision: "different-source" },
+    { continuity_revision: undefined },
+    { reset: true },
+  ]) {
+    const replaced = reduce(aliasState, { type: "event", event: {
+      ...aliasHead, revision: "replacement", build_seq: 3, ...invalidation,
+    } });
+    assert.ok(!replaced.runtimes[aliasSid].turns.some(
+      (turn: Turn) => turn.id === "alias-history-0"),
+    "destructive/unknown revisions and rollback must still discard old completed rows");
+  }
+  };
+  testSendAliasContinuity();
 
   // Even before the user explicitly paginates, a same-revision compact/head
   // refresh is only a suffix. It must not erase rows already rendered from the
@@ -10790,6 +10952,28 @@ try {
     2,
     "a newly running turn must hide an older completion label",
   );
+  ([
+    ["idle", "both", "2 项完成"],
+    ["running", "btw", "BTW 完成"],
+    ["interrupting", "btw", "BTW 完成"],
+    ["running", "both", "BTW 完成"],
+    ["interrupting", "both", "BTW 完成"],
+    ["running", "main", null],
+    ["interrupting", "main", null],
+  ] as const).forEach(([state, completion, label]) => {
+    const markup = renderToStaticMarkup(createElement(SessionsSidebar, {
+      ...sidebarProps,
+      sessions: [{ session_id: "parent", summary: "Parent", state: "idle" }],
+      liveStates: { parent: state },
+      completionBadges: { parent: completion },
+    }));
+    assert.deepEqual(
+      [...markup.matchAll(/class="pill completed"><span class="sd"><\/span>([^<]+)</g)]
+        .map((match) => match[1]),
+      label ? [label] : [],
+      `${state} parent must show the appropriate ${completion} completion badge`,
+    );
+  });
   const profileSidebarMarkup = renderToStaticMarkup(createElement(
     SessionsSidebar,
     {
@@ -15011,6 +15195,9 @@ try {
 
   const { ChatView } = await reducerHarness.ssrLoadModule(
     "/src/components/ChatView.tsx");
+  const { TurnChangesPanel } = await reducerHarness.ssrLoadModule(
+    "/src/components/TurnChangesPanel.tsx");
+  await import("./turn-changes.test.ts");
   const boundedInitialMarkup = renderToStaticMarkup(createElement(ChatView, {
     sid: "long-session",
     turns: Array.from({ length: 30 }, (_, index) => ({
@@ -15935,88 +16122,109 @@ try {
   assert.match(historyImageViewMarkup, /data:image\/webp;base64,UklGRg==/);
   assert.doesNotMatch(historyImageViewMarkup, /&quot;history_image&quot;/);
 
-  const noNativeDiffMarkup = renderToStaticMarkup(createElement(ChatView, {
-    sid: "historical-file-without-diff",
-    engine: "codex",
-    turns: [{
-      id: "historical-file-without-diff-turn",
-      prompt: "update the file",
-      done: true,
-      blocks: [{
-        kind: "tool",
-        message_id: "historical-file-message",
-        tool_use_id: "historical-file-tool",
-        tool: "fileChange",
-        input: {
-          changes: [{ path: "/repo/existing.ts", kind: "update" }],
-        },
+  function verifyFileChangeMarkup() {
+    const noNativeDiffMarkup = renderToStaticMarkup(createElement(ChatView, {
+      sid: "historical-file-without-diff",
+      engine: "codex",
+      turns: [{
+        id: "historical-file-without-diff-turn",
+        prompt: "update the file",
         done: true,
-        result: { content: "updated", is_error: false },
+        blocks: [{
+          kind: "tool",
+          message_id: "historical-file-message",
+          tool_use_id: "historical-file-tool",
+          tool: "fileChange",
+          input: {
+            changes: [{ path: "/repo/existing.ts", kind: "update" }],
+          },
+          done: true,
+          result: { content: "updated", is_error: false },
+        }],
       }],
-    }],
-    // Legacy callers may still pass this callback. Historical cards must not
-    // use it to read today's worktree when this turn persisted no native diff.
-    onGetDiff: () => {},
-    onOpenTurnDiff: () => {},
-  }));
-  assert.match(noNativeDiffMarkup,
-    /class="turn-files-summary"[^>]*disabled/);
-  assert.match(noNativeDiffMarkup,
-    /class="turn-file-chip"[^>]*disabled[^>]*title="本轮没有可用的原生 diff"/);
+      // Legacy callers may still pass this callback. Historical cards must not
+      // use it to read today's worktree when this turn persisted no native diff.
+      onGetDiff: () => {},
+      onOpenTurnDiff: () => {},
+    }));
+    assert.match(noNativeDiffMarkup,
+      /class="turn-changes-toggle"[^>]*aria-expanded="false"/);
+    assert.doesNotMatch(noNativeDiffMarkup, /class="turn-changes-files"/);
+    const unavailableFiles = renderToStaticMarkup(createElement(TurnChangesPanel, {
+      turn: { id: "missing", blocks: [], done: true, fileChanges: {
+        revision: "missing-revision", files: [{ path: "/repo/existing.ts", state: "unavailable" }],
+      } }, open: true, onToggle: () => {}, work: false, onOpenDiff: () => {},
+    }));
+    assert.match(unavailableFiles, /class="turn-change-path" disabled=""/);
+    assert.match(unavailableFiles, /差异未保存/);
 
-  const nativeDiffMarkup = renderToStaticMarkup(createElement(ChatView, {
-    sid: "historical-file-with-native-diff",
-    engine: "codex",
-    turns: [{
-      id: "historical-file-with-native-diff-turn",
-      prompt: "update the file",
-      done: true,
-      blocks: [{
-        kind: "tool",
-        message_id: "native-diff-message",
-        tool_use_id: "native-diff-tool",
-        tool: "fileChange",
-        input: {
-          changes: [{ path: "/repo/existing.ts", kind: "update" }],
-        },
+    const nativeDiffMarkup = renderToStaticMarkup(createElement(ChatView, {
+      sid: "historical-file-with-native-diff",
+      engine: "codex",
+      turns: [{
+        id: "historical-file-with-native-diff-turn",
+        prompt: "update the file",
         done: true,
-        result: {
-          content: "updated",
-          is_error: false,
-          diff: "--- /repo/existing.ts\n+++ /repo/existing.ts\n@@ -1 +1 @@\n-old\n+new",
-        },
+        blocks: [{
+          kind: "tool",
+          message_id: "native-diff-message",
+          tool_use_id: "native-diff-tool",
+          tool: "fileChange",
+          input: {
+            changes: [{ path: "/repo/existing.ts", kind: "update" }],
+          },
+          done: true,
+          result: {
+            content: "updated",
+            is_error: false,
+            diff: "--- /repo/existing.ts\n+++ /repo/existing.ts\n@@ -1 +1 @@\n-old\n+new",
+          },
+        }],
       }],
-    }],
-    onOpenTurnDiff: () => {},
-  }));
-  assert.doesNotMatch(nativeDiffMarkup,
-    /class="turn-files-summary"[^>]*disabled/);
-  assert.match(nativeDiffMarkup, /title="查看本轮原生 diff"/);
+      onOpenTurnDiff: () => {},
+    }));
+    assert.match(nativeDiffMarkup, /class="turn-changes-toggle"[^>]*aria-expanded="false"/);
+    assert.doesNotMatch(nativeDiffMarkup, /class="turn-changes-files"/);
 
-  const markdownWithoutDiffMarkup = renderToStaticMarkup(createElement(ChatView, {
-    sid: "historical-markdown-without-diff",
-    engine: "codex",
-    turns: [{
-      id: "historical-markdown-without-diff-turn",
-      prompt: "update docs",
-      done: true,
-      blocks: [{
-        kind: "tool",
-        message_id: "historical-markdown-message",
-        tool_use_id: "historical-markdown-tool",
-        tool: "fileChange",
-        input: { changes: [{ path: "/repo/README.md", kind: "update" }] },
+    const markdownWithoutDiffMarkup = renderToStaticMarkup(createElement(ChatView, {
+      sid: "historical-markdown-without-diff",
+      engine: "codex",
+      turns: [{
+        id: "historical-markdown-without-diff-turn",
+        prompt: "update docs",
         done: true,
-        result: { content: "updated", is_error: false },
+        blocks: [{
+          kind: "tool",
+          message_id: "historical-markdown-message",
+          tool_use_id: "historical-markdown-tool",
+          tool: "fileChange",
+          input: { changes: [{ path: "/repo/README.md", kind: "update" }] },
+          done: true,
+          result: { content: "updated", is_error: false },
+        }],
       }],
-    }],
-    onPreviewMarkdown: () => {},
-  }));
-  assert.match(markdownWithoutDiffMarkup,
-    /class="turn-file-chip markdown"[^>]*title="预览 \/repo\/README.md"/,
-    "Markdown remains previewable even when an old turn has no native diff");
-  assert.doesNotMatch(markdownWithoutDiffMarkup,
-    /class="turn-file-chip markdown"[^>]*disabled/);
+      onPreviewMarkdown: () => {},
+    }));
+    assert.match(markdownWithoutDiffMarkup, /class="turn-changes-toggle"/);
+    const markdownPreview = renderToStaticMarkup(createElement(TurnChangesPanel, {
+      turn: { id: "markdown", blocks: [], done: true, fileChanges: {
+        revision: "md-revision", files: [{ path: "/repo/README.md", state: "unavailable" }],
+      } }, open: true, onToggle: () => {}, work: false, onPreviewMarkdown: () => {},
+    }));
+    assert.match(markdownPreview, /class="turn-change-preview"[^>]*>预览当前文件/,
+      "Current Markdown preview remains separate from unavailable historical diff");
+    const workFiles = renderToStaticMarkup(createElement(TurnChangesPanel, {
+      turn: { id: "work-file", blocks: [], done: true, fileChanges: {
+        revision: "work-revision", files: [{ path: "/work/report.md", state: "unavailable" }],
+      } }, open: true, onToggle: () => {}, work: true,
+      onOpenFile: () => {}, onOpenArtifacts: () => {},
+    }));
+    assert.match(workFiles, /Artifacts/);
+    assert.match(workFiles, /查看 Artifacts/);
+    assert.doesNotMatch(workFiles, /turn-change-path" disabled|差异未保存|预览当前文件/,
+      "Work artifacts open their file viewer independently of historical Code diffs");
+  }
+  verifyFileChangeMarkup();
 
   const codexHookWrappedBatchMarkup = renderToStaticMarkup(createElement(ProcessTimeline, {
     engine: "codex", done: false,
@@ -17835,7 +18043,6 @@ assert.match(appSource, /draftKey=\{focusedComposerDraftKey\}/);
 assert.match(appSource, /composerDraftsRef\.current\.rekey/,
   "temp session id capture must retain the focused composer draft");
 assert.match(appSource, /\{space === "work" \? "Work" : "Code"\}/);
-assert.match(appSource, /<button className="engine-toggle" onClick=\{toggleEngine\}/);
 assert.match(appSource, /setNewChatAutoFocus\(false\)/,
   "switching engines must not summon the new-chat keyboard");
 assert.match(appSource, /prepareSurfaceSwitch\(nextEngine, nextSpace\)/,
@@ -18051,14 +18258,13 @@ assert.doesNotMatch(composerSource, /交付物/);
 assert.doesNotMatch(composerSource, /项目与资料/);
 assert.match(composerSource, /工作设置/);
 assert.match(contextPopoverSource, /会话新增上下文/);
-assert.match(composerSource, /workContext\.sessionPercentage\.toFixed\(0\)/);
+assert.match(composerSource, /workContext\.session_percentage \?\? workContext\.percentage/,
+  "the Work summary uses the report's precomputed session percentage; details load on demand");
 assert.match(contextPopoverSource,
   /usage\(p\.report\.total_tokens, p\.report\.percentage\)/,
   "Code must render the last native engine-total context reading");
-assert.match(composerSource, /contextAvailable = p\.contextReport\?\.available !== false/,
-  "an absent tokenUsage report must not be rendered as a real zero");
-assert.match(contextPopoverSource, /正在读取真实上下文/,
-  "the context popover must explain that its native reading is still loading");
+assert.doesNotMatch(contextPopoverSource, /正在读取真实上下文/,
+  "background context refreshes must not flash a loading notice");
 assert.match(composerSource, /ref=\{workSettingsRef\}/);
 assert.match(composerSource, /document\.addEventListener\("pointerdown", onPointerDown\)/);
 assert.match(composerSource, /disabled=\{locked\}[\s\S]*?: "选择模型"/,
@@ -18509,9 +18715,7 @@ assert.equal(
 );
 const chatViewSource = readFileSync(
   resolve(process.cwd(), "src/components/ChatView.tsx"), "utf8");
-assert.match(chatViewSource, /surface !== "work"/);
-assert.match(chatViewSource, /arr\.length === 1 && onOpenFile/);
-assert.match(chatViewSource, /onOpenArtifacts\?\.\(\)/);
+assert.match(chatViewSource, /<TurnChangesPanel/);
 assert.match(chatViewSource,
   /const terminalProblem = t\.done[\s\S]{0,120}const working = !terminalProblem/,
   "an interrupted or failed terminal must beat stale open process metadata");

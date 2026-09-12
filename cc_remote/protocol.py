@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 55
+PROTOCOL_VERSION = 66
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -537,6 +537,27 @@ class SetEffort(_Command):
     effort: EffortLevel
 
 
+class SetCodexContext(_Command):
+    """Set usable context capacity for one Codex session; derive compaction."""
+
+    type: Literal["set_codex_context"] = "set_codex_context"
+    max_context_tokens: Optional[int] = Field(default=None, ge=1, le=100_000_000, strict=True)
+
+
+class CodexContext(_Base):
+    type: Literal["codex_context"] = "codex_context"
+    model: str = ""
+    max_context_tokens: Optional[int] = None
+    applied_max_context_tokens: Optional[int] = None
+    applied_threshold_tokens: Optional[int] = None
+    model_max_tokens: Optional[int] = None
+    limit_tokens: Optional[int] = None
+    context_window_tokens: Optional[int] = None
+    pending: bool = False
+    mutable: bool = True
+    error: Optional[str] = None
+
+
 class SetAutoCompact(_Command):
     """Set one Claude session's spawn-time automatic compaction threshold.
 
@@ -846,6 +867,8 @@ class Delta(_Base):
 
 
 class ToolUse(_Base):
+    # Native file evidence is consumed locally before entering the replay ring.
+    _turn_change_source: Optional[dict] = PrivateAttr(default=None)
     type: Literal["tool_use"] = "tool_use"
     message_id: WireId
     tool_use_id: WireId
@@ -870,6 +893,7 @@ class ToolDelta(_Base):
 
 
 class ToolResult(_Base):
+    _turn_change_source: Optional[dict] = PrivateAttr(default=None)
     type: Literal["tool_result"] = "tool_result"
     tool_use_id: WireId
     turn_id: Optional[WireId] = None
@@ -880,6 +904,8 @@ class ToolResult(_Base):
     status: Optional[ProcessStatus] = None
     summary: Optional[str] = Field(default=None, max_length=64 * 1024)
     diff: Optional[str] = Field(default=None, max_length=2 * 1024 * 1024)
+    diff_source: Optional[Literal["native", "fragment"]] = None
+    diff_truncated: Optional[bool] = None
     exit_code: Optional[int] = None
     duration_ms: Optional[int] = Field(default=None, ge=0)
 
@@ -1008,6 +1034,32 @@ class TurnDiff(_Base):
     truncated: Optional[bool] = None
 
 
+class TurnFileChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str = Field(min_length=1, max_length=4096)
+    state: Literal["pending", "available", "unavailable"]
+    additions: Optional[int] = Field(default=None, ge=0)
+    deletions: Optional[int] = Field(default=None, ge=0)
+    reason: Optional[str] = Field(default=None, max_length=256)
+
+
+class TurnChangeSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision: str = Field(min_length=1, max_length=64)
+    files: list[TurnFileChange] = Field(max_length=64)
+    total_files: Optional[int] = Field(default=None, ge=0, le=4096)
+    total_additions: Optional[int] = Field(default=None, ge=0)
+    total_deletions: Optional[int] = Field(default=None, ge=0)
+    next_offset: Optional[int] = Field(default=None, ge=1, le=4096)
+    truncated: Optional[bool] = None
+
+
+class TurnFileChanges(_Base):
+    type: Literal["turn_file_changes"] = "turn_file_changes"
+    turn_id: WireId
+    changes: TurnChangeSummary
+
+
 class TurnBinding(_Base):
     """Bind one browser optimistic message id to Codex's native turn id.
 
@@ -1062,6 +1114,9 @@ class TurnEnd(_Base):
     # Only a real Codex app-server ``turn/completed`` may set it; locally
     # synthesized TurnEnd frames must not become durable lifecycle facts.
     _codex_authoritative_terminal: bool = PrivateAttr(default=False)
+    # Claude's final assistant UUID is a fork point, not the logical owner of
+    # its tool events. Keep their exact translator owner off the wire.
+    _changes_turn_id: Optional[str] = PrivateAttr(default=None)
 
 
 class Error(_Base):
@@ -1899,11 +1954,10 @@ class ContextReport(_Base):
     # unavailable instead of presenting a fabricated 0% to the user.  ``None``
     # is omitted so older Code reports retain their exact historical shape.
     available: Optional[bool] = None
-    # Claude may fall back to the most recent exact control response or the
-    # newest main-chain assistant usage. Omitted reports retain the historical
-    # exact/control meaning (including all Codex reports).
+    # Native Codex compaction estimates and recent model usage are distinct.
+    # Claude may also fall back to cached control or recent assistant usage.
     source: Optional[
-        Literal["control", "cached_control", "recent_turn"]
+        Literal["control", "cached_control", "recent_turn", "native_estimate"]
     ] = None
     # Work reports keep the engine's real context usage above for honest
     # remaining-capacity calculations, while exposing the fresh-session startup
@@ -1914,8 +1968,8 @@ class ContextReport(_Base):
     session_percentage: Optional[float] = None
     model: Optional[str] = None
     is_auto_compact_enabled: Optional[bool] = None
-    # Claude's effective automatic-compaction boundary and physical context
-    # capacity. They are observations from get_context_usage(), not substitutes
+    # Native automatic-compaction boundary and physical context capacity.
+    # These observations are not substitutes
     # for the desired/applied session control carried by AutoCompact.
     auto_compact_threshold_tokens: Optional[int] = Field(default=None, ge=0)
     raw_max_tokens: Optional[int] = Field(default=None, ge=0)
@@ -2136,6 +2190,40 @@ class GetDiff(_Command):
     type: Literal["get_diff"] = "get_diff"
     file: str = Field(max_length=4096)
     theme: Literal["light", "dark"] = "light"
+    turn_id: Optional[WireId] = None
+    revision: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    engine: Optional[Literal["claude", "codex"]] = None
+
+    @model_validator(mode="after")
+    def require_complete_archive_identity(self):
+        fields = (self.turn_id, self.revision, self.engine)
+        if any(value is not None for value in fields) and not all(value is not None for value in fields):
+            raise ValueError("historical diff requires turn_id, revision and engine together")
+        return self
+
+
+class GetTurnFileChanges(_Command):
+    """Read an immutable file-index page without resuming the engine."""
+    type: Literal["get_turn_file_changes"] = "get_turn_file_changes"
+    sid: WireId
+    engine: Literal["claude", "codex"]
+    turn_id: WireId
+    revision: str = Field(min_length=1, max_length=64)
+    offset: int = Field(default=0, ge=0, le=4096, strict=True)
+    limit: int = Field(default=64, ge=1, le=64, strict=True)
+
+
+class TurnFileChangesPage(_Base):
+    """Private one-shot response; never retained in the live replay ring."""
+    type: Literal["turn_file_changes_page"] = "turn_file_changes_page"
+    engine: Literal["claude", "codex"]
+    turn_id: WireId
+    revision: str = Field(min_length=1, max_length=64)
+    offset: int = Field(ge=0, le=4096)
+    files: list[TurnFileChange] = Field(max_length=64)
+    total_files: int = Field(ge=0, le=4096)
+    next_offset: Optional[int] = Field(default=None, ge=1, le=4096)
+    request_id: Optional[WireId] = None
 
 
 class DiffReport(_Base):
@@ -2146,8 +2234,40 @@ class DiffReport(_Base):
     request_id: Optional[WireId] = None
 
 
+class BrowseFiles(_Command):
+    """List one session directory without starting or resuming an engine."""
+
+    type: Literal["browse_files"] = "browse_files"
+    path: str = Field(default=".", max_length=4096)
+    request_id: str = Field(min_length=1, max_length=128)
+    offset: int = Field(default=0, ge=0, le=20_000)
+    limit: int = Field(default=100, ge=1, le=100)
+    hidden: bool = False
+    revision: Optional[str] = Field(default=None, max_length=128)
+
+
+class WorkspaceEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(max_length=1024)
+    path: str = Field(max_length=4096)
+    kind: Literal["directory", "file", "unsupported"]
+
+
+class FilesListed(_Base):
+    type: Literal["files_listed"] = "files_listed"
+    request_id: str
+    root: str = ""
+    path: str = ""
+    kind: Literal["directory", "file"] = "directory"
+    parent: Optional[str] = None
+    entries: list[WorkspaceEntry] = Field(default_factory=list, max_length=100)
+    revision: Optional[str] = None
+    next_offset: Optional[int] = None
+    error: Optional[str] = None
+
+
 class GetFilePreview(_Command):
-    """client -> wrapper: read one UTF-8 text file below the session cwd."""
+    """client -> wrapper: read one authorized, bounded file preview."""
     type: Literal["get_file_preview"] = "get_file_preview"
     path: PreviewPath
     request_id: WireId
@@ -2161,13 +2281,16 @@ class FilePreview(_Base):
     wrapper host and report their original extension in ``converted_from``.
     """
     type: Literal["file_preview"] = "file_preview"
+    directory: bool = False
     path: PreviewPath
     request_id: WireId
-    format: Literal["markdown", "text", "html", "image", "pdf"] = "text"
+    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "spreadsheet"] = "text"
     content: PreviewContent = ""
     media_type: Optional[Literal[
         "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
         "image/svg+xml", "application/pdf",
+        "audio/wav", "audio/mpeg", "audio/mp4", "audio/aac", "audio/flac",
+        "audio/ogg", "audio/webm",
     ]] = None
     data: Optional[ArtifactPreviewData] = None
     converted_from: Optional[str] = Field(default=None, max_length=16)
@@ -2238,7 +2361,7 @@ class PreviewAuthorizationRequired(_Base):
     operation: Literal["file_preview", "preview_asset"]
     path: PreviewPath
     resolved_path: PreviewPath
-    format: Literal["markdown", "text", "html", "image", "pdf"] = "text"
+    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "spreadsheet"] = "text"
     preview_id: Optional[WireId] = None
 
 
@@ -2317,6 +2440,7 @@ class ConversationTurn(BaseModel):
     processDoneTs: Optional[int] = Field(default=None, ge=0)
     detailEventCount: int = Field(default=0, ge=0)
     detailLoaded: bool = False
+    fileChanges: Optional[TurnChangeSummary] = None
 
 
 class CodexTerminalFence(BaseModel):
@@ -2346,13 +2470,18 @@ class History(_Base):
     type: Literal["history"] = "history"
     session_id: WireId
     # Boot-scoped authoritative transcript revision.  Browsers persist this
-    # beside cached turns and must replace completed cache state whenever it
-    # changes, including after a wrapper restart or destructive rewind.
+    # beside cached turns. A change replaces completed cache state unless an
+    # explicit same-generation continuity boundary proves only aliases changed.
+    # Wrapper restart and destructive rewind never preserve that continuity.
     revision: WireId
     # Wrapper lifetime that owns build_seq. It lets clients reject a pre-
     # rollback response across revision epochs while still accepting build_seq
     # restarting from one after a real wrapper restart.
     generation: Optional[WireId] = None
+    # Stable only across additive message-ID alias updates. A source-family
+    # switch, rollback or wrapper restart starts a new continuity boundary.
+    # This is not a pagination/detail revision: those still use `revision`.
+    continuity_revision: Optional[WireId] = None
     # Monotonic per-session sequence for newest-page builds. Pagination echoes
     # the sequence of the newest page it belongs to, so a browser can reject an
     # older first page without rejecting a valid older page from the same view.
@@ -2677,6 +2806,8 @@ class CompletionState(_Base):
 
 
 AnyMessage = Union[
+    BrowseFiles, FilesListed, SetCodexContext, CodexContext,
+    GetTurnFileChanges, TurnFileChangesPage,
     Hello, Query, CancelQueuedQuery, GetQueuedQuery, QueuedQueryDetail, UpdateQueuedQuery, QueuedQueryUpdated, QueryQueueState, Steer, Interrupt, Takeover, TakeoverState, SessionControl, SetModel, SetEffort, SetAutoCompact, SetServiceTier, SetCollaborationMode, SetPerm, GetPermissionProfiles, SetPermissionProfile, SetWebSearch, Fast, CollaborationMode, OpenBtw, CloseBtw, SyncBtw, BtwOpened, BtwSync, BtwClosed, GetContext, GetStatus, ConsumeRateLimitResetCredit, GetDiff, GetFilePreview, SaveMarkdown, GetPreviewAsset, AuthorizePreview, GetHistory, GetTurnDetail, GetAgentDetail, GetHistoryImage, GetModels, GetEngineCapabilities, ManageEnginePlugin, ManageEngineSkill, ManageEngineHook, ListSessions, SwitchSession, NewSession, DeleteWorkSession, DeleteSession, RollbackSession, RollbackResult, CompactSession, StartReview, GetWorkDashboard, CreateWorkProject, DeleteWorkProject, AddWorkSource, DeleteWorkSource, CreateWorkPlugin, DeleteWorkPlugin, CreateWorkSchedule, DeleteWorkSchedule, GetWorkArtifacts, ListDir, Ping, Pong, CommandAck,
     ReplayStart, ReplayEnd, Snapshot, StateEvent, Model, Effort, AutoCompact, Perm, PermissionProfiles, PermissionProfile, WebSearch, ContextReport, StatusReport, RateLimitResetResult, Notice, RateLimitUpdate, DiffReport, FilePreview, FileSaveResult, PreviewAsset, PreviewAuthorizationRequired, PreviewAuthorizationResult, History, TurnDetail, AgentDetail, HistoryImage, HistoryInvalidated, ArtifactInvalidated, Models, EngineCapabilities, AskUser, AskUserSync, AskUserClosed, AnswerQuestion, BackgroundProcessSync,
     SessionList, SessionListInvalidated, SessionActivity, SessionFocus, SessionRekey, RenameSession, ArchiveSession, PinSession, WorkDashboard, WorkArtifacts,
@@ -2684,7 +2815,7 @@ AnyMessage = Union[
     GetGoal, SetGoal, ClearGoal, DismissGoal, GoalState,
     AcknowledgeCompletion, CompletionState,
     UserMsg, TurnSteered, AssistantMsgStart, Delta, ToolUse, ToolDelta, ToolResult,
-    AssistantMsgEnd, ProcessEvent, TurnPlan, TurnDiff, TurnBinding,
+    AssistantMsgEnd, ProcessEvent, TurnPlan, TurnDiff, TurnFileChanges, TurnBinding,
     TurnEnd, Error, WrapperDisconnected, WrapperReconnected,
 ]
 
@@ -2695,15 +2826,19 @@ AnyMessage = Union[
 # are NOT seq'd/buffered.
 DOWNSTREAM_TYPES = frozenset({
     "user_msg", "turn_steered", "state", "model", "effort", "auto_compact", "perm",
-    "permission_profile", "web_search", "fast",
+    "permission_profile", "web_search", "fast", "codex_context",
     "collaboration_mode", "session_control", "query_queue", "btw_opened",
     "assistant_msg_start", "delta", "tool_use", "tool_delta", "tool_result",
-    "assistant_msg_end", "process", "turn_plan", "turn_diff", "turn_binding",
+    "assistant_msg_end", "process", "turn_plan", "turn_diff", "turn_file_changes", "turn_binding",
     "turn_end", "completion_state",
     "error", "ask_user", "ask_user_closed", "history_invalidated", "artifact_invalidated",
 })
 
 _TYPE_MAP: dict[str, type[BaseModel]] = {
+    "browse_files": BrowseFiles,
+    "files_listed": FilesListed,
+    "set_codex_context": SetCodexContext,
+    "codex_context": CodexContext,
     "hello": Hello,
     "query": Query,
     "cancel_queued_query": CancelQueuedQuery,
@@ -2739,6 +2874,8 @@ _TYPE_MAP: dict[str, type[BaseModel]] = {
     "get_status": GetStatus,
     "consume_rate_limit_reset_credit": ConsumeRateLimitResetCredit,
     "get_diff": GetDiff,
+    "get_turn_file_changes": GetTurnFileChanges,
+    "turn_file_changes_page": TurnFileChangesPage,
     "get_file_preview": GetFilePreview,
     "save_markdown": SaveMarkdown,
     "get_preview_asset": GetPreviewAsset,
@@ -2843,6 +2980,7 @@ _TYPE_MAP: dict[str, type[BaseModel]] = {
     "background_process_sync": BackgroundProcessSync,
     "turn_plan": TurnPlan,
     "turn_diff": TurnDiff,
+    "turn_file_changes": TurnFileChanges,
     "turn_binding": TurnBinding,
     "turn_end": TurnEnd,
     "error": Error,

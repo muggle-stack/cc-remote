@@ -9,6 +9,7 @@ import {
 } from "./domain/conversation.ts";
 import { reconcileProvenCompactionOrphans } from "./compaction-orphans.ts";
 import { generatedImageIdentity, generatedOutputImages } from "./process-blocks.ts";
+import { codexTransportInterruption } from "./problem-presentation.ts";
 export { reconcileProvenCompactionOrphans } from "./compaction-orphans.ts";
 
 function combineText(first: string, second: string): string {
@@ -77,6 +78,11 @@ function hasDeferredTurnDetail(turn: Turn): boolean {
     || (turn.detailEventCount ?? 0) > 0;
 }
 
+function isExactClosedSteer(summary: Turn, detail: Turn): boolean {
+  return summary.done && !!summary.clientMsgId && !summary.forkPointId
+    && sharesExactTurnAlias(summary, detail);
+}
+
 /** Merge only same-revision process evidence. A concrete browser/detail
  * projection refines an opaque native summary, while an opaque refresh can
  * never erase an exact conclusion already learned for that revision. */
@@ -84,10 +90,20 @@ function mergedProcessDetailState(
   history: Turn,
   live: Turn,
   blocks: readonly Block[],
+  repairEmptySteer = false,
 ): ProcessDetailState {
   if (blocks.some(isPresentableProcessBlock)) return "present";
   const historyState = statedProcessDetailState(history);
   const liveState = statedProcessDetailState(live);
+  // Exact source emptiness can retire a metadata-only live/cache claim. An
+  // accepted steer used to inherit its predecessor's process clock before the
+  // native input arrived. Keep real retained process and unread detail pages;
+  // neither an opaque summary nor a bounded empty page proves their absence.
+  if (repairEmptySteer && history.processDetailState === "none"
+      && !live.detailHasMore && !live.detailHasNewer
+      && !live.detailProjection?.hasMore && !live.detailProjection?.hasNewer
+      && !live.detailProjection?.blocks.some(isPresentableProcessBlock)
+      && !live.liveSpillBlocks?.some(isPresentableProcessBlock)) return "none";
   // Visible process is immutable within one history revision. A later opaque
   // or final-only page may replace the currently retained block window, but it
   // cannot prove that a process observed on another page never existed.
@@ -147,6 +163,23 @@ function trustworthyProcessDoneTs(turn: Turn): number | undefined {
     return undefined;
   }
   return done;
+}
+
+function mergedProcessMetadata(
+  history: Turn, live: Turn, processDetailState: ProcessDetailState,
+) {
+  return {
+    processDetailState,
+    detailReasons: mergedDetailReasons(history, live, processDetailState),
+    processStartedTs: processDetailState === "present"
+      ? earliestTimestamp(
+          trustworthyProcessStartedTs(history), trustworthyProcessStartedTs(live))
+      : undefined,
+    processDoneTs: processDetailState === "present"
+      ? latestTimestamp(
+          trustworthyProcessDoneTs(history), trustworthyProcessDoneTs(live))
+      : undefined,
+  };
 }
 
 function processBlockMatches(
@@ -467,6 +500,33 @@ function nativeTaskIdentity(turn: Turn): string | undefined {
   return turn.liveTaskId ?? turn.forkPointId ?? turn.codexTurnId;
 }
 
+function historicalInterruptionError(history: Turn, previous: Turn): string | undefined {
+  if (history.error != null) return history.error;
+  // Native history knows the outcome, but a daemon replacement's cause exists
+  // only on the control link. Keep it only for the exact interrupted task.
+  const nativeId = nativeTaskIdentity(history);
+  return history.done && history.interrupted
+    && nativeId && nativeId === nativeTaskIdentity(previous)
+    && codexTransportInterruption(previous.error) ? previous.error : undefined;
+}
+
+/** Restore observed control-link causes within the caller's validated history
+ * revision/generation, without resurrecting rows or changing native outcomes. */
+export function restoreTurnInterruptionCauses(
+  summaries: Turn[], previous: readonly Turn[],
+): Turn[] {
+  const observed = previous.filter(turn => codexTransportInterruption(turn.error));
+  if (!observed.length) return summaries;
+  return summaries.map(summary => {
+    if (!summary.done || !summary.interrupted || summary.error != null) return summary;
+    const matches = observed.filter(turn => sharesExactTurnAlias(summary, turn)
+      && nativeTaskIdentity(summary) === nativeTaskIdentity(turn));
+    if (matches.length !== 1) return summary;
+    const error = historicalInterruptionError(summary, matches[0]);
+    return error ? { ...summary, error } : summary;
+  });
+}
+
 function isIdleHistoryRestartOrphan(turn: Turn): boolean {
   return turn.done
     && turn.interrupted === true
@@ -482,6 +542,38 @@ function isIdleHistoryRestartOrphan(turn: Turn): boolean {
     && !turn.files?.length
     && turn.blocks.length > 0
     && turn.blocks.every((block) => block.done);
+}
+
+function indexedBlockOwners(turns: readonly Turn[]): Map<string, Set<number>> {
+  const result = new Map<string, Set<number>>();
+  turns.forEach((turn, index) => {
+    for (const block of turn.blocks) {
+      const key = blockIdentity(block);
+      const owners = result.get(key) ?? new Set<number>();
+      owners.add(index);
+      result.set(key, owners);
+    }
+  });
+  return result;
+}
+
+function ownsProcessBlock(owners: Map<string, Set<number>>, index: number) {
+  return (block: Block): boolean => {
+    const declared = owners.get(blockIdentity(block));
+    return !declared || declared.size !== 1 || declared.has(index);
+  };
+}
+
+function retainOwnedTurnBlocks(turn: Turn, owned: (block: Block) => boolean): Turn {
+  return {
+    ...turn,
+    blocks: turn.blocks.filter(owned),
+    liveSpillBlocks: turn.liveSpillBlocks?.filter(owned),
+    detailProjection: turn.detailProjection ? {
+      ...turn.detailProjection,
+      blocks: turn.detailProjection.blocks.filter(owned),
+    } : undefined,
+  };
 }
 
 function blockIdentity(block: Block): string {
@@ -675,19 +767,7 @@ function installCachedDetailRestore(
     summary, cached, blocks);
   return {
     ...summary,
-    processDetailState,
-    detailReasons: mergedDetailReasons(
-      summary, cached, processDetailState),
-    processStartedTs: processDetailState === "present"
-      ? earliestTimestamp(
-          trustworthyProcessStartedTs(summary),
-          trustworthyProcessStartedTs(cached))
-      : undefined,
-    processDoneTs: processDetailState === "present"
-      ? latestTimestamp(
-          trustworthyProcessDoneTs(summary),
-          trustworthyProcessDoneTs(cached))
-      : undefined,
+    ...mergedProcessMetadata(summary, cached, processDetailState),
     detailLoaded: false,
     detailLoading: false,
     detailError: undefined,
@@ -733,6 +813,7 @@ export function restoreObservedLiveTurnDetails(
 ): Turn[] {
   const observedMatches = new Array<number>(summaries.length).fill(-1);
   const usedObserved = new Set<number>();
+  const itemOwners = indexedBlockOwners(summaries);
   const reserveMatches = (
     predicate: (summary: Turn, observed: Turn) => boolean,
   ) => {
@@ -778,7 +859,9 @@ export function restoreObservedLiveTurnDetails(
       observed.blocks,
       true,
     );
-    const blocks = source.filter((block) => !isFinalTextBlock(block)
+    const owned = ownsProcessBlock(itemOwners, summaryIndex);
+    const blocks = source.filter((block) => owned(block)
+        && !isFinalTextBlock(block)
         && (block.kind !== "text" || block.text.length > 0))
       .map(cloneDetailBlock);
     if (blocks.length === 0) continue;
@@ -786,19 +869,7 @@ export function restoreObservedLiveTurnDetails(
       summary, observed, blocks);
     restored[summaryIndex] = {
       ...summary,
-      processDetailState,
-      detailReasons: mergedDetailReasons(
-        summary, observed, processDetailState),
-      processStartedTs: processDetailState === "present"
-        ? earliestTimestamp(
-            trustworthyProcessStartedTs(summary),
-            trustworthyProcessStartedTs(observed))
-        : undefined,
-      processDoneTs: processDetailState === "present"
-        ? latestTimestamp(
-            trustworthyProcessDoneTs(summary),
-            trustworthyProcessDoneTs(observed))
-        : undefined,
+      ...mergedProcessMetadata(summary, observed, processDetailState),
       detailLoaded: false,
       detailLoading: false,
       detailError: undefined,
@@ -893,7 +964,9 @@ export function restoreCachedTurnDetails(
     const summary = restored[summaryIndex];
     const installed = installCachedDetailRestore(
       summary, cachedTurns[cachedIndex], authority, activeOwnerId);
-    restored[summaryIndex] = installed;
+    const error = historicalInterruptionError(summary, cachedTurns[cachedIndex]);
+    restored[summaryIndex] = error === installed.error
+      ? installed : { ...installed, error };
   }
   return restored;
 }
@@ -905,6 +978,7 @@ function mergeTurn(
   completedTextAuthority: "first" | "second" | "combine" = "first",
   settledCanonicalText = false,
   preserveCompleteLiveOrder = false,
+  repairEmptySteer = false,
 ): Turn {
   const historyImageRefs = history.imageRefs?.length
     ? history.imageRefs : undefined;
@@ -933,8 +1007,8 @@ function mergeTurn(
     settledCanonicalText,
   );
   const processDetailState = mergedProcessDetailState(
-    history, live, blocks);
-  const detailReasons = mergedDetailReasons(
+    history, live, blocks, repairEmptySteer);
+  const processMetadata = mergedProcessMetadata(
     history, live, processDetailState);
   // A Plan is durable session-level progress and ChatView may lift it into the
   // composer-adjacent progress strip.  It therefore cannot prove that this
@@ -985,6 +1059,10 @@ function mergeTurn(
     images: historyImageRefs ? undefined : live.images ?? history.images,
     imageRefs: historyImageRefs ?? live.imageRefs ?? history.imageRefs,
     files: live.files ?? history.files,
+    fileChanges: liveOwnsLifecycle ? live.fileChanges ?? history.fileChanges : history.fileChanges ?? live.fileChanges,
+    fileChangesTurnId: liveOwnsLifecycle
+      ? live.fileChangesTurnId ?? history.fileChangesTurnId
+      : history.fileChangesTurnId ?? live.fileChangesTurnId,
     ts: Math.min(history.ts ?? Number.MAX_SAFE_INTEGER,
       live.ts ?? Number.MAX_SAFE_INTEGER) === Number.MAX_SAFE_INTEGER
       ? undefined
@@ -996,18 +1074,7 @@ function mergeTurn(
     durationMs: history.durationMs === 0 && (live.durationMs ?? 0) > 0
       ? live.durationMs
       : history.durationMs ?? live.durationMs,
-    processDetailState,
-    detailReasons,
-    processStartedTs: processDetailState === "present"
-      ? earliestTimestamp(
-          trustworthyProcessStartedTs(history),
-          trustworthyProcessStartedTs(live))
-      : undefined,
-    processDoneTs: processDetailState === "present"
-      ? latestTimestamp(
-          trustworthyProcessDoneTs(history),
-          trustworthyProcessDoneTs(live))
-      : undefined,
+    ...processMetadata,
     // Detail is a monotonic, revision-bound local projection. A later summary
     // may legitimately contain no heavyweight blocks; it must not erase pages
     // which the user already expanded in this same revision.
@@ -1024,7 +1091,8 @@ function mergeTurn(
       || (live.detailLoaded || history.detailLoaded)
         && (hasLoadedDetailPayload || !hasDeferredTurnDetail(history))),
     detailLoading: live.detailLoading ?? history.detailLoading,
-    detailError: live.detailError ?? history.detailError,
+    detailError: processDetailState === "none" && processMetadata.detailReasons.length === 0
+      ? undefined : live.detailError ?? history.detailError,
     detailResetPending:
       live.detailResetPending ?? history.detailResetPending,
     detailHasMore: detailProjection
@@ -1054,12 +1122,12 @@ function mergeTurn(
   };
 }
 
-function restoreAuthoritativeLifecycle(merged: Turn, history: Turn): Turn {
+function restoreAuthoritativeLifecycle(merged: Turn, history: Turn, live: Turn): Turn {
   const restored = {
     ...merged,
     done: history.done,
     interrupted: history.interrupted,
-    error: history.error,
+    error: historicalInterruptionError(history, live),
     progress: history.progress,
     doneTs: history.doneTs,
     durationMs: history.durationMs,
@@ -1092,12 +1160,24 @@ function restoreUnownedHistoryIdentity(
 export function mergeAuthoritativeTurnDetail(
   summary: Turn,
   detail: Turn,
+  canonicalTurns?: readonly Turn[],
 ): Turn {
   // The summary owns lifecycle and ordering, but an already-loaded detail page
   // owns the complete payload for an exact native message. In particular, a
   // later summary refresh must not replace a >256 KiB final answer with the
   // bounded "expand for full content" prefix again.
-  const merged = mergeTurn(summary, detail, false, "second");
+  // The already-merged row may carry an optimistic native-task alias. Use the
+  // source page to identify a closed steer and to keep another segment's exact
+  // items from being copied back out of previously expanded detail.
+  const index = canonicalTurns?.findIndex((turn) =>
+    sharesExactTurnAlias(turn, summary)) ?? -1;
+  const canonical = index >= 0 ? canonicalTurns![index] : summary;
+  if (index >= 0) {
+    detail = retainOwnedTurnBlocks(detail,
+      ownsProcessBlock(indexedBlockOwners(canonicalTurns!), index));
+  }
+  const merged = mergeTurn(summary, detail, false, "second", false, false,
+    isExactClosedSteer(canonical, detail));
   return {
     ...merged,
     id: summary.id,
@@ -1255,19 +1335,7 @@ export function installAuthoritativeTurnDetailPage(
     done: summary.done,
     doneTs: summary.doneTs,
     durationMs: summary.durationMs,
-    processDetailState,
-    detailReasons: mergedDetailReasons(
-      summary, detail, processDetailState),
-    processStartedTs: processDetailState === "present"
-      ? earliestTimestamp(
-          trustworthyProcessStartedTs(summary),
-          trustworthyProcessStartedTs(detail))
-      : undefined,
-    processDoneTs: processDetailState === "present"
-      ? latestTimestamp(
-          trustworthyProcessDoneTs(summary),
-          trustworthyProcessDoneTs(detail))
-      : undefined,
+    ...mergedProcessMetadata(summary, detail, processDetailState),
     interrupted: summary.interrupted,
     error: summary.error,
     progress: summary.progress,
@@ -1355,7 +1423,33 @@ export function mergeInitialHistory(
   reserveMatches((historyTurn, liveTurn) => historyTurn.id === liveTurn.id);
   reserveMatches(sharesExactTurnAlias);
 
-  reserveMatches(sameTurn);
+  const itemOwners = indexedBlockOwners(history);
+  // A steer and its predecessor share a native task. Reserve exact item
+  // ownership before considering that coarse alias, including an old live row
+  // whose user-message binding has already fallen out of the replay ring.
+  const nativeItemOwners = new Map(live.map((turn) => {
+    const owners = new Set(turn.blocks.flatMap((block) =>
+      [...(itemOwners.get(blockIdentity(block)) ?? [])]));
+    return [turn, owners.size === 1 ? [...owners][0] : -1] as const;
+  }));
+  const historyIndexes = new Map(merged.map((turn, index) => [turn, index]));
+  reserveMatches((historyTurn, liveTurn) => {
+    const nativeId = nativeTaskIdentity(historyTurn);
+    if (!nativeId || nativeId !== nativeTaskIdentity(liveTurn)) return false;
+    return nativeItemOwners.get(liveTurn) === historyIndexes.get(historyTurn);
+  });
+  reserveMatches(sharesCompactionTurnAlias);
+  const historyAliasCounts = new Map<Turn, number>();
+  const liveAliasCounts = new Map<Turn, number>();
+  reserveMatches((historyTurn, liveTurn) => sameTurn(historyTurn, liveTurn)
+    // A task-only fallback is safe only when it identifies one row on both
+    // sides. Even identical prompts can represent distinct user steers.
+    && (historyAliasCounts.get(liveTurn) ?? historyAliasCounts.set(liveTurn,
+      history.filter((candidate) => sameTurn(candidate, liveTurn)).length
+    ).get(liveTurn)) === 1
+    && (liveAliasCounts.get(historyTurn) ?? liveAliasCounts.set(historyTurn,
+      live.filter((candidate) => sameTurn(historyTurn, candidate)).length
+    ).get(historyTurn)) === 1);
 
   const explicitActiveOwnerIndexes = options.activeOwnerId
     ? live.flatMap((turn, index) =>
@@ -1565,8 +1659,14 @@ export function mergeInitialHistory(
   // Apply the precomputed mapping in original live order. Matching direction
   // must not reorder unmatched optimistic rows.
   for (let liveIndex = 0; liveIndex < live.length; liveIndex += 1) {
-    const liveTurn = live[liveIndex];
+    let liveTurn = live[liveIndex];
     const index = matches[liveIndex];
+    if (index >= 0 && (settledCodex || options.reconcileReplayOrphans)) {
+      // Heal an older persisted wrong-segment copy only when this canonical
+      // page assigns its exact item id uniquely to a different row. Missing
+      // summary detail and repeated text are never grounds for deleting items.
+      liveTurn = retainOwnedTurnBlocks(liveTurn, ownsProcessBlock(itemOwners, index));
+    }
     if (index >= 0) {
       if (authoritativeHeadDuplicateMatches.has(liveIndex)) continue;
       if (activeReplayMatches.has(liveIndex)) {
@@ -1585,7 +1685,7 @@ export function mergeInitialHistory(
         );
         merged[index] = preserveLiveOpen
           ? bound
-          : restoreAuthoritativeLifecycle(bound, merged[index]);
+          : restoreAuthoritativeLifecycle(bound, merged[index], liveTurn);
         continue;
       }
       if (replayOrphanMatches.has(liveIndex)) {
@@ -1616,10 +1716,12 @@ export function mergeInitialHistory(
         historyTurn, liveTurn, isOpenLiveTail, "first", settledCodex,
         !!options.preserveLiveTailOpen && !!options.reconcileReplayOrphans
           && liveIndex === activeOwnerIndex,
+        (settledCodex || !!options.reconcileReplayOrphans)
+          && isExactClosedSteer(historyTurn, liveTurn),
       );
       if (settledCodex && sharesExactTurnAlias(historyTurn, liveTurn)) {
         merged[index] = restoreUnownedHistoryIdentity(
-          restoreAuthoritativeLifecycle(bound, historyTurn),
+          restoreAuthoritativeLifecycle(bound, historyTurn, liveTurn),
           historyTurn,
           liveTurn,
         );
@@ -1650,7 +1752,7 @@ export function mergeInitialHistory(
     );
     merged[index] = preserveLiveOpen
       ? bound
-      : restoreAuthoritativeLifecycle(bound, merged[index]);
+      : restoreAuthoritativeLifecycle(bound, merged[index], liveTurn);
   }
 
   const rows = [...merged, ...unmatched].map((turn, order) => ({ turn, order }));

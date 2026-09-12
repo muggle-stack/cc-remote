@@ -17,6 +17,35 @@ try {
   const event = (body: Record<string, unknown>): ServerEvent => ({
     v: 37, ts: 10, ...body,
   } as ServerEvent);
+  for (const includeError of [true, false]) {
+    const sid = "capacity-terminal-order";
+    let state = { ...initialState, focusedSid: sid,
+      sessions: [{ session_id: sid, engine: "codex", space: "code" }],
+      runtimes: { [sid]: { ...createRuntime(), state: "running" } } };
+    const apply = (body: Record<string, unknown>) => {
+      state = reduce(state, { type: "event", event: event({ sid, ...body }) });
+    };
+    apply({ type: "user_msg", msg_id: "failed-message", prompt: "deploy", seq: 1 });
+    apply({ type: "turn_binding", msg_id: "failed-message", turn_id: "failed-native", seq: 2 });
+    if (includeError) apply({ type: "error", code: "cc_crash", msg_id: "failed-message",
+      message: "当前模型繁忙，请稍后重试或切换模型。", seq: 3 });
+    apply({ type: "turn_end", turn_id: "failed-native", seq: 4,
+      result: { subtype: "error", is_error: true, duration_ms: 337204 } });
+    const failed = state.runtimes[sid].turns[0];
+    assert.equal(failed.done, true);
+    assert.equal(failed.error, includeError ? "当前模型繁忙，请稍后重试或切换模型。" : "本次回复未完成，请重试。",
+      "TurnEnd keeps the preceding provider error; a lost Error still cannot become success");
+    assert.equal(failed.terminalSource, "failed");
+    apply({ type: "user_msg", msg_id: "next-message", prompt: "", seq: 5 });
+    apply({ type: "turn_binding", msg_id: "next-message", turn_id: "next-native", seq: 6 });
+    apply({ type: "process", item_id: "next-tool", kind: "command", phase: "start",
+      status: "running", title: "verify", turn_id: "next-native", seq: 7 });
+    apply({ type: "turn_end", turn_id: "failed-native", seq: 8,
+      result: { subtype: "error", is_error: true, duration_ms: 337204 } });
+    assert.equal(state.runtimes[sid].turns[1].done, false,
+      "a repeated old failure cannot stop the next native turn");
+    assert.equal(state.runtimes[sid].turns[0].error, failed.error);
+  }
   const history = (
     sid: string,
     revision: string,
