@@ -353,7 +353,7 @@ class DshProjection:
             todos = data.get("todos", [])
             return [TurnPlan(item_id="dsh-todo", turn_id=self.owner, plan=[{
                 "step": str(t.get("content", t.get("text", ""))),
-                "status": {"pending": "pending", "in_progress": "in_progress", "completed": "completed"}.get(t.get("status"), "pending"),
+                "status": {"pending": "pending", "in_progress": "inProgress", "completed": "completed"}.get(t.get("status"), "pending"),
             } for t in todos[:64]])]
         if kind in {"command/run", "command/done"}:
             ended = kind.endswith("done")
