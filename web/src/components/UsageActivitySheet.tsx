@@ -7,6 +7,7 @@ import {
 } from "react";
 import type { StatusReport } from "../protocol";
 import { Icon } from "../icons";
+import { CenteredSheet } from "./CenteredSheet";
 import { accountStatsNote } from "../status-capabilities";
 import {
   buildUsageActivityCalendar,
@@ -73,17 +74,6 @@ export function UsageActivitySheet({
     return () => window.cancelAnimationFrame(frame);
   }, [calendar, open]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      onClose();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose, open]);
-
   if (!open) return null;
   const selected = calendar.days.find((day) => day.date === selectedDate);
   const statsNote = accountStatsNote(report?.account);
@@ -91,11 +81,8 @@ export function UsageActivitySheet({
     "--usage-activity-weeks": USAGE_ACTIVITY_WEEKS,
   } as CSSProperties;
 
-  return <>
-    <div className="scrim show usage-activity-scrim" onClick={onClose} />
-    <section className="sheet show usage-activity-sheet" role="dialog"
-      aria-modal="true" aria-label="Codex 使用活动">
-      <div className="sheet-grip" />
+  return <CenteredSheet open={open} label="Codex 使用活动" onClose={onClose}
+    className="usage-activity-sheet" maxWidth={900} maxHeight={780} header={false}>
       <header className="usage-activity-head">
         <span className="usage-activity-icon"><Icon name="calendar" size={19} /></span>
         <span>
@@ -223,6 +210,5 @@ export function UsageActivitySheet({
           </section>
         </>}
       </div>
-    </section>
-  </>;
+  </CenteredSheet>;
 }

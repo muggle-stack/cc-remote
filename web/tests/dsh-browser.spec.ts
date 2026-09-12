@@ -441,7 +441,9 @@ test("DSH preset picker uses the native roster and carries the selected preset",
   const relay = await openDsh(page);
   await page.locator(".surface-head-title").click();
   await page.getByRole("button", { name: "新会话", exact: true }).click();
-  await page.getByLabel("DSH Agent Preset").selectOption("ptc");
+  await page.getByRole("button", { name: "选择 DSH 会话模式" }).click();
+  await page.getByRole("dialog", { name: "选择 DSH 会话模式" })
+    .getByRole("button", { name: /代码编排/ }).click();
   await expect(page.locator(".dsh-preset-row")).toContainText("通过代码组织工具调用");
   await page.locator(".newchat-input").fill("开始任务");
   await page.locator(".newchat-send").click();

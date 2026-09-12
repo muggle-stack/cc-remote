@@ -19,6 +19,9 @@ import type { ClaudeProfileInfo, CodexPermissionMode, CodexProfileInfo, CodexSer
 import { ImeSubmitGuard } from "../ime-submit";
 import { PendingImageAttachments } from "./PendingImageAttachments";
 import { CommandSheet } from "./CommandSheet";
+import { CenteredSheet } from "./CenteredSheet";
+import { ChoicePicker } from "./ChoicePicker";
+import { AttachmentPicker } from "./AttachmentPicker";
 import { permissionProfileLabel } from "../data";
 import { codexProfilePresentation } from "../codex-profile-presentation";
 import {
@@ -123,12 +126,7 @@ function NewChatSelectorSheet({
 }) {
   const title = kind === "models" ? "选择模型" : "选择思考强度";
   return (
-    <>
-      <div className={"scrim" + (open ? " show" : "")} onClick={onClose} />
-      <div className={"sheet" + (open ? " show" : "")}
-        role="dialog" aria-label={title}>
-        <div className="sheet-grip" />
-        <div className="sheet-title">{title}</div>
+    <CenteredSheet open={open} label={title} onClose={onClose}>
         <div className="sheet-scroll">
           {options.map((option) => (
             <button key={option.id ?? "__local_default__"}
@@ -145,8 +143,7 @@ function NewChatSelectorSheet({
             </button>
           ))}
         </div>
-      </div>
-    </>
+    </CenteredSheet>
   );
 }
 
@@ -192,8 +189,6 @@ export function NewChatView({ cwd, controlScopeKey,
     useState<NewChatExecutionControls>(
       () => defaultExecutionControls(controlScopeKey));
   const [permissionsOpen, setPermissionsOpen] = useState(false);
-  const photoRef = useRef<HTMLInputElement>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const imeSubmitRef = useRef(new ImeSubmitGuard());
   const buttonSendTimerRef = useRef<number | null>(null);
@@ -429,27 +424,23 @@ export function NewChatView({ cwd, controlScopeKey,
   const pickAccountProfile = engine === "codex"
     ? onPickCodexProfile : onPickClaudeProfile;
   const profileSelector = showProfileSelector ? (
-    <label className="newchat-profile">
-      <span>账号</span>
-      <select value={accountProfileId ?? ""}
-        onChange={(event) => pickAccountProfile?.(event.target.value)}
-        disabled={creating || importing || !pickAccountProfile}
-        aria-label={`选择 ${engine === "codex" ? "Codex" : "Claude"} 账号`}>
-        {selectedProfileMissing && accountProfileId && (
-          <option value={accountProfileId} disabled>已移除账号</option>
-        )}
-        {accountProfiles.map((profile) => (
-          <option key={profile.id} value={profile.id}>
-            {codexProfilePresentation(
-              accountProfiles,
-              defaultAccountProfileId,
-              profile.id,
-            )?.fullLabel ?? profile.label}
-            {profile.error ? " · 目录暂不可用" : ""}
-          </option>
-        ))}
-      </select>
-    </label>
+    <ChoicePicker key={`${controlScopeKey}:account`} className="newchat-profile"
+      label={`选择 ${engine === "codex" ? "Codex" : "Claude"} 账号`}
+      value={accountProfileId ?? ""} onChange={value => pickAccountProfile?.(value)}
+      disabled={creating || importing || !pickAccountProfile}
+      options={[
+        ...(selectedProfileMissing && accountProfileId
+          ? [{ value: accountProfileId, label: "已移除账号", disabled: true }] : []),
+        ...accountProfiles.map(profile => ({ value: profile.id,
+          label: codexProfilePresentation(accountProfiles, defaultAccountProfileId, profile.id)?.fullLabel ?? profile.label,
+          description: profile.error ? "目录暂不可用" : undefined, icon: "user",
+        })),
+      ]}>
+      <Icon name="user" size={14} /><span>账号</span>
+      <b>{selectedProfileMissing ? "已移除账号" : codexProfilePresentation(
+        accountProfiles, defaultAccountProfileId, accountProfileId,
+      )?.fullLabel ?? "选择账号"}</b>
+    </ChoicePicker>
   ) : null;
   const profileWarning = selectedProfileWarning ? (
     <div className="newchat-profile-error" role="status">
@@ -467,15 +458,20 @@ export function NewChatView({ cwd, controlScopeKey,
           <span className={`newchat-engine ${engine}`}>{engine === "dsh" ? "DSH" : engine === "codex" ? "◇ Codex" : "✳ Claude"}</span>
         </div>
         {engine === "dsh" && <div className="dsh-preset-row">
-          <label>Agent Preset
-            <select aria-label="DSH Agent Preset" value={dshPreset ?? ""}
-              onChange={event => onPickDshPreset?.(event.target.value)} disabled={creating}>
-              <option value="">DSH 默认</option>
-              {dshPresets.map(preset => <option key={preset.id} value={preset.id} disabled={!preset.available}>
-                {preset.name}{preset.available ? "" : " · 不可用"}
-              </option>)}
-            </select>
-          </label>
+          <ChoicePicker key={`${controlScopeKey}:preset`} className="dsh-preset-trigger"
+            label="选择 DSH 会话模式" value={dshPreset ?? ""}
+            disabled={creating || importing || !onPickDshPreset}
+            onChange={value => onPickDshPreset?.(value)}
+            options={[
+              { value: "", label: "DSH 默认", description: "使用设备上的默认会话模式", icon: "dsh" },
+              ...dshPresets.map(preset => ({ value: preset.id, label: preset.name,
+                description: preset.available ? preset.description : `${preset.description || "此模式"} · 不可用`,
+                disabled: !preset.available, icon: "dsh",
+              })),
+            ]}>
+            <Icon name="dsh" size={17} /><span>会话模式</span>
+            <b>{dshPresets.find(preset => preset.id === dshPreset)?.name ?? "DSH 默认"}</b>
+          </ChoicePicker>
           <p>{dshError || dshPresets.find(preset => dshPreset ? preset.id === dshPreset : preset.is_default)?.description || "正在读取设备上的 DSH…"}</p>
         </div>}
         {space === "work" ? (
@@ -574,19 +570,9 @@ export function NewChatView({ cwd, controlScopeKey,
 
         <div className="newchat-foot">
           <div className="newchat-ctls">
-            <button type="button" className="cmdbtn"
-              onClick={() => (space === "work"
-                ? fileRef.current : photoRef.current)?.click()}
-              aria-label={space === "work" ? "添加资料" : "添加照片"}
-              title={space === "work" ? "添加资料" : "添加照片"}
-              disabled={creating || importing}>
-              <Icon name="plus" size={18} />
-            </button>
-            <input ref={photoRef} type="file" accept="image/*" multiple
-              aria-label="添加照片" hidden
-              onChange={(e) => { void onPick(e.target.files); e.target.value = ""; }} />
-            <input ref={fileRef} type="file" multiple aria-label="添加文件" hidden
-              onChange={(e) => { void onPick(e.target.files); e.target.value = ""; }} />
+            <AttachmentPicker key={controlScopeKey} onPick={onPick}
+              label={space === "work" ? "添加资料" : "添加附件"}
+              disabled={creating || importing} />
             <button type="button" className="hint-ctl"
               onClick={() => setSheetKind("models")}
               title="选择模型" disabled={creating || importing || !onPickModel}>
@@ -655,14 +641,8 @@ export function NewChatView({ cwd, controlScopeKey,
           setSheetKind(null);
         }}
       />
-      <>
-        <div className={"scrim" + (autoCompactOpen ? " show" : "")}
-          onClick={() => setAutoCompactOpen(false)} />
-        <div className={"sheet auto-compact-sheet"
-          + (autoCompactOpen ? " show" : "")}
-          role="dialog" aria-label="新会话自动压缩">
-          <div className="sheet-grip" />
-          <div className="sheet-title">新会话自动压缩</div>
+      <CenteredSheet open={autoCompactOpen} label="新会话自动压缩"
+        className="auto-compact-sheet" onClose={() => setAutoCompactOpen(false)}>
           <div className="sheet-scroll">
             <Suspense fallback={
               <div className="ctx-pop-loading">读取自动压缩设置…</div>}>
@@ -677,8 +657,7 @@ export function NewChatView({ cwd, controlScopeKey,
                 }} />
             </Suspense>
           </div>
-        </div>
-      </>
+      </CenteredSheet>
       <CommandSheet
         open={permissionsOpen}
         kind="perms"

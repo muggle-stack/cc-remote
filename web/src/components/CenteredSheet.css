@@ -1,0 +1,34 @@
+.centered-sheet.sheet.show {
+  right:auto; bottom:auto; height:auto; padding:0;
+  border:1px solid var(--border-strong); border-radius:26px;
+  background:var(--surface); color:var(--text); overflow:hidden; outline:none;
+  transform:translate(-50%,-50%); opacity:1; transition:none;
+}
+.centered-sheet-head {
+  display:flex; align-items:center; justify-content:space-between; gap:12px;
+  flex:none; padding:16px 18px 8px;
+}
+.centered-sheet-head .sheet-title { padding:0; font-size:15px; color:var(--text); }
+.centered-sheet-head > button {
+  display:grid; place-items:center; flex:none; width:34px; height:34px;
+  border:0; border-radius:50%; padding:0; background:var(--raised); color:var(--dim);
+}
+.centered-sheet-head > button:hover { background:var(--accent-weak); color:var(--text); }
+.centered-sheet .sheet-scroll { min-height:0; overscroll-behavior:contain; padding-bottom:16px; }
+.centered-sheet button:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.centered-sheet .cmd { border-radius:16px; }
+.centered-sheet .cmd:disabled { opacity:.5; cursor:default; }
+.choice-picker-trigger { cursor:pointer; }
+.choice-picker-trigger > b { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.choice-picker-trigger > svg { flex:none; }
+.choice-picker-trigger:disabled { opacity:.5; cursor:default; }
+.choice-picker-trigger:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+.attachment-choices .cmd { min-height:64px; }
+.attachment-choices .cmd-ic { border-radius:14px; }
+@media (max-width:600px) {
+  .centered-sheet.sheet { border-radius:24px; }
+  .centered-sheet-head { padding:12px 14px 6px; }
+  :root:is([data-short-viewport="true"],[data-short-viewport="ime"]) .centered-sheet.permission-sheet .centered-sheet-head { padding:6px 12px 2px; }
+  :root:is([data-short-viewport="true"],[data-short-viewport="ime"]) .centered-sheet.permission-sheet .cmd-group { padding-top:4px; }
+  :root:is([data-short-viewport="true"],[data-short-viewport="ime"]) .centered-sheet.permission-sheet .permission-options .cmd { min-height:80px; }
+}

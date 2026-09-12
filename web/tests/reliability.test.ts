@@ -10829,7 +10829,7 @@ try {
     assert.match(markup, /accept="image\/\*"/);
     assert.match(markup, /multiple=""/);
     assert.equal(
-      (markup.match(/<button[^>]+aria-label="添加照片"/g) ?? []).length, 1);
+      (markup.match(/<button[^>]+aria-label="添加附件"/g) ?? []).length, 1);
     assert.equal(
       (markup.match(/<button[^>]+aria-label="添加文件"/g) ?? []).length, 0);
     assert.match(markup, />开始</);
@@ -10841,16 +10841,14 @@ try {
   assert.match(newChatMarkup, /本机默认 · Mythos 5\.1/);
   assert.match(newChatMarkup, /默认 · max/);
   assert.match(codexNewChatMarkup, /本机默认 · GPT Future/);
-  assert.match(codexNewChatMarkup, /dynamic catalog model/,
-    "new-session selectors render the live Codex catalog when available");
   const codexNewChatControls = codexNewChatMarkup.match(
     /<div class="newchat-ctls">([\s\S]*?)<\/div>/,
   )?.[1] ?? "";
   assert.doesNotMatch(codexNewChatControls, /不询问|Plan|标准/,
     "the compact footer must not duplicate controls that live in its sheet");
   assert.match(codexNewChatMarkup, /class="newchat-access"/);
-  assert.match(codexNewChatMarkup, /权限与执行环境/);
-  assert.match(codexNewChatMarkup, /Full Access/);
+  assert.doesNotMatch(codexNewChatMarkup, /role="dialog"/,
+    "closed selection surfaces are mounted only when opened");
   assert.doesNotMatch(newChatMarkup, /class="newchat-access"/);
   for (const markup of [newChatMarkup, codexNewChatMarkup]) {
     assert.doesNotMatch(markup, /class="newchat-context"/,
@@ -10866,7 +10864,7 @@ try {
   assert.match(multiProfileNewChatMarkup, /aria-label="选择 Codex 账号"/);
   assert.match(multiProfileNewChatMarkup, />nyx · Stack</);
   assert.match(multiProfileWorkMarkup, /aria-label="选择 Codex 账号"/);
-  assert.match(multiProfileWorkMarkup, />nyx · Stack · 目录暂不可用</);
+  assert.match(multiProfileWorkMarkup, />nyx · Stack</);
   assert.match(multiProfileWorkMarkup, /会话列表暂不可用/,
     "a transient catalog error warns without removing the Work account");
   assert.match(removedProfileWorkMarkup, />已移除账号</);
@@ -18249,9 +18247,11 @@ assert.match(composerSource, /<PendingImageAttachments/,
   "session drafts must expose the shared interactive image preview");
 assert.match(composerSource, /workSurface \? \(/);
 assert.match(composerSource, /p\.draftStore\.get\(p\.draftKey\)/);
-assert.match(composerSource, /accept="image\/\*" multiple/);
-assert.match(composerSource, /aria-label="添加照片"/);
-assert.match(composerSource, /aria-label="添加文件"/);
+const attachmentPickerSource = readFileSync(resolve("src/components/AttachmentPicker.tsx"), "utf8");
+assert.match(composerSource, /<AttachmentPicker/);
+assert.match(attachmentPickerSource, /accept="image\/\*" multiple/);
+assert.match(attachmentPickerSource, /aria-label="添加照片"/);
+assert.match(attachmentPickerSource, /aria-label="添加文件"/);
 assert.match(composerSource, /className="work-compose-card"/);
 assert.match(composerSource, /Artifacts · \{p\.workArtifactCount\}/);
 assert.doesNotMatch(composerSource, /交付物/);

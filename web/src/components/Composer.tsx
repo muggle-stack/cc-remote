@@ -23,6 +23,7 @@ import type {
 import { presentLegacyExternalControl, presentSessionControl } from "../session-control-ui";
 import type { ConnState } from "../ws";
 import { Icon } from "../icons";
+import { AttachmentPicker } from "./AttachmentPicker";
 import { parseContextCapacity } from "../codex-context";
 const CodexContextControl = lazy(() => import("./CodexContextControl"));
 import {
@@ -223,8 +224,6 @@ export function Composer(p: Props) {
   };
   const imeSubmitRef = useRef(new ImeSubmitGuard());
   const buttonSendTimerRef = useRef<number | null>(null);
-  const photoRef = useRef<HTMLInputElement>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
   const requestedSkillScopeRef = useRef<string | null>(null);
   const pickFilesRef = useRef<(files: FileList | File[] | null) => Promise<void>>(
     async () => {});
@@ -997,12 +996,6 @@ export function Composer(p: Props) {
           </div>
         )}
 
-        <input ref={photoRef} type="file" accept="image/*" multiple hidden
-          aria-label="添加照片"
-          onChange={(e) => { void onPickFiles(e.target.files); e.target.value = ""; }} />
-        <input ref={fileRef} type="file" multiple hidden aria-label="添加文件"
-          onChange={(e) => { void onPickFiles(e.target.files); e.target.value = ""; }} />
-
         {workSurface ? (
           <div className="work-compose-card">
             <div className="work-compose-caption">
@@ -1015,11 +1008,10 @@ export function Composer(p: Props) {
               {sendControl}
             </div>
             <div className="work-compose-foot">
-              <button type="button" className="work-compose-tool"
-                onClick={() => fileRef.current?.click()} disabled={locked || importing}
-                aria-label="添加资料" title="添加资料">
+              <AttachmentPicker key={p.draftKey} className="work-compose-tool"
+                onPick={onPickFiles} disabled={locked || importing} label="添加资料">
                 <Icon name="plus" size={15} /><span>添加资料</span>
-              </button>
+              </AttachmentPicker>
               {!!p.workArtifactCount && (
                 <button type="button" className="work-compose-tool"
                   onClick={p.onOpenArtifacts}
@@ -1091,9 +1083,7 @@ export function Composer(p: Props) {
         ) : (<>
           {refs.open && <Suspense fallback={null}><DshReferences value={refs} onPick={pickReference} /></Suspense>}
           <div className="inrow">
-            <button className="cmdbtn" onClick={() => photoRef.current?.click()}
-              aria-label="添加照片" title="添加照片"
-              disabled={locked || importing}><Icon name="plus" size={19} /></button>
+            <AttachmentPicker key={p.draftKey} onPick={onPickFiles} disabled={locked || importing} />
             {inputControl(p.engine === "codex" || p.engine === "dsh"
               ? "输入 / 命令，$ Skill"
               : "输入 / 命令")}

@@ -3648,6 +3648,10 @@ test("Codex settings opens the responsive daily usage activity view", async ({
   await expect(dialog).toContainText("当前连续");
   await expect(dialog).toContainText("最长连续");
   await expect(dialog.locator(".usage-activity-tile")).toHaveCount(371);
+  const activityBox = (await dialog.boundingBox())!;
+  expect(activityBox.y).toBeGreaterThan(12);
+  expect(activityBox.y + activityBox.height).toBeLessThan(page.viewportSize()!.height - 12);
+  expect(await dialog.evaluate(node => parseFloat(getComputedStyle(node).borderBottomLeftRadius))).toBeGreaterThan(16);
 
   const geometry = await page.locator(".usage-activity-viewport")
     .evaluate((viewport) => ({
@@ -8645,11 +8649,111 @@ async function chooseDangerousNewChatControls(
   await dialog.getByRole("button", { name: /Full Access/ }).click();
   await dialog.getByRole("button", { name: "Live", exact: true }).click();
   await page.locator(".scrim.show").click({ position: { x: 8, y: 8 } });
-  await expect(dialog).not.toHaveClass(/(?:^|\s)show(?:\s|$)/);
+  await expect(dialog).not.toBeVisible();
   await expect(page.locator(".newchat-access")).toContainText("Full Access");
 }
 
 let newChatSubmissionSequence = 0;
+
+test("new-chat controls center selections and recover after the phone keyboard closes", async ({ page }, info) => {
+  await page.setViewportSize({ width: 393, height: 852 });
+  await page.goto("/tests/history-browser.html?newchat-controls=1&selection-controls=1");
+  for (const label of ["选择模型", "选择思考强度", "选择 Codex 账号"]) {
+    const trigger = label.includes("账号")
+      ? page.getByRole("button", { name: label, exact: true }) : page.getByTitle(label, { exact: true });
+    await trigger.focus();
+    await trigger.press("Enter");
+    const dialog = page.getByRole("dialog", { name: label, exact: true });
+    await expect(dialog).toBeVisible();
+    const box = (await dialog.boundingBox())!;
+    expect(Math.abs(box.x + box.width / 2 - 393 / 2)).toBeLessThan(2);
+    expect(Math.abs(box.y + box.height / 2 - 852 / 2)).toBeLessThan(2);
+    expect(await dialog.evaluate(node => parseFloat(getComputedStyle(node).borderBottomLeftRadius))).toBeGreaterThan(16);
+    await page.keyboard.press("Escape");
+    await expect(dialog).not.toBeVisible();
+    await expect(trigger).toBeFocused();
+  }
+  await page.locator(".newchat-access").click();
+  const dialog = page.getByRole("dialog", { name: "权限与执行环境" });
+  const original = (await dialog.boundingBox())!;
+  await page.evaluate(() => {
+    Object.defineProperties(window.visualViewport!, {
+      height: { configurable: true, value: 380 },
+      offsetTop: { configurable: true, value: 20 },
+    });
+    window.visualViewport!.dispatchEvent(new Event("resize"));
+  });
+  await expect.poll(() => dialog.evaluate(node => {
+    const box = node.getBoundingClientRect();
+    return box.top >= 20 && box.bottom <= 400;
+  })).toBe(true);
+  await page.evaluate(() => {
+    Object.defineProperties(window.visualViewport!, {
+      height: { configurable: true, value: 852 },
+      offsetTop: { configurable: true, value: 0 },
+    });
+    window.visualViewport!.dispatchEvent(new Event("resize"));
+  });
+  await expect.poll(async () => Math.abs((await dialog.boundingBox())!.height - original.height)).toBeLessThan(2);
+  await page.screenshot({ path: info.outputPath("mobile-permissions-centered.png") });
+});
+
+test("new-chat controls use custom account choices without losing the draft", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?newchat-controls=1&selection-controls=1");
+  for (const engine of ["Codex", "Claude"]) {
+    if (engine === "Claude") await page.getByTestId("switch-newchat-engine").click();
+    await page.locator(".newchat-input").fill("保留这个新会话的内容");
+    await page.getByRole("button", { name: `选择 ${engine} 账号` }).click();
+    const dialog = page.getByRole("dialog", { name: `选择 ${engine} 账号` });
+    const account = dialog.getByRole("button", { name: /Secondary/ });
+    await account.focus();
+    await page.keyboard.press("Enter");
+    await expect(dialog).not.toBeVisible();
+    await expect(page.locator(".newchat-input")).toHaveValue("保留这个新会话的内容");
+    const submitted = await submitNewChatFixture(page);
+    expect(submitted.account).toBe("secondary");
+    await page.getByRole("button", { name: `选择 ${engine} 账号` }).click();
+    await expect(account).toHaveAttribute("aria-pressed", "true");
+    await page.keyboard.press("Escape");
+  }
+});
+
+test("new-chat controls show attachment choices before opening the device picker", async ({ page }, info) => {
+  await page.goto("/tests/history-browser.html?newchat-controls=1&selection-controls=1");
+  await page.locator(".newchat-input").fill("带上这些附件");
+  for (const [choice, inputLabel, accept, capture] of [
+    ["照片", "添加照片", "image/*", null],
+    ["文件", "添加文件", null, null],
+    ["拍照", "拍照", "image/*", "environment"],
+  ]) {
+    let chooserCount = 0;
+    const countChooser = () => { chooserCount += 1; };
+    page.on("filechooser", countChooser);
+    await page.getByRole("button", { name: "添加附件", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "添加附件", exact: true });
+    await expect(dialog).toBeVisible();
+    expect(chooserCount).toBe(0);
+    if (choice === "照片") await page.screenshot({ path: info.outputPath("attachment-choices.png") });
+    const picked = page.waitForEvent("filechooser");
+    await dialog.getByRole("button", { name: new RegExp(`^${choice}`) }).click();
+    const chooser = await picked;
+    expect(await chooser.element().getAttribute("aria-label")).toBe(inputLabel);
+    expect(await chooser.element().getAttribute("accept")).toBe(accept);
+    expect(await chooser.element().getAttribute("capture")).toBe(capture);
+    await chooser.setFiles(choice === "文件"
+      ? { name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("附件内容") }
+      : { name: `${choice}.png`, mimeType: "image/png", buffer: staticPng(8, 8) });
+    await expect(dialog).not.toBeVisible();
+    await expect(page.getByRole("button", { name: "添加附件", exact: true })).toBeEnabled();
+    expect(chooserCount).toBe(1);
+    page.off("filechooser", countChooser);
+  }
+  await expect(page.locator(".newchat-input")).toHaveValue("带上这些附件");
+  await expect(page.locator(".newchat-attach .attach-file")).toContainText("notes.txt");
+  const submitted = await submitNewChatFixture(page);
+  expect(submitted.files).toEqual(["notes.txt"]);
+  expect(submitted.images).toHaveLength(2);
+});
 
 async function submitNewChatFixture(
   page: import("@playwright/test").Page,
@@ -8968,6 +9072,13 @@ test("new-chat controls fit when the visual app height is keyboard-sized", async
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/tests/history-browser.html?newchat-controls=1");
   await page.evaluate(() => {
+    // Opening the dialog focuses it and re-reads the native viewport. Keep
+    // that reading consistent with the mirrored keyboard-sized shell.
+    Object.defineProperties(window.visualViewport!, {
+      height: { configurable: true, value: 400 },
+      offsetTop: { configurable: true, value: 0 },
+    });
+    window.visualViewport!.dispatchEvent(new Event("resize"));
     document.documentElement.style.setProperty("--app-height", "400px");
     document.documentElement.style.setProperty("--keyboard-inset", "452px");
     document.documentElement.setAttribute("data-short-viewport", "ime");
@@ -8977,6 +9088,7 @@ test("new-chat controls fit when the visual app height is keyboard-sized", async
     name: "权限与执行环境",
   });
   await expect(dialog).toBeVisible();
+  await expect(dialog).toHaveCSS("max-height", "368px");
 
   const layout = await dialog.evaluate((sheet) => {
     const scroll = sheet.querySelector<HTMLElement>(".sheet-scroll");

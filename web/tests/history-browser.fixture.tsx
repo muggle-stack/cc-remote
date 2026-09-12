@@ -1264,6 +1264,12 @@ function HistoryConversationBrowserFixture() {
   });
   const [newChatSubmission, setNewChatSubmission] =
     useState<Record<string, unknown> | null>(null);
+  const [newChatAccount, setNewChatAccount] = useState("primary");
+  const [newChatModel, setNewChatModel] = useState<string | null>(null);
+  const [newChatEffort, setNewChatEffort] = useState<string | null>(null);
+  const selectionAccounts = params.has("selection-controls")
+    ? [{ id: "primary", label: "Main" }, { id: "secondary", label: "Secondary" }]
+    : [];
   const [queuedPrompt, setQueuedPrompt] = useState(QUEUED_FULL_PROMPT);
   const [queuedEditor, setQueuedEditor] =
     useState<QueuedQueryEditor | null>(null);
@@ -1897,6 +1903,18 @@ function HistoryConversationBrowserFixture() {
             space={newChatSurface.space}
             autoFocus={false}
             permissionProfiles={newChatProfiles}
+            claudeProfiles={selectionAccounts}
+            codexProfiles={selectionAccounts}
+            defaultClaudeProfileId="primary"
+            defaultCodexProfileId="primary"
+            claudeProfileId={selectionAccounts.length ? newChatAccount : undefined}
+            codexProfileId={selectionAccounts.length ? newChatAccount : undefined}
+            onPickClaudeProfile={setNewChatAccount}
+            onPickCodexProfile={setNewChatAccount}
+            model={newChatModel}
+            effort={newChatEffort}
+            onPickModel={setNewChatModel}
+            onPickEffort={setNewChatEffort}
             onPickCwd={() => {}}
             onSend={(
               prompt: string,
@@ -1910,6 +1928,11 @@ function HistoryConversationBrowserFixture() {
             ) => {
               setNewChatSubmission({
                 prompt,
+                account: newChatAccount,
+                model: newChatModel,
+                effort: newChatEffort,
+                images: _images?.map(image => image.media_type),
+                files: _files?.map(file => file.filename),
                 collaborationMode,
                 permissionMode,
                 permissionProfile,

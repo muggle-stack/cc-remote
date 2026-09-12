@@ -783,7 +783,7 @@ $$`,
   assert.match(newChatMarkup, /aria-label="添加照片"/);
   assert.match(newChatMarkup, /aria-label="添加文件"/);
   assert.equal(
-    (newChatMarkup.match(/<button[^>]+aria-label="添加照片"/g) ?? []).length, 1);
+    (newChatMarkup.match(/<button[^>]+aria-label="添加附件"/g) ?? []).length, 1);
   assert.equal(
     (newChatMarkup.match(/<button[^>]+aria-label="添加文件"/g) ?? []).length, 0);
   assert.match(newChatMarkup, /type="file"[^>]*accept="image\/\*"[^>]*multiple/,
