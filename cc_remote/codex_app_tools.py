@@ -20,6 +20,8 @@ import sys
 from urllib.parse import urlsplit
 
 from cc_remote.wrapper.process_scan import (
+    ProcessIdentity,
+    process_command,
     process_environment_value,
     process_identity,
     process_owner_uid,
@@ -92,6 +94,54 @@ def _matching_app_pids(executable: Path) -> list[int]:
     return found
 
 
+def _shared_bridge(profile: Path, port: int) -> ProcessIdentity | None:
+    """Identify our profile-bound supervisor at the kernel's TCP listener."""
+    listeners = _command(
+        "/usr/sbin/lsof", "-nP", "-a", f"-iTCP:{port}",
+        "-sTCP:LISTEN", "-Fpun",
+    )
+    pids = set()
+    pid, uid = None, None
+    for line in listeners.splitlines():
+        if line.startswith("p"):
+            pid, uid = int(line[1:]), None
+        elif line.startswith("u"):
+            uid = int(line[1:])
+        elif line == f"n127.0.0.1:{port}" and uid == os.getuid() and pid is not None:
+            pids.add(pid)
+    if len(pids) != 1:
+        return None
+    identity = process_identity(pids.pop())
+    if identity is None or process_owner_uid(identity.pid) != os.getuid():
+        return None
+    argv = process_command(identity)
+    if not argv:
+        return None
+    args = [os.fsdecode(arg) for arg in argv]
+    if args[1:4] != ["-m", "cc_remote.codex_desktop", "run"]:
+        return None
+    options = args[4:]
+    if len(options) % 2:
+        return None
+    values = dict(zip(options[::2], options[1::2]))
+    if (
+        len(values) * 2 != len(options)
+        or not {"--profile", "--app"} <= values.keys()
+        or values.keys() - {"--profile", "--app", "--state-dir", "--ready-fd"}
+    ):
+        return None
+    selected = Path(values["--profile"])
+    if not selected.is_absolute() or selected.resolve(strict=True) != profile:
+        return None
+    # This supervisor forwards only to this profile's canonical private Unix
+    # socket, never to a custom WebSocket backend or a private stdio server.
+    upstream = profile / "app-server-control/app-server-control.sock"
+    if upstream.resolve(strict=True) != upstream:
+        return None
+    _private_socket(upstream)
+    return identity if process_identity(identity.pid) == identity else None
+
+
 def _shared_app(identity, profile: Path) -> bool:
     complete, home = process_environment_value(identity, "CODEX_HOME")
     if not complete or not home or Path(home).resolve() != profile:
@@ -104,7 +154,7 @@ def _shared_app(identity, profile: Path) -> bool:
         if (
             parsed.scheme != "ws" or parsed.hostname != "127.0.0.1"
             or not parsed.port or parsed.username or parsed.password
-            or parsed.query or parsed.fragment
+            or parsed.path != "/rpc" or parsed.query or parsed.fragment
         ):
             return False
         expected = f"->127.0.0.1:{parsed.port}"
@@ -112,9 +162,26 @@ def _shared_app(identity, profile: Path) -> bool:
             "/usr/sbin/lsof", "-nP", "-a", "-p", str(identity.pid),
             "-iTCP", "-sTCP:ESTABLISHED", "-Fn",
         )
-        return any(
-            line.startswith("n127.0.0.1:") and line.endswith(expected)
+        peers = {
+            line.removeprefix("n127.0.0.1:").removesuffix(expected)
             for line in connections.splitlines()
+            if line.startswith("n127.0.0.1:") and line.endswith(expected)
+        }
+        if not peers or any(not peer.isdigit() for peer in peers):
+            return False
+        bridge = _shared_bridge(profile, parsed.port)
+        if bridge is None:
+            return False
+        bridge_connections = _command(
+            "/usr/sbin/lsof", "-nP", "-a", "-p", str(bridge.pid),
+            "-iTCP", "-sTCP:ESTABLISHED", "-Fn",
+        ).splitlines()
+        return (
+            any(f"n127.0.0.1:{parsed.port}->127.0.0.1:{peer}" in bridge_connections
+                for peer in peers)
+            and process_identity(bridge.pid) == bridge
+            and process_identity(identity.pid) == identity
+            and process_owner_uid(identity.pid) == os.getuid()
         )
     except (OSError, ValueError, subprocess.SubprocessError):
         return False

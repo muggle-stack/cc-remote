@@ -40,6 +40,8 @@ def test_private_socket_rejects_world_access_and_symlinks():
     ("same", "ws://127.0.0.1:1234/rpc?token=x", True, False),
     ("same", "ws://user:pass@127.0.0.1:1234/rpc", True, False),
     ("same", "ws://127.0.0.1:bad/rpc", True, False),
+    ("same", "ws://127.0.0.1:1234/private", True, False),
+    ("same", "ws://127.0.0.1:1234", True, False),
 ])
 def test_discovery_requires_exact_shared_profile(monkeypatch, tmp_path, home, endpoint, connected, expected):
     profile = tmp_path.resolve()
@@ -48,8 +50,78 @@ def test_discovery_requires_exact_shared_profile(monkeypatch, tmp_path, home, en
         "CODEX_APP_SERVER_WS_URL": endpoint,
     }
     monkeypatch.setattr(tools, "process_environment_value", lambda _pid, key: (True, env[key]))
-    monkeypatch.setattr(tools, "_command", lambda *args: "n127.0.0.1:999->127.0.0.1:1234\n" if connected else "")
+    monkeypatch.setattr(tools, "_command", lambda *args: (
+        "n127.0.0.1:1234->127.0.0.1:999\n" if "43" in args
+        else "n127.0.0.1:999->127.0.0.1:1234\n"
+    ) if connected else "")
+    monkeypatch.setattr(tools, "_shared_bridge", lambda *_args: ProcessIdentity(43, 100))
+    monkeypatch.setattr(tools, "process_identity", lambda pid: ProcessIdentity(pid, 100))
+    monkeypatch.setattr(tools, "process_owner_uid", lambda _pid: tools.os.getuid())
     assert tools._shared_app(ProcessIdentity(42, 100), profile) is expected
+
+
+@pytest.mark.parametrize("failure", [
+    None, "private_listener", "wrong_profile", "duplicate_profile", "wrong_path",
+    "missing_listener", "ambiguous_listener", "foreign_owner", "wrong_peer",
+    "bridge_reused", "app_reused", "missing_daemon", "linked_daemon",
+])
+def test_shared_app_requires_profile_bound_bridge_and_both_connection_ends(monkeypatch, failure):
+    with tempfile.TemporaryDirectory(prefix="cc-bridge-", dir="/tmp") as root:
+        profile = Path(root).resolve()
+        directory = profile / "app-server-control"
+        directory.mkdir()
+        upstream = directory / "app-server-control.sock"
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.bind(str(upstream))
+            upstream.chmod(0o600)
+            if failure == "missing_daemon":
+                upstream.unlink()
+            elif failure == "linked_daemon":
+                actual = directory / "actual.sock"
+                upstream.rename(actual)
+                upstream.symlink_to(actual)
+            env = {
+                "CODEX_HOME": str(profile),
+                "CODEX_APP_SERVER_WS_URL": "ws://127.0.0.1:1234/" + (
+                    "private" if failure == "wrong_path" else "rpc"),
+            }
+            argv = ["/python", "-m", "cc_remote.codex_desktop", "run",
+                    "--profile", str(profile), "--app", "/Official.app",
+                    "--state-dir", root, "--ready-fd", "4"]
+            if failure == "private_listener":
+                argv = ["/codex", "app-server", "--listen", "ws://127.0.0.1:1234"]
+            elif failure == "wrong_profile":
+                argv[5] = str(profile.parent)
+            elif failure == "duplicate_profile":
+                argv += ["--profile", str(profile.parent)]
+            owner = tools.os.getuid() + (failure == "foreign_owner")
+            calls = {}
+
+            def identity(pid):
+                calls[pid] = calls.get(pid, 0) + 1
+                reused = ((failure == "bridge_reused" and pid == 43 and calls[pid] > 1)
+                          or (failure == "app_reused" and pid == 42))
+                return ProcessIdentity(pid, 200 if reused else 100)
+
+            def command(*args):
+                if "-sTCP:LISTEN" in args:
+                    if failure == "missing_listener":
+                        return ""
+                    result = f"p43\nu{owner}\nn127.0.0.1:1234\n"
+                    if failure == "ambiguous_listener":
+                        result += f"p44\nu{owner}\nn127.0.0.1:1234\n"
+                    return result
+                if "43" in args:
+                    peer = 888 if failure == "wrong_peer" else 999
+                    return f"n127.0.0.1:1234->127.0.0.1:{peer}\n"
+                return "n127.0.0.1:999->127.0.0.1:1234\n"
+
+            monkeypatch.setattr(tools, "process_environment_value", lambda _id, key: (True, env[key]))
+            monkeypatch.setattr(tools, "process_command", lambda _id: tuple(arg.encode() for arg in argv))
+            monkeypatch.setattr(tools, "process_owner_uid", lambda _pid: owner)
+            monkeypatch.setattr(tools, "process_identity", identity)
+            monkeypatch.setattr(tools, "_command", command)
+            assert tools._shared_app(ProcessIdentity(42, 100), profile) is (failure is None)
 
 
 def test_incomplete_profile_read_fails_closed(monkeypatch, tmp_path):
