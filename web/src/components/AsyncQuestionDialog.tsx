@@ -1,10 +1,12 @@
-import { useId, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { AsyncQuestionSpec } from "../protocol";
 import type { TextBlock, Turn } from "../domain/conversation";
 import { Icon } from "../icons";
 import { supplementalAnswerPrompt } from "../async-question-presentation";
 import { ImeSubmitGuard } from "../ime-submit";
+import type { QueryAcceptanceResult } from "../outbox";
+import { presentCommandProblem } from "../problem-presentation";
 
 export interface AsyncQuestionDraft {
   choices: (string | null)[];
@@ -14,11 +16,12 @@ export interface AsyncQuestionDraft {
 /** Nonblocking questions are not approval leases. The native dialog only owns
  * UI focus; replies still use the existing scoped query/steer outbox. */
 function AsyncQuestionDialog({ questions, initialDraft,
-  onDraftChange, onReply, onClose, answered, replyMode }: {
+  onDraftChange, onReply, pendingReply, onClose, answered, replyMode }: {
   questions: AsyncQuestionSpec[];
   initialDraft?: AsyncQuestionDraft;
   onDraftChange: (draft: AsyncQuestionDraft) => void;
-  onReply?: (prompt: string) => boolean;
+  onReply?: (prompt: string) => Promise<QueryAcceptanceResult> | null;
+  pendingReply?: Promise<QueryAcceptanceResult>;
   onClose: () => void;
   answered: boolean;
   replyMode?: "query" | "steer";
@@ -28,7 +31,8 @@ function AsyncQuestionDialog({ questions, initialDraft,
   const bodyRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLSpanElement>(null);
   const backdropPressRef = useRef(false);
-  const sendingRef = useRef(false);
+  const sendingRef = useRef(!!pendingReply);
+  const [submission, setSubmission] = useState(pendingReply);
   const imeRef = useRef(new ImeSubmitGuard());
   const [notice, setNotice] = useState("");
   const [draft, setDraft] = useState<AsyncQuestionDraft>(() => initialDraft ?? {
@@ -41,12 +45,31 @@ function AsyncQuestionDialog({ questions, initialDraft,
     setDraft(next);
     onDraftChange(next);
     setNotice("");
-    sendingRef.current = false;
   };
   const canSubmit = draft.texts.some(text => text.trim()) || draft.choices.some(Boolean);
-  const replyHint = !onReply ? "当前会话暂不可写，回答草稿会保留"
+  const replyHint = submission ? "正在确认回答是否送达，可先收起小窗。"
+    : !onReply ? "当前会话暂不可写，回答草稿会保留"
     : replyMode === "steer" ? "补充会发送给当前任务，不会中断执行"
     : null;
+
+  useEffect(() => {
+    if (!submission) return;
+    let current = true;
+    void submission.then((result) => {
+      // A late receipt belongs only to this question's current opening. It
+      // must not close a different question or a newly focused session.
+      if (!current) return;
+      if (result.accepted) onClose();
+      else {
+        sendingRef.current = false;
+        setSubmission(undefined);
+        setNotice(presentCommandProblem(result.error));
+      }
+    }, () => {
+      if (current) setNotice("暂未确认回答是否送达，请先查看后续消息，避免重复发送。");
+    });
+    return () => { current = false; };
+  }, [submission, onClose]);
 
   useLayoutEffect(() => {
     const dialog = dialogRef.current;
@@ -134,22 +157,23 @@ function AsyncQuestionDialog({ questions, initialDraft,
       });
       if (!answers.length) { setNotice("请填写至少一个回答。"); return; }
       sendingRef.current = true;
-      const sent = onReply(supplementalAnswerPrompt(answers));
-      sendingRef.current = sent;
-      if (sent) onClose();
-      else setNotice("暂时无法发送。回答已保留，请稍后重试。");
+      setNotice("");
+      const receipt = onReply(supplementalAnswerPrompt(answers));
+      sendingRef.current = !!receipt;
+      setSubmission(receipt ?? undefined);
+      if (!receipt) setNotice("当前会话暂不可写，回答已保留，请稍后重试。");
     }}>
       <header className="async-question-heading">
         <span id={`${id}-heading`} ref={headingRef} tabIndex={-1}>
           <Icon name="message" size={20} />助手询问
         </span>
-        {answered && <span className="async-question-answered">已回答</span>}
+        {answered && !submission && <span className="async-question-answered">已回答</span>}
         <button className="async-question-close" type="button" aria-label="关闭助手询问" onClick={onClose}>
           <Icon name="close" size={20} />
         </button>
       </header>
       <div className="async-question-body" ref={bodyRef}>
-        {questions.map((question, index) => <fieldset key={index} disabled={!onReply}>
+        {questions.map((question, index) => <fieldset key={index} disabled={!onReply || !!submission}>
           <legend>{question.title}</legend>
           {question.options?.map((option, optionIndex) => <label className="async-question-option" key={optionIndex}>
             <input type="radio" name={`option-${index}`} value={option}
@@ -185,8 +209,8 @@ function AsyncQuestionDialog({ questions, initialDraft,
         </span>}
         <div className="async-question-footer-actions">
           <button className="async-question-later" type="button" onClick={onClose}>稍后回答</button>
-          <button className="async-question-send" type="submit" disabled={!onReply || !canSubmit}>
-            发送回答<Icon name="send" size={16} />
+          <button className="async-question-send" type="submit" disabled={!onReply || !canSubmit || !!submission}>
+            {submission ? "等待确认" : "发送回答"}<Icon name="send" size={16} />
           </button>
         </div>
         {notice && <p className="async-question-notice" role="status">{notice}</p>}
@@ -202,11 +226,12 @@ export default function AsyncQuestionHost({ messageId, turns, answeredMessageIds
   messageId: string | null;
   turns: readonly Turn[];
   answeredMessageIds: ReadonlySet<string>;
-  onReply?: (prompt: string) => boolean;
+  onReply?: (prompt: string) => Promise<QueryAcceptanceResult> | null;
   onClose: () => void;
   replyMode?: "query" | "steer";
 }) {
   const drafts = useRef(new Map<string, { signature: string; draft: AsyncQuestionDraft }>());
+  const submissions = useRef(new Map<string, Promise<QueryAcceptanceResult>>());
   const turn = messageId ? turns.find(t => t.blocks.some(block => block.kind === "text"
     && block.delivery === "async" && block.message_id === messageId)) : undefined;
   const block = turn?.blocks.find((b): b is TextBlock => b.kind === "text"
@@ -218,12 +243,25 @@ export default function AsyncQuestionHost({ messageId, turns, answeredMessageIds
   }, [messageId, available, onClose]);
   if (!turn || !block?.questions?.length) return null;
   const signature = JSON.stringify(block.questions);
+  const questionKey = `${block.message_id}:${signature}`;
   const stored = drafts.current.get(block.message_id);
-  return <AsyncQuestionDialog key={`${block.message_id}:${signature}`}
+  return <AsyncQuestionDialog key={questionKey}
     questions={block.questions}
     initialDraft={stored?.signature === signature ? stored.draft : undefined}
     answered={answeredMessageIds.has(block.message_id)}
-    replyMode={replyMode} onReply={onReply} onClose={onClose}
+    replyMode={replyMode} onClose={onClose}
+    pendingReply={submissions.current.get(questionKey)}
+    onReply={onReply && ((prompt) => {
+      const existing = submissions.current.get(questionKey);
+      if (existing) return existing;
+      const receipt = onReply(prompt);
+      if (!receipt) return null;
+      submissions.current.set(questionKey, receipt);
+      void receipt.then(() => {
+        if (submissions.current.get(questionKey) === receipt) submissions.current.delete(questionKey);
+      }, () => { /* An unknown outcome stays locked, including after reopening. */ });
+      return receipt;
+    })}
     onDraftChange={(draft) => {
       drafts.current.delete(block.message_id);
       drafts.current.set(block.message_id, { signature, draft });

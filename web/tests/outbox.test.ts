@@ -167,4 +167,36 @@ assert.equal(shouldAcceptSessionList("codex", "code", {
   v: 10, type: "session_list", ts: 1, engine: "claude", sessions: [],
 }), false);
 
+{
+  const replies = new QueryAcceptanceLatch();
+  replies.begin("question-session", "reply-1");
+  let settled = false;
+  const receipt = replies.receiptFor("question-session", "reply-1")!;
+  void receipt.then(() => { settled = true; });
+  assert.equal(replies.receiptFor("other-session", "reply-1"), null);
+  assert.equal(replies.receiptFor("question-session", "other-reply"), null);
+  for (const event of [
+    { type: "user_msg" as const, sid: "other-session", msg_id: "reply-1" },
+    { type: "turn_binding" as const, sid: "question-session", msg_id: "older-reply" },
+    { type: "error" as const, sid: "question-session", msg_id: "reply-1", code: "wrapper_offline" },
+  ]) assert.equal(replies.accept(event), false);
+  await Promise.resolve();
+  assert.equal(settled, false, "unrelated frames and a reconnect are not acceptance");
+  const error = { code: "not_steerable", message: "Codex 任务已结束，本次引导未发送。" };
+  replies.accept({ type: "error", sid: "question-session", msg_id: "reply-1", ...error });
+  assert.deepEqual(await receipt, { accepted: false, error }, "keep the correlated rejection reason");
+  replies.begin("question-session", "reply-2");
+  const retry = replies.receiptFor("question-session", "reply-2")!;
+  replies.rekeySession("question-session", "native-session");
+  assert.equal(replies.receiptFor("native-session", "reply-2"), retry);
+  assert.equal(replies.accept({ type: "error", sid: "native-session", msg_id: "reply-1", ...error }), false);
+  assert.equal(replies.accept({ type: "turn_steered", sid: "native-session", msg_id: "reply-2" }), true);
+  assert.deepEqual(await retry, { accepted: true });
+  replies.begin("native-session", "reply-3");
+  const unknown = replies.receiptFor("native-session", "reply-3")!;
+  replies.accept({ type: "error", sid: "native-session", msg_id: "reply-3",
+    code: "steer_outcome_unknown", message: "still reconciling" });
+  assert.equal((await unknown).accepted, false, "an unknown native outcome is never success");
+}
+
 console.log("command outbox tests passed");

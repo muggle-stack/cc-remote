@@ -33,7 +33,7 @@ function matchReply(prompt: string, questions: AsyncQuestionSpec[]): Supplementa
   return answers.length && supplementalAnswerPrompt(answers) === prompt ? answers : null;
 }
 
-export function presentAsyncQuestionReplies(turns: readonly Turn[]) {
+export function presentAsyncQuestionReplies(turns: readonly Turn[], pendingReplyId?: string | null) {
   // Compaction/replay can temporarily project one immutable native question in
   // more than one row. A row alias is not a new question or a new answer slot.
   const candidates = new Map<string, AsyncQuestionSpec[]>();
@@ -48,7 +48,10 @@ export function presentAsyncQuestionReplies(turns: readonly Turn[]) {
       });
       if (matches.length === 1) {
         replies.set(turn.id, matches[0].answers);
-        if (!turn.error && !turn.interrupted) answered.add(matches[0].messageId);
+        if (!turn.error && !turn.interrupted && (!pendingReplyId
+            || (turn.id !== pendingReplyId && turn.clientMsgId !== pendingReplyId))) {
+          answered.add(matches[0].messageId);
+        }
       }
     }
     for (const block of turn.blocks) {

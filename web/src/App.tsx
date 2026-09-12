@@ -9,6 +9,7 @@ import {
   type TouchEvent,
 } from "react";
 import { RelayWs, sessionScopeKey, type EventOwnership } from "./ws";
+import type { QueryAcceptanceResult } from "./outbox";
 import { RemoteViewerContext, useRemoteViewerLinks } from "./remote-viewer-context";
 import { ViewerPagesProvider } from "./components/ViewerPagesProvider";
 import { MANUAL_UNREAD_STORAGE } from "./manual-unread-storage";
@@ -4651,7 +4652,7 @@ export default function App() {
   const replyAsyncQuestion = (
     sid: string, prompt: string,
     whenIdle: (text: string) => boolean, whenRunning: (text: string) => boolean,
-  ): boolean => {
+  ): Promise<QueryAcceptanceResult> | null => {
     const current = stateRef.current;
     const ws = wsRef.current;
     const runtime = current.runtimes[sid];
@@ -4659,10 +4660,14 @@ export default function App() {
     // cards. A second answer must not enter the composer's replace-query path.
     if (!ws || current.connState !== "connected" || !current.wrapperOnline
         || !runtime || ws.pendingQueryFor(sid) || runtime.acceptancePending
+        || (runtime.state === "idle" && (runtime.queue.length || runtime.pendingSend))
         || (runtime.control
-          ? sessionControlLocksInput(runtime.control) : runtime.external)) return false;
-    return runtime.state === "running" ? whenRunning(prompt)
+          ? sessionControlLocksInput(runtime.control) : runtime.external)) return null;
+    const sent = runtime.state === "running" ? whenRunning(prompt)
       : runtime.state === "idle" ? whenIdle(prompt) : false;
+    if (!sent) return null;
+    const messageId = ws.pendingQueryFor(sid);
+    return messageId ? ws.queryReceiptFor(sid, messageId) : null;
   };
   const loadOlderHistoryPage = (
     anchorTurnId?: string,
@@ -5769,6 +5774,7 @@ export default function App() {
                 ? undefined : (prompt) => setEditPrompt(prompt)}
               asyncReplyMode={rt.state === "running" ? "steer"
                 : rt.state === "idle" ? "query" : undefined}
+              pendingReplyId={rt.acceptancePending}
               onReplyAsyncQuestion={focusedEngine !== "codex"
                 || historyView.recovering || !state.wrapperOnline
                 || state.connState !== "connected"
@@ -5778,7 +5784,7 @@ export default function App() {
                 ? undefined : (prompt) => {
                   const current = stateRef.current;
                   if (!focusedSid || current.focusedSid !== focusedSid
-                      || previousMachineRef.current !== machineId) return false;
+                      || previousMachineRef.current !== machineId) return null;
                   return replyAsyncQuestion(focusedSid, prompt, sendQuery, sendSteer);
                 }}
               onGetDiff={historyView.recovering ? undefined : getDiff}
@@ -6088,7 +6094,7 @@ export default function App() {
               ? undefined : (prompt) => {
                 if (!activeBtwSid || stateRef.current.newChat
                     || stateRef.current.focusedSid !== visibleParentSid
-                    || previousMachineRef.current !== machineId) return false;
+                    || previousMachineRef.current !== machineId) return null;
                 return replyAsyncQuestion(activeBtwSid, prompt, sendBtw, steerBtw);
               }}
             onInterrupt={() => {

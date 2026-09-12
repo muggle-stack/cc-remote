@@ -21,7 +21,12 @@ export interface QueryAcceptanceEvent {
   msg_id?: string | null;
   client_msg_id?: string | null;
   code?: string;
+  message?: string;
 }
+
+export type QueryAcceptanceResult =
+  | { accepted: true }
+  | { accepted: false; error: { code: string; message: string } };
 
 export interface QueryAcceptanceDescriptor {
   messageId: string;
@@ -155,6 +160,8 @@ export function matchQueryAcceptanceHistory(
 interface PendingQueryAcceptance {
   descriptor: QueryAcceptanceDescriptor;
   baseline: QueryAcceptanceHistoryHead | null;
+  receipt?: Promise<QueryAcceptanceResult>;
+  finish?: (result: QueryAcceptanceResult) => void;
 }
 
 /** Per-session acceptance barrier for direct query commands.
@@ -190,6 +197,15 @@ export class QueryAcceptanceLatch {
     return this.bySession.get(sid)?.descriptor.messageId ?? null;
   }
 
+  /** The same receipt survives reconnect and temporary-to-native re-keying.
+   * Unknown outcomes surface as errors; the runtime's steer_unknown barrier
+   * continues to block resubmission until native activity is reconciled. */
+  receiptFor(sid: string, messageId: string): Promise<QueryAcceptanceResult> | null {
+    const pending = this.bySession.get(sid);
+    if (!pending || pending.descriptor.messageId !== messageId) return null;
+    return pending.receipt ??= new Promise((resolve) => { pending.finish = resolve; });
+  }
+
   pendingSessionIds(): string[] {
     return [...this.bySession.keys()];
   }
@@ -199,8 +215,9 @@ export class QueryAcceptanceLatch {
     if (!event.sid || !messageId) return false;
     if (event.type === "error" && event.code === "wrapper_offline") return false;
     if (this.pendingMessageId(event.sid) !== messageId) return false;
-    this.bySession.delete(event.sid);
-    return true;
+    return this.completeSession(event.sid, event.type === "error"
+      ? { accepted: false, error: { code: event.code ?? "", message: event.message ?? "" } }
+      : { accepted: true });
   }
 
   acceptHistory(history: History): boolean {
@@ -208,12 +225,15 @@ export class QueryAcceptanceLatch {
     if (!pending
         || !matchQueryAcceptanceHistory(
           pending.descriptor, pending.baseline, history)) return false;
-    this.bySession.delete(history.session_id);
-    return true;
+    return this.completeSession(history.session_id);
   }
 
-  completeSession(sid: string): boolean {
-    return this.bySession.delete(sid);
+  completeSession(sid: string, result: QueryAcceptanceResult = { accepted: true }): boolean {
+    const pending = this.bySession.get(sid);
+    if (!pending) return false;
+    this.bySession.delete(sid);
+    pending.finish?.(result);
+    return true;
   }
 
   rekeySession(oldKey: string, sessionId: string): void {

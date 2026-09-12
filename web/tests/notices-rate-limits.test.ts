@@ -457,6 +457,16 @@ try {
   assert.equal(presentTurnOutcome("failed", hiddenDiagnostic), "回复未完成");
   assert.equal(presentCommandProblem({ code: "steer_outcome_unknown", message: hiddenDiagnostic }),
     "引导已发出，Codex 尚未确认是否生效。请先查看后续结果。");
+  assert.equal(presentCommandProblem({ code: "not_steerable", message: "当前没有可引导的 Codex 任务" }),
+    "当前没有可引导的任务，本次未发送。请在会话空闲后重试。");
+  assert.equal(presentCommandProblem({ code: "not_steerable", message: "Codex 任务已结束，本次引导未发送。" }),
+    "当前任务已结束，本次引导未发送。请重试以开始新一轮对话。");
+  for (const stage of ["自动压缩", "Review", "当前阶段"]) {
+    const message = `Codex ${stage}不支持引导，或任务已经切换；本次未发送。`;
+    assert.equal(presentCommandProblem({ code: "not_steerable", message }), message);
+  }
+  assert.equal(presentCommandProblem({ code: "not_steerable", message: hiddenDiagnostic }),
+    "本次引导未发送，请稍后重试。", "only authored rejection reasons reach the dialog");
   assert.doesNotMatch(
     presentCommandProblem({ code: "protocol", message: hiddenDiagnostic }),
     /crash|wrapper|private|protocol/i);

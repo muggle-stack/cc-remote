@@ -17840,6 +17840,13 @@ class WrapperMachine:
                 to=getattr(cmd, "client_id", None),
                 sid=self._ctx_wire_sid(ctx) if ctx is not None else sid,
             )
+            log.info(
+                "Codex steer not accepted",
+                session_id=error.sid,
+                msg_id=error.msg_id,
+                error_code=code,
+                reason=message,
+            )
             # This is a correlated control rejection, not shared session
             # narrative. Buffering it would let a later client replay A's
             # targeted failure as its own after hello rewrites the recipient.

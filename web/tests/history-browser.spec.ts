@@ -1804,6 +1804,9 @@ test("async question history restores a nonblocking card and replies through the
   expect(query.prompt).toContain("回答：三指拖拽");
   expect(relay.commands.filter((c) => ["interrupt", "answer_question", "steer"].includes(String(c.type))))
     .toHaveLength(0);
+  await expect(card.getByRole("button", { name: "等待确认" })).toBeDisabled();
+  await expect(entry).toContainText("待回答");
+  relay.emit({ type: "user_msg", sid: String(query.sid), msg_id: String(query.msg_id), prompt: String(query.prompt) });
   await expect(card).toHaveCount(0);
 });
 
@@ -1948,9 +1951,11 @@ test("async question keyboard sends with Enter, keeps Shift+Enter newlines and d
   await openAsyncQuestion(page);
   await expect(input).toHaveValue("第一行\n第二行");
   await input.press("Enter");
-  await expect(dialog).toHaveCount(0);
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
   const query = relay.commands.find(c => c.type === "query")!;
+  await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
+  relay.emit({ type: "user_msg", sid: String(query.sid), msg_id: String(query.msg_id), prompt: String(query.prompt) });
+  await expect(dialog).toHaveCount(0);
   expect(query.prompt).toContain("回答：第一行\n第二行");
   expect(query.sid).toBe("layout-parent");
   expect(relay.commands.filter(c => ["interrupt", "answer_question", "steer"].includes(String(c.type)))).toHaveLength(0);
@@ -1975,13 +1980,17 @@ test("async question keyboard leaves IME confirmation and repeated Enter out of 
   await expect(dialog).toBeVisible();
   expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
   await input.press("Enter");
-  await expect(dialog).toHaveCount(0);
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
-  expect(relay.commands.find(c => c.type === "query")?.prompt).toContain("回答：中文输入");
+  const query = relay.commands.find(c => c.type === "query")!;
+  expect(query.prompt).toContain("回答：中文输入");
+  relay.emit({ type: "user_msg", sid: String(query.sid), msg_id: String(query.msg_id), prompt: String(query.prompt) });
+  await expect(dialog).toHaveCount(0);
 });
 
 test("async question completion updates reply mode while preserving a collapsed draft", async ({ page }) => {
-  const relay = await mockRightPanelRelay(page);
+  // This case is entirely live; an empty canonical history response after the
+  // terminal would incorrectly claim that the question never existed.
+  const relay = await mockRightPanelRelay(page, { historyReply: () => null });
   await page.goto("/");
   await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
   const sid = "layout-parent";
@@ -2009,13 +2018,117 @@ test("async question completion updates reply mode while preserving a collapsed 
   await card.getByRole("button", { name: "发送回答" }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
   expect(relay.commands.filter(c => ["steer", "interrupt", "answer_question"].includes(String(c.type)))).toHaveLength(0);
+  await expect(card.getByRole("button", { name: "等待确认" })).toBeDisabled();
+  await card.getByRole("button", { name: "稍后回答", exact: true }).click();
   await expect(card.getByRole("textbox")).toHaveCount(0);
   // Submission locks input until native acceptance, not the view-only toggle.
   await openAsyncQuestion(page);
   await expect(card.getByRole("textbox")).toBeVisible();
   await expect(card.getByRole("textbox")).toBeDisabled();
-  await card.getByRole("button", { name: "稍后回答", exact: true }).click();
+  const query = relay.commands.find(c => c.type === "query")!;
+  relay.emit({ type: "user_msg", sid, msg_id: String(query.msg_id), prompt: String(query.prompt) });
+  await expect(card).toHaveCount(0);
+  await expect(page.locator(".async-question-card")).toContainText("已回答");
   expect(relay.commands.filter(c => c.type === "query")).toHaveLength(1);
+});
+
+test("async question rejected at turn completion keeps the answer and retries through a new query", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  const sid = "layout-parent";
+  relay.emit({ type: "state", sid, state: "running" });
+  await expect(dialog).toContainText("补充会发送给当前任务");
+  const input = dialog.getByLabel("你的回答", { exact: true });
+  await input.fill("项目在这台设备的工作目录里");
+  await input.press("Enter");
+  await expect.poll(() => relay.commands.filter(c => c.type === "steer").length).toBe(1);
+  const steer = relay.commands.find(c => c.type === "steer")!;
+  // A transport ACK and another message's rejection are not this answer's result.
+  relay.emit({ type: "command_ack", client_id: String(steer.client_id), cmd_id: String(steer.cmd_id) });
+  relay.emit({ type: "error", sid, msg_id: "different-answer", code: "not_steerable", message: "unrelated" });
+  await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
+  await expect(input).toHaveValue("项目在这台设备的工作目录里");
+  await expect(page.locator(".async-question-card")).toContainText("待回答");
+  relay.emit({ type: "state", sid, state: "idle" });
+  relay.emit({ type: "error", sid, msg_id: String(steer.msg_id), code: "not_steerable",
+    message: "Codex 任务已结束，本次引导未发送。" });
+  await expect(dialog.getByRole("status")).toHaveText("当前任务已结束，本次引导未发送。请重试以开始新一轮对话。");
+  await expect(input).toBeEnabled();
+  await expect(input).toHaveValue("项目在这台设备的工作目录里");
+  await expect(page.locator(".async-question-card")).toContainText("待回答");
+  await input.press("Enter");
+  await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
+  const query = relay.commands.find(c => c.type === "query")!;
+  expect(query.prompt).toBe(steer.prompt);
+  expect(query.msg_id).not.toBe(steer.msg_id);
+  relay.emit({ type: "error", sid, msg_id: String(steer.msg_id), code: "not_steerable", message: "late old rejection" });
+  await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
+  relay.emit({ type: "user_msg", sid, msg_id: String(query.msg_id), prompt: String(query.prompt) });
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".async-question-card")).toContainText("已回答");
+  expect(relay.commands.filter(c => c.type === "steer")).toHaveLength(1);
+  expect(relay.commands.filter(c => c.type === "interrupt")).toHaveLength(0);
+});
+
+test("async question acceptance recovered from history closes the reopened pending editor", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  await dialog.getByLabel("你的回答", { exact: true }).fill("保留到确认收到");
+  await dialog.getByRole("button", { name: "发送回答" }).click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
+  const query = relay.commands.find(c => c.type === "query")!;
+  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  await openAsyncQuestion(page);
+  await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
+  await expect(dialog.getByLabel("你的回答", { exact: true })).toHaveValue("保留到确认收到");
+  relay.emit({ type: "history", sid: "layout-parent", session_id: "layout-parent",
+    revision: "layout-history", generation: "layout-generation", detail: "summary",
+    events: [], has_more: false, authoritative: true, in_progress: true,
+    turns: [ASYNC_HISTORY_TURN, { id: "native-recovered-reply", clientMsgId: String(query.msg_id),
+      prompt: String(query.prompt), done: false, blocks: [] }] });
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".async-question-card")).toContainText("已回答");
+  expect(relay.commands.filter(c => c.type === "query")).toHaveLength(1);
+});
+
+test("async question unknown steer outcome keeps the draft and prevents duplicate sends", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  relay.emit({ type: "state", sid: "layout-parent", state: "running" });
+  await expect(dialog).toContainText("补充会发送给当前任务");
+  await dialog.getByLabel("你的回答", { exact: true }).fill("只发一次");
+  await dialog.getByRole("button", { name: "发送回答" }).click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "steer").length).toBe(1);
+  const steer = relay.commands.find(c => c.type === "steer")!;
+  relay.emit({ type: "error", sid: "layout-parent", msg_id: String(steer.msg_id),
+    code: "steer_outcome_unknown", message: "private transport detail" });
+  await expect(dialog.getByRole("status")).toHaveText("引导已发出，Codex 尚未确认是否生效。请先查看后续结果。");
+  await expect(dialog.getByLabel("你的回答", { exact: true })).toHaveValue("只发一次");
+  await expect(dialog.getByRole("button", { name: "发送回答" })).toBeDisabled();
+  await dialog.getByRole("form").evaluate((form: HTMLFormElement) => form.requestSubmit());
+  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  await openAsyncQuestion(page);
+  await expect(dialog.getByRole("button", { name: "发送回答" })).toBeDisabled();
+  expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(1);
+});
+
+test("async question does not mistake a queued submission for a confirmed answer", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  relay.emit({ type: "query_queue", sid: "layout-parent", total_count: 1, total_bytes: 64,
+    items: [{ msg_id: "queued-work", kind: "queue", prompt_preview: "原有排队任务",
+      image_count: 0, file_count: 0, retained_bytes: 64 }] });
+  const input = dialog.getByLabel("你的回答", { exact: true });
+  await input.fill("这条回答不能被替换或重复排队");
+  await input.press("Enter");
+  await expect(dialog.getByRole("status")).toHaveText("当前会话暂不可写，回答已保留，请稍后重试。");
+  await expect(input).toHaveValue("这条回答不能被替换或重复排队");
+  await expect(page.locator(".async-question-card")).toContainText("待回答");
+  expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
 });
 
 test("async question from a hidden side chat never steals the main view", async ({ page }) => {
@@ -2074,6 +2187,8 @@ for (const sideChat of [false, true]) {
       form.requestSubmit();
     });
     await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
+    await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
+    await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
     await expect(dialog).toHaveCount(0);
     await openAsyncQuestion(page, 1);
     await expect(dialog.getByRole("button", { name: "发送回答" })).toBeDisabled();
@@ -2083,6 +2198,9 @@ for (const sideChat of [false, true]) {
     expect(query.sid).toBe(sideChat ? "btw-layout-child" : "layout-parent");
     expect(query.delivery).not.toBe("replace");
     expect(relay.commands.some((c) => c.type === "interrupt")).toBe(false);
+    relay.emit({ type: "user_msg", sid: String(query.sid), msg_id: String(query.msg_id), prompt: String(query.prompt) });
+    await expect(dialog.getByRole("button", { name: "发送回答" })).toBeEnabled();
+    await expect(dialog).toBeVisible(); // The first question's late receipt cannot close the second.
   });
 }
 

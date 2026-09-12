@@ -83,6 +83,7 @@ import {
 } from "../history-requests";
 import { mergeDetailWithLiveTail } from "../history-merge";
 import { presentAsyncQuestionReplies } from "../async-question-presentation";
+import type { QueryAcceptanceResult } from "../outbox";
 
 const AsyncQuestionCard = lazy(() => import("./AsyncQuestionCard"));
 const AsyncQuestionHost = lazy(() => import("./AsyncQuestionDialog"));
@@ -356,7 +357,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
   historyCursor: incomingHistoryCursor = null,
   browseMode: incomingBrowseMode = false, hasNewer: incomingHasNewer = false,
   onLoadMore, onLoadNewer, onReturnLatest,
-  onLoadDetail, onEdit, onReplyAsyncQuestion, asyncReplyMode, onOpenTurnDiff, onOpenArchivedDiff, onLoadFilePage, onPreviewMarkdown, onOpenFile,
+  onLoadDetail, onEdit, onReplyAsyncQuestion, asyncReplyMode, pendingReplyId, onOpenTurnDiff, onOpenArchivedDiff, onLoadFilePage, onPreviewMarkdown, onOpenFile,
   onOpenArtifacts, onFork, forkingPointId, imageAssets, onLoadImage,
   onAuthorizeImage,
   historyImageAssets, onLoadHistoryImage,
@@ -395,8 +396,9 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
     autoLoad?: boolean,
   ) => boolean;
   onEdit?: (prompt: string) => void;
-  onReplyAsyncQuestion?: (prompt: string) => boolean;
+  onReplyAsyncQuestion?: (prompt: string) => Promise<QueryAcceptanceResult> | null;
   asyncReplyMode?: "query" | "steer";
+  pendingReplyId?: string | null;
   onGetDiff?: (file: string) => void;
   onOpenTurnDiff?: (files: string[], diff: string) => void;
   onOpenArchivedDiff?: (turnId: string, revision: string, path: string) => void;
@@ -568,7 +570,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
     hasNewer,
     windowEpoch: historyWindowEpoch,
   } = scopedPresentedHistory;
-  const supplemental = useMemo(() => presentAsyncQuestionReplies(turns), [turns]);
+  const supplemental = useMemo(() => presentAsyncQuestionReplies(turns, pendingReplyId), [turns, pendingReplyId]);
   const asyncQuestionScope = JSON.stringify([historyScopeKey ?? "", sid]);
   const [openAsyncQuestion, setOpenAsyncQuestion] = useState<{
     scope: string; messageId: string | null;
