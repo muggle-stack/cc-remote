@@ -295,6 +295,102 @@ async def test_resume_rebuild_receipt_is_exact_thread_scoped():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", [
+    "concurrent_subscriber", "early_receipt", "late_receipt", "sibling_receipt",
+    "native_reload", "cold_then_reload", "new_thread", "private_resume",
+])
+async def test_context_connect_confirms_only_native_reload_or_new_thread(
+    monkeypatch, astra_catalog, scenario,
+):
+    from cc_remote.wrapper import codex_handle as module
+    from tests.test_codex_controls import _Cfg
+
+    manager = SimpleNamespace(
+        strict_shared_affinity=True, mode="auto", invalidate=lambda: None,
+        proxy_args=AsyncMock(return_value=["/unused/codex", "app-server", "proxy"]),
+    )
+    handle = module.CodexHandle(_Cfg(), codex_home=str(astra_catalog),
+                               daemon_mode="off" if scenario == "private_resume" else "auto",
+                               daemon_manager=manager)
+    handle.model = "gpt-6-astra"
+    settings = handle.context_settings
+    settings.applied_model = handle.model
+    settings.applied_effective_window = 258400
+    await settings.select(handle, 300000)
+    methods = []
+    resumes = 0
+
+    async def status(thread_id="target"):
+        await handle._dispatch({"method": "thread/status/changed", "params": {
+            "threadId": thread_id, "status": {"type": "notLoaded"}}})
+
+    async def open_process(_argv, _bin, *, daemon_proxy):
+        handle.proc = SimpleNamespace(returncode=None)
+        handle._using_daemon_proxy = daemon_proxy
+        handle._dead = False
+
+    async def send(frame):
+        nonlocal resumes
+        method = frame["method"]
+        methods.append(method)
+        if method == "initialized":
+            return
+        if method == "initialize":
+            if scenario == "early_receipt":
+                await status()
+            result = {"userAgent": "codex_cli_rs/0.154.0 (fixture)"}
+        elif method == "thread/loaded/list":
+            # The old check sees an unloaded snapshot; a sibling subscribes
+            # immediately afterward and resume retains that native config.
+            result = {"data": [], "nextCursor": None}
+        elif method in {"thread/resume", "thread/start"}:
+            resumes += 1
+            assert frame["params"]["config"]["model_context_window"] == 315790
+            if scenario == "native_reload" or resumes > 1:
+                await status()
+            elif scenario == "sibling_receipt":
+                await status("other")
+            result = {"thread": {"id": "target"}, "model": handle.model}
+        elif method == "thread/read":
+            result = {"thread": {"status": {"type": "idle"}}}
+        elif method == "thread/unsubscribe":
+            result = {}
+        else:
+            raise AssertionError(method)
+        await handle._dispatch({"id": frame["id"], "result": result})
+        if method == "thread/resume" and scenario == "late_receipt":
+            # The reader can see a sibling's later reload before our awaiting
+            # connect coroutine resumes. It must already have closed the fence.
+            await status()
+
+    async def reconnect(sid, **_kwargs):
+        handle.proc = None
+        await handle.connect(resume_id=sid, cwd=str(astra_catalog), preserve_controls=True)
+
+    monkeypatch.setattr(module, "_resolve_codex_bin", lambda: "/unused/codex")
+    monkeypatch.setattr(module, "_newer_private_core_for_oversized_resume", lambda *_a: None)
+    monkeypatch.setattr(module, "_oversized_desktop_openai_resume_requires_http", lambda *_a: False)
+    monkeypatch.setattr(module, "_profile_codex_env", lambda *_a: {})
+    handle._open_process, handle._send = open_process, send
+    handle._update_thread_settings = AsyncMock()
+    handle.force_reconnect = reconnect
+    await handle.connect(resume_id=None if scenario == "new_thread" else "target",
+                         cwd=str(astra_catalog))
+    confirmed = scenario in {"native_reload", "new_thread", "private_resume"}
+    assert settings.pending is not confirmed
+    assert handle.context_window == (300000 if confirmed else 258400)
+    assert settings.applied_effective_window == handle.context_window
+    assert handle._context_resume_request_id is None
+    assert handle._context_resume_thread_id is None
+    if scenario == "cold_then_reload":
+        assert await settings.apply(handle)
+        assert not settings.pending and handle.context_window == 300000
+        assert resumes == 2
+    assert not any(method.startswith("turn/") for method in methods)
+    handle.proc = None
+
+
+@pytest.mark.asyncio
 async def test_applied_capacity_survives_old_rollout_and_yields_to_live_usage(catalog, monkeypatch):
     from cc_remote.wrapper import codex_handle as module
     from tests.test_codex_controls import _Cfg
