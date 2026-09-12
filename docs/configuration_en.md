@@ -97,6 +97,15 @@ variables; provider settings belong in that Profile, not project/local settings.
 Claude still discovers project instruction files natively. Each Codex `CODEX_HOME`
 uses an independent daemon; Remote and the terminal should use the same directory.
 
+When a Claude profile's `config_dir` resolves to the service user's `~/.claude`,
+Remote preserves the daily CLI's native layout: `CLAUDE_CONFIG_DIR` stays unset,
+so account metadata still comes from `~/.claude.json`. Log in to that account
+with the variable unset too. Other directories use an explicit `CLAUDE_CONFIG_DIR`
+and must be authenticated under that same directory. Explicitly setting it to
+`~/.claude` makes the official CLI read `~/.claude/.claude.json` instead; do not
+maintain two copies of account metadata. This rule follows the directory itself,
+regardless of the Profile's label or default ordering.
+
 Multi-account routing uses `<profile>@<native-session-id>` internally; Copy session
 ID still copies the native UUID. Code, Work and Work schedules can select an
 account. Work freezes its ownership, so retries or default changes do not switch

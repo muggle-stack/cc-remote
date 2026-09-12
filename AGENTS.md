@@ -84,9 +84,12 @@ attachment and optional App-control MCP tools are separate user choices.
   Text deltas still stream live via `StreamEvent`.
 - **Claude only — don't set `setting_sources=[]` for Code**: legacy single-account
   Code intentionally loads `~/.claude/settings.json`. Explicit account profiles
-  keep the real HOME, select their native storage boundary with
-  `CLAUDE_CONFIG_DIR`, clear ambient provider variables, and use
-  `setting_sources=["user"]`. Project/local settings may contain provider env or
+  keep the real HOME, clear ambient account selectors, and use
+  `setting_sources=["user"]`. A profile rooted at the real per-user `~/.claude`
+  must leave `CLAUDE_CONFIG_DIR` unset, retaining `~/.claude.json` and native
+  keychain identity; other roots set it explicitly. Setting it to `~/.claude`
+  changes the account file to `~/.claude/.claude.json`. Project/local settings
+  may contain provider env or
   auth helpers and must not participate in an account-isolated child. Never pass
   the selected profile's complete settings file through `--settings`: that
   promotes every user setting above project/local precedence. Never parse or

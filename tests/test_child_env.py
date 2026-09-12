@@ -130,6 +130,98 @@ def test_claude_sdk_process_environment_really_unsets_account_sources(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("selected", ["native", "other"])
+@pytest.mark.parametrize("work_mode", [False, True])
+async def test_claude_profiles_use_the_daily_cli_account_metadata(
+    tmp_path, monkeypatch, selected, work_mode,
+):
+    home = tmp_path / "home"
+    native = home / ".claude"
+    other = tmp_path / "other-account"
+    native.mkdir(parents=True)
+    other.mkdir()
+    metadata = {
+        home / ".claude.json": {"oauthAccount": {"accountUuid": "native"}},
+        native / ".claude.json": {},
+        other / ".claude.json": {"oauthAccount": {"accountUuid": "other"}},
+    }
+    for path, value in metadata.items():
+        path.write_text(json.dumps(value), encoding="utf-8")
+    before_files = {path: path.read_bytes() for path in metadata}
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(other))
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "ambient-other-account")
+    monkeypatch.setenv("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1")
+    parent = dict(os.environ)
+    profile = native if selected == "native" else other
+    handle = SdkHandle(
+        WrapperConfig(claude_bin="/fake/claude"),
+        claude_config_dir=str(profile),
+        isolate_account_env=True,
+    )
+    handle.work_mode = work_mode
+    handle.work_settings_path = str(tmp_path / "work-policy.json")
+    options = handle._options(None, str(home))
+    assert options.setting_sources == ([] if work_mode else ["user"])
+    captured = {}
+
+    class FakeProcess:
+        stdin = None
+        stdout = None
+        stderr = None
+
+    process = FakeProcess()
+
+    async def fake_open_process(command, **kwargs):
+        captured["env"] = kwargs["env"]
+        return process
+
+    monkeypatch.setattr(
+        sdk_subprocess_cli.anyio, "open_process", fake_open_process)
+    transport = account_isolated_transport(options)
+    try:
+        await transport.connect()
+    finally:
+        sdk_subprocess_cli._ACTIVE_CHILDREN.discard(process)
+
+    # SDK controls and direct capability probes must select the same native
+    # account file. A matching transcript/settings directory alone is not enough.
+    direct = claude_profile_process_env(
+        str(profile), isolate_account_env=True)
+    for child in (captured["env"], direct):
+        account_root = Path(child.get("CLAUDE_CONFIG_DIR") or child["HOME"])
+        account = json.loads((account_root / ".claude.json").read_text())
+        assert account.get("oauthAccount", {}).get("accountUuid") == selected
+        assert child["HOME"] == str(home)
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in child
+        if selected == "native":
+            assert "CLAUDE_CONFIG_DIR" not in child
+        else:
+            assert child["CLAUDE_CONFIG_DIR"] == str(other)
+    assert dict(os.environ) == parent
+    assert {path: path.read_bytes() for path in metadata} == before_files
+
+
+def test_native_claude_profile_symlink_uses_the_same_account_layout(
+    tmp_path, monkeypatch,
+):
+    home = tmp_path / "home"
+    native = home / ".claude"
+    native.mkdir(parents=True)
+    alias = tmp_path / "native-alias"
+    alias.symlink_to(native, target_is_directory=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/unrelated/account")
+
+    overlay = claude_profile_child_env(
+        str(alias), isolate_account_env=True)
+    child = claude_sdk_process_env(overlay)
+
+    assert "CLAUDE_CONFIG_DIR" not in child
+    assert child["HOME"] == str(home)
+
+
+@pytest.mark.asyncio
 async def test_account_isolated_transport_scrubs_only_its_child_environment(
     monkeypatch,
 ):

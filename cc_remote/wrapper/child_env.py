@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+from pathlib import Path
 import sys
 from collections.abc import Mapping
 
@@ -121,6 +122,21 @@ def child_env_tombstones() -> dict[str, str]:
     return {key: "" for key in CONTROL_PLANE_SECRET_KEYS}
 
 
+def _claude_config_override(
+    config_dir: str, *, isolate_account_env: bool,
+) -> str | None:
+    # Claude keeps native account metadata in ~/.claude.json. Explicitly
+    # setting CLAUDE_CONFIG_DIR=~/.claude instead selects ~/.claude/.claude.json
+    # (and a different keychain identity), despite sharing settings/transcripts.
+    # A profile rooted at the native directory must preserve that native layout.
+    if isolate_account_env and (
+        Path(config_dir).resolve(strict=False)
+        == (Path.home() / ".claude").resolve(strict=False)
+    ):
+        return None
+    return config_dir
+
+
 def claude_profile_child_env(
     config_dir: str | None,
     *,
@@ -138,7 +154,10 @@ def claude_profile_child_env(
         raise ValueError("isolated Claude profile requires a config directory")
     result = child_env_tombstones()
     if config_dir is not None:
-        result["CLAUDE_CONFIG_DIR"] = config_dir
+        override = _claude_config_override(
+            config_dir, isolate_account_env=isolate_account_env)
+        if override is not None:
+            result["CLAUDE_CONFIG_DIR"] = override
     return result
 
 
@@ -149,6 +168,9 @@ def claude_sdk_process_env(
     """Build one exact Claude child environment without mutating its parent."""
     result = dict(os.environ if source is None else source)
     result.pop("CLAUDECODE", None)
+    # An omitted profile override means Claude's native layout, never an
+    # unrelated account directory inherited from the Wrapper's own process.
+    result.pop("CLAUDE_CONFIG_DIR", None)
     for key in CLAUDE_ACCOUNT_ENV_KEYS:
         result.pop(key, None)
     result.update(overlay)
@@ -169,10 +191,14 @@ def claude_profile_process_env(
     """
     result = sanitized_child_env()
     if isolate_account_env:
+        result.pop("CLAUDE_CONFIG_DIR", None)
         for key in CLAUDE_ACCOUNT_ENV_KEYS:
             result.pop(key, None)
     if config_dir is not None:
-        result["CLAUDE_CONFIG_DIR"] = config_dir
+        override = _claude_config_override(
+            config_dir, isolate_account_env=isolate_account_env)
+        if override is not None:
+            result["CLAUDE_CONFIG_DIR"] = override
     return result
 
 

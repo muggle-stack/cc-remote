@@ -85,6 +85,13 @@ Codex 示例：
 切换账号。项目说明文件仍由 Claude 原生发现。Codex 每个 `CODEX_HOME` 使用独立 daemon；
 Remote 与终端应使用相同目录。
 
+Claude 的 `config_dir` 若指向服务用户的 `~/.claude`，Remote 会保留日常 CLI 的
+原生布局：不设置 `CLAUDE_CONFIG_DIR`，账号信息仍从 `~/.claude.json` 读取。
+该账号在终端登录时也应不设置此变量。其他目录继续通过明确的 `CLAUDE_CONFIG_DIR`
+选择账号，并在同一目录下完成登录。显式设置 `CLAUDE_CONFIG_DIR=~/.claude` 会让
+官方 CLI 改读 `~/.claude/.claude.json`，与日常默认路径不同；不要通过复制账号信息
+来维持两份配置。此规则取决于目录本身，与 Profile 的名称或默认排序无关。
+
 多账号内部路由为 `<profile>@<native-session-id>`；“复制 session ID”仍复制原生 UUID。
 Code、Work 和 Work 定时任务都可选择账号；Work 会冻结账号归属，默认账号变化或重试
 不会换号。删除 Profile 后，原 Work 明确失败，需要恢复该 Profile 或另建工作。

@@ -69,8 +69,11 @@ a separate choice; sharing alone does not authorize them.
   Text deltas still stream live via `StreamEvent`.
 - **Claude only — don't set `setting_sources=[]` for Code**: single-account Code
   intentionally loads the user's native settings. Explicit multi-account
-  profiles keep their own `CLAUDE_CONFIG_DIR` and load only the selected user
-  settings source. Project/local settings cannot replace the selected model
+  profiles load only the selected user settings source. The per-user `~/.claude`
+  profile leaves `CLAUDE_CONFIG_DIR` unset so native `~/.claude.json` and keychain
+  identity are preserved; other directories set it explicitly. Inherited account
+  selectors are cleared in either case. Project/local settings cannot replace
+  the selected model
   link, and the complete user file is never promoted through `--settings`.
   Single-account Code retains Claude's normal source precedence. Work remains
   isolated with one wrapper-owned settings policy and `setting_sources=[]`.
