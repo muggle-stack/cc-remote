@@ -302,6 +302,10 @@ export class RelayWs {
     return this.queryAcceptance.pendingMessageId(sid);
   }
 
+  queryReceiptFor(sid: string, messageId: string) {
+    return this.queryAcceptance.receiptFor(sid, messageId);
+  }
+
   private touchReplay(sid: string): void {
     this.replayOrder = this.replayOrder.filter((known) => known !== sid);
     this.replayOrder.push(sid);

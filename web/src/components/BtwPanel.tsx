@@ -7,6 +7,7 @@ import {
   type SetStateAction,
 } from "react";
 import { ChatView } from "./ChatView";
+import type { QueryAcceptanceResult } from "../outbox";
 import { CommandSheet } from "./CommandSheet";
 import { Icon } from "../icons";
 import { PanelTabs, type RightPanelView } from "./PanelTabs";
@@ -82,7 +83,7 @@ interface Props {
   onCloseChat: (sid: string) => void;
   onSend: (prompt: string) => boolean;
   onSteer: (prompt: string) => boolean;
-  onReplyAsyncQuestion?: (prompt: string) => boolean;
+  onReplyAsyncQuestion?: (prompt: string) => Promise<QueryAcceptanceResult> | null;
   onInterrupt: () => void;
   onSetSendMode: (mode: SendMode) => void;
   onEnqueue: (query: PendingQuery) => boolean;
@@ -426,6 +427,7 @@ export function BtwPanel(p: Props) {
                 onAuthorizeImage={p.onAuthorizeImage}
                 asyncReplyMode={runtimeState === "running" ? "steer"
                   : runtimeState === "idle" ? "query" : undefined}
+                pendingReplyId={p.rt?.acceptancePending}
                 onReplyAsyncQuestion={p.engine !== "codex" || !p.sid
                   || acceptancePending
                   || (p.rt?.control ? sessionControlLocksInput(p.rt.control) : p.rt?.external)
