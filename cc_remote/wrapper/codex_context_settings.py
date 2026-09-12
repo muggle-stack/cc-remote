@@ -79,7 +79,6 @@ class NativeContextSettings:
         self.pending = False
         self.error: str | None = None
         self.lock = asyncio.Lock()
-        self.reloaded = False
 
     async def confirm_applied(self, handle) -> None:
         """Keep capacity from the accepted configuration separate from old usage.
@@ -166,7 +165,9 @@ class NativeContextSettings:
         """Resubscribe with config and let native guards reload an idle thread.
 
         A subscribed thread silently ignores resume config (verified on 0.153.4).
-        Another client retaining this thread must leave the change pending.
+        Shared resume has no request-bound context configuration receipt, so
+        even an apparent reload must leave the change pending. Only a connect
+        path that can prove it accepted these settings may clear pending.
         """
         async with self.lock:
             if not self.pending or handle.turn_active or handle.turn_start_pending:
@@ -190,12 +191,12 @@ class NativeContextSettings:
             if status.get("type") != "idle":
                 return False
             await handle._request("thread/unsubscribe", {"threadId": sid})
-            # Native resume atomically replaces an idle cache entry only when
-            # no subscribers remain. Its notLoaded -> idle notifications prove
-            # replacement; loaded/list alone cannot distinguish that case.
+            # Native may replace an idle cache entry when no subscribers remain,
+            # but status notifications cannot distinguish our reload from a
+            # competing client's. Reconnect must independently confirm config.
             await handle.force_reconnect(sid, reason="session context settings")
             if not self.pending:
                 self.error = None
                 return True
-            self.error = "其他客户端仍连接此会话；设置已保存，待会话可重新加载时应用"
+            self.error = "设置已保存；尚未确认原生会话已应用，仍标记为待生效"
             return False
