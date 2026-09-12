@@ -9,7 +9,8 @@ published tag may lag the maintained source branch. This guide selects the insta
 activation, rollback and acceptance. Existing custom services retain their
 ownership, private configuration and installation layout.
 
-[Release packages](#release-install) · [Source deployment](#source-install)
+[Release packages](#release-install) · [Source deployment](#source-install) ·
+[DSH setup](../integrations/dsh/README.md)
 
 <a id="release-install"></a>
 
@@ -86,7 +87,7 @@ The current Wrapper installer checks that the service user has an executable
 `~/.local/bin/claude`, including when another engine will be used. Install that
 daily CLI before using this installer; an arbitrary `CLAUDE_BIN` override in a
 source-run config does not bypass the installer check. Authenticate whichever
-engine you intend to use. Then run:
+engine you intend to use. DSH still needs its separate local setup. Then run:
 
 ```bash
 ./install.sh wrapper \
@@ -188,7 +189,7 @@ as described in the deployment contract. No browser secret is needed for a build
 
 **Stage every target before changing live services.** The commands below describe
 the Relay and Wrapper separately; do not activate Relay until every Wrapper stage
-has passed validation. Protocol v67 cannot be mixed with older clients. Stop old
+has passed validation. Protocol v65 cannot be mixed with older clients. Stop old
 incompatible Wrappers, activate Relay + Web, then activate Wrappers and hard-refresh
 browser tabs. Wrapper activation must snapshot Work SQLite and private profile
 control state with `deploy/work_registry_snapshot.py`; this is not limited to
@@ -250,7 +251,7 @@ The script installs `python3-venv` + Caddy, creates the `ccremote` service user,
 builds an immutable release and its venv, merges Caddy configuration, atomically
 switches `current`, and restarts the relay. If restart/readiness fails, `current`,
 the Caddyfile, and the systemd unit roll back as one transaction and the previous
-release's `/healthz` is verified. Start the v67 wrapper after success.
+release's `/healthz` is verified. Start the v65 wrapper after success.
 
 Verify:
 
@@ -318,6 +319,8 @@ sudo apt-get install -y libreoffice bubblewrap
 
 This is for DOCX/PPTX and other convertible Office formats. **XLSX previews need
 neither package** and also work on macOS. Do not install converters on Relay.
+DSH's native process, patch and pairing file stay separate from the cc-remote
+release; follow [DSH setup](../integrations/dsh/README.md).
 
 #### Pair a Mac or Linux machine from Device Center (recommended)
 

@@ -38,6 +38,13 @@ codex app-server proxy --help
 
 桌面 App 接入单独选择，见 [macOS](codex-desktop-launcher.md)／[Linux](codex-desktop-linux.md)。
 
+### DSH
+
+DSH 独立运行于本机 loopback Web 服务；bridge、配对文件和
+`CC_REMOTE_DSH_CONNECTION_FILE` 见 [DSH 接入](../integrations/dsh/README.md)。
+模型账号、工具、插件和 Preset 在 DSH 中配置。Wrapper 不启动或升级 DSH，也不把它的
+本机控制 Cookie 发给 Relay。停止 Wrapper 只断开订阅；停止任务需显式取消。
+
 ## 多个账号
 
 Claude 和 Codex 分别支持最多 32 个 Profile。每个注册表必须有且只有一个
@@ -144,6 +151,7 @@ hook 和 Wrapper 应使用相同的 `CC_REMOTE_STATE_DIR`；日志默认为
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
+| `CC_REMOTE_DSH_CONNECTION_FILE` | 空 | `dsh_pair` 生成的本机私有配对文件；留空不启用 DSH。见 [DSH 接入](../integrations/dsh/README.md)。 |
 | `CC_REMOTE_VIEWER_HOME_PREVIEW` | `1` | 仅发现核验过的明确引用页面或所属静态监听器；`0` 关闭自动发现。见 [Viewer](remote-viewer.md)。 |
 | `RELAY_URL` | `ws://127.0.0.1:8765/ws` | 中继的 WebSocket 地址（公网用 `wss://域名/ws`，除非开了 `ALLOW_INSECURE_HTTP`）。 |
 | `ALLOW_INSECURE_HTTP` | `0` | 同中继的逃生开关；wrapper 也读这个变量，开启后 `RELAY_URL` 可以在非 loopback 时仍用 `ws://`。 |
@@ -184,7 +192,7 @@ hook 和 Wrapper 应使用相同的 `CC_REMOTE_STATE_DIR`；日志默认为
 - Web 客户端会给可重试命令附加稳定的 `cmd_id`，断线重连或 wrapper 恢复后重发；wrapper 在同一进程生命周期内去重并返回 ACK。每个实时会话还用 wrapper generation 配对 cursor，避免 wrapper 重启后把旧序号误当成新序号。
 - 排队及打断后的替换消息一经 wrapper 接收，就由 wrapper 的有界内存队列持有；即使所有浏览器/PWA 休眠、断线或硬刷新，也会在当前回合真正结束后继续执行，并在客户端重连时恢复队列摘要。点击摘要会私有按需读取完整指令，可在执行前原子编辑文字且保留附件；完整 payload 不进入可重放 ring。该队列不会跨 wrapper 进程崩溃或重启持久化。
 - 未确认命令队列和通用命令去重表是**有界内存状态**：浏览器硬刷新、客户端退出或 wrapper 进程崩溃，不承诺跨进程的 exactly-once。cc-remote 是交互控制面，不是持久任务队列；这类故障后应先核对 transcript/rollout 和会话状态，再决定是否重发。
-- 已落盘的 Claude transcript 和 Codex rollout 是历史事实来源；wrapper 的 SQLite 摘要索引和浏览器 IndexedDB 都是可重建投影，实时 ring 只负责有界的断线补流。工具/思考等大块详情按单轮展开，不阻塞会话首屏。
+- 已落盘的 Claude transcript、Codex rollout 和 DSH 原生记录是历史事实来源；DSH 冷历史通过鉴权 bridge 读取，不激活 Agent；wrapper 的 SQLite 摘要索引和浏览器 IndexedDB 都是可重建投影，实时 ring 只负责有界的断线补流。工具/思考等大块详情按单轮展开，不阻塞会话首屏。
 - Work 定时任务是例外：计划、运行记录、租约、心跳、重试次数和下次运行时间写入 SQLite；wrapper 重启后会恢复过期租约，但仍不会把不确定结果伪装成成功。
 
 ## 安全须知（务必读）
@@ -199,8 +207,8 @@ hook 和 Wrapper 应使用相同的 `CC_REMOTE_STATE_DIR`；日志默认为
 ## 模型配置
 
 先在原生引擎中配置并完成登录，再接入 Remote。单账号 Claude 使用生效的
-`CLAUDE_CONFIG_DIR`（通常为 `~/.claude`），Codex 使用 `CODEX_HOME`（通常为 `~/.codex`）。
-订阅登录或供应商认证留在各自目录；Profile 只选择原生配置边界，
+`CLAUDE_CONFIG_DIR`（通常为 `~/.claude`），Codex 使用 `CODEX_HOME`（通常为 `~/.codex`），
+DSH 使用自己的配置。订阅登录或供应商认证留在各自目录；Profile 只选择原生配置边界，
 cc-remote 不下发模型凭据，也不充当模型 API 网关。
 
 Wrapper 到 Relay 的代理使用外部配置中的 `HTTPS_PROXY` / `ALL_PROXY`；

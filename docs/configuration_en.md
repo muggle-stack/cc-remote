@@ -45,6 +45,15 @@ changing accounts. Codex Work always uses private processes and directories.
 Desktop App attachment is a separate choice; see the [macOS](codex-desktop-launcher.md)
 or [Linux](codex-desktop-linux.md) guide.
 
+### DSH
+
+DSH runs independently as a loopback Web service. See
+[DSH setup](../integrations/dsh/README.md) for the bridge, pairing file and
+`CC_REMOTE_DSH_CONNECTION_FILE`. Configure model accounts, tools, plugins and
+Presets in DSH. Wrapper neither starts/upgrades DSH nor sends its local control
+Cookie to Relay. Stopping Wrapper detaches subscriptions; cancelling a task is
+an explicit operation.
+
 ## Multiple accounts
 
 Claude and Codex each support up to 32 Profiles. Each registry needs exactly one
@@ -162,6 +171,7 @@ Common settings below; [config.py](../cc_remote/config.py) and the deployment en
 
 | Var | Default | Notes |
 |---|---|---|
+| `CC_REMOTE_DSH_CONNECTION_FILE` | empty | Private local DSH pairing file created by `dsh_pair`; see [DSH setup](../integrations/dsh/README.md). Empty disables DSH. |
 | `CC_REMOTE_VIEWER_HOME_PREVIEW` | `1` | Discover only verified, explicitly referenced home-directory pages or owned static listeners. Set `0` to opt out; see [Viewer](remote-viewer.md). |
 | `RELAY_URL` | `ws://127.0.0.1:8765/ws` | Relay WebSocket URL (`wss://domain/ws` in prod, unless `ALLOW_INSECURE_HTTP` is set). |
 | `ALLOW_INSECURE_HTTP` | `0` | Same escape hatch as the relay; the wrapper reads it too so `RELAY_URL` can stay `ws://` against a non-loopback host. |
@@ -202,7 +212,7 @@ Each message accepts at most 8 attachments, at most 6 MiB each and 8 MiB decoded
 - The Web client attaches a stable `cmd_id` to retryable commands and resend them after a socket reconnect or wrapper recovery. The wrapper deduplicates them and ACKs completion within the same wrapper process lifetime. Each live session also pairs its cursor with a wrapper generation so a restart cannot make an old sequence number look current.
 - Once the wrapper accepts a queued or interrupt-replacement message, its bounded in-memory queue owns that work. It starts after the active turn's real terminal boundary even if every Web/PWA client sleeps, disconnects, or hard-refreshes, and reconnecting clients recover a payload-bounded queue summary. Opening a summary privately fetches the full instruction, whose text can be atomically edited before execution without dropping attachments; full payloads never enter the replay ring. This queue is not persisted across a wrapper process crash or restart.
 - Unacknowledged-command queues and the general command-deduplication table are **bounded in-memory state**. A hard browser refresh, client exit, or wrapper crash does not promise cross-process exactly-once delivery. cc-remote is an interactive control plane, not a durable job queue; after such a failure, inspect the transcript/rollout and live session state before resending.
-- Persisted Claude transcripts and Codex rollouts are the history sources of truth. The wrapper SQLite summary index and browser IndexedDB are rebuildable projections; the live ring only provides bounded reconnect catch-up. Heavy tool/reasoning detail loads per turn instead of blocking first paint.
+- Persisted Claude transcripts, Codex rollouts and DSH native records are the history sources of truth. DSH history requires the authenticated bridge; a cold read must not activate an Agent. The wrapper SQLite summary index and browser IndexedDB are rebuildable projections; the live ring only provides bounded reconnect catch-up. Heavy tool/reasoning detail loads per turn instead of blocking first paint.
 - Work schedules are the exception: schedules, run records, leases, heartbeats, retry counts, and next-run timestamps live in SQLite. An expired lease is recovered after a wrapper restart, but an uncertain outcome is never reported as success.
 
 ## Security (please read)
@@ -218,7 +228,7 @@ Each message accepts at most 8 attachments, at most 6 MiB each and 8 MiB decoded
 
 Configure and authenticate each engine natively before connecting Remote.
 Single-account Claude uses its effective `CLAUDE_CONFIG_DIR` (normally `~/.claude`),
-and Codex its `CODEX_HOME` (normally `~/.codex`).
+Codex its `CODEX_HOME` (normally `~/.codex`), and DSH its own configuration.
 Subscription or provider credentials remain there. Profiles select the native
 configuration boundary; cc-remote does not distribute model credentials or act as
 a model API gateway.

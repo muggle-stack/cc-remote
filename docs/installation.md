@@ -7,7 +7,8 @@
 本文提供安装路径，[deploy/README.md](../deploy/README.md) 负责 staging、激活、回滚与
 验收约定。既有自定义服务保留原来的运行用户、私有配置和安装布局。
 
-[Release 安装](#release-install) · [源码部署](#source-install)
+[Release 安装](#release-install) · [源码部署](#source-install) ·
+[DSH 接入](../integrations/dsh/README.md)
 
 <a id="release-install"></a>
 
@@ -77,7 +78,8 @@ Linux 上脚本会自行请求 `sudo`。首次安装会交互要求一个至少 
 
 当前 Wrapper 安装器会检查服务用户的 `~/.local/bin/claude` 是否可执行，
 即使主要使用其他引擎也会检查。使用安装器前先准备该日常 CLI；源码运行配置中的
-任意 `CLAUDE_BIN` 覆盖不会绕过这项安装检查。完成实际要用的引擎登录，然后执行：
+任意 `CLAUDE_BIN` 覆盖不会绕过这项安装检查。完成实际要用的引擎登录，DSH 另外
+按接入说明配置本机服务。然后执行：
 
 ```bash
 ./install.sh wrapper \
@@ -166,7 +168,7 @@ npm --prefix web run build   # 产出 web/dist/
 网页构建不需要任何登录密钥。
 
 **所有目标先 staging，再改动线上服务。** 下文分别描述 Relay 和 Wrapper，
-不能在 Wrapper staging 未验证时先激活 Relay。协议 v67 不允许混用旧客户端：
+不能在 Wrapper staging 未验证时先激活 Relay。协议 v65 不允许混用旧客户端：
 停止不兼容的旧 Wrapper，激活 Relay + Web，再激活 Wrapper 并硬刷新网页。
 Wrapper 激活须通过 `deploy/work_registry_snapshot.py` 保存 Work SQLite 与私有账号
 控制状态，不再按“是否来自某个旧协议”决定是否保护。回滚先恢复匹配状态，再启动
@@ -224,7 +226,7 @@ sudo bash ~/cc-remote-upload/deploy/setup-vps.sh \
 脚本会：装 `python3-venv` + Caddy、建 `ccremote` 系统用户、创建不可变 release
 和 release-local venv、合并 Caddy 配置、原子切换 `current`，再重启 relay。若新
 relay 重启或健康检查失败，`current`、Caddyfile、systemd unit 会作为一个事务全部
-恢复，并验证旧 release 的 `/healthz`。成功后再启动 v67 wrapper。
+恢复，并验证旧 release 的 `/healthz`。成功后再启动 v65 wrapper。
 
 验证：
 
@@ -282,7 +284,8 @@ sudo apt-get install -y libreoffice bubblewrap
 ```
 
 这用于 DOCX/PPTX 等需要转换的格式；**XLSX 预览不需要这两个包**，macOS 也可用。
-Relay 不需要安装转换器。
+Relay 不需要安装转换器。DSH 原生进程、patch 和配对文件与 cc-remote 发布独立管理，
+见 [DSH 接入](../integrations/dsh/README.md)。
 
 #### 用设备中心配对 Mac / Linux（推荐）
 

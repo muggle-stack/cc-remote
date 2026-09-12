@@ -1,6 +1,6 @@
 # cc-remote
 
-**在手机和浏览器里，继续使用你机器上的 Claude Code 和 Codex。**
+**在手机和浏览器里，继续使用你机器上的 Claude Code、Codex 和 DeepSeek Harness。**
 
 自托管 · 多会话 · 多设备 · 实时工具过程 · Code / Work · PWA
 
@@ -13,9 +13,8 @@ cc-remote 把本机 agent 的会话、工具过程、文件和运行控制带到
 开始任务，用手机查看进度、回答询问、补充指令，再回到原来的会话继续工作。
 模型登录、供应商配置和工具执行仍由本机引擎负责；cc-remote 不代理模型 API。
 
-可选连接 **DeepSeek Harness 0.1.5-rc.2**，在 Code 中使用原生模型、Agent Preset、
-权限、目标与命令。手机和桌面复用现有会话、图片、文件预览和实时过程界面。
-参见 [DSH 本机接入与功能边界](integrations/dsh/README.md)。
+本文说明当前源码的能力。安装已发布包时，请阅读对应 tag 的文档；产品版本号相同，
+也不代表不同提交的功能和协议相同。
 
 本文说明当前源码的能力。安装已发布包时，请阅读对应 tag 的文档；产品版本号相同，
 也不代表不同提交的功能和协议相同。
@@ -27,7 +26,7 @@ cc-remote 把本机 agent 的会话、工具过程、文件和运行控制带到
 - **同时处理多个任务**：会话按目录分组，支持搜索、置顶、重命名和后台运行。
   切换页面不会停止任务；历史按需加载，工具细节展开后再读取。
 - **跟进完整过程**：查看流式回复、引擎公开的思考摘要、计划、工具调用、命令输出、
-  文件改动和审批。Codex 运行中支持引导或排队；Claude 支持打断并发送或排队。
+  文件改动和审批。Codex 与 DSH 运行中支持引导或排队；Claude 支持打断并发送或排队。
 - **管理长任务**：通过 `/goal` 设置目标，查看进展并使用各引擎原生的预算与控制。
   Claude、Codex 还支持 `/btw` 临时侧聊，主任务继续运行。
 - **直接查看文件**：聊天里的文件和目录链接连接到 `/open` 与预览面板，支持源码、
@@ -39,37 +38,44 @@ cc-remote 把本机 agent 的会话、工具过程、文件和运行控制带到
 
 ### Code 与 Work
 
-**Code** 面向你选择的项目目录，用于开发、调试和日常 agent 任务，支持两种引擎。
+**Code** 面向你选择的项目目录，用于开发、调试和日常 agent 任务，支持三种引擎。
 
 **Work** 是 Claude/Codex 的独立工作区，适合文档、表格、演示和资料整理。它有私有
 项目、文件／链接／笔记资料库、工作模板、Artifacts，以及一次、每日、每周定时任务。
 每项工作使用独立目录，需要的材料通过附件或资料库加入。Work 的会话、资料与 Code
-分开。
+分开；DSH 当前没有 Work。
 
 ## 引擎与功能
 
 下表描述 **cc-remote 已接入的能力**。模型、权限和扩展目录仍以所选设备上的原生
-引擎为准。
+引擎为准；DSH 的命令还取决于创建会话时选择的 Agent Preset。
 
-| 能力 | Claude Code | Codex |
-|---|---|---|
-| 接入方式 | 日常 Claude CLI + Agent SDK | 官方 app-server，共享 daemon |
-| Code / Work | 两者支持 | 两者支持 |
-| 模型与思考 | 原生模型与支持的档位 | 原生模型、思考强度、服务档位 |
-| Plan | 原生 Plan 模式 | 原生 Plan 协作模式 |
-| Goal | 完成条件、检查轮次、最近检查结果、Token 用量和耗时 | 目标、可选 Token 预算、暂停／继续、完成和清除 |
-| `/btw` 临时侧聊 | 支持 | 支持 |
-| 归档与删除 | 归档、恢复、删除 | 归档、恢复、删除 |
-| 会话派生 | 支持 | 支持；可派生到独立 worktree |
-| 特有工具 | Hooks 管理、原生询问与工具审批 | Review、空闲会话目录迁移、状态与账号限额 |
-| 扩展 | Skills、插件、MCP、Hooks 等，按能力管理 | Skills、插件、Apps、MCP；Hooks 只读 |
+| 能力 | Claude Code | Codex | DeepSeek Harness（DSH） |
+|---|---|---|---|
+| 接入方式 | 日常 Claude CLI + Agent SDK | 官方 app-server，共享 daemon | 本机 Web profile + cc-remote bridge |
+| Code / Work | 两者支持 | 两者支持 | 仅 Code |
+| 模型与思考 | 原生模型与支持的档位 | 原生模型、思考强度、服务档位 | 仅 DeepSeek V4.1 Flash；原生思考档位 |
+| Plan | 原生 Plan 模式 | 原生 Plan 协作模式 | Standard / PTC 的原生 `/plan` |
+| Goal | 完成条件、检查轮次、最近检查结果、Token 用量和耗时 | 目标、可选 Token 预算、暂停／继续、完成和清除 | 目标、原生轮数上限、自动续行状态、暂停／继续和清除 |
+| `/btw` 临时侧聊 | 支持 | 支持 | 未接入 |
+| 归档与删除 | 归档、恢复、删除 | 归档、恢复、删除 | 仅单向归档；归档后仍可读历史、导出 |
+| 会话派生 | 支持 | 支持；可派生到独立 worktree | 支持在已完成边界、同目录派生 |
+| 特有工具 | Hooks 管理、原生询问与工具审批 | Review、空闲会话目录迁移、状态与账号限额 | 子代理、后台任务、文件／会话引用、完整会话 ZIP 导出 |
+| 扩展 | Skills、插件、MCP、Hooks 等，按能力管理 | Skills、插件、Apps、MCP；Hooks 只读 | 原生命令与 Skills；安装配置留在 DSH |
+
+**DSH 接入版本为 `0.1.5-rc.2`。** 新会话可选择 **标准（Standard）** 或 **PTC**
+Preset 使用这里描述的 Goal／Plan。旧 Minimal 会话保持原来的能力；切换模型、
+思考强度或权限不会改变 Preset，需要从“新会话 → Agent Preset”创建相应会话。
+DSH 的 Plan 用来组织规划流程，不会替代权限设置或收紧工具沙箱。
+详见 [DSH 接入、模式与功能边界](integrations/dsh/README.md)。
 
 ### Goal 的预算不是上下文窗口
 
-`/goal` 打开当前引擎的目标小窗，两家的控制分别对应原生能力：
+`/goal` 打开当前引擎的目标小窗，三家的控制分别对应原生能力：
 
 - **Claude** 使用完成条件和原生检查反馈；展示用量与耗时，没有 Codex 式 Token 预算输入。
 - **Codex** 可设置目标累计 Token 预算，或不设预算；预算不用于扩大上下文窗口。
+- **DSH** 使用原生轮数上限，创建时默认 256 轮；轮数耗尽后，增加上限和恢复续行是两个操作。
 
 ## 常用操作
 
@@ -78,8 +84,8 @@ cc-remote 把本机 agent 的会话、工具过程、文件和运行控制带到
 | 入口 | 用途 |
 |---|---|
 | `/model` | 选择模型与思考强度 |
-| `/goal` | 打开当前引擎的目标小窗 |
-| `/plan` | 进入计划模式，用 `/normal` 退出 |
+| `/goal` | 打开目标小窗；DSH 需要相应 Preset |
+| `/plan` | 进入计划模式；Claude/Codex 用 `/normal` 退出，DSH 用 `/plan off` |
 | `/btw [问题]` | 在 Claude/Codex 中创建基于当前会话的临时侧聊 |
 | `/open [路径]` | 浏览目录；也可从“更多 → 会话文件”进入 |
 | `/preview <路径>` | 打开文件预览 |
@@ -104,7 +110,8 @@ Codex 原生限制为准。进度使用原生压缩估算，不把最近一次�
 切换到容量更小的模型前，应先恢复默认设置。
 
 **Claude** 默认沿用原生自动压缩行为，也可显式选择自动或 `100K–1M` 的会话窗口；
-降低窗口会先确认原生 compact 边界。查看上下文不会创建模型回合。
+降低窗口会先确认原生 compact 边界。**DSH** 展示原生上下文估算与模型容量，
+不提供 Codex 的窗口覆盖设置。查看上下文不会创建模型回合。
 
 ## 文件与预览
 
@@ -132,7 +139,7 @@ Relay 不落盘原文件或预览结果。Viewer 默认复用主站地址，不�
 flowchart LR
   browser["手机 / 浏览器"] <-->|HTTPS / WSS| relay["Relay + Web 静态文件"]
   subgraph device["你的机器"]
-    wrapper["Wrapper"] <--> engine["Claude SDK / Codex app-server"]
+    wrapper["Wrapper"] <--> engine["Claude SDK / Codex app-server / DSH Web"]
   end
   relay <-->|WebSocket| wrapper
   engine -->|原生配置与登录| model["模型服务"]
@@ -154,6 +161,8 @@ Wrapper 主动出站连接 Relay，设备不需要开放公网入站端口。Rel
   Wrapper 使用该 CLI；Python Agent SDK 固定为 `0.2.151`。
 - **Codex**：已登录的官方 CLI。共享控制需要同时支持
   `codex app-server daemon --help` 和 `codex app-server proxy --help`。
+- **DSH**：独立安装并启动 `0.1.5-rc.2` Web profile，按
+  [接入说明](integrations/dsh/README.md) 配置 bridge 和本机配对文件。
 
 ### 1. 安装依赖并构建
 
@@ -191,7 +200,8 @@ CC_CWD=/absolute/path/to/project
 CLAUDE_BIN=
 ```
 
-`CLAUDE_BIN` 留空使用默认路径；覆盖时填写完整绝对路径。
+`CLAUDE_BIN` 留空使用默认路径；覆盖时填写完整绝对路径。DSH 的
+`CC_REMOTE_DSH_CONNECTION_FILE` 另按接入文档设置。
 本地 `.env` 只用于开发体验，生产凭据存放方式见 [安装文档](docs/installation.md)。
 
 ### 3. 启动
@@ -222,6 +232,7 @@ CLAUDE_BIN=
 | 使用当前功能（推荐）、部署开发分支 | [源码部署](docs/installation.md#source-install)：使用同一份测试通过的快照 |
 | 安装指定已发布版本 | [Release 包安装](docs/installation.md#release-install)：先确认该 tag 包含需要的功能；Relay 为 Linux，Wrapper 支持 macOS 与 glibc Linux，均提供 x86_64 / arm64 包 |
 | 容器或现有反向代理 | [部署参考](deploy/README.md#container-deploy-docker-and-the-nginx-alternative) |
+| 添加 DSH | [本机 Web profile、bridge 与配对](integrations/dsh/README.md#connect-a-local-dsh) |
 
 生产 Relay 使用 `/opt/cc-remote/releases/` 中的不可变版本，通过
 `/opt/cc-remote/current` 原子切换。升级前保留外部配置与私有状态快照；Relay、Web
@@ -232,6 +243,7 @@ AI 协助部署使用仓库 [部署 Skill](.agents/skills/cc-remote-deploy/SKILL
 Codex 需核对每个账号的 CLI 与 Wrapper 共用官方 daemon；已安装的 Codex App
 接入是单独的可选步骤，提供 [macOS](docs/codex-desktop-launcher.md) 和
 [Linux](docs/codex-desktop-linux.md) 流程，不影响核心部署结果。
+升级 cc-remote 不会代替你升级或重启 DSH。
 
 ## 配置与原生客户端
 
@@ -239,6 +251,8 @@ Codex 需核对每个账号的 CLI 与 Wrapper 共用官方 daemon；已安装�
   Remote 才恢复写入。官方 `claude` 命令保持原样。
 - **Codex Code**：通过官方共享 daemon 与原生客户端协同。私有 stdio 降级不具备
   同样的双向共享能力，部署验收不能把它当作共享成功；Work 使用私有进程。
+- **DSH**：Wrapper 连接已经运行的本机 Web 服务。关闭 Wrapper 只断开订阅，
+  原生任务继续运行；界面的停止按钮才会显式取消任务。
 
 账号目录、代理、设备授权、通知和环境变量见 [配置、账号与数据](docs/configuration.md)。
 Claude/Codex 多账号的配置和登录各自隔离；账号选择不会把凭据发给网页或 Relay。
@@ -266,6 +280,7 @@ Code 默认权限较宽；Work 的私有目录策略不能替代独立系统用�
 | [安装与升级](docs/installation.md) | Release、源码、配对、网络入口 |
 | [配置、账号与数据](docs/configuration.md) | 多账号、环境变量、鉴权、队列与历史边界 |
 | [部署流程](deploy/README.md) | 不可变发布、回滚、共享控制与上线验收 |
+| [DSH 接入](integrations/dsh/README.md) | 原生 Preset、Goal／Plan、搜索、子代理、导出与限制 |
 | [远程 Viewer](docs/remote-viewer.md) | 交互式静态页面、Bridge／Isolated 模式 |
 | Codex App 接入：[macOS](docs/codex-desktop-launcher.md)／[Linux](docs/codex-desktop-linux.md) | 可选桌面 App、日常 CLI 与 Wrapper 共用 daemon |
 | [Codex App 工具](docs/codex-app-tools.md) | 可选 App-control MCP |
@@ -292,16 +307,20 @@ relay/wrapper 会话，提供会话标签、Space e 目录树及搜索、Vim 风
 npm --prefix web run test:reliability
 npm --prefix web run test:history-browser
 npm --prefix web run test:viewer
+npm --prefix web run test:dsh
 npm --prefix web run lint
 npm --prefix web run build
 ```
 
 完整提交／PR 门禁见 [AGENTS.md](AGENTS.md#commit-and-pr-gate)。
-[真实链路脚本](scripts/live/) 单独运行；真实模型探针可能消耗额度，不属于默认单元测试。
+[真实链路脚本](scripts/live/) 与 [DSH 隔离验收](integrations/dsh/README.md#verification)
+单独运行；真实模型探针可能消耗额度，不属于默认单元测试。
 网页开发服务器使用 `npm --prefix web run dev`，同源联调使用构建后的 Relay 网页。
 
 ## FAQ
 
+- **DSH 的 `/goal`、`/plan` 为什么不可用？** 先检查会话 Preset。Minimal 不提供这两项，
+  应新建 Standard／PTC 会话；若一直显示命令读取失败，再检查 DSH bridge 与配对连接。
 - **为什么文件能列出却不能预览？** 除系统读取权限外，预览还要求普通文件、支持的格式和
   大小。XLSX 无需 Office；其他 Office 格式在缺少 Linux 转换沙箱时不能直接预览。
 - **重启后历史会丢吗？** 已落盘历史保留。实时尾流和普通待执行队列是有界内存状态，

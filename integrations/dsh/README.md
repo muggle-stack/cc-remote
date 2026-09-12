@@ -69,7 +69,8 @@ it does not stop native Agents. The Stop button explicitly calls native cancel.
 ## Controls
 
 - **Conversation:** text, images, file uploads, streaming text/reasoning/tool
-  results, steer while running, durable Wrapper-owned queues and cancellation.
+  results, steer while running, Wrapper-owned in-memory queues and cancellation.
+  Accepted queues survive browser disconnects, but not a Wrapper restart.
 - **Interactions:** scoped native questions and one-time tool approvals. Native
   cancellation closes the matching question; history does not reopen it.
 - **Goals:** objective, native phase, rounds consumed/limit, and whether automatic
