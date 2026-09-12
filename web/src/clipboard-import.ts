@@ -1,23 +1,25 @@
-import { MAX_ATTACHMENT_COUNT } from "./img";
+import {
+  ATTACHMENT_LIMIT_NOTICE, MAX_ATTACHMENT_COUNT, snapshotAttachmentFiles,
+} from "./img.ts";
 
 export interface ClipboardImport {
   text: string;
   files: File[];
   images: string[];
   errors: string[];
+  /** Capacity of the originating draft at paste time. */
+  remainingAttachments: number;
 }
 const MAX_HTML_CHARS = 32 * 1024 * 1024;
 
 /** Snapshot synchronously: DataTransfer is no longer readable after onPaste. */
-export function readClipboardImport(data: DataTransfer): ClipboardImport {
+export function readClipboardImport(data: DataTransfer, existingCount = 0): ClipboardImport {
+  const remainingAttachments = Math.max(0, MAX_ATTACHMENT_COUNT - existingCount);
+  // The browser's file-only view avoids enumerating every clipboard MIME item.
+  const selected = snapshotAttachmentFiles(data.files, existingCount);
   const result: ClipboardImport = {
-    text: data.getData("text/plain"), files: [], images: [], errors: [],
+    text: data.getData("text/plain"), ...selected, images: [], remainingAttachments,
   };
-  for (const item of Array.from(data.items)) {
-    if (item.kind !== "file") continue;
-    const file = item.getAsFile();
-    if (file) result.files.push(file);
-  }
   const html = data.getData("text/html");
   if (!html) return result;
   if (html.length > MAX_HTML_CHARS) {
@@ -30,11 +32,19 @@ export function readClipboardImport(data: DataTransfer): ClipboardImport {
   template.innerHTML = html;
   template.content.querySelectorAll("script,style,iframe,object,template")
     .forEach((node) => node.remove());
-  const images = Array.from(template.content.querySelectorAll("img"));
-  result.images = images.slice(0, MAX_ATTACHMENT_COUNT).map((img) =>
-    img.getAttribute("src") || img.getAttribute("data-lark-image-uri") || "");
-  if (images.length > MAX_ATTACHMENT_COUNT) {
-    result.errors.push(`一次最多导入 ${MAX_ATTACHMENT_COUNT} 张图片，其余图片未导入。`);
+  const images = document.createTreeWalker(template.content, NodeFilter.SHOW_ELEMENT, {
+    acceptNode: (node) => node.nodeName === "IMG"
+      ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP,
+  });
+  while (images.nextNode()) {
+    if (result.images.length >= remainingAttachments) {
+      if (!result.errors.includes(ATTACHMENT_LIMIT_NOTICE)) {
+        result.errors.push(ATTACHMENT_LIMIT_NOTICE);
+      }
+      break;
+    }
+    const img = images.currentNode as Element;
+    result.images.push(img.getAttribute("src") || img.getAttribute("data-lark-image-uri") || "");
   }
   if (!result.text) {
     template.content.querySelectorAll("br").forEach((node) => node.replaceWith("\n"));
@@ -45,7 +55,7 @@ export function readClipboardImport(data: DataTransfer): ClipboardImport {
 }
 
 export async function resolveClipboardImport(snapshot: ClipboardImport) {
-  const { resolveClipboardFiles } = await import("./clipboard-files");
+  const { resolveClipboardFiles } = await import("./clipboard-files.ts");
   return resolveClipboardFiles(snapshot);
 }
 

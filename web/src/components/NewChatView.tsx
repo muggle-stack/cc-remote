@@ -329,7 +329,7 @@ export function NewChatView({ cwd, controlScopeKey,
   };
 
   const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
-    const clipboard = readClipboardImport(e.clipboardData);
+    const clipboard = readClipboardImport(e.clipboardData, images.length + files.length);
     const pastedText = clipboard.text;
     const attachments = clipboard.files.length || clipboard.images.length
       || clipboard.errors.length;

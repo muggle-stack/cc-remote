@@ -4,6 +4,8 @@ import type { QueryImg, QueryFile } from "./protocol";
 // sequentially and committed as one batch so Enter can never race a FileReader.
 export const IMG_MAX_EDGE = 1568;
 export const MAX_ATTACHMENT_COUNT = 8;
+export const ATTACHMENT_LIMIT_NOTICE =
+  `一次消息最多 ${MAX_ATTACHMENT_COUNT} 个附件，其余文件未导入`;
 export const MAX_SINGLE_ATTACHMENT_BYTES = 6 * 1024 * 1024;
 export const MAX_TOTAL_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 export const MAX_IMAGE_SOURCE_BYTES = 20 * 1024 * 1024;
@@ -39,9 +41,7 @@ export function snapshotAttachmentFiles(
   }
   return {
     files,
-    errors: length > remaining
-      ? [`一次消息最多 ${MAX_ATTACHMENT_COUNT} 个附件，其余文件未导入`]
-      : [],
+    errors: length > remaining ? [ATTACHMENT_LIMIT_NOTICE] : [],
   };
 }
 

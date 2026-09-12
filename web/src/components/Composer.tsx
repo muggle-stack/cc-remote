@@ -447,7 +447,7 @@ export function Composer(p: Props) {
   // Keep the native textarea for reliable selection/undo/IME. Large text is
   // retained privately by the draft and represented only by an editable card.
   const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
-    const clipboard = readClipboardImport(e.clipboardData);
+    const clipboard = readClipboardImport(e.clipboardData, images.length + files.length);
     const { text } = clipboard;
     const attachments = clipboard.files.length || clipboard.images.length
       || clipboard.errors.length;

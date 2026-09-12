@@ -8215,7 +8215,9 @@ test("multi-line IME growth stays pinned during a Codex tool burst", async ({
 for (const [target, source] of [
   ["composer", "picker"],
   ["composer", "drop"],
+  ["composer", "paste"],
   ["new-chat controls", "picker"],
+  ["new-chat controls", "paste"],
 ] as const) {
   test(`${target} bounded attachment selection from ${source} survives event cleanup`, async ({ page }) => {
     const alerts: string[] = [];
@@ -8265,11 +8267,24 @@ for (const [target, source] of [
             element.dispatchEvent(new Event("change", { bubbles: true }));
           } else {
             const data = new DataTransfer();
-            Object.defineProperty(data, "types", { value: ["Files"] });
             Object.defineProperty(data, "files", { value: files });
-            window.dispatchEvent(new DragEvent("drop", {
-              bubbles: true, cancelable: true, dataTransfer: data,
-            }));
+            if (source === "paste") {
+              data.setData("text/plain", ` pasted-${remaining}`);
+              Object.defineProperty(data, "items", { get() {
+                throw new Error("unbounded clipboard item access");
+              } });
+              const textarea = document.querySelector("textarea")!;
+              textarea.focus();
+              textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+              textarea.dispatchEvent(new ClipboardEvent("paste", {
+                bubbles: true, cancelable: true, clipboardData: data,
+              }));
+            } else {
+              Object.defineProperty(data, "types", { value: ["Files"] });
+              window.dispatchEvent(new DragEvent("drop", {
+                bubbles: true, cancelable: true, dataTransfer: data,
+              }));
+            }
           }
         } finally {
           expired = true;
@@ -8280,7 +8295,8 @@ for (const [target, source] of [
       expect(reads).toEqual(remaining ? [0, 1] : []);
       await expect(page.locator(".attach-file")).toHaveCount(7);
       await expect(page.locator(".attach-image-preview")).toHaveCount(1);
-      await expect(input).toHaveValue("keep this draft");
+      await expect(input).toHaveValue(source === "paste"
+        ? `keep this draft pasted-2${remaining ? "" : " pasted-0"}` : "keep this draft");
       const overflow = "一次消息最多 8 个附件，其余文件未导入";
       if (target === "composer") {
         await expect(page.getByText(overflow, { exact: true })).toBeVisible();
@@ -8298,11 +8314,24 @@ for (const [target, source] of [
 
 for (const target of ["composer", "new-chat controls"]) {
   test(`${target === "composer" ? "long paste" : target} mixed clipboard keeps text and deduplicates supplied images`, async ({ page }) => {
+    const alerts: string[] = [];
+    page.on("dialog", async (dialog) => {
+      alerts.push(dialog.message());
+      await dialog.accept();
+    });
     await page.goto(target === "composer"
       ? "/tests/history-browser.html?codex-live-burst=1&composer-live=1&composer-paste=1"
       : "/tests/history-browser.html?newchat-controls=1");
     const input = page.locator("textarea").first();
     await input.fill("before REPLACE after");
+    // One free slot must accept a clipboard File plus the same HTML image
+    // without treating those two representations as two new attachments.
+    await page.getByLabel("添加文件", { exact: true }).setInputFiles(
+      Array.from({ length: 7 }, (_, index) => ({
+        name: `existing-${index}.txt`, mimeType: "text/plain", buffer: Buffer.from("existing"),
+      })),
+    );
+    await expect(page.locator(".attach-file")).toHaveCount(7);
     await input.evaluate((node) => {
       const ta = node as HTMLTextAreaElement;
       ta.focus(); ta.setSelectionRange(7, 14);
@@ -8321,6 +8350,10 @@ for (const target of ["composer", "new-chat controls"]) {
     });
     await expect(input).toHaveValue("before pasted text after");
     await expect(page.locator(".attach-image-preview")).toHaveCount(1);
+    await expect(page.locator(".attach-file")).toHaveCount(7);
+    expect(alerts).toEqual([]);
+    await expect(page.getByText("一次消息最多 8 个附件，其余文件未导入", { exact: true }))
+      .toHaveCount(0);
     if (target === "composer") {
       await input.press("Enter");
       await expect(page.getByTestId("composer-paste-output"))
