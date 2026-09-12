@@ -5,6 +5,7 @@ import asyncio
 import ctypes
 import json
 import os
+import select
 import shutil
 import sqlite3
 import subprocess
@@ -321,12 +322,18 @@ def test_darwin_kernel_payload_preserves_spaced_profile_home():
         [
             sys.executable,
             "-c",
-            "import time; time.sleep(30)",
+            "import time; print('ready', flush=True); time.sleep(30)",
             argument,
         ],
         env=environment,
+        stdout=subprocess.PIPE,
     )
     try:
+        # Popen may return before macOS exposes the post-exec identity. Read
+        # only after this fixture is running, without weakening PID validation.
+        assert child.stdout is not None
+        assert select.select([child.stdout], [], [], 5)[0]
+        assert child.stdout.readline() == b"ready\n"
         identity = process_identity(child.pid)
         assert identity is not None
         complete, args, value = process_command_environment_value(

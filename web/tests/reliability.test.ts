@@ -861,6 +861,37 @@ assert.equal(parallelLanes.accept(
   false);
 
 const parallelMutationStarts: string[] = [];
+function testFailedSkillReads() {
+  const failedReadStarts: string[] = [];
+  const failedReadLanes = new SkillCatalogRequestCoordinator((request) => {
+    failedReadStarts.push(request.key);
+    return `failed-read-${failedReadStarts.length}`;
+  });
+  assert.equal(failedReadLanes.request(parallelSkillsRequest), true);
+  assert.equal(failedReadLanes.request(capabilityRequest(
+    "next-repo", "/repo/b", true)), false);
+  assert.equal(failedReadLanes.fail("unrelated-request"), null,
+    "an unrelated error must not release a pending Skills read");
+  assert.equal(failedReadLanes.fail("failed-read-1")?.key, repoSkillKey);
+  assert.deepEqual(failedReadStarts, [repoSkillKey, "next-repo"],
+    "a failed Skills read releases its lane and starts the queued repository read");
+  assert.equal(failedReadLanes.hasPendingRead(repoSkillKey, true), false);
+  assert.equal(failedReadLanes.accept(
+    capabilityResponse("failed-read-1", "/repo/a", true)), null,
+    "a delayed response to a failed read must not replace the current catalog");
+  assert.equal(failedReadLanes.accept(
+    capabilityResponse("failed-read-2", "/repo/b", true))?.request.key, "next-repo");
+  assert.equal(failedReadLanes.request(parallelSkillsRequest), true,
+    "the failed repository can be retried after draining the queue");
+  failedReadLanes.reset();
+  assert.equal(failedReadLanes.trackMutation("failed-mutation", parallelFullRequest), true);
+  assert.equal(failedReadLanes.request(parallelSkillsRequest), false);
+  assert.equal(failedReadLanes.fail("failed-mutation")?.key, repoSkillKey);
+  assert.equal(failedReadStarts.length, 4,
+    "a failed capability mutation must also release queued reads");
+}
+testFailedSkillReads();
+
 const parallelMutation = new SkillCatalogRequestCoordinator((_request) => {
   const requestId = `parallel-mutation-read-${parallelMutationStarts.length + 1}`;
   parallelMutationStarts.push(requestId);
@@ -5059,8 +5090,9 @@ try {
   assert.equal(firstSteeredTurns[0].durationMs, undefined,
     "a steer fence without one authoritative clock domain has unknown duration");
   assert.equal(firstSteeredTurns[0].doneTs, 11_000);
-  assert.ok(firstSteeredTurns[0].blocks.every((block: Block) => block.done),
-    "closing the old segment also settles every open block it owned");
+  assert.ok(firstSteeredTurns[0].blocks.every((block: Block) =>
+    block.kind === "text" ? !block.done : block.done),
+    "the old process segment settles while native text continues to its own end");
   assert.equal(firstSteeredTurns[1].images?.[0]?.data, "steered-image");
   assert.deepEqual(firstSteeredTurns[1].files, [{
     filename: "steered.txt", data: "",
@@ -18011,7 +18043,6 @@ assert.match(appSource, /draftKey=\{focusedComposerDraftKey\}/);
 assert.match(appSource, /composerDraftsRef\.current\.rekey/,
   "temp session id capture must retain the focused composer draft");
 assert.match(appSource, /\{space === "work" \? "Work" : "Code"\}/);
-assert.match(appSource, /<button className="engine-toggle" onClick=\{toggleEngine\}/);
 assert.match(appSource, /setNewChatAutoFocus\(false\)/,
   "switching engines must not summon the new-chat keyboard");
 assert.match(appSource, /prepareSurfaceSwitch\(nextEngine, nextSpace\)/,
@@ -18232,10 +18263,8 @@ assert.match(composerSource, /workContext\.session_percentage \?\? workContext\.
 assert.match(contextPopoverSource,
   /usage\(p\.report\.total_tokens, p\.report\.percentage\)/,
   "Code must render the last native engine-total context reading");
-assert.match(composerSource, /contextAvailable = p\.contextReport\?\.available !== false/,
-  "an absent tokenUsage report must not be rendered as a real zero");
-assert.match(contextPopoverSource, /正在读取真实上下文/,
-  "the context popover must explain that its native reading is still loading");
+assert.doesNotMatch(contextPopoverSource, /正在读取真实上下文/,
+  "background context refreshes must not flash a loading notice");
 assert.match(composerSource, /ref=\{workSettingsRef\}/);
 assert.match(composerSource, /document\.addEventListener\("pointerdown", onPointerDown\)/);
 assert.match(composerSource, /disabled=\{locked\}[\s\S]*?: "选择模型"/,

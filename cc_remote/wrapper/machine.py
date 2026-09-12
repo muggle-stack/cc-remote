@@ -9589,11 +9589,11 @@ class WrapperMachine:
     async def _observe_preview_path_event(self, ctx: SessionContext, msg) -> None:
         """Grant an exact capability only at a live successful-write boundary.
 
-        Normal previews remain cwd-confined. Claude/Codex can, however, be
-        explicitly asked to create a deliverable elsewhere (for example
-        ``/tmp/test.md``). The live ToolUse + successful ToolResult pair is an
-        auditable capability for the exact file identity inspected at that
-        moment; replaying the same pair from history is not.
+        Claude/Codex can be asked to create a deliverable elsewhere (for
+        example ``/tmp/test.md``). The live ToolUse + successful ToolResult
+        pair permits editing that exact file; an ordinary Code preview only
+        grants read access. Replaying the write pair from history must not
+        authorize a replacement file or its neighbors.
         """
         if isinstance(msg, ToolUse):
             raw_paths = self._normalize_preview_write_event(msg)
@@ -23299,9 +23299,14 @@ class WrapperMachine:
                     )
                     if isinstance(query_result, Error):
                         ctx.sdk.restore_goal_state(previous)
+                        query_result = query_result.model_copy(update={
+                            "request_id": getattr(cmd, "cmd_id", None),
+                            "to": getattr(cmd, "client_id", None),
+                        })
+                        await self._emit(ctx, query_result)
                         return query_result
                     ctx.goal_visible = True
-                    event = GoalState(goal=goal)
+                    event = GoalState(goal=goal, request_id=getattr(cmd, "cmd_id", None))
                     await self._emit(ctx, event)
                     return event
                 except Exception as exc:
@@ -23319,6 +23324,14 @@ class WrapperMachine:
             # cannot become a second writer. launch_lock also makes an immediate
             # interrupt wait until the authoritative automatic turn id is known.
             async with ctx.launch_lock:
+                if (ctx.state == "running" and ctx.codex_spontaneous_turn_id is not None
+                        and getattr(cmd, "objective", None) is None
+                        and getattr(cmd, "token_budget", None) is None
+                        and getattr(cmd, "status", None) in {"paused", "complete"}):
+                    goal = await ctx.sdk.set_goal(status=cmd.status)
+                    event = GoalState(goal=goal, request_id=getattr(cmd, "cmd_id", None))
+                    await self._emit(ctx, event)
+                    return event
                 if ctx.state != "idle":
                     # The browser may retry after receiving GoalState but before
                     # its CommandAck, or two taps may enqueue equivalent command
@@ -23327,7 +23340,7 @@ class WrapperMachine:
                     # false failure banner even though the Goal is active.
                     applied = self._codex_goal_update_already_applied(ctx, cmd)
                     if applied is not None:
-                        event = GoalState(goal=applied)
+                        event = GoalState(goal=applied, request_id=getattr(cmd, "cmd_id", None))
                         await self._emit(ctx, event)
                         return event
                     error = Error(
@@ -23370,7 +23383,7 @@ class WrapperMachine:
                     ctx.codex_goal_mutation = None
                     if ctx.state != "idle":
                         await self._set_idle_after_managed_turn(ctx)
-            event = GoalState(goal=goal)
+            event = GoalState(goal=goal, request_id=getattr(cmd, "cmd_id", None))
             await self._emit(ctx, event)
             return event
         except Exception as exc:
@@ -23379,7 +23392,7 @@ class WrapperMachine:
                 mutation = ctx.codex_goal_mutation
                 if mutation is not None:
                     mutation.applied = True
-                event = GoalState(goal=applied)
+                event = GoalState(goal=applied, request_id=getattr(cmd, "cmd_id", None))
                 await self._emit(ctx, event)
                 return event
             automatic_turn_live = bool(
@@ -23420,9 +23433,14 @@ class WrapperMachine:
                     )
                     if isinstance(query_result, Error):
                         ctx.sdk.restore_goal_state(previous)
+                        query_result = query_result.model_copy(update={
+                            "request_id": getattr(cmd, "cmd_id", None),
+                            "to": getattr(cmd, "client_id", None),
+                        })
+                        await self._emit(ctx, query_result)
                         return query_result
                     ctx.goal_visible = False
-                    event = GoalState(goal=None)
+                    event = GoalState(goal=None, request_id=getattr(cmd, "cmd_id", None))
                     await self._emit(ctx, event)
                     return event
                 except Exception as exc:
@@ -23452,7 +23470,7 @@ class WrapperMachine:
             if (ctx.codex_spontaneous_turn_id is not None
                     and ctx.state == "running"):
                 await self._handle_interrupt(Interrupt(sid=ctx.key))
-            event = GoalState(goal=None)
+            event = GoalState(goal=None, request_id=getattr(cmd, "cmd_id", None))
             await self._emit(ctx, event)
             return event
         except Exception as exc:
@@ -23874,22 +23892,45 @@ class WrapperMachine:
             return response
 
         try:
-            suffix = os.path.splitext(cmd.path)[1].lower()
+            # Links in prose can name directories as well as files. Resolve
+            # directories through the same no-symlink boundary as /open.
+            requested_path = os.path.expanduser(cmd.path)
+            candidate = os.path.join(ctx.cwd, requested_path)
+            if await asyncio.to_thread(os.path.isdir, candidate):
+                from cc_remote.wrapper.workspace_browser import browse_workspace
+
+                target = await asyncio.to_thread(
+                    browse_workspace, ctx.cwd, cmd.path, limit=1,
+                    confine_to_cwd=ctx.space != "code")
+                if target["kind"] == "directory":
+                    response = FilePreview(
+                        path=target["path"], request_id=cmd.request_id,
+                        directory=True, writable=False, to=client_id)
+                    await self._emit(ctx, response)
+                    return response
+            resolved_path = os.path.realpath(candidate)
+            inside_root = self._path_is_below(
+                os.path.realpath(ctx.cwd), resolved_path)
+            # In Code, opening a file is already an explicit browser request.
+            # Bind only that file, using the OS read permission and its current
+            # identity. Embedded resources and Work retain their own boundary.
+            if ctx.space == "code" and client_id and not inside_root:
+                await self._run_preview_capability_mutation(
+                    self._preview_capability_store.grant_path,
+                    ctx.engine, ctx.space, self._ctx_wire_sid(ctx),
+                    resolved_path, mode="read", source="user_approved",
+                    persist=not ctx.btw)
+            suffix = os.path.splitext(requested_path)[1].lower()
             external_paths = self._preview_capabilities(ctx)
             if suffix in self.OFFICE_PREVIEW_SUFFIXES:
                 async with self._preview_conversion_limit:
                     preview = await asyncio.to_thread(
-                        self._read_file_preview, ctx.cwd, cmd.path,
+                        self._read_file_preview, ctx.cwd, requested_path,
                         external_paths)
             else:
                 preview = await asyncio.to_thread(
-                    self._read_file_preview, ctx.cwd, cmd.path,
+                    self._read_file_preview, ctx.cwd, requested_path,
                     external_paths)
-            resolved_path = os.path.realpath(
-                cmd.path if os.path.isabs(cmd.path)
-                else os.path.join(ctx.cwd, cmd.path))
-            inside_root = self._path_is_below(
-                os.path.realpath(ctx.cwd), resolved_path)
             external_capability = external_paths.get(resolved_path)
             response = FilePreview(
                 path=preview["path"],
@@ -24847,6 +24888,15 @@ class WrapperMachine:
         is persisted by the relay/VPS.
         """
         suffix = os.path.splitext(path)[1].lower()
+        if suffix == ".xlsx":
+            from cc_remote.wrapper.spreadsheet_preview import spreadsheet_preview
+
+            relative, data, file_stat, _ = cls._read_session_file(
+                cwd, path, allowed_suffixes=frozenset({".xlsx"}),
+                max_bytes=ARTIFACT_PREVIEW_MAX_BYTES, allow_truncate=False,
+                allowed_external_paths=allowed_external_paths)
+            return {"path": relative, "format": "spreadsheet", "content": spreadsheet_preview(data),
+                    "data": data, "size": file_stat.st_size, "mtime_ns": file_stat.st_mtime_ns}
         if suffix in cls.OFFICE_PREVIEW_SUFFIXES:
             return cls._convert_office_preview(
                 cwd, path, allowed_external_paths)
@@ -25296,6 +25346,8 @@ class WrapperMachine:
             return "markdown"
         if suffix in cls.HTML_PREVIEW_SUFFIXES:
             return "html"
+        if suffix == ".xlsx":
+            return "spreadsheet"
         if suffix in cls.OFFICE_PREVIEW_SUFFIXES or suffix == ".pdf":
             return "pdf"
         if suffix in cls.PREVIEW_ASSET_MEDIA_TYPES:

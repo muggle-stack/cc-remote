@@ -6,6 +6,7 @@ import {
   mergeAuthoritativeTurnDetail, mergeInitialHistory, restoreObservedLiveTurnDetails,
 } from "../src/history-merge.ts";
 import type { Turn } from "../src/reducer.ts";
+import type { TextBlock } from "../src/domain/conversation.ts";
 
 // A final item and a user steer can be recorded 78 ms apart inside ONE native
 // task. The native task is a routing identity, not a visible conversation row.
@@ -116,6 +117,55 @@ try {
   const { initialState, createRuntime, reduce } =
     await harness.ssrLoadModule("/src/reducer.ts");
   const { ChatView } = await harness.ssrLoadModule("/src/components/ChatView.tsx");
+  for (const local of [false, true]) {
+  for (const channel of ["final", "commentary"] as const) {
+  for (const explicitTask of [undefined, task]) {
+  for (const storage of ["blocks", "liveSpillBlocks"] as const) {
+    const partial = { kind: "text" as const, message_id: "streaming-old",
+      channel, text: "周期约 **1", done: false };
+    const old: Turn = { id: "streaming-user", forkPointId: task,
+      prompt: "检查当前状态", done: false, blocks: [] };
+    old[storage] = [partial];
+    let state = { ...initialState, focusedSid: "s", runtimes: { s: {
+      ...createRuntime(), state: "running", syncReady: true,
+      legacyLiveFallbackBlocked: true, turns: [old],
+    } } };
+    const emit = (body: Record<string, unknown>) => {
+      state = reduce(state, { type: "event", event: {
+        v: 64, sid: "s", ts: 1, ...body,
+      } });
+    };
+    const text = () => {
+      const turn: Turn = state.runtimes.s.turns[0];
+      return [...turn.blocks, ...(turn.liveSpillBlocks ?? []),
+        ...(turn.detailProjection?.blocks ?? [])].find((block): block is TextBlock =>
+        block.kind === "text" && block.message_id === "streaming-old")!;
+    };
+    if (local) state = reduce(state, { type: "steer_sent", sid: "s", ts: 1000,
+      msg_id: "streaming-steer", prompt: "补充当前现象" });
+    emit({ type: "turn_steered", msg_id: "streaming-steer", turn_id: task,
+      prompt: "补充当前现象", seq: 10 });
+    assert.equal(text().done, false,
+      "accepting a steer cannot complete a still-streaming native message");
+    emit({ type: "delta", message_id: "streaming-old", turn_id: explicitTask,
+      channel, text: " ms**，仍在继续。", seq: 11 });
+    assert.equal(text().text, "周期约 **1 ms**，仍在继续。",
+      "the predecessor keeps receiving text without a History refresh");
+    assert.equal(state.runtimes.s.turns[0].done, true);
+    assert.equal(state.runtimes.s.liveOwner?.turnId, "streaming-steer");
+    emit({ type: "assistant_msg_end", message_id: "streaming-old",
+      turn_id: explicitTask, channel, seq: 12 });
+    emit({ type: "delta", message_id: "streaming-old", turn_id: explicitTask,
+      channel, text: " ms**，仍在继续。", seq: 13 });
+    assert.equal(text().text, "周期约 **1 ms**，仍在继续。",
+      "a genuinely completed native message still rejects replay deltas");
+    assert.equal(text().done, true);
+    assert.equal(state.runtimes.s.turns[1].blocks.length, 0,
+      "late text stays in its original row, including spilled blocks");
+  }
+  }
+  }
+  }
   const repairedMarkup = renderToStaticMarkup(createElement(ChatView, {
     sid: "compact-steers", engine: "codex",
     turns: mergeInitialHistory(compactHistory, [{

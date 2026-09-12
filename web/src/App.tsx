@@ -39,22 +39,24 @@ import { LoginForm } from "./components/LoginForm";
 import {
   compatibleNewChatEffort,
   newChatCatalogRequest,
-  NewChatView,
   reconcileNewChatSelection,
   resolveNewChatLocalDefaults,
-} from "./components/NewChatView";
+} from "./new-chat-selection";
+const NewChatView = lazy(() => import("./components/NewChatView").then(m => ({ default: m.NewChatView })));
 import { QuestionSheet } from "./components/QuestionSheet";
 import { WorkDashboardSheet } from "./components/WorkDashboardSheet";
 import type { HookDraft, SkillDraft } from "./components/CapabilitiesSheet";
 import { TerminalControl } from "./components/TerminalControl";
 import { DeviceSheet, type PairingState, type RemoteDevice } from "./components/DeviceSheet";
 import { HeaderMenu } from "./components/HeaderMenu";
+import { EngineSelector } from "./components/EngineSelector";
 import {
   claudeProfileIdForSession,
   claudeProfilePresentation,
   codexProfileIdForSession,
   codexProfilePresentation,
 } from "./codex-profile-presentation";
+import type { GoalApi } from "./goal-api";
 import { parseGoalCommand } from "./goal-command";
 import {
   BTW_PANEL_SCOPES_KEY, btwPanelScopeKey, readBtwPanelScopes,
@@ -466,6 +468,13 @@ export default function App() {
   const stateRef = useRef(state);
   stateRef.current = state;
   const wsRef = useRef<RelayWs | null>(null);
+  const goalApiRef = useRef<GoalApi | null>(null);
+  const getGoalApi = useCallback(async () => {
+    const transport = wsRef.current;
+    const { GoalApi } = await import("./goal-api");
+    if (!transport || transport !== wsRef.current) throw new Error("连接已切换，请重试。");
+    return goalApiRef.current ??= new GoalApi(() => wsRef.current);
+  }, []);
   const [permissionProfileRequests, setPermissionProfileRequests] =
     useState<Record<string, string>>({});
   const archivedBrowseRef = useRef<string | null>(null);
@@ -964,6 +973,7 @@ export default function App() {
     }),
   ) as Record<string, CompletionBadgeKind>;
   const activeScopeKey = sessionScopeKey(machineId, engine, space);
+  useEffect(() => () => goalApiRef.current?.reset(), [activeScopeKey]);
   const activeWorkDashboard = workDashboardMachineId === machineId
     ? workDashboards[engine] ?? null
     : null;
@@ -2069,9 +2079,8 @@ export default function App() {
 
   // Engine and Work/Code switches are navigation. Each surface restores the
   // session that was last open there instead of silently starting a new one.
-  const toggleEngine = () => {
+  const toggleEngine = (nextEngine: Engine) => {
     cancelPendingNotificationTarget();
-    const nextEngine: Engine = engine === "codex" ? "claude" : "codex";
     const nextSpace = spacesByEngineRef.current[nextEngine];
     pendingCreateRef.current = null;
     setCreateError(null);
@@ -2188,6 +2197,7 @@ export default function App() {
         onEvent: (msg, ownership) => {
           if (!acceptsLifecycle()) return;
           if (turnFileRequestsRef.current.accept(msg)) return;
+          if (goalApiRef.current?.accept(msg)) return;
           const settlesContextRequest = !!(
             (msg.type === "context_report"
                 || (msg.type === "error" && msg.code !== "wrapper_offline"))
@@ -2353,6 +2363,14 @@ export default function App() {
               return next;
             });
           } else if (msg.type === "error" && msg.request_id) {
+            const coordinator = skillCatalogRequestsRef.current;
+            const failedSkills = msg.code === "wrapper_offline"
+              ? null : coordinator?.fail(msg.request_id);
+            if (failedSkills && failedSkills.key === focusedSkillScopeRef.current?.key
+                && !coordinator?.hasPendingRead(failedSkills.key, false)
+                && !coordinator?.hasPendingMutation(failedSkills.key)) {
+              setCapabilitiesLoading(false);
+            }
             const failedMigration =
               goalDismissMigrationByRequestRef.current.get(msg.request_id);
             if (failedMigration && msg.code !== "wrapper_offline") {
@@ -3529,6 +3547,16 @@ export default function App() {
             filesListenerRef.current?.(msg);
             return;
           }
+          if (msg.type === "file_preview" && msg.directory && !msg.error) {
+            const current = stateRef.current;
+            const artifact = current.artifact;
+            if (artifact && msg.sid && artifact.sid === msg.sid && artifact.requestId === msg.request_id) {
+              dispatch({ type: "clear_artifact" });
+              setFileBrowser({ sid: msg.sid, machineId, engine: engineRef.current, space: spaceRef.current,
+                path: msg.path, preview: false, id: uuid() });
+            }
+            return;
+          }
           if (msg.type === "agent_detail") {
             agentDetailListenerRef.current?.(msg);
             // Requester-scoped details never belong in the conversation
@@ -3646,6 +3674,7 @@ export default function App() {
           dispatch({ type: "conn", connState: s, detail });
           if (s !== "connected") {
             turnFileRequestsRef.current.clear();
+            goalApiRef.current?.reset();
             skillCatalogRequestsRef.current?.resetReads();
             // The fork result is authoritative only for this live connection.
             // A reconnect will obtain a fresh native SessionList, so do not
@@ -5636,8 +5665,7 @@ export default function App() {
             <Icon name="devices" size={18} />
             <span>{activeDevice?.label ?? machineId}</span><i />
           </button>
-          <button className="engine-toggle" onClick={toggleEngine} aria-label="切换新会话引擎"
-            title="新建会话使用的引擎">{engine === "codex" ? "◇ Codex" : "✳ Claude"}</button>
+          <EngineSelector engine={engine} onChange={toggleEngine} />
           <HeaderMenu
             engine={engine}
             theme={theme}
@@ -5670,7 +5698,7 @@ export default function App() {
             <span className="loading-tx">正在恢复会话</span>
           </div>
         ) : state.newChat ? (
-          <NewChatView cwd={state.newChat.cwd}
+          <Suspense fallback={null}><NewChatView cwd={state.newChat.cwd}
             controlScopeKey={`${activeScopeKey}\u0000${newChatProfileId ?? "__default__"}`}
             space={space}
             createError={createError}
@@ -5713,7 +5741,7 @@ export default function App() {
               wsRef.current?.sendGetPermissionProfiles(
                 cwd, newChatCodexProfileId);
             }}
-            onSend={sendFirstMessage} />
+            onSend={sendFirstMessage} /></Suspense>
         ) : (
           <>
             <ChatView key={`${activeScopeKey}\u0000${focusedSid ?? ""}`}
@@ -5799,6 +5827,7 @@ export default function App() {
               <GoalPanel engine={focusedEngine} goal={rt.goal}
                 revealed={!archivedBrowse && !!goalUi?.revealed}
                 open={!archivedBrowse && !!goalUi?.open}
+                key={focusedGoalScopeKey}
                 loading={!!goalUi?.loading}
                 completedGoalRetired={completedGoalRetired}
                 plan={planProgress}
@@ -5832,17 +5861,17 @@ export default function App() {
                   }
                   setGoalUi({ revealed: false, open: false, loading: false });
                 }}
-                onSave={(objective, status, budget) => {
+                disabled={!state.wrapperOnline || state.connState !== "connected"}
+                onStatus={async status => (await getGoalApi()).save(focusedSid!, null, status, null)}
+                onSave={async (objective, status, budget) => {
                   rememberFocusedGoalUi();
-                  wsRef.current?.sendSetGoal(
-                    objective, status,
+                  await (await getGoalApi()).save(focusedSid!, objective,
+                    focusedEngine === "claude" ? "active" : status,
                     focusedEngine === "codex" ? budget : null);
-                  setGoalUi({ revealed: true, open: false, loading: false });
                 }}
-                onClear={() => {
+                onClear={async () => {
                   rememberFocusedGoalUi();
-                  wsRef.current?.sendClearGoal();
-                  setGoalUi({ revealed: false, open: false, loading: false });
+                  await (await getGoalApi()).clear(focusedSid!);
                 }} />
             </Suspense>
 
@@ -5969,9 +5998,6 @@ export default function App() {
           }}
           contextReport={rt.contextReport}
           contextExactReport={rt.contextExactReport}
-          contextLoading={rt.contextRequestId !== null}
-          contextDeferred={rt.contextRefreshDeferred}
-          contextError={rt.contextError}
           statusReport={rt.statusReport}
           rateLimits={rt.rateLimits}
           statusError={rt.statusError}

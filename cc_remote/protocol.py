@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 62
+PROTOCOL_VERSION = 66
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -2281,9 +2281,10 @@ class FilePreview(_Base):
     wrapper host and report their original extension in ``converted_from``.
     """
     type: Literal["file_preview"] = "file_preview"
+    directory: bool = False
     path: PreviewPath
     request_id: WireId
-    format: Literal["markdown", "text", "html", "image", "pdf", "audio"] = "text"
+    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "spreadsheet"] = "text"
     content: PreviewContent = ""
     media_type: Optional[Literal[
         "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
@@ -2360,7 +2361,7 @@ class PreviewAuthorizationRequired(_Base):
     operation: Literal["file_preview", "preview_asset"]
     path: PreviewPath
     resolved_path: PreviewPath
-    format: Literal["markdown", "text", "html", "image", "pdf", "audio"] = "text"
+    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "spreadsheet"] = "text"
     preview_id: Optional[WireId] = None
 
 

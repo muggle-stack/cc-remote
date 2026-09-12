@@ -314,6 +314,9 @@ async function mockRightPanelRelay(
       } else if (command.type === "get_diff") {
         emit({ type: "diff_report", sid: String(command.sid),
           request_id: String(command.cmd_id), file: "", diff: "" });
+      } else if (command.type === "get_goal") {
+        emit({ type: "goal_state", sid: String(command.sid),
+          request_id: String(command.cmd_id), goal: null });
       } else if (command.type === "ping") {
         emit({ type: "pong", n: Number(command.n) });
       }
@@ -435,6 +438,97 @@ for (const browsing of [false, true]) {
     }
   });
 }
+
+test("session workspace harness menu clears pointer focus and preserves keyboard navigation", async ({ page }) => {
+  await mockRightPanelRelay(page, { retained: false });
+  await page.goto("/");
+  const select = page.locator(".engine-toggle");
+  await select.click();
+  await page.getByRole("menuitemradio", { name: "Claude", exact: true }).click();
+  await expect(select).not.toBeFocused();
+  await expect(select).toHaveCSS("outline-style", "none");
+  await expect(page.locator(".engine-label")).toHaveText("Claude");
+  await select.focus();
+  await select.press("ArrowDown");
+  const selected = page.getByRole("menuitemradio", { name: "Claude", exact: true });
+  await expect(selected).toBeFocused();
+  await selected.press("ArrowDown");
+  await expect(page.getByRole("menuitemradio", { name: "Codex", exact: true })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(select).toBeFocused();
+  await expect(select).toHaveCSS("outline-style", "solid");
+  await expect(page.locator(".engine-label")).toHaveText("Codex");
+  await select.press("ArrowUp");
+  await page.keyboard.press("Home");
+  await expect(page.getByRole("menuitemradio", { name: "Claude", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(select).toBeFocused();
+  await expect(page.getByRole("menu", { name: "会话引擎" })).toHaveCount(0);
+});
+
+test("session workspace directory links open the browser and keep original downloads", async ({ page }) => {
+  const path = "/tmp/layout/dir";
+  const relay = await mockRightPanelRelay(page, { retained: false, seedTurns: [{
+    id: "directory-link", prompt: "查看目录", done: true,
+    blocks: [{ kind: "text", message_id: "directory-answer", channel: "final", done: true,
+      text: `[目录](${path})` }],
+  }] });
+  await page.goto("/");
+  await page.getByRole("button", { name: `在 Remote 中打开 ${path}`, exact: true }).click();
+  await expect.poll(() => relay.commands.some(c => c.type === "get_file_preview")).toBe(true);
+  const request = relay.commands.find(c => c.type === "get_file_preview")!;
+  relay.emit({ type: "file_preview", sid: "layout-parent", request_id: String(request.request_id),
+    path, directory: true, format: "text", content: "", size: 0 });
+  await expect.poll(() => relay.commands.some(c => c.type === "browse_files")).toBe(true);
+  const browse = relay.commands.find(c => c.type === "browse_files")!;
+  expect(browse.path).toBe(path);
+  expect(browse.sid).toBe("layout-parent");
+  relay.emit({ type: "files_listed", sid: "layout-parent", request_id: String(browse.request_id),
+    root: "/tmp/layout", path, parent: "/tmp/layout", kind: "directory", revision: "dir-1",
+    next_offset: null, entries: [{ name: "README.md", path: `${path}/README.md`, kind: "file" }] });
+  await expect(page.locator(".file-browser-shell")).toBeVisible();
+  await page.getByRole("button", { name: "README.md", exact: true }).click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "get_file_preview").length).toBe(2);
+  const preview = relay.commands.filter(c => c.type === "get_file_preview").at(-1)!;
+  relay.emit({ type: "file_preview", sid: "layout-parent", request_id: String(preview.request_id),
+    path: `${path}/README.md`, format: "text", content: "Directory preview", size: 17, writable: false });
+  await expect(page.locator(".artifact-panel")).toContainText("Directory preview");
+  const downloadEvent = page.waitForEvent("download");
+  await page.getByRole("link", { name: "下载原文件", exact: true }).click();
+  expect((await downloadEvent).suggestedFilename()).toBe("README.md");
+  await page.getByRole("button", { name: "返回目录", exact: true }).click();
+  await expect(page.getByRole("button", { name: "README.md", exact: true })).toBeVisible();
+  expect(relay.commands.some(c => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
+});
+
+test("session workspace XLSX previews sheets and downloads the original on mobile", async ({ page }, info) => {
+  const path = "/tmp/layout/report.xlsx";
+  const relay = await mockRightPanelRelay(page, { retained: false, seedTurns: [{
+    id: "spreadsheet-link", prompt: "查看表格", done: true,
+    blocks: [{ kind: "text", message_id: "spreadsheet-answer", channel: "final", done: true,
+      text: `[表格](${path})` }],
+  }] });
+  await page.goto("/");
+  await page.getByRole("button", { name: `在 Remote 中打开 ${path}`, exact: true }).click();
+  await expect.poll(() => relay.commands.some(c => c.type === "get_file_preview")).toBe(true);
+  const request = relay.commands.find(c => c.type === "get_file_preview")!;
+  relay.emit({ type: "file_preview", sid: "layout-parent", request_id: String(request.request_id),
+    path, format: "spreadsheet", content: JSON.stringify({ sheets: [
+      { name: "路线图", cells: [{ r: 1, c: 1, v: "本周进展" }, { r: 1, c: 2, v: "42", f: "SUM(B2:B3)" }], truncated: false },
+      { name: "进展", cells: [{ r: 1, c: 1, v: "<script>bad()</script>" }], truncated: false }], truncated: false }),
+    data: "UEsDBA==", size: 4, mtime_ns: "1", truncated: false });
+  const sheet = page.getByRole("region", { name: "表格预览" });
+  await expect(sheet).toContainText("本周进展");
+  await expect(sheet.getByRole("cell", { name: "42", exact: true })).toHaveAttribute("title", "=SUM(B2:B3)");
+  await sheet.getByRole("tab", { name: "进展", exact: true }).click();
+  await expect(sheet).toContainText("<script>bad()</script>");
+  await expect(sheet.locator("script")).toHaveCount(0);
+  const downloadEvent = page.waitForEvent("download");
+  await sheet.getByRole("link", { name: "下载原文件" }).click();
+  expect((await downloadEvent).suggestedFilename()).toBe("report.xlsx");
+  await page.screenshot({ path: info.outputPath("spreadsheet-preview.png") });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+});
 
 test("session workspace opens files in the sidebar and returns to its directory", async ({ page }, testInfo) => {
   if (testInfo.project.name === "chromium") await page.setViewportSize({ width: 1440, height: 950 });
@@ -659,11 +753,26 @@ test("session workspace distinguishes 300k capacity from native usage and compac
     expect(await popover.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
     await page.screenshot({ path: testInfo.outputPath(`context-300k-usage-${theme}.png`), animations: "disabled" });
   }
-  // A missing native reading must not revive the cached pre-compaction 95%.
+  // Background read failures retain the last native estimate without UI noise.
   relay.emit(report);
-  await expect(popover).toContainText("245,325 tokens");
-  await expect(popover).not.toContainText("95%");
-  await expect(ring.locator(".hr-fill")).toHaveCount(0);
+  await expect(popover).toContainText("284,793 / 300,000 (95%)");
+  const oldHeight = (await popover.boundingBox())!.height;
+  const oldOffset = await ring.locator(".hr-fill").getAttribute("stroke-dashoffset");
+  relay.emit({ ...report, available: false, total_tokens: 0, percentage: 0 });
+  await expect(popover).toContainText("284,793 / 300,000 (95%)");
+  const requestCount = relay.commands.filter(c => c.type === "get_context").length;
+  await ring.click();
+  await ring.click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "get_context").length).toBeGreaterThan(requestCount);
+  const refresh = relay.commands.filter(c => c.type === "get_context").at(-1)!;
+  relay.emit({ type: "error", sid: "layout-parent", request_id: String(refresh.cmd_id),
+    code: "invalid_command", message: "无法读取上下文，请稍后重试" });
+  await expect(popover).not.toContainText("正在读取");
+  await expect(page.getByText("无法读取上下文，请稍后重试", { exact: true })).toHaveCount(0);
+  await expect(popover.locator(".ctx-pop-status")).toHaveCount(0);
+  await expect(ring.locator("text")).toHaveCount(0);
+  await expect(ring.locator(".hr-fill")).toHaveAttribute("stroke-dashoffset", oldOffset!);
+  expect((await popover.boundingBox())!.height).toBe(oldHeight);
   relay.emit({ ...nativeReport, total_tokens: 33824, percentage: 11.27467 });
   await expect(popover).toContainText("33,824 / 300,000 (11%)");
   expect(relay.commands.some((c) => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
@@ -1685,7 +1794,7 @@ test("async question history restores a nonblocking card and replies through the
   await expect(card.getByLabel("其他回答（填写后替代选项）")).toBeVisible();
   await card.getByLabel("其他回答（填写后替代选项）").fill("Mac 浏览器");
   await card.getByLabel("你的回答", { exact: true }).fill("三指拖拽");
-  await card.getByLabel("你的回答", { exact: true }).press("Enter");
+  await card.getByLabel("你的回答", { exact: true }).press("Shift+Enter");
   expect(relay.commands.filter((c) => c.type === "query")).toHaveLength(0);
   await card.getByRole("button", { name: "发送回答" }).click();
   await expect.poll(() => relay.commands.filter((c) => c.type === "query").length).toBe(1);
@@ -1738,11 +1847,137 @@ test("async question live delivery preserves running state and uses steer instea
   await expect(card).toContainText("补充会发送给当前任务，不会中断执行");
   await expect(card).not.toContainText("发送后将开始新一轮对话");
   await card.getByLabel("你的回答", { exact: true }).fill("三指拖拽");
-  await card.getByRole("button", { name: "发送回答" }).click();
+  await card.getByLabel("你的回答", { exact: true }).press("Enter");
   await expect.poll(() => relay.commands.filter((c) => c.type === "steer").length).toBe(1);
   expect(relay.commands.find((c) => c.type === "steer")?.sid).toBe(sid);
   expect(relay.commands.filter((c) => ["interrupt", "answer_question", "query"].includes(String(c.type))))
     .toHaveLength(0);
+});
+
+test("async question reply keeps an in-flight answer streaming across the steer fence", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { historyReply: () => null });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
+  const sid = "layout-parent";
+  let seq = 0;
+  const emit = (event: PanelRelayEvent) => relay.emit({ ...event, seq: ++seq });
+  emit({ type: "user_msg", sid, msg_id: "stream-user", prompt: "检查当前结果" });
+  emit({ type: "turn_binding", sid, msg_id: "stream-user", turn_id: "stream-task" });
+  emit({ type: "state", sid, state: "running", msg_id: "stream-user" });
+  emit({ type: "assistant_msg_start", sid, message_id: "stream-question", channel: "final" });
+  emit({ type: "delta", sid, message_id: "stream-question", channel: "final", text: "要检查哪一项？" });
+  emit({ type: "assistant_msg_end", sid, message_id: "stream-question", channel: "final",
+    delivery: "async", questions: [{ title: "要检查哪一项？", options: null }] });
+  emit({ type: "assistant_msg_start", sid, message_id: "stream-answer", channel: "final" });
+  emit({ type: "delta", sid, message_id: "stream-answer", channel: "final", text: "检查结果：周期约 **1" });
+  const oldRow = page.locator('.turn[data-turn-id="stream-user"]');
+  await expect(oldRow).toContainText("检查结果：周期约");
+  const dialog = await openAsyncQuestion(page);
+  await dialog.getByLabel("你的回答", { exact: true }).fill("再检查输入");
+  await dialog.getByLabel("你的回答", { exact: true }).press("Enter");
+  await expect.poll(() => relay.commands.filter(c => c.type === "steer").length).toBe(1);
+  const steer = relay.commands.find(c => c.type === "steer")!;
+  emit({ type: "turn_steered", sid, msg_id: String(steer.msg_id),
+    turn_id: "stream-task", prompt: String(steer.prompt) });
+  emit({ type: "delta", sid, message_id: "stream-answer", channel: "final", text: " ms**，" });
+  await expect(oldRow.locator("strong")).toHaveText("1 ms");
+  emit({ type: "delta", sid, message_id: "stream-answer", channel: "final", text: "输出仍会完整显示。" });
+  emit({ type: "assistant_msg_end", sid, message_id: "stream-answer", channel: "final" });
+  await expect(oldRow).toContainText("检查结果：周期约 1 ms，输出仍会完整显示。");
+  emit({ type: "assistant_msg_start", sid, message_id: "next-answer", turn_id: "stream-task", channel: "final" });
+  emit({ type: "delta", sid, message_id: "next-answer", turn_id: "stream-task", channel: "final", text: "继续检查输入。" });
+  const newRow = page.locator(`.turn[data-turn-id="${String(steer.msg_id)}"]`);
+  await expect(newRow).toContainText("继续检查输入。");
+  await expect(newRow).not.toContainText("输出仍会完整显示。");
+  expect(relay.commands.filter(c => ["query", "interrupt"].includes(String(c.type)))).toHaveLength(0);
+});
+
+test("async question process disclosure stays settled through late updates after a steer", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { historyReply: () => null });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
+  const sid = "layout-parent";
+  let seq = 0;
+  const emit = (event: PanelRelayEvent) => relay.emit({ ...event, seq: ++seq });
+  emit({ type: "user_msg", sid, msg_id: "process-user", prompt: "检查处理过程" });
+  emit({ type: "turn_binding", sid, msg_id: "process-user", turn_id: "process-task" });
+  emit({ type: "state", sid, state: "running", msg_id: "process-user" });
+  emit({ type: "process", sid, item_id: "check-process", turn_id: "process-task",
+    kind: "command", phase: "start", status: "running", title: "检查日志" });
+  const head = page.locator('.turn[data-turn-id="process-user"] .turn-process-head');
+  await expect(head).toHaveAttribute("aria-expanded", "true");
+  emit({ type: "turn_steered", sid, msg_id: "next-process-user",
+    turn_id: "process-task", prompt: "只检查输入" });
+  await expect(head).toHaveAttribute("aria-expanded", "false");
+  // Native item activity belongs to its old row even after the visible input
+  // fence. Content can keep changing, but must not repeatedly reopen the UI.
+  for (let i = 0; i < 2; i++) {
+    emit({ type: "process", sid, item_id: "check-process", turn_id: "process-task",
+      kind: "command", phase: "update", status: "running", title: "检查日志", output: `后续输出 ${i}` });
+    await expect(head).toContainText("正在处理");
+    await expect(head).toHaveAttribute("aria-expanded", "false");
+    emit({ type: "process", sid, item_id: "check-process", turn_id: "process-task",
+      kind: "command", phase: "end", status: "succeeded", title: "检查日志" });
+    await expect(head).toContainText("已处理");
+    await expect(head).toHaveAttribute("aria-expanded", "false");
+  }
+  await head.click();
+  await expect(head).toHaveAttribute("aria-expanded", "true");
+  emit({ type: "process", sid, item_id: "check-process", turn_id: "process-task",
+    kind: "command", phase: "update", status: "running", title: "检查日志", output: "最后的输出" });
+  emit({ type: "process", sid, item_id: "check-process", turn_id: "process-task",
+    kind: "command", phase: "end", status: "succeeded", title: "检查日志" });
+  await expect(head).toContainText("已处理");
+  await expect(head).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator('.turn[data-turn-id="process-user"] .process-timeline')).toContainText("检查日志");
+});
+
+test("async question keyboard sends with Enter, keeps Shift+Enter newlines and dismisses unanswered drafts with Escape", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  const input = dialog.getByLabel("你的回答", { exact: true });
+  await input.fill("第一行");
+  await input.press("Shift+Enter");
+  await page.keyboard.insertText("第二行");
+  await expect(input).toHaveValue("第一行\n第二行");
+  expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
+  await input.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".async-question-card")).toContainText("待回答");
+  await openAsyncQuestion(page);
+  await expect(input).toHaveValue("第一行\n第二行");
+  await input.press("Enter");
+  await expect(dialog).toHaveCount(0);
+  await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
+  const query = relay.commands.find(c => c.type === "query")!;
+  expect(query.prompt).toContain("回答：第一行\n第二行");
+  expect(query.sid).toBe("layout-parent");
+  expect(relay.commands.filter(c => ["interrupt", "answer_question", "steer"].includes(String(c.type)))).toHaveLength(0);
+});
+
+test("async question keyboard leaves IME confirmation and repeated Enter out of the send path", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  const input = dialog.getByLabel("你的回答", { exact: true });
+  await input.fill("中文输入");
+  await input.dispatchEvent("compositionstart", { data: "输入" });
+  // Some WebKit IME keys omit isComposing; the composition lifecycle still owns them.
+  await input.press("Enter");
+  await input.press("Escape");
+  await expect(dialog).toBeVisible();
+  expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
+  await input.dispatchEvent("compositionend", { data: "输入" });
+  await input.dispatchEvent("keydown", { key: "Enter", code: "Enter", isComposing: true });
+  await input.dispatchEvent("keydown", { key: "Enter", code: "Enter", keyCode: 229 });
+  await input.dispatchEvent("keydown", { key: "Enter", code: "Enter", repeat: true });
+  await expect(dialog).toBeVisible();
+  expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
+  await input.press("Enter");
+  await expect(dialog).toHaveCount(0);
+  await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
+  expect(relay.commands.find(c => c.type === "query")?.prompt).toContain("回答：中文输入");
 });
 
 test("async question completion updates reply mode while preserving a collapsed draft", async ({ page }) => {
@@ -6793,6 +7028,7 @@ test("goal editor stays inside the tablet visual viewport above the keyboard", a
     );
     window.dispatchEvent(new Event("resize"));
   }, { top: visualTop, height: visualHeight });
+  await dialog.getByRole("button", { name: "修改目标", exact: true }).click();
   await dialog.locator("textarea").focus();
 
   await expect.poll(async () => dialog.boundingBox()).not.toBeNull();
@@ -8970,4 +9206,171 @@ test("profile session card edges remain visible in dark theme", async ({
   const inactive = appearance.find((card) => !card.active)!;
   expect(active.background).not.toBe(inactive.background);
   expect(active.boxShadow).not.toBe("none");
+});
+
+for (const engine of ["codex", "claude"] as const) {
+  for (const theme of ["light", "dark"] as const) {
+    test(`Goal rounded ${engine} card supports native fields and preserves edits (${theme})`, async ({ page }, info) => {
+      await page.goto(`/tests/history-browser.html?goal-ui=1&engine=${engine}&theme=${theme}`);
+      await page.getByRole("button", { name: /查看 Goal/ }).click();
+      const dialog = page.getByRole("dialog", { name: `${engine === "codex" ? "Codex" : "Claude"} Goal` });
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByRole("textbox")).toHaveCount(0);
+      expect(await dialog.evaluate(node => parseFloat(getComputedStyle(node).borderRadius))).toBeGreaterThanOrEqual(28);
+      await expect(dialog.getByText("完成 protocol v30 发布并验证所有终端同步升级", { exact: true })).toHaveCount(1);
+      if (engine === "claude") {
+        await expect(dialog).toContainText("检查轮次");
+        await expect(dialog).toContainText("3 次");
+        await expect(dialog).toContainText("最近一次检查");
+        await expect(dialog.getByText("Token 预算", { exact: true })).toHaveCount(0);
+        await expect(dialog.getByRole("button", { name: "暂停续行" })).toHaveCount(0);
+      } else {
+        await expect(dialog.getByRole("progressbar", { name: "Token 预算用量" })).toHaveAttribute("value", "37000");
+      }
+      await page.screenshot({ path: info.outputPath(`${engine}-${theme}-active.png`) });
+      await dialog.getByRole("button", { name: "修改目标", exact: true }).click();
+      await dialog.getByLabel("目标内容").fill("修复引导后的输出中断，\n并通过回归测试。");
+      await page.evaluate(() => window.dispatchEvent(new Event("goal-fixture-refresh")));
+      await expect(dialog.getByLabel("目标内容")).toHaveValue("修复引导后的输出中断，\n并通过回归测试。");
+      await expect(dialog.getByText("完成 protocol v30 发布并验证所有终端同步升级", { exact: true })).toHaveCount(0);
+      if (engine === "codex") {
+        await dialog.getByRole("button", { name: /预算 ·/ }).click();
+        await dialog.getByLabel("Token 预算", { exact: true }).fill("0");
+        await expect(dialog.getByRole("button", { name: "保存修改", exact: true })).toBeDisabled();
+        await dialog.getByLabel("Token 预算", { exact: true }).fill("250000");
+        await dialog.getByRole("button", { name: "确定", exact: true }).click();
+      }
+      await page.screenshot({ path: info.outputPath(`${engine}-${theme}-editing.png`) });
+      await dialog.getByRole("button", { name: "保存修改", exact: true }).click();
+      await expect(dialog.getByRole("textbox")).toHaveCount(0);
+      await expect(dialog).toContainText("修复引导后的输出中断");
+      if (engine === "codex") await expect(dialog.getByRole("progressbar")).toHaveAttribute("max", "250000");
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    });
+  }
+}
+
+test("Goal creation uses optional Codex budget and shows native errors without discarding drafts", async ({ page }, info) => {
+  await page.goto("/tests/history-browser.html?goal-ui=1&goal-status=none&goal-open=1&theme=dark");
+  const dialog = page.getByRole("dialog", { name: "Codex Goal" });
+  await expect(dialog.getByRole("button", { name: "开始目标", exact: true })).toBeDisabled();
+  await dialog.getByLabel("目标内容").fill("完善 Goal 界面并通过桌面、手机回归。");
+  await expect(dialog.getByRole("button", { name: /预算 · 不限/ })).toBeVisible();
+  await page.screenshot({ path: info.outputPath("codex-create.png") });
+  await dialog.getByRole("button", { name: "开始目标", exact: true }).click();
+  await expect(dialog).toContainText("当前目标");
+  await expect(dialog.getByRole("progressbar")).toHaveCount(0);
+  await page.goto("/tests/history-browser.html?goal-ui=1&goal-fail=1");
+  await page.getByRole("button", { name: /查看 Goal/ }).click();
+  await dialog.getByRole("button", { name: "修改目标", exact: true }).click();
+  await dialog.getByLabel("目标内容").fill("失败后保留我的目标");
+  await dialog.getByRole("button", { name: "保存修改", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("输入已保留");
+  await expect(dialog.getByLabel("目标内容")).toHaveValue("失败后保留我的目标");
+});
+
+test("Goal completed state preserves actual budget usage and nested Escape only closes the budget picker", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?goal-ui=1&goal-status=complete");
+  const chip = page.getByRole("button", { name: /查看 Goal/ });
+  expect(await chip.locator(".goal-chip-ring").evaluate(node =>
+    parseFloat((node as HTMLElement).style.getPropertyValue("--goal-progress")))).toBeCloseTo(133.2);
+  await chip.click();
+  const dialog = page.getByRole("dialog", { name: "Codex Goal" });
+  await expect(dialog.getByRole("progressbar")).toHaveAttribute("value", "37000");
+  await dialog.getByRole("button", { name: "修改目标", exact: true }).click();
+  await dialog.getByRole("button", { name: /预算 ·/ }).click();
+  await dialog.getByLabel("Token 预算", { exact: true }).focus();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel("Token 预算", { exact: true })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+});
+
+for (const engine of ["codex", "claude"] as const) {
+  test(`Goal ${engine} editor stays usable through mobile keyboard open and close`, async ({ page }, info) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const relay = await mockRightPanelRelay(page, { retained: false, engine });
+    await page.goto("/");
+    const composer = page.locator(".composer textarea");
+    await composer.fill("/goal");
+    await composer.press("Enter");
+    const dialog = page.getByRole("dialog", { name: `${engine === "codex" ? "Codex" : "Claude"} Goal` });
+    const editor = dialog.getByLabel("目标内容");
+    await expect(editor).toBeVisible();
+    await editor.fill("键盘收起后保留目标，恢复完整编辑区。");
+    const originalHeight = (await dialog.boundingBox())!.height;
+    for (const { height, top } of [{ height: 350, top: 30 }, { height: 280, top: 12 }]) {
+      await editor.focus();
+      await page.evaluate(({ height, top }) => {
+        Object.defineProperties(window.visualViewport!, {
+          height: { configurable: true, value: height },
+          offsetTop: { configurable: true, value: top },
+        });
+        window.visualViewport!.dispatchEvent(new Event("resize"));
+      }, { height, top });
+      await expect.poll(async () => {
+        const visible = await dialog.locator(".goal-sheet-scroll").boundingBox();
+        return visible?.height ?? 0;
+      }).toBeGreaterThan(80);
+      await expect.poll(() => dialog.evaluate(node => {
+        const box = node.getBoundingClientRect();
+        const viewport = window.visualViewport!;
+        return box.top >= viewport.offsetTop - 1
+          && box.bottom <= viewport.offsetTop + viewport.height + 1;
+      })).toBe(true);
+      await expect(dialog.getByRole("button", { name: "开始目标", exact: true })).toBeInViewport();
+      await expect(editor).toBeFocused();
+      await expect(editor).toHaveValue("键盘收起后保留目标，恢复完整编辑区。");
+      await page.screenshot({ path: info.outputPath(`goal-${engine}-keyboard-${height}.png`) });
+      await editor.blur();
+      await page.evaluate(() => {
+        Object.defineProperties(window.visualViewport!, {
+          height: { configurable: true, value: window.innerHeight },
+          offsetTop: { configurable: true, value: 0 },
+        });
+        window.visualViewport!.dispatchEvent(new Event("resize"));
+      });
+      await expect.poll(async () => Math.abs((await dialog.boundingBox())!.height - originalHeight)).toBeLessThan(2);
+      await expect.poll(() => editor.evaluate(input => {
+        const editorBox = input.getBoundingClientRect();
+        const bodyBox = input.closest(".goal-sheet-scroll")!.getBoundingClientRect();
+        return editorBox.top >= bodyBox.top && editorBox.bottom <= bodyBox.bottom;
+      })).toBe(true);
+      await expect(editor).toHaveValue("键盘收起后保留目标，恢复完整编辑区。");
+    }
+    await page.screenshot({ path: info.outputPath(`goal-${engine}-restored.png`) });
+    expect(relay.commands.some(command => ["query", "set_goal", "interrupt"].includes(String(command.type)))).toBe(false);
+  });
+}
+
+test("Goal editor restores after a late keyboard viewport correction without another resize", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/tests/history-browser.html?goal-ui=1&goal-status=none&goal-open=1");
+  const dialog = page.getByRole("dialog", { name: "Codex Goal" });
+  const editor = dialog.getByLabel("目标内容");
+  await editor.fill("晚到的键盘恢复也不能隐藏这段草稿。");
+  const fullHeight = (await dialog.boundingBox())!.height;
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty("--app-height", "220px");
+    document.documentElement.style.setProperty("--app-offset-top", "20px");
+    window.dispatchEvent(new Event("resize"));
+  });
+  await expect.poll(async () => (await dialog.boundingBox())!.height).toBeLessThan(fullHeight - 80);
+  // A delayed viewport synchronization is allowed to arrive after the final
+  // native resize event. The fixture's chat box itself remains 100dvh tall.
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty("--app-height", `${window.innerHeight}px`);
+    document.documentElement.style.setProperty("--app-offset-top", "0px");
+  });
+  await expect.poll(async () => Math.abs((await dialog.boundingBox())!.height - fullHeight)).toBeLessThan(2);
+  await expect(editor).toBeFocused();
+  await expect(editor).toHaveValue("晚到的键盘恢复也不能隐藏这段草稿。");
+  await expect.poll(() => editor.evaluate(node => {
+    const editorBox = node.getBoundingClientRect();
+    const bodyBox = node.closest(".goal-sheet-scroll")!.getBoundingClientRect();
+    return editorBox.top >= bodyBox.top && editorBox.bottom <= bodyBox.bottom;
+  })).toBe(true);
 });

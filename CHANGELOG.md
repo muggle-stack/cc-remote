@@ -4,6 +4,17 @@
 
 ## Unreleased
 
+- Backport shared improvements from the DSH branch without adding a third
+  engine (protocol v66): rounded Claude/Codex Goal dialogs with native save
+  confirmation and mobile keyboard recovery; directory links open `/open`, and
+  XLSX previews show saved cells, sheet tabs and original-file downloads.
+- Keep streamed replies updating after steering, preserve manually expanded
+  process details, and support Enter/Shift+Enter/Escape in assistant questions.
+  Retain valid context readings during transient refresh failures, use a compact
+  custom engine menu, and allow failed Skills reads to retry.
+- Reorganize the bilingual setup documentation around source deployment and
+  document shared Codex App, CLI and Wrapper daemons on macOS and Linux.
+
 - Align the Codex context gauge with native compaction estimates (protocol v62).
   Match bounded local log reads to the account, thread and latest rollout sample;
   invalidate estimates after compaction and show recent request usage without a

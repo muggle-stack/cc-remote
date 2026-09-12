@@ -4,6 +4,7 @@ import type { AsyncQuestionSpec } from "../protocol";
 import type { TextBlock, Turn } from "../domain/conversation";
 import { Icon } from "../icons";
 import { supplementalAnswerPrompt } from "../async-question-presentation";
+import { ImeSubmitGuard } from "../ime-submit";
 
 export interface AsyncQuestionDraft {
   choices: (string | null)[];
@@ -28,6 +29,7 @@ function AsyncQuestionDialog({ questions, initialDraft,
   const headingRef = useRef<HTMLSpanElement>(null);
   const backdropPressRef = useRef(false);
   const sendingRef = useRef(false);
+  const imeRef = useRef(new ImeSubmitGuard());
   const [notice, setNotice] = useState("");
   const [draft, setDraft] = useState<AsyncQuestionDraft>(() => initialDraft ?? {
     choices: questions.map(q => q.options?.[0] ?? null),
@@ -98,10 +100,13 @@ function AsyncQuestionDialog({ questions, initialDraft,
           focusable[next].focus();
         }
       }
-      if (event.key === "Escape" && (event.nativeEvent.isComposing || event.keyCode === 229)) {
+      if (event.key === "Escape" && (imeRef.current.shouldCommitBeforeButtonSubmit()
+          || event.nativeEvent.isComposing || event.keyCode === 229)) {
         event.preventDefault();
       }
     }}
+    onCompositionStart={() => imeRef.current.startComposition()}
+    onCompositionEnd={() => imeRef.current.endComposition()}
     onPointerDown={(event) => {
       event.stopPropagation();
       backdropPressRef.current = event.target === event.currentTarget;
@@ -119,7 +124,8 @@ function AsyncQuestionDialog({ questions, initialDraft,
       event.preventDefault();
       event.stopPropagation();
       if (!onReply || sendingRef.current || !dialogRef.current?.open) return;
-      // Read DOM values after pointer/IME commit; textarea Enter stays a newline.
+      // Keyboard and pointer submits share the same current DOM values and
+      // duplicate-send guard, including answers to multiple questions.
       const data = new FormData(event.currentTarget);
       const answers = questions.flatMap((question, index) => {
         const answer = String(data.get(`text-${index}`) ?? "").trim()
@@ -163,6 +169,12 @@ function AsyncQuestionDialog({ questions, initialDraft,
               onChange={(event) => updateDraft({ ...draftRef.current,
                 texts: draftRef.current.texts.map((value, i) => i === index ? event.target.value : value),
               })}
+              onKeyDown={(event) => {
+                if (!imeRef.current.shouldSubmitKey({ key: event.key, shiftKey: event.shiftKey,
+                  isComposing: event.nativeEvent.isComposing, keyCode: event.keyCode })) return;
+                event.preventDefault();
+                if (!event.repeat) event.currentTarget.form?.requestSubmit();
+              }}
               maxLength={8192} placeholder="补充一点信息…" />
           </div>
         </fieldset>)}

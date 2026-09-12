@@ -26,7 +26,7 @@ import {
   modelsFor, effortNameForDisplay, permsFor,
   permissionProfileLabel, type Catalog,
 } from "../data";
-import { CommandSheet } from "./CommandSheet";
+const CommandSheet = lazy(() => import("./CommandSheet").then(m => ({ default: m.CommandSheet })));
 import { attachmentBytes } from "../img";
 import {
   readClipboardImport, resolveClipboardImport, insertClipboardText,
@@ -139,9 +139,6 @@ interface Props {
   onOpenArtifacts?: () => void;
   contextReport: ContextReport | null;
   contextExactReport?: ContextReport | null;
-  contextLoading?: boolean;
-  contextDeferred?: boolean;
-  contextError?: string | null;
   statusReport?: StatusReport | null;
   rateLimits?: StatusRateLimit[];
   statusError?: string | null;
@@ -391,7 +388,7 @@ export function Composer(p: Props) {
       const [{ pickFiles }, imported] = await Promise.all([
         import("../attachment-import"),
         clipboard ? resolveClipboardImport(clipboard)
-          : Promise.resolve({ files: fl, errors: [] }),
+          : Promise.resolve({ files: fl ? Array.from(fl) : null, errors: [] }),
       ]);
       const batch = await pickFiles(
         imported.files, images.length + files.length, attachmentBytes(images, files));
@@ -736,19 +733,17 @@ export function Composer(p: Props) {
   // "/model <id>" shows its actual id on the chip instead of "Mythos 5".
   const MODELS_E = modelsFor(p.engine, p.catalog), PERMS_E = permsFor(p.engine);
   const workSurface = p.surface === "work";
-  const contextAvailable = p.contextReport?.available !== false;
-  const currentContextExact = !!p.contextReport && contextAvailable
-    && p.contextReport.source !== "recent_turn";
-  const lastExactContextReport = p.engine === "codex" || currentContextExact
-    ? p.contextReport : p.contextExactReport ?? null;
-  const exactContextReport = lastExactContextReport?.available !== false
-    ? lastExactContextReport : null;
+  const currentContextReport = p.contextReport?.available !== false ? p.contextReport : null;
+  const retainedContextReport = p.contextExactReport?.available !== false ? p.contextExactReport : null;
+  // A background read may temporarily return billing usage or no estimate.
+  // Keep the last native reading until another arrives. Runtime invalidation
+  // already clears both reports when the session's model or capacity changes.
+  const exactContextReport = currentContextReport?.source !== "recent_turn" && currentContextReport
+    ? currentContextReport : retainedContextReport ?? currentContextReport;
   const codexEstimate = p.engine !== "codex"
-    || p.contextReport?.source === "native_estimate";
+    || exactContextReport?.source === "native_estimate";
   const contextHasCapacity = codexEstimate && (exactContextReport?.max_tokens ?? 0) > 0;
-  const contextRingHasCapacity = contextAvailable
-    && codexEstimate
-    && (p.contextReport?.max_tokens ?? 0) > 0;
+  const contextRingHasCapacity = contextHasCapacity;
   const workContext = workSurface ? exactContextReport : null;
   const autoCompactSelection = normalizeAutoCompactSelection(
     p.autoCompact?.mode ?? "inherit",
@@ -1005,12 +1000,9 @@ export function Composer(p: Props) {
                           : "查看"}</b>
                   </button>
                   {ctxOpen && (
-                    <Suspense fallback={<div className="ctx-pop work-ctx-pop">
-                      <div className="ctx-pop-loading">正在读取真实上下文…</div>
-                    </div>}>
+                    <Suspense fallback={null}>
                       <ContextPopover report={exactContextReport}
-                        loading={p.contextLoading} deferred={p.contextDeferred}
-                        error={p.contextError} work codex={p.engine === "codex"} />
+                        work codex={p.engine === "codex"} />
                     </Suspense>
                   )}
                   {p.engine === "claude" && autoCompactOpen && (
@@ -1118,7 +1110,7 @@ export function Composer(p: Props) {
             )}
             <button
               className={"hint-ring"
-                + (contextAvailable && codexEstimate ? "" : " unavailable")}
+                + (contextRingHasCapacity ? "" : " unavailable")}
               aria-expanded={ctxOpen}
               aria-label="上下文占用"
               title="上下文占用"
@@ -1137,20 +1129,16 @@ export function Composer(p: Props) {
                   className="hr-fill"
                   cx="18" cy="18" r="15"
                   strokeDasharray="94.25"
-                  strokeDashoffset={94.25 * (1 - Math.min(p.contextReport?.percentage ?? 0, 100) / 100)}
+                  strokeDashoffset={94.25 * (1 - Math.min(exactContextReport?.percentage ?? 0, 100) / 100)}
                   transform="rotate(-90 18 18)"
-                /> : <text x="18" y="24" textAnchor="middle" fontSize="18"
-                  fill="currentColor" stroke="none">?</text>}
+                /> : null}
               </svg>
             </button>
             {ctxOpen && (
-              <Suspense fallback={<div className="ctx-pop">
-                <div className="ctx-pop-loading">正在读取真实上下文…</div>
-              </div>}>
+              <Suspense fallback={null}>
                 <ContextPopover report={exactContextReport}
-                  loading={p.contextLoading} deferred={p.contextDeferred}
                   codex={p.engine === "codex"}
-                  error={p.contextError} codexContext={p.engine === "codex" ? p.codexContext : null}
+                  codexContext={p.engine === "codex" ? p.codexContext : null}
                   onAutoCompact={p.engine === "codex" && p.onSetCodexContext
                     ? () => { setCtxOpen(false); setAutoCompactOpen(true); } : undefined} />
               </Suspense>
@@ -1173,7 +1161,7 @@ export function Composer(p: Props) {
         </>)}
       </div>
 
-      <CommandSheet
+      {sheetKind !== null && <Suspense fallback={null}><CommandSheet
         open={sheetKind !== null}
         kind={sheetKind ?? "models"}
         engine={p.engine}
@@ -1193,7 +1181,7 @@ export function Composer(p: Props) {
         onPickPermissionProfile={p.onSetPermissionProfile}
         currentWebSearch={p.webSearch}
         onPickWebSearch={p.onSetWebSearch}
-      />
+      /></Suspense>}
 
       {dragOver && (
         <div className="drop-overlay" aria-hidden="true">
