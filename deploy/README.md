@@ -1,8 +1,9 @@
 # deploy/
 
-Reference files for the production deploy (public VPS relay + wrapper on your
-machine). The **full step-by-step guide is in the main [README](../README.md#生产部署公网-vps-中继--你机器上的-wrapper)**
-([English](../README_en.md#production-deploy-public-vps-relay--wrapper-on-your-machine)).
+Reference files for production deployment (public VPS relay + wrapper on your
+machine). Step-by-step installation paths are in
+[安装与升级](../docs/installation.md) / [Installation and upgrades](../docs/installation_en.md).
+Product features and the engine comparison live in the [main README](../README.md).
 
 ## Deployment contract for automation
 
@@ -23,10 +24,12 @@ Before changing a live service:
 1. Inspect the source worktree, target installation, current release, service
    manager, and health. Preserve unrelated changes; do not normalize a dirty
    worktree or silently replace a custom installation layout.
-2. Select the matching supported path. Use `install.sh` for a published release.
-   Use the main README's source-staging/manual production path for the current
-   source tree. An existing nonstandard installation must retain its established
-   service ownership and configuration boundaries rather than being overwritten
+2. Select the matching supported path. Prefer a tested source snapshot for
+   current features using the [source deployment guide](../docs/installation_en.md#source-install).
+   Use `install.sh` when the operator selects a published release that includes
+   the requested features; a latest tag can lag the maintained source branch.
+   An existing nonstandard installation must retain
+   its established service ownership and configuration boundaries rather than being overwritten
    with a first-install template.
 3. Run the complete gate in `AGENTS.md`, build `web/dist`, and validate the
    Python/Web protocol pair with `validate_protocol_bundle.py`.
@@ -334,10 +337,13 @@ After core deployment and Codex CLI sharing checks, inspect each in-scope
 Wrapper desktop for an installed official Codex App. This is a **post-deploy
 offer**, not an installer side effect or a condition of Relay/Web health.
 
-- The current helper supports macOS only. Do not install an App on a headless
-  server, crawl unrelated machines, or treat a PWA named cc-remote as Codex App.
-  Read-only discovery may inspect the logged-in user's application locations
-  and bundle metadata (`com.openai.codex`); do not rely on the `.app` filename.
+- macOS and Linux desktops have separate attachment paths. The
+  `cc_remote.codex_desktop` helper is macOS-only; Linux uses the
+  [account-scoped Linux launcher](../docs/codex-desktop-linux.md).
+  Do not install an App on a headless server, crawl unrelated machines, or treat
+  a PWA named cc-remote as Codex App. On macOS inspect bundle metadata
+  (`com.openai.codex`); on Linux inspect the official package and desktop entry's
+  actual executable. The Linux App may be named ChatGPT and includes Codex mode.
 - If no supported App is installed, skip the offer. If a previously approved
   shared entry is still verified for the selected account, preserve it without
   prompting again. A different account or changed setup needs a new choice.
@@ -351,15 +357,21 @@ offer**, not an installer side effect or a condition of Relay/Web health.
   `declined` or `pending consent` in the handoff, not a failed core deployment.
   Respect that choice on follow-up deploys unless the user changes it; do not
   invent a new tracking database solely to remember this offer.
-- After consent, follow the complete
-  [shared Desktop launcher runbook](../docs/codex-desktop-launcher.md), including
+- An explicit request to attach the selected account already supplies consent;
+  do not ask the same question again while carrying it out.
+- After consent, follow the complete runbook for
+  [macOS](../docs/codex-desktop-launcher.md) or
+  [Linux](../docs/codex-desktop-linux.md), including
   preflight, installation, live transport checks, user-controlled quit/reopen and
-  removal. Use repository helpers from the chosen trusted source/release; if
-  that version lacks them, report the optional feature unavailable rather than
-  downloading ad hoc scripts or patching the official App.
+  removal. Use that checkout's helper or documented launcher template; do not
+  download unrelated scripts or patch the official App. Recheck the installed
+  App build's launch transport rather than treating an internal environment
+  variable as an official cross-version guarantee.
 - App-control MCP tools are a **separate opt-in**. Describe that a prompt from
   CLI/cc-remote could then operate the desktop App, subject to native approvals.
   Only after that choice, follow [the MCP guide](../docs/codex-app-tools.md).
+  Inspect the App's bundled native plugin before adding an adapter. The custom
+  macOS adapter does not implement Linux discovery.
 
 Never force a running private App into sharing, kill a CLI/daemon, merge account
 homes, modify the original App, relax signatures, or use global environment

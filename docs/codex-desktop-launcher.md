@@ -1,5 +1,8 @@
 # Shared Desktop launcher (experimental, macOS)
 
+For Linux, use [App, CLI and Wrapper sharing on Linux](codex-desktop-linux.md).
+The Python helper and Finder/Dock instructions on this page are macOS-specific.
+
 This is a separate, clickable **Codex Shared** application for an already-running
 official shared app-server. It leaves the signed official Desktop App, the
 Wrapper, the CLI, the daemon and their authentication untouched. It is optional
