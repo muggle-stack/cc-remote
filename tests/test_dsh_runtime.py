@@ -4,7 +4,7 @@ import asyncio
 import pytest
 
 from cc_remote.protocol import (
-    DshState, GetContext, GetEngineCapabilities, GetHistory, GetHistoryImage, GetTurnDetail, Hello, Models, NewSession, Query, SetDshControl,
+    DshState, GetContext, GetEngineCapabilities, GetHistory, GetHistoryImage, GetTurnDetail, Hello, ListSessions, Models, NewSession, Query, SetDshControl,
     SwitchSession, TurnEnd, TurnResult, deserialize, is_downstream, serialize,
 )
 from cc_remote.wrapper.dsh_client import DshError
@@ -67,6 +67,31 @@ def setup_runtime():
         return client
     runtime.connection = connection
     return machine, transport, runtime, client
+
+
+@pytest.mark.asyncio
+async def test_sidebar_excludes_delegated_agents_but_retains_user_forks(monkeypatch):
+    machine, transport, runtime, client = setup_runtime()
+    items = [
+        {"sessionId": "root", "running": True},
+        {"sessionId": "user-fork", "parentSessionId": "root", "running": False},
+        {"sessionId": "child", "parentSessionId": "root", "origin": "subagent", "running": True},
+        {"sessionId": "grandchild", "parentSessionId": "child", "origin": "subagent", "running": False},
+    ]
+    items = [{"updatedAt": 1000, "cwd": "/tmp", **item} for item in items]
+    async def list_sessions():
+        return items
+    monkeypatch.setattr(client, "list_sessions", list_sessions)
+    runtime.archived.add("grandchild")
+    result = await machine._handle(ListSessions(engine="dsh", client_id="viewer", cmd_id="catalog"))
+    assert [row.session_id for row in result.sessions] == ["dsh@root", "dsh@user-fork"]
+    assert result.sessions[1].forked_from_id == "dsh@root"
+    assert result.to == "viewer" and result.request_id == "catalog"
+    assert transport.sent[-1] == result
+    # Child history and descendant control authorization still use the full
+    # native catalog, not the sidebar projection.
+    assert len(await client.list_sessions()) == 4
+    await runtime.close()
 
 
 @pytest.mark.asyncio

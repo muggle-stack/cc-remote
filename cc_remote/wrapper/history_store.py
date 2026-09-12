@@ -552,6 +552,7 @@ def materialize_history_turns(
             continue
         prompt = ""
         has_user = False
+        continuation = None
         client_msg_id = None
         prompt_truncated = False
         image_refs: list[dict[str, Any]] = []
@@ -756,6 +757,8 @@ def materialize_history_turns(
                         text_last_ms[message_id] = stamp
                         text_done_ms[message_id] = stamp
             elif event_type == "turn_binding":
+                if event.get("autonomous") and event.get("continuation") == "subagent":
+                    continuation = event["continuation"]
                 if isinstance(event.get("turn_id"), str):
                     fork_point = event["turn_id"]
                 if started_ms is None:
@@ -1204,6 +1207,7 @@ def materialize_history_turns(
         }
         optional = {
             "clientMsgId": client_msg_id,
+            "continuation": continuation if not has_user else None,
             "forkPointId": fork_point,
             "checkpointId": checkpoint_id,
             "imageRefs": image_refs or None,

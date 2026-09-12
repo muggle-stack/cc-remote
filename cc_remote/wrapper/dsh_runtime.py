@@ -420,6 +420,11 @@ class DshRuntime:
         rows = []
         pins = self.machine._session_pins.ids("dsh") if self.machine._session_pins else set()
         for item in items:
+            # The native catalog also contains delegated agents. They belong
+            # in the parent's subagent panel; ordinary user forks stay here.
+            # Keep DshClient.list_sessions unfiltered for descendant controls.
+            if item.get("origin") == "subagent":
+                continue
             sid = wire_session_id(item["sessionId"])
             values = item.get("projections", {}).get("values", {})
             row = SessionInfo(session_id=sid, native_session_id=item["sessionId"],

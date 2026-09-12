@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 65
+PROTOCOL_VERSION = 67
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -1093,6 +1093,8 @@ class TurnBinding(_Base):
     turn_id: WireId
     # A native autonomous round has no human/optimistic prompt row.
     autonomous: bool = False
+    # Presentation only; the native turn identity and terminal remain separate.
+    continuation: Optional[Literal["subagent"]] = None
 
 
 class TurnResult(BaseModel):
@@ -2624,6 +2626,7 @@ class ConversationTurn(BaseModel):
     prompt: str = Field(default="", max_length=128 * 1024)
     blocks: list[dict[str, Any]] = Field(default_factory=list, max_length=32)
     done: bool = False
+    continuation: Optional[Literal["subagent"]] = None
     forkPointId: Optional[WireId] = None
     checkpointId: Optional[WireId] = None
     interrupted: Optional[bool] = None

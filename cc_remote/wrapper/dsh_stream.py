@@ -94,6 +94,7 @@ class DshProjection:
         self.step = 0
         self.owner: str | None = None
         self.client_id: str | None = None
+        self.continuation: str | None = None
         self.open = False
         self.running = False
         self.started = 0
@@ -118,7 +119,8 @@ class DshProjection:
             return []
         self.owner = f"dsh-turn-{turn}"
         self.open = True
-        return [TurnBinding(msg_id=self.owner, turn_id=self.owner, autonomous=True)]
+        return [TurnBinding(msg_id=self.owner, turn_id=self.owner, autonomous=True,
+                            continuation=self.continuation)]
 
     @staticmethod
     def message_id(turn: int, step: int, channel: str) -> str:
@@ -181,6 +183,7 @@ class DshProjection:
             # prompt. Never attach its output to a completed previous turn.
             self.owner = None
             self.client_id = None
+            self.continuation = None
             self.open = False
             self.running = True
             self.step_owners.clear()
@@ -195,7 +198,21 @@ class DshProjection:
         if kind == "user/message":
             # Compaction and plugins may append/replace user-role model context.
             # They are not another human prompt, even when sourced from one.
-            if data.get("source", {}).get("kind") != "user" or isinstance(event.get("surfaceOp"), dict):
+            if isinstance(event.get("surfaceOp"), dict):
+                return []
+            source = data.get("source", {}).get("kind")
+            if source in {"agent-message", "subagent-settled"}:
+                # A child result can wake the parent after its answer ended.
+                # Mark that native autonomous round without reopening the old
+                # answer or rendering the internal relay as a human question.
+                if self.owner is None:
+                    self.continuation = "subagent"
+                elif self.owner == f"dsh-turn-{self.turn}" and self.continuation != "subagent":
+                    self.continuation = "subagent"
+                    return [TurnBinding(msg_id=self.owner, turn_id=self.owner,
+                                        autonomous=True, continuation="subagent")]
+                return []
+            if source != "user":
                 return []
             out = []
             if self.open:
@@ -203,6 +220,7 @@ class DshProjection:
                 # model attempt can still stream and commit after this record.
                 self.superseded[self.owner] = None
             self.owner = f"dsh-seq-{seq}"
+            self.continuation = None
             native_id = data.get("id", seq)
             self.client_id = data.get("source", {}).get("rpcId") or identity(native_id, "dsh-user")
             self.open = True

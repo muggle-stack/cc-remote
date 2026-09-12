@@ -1043,6 +1043,7 @@ function mergeTurn(
     forkPointId: history.forkPointId ?? live.forkPointId,
     forkAvailable: history.forkAvailable ?? live.forkAvailable,
     checkpointId: history.checkpointId ?? live.checkpointId,
+    continuation: history.continuation ?? live.continuation,
     prompt: history.prompt || live.prompt,
     blocks,
     // A transcript has no ResultMessage, so its EOF is represented by a

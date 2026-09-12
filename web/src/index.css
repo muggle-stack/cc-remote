@@ -408,6 +408,7 @@ body{
 .scroll-bottom-btn:hover{ background:var(--accent-weak); color:var(--accent-ink); }
 .scroll-bottom-btn svg{ width:20px; height:20px; }
 .turn{ margin-bottom:0; }
+.turn-continuation{ width:fit-content; max-width:100%; margin:2px 0 12px; padding:6px 11px; border:1px solid var(--accent-line); border-radius:999px; background:var(--accent-weak); color:var(--accent-ink); font-size:11px; line-height:1.5; }
 .ubub-wrap{ max-width:82%; margin-left:auto; display:flex; flex-direction:column; align-items:flex-end; gap:5px; margin-bottom:2px; }
 .ubub{ background:var(--accent-weak); color:var(--text); border:1px solid var(--accent-line);
   padding:10px 14px; border-radius:16px 16px 5px 16px; max-width:100%;

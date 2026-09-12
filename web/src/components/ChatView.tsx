@@ -2837,6 +2837,9 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                   turnNodeRefs.current.delete(t.id);
                 }
               }}>
+            {t.continuation && !t.prompt && (
+              <div className="turn-continuation">收到子代理结果，继续处理</div>
+            )}
             {(t.prompt || (t.images && t.images.length) || (t.imageRefs && t.imageRefs.length) || (t.files && t.files.length)) && (
               <div className="ubub-wrap">
                 {t.prompt && <div className="ubub">{supplemental.replies.has(t.id)

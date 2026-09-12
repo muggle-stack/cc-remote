@@ -288,7 +288,8 @@ export interface TurnChangeSummary { revision: string; files: TurnFileChange[]; 
 export interface TurnFileChanges extends Base { type: "turn_file_changes"; turn_id: string; changes: TurnChangeSummary }
 export interface TurnFileChangesPage extends Base { type: "turn_file_changes_page"; engine: Engine; turn_id: string; revision: string; offset: number; files: TurnFileChange[]; total_files: number; next_offset?: number | null; request_id?: string | null }
 export interface GetTurnFileChanges extends Base { type: "get_turn_file_changes"; sid: string; engine: Engine; turn_id: string; revision: string; offset?: number; limit?: number }
-export interface TurnBinding extends Base { type: "turn_binding"; msg_id: string; turn_id: string; autonomous?: boolean }
+export type TurnContinuation = "subagent";
+export interface TurnBinding extends Base { type: "turn_binding"; msg_id: string; turn_id: string; autonomous?: boolean; continuation?: TurnContinuation | null }
 export interface TurnResult { subtype: string; duration_ms: number; is_error: boolean; total_cost_usd?: number | null; num_turns?: number | null }
 export interface TurnNotificationContext { engine: Engine; space: Space; display_name?: string | null; parent_session_id?: string | null }
 export interface TurnEnd extends Base { type: "turn_end"; result: TurnResult; turn_id?: string | null; checkpoint_id?: string | null; notification_context?: TurnNotificationContext | null }
@@ -483,7 +484,7 @@ export interface GetHistory extends Base { type: "get_history"; session_id: stri
 export interface ConversationImageRef { image_id: string; media_type: QueryImg["media_type"]; width: number; height: number; byte_size: number }
 export type ProcessDetailState = "none" | "present" | "unknown";
 export type TurnDetailReason = "process" | "prompt_truncated" | "answer_truncated" | "image_deferred";
-export interface ConversationTurn { id: string; clientMsgId?: string | null; prompt: string; blocks: unknown[]; done: boolean; forkPointId?: string | null; checkpointId?: string | null; interrupted?: boolean | null; error?: string | null; images?: QueryImg[] | null; imageRefs?: ConversationImageRef[] | null; files?: QueryFile[] | null; ts?: number | null; doneTs?: number | null; durationMs?: number | null; processDetailState?: ProcessDetailState; detailReasons?: TurnDetailReason[]; processStartedTs?: number | null; processDoneTs?: number | null; detailEventCount: number; detailLoaded: boolean; fileChanges?: TurnChangeSummary | null }
+export interface ConversationTurn { id: string; clientMsgId?: string | null; prompt: string; blocks: unknown[]; done: boolean; continuation?: TurnContinuation | null; forkPointId?: string | null; checkpointId?: string | null; interrupted?: boolean | null; error?: string | null; images?: QueryImg[] | null; imageRefs?: ConversationImageRef[] | null; files?: QueryFile[] | null; ts?: number | null; doneTs?: number | null; durationMs?: number | null; processDetailState?: ProcessDetailState; detailReasons?: TurnDetailReason[]; processStartedTs?: number | null; processDoneTs?: number | null; detailEventCount: number; detailLoaded: boolean; fileChanges?: TurnChangeSummary | null }
 export interface CodexTerminalFence { turn_id: string; status: "completed" | "interrupted" | "failed"; duration_ms?: number | null; completed_at?: number | null }
 export interface History extends Base { type: "history"; session_id: string; revision: string; generation?: string | null; continuity_revision?: string | null; build_seq?: number; live_seq?: number | null; authoritative?: boolean; error?: string | null; events: ServerEvent[]; turns?: ConversationTurn[]; detail?: "summary" | "full"; has_more: boolean; oldest_id?: string | null; newest_id?: string | null; before?: string | null; control?: SessionControl | null; external?: boolean; takeover_pending?: boolean; in_progress?: boolean; compaction_continuation_turn_ids?: string[]; terminal_fences?: CodexTerminalFence[]; reset?: boolean }
 export interface GetTurnDetail extends Base { type: "get_turn_detail"; session_id: string; turn_id: string; client_id?: string | null; revision?: string | null; before?: string | null; limit?: number | null }
@@ -729,7 +730,7 @@ export type ServerEvent = FilesListed | CodexContext
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 65;
+export const PROTOCOL_VERSION = 67;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 
