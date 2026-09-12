@@ -458,15 +458,20 @@ export function NewChatView({ cwd, controlScopeKey,
           <span className={`newchat-engine ${engine}`}>{engine === "dsh" ? "DSH" : engine === "codex" ? "◇ Codex" : "✳ Claude"}</span>
         </div>
         {engine === "dsh" && <div className="dsh-preset-row">
-          <label>Agent Preset
-            <select aria-label="DSH Agent Preset" value={dshPreset ?? ""}
-              onChange={event => onPickDshPreset?.(event.target.value)} disabled={creating}>
-              <option value="">DSH 默认</option>
-              {dshPresets.map(preset => <option key={preset.id} value={preset.id} disabled={!preset.available}>
-                {preset.name}{preset.available ? "" : " · 不可用"}
-              </option>)}
-            </select>
-          </label>
+          <ChoicePicker key={`${controlScopeKey}:preset`} className="dsh-preset-trigger"
+            label="选择 DSH 会话模式" value={dshPreset ?? ""}
+            disabled={creating || importing || !onPickDshPreset}
+            onChange={value => onPickDshPreset?.(value)}
+            options={[
+              { value: "", label: "DSH 默认", description: "使用设备上的默认会话模式", icon: "dsh" },
+              ...dshPresets.map(preset => ({ value: preset.id, label: preset.name,
+                description: preset.available ? preset.description : `${preset.description || "此模式"} · 不可用`,
+                disabled: !preset.available, icon: "dsh",
+              })),
+            ]}>
+            <Icon name="dsh" size={17} /><span>会话模式</span>
+            <b>{dshPresets.find(preset => preset.id === dshPreset)?.name ?? "DSH 默认"}</b>
+          </ChoicePicker>
           <p>{dshError || dshPresets.find(preset => dshPreset ? preset.id === dshPreset : preset.is_default)?.description || "正在读取设备上的 DSH…"}</p>
         </div>}
         {space === "work" ? (
