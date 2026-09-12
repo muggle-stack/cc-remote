@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from cc_remote.protocol import deserialize, serialize
 from cc_remote.wrapper.dsh_client import DshError
 from cc_remote.wrapper.dsh_stream import DshProjection, history_events, input_tokens, model_id, model_parts
 from cc_remote.wrapper.history_store import materialize_history_turns
@@ -83,6 +84,32 @@ def user(p, client):
     return record(p, "user/message", {"id": client, "role": "user",
                   "source": {"kind": "user", "rpcId": client},
                   "content": [{"type": "text", "text": client}]})
+
+
+@pytest.mark.parametrize("native_status,wire_status", [
+    ("pending", "pending"), ("in_progress", "inProgress"), ("completed", "completed"),
+])
+def test_native_todo_status_keeps_live_and_replayed_progress_readable(native_status, wire_status):
+    p = DshProjection()
+    user(p, "prompt")
+    event = {"seq": p.cursor + 1, "time": 1000, "type": "todo/write", "data": {
+        "todos": [{"content": "Inspect logs", "status": native_status}],
+    }}
+    live = p.record(event)[0]
+    assert live.type == "turn_plan" and live.turn_id == p.owner
+    assert live.plan[0]["status"] == wire_status
+    assert deserialize(serialize(live)) == live
+
+    # Reconnect must be able to replay the same durable record, not repeatedly
+    # fail validation and leave the session read-only at its first active todo.
+    cold = DshProjection(cursor=event["seq"] - 1)
+    cold.owner = p.owner
+    assert cold.record(event) == [live]
+    following = {"seq": event["seq"] + 1, "time": 2000, "type": "tool/call", "data": {
+        "turn": 1, "step": 1, "callId": "read-logs", "name": "read", "arguments": "{}",
+    }}
+    assert p.record(following)[-1].type == "tool_use"
+    assert cold.record(following)[-1].type == "tool_use"
 
 
 def test_late_answer_keeps_pre_steer_owner_even_when_new_user_has_arrived():
