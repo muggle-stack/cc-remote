@@ -515,8 +515,9 @@ class TurnChangeArchive:
         if len(encoded) > MAX_DIFF * 8:
             raise ValueError("archive payload too large")
         with self._lock, self._connect() as db:
-            if self.path.stat().st_size > MAX_ARCHIVE:
-                raise ValueError("turn diff archive full")
+            # Serialize admission with other archive instances, including the
+            # quota check after obsolete running revisions have been removed.
+            db.execute("BEGIN IMMEDIATE")
             files = payload["files"]
             manifest = {key: value for key, value in payload.items() if key != "files"}
             summary = change_summary(payload)
@@ -538,6 +539,14 @@ class TurnChangeArchive:
                        (sid, turn_id, sid, turn_id))
             db.execute("DELETE FROM turn_change_files WHERE sid=? AND turn_id=? AND revision NOT IN (SELECT revision FROM turn_changes WHERE sid=? AND turn_id=?)",
                        (sid, turn_id, sid, turn_id))
+            # DELETE frees SQLite pages without shrinking the file. Count live
+            # pages so old oversized archives can reuse that space; rejecting
+            # inside the transaction also rolls back every part of this write.
+            page_size = db.execute("PRAGMA page_size").fetchone()[0]
+            page_count = db.execute("PRAGMA page_count").fetchone()[0]
+            free_pages = db.execute("PRAGMA freelist_count").fetchone()[0]
+            if (page_count - free_pages) * page_size > MAX_ARCHIVE:
+                raise ValueError("turn diff archive full")
 
     def get(self, sid: str, turn_id: str, revision: str) -> dict | None:
         with self._lock, self._connect() as db:
