@@ -38,7 +38,7 @@ export default function CodexContextControl({ state, onChange }: {
         onClick={() => { setInput(""); submit(null); }}>恢复 Codex 默认值</button>
       <p role="status">
         {state.pending
-          ? `已保存上限 ${state.max_context_tokens?.toLocaleString() ?? "默认值"}，等待会话空闲并可重新加载`
+          ? `已保存上限 ${state.max_context_tokens?.toLocaleString() ?? "默认值"}，待确认生效`
           : `设定上限：${state.max_context_tokens?.toLocaleString() ?? "Codex 默认值"}`}
         <br />
         当前生效上限：{state.applied_max_context_tokens?.toLocaleString() ?? "待确认"}

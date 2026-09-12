@@ -11201,7 +11201,7 @@ class WrapperMachine:
         await self._emit(ctx, StateEvent(state=state))
         log.info("state transition", sid=ctx.session_id, state=state)
         settings = getattr(ctx.sdk, "context_settings", None)
-        if state == "idle" and ctx.engine == "codex" and settings is not None and settings.pending:
+        if state == "idle" and ctx.engine == "codex" and settings is not None and settings.needs_apply:
             task = ctx.auto_compact_apply_task
             if task is None or task.done():
                 task = asyncio.create_task(self._settle_codex_context(ctx))
@@ -19407,7 +19407,7 @@ class WrapperMachine:
 
     async def _apply_codex_context(self, ctx):
         settings = getattr(ctx.sdk, "context_settings", None)
-        if ctx.engine != "codex" or settings is None or not settings.pending:
+        if ctx.engine != "codex" or settings is None or not settings.needs_apply:
             return
         try:
             applied = await settings.apply(ctx.sdk)
@@ -19438,7 +19438,8 @@ class WrapperMachine:
                               request_id=getattr(cmd, "cmd_id", None), to=getattr(cmd, "client_id", None))
                 await self._emit(ctx, error)
                 return error
-            previous = (settings.max_tokens, settings.threshold, settings.window, settings.pending, settings.error)
+            previous = (settings.max_tokens, settings.threshold, settings.window,
+                        settings.pending, settings.apply_attempted, settings.error)
             try:
                 await settings.select(ctx.sdk, cmd.max_context_tokens)
                 if self._codex_controls is None:
@@ -19446,7 +19447,8 @@ class WrapperMachine:
                 await asyncio.to_thread(self._codex_controls.set_context,
                     self._ctx_wire_sid(ctx), settings.max_tokens, settings.window)
             except Exception as exc:
-                settings.max_tokens, settings.threshold, settings.window, settings.pending, settings.error = previous
+                (settings.max_tokens, settings.threshold, settings.window,
+                 settings.pending, settings.apply_attempted, settings.error) = previous
                 settings.error = str(exc)[:1024]
                 return await self._publish_codex_context(ctx)
             if ctx.state == "idle":

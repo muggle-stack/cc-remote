@@ -180,8 +180,9 @@ async def test_lowering_capacity_also_lowers_window_despite_old_usage(astra_cata
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("save_fails", [False, True])
+@pytest.mark.parametrize("previous_pending", [False, True])
 async def test_capacity_command_saves_session_limit_and_preserves_live_configuration(
-    astra_catalog, monkeypatch, save_fails,
+    astra_catalog, monkeypatch, save_fails, previous_pending,
 ):
     from cc_remote.wrapper.machine import WrapperMachine
 
@@ -190,6 +191,10 @@ async def test_capacity_command_saves_session_limit_and_preserves_live_configura
     handle.model, handle.context_settings = "gpt-6-astra", settings
     await settings.select(handle, 400000)
     await settings.confirm_applied(handle)
+    if previous_pending:
+        await settings.select(handle, 400000)
+        assert not await settings.apply(handle)
+        handle.force_reconnect.reset_mock()
     if save_fails:
         def fail(*args):
             raise OSError("storage unavailable")
@@ -209,7 +214,7 @@ async def test_capacity_command_saves_session_limit_and_preserves_live_configura
     assert result.limit_tokens == 828400
     if save_fails:
         assert (settings.max_tokens, settings.window, settings.threshold) == (400000, 421053, 378947)
-        assert result.error == "storage unavailable" and not result.pending
+        assert result.error == "storage unavailable" and result.pending is previous_pending
         assert store.get("primary@one").context_max_tokens is None
     else:
         assert result.max_context_tokens == 300000 and result.pending
@@ -218,6 +223,7 @@ async def test_capacity_command_saves_session_limit_and_preserves_live_configura
         assert store.get("other@one").context_max_tokens is None
     machine._apply_codex_context.assert_not_called()
     handle.force_reconnect.assert_not_called()
+    assert settings.needs_apply is (not save_fails)
 
 
 @pytest.mark.asyncio
@@ -250,6 +256,96 @@ async def test_other_client_keeps_setting_pending_and_our_subscription_restored(
     assert settings.pending and settings.applied_threshold is None
     assert "尚未确认原生会话已应用" in settings.error
     handle.force_reconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capacity", [12000, None], ids=["set-limit", "reset-limit"])
+@pytest.mark.parametrize("reconnect_fails", [False, True])
+async def test_unconfirmed_context_is_not_reloaded_at_each_turn_boundary(
+    catalog, capacity, reconnect_fails,
+):
+    from cc_remote.wrapper.machine import WrapperMachine
+
+    settings, handle = NativeContextSettings(), handle_for(catalog)
+    handle.context_settings = settings
+    if reconnect_fails:
+        handle.force_reconnect.side_effect = RuntimeError("connection lost")
+    ctx = SimpleNamespace(
+        sdk=handle, engine="codex", session_id="one", space="code", btw=False,
+        state="running", query_lock=asyncio.Lock(), queued_query_wakeup=asyncio.Event(),
+        auto_compact_apply_task=None,
+    )
+    machine = SimpleNamespace(_emit=AsyncMock(), _is_resident_context=lambda _ctx: True)
+    machine._publish_codex_context = lambda ctx: WrapperMachine._publish_codex_context(machine, ctx)
+    machine._apply_codex_context = lambda ctx: WrapperMachine._apply_codex_context(machine, ctx)
+    machine._settle_codex_context = lambda ctx: WrapperMachine._settle_codex_context(machine, ctx)
+    await settings.select(handle, capacity)
+    handle.turn_active = True
+    await machine._apply_codex_context(ctx)
+    handle._request.assert_not_called()
+    handle.turn_active = False
+
+    for turn in range(3):
+        await WrapperMachine._set_state(machine, ctx, "idle")
+        task = ctx.auto_compact_apply_task
+        if turn == 0:
+            assert task is not None
+        else:
+            assert task is None
+        if task is not None:
+            await task
+            await asyncio.sleep(0)  # Run the task's completion callback.
+        # The immediate-query path runs this same hook before the next turn.
+        await machine._apply_codex_context(ctx)
+        await WrapperMachine._set_state(machine, ctx, "running")
+
+    handle.force_reconnect.assert_awaited_once()
+    assert [call.args[0] for call in handle._request.call_args_list] == [
+        "thread/read", "thread/unsubscribe",
+    ]
+    event = await machine._publish_codex_context(ctx)
+    assert event.pending and event.applied_max_context_tokens is None
+    assert event.max_context_tokens == capacity
+    if reconnect_fails:
+        assert event.error == "connection lost"
+    else:
+        assert "尚未确认原生会话已应用" in event.error
+    # An explicit save, including reselecting the same value, permits one retry.
+    await settings.select(handle, capacity)
+    await machine._apply_codex_context(ctx)
+    await machine._apply_codex_context(ctx)
+    assert handle.force_reconnect.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_native_busy_context_attempt_waits_without_consuming_retry(catalog):
+    settings, handle = NativeContextSettings(), handle_for(catalog)
+    await settings.select(handle, 12000)
+    handle._request.return_value = {"thread": {"status": {"type": "active"}}}
+    assert not await settings.apply(handle)
+    handle.force_reconnect.assert_not_called()
+    handle._request.return_value = {"thread": {"status": {"type": "idle"}}}
+    assert not await settings.apply(handle)
+    assert not await settings.apply(handle)
+    handle.force_reconnect.assert_awaited_once()
+    assert [call.args[0] for call in handle._request.call_args_list] == [
+        "thread/read", "thread/read", "thread/unsubscribe",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_lost_unsubscribe_response_restores_subscription_without_retry_loop(catalog):
+    settings, handle = NativeContextSettings(), handle_for(catalog)
+    await settings.select(handle, 12000)
+    handle._request.side_effect = [
+        {"thread": {"status": {"type": "idle"}}}, RuntimeError("response lost"),
+    ]
+    with pytest.raises(RuntimeError, match="response lost"):
+        await settings.apply(handle)
+    assert not await settings.apply(handle)
+    assert settings.pending and settings.applied_effective_window is None
+    assert handle._request.await_count == 2
+    handle.force_reconnect.assert_awaited_once_with("one", reason="restore context subscription")
 
 
 @pytest.mark.asyncio
@@ -406,13 +502,14 @@ async def test_context_connect_needs_more_than_shared_reload_notifications(
         assert event.applied_max_context_tokens == previous_capacity
         assert event.applied_threshold_tokens == previous_threshold
         if scenario != "fork_without_context":
-            # An idle retry may apply the config, but is still no stronger
-            # evidence. Do not clear pending or advance capacity on retry.
+            # The resume already attempted the setting. Idle/query boundaries
+            # must not detach again merely because confirmation is unavailable.
             assert not await settings.apply(handle)
             assert settings.pending and handle.context_window == previous_capacity
             assert settings.applied_threshold == previous_threshold
             assert "尚未确认原生会话已应用" in settings.error
-            assert resumes == 2
+            assert resumes == 1
+            assert "thread/unsubscribe" not in methods
     assert not any(method.startswith("turn/") for method in methods)
     handle.proc = None
 

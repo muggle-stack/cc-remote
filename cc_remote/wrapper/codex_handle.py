@@ -2608,13 +2608,18 @@ class CodexHandle:
         # so shared resumes stay pending even after an apparent cold reload.
         # Start and fresh private resume have no competing cache entry; fork
         # does not submit context_config and cannot confirm it either.
-        context_confirmed = not (fork and resume_id) and (not resume_id or not daemon_proxy)
-        if context_confirmed and self.context_settings.pending and (
+        if not (fork and resume_id) and self.context_settings.pending and (
             self.context_settings.max_tokens is None or context_config
         ):
-            await self.context_settings.confirm_applied(self)
-            self.context_window = self.context_settings.applied_effective_window
-        elif (self.context_settings.applied_model is not None
+            if not resume_id or not daemon_proxy:
+                await self.context_settings.confirm_applied(self)
+                self.context_window = self.context_settings.applied_effective_window
+            else:
+                # This resume submitted the preference, including on a cold
+                # attach. Lack of a receipt must not trigger another reload at
+                # every idle/query boundary. A new explicit save can retry.
+                self.context_settings.mark_attempted()
+        if (self.context_settings.applied_model is not None
                 and self.context_settings.applied_model == self.model
                 and self.context_window is None):
             self.context_window = self.context_settings.applied_effective_window

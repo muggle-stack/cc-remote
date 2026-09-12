@@ -636,6 +636,7 @@ test("session workspace browses outside cwd and never shows an old directory aft
 test("session workspace Codex capacity rejects oversize and sends a session preference", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { retained: false });
   await page.goto("/");
+  await expect(page.locator(".scard.active .scard-title")).toHaveText("Layout parent");
   const input = page.locator("textarea").first();
   await input.fill("/autocompact ");
   await input.press("Enter");
@@ -698,6 +699,9 @@ test("session workspace context ring refreshes applied capacity and distinguishe
 test("session workspace distinguishes 300k capacity from native usage and compaction", async ({ page }, testInfo) => {
   const relay = await mockRightPanelRelay(page, { retained: false });
   await page.goto("/");
+  // Initial focus changes the draft scope. Type only after this session is
+  // selected, otherwise WebKit can fill the pre-focus draft and then lose it.
+  await expect(page.locator(".scard.active .scard-title")).toHaveText("Layout parent");
   const input = page.locator("textarea").first();
   await input.fill("/autocompact ");
   await input.press("Enter");
