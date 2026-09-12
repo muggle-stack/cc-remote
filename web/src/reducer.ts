@@ -6522,11 +6522,15 @@ function reduceEvent(
         }
         let turns = cloneTurns(rt.turns);
         const seq = typeof e.seq === "number" ? e.seq : 0;
-        if (e.autonomous && !turns.some(turn => turnHasIdentityAlias(turn, e.msg_id))) {
-          // The engine explicitly opened a round without a human prompt (for
-          // example a DSH goal continuation). Give it its own exact owner.
-          turns.push({ id: e.msg_id, prompt: "", blocks: [], done: false,
-            forkPointId: e.turn_id, ts: eventTimestampMs(e.ts) });
+        if (e.autonomous) {
+          let owner = turns.find(turn => turnHasIdentityAlias(turn, e.msg_id));
+          if (!owner) {
+            // Native rounds without a human prompt retain their exact owner.
+            owner = { id: e.msg_id, prompt: "", blocks: [], done: false,
+              forkPointId: e.turn_id, ts: eventTimestampMs(e.ts) };
+            turns.push(owner);
+          }
+          if (e.continuation) owner.continuation = e.continuation;
         }
         const binding = {
           msgId: e.msg_id,

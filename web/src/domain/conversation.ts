@@ -145,6 +145,8 @@ export interface Turn {
   /** Routing-only native task identity for a steered live segment. */
   liveTaskId?: string;
   prompt: string;
+  /** Native automatic continuation, never inferred from an empty prompt. */
+  continuation?: "subagent" | null;
   blocks: Block[];
   done: boolean;
   interrupted?: boolean;

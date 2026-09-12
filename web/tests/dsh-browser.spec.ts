@@ -17,6 +17,7 @@ const nativeState: Omit<DshState, "v" | "ts"> = { type: "dsh_state", sid, connec
 
 async function mockDshRelay(page: Page, { running = false, commandSuccess = false, features = false } = {}) {
   const commands: Record<string, unknown>[] = [];
+  let historyTurns: Record<string, unknown>[] | undefined;
   let archived = false;
   let currentGoal = nativeState.goal;
   const context = { type: "context_report", sid, total_tokens: 24000,
@@ -73,7 +74,7 @@ async function mockDshRelay(page: Page, { running = false, commandSuccess = fals
       }
       if (cmd.type === "switch_session") { emit({ type: "session_focus", session_id: cmd.session_id }); snapshot(); }
       if (cmd.type === "get_history") emit({ type: "history", sid, session_id: sid, revision: "dsh-history",
-        generation: "dsh-generation", detail: "summary", events: [], turns: [{ id: "native-prompt", clientMsgId: "native-prompt",
+        generation: "dsh-generation", detail: "summary", events: [], turns: historyTurns ?? [{ id: "native-prompt", clientMsgId: "native-prompt",
           prompt: "验证图片、引导与原生控件", done: !running, forkPointId: "dsh-seq-5", blocks: [
             ...(features ? [{ kind: "tool", message_id: "present", tool_use_id: "present-file", tool: "present",
               input: { files: [{ path: "/tmp/dsh-test/report.xlsx", description: "路线图" }] },
@@ -138,7 +139,8 @@ async function mockDshRelay(page: Page, { running = false, commandSuccess = fals
       if (cmd.cmd_id) emit({ type: "command_ack", client_id: cmd.client_id, cmd_id: cmd.cmd_id });
     });
   });
-  return { commands, emit: (event: Record<string, unknown>) => emit(event) };
+  return { commands, emit: (event: Record<string, unknown>) => emit(event),
+    setHistory: (turns: Record<string, unknown>[]) => { historyTurns = turns; } };
 }
 
 async function openDsh(page: Page, options = {}) {
@@ -307,6 +309,49 @@ test("DSH working spark animates while a native turn runs", async ({ page }) => 
   const initial = await working.innerHTML();
   await page.clock.runFor(180);
   await expect.poll(() => working.innerHTML()).not.toBe(initial);
+});
+
+test("DSH child-result continuation stays connected across completion, refresh and a new question", async ({ page }, info) => {
+  const relay = await openDsh(page);
+  const auto = "dsh-turn-2";
+  relay.emit({ type: "state", sid, state: "running" });
+  relay.emit({ type: "turn_binding", sid, msg_id: auto, turn_id: auto,
+    autonomous: true, continuation: "subagent" });
+  relay.emit({ type: "assistant_msg_start", sid, turn_id: auto, message_id: "child-check", channel: "final" });
+  relay.emit({ type: "delta", sid, turn_id: auto, message_id: "child-check", text: "子代理结果已核对，继续补充结论。" });
+  const continuation = page.locator(`[data-turn-id="${auto}"]`);
+  const cue = continuation.locator(".turn-continuation");
+  await expect(cue).toHaveText("收到子代理结果，继续处理");
+  await expect(continuation.locator(".turn-working")).toBeVisible();
+  await expect(page.getByText("DSH 已准备好。", { exact: true })).toBeVisible();
+  await expect(page.locator('[data-turn-id="native-prompt"] .turn-working')).toHaveCount(0);
+  await expect(continuation.locator(".ubub")).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath("dsh-child-continuation.png") });
+  relay.emit({ type: "assistant_msg_end", sid, turn_id: auto, message_id: "child-check" });
+  relay.emit({ type: "turn_end", sid, turn_id: auto,
+    result: { subtype: "success", duration_ms: 1200, is_error: false } });
+  relay.emit({ type: "state", sid, state: "idle" });
+  await expect(continuation.locator(".turn-working")).toHaveCount(0);
+  await expect(cue).toBeVisible();
+  relay.setHistory([
+    { id: "native-prompt", clientMsgId: "native-prompt", prompt: "验证图片、引导与原生控件",
+      done: true, forkPointId: "dsh-seq-5", blocks: [
+        { kind: "text", message_id: "answer", text: "DSH 已准备好。", channel: "final", done: true },
+      ] },
+    { id: auto, prompt: "", done: true, forkPointId: auto, continuation: "subagent", blocks: [
+      { kind: "text", message_id: "child-check", text: "子代理结果已核对，继续补充结论。", channel: "final", done: true },
+    ] },
+  ]);
+  await page.reload();
+  await expect(cue).toBeVisible();
+  await expect(page.locator(".turn-continuation")).toHaveCount(1);
+  await expect(page.getByText("DSH 已准备好。", { exact: true })).toBeVisible();
+  await expect(continuation).toContainText("子代理结果已核对，继续补充结论。");
+  relay.emit({ type: "user_msg", sid, msg_id: "next-task", client_msg_id: "next-task", prompt: "接下来检查另一个目录" });
+  relay.emit({ type: "turn_binding", sid, msg_id: "next-task", turn_id: "dsh-seq-30" });
+  await expect(page.locator('[data-turn-id="next-task"] .ubub')).toHaveText("接下来检查另一个目录");
+  await expect(page.locator('[data-turn-id="next-task"] .turn-continuation')).toHaveCount(0);
+  await expect(page.locator(".turn-continuation")).toHaveCount(1);
 });
 
 test("DSH model picker offers Flash only and preserves native reasoning levels", async ({ page }) => {

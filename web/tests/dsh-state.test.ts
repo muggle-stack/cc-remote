@@ -52,11 +52,37 @@ try {
   assert.deepEqual(rows.map(row => row.blocks.filter(b => b.kind === "text").map(b => b.text)),
     [["old answer complete"], ["new answer"], ["goal continuation"]]);
   assert.ok(rows.every(row => row.done));
+  assert.deepEqual(rows.map(row => row.continuation), [undefined, undefined, undefined]);
   assert.deepEqual(rows.map(row => canForkTurn("dsh", row)), [false, true, true]);
   assert.equal(rows[0].forkPointId, "dsh-seq-2", "keep the native identity for late event routing");
   const canonicalOld = { ...rows[0], forkPointId: undefined, forkAvailable: undefined };
   assert.equal(canForkTurn("dsh", mergeAuthoritativeTurnDetail(canonicalOld, rows[0])), false,
     "refreshing a completed steer segment must not restore its fork button");
+  emit({ type: "turn_binding", msg_id: "dsh-turn-3", turn_id: "dsh-turn-3", autonomous: true });
+  emit({ type: "turn_binding", msg_id: "dsh-turn-3", turn_id: "dsh-turn-3", autonomous: true, continuation: "subagent" });
+  text("dsh-turn-3", "child-answer", "child result checked", true);
+  emit({ type: "assistant_msg_end", turn_id: "dsh-turn-3", message_id: "child-answer" });
+  emit({ type: "turn_end", turn_id: "dsh-turn-3", result: { subtype: "success", duration_ms: 5, is_error: false } });
+  assert.equal(state.runtimes[sid].turns.length, 4, "late wakeup metadata updates the same native row");
+  assert.equal(state.runtimes[sid].turns.at(-1).continuation, "subagent");
+  emit({ type: "user_msg", msg_id: "next", client_msg_id: "next", prompt: "new task" });
+  emit({ type: "turn_binding", msg_id: "next", turn_id: "dsh-seq-30" });
+  emit({ type: "turn_end", turn_id: "dsh-seq-30", result: { subtype: "success", duration_ms: 1, is_error: false } });
+  assert.equal(state.runtimes[sid].turns.at(-1).continuation, undefined);
+  const summaries = state.runtimes[sid].turns.map((turn: Turn) => ({
+    id: turn.id, prompt: turn.prompt, blocks: turn.blocks, done: turn.done,
+    forkPointId: turn.forkPointId, continuation: turn.continuation,
+    detailEventCount: 0, detailLoaded: false,
+  }));
+  const cold = reduce({ ...initialState, focusedSid: sid, runtimes: { [sid]: createRuntime() } }, {
+    type: "event", event: { type: "history", v: PROTOCOL_VERSION, ts: 1, sid, session_id: sid,
+      revision: "native", events: [], turns: summaries, detail: "summary", has_more: false },
+  });
+  assert.deepEqual(cold.runtimes[sid].turns.map((turn: Turn) => turn.continuation),
+    [undefined, undefined, undefined, "subagent", undefined], "refresh retains the same task boundaries");
+  const continued = cold.runtimes[sid].turns[3];
+  assert.equal(mergeAuthoritativeTurnDetail(continued, { ...continued, continuation: undefined }).continuation,
+    "subagent", "reading process detail retains summary continuation metadata");
   emit({ type: "turn_binding", msg_id: "dsh-turn-cancelled", turn_id: "dsh-turn-cancelled", autonomous: true });
   emit({ type: "turn_end", turn_id: "dsh-turn-cancelled", result: { subtype: "interrupted", duration_ms: 1, is_error: false } });
   assert.equal(state.runtimes[sid].turns.at(-1).interrupted, true,

@@ -174,8 +174,58 @@ def test_autonomous_goal_round_opens_its_own_owner_in_live_and_cold_views():
     frames += record(p, "turn/end", {"turn": 2, "reason": {"kind": "completed"}})
     rows = materialize_history_turns(history_events(frames))
     assert len(rows) == 2 and rows[1]["id"] == "dsh-turn-2"
+    assert rows[1].get("continuation") is None
     assert rows[1]["blocks"][0]["text"] == "continued"
     assert not p.running and not p.open
+
+
+@pytest.mark.parametrize("source", ["agent-message", "subagent-settled"])
+@pytest.mark.parametrize("live", [False, True])
+def test_child_wakeup_preserves_answer_and_continuation_in_live_and_cold_history(source, live):
+    p = DshProjection()
+    frames = record(p, "turn/start", {"turn": 1}) + user(p, "human")
+    frames += record(p, "assistant/message", {"turn": 1, "step": 1,
+        "message": {"content": [{"type": "text", "text": "initial answer"}]}})
+    frames += record(p, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    assert not p.running
+    frames += record(p, "turn/start", {"turn": 2})
+    # No new human question; this is the native wakeup observed in the report.
+    frames += record(p, "user/message", {"source": {"kind": source, "senderSessionId": "child"},
+        "content": [{"type": "text", "text": "private child relay"}]})
+    if live:
+        frames += p.frame({"type": "start", "attemptId": "child-return", "turn": 2, "step": 1, "revision": 1})
+    frames += record(p, "assistant/message", {"turn": 2, "step": 1,
+        "message": {"content": [{"type": "text", "text": "checked child result"}]}})
+    assert p.running
+    frames += record(p, "turn/end", {"turn": 2, "reason": {"kind": "completed"}})
+    assert not p.running
+    frames += record(p, "turn/start", {"turn": 3}) + user(p, "next-question")
+    # A child arriving during a human task does not replace the user's boundary.
+    frames += record(p, "user/message", {"source": {"kind": source}})
+    frames += record(p, "turn/end", {"turn": 3, "reason": {"kind": "aborted"}})
+    rows = materialize_history_turns(history_events(frames))
+    assert [row["id"] for row in rows] == ["human", "dsh-turn-2", "next-question"]
+    assert [row.get("continuation") for row in rows] == [None, "subagent", None]
+    assert [row["prompt"] for row in rows] == ["human", "", "next-question"]
+    assert rows[0]["blocks"][0]["text"] == "initial answer"
+    assert rows[1]["blocks"][0]["text"] == "checked child result"
+    assert rows[2]["interrupted"]
+    assert len([frame for frame in frames if frame.type == "turn_end"]) == 3
+
+
+def test_late_child_metadata_updates_same_autonomous_owner_but_surface_replay_does_not():
+    p = DshProjection()
+    frames = record(p, "turn/start", {"turn": 2})
+    frames += p.frame({"type": "start", "attemptId": "auto", "turn": 2, "step": 1, "revision": 1})
+    assert frames[-1].continuation is None
+    assert record(p, "user/message", {"source": {"kind": "agent-message"}}, surfaceOp={}) == []
+    update = record(p, "user/message", {"source": {"kind": "subagent-settled"}})
+    assert len(update) == 1 and update[0].turn_id == "dsh-turn-2"
+    assert update[0].continuation == "subagent"
+    frames += update
+    frames += record(p, "turn/end", {"turn": 2, "reason": {"kind": "completed"}})
+    rows = materialize_history_turns(history_events(frames))
+    assert len(rows) == 1 and rows[0]["continuation"] == "subagent"
 
 
 def test_late_pre_steer_answer_stays_in_its_canonical_history_row():

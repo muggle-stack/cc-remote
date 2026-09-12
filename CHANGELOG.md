@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+- Fix DSH subagent history reads and top-level session filtering, suppress false
+  older-history pagination on the first task, and preserve a rounded continuation
+  cue when a child result wakes the parent. Live bindings and history summaries
+  carry the cue on **protocol v67**; deploy Web, relay and Wrapper together.
+
 - Redesign Goal dialogs with rounded, engine-specific controls: Codex Token budgets,
   Claude completion checks and DSH native round caps. Confirm mutations against
   native state and preserve edits on errors or stale revisions (protocol v65).

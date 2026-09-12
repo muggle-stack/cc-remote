@@ -68,7 +68,7 @@ export async function snapshot(ctx, request) {
     const page = await ctx.typertGateway.invoke({
       namespace: 'session', method: 'page',
       args: { request: {
-        address: { kind: 'session', sessionId }, throughSeq: cursor, maxMessages,
+        address: historyAddress(source), throughSeq: cursor, maxMessages,
         ...(beforeSeq === undefined ? {} : { beforeSeq }),
       } },
       signal: request.signal,
@@ -81,8 +81,15 @@ export async function snapshot(ctx, request) {
       if (start !== undefined && start < first) {
         const prefix = source.events.filter(event => event.seq >= start && event.seq < first);
         page.records = [...prefix.map(event => ({ type: 'event', event })), ...page.records];
-        page.hasMore = start > 0;
       }
+      // A turn can start after permission/model/inbox setup records. Those
+      // records are not an older conversation, even when their seq is > 0.
+      // The read lease contains the full logical log, including inherited
+      // events; keep genuine earlier turns/messages visible to pagination.
+      const oldest = page.records[0].event.seq;
+      page.hasMore = source.events.some(event => event.seq < oldest
+        && (event.type === 'turn/start' || event.type === 'assistant/message'
+          || (event.type === 'user/message' && event.data?.source?.kind === 'user')));
     }
     const body = JSON.stringify({
       contract: 1, header: source.header, cursor, ...page,
@@ -101,6 +108,18 @@ export async function snapshot(ctx, request) {
   } finally {
     source?.[Symbol.dispose]();
   }
+}
+
+function historyAddress(source) {
+  const { id: sessionId, origin, parentSession } = source.header;
+  if (origin !== 'subagent') return { kind: 'session', sessionId };
+  const mode = source.projections?.values?.subagent?.mode;
+  if (!SESSION_ID.test(parentSession ?? '') || !['one-shot', 'continuable'].includes(mode)) {
+    throw new Error('Unavailable subagent identity');
+  }
+  // Use the child's durable immediate parent and descriptor. The official
+  // Gateway independently validates lineage, mode and inherited-log identity.
+  return { kind: 'subagent', parentSessionId: parentSession, childSessionId: sessionId, mode };
 }
 
 export async function commandCatalog(ctx, source) {
