@@ -1740,6 +1740,7 @@ class CodexHandle:
         self.web_search_override: Optional[str] = None
         self.context_settings = NativeContextSettings()
         self._context_resume_thread_id: Optional[str] = None
+        self._context_resume_request_id: Optional[int] = None
         self.web_search: str = (
             "cached" if self.work_mode else (
                 codex_web_search() if self.codex_home is None
@@ -2319,9 +2320,7 @@ class CodexHandle:
             raise RuntimeError("unable to start Codex app-server transport")
         bound_thread_id: Optional[str] = None
         context_config = await self.context_settings.validated_config(self) if not self.work_mode else {}
-        context_will_apply = not resume_id
         self.context_settings.reloaded = False
-        self._context_resume_thread_id = resume_id if self.context_settings.pending else None
         try:
             if control_only:
                 log.info("codex control connection established", cwd=self._cwd)
@@ -2392,8 +2391,6 @@ class CodexHandle:
                 self._ephemeral_thread_gone = False
             elif resume_id:
                 await self._require_loaded_ephemeral_thread(resume_id)
-                if self.context_settings.pending:
-                    context_will_apply = resume_id not in await self.list_loaded_thread_ids()
                 # A replacement daemon reconstructs approval/profile from
                 # config defaults rather than the last live thread settings.
                 # Controlled reconnects repeat the exact settings that the old
@@ -2606,7 +2603,13 @@ class CodexHandle:
                 return
             await self.disconnect()
             raise
-        if (context_will_apply or self.context_settings.reloaded) and self.context_settings.pending and (
+        # A loaded/list snapshot cannot prove a resume applied its config:
+        # another client may subscribe before the native resume acquires its
+        # guard. A new/forked thread or a fresh private stdio process has no
+        # competing subscribers. Shared resumes need the native reload receipt;
+        # unconfirmed cold resumes retain pending and use the idle apply path.
+        context_confirmed = not resume_id or fork or not daemon_proxy or self.context_settings.reloaded
+        if context_confirmed and self.context_settings.pending and (
             self.context_settings.max_tokens is None or context_config
         ):
             await self.context_settings.confirm_applied(self)
@@ -4485,6 +4488,8 @@ class CodexHandle:
         self._reader = None
         self._stderr_task = None
         self._generation += 1  # invalidate callbacks from the old process
+        self._context_resume_thread_id = None
+        self._context_resume_request_id = None
         self._dead = True
         for t in tasks + server_tasks:
             t.cancel()
@@ -6149,6 +6154,11 @@ class CodexHandle:
         rid = self._id
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending[rid] = fut
+        context_resume = method == "thread/resume" and self.context_settings.pending
+        if context_resume:
+            self._context_resume_request_id = rid
+            self._context_resume_thread_id = (params or {}).get("threadId")
+            self.context_settings.reloaded = False
         if response_boundary is not None:
             self._pending_response_boundaries[rid] = response_boundary
         obj = {"jsonrpc": "2.0", "id": rid, "method": method}
@@ -6163,6 +6173,9 @@ class CodexHandle:
             completed = True
             return result
         finally:
+            if context_resume and self._context_resume_request_id == rid:
+                self._context_resume_request_id = None
+                self._context_resume_thread_id = None
             self._pending.pop(rid, None)
             boundary = self._pending_response_boundaries.pop(rid, None)
             if boundary is not None and not completed:
@@ -6948,6 +6961,11 @@ class CodexHandle:
         has_id = "id" in m
         has_method = "method" in m
         if has_id and not has_method:                       # response to our request
+            if m["id"] == self._context_resume_request_id:
+                # Close the receipt window in the reader, before waking the
+                # waiter: a later sibling reload must not confirm our config.
+                self._context_resume_request_id = None
+                self._context_resume_thread_id = None
             fut = self._pending.get(m["id"])
             if fut and not fut.done():
                 boundary = self._pending_response_boundaries.get(m["id"])
