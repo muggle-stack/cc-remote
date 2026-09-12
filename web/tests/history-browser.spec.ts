@@ -8212,6 +8212,90 @@ test("multi-line IME growth stays pinned during a Codex tool burst", async ({
   expect(result.worstDistance).toBeLessThanOrEqual(2);
 });
 
+for (const [target, source] of [
+  ["composer", "picker"],
+  ["composer", "drop"],
+  ["new-chat controls", "picker"],
+] as const) {
+  test(`${target} bounded attachment selection from ${source} survives event cleanup`, async ({ page }) => {
+    const alerts: string[] = [];
+    page.on("dialog", async (dialog) => {
+      alerts.push(dialog.message());
+      await dialog.accept();
+    });
+    await page.goto(target === "composer"
+      ? "/tests/history-browser.html?codex-live-burst=1&composer-live=1&composer-paste=1"
+      : "/tests/history-browser.html?newchat-controls=1");
+    const input = page.locator("textarea").first();
+    await input.fill("keep this draft");
+    const picker = page.getByLabel("添加文件", { exact: true });
+    await picker.setInputFiles([
+      { name: "existing.png", mimeType: "image/png", buffer: staticPng() },
+      ...Array.from({ length: 5 }, (_, index) => ({
+        name: `existing-${index}.txt`, mimeType: "text/plain", buffer: Buffer.from("existing"),
+      })),
+    ]);
+    await expect(page.locator(".attach-image-preview")).toHaveCount(1);
+    await expect(page.locator(".attach-file")).toHaveCount(5);
+    expect(await picker.inputValue()).toBe("");
+
+    // A huge lazy FileList exposes unbounded copying without allocating a huge
+    // fixture. Invalidate it when the event returns, as native drop stores do.
+    for (const remaining of [2, 0]) {
+      const reads = await picker.evaluate((node, { source, remaining }) => {
+        const element = node as HTMLInputElement;
+        const reads: number[] = [];
+        let expired = false;
+        const files = new Proxy({ length: 100_000 }, {
+          get(target, key) {
+            if (expired) throw new Error("selection accessed after event cleanup");
+            if (key === "length") return target.length;
+            if (key === Symbol.iterator) throw new Error("unbounded FileList iteration");
+            const index = Number(key);
+            if (!Number.isInteger(index) || index < 0 || index >= remaining) {
+              throw new Error("selection read beyond the remaining attachment allowance");
+            }
+            reads.push(index);
+            return new File([`added ${index}`], `added-${index}.txt`, { type: "text/plain" });
+          },
+        });
+        try {
+          if (source === "picker") {
+            Object.defineProperty(element, "files", { configurable: true, value: files });
+            element.dispatchEvent(new Event("change", { bubbles: true }));
+          } else {
+            const data = new DataTransfer();
+            Object.defineProperty(data, "types", { value: ["Files"] });
+            Object.defineProperty(data, "files", { value: files });
+            window.dispatchEvent(new DragEvent("drop", {
+              bubbles: true, cancelable: true, dataTransfer: data,
+            }));
+          }
+        } finally {
+          expired = true;
+          if (source === "picker") Reflect.deleteProperty(element, "files");
+        }
+        return reads;
+      }, { source, remaining });
+      expect(reads).toEqual(remaining ? [0, 1] : []);
+      await expect(page.locator(".attach-file")).toHaveCount(7);
+      await expect(page.locator(".attach-image-preview")).toHaveCount(1);
+      await expect(input).toHaveValue("keep this draft");
+      const overflow = "一次消息最多 8 个附件，其余文件未导入";
+      if (target === "composer") {
+        await expect(page.getByText(overflow, { exact: true })).toBeVisible();
+      } else {
+        await expect.poll(() => alerts.length).toBe(remaining ? 1 : 2);
+        expect(alerts.at(-1)).toBe(overflow);
+      }
+    }
+    await expect(page.locator(".attach-file")).toContainText([
+      "existing-0.txt", "existing-1.txt", "existing-2.txt", "existing-3.txt",
+      "existing-4.txt", "added-0.txt", "added-1.txt",
+    ]);
+  });
+}
+
 for (const target of ["composer", "new-chat controls"]) {
   test(`${target === "composer" ? "long paste" : target} mixed clipboard keeps text and deduplicates supplied images`, async ({ page }) => {
     await page.goto(target === "composer"

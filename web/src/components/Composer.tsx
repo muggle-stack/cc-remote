@@ -27,7 +27,7 @@ import {
   permissionProfileLabel, type Catalog,
 } from "../data";
 const CommandSheet = lazy(() => import("./CommandSheet").then(m => ({ default: m.CommandSheet })));
-import { attachmentBytes } from "../img";
+import { attachmentBytes, snapshotAttachmentFiles } from "../img";
 import {
   readClipboardImport, resolveClipboardImport, insertClipboardText,
   type ClipboardImport,
@@ -388,7 +388,7 @@ export function Composer(p: Props) {
       const [{ pickFiles }, imported] = await Promise.all([
         import("../attachment-import"),
         clipboard ? resolveClipboardImport(clipboard)
-          : Promise.resolve({ files: fl ? Array.from(fl) : null, errors: [] }),
+          : Promise.resolve(snapshotAttachmentFiles(fl, images.length + files.length)),
       ]);
       const batch = await pickFiles(
         imported.files, images.length + files.length, attachmentBytes(images, files));

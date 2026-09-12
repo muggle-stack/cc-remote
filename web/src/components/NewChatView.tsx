@@ -9,7 +9,7 @@ import { Icon } from "../icons";
 import {
   modelsFor, parseSlash, type Catalog, type Effort, type Model,
 } from "../data";
-import { attachmentBytes } from "../img";
+import { attachmentBytes, snapshotAttachmentFiles } from "../img";
 import {
   readClipboardImport, resolveClipboardImport, insertClipboardText,
   type ClipboardImport,
@@ -312,7 +312,7 @@ export function NewChatView({ cwd, controlScopeKey,
       const [{ pickFiles }, imported] = await Promise.all([
         import("../attachment-import"),
         clipboard ? resolveClipboardImport(clipboard)
-          : Promise.resolve({ files: fl ? Array.from(fl) : null, errors: [] }),
+          : Promise.resolve(snapshotAttachmentFiles(fl, images.length + files.length)),
       ]);
       const batch = await pickFiles(
         imported.files, images.length + files.length, attachmentBytes(images, files));
