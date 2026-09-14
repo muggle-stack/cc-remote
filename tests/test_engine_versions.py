@@ -64,7 +64,7 @@ def test_claude_runtime_rejects_failed_version_probe(monkeypatch, tmp_path):
         claude_runtime.subprocess,
         "run",
         lambda *args, **kwargs: SimpleNamespace(
-            stdout="2.1.258 (Claude Code)\n", stderr="", returncode=1,
+            stdout="2.1.263 (Claude Code)\n", stderr="", returncode=1,
         ),
     )
 
@@ -72,12 +72,12 @@ def test_claude_runtime_rejects_failed_version_probe(monkeypatch, tmp_path):
         claude_runtime.probe_claude_cli_version(str(cli))
 
 
-@pytest.mark.parametrize("version", ["2.1.258", "2.1.258+build.1", "2.2.0", "3.0.0"])
+@pytest.mark.parametrize("version", ["2.1.263", "2.1.263+build.1", "2.2.0", "3.0.0"])
 def test_claude_runtime_accepts_supported_cli_versions(version):
     assert claude_runtime.validate_cli_version(version) == version
 
 
-@pytest.mark.parametrize("version", ["2.1.257", "2.1.258-beta.1"])
+@pytest.mark.parametrize("version", ["2.1.257", "2.1.263-beta.1"])
 def test_claude_runtime_rejects_unsupported_cli_versions(version):
     with pytest.raises(RuntimeError, match="run `claude update`"):
         claude_runtime.validate_cli_version(version)
@@ -95,7 +95,7 @@ def test_claude_runtime_inspection_enforces_cli_minimum(monkeypatch, tmp_path):
         claude_runtime, "probe_claude_cli_version", lambda _path: "2.1.257",
     )
 
-    with pytest.raises(RuntimeError, match="older than required 2.1.258"):
+    with pytest.raises(RuntimeError, match="older than required 2.1.263"):
         claude_runtime.inspect_claude_runtime(str(cli))
 
 

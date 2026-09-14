@@ -157,7 +157,7 @@ Wrapper 主动出站连接 Relay，设备不需要开放公网入站端口。Rel
 
 至少准备一个可用引擎：
 
-- **Claude**：日常 Claude Code `>= 2.1.258`，默认路径 `~/.local/bin/claude`。
+- **Claude**：日常 Claude Code `>= 2.1.263`，默认路径 `~/.local/bin/claude`。
   Wrapper 使用该 CLI；Python Agent SDK 固定为 `0.2.151`。
 - **Codex**：已登录的官方 CLI。共享控制需要同时支持
   `codex app-server daemon --help` 和 `codex app-server proxy --help`。

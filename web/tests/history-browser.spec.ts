@@ -1670,6 +1670,64 @@ test("async question dialog retains an IME draft when control becomes read-only"
   expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
 });
 
+for (const managed of [false, true]) {
+test(`Claude native compaction animates once and settles at the persisted boundary (${managed ? "maintenance" : "turn"})`, async ({ page }, testInfo) => {
+  const relay = await mockRightPanelRelay(page, {
+    engine: "claude", retained: false, historyReply: () => null,
+  });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  const sid = "layout-parent";
+  if (!managed) {
+    relay.emit({ type: "user_msg", sid, msg_id: "compact-request", prompt: "/compact" });
+    relay.emit({ type: "turn_binding", sid, msg_id: "compact-request", turn_id: "compact-turn" });
+    relay.emit({ type: "state", sid, state: "running" });
+  }
+  const start: PanelRelayEvent<Extract<ServerEvent, { type: "process" }>> = {
+    type: "process", sid, turn_id: managed ? undefined : "compact-turn", item_id: "compact-status",
+    kind: "compaction", phase: "start", status: "running", title: "压缩上下文",
+  };
+  relay.emit(start);
+  relay.emit(start);
+  const turn = page.locator(`[data-turn-id="${managed ? "compact-status" : "compact-request"}"]`);
+  const running = turn.locator(".process-compaction-running");
+  await expect(running).toHaveCount(1);
+  await expect(running).toBeVisible();
+  await expect(running).toHaveText("正在压缩上下文");
+  const bar = running.locator(".compact-motion i").first();
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await expect(bar).toHaveCSS("animation-name", "compact-fold");
+  const firstTransform = await bar.evaluate(node => getComputedStyle(node).transform);
+  await expect.poll(() => bar.evaluate(node => getComputedStyle(node).transform)).not.toBe(firstTransform);
+  await expect(running).toHaveCSS("border-radius", "16px");
+  await page.screenshot({ path: testInfo.outputPath("claude-compacting-dark.png") });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(bar).toHaveCSS("animation-name", "none");
+  const end: typeof start = { ...start, item_id: "native-boundary", phase: "end",
+    status: "succeeded", summary: "手动压缩 · 600,000 → 8,000 tokens", duration_ms: 20_000,
+    input: { compaction_started_id: "compact-status" } };
+  relay.emit(end);
+  relay.emit(end);
+  if (!managed) {
+    relay.emit({ type: "turn_end", sid, turn_id: "compact-turn", result: { subtype: "success", is_error: false } });
+    relay.emit({ type: "state", sid, state: "idle" });
+  }
+  await expect(running).toHaveCount(0);
+  const head = turn.locator(".turn-process-head");
+  await expect(head).toContainText("已处理");
+  if (await head.getAttribute("aria-expanded") === "false") await head.click();
+  const completed = turn.locator(".process-activity");
+  await expect(completed).toHaveCount(1);
+  await completed.locator("summary").click();
+  await expect(completed).toContainText("手动压缩 · 600,000 → 8,000 tokens");
+  await expect(completed).not.toContainText("compaction_started_id");
+  await expect(turn.locator(".turn-working")).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("claude-compacted-dark.png") });
+  expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toHaveLength(0);
+});
+}
+
 for (const staleProcess of [false, true]) {
 test(`turn regressions compaction steer clears phantom detail failure across history and reload (${staleProcess ? "foreign process" : "clock only"})`, async ({ page }, testInfo) => {
   const seedTurns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = [{

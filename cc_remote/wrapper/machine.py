@@ -112,7 +112,6 @@ from cc_remote.protocol import (
     MAX_BACKGROUND_PROCESS_CWD_CHARS,
     MAX_BACKGROUND_PROCESS_ITEMS,
     MAX_BACKGROUND_PROCESS_SUMMARY_CHARS,
-    MIN_AUTO_COMPACT_TOKENS,
     MAX_SAFE_WIRE_INTEGER,
     MAX_QUERY_QUEUE_BYTES, MAX_QUERY_QUEUE_ITEMS, PREVIEW_ASSET_MAX_BYTES,
     Error, Hello, Query, QueryQueueState, QueuedQueryDetail, QueuedQueryInfo,
@@ -7116,30 +7115,10 @@ class WrapperMachine:
         """Whether applying a smaller custom window first needs /compact."""
         total = cls._claude_cached_context_total(ctx)
         target = event.threshold_tokens if event.mode == "custom" else None
-        if target is None:
-            # ``auto`` and ``inherit`` reveal their effective threshold only in
-            # the replacement child. A prior custom window may already hold
-            # more context than that unknown target. Avoid reconnecting into an
-            # oversized first request; only a known context below the smallest
-            # selectable threshold can safely skip the boundary.
-            return total is None or total >= MIN_AUTO_COMPACT_TOKENS
-        if total is not None:
-            return total >= target
-        current_threshold = (
-            event.applied_threshold_tokens
-            if event.applied_mode == "custom" else
-            getattr(ctx.sdk, "effective_auto_compact_threshold_tokens", None)
-        )
-        # Unknown usage while reducing a proven larger window is not permission
-        # to gamble the next provider request. Compact conservatively once.
-        if (
-            isinstance(current_threshold, int)
-            and not isinstance(current_threshold, bool)
-        ):
-            return current_threshold >= target
-        # ``inherit``/``auto`` without a successful control reading is an
-        # unknown upper bound, not proof that the current context fits.
-        return event.applied_mode in {"inherit", "auto", None}
+        # Missing usage/capacity is not evidence of overflow. Apply the native
+        # CLI option without issuing a speculative model call; Claude will
+        # enforce its own threshold when the next normal turn starts.
+        return total is not None and target is not None and total >= target
 
     async def _compact_managed_claude_context(
         self,
@@ -7181,17 +7160,13 @@ class WrapperMachine:
                 native_sid = extract_session_id(message)
                 if native_sid and not ctx.session_id:
                     await self._capture_session_id(ctx, native_sid)
-                if (
-                    isinstance(message, SystemMessage)
-                    and message.subtype == "compact_boundary"
-                ):
-                    for event in translator.feed(message):
-                        if (
-                            isinstance(event, ProcessEvent)
-                            and event.kind == "compaction"
-                        ):
+                for event in translator.feed(message):
+                    if (isinstance(event, ProcessEvent)
+                            and event.kind == "compaction"):
+                        if (isinstance(message, SystemMessage)
+                                and message.subtype == "compact_boundary"):
                             compact_event = event
-                            await self._emit(ctx, event)
+                        await self._emit(ctx, event)
                 if isinstance(message, ResultMessage):
                     terminal = message
                     break
@@ -7218,7 +7193,10 @@ class WrapperMachine:
             raise RuntimeError(
                 "Claude reported compact success without compact_boundary")
 
-        self._invalidate_claude_context_usage(ctx)
+        # SdkHandle already replaced the old count at the native boundary.
+        # Do not discard its post-compaction sample again after the result.
+        if not isinstance(ctx.sdk, SdkHandle):
+            self._invalidate_claude_context_usage(ctx)
         ctx.claude_compaction_revision += 1
         log.info(
             "Claude native context compacted",
@@ -7328,8 +7306,8 @@ class WrapperMachine:
             except Exception as compact_exc:
                 ctx.auto_compact_phase = "blocked"
                 ctx.auto_compact_error = (
-                    "当前上下文高于目标窗口，但原生压缩未产生有效边界；"
-                    "仍保留原阈值，未发送新的模型请求。可以 Fork/新建会话后继续。"
+                    "尚未确认原生压缩完成，暂时保留原阈值。"
+                    "请检查压缩结果后重试。"
                 )
                 await self._persist_claude_session_controls(ctx)
                 event, _ = await self._publish_claude_auto_compact(
@@ -20763,6 +20741,9 @@ class WrapperMachine:
                     reason=reason,
                     fork=fork,
                 )
+                # One recovery is enough. A normal ResultMessage re-enables
+                # inspection; reopening the popover must not restart again.
+                expected_sdk.context_probe_suppressed = True
             except Exception as reconnect_exc:
                 log.warning(
                     "Claude context timeout recovery failed",
@@ -20830,8 +20811,7 @@ class WrapperMachine:
                 recent_reader = getattr(
                     ctx.sdk, "cached_recent_context_usage", None)
                 recent = recent_reader() if callable(recent_reader) else None
-                if (not _has_claude_context_total(recent)
-                        or recent.get("totalTokens") == 0):
+                if not _has_claude_context_total(recent):
                     recent = None
                 # A successful generation probe is newer than the transcript
                 # it resumed. Read disk only when no exact/live cache exists.
@@ -20855,6 +20835,7 @@ class WrapperMachine:
                 refresh = bool(
                     getattr(cmd, "refresh", False)
                     and not prefer_cached_claude
+                    and not getattr(ctx.sdk, "context_probe_suppressed", False)
                 )
                 refresh_readiness: Literal[
                     "ready", "busy", "external", "stale", "changed"
@@ -20957,20 +20938,18 @@ class WrapperMachine:
                                 )
                             )
                         work_claimed = self._claude_context_work_active(ctx)
-                        error = Error(
-                            code=ERR_BUSY if work_claimed else ERR_INTERNAL,
-                            message=(
-                                "Claude 已开始处理后台任务结果，将在空闲后重试。"
-                                if work_claimed else
-                                "上下文读取超时，Claude 会话已安全恢复，请重试。"
-                                if poisoned and recovered else
-                                "上下文读取暂不可用，请稍后重试。"
-                            ),
-                            request_id=getattr(cmd, "cmd_id", None),
-                            to=getattr(cmd, "client_id", None),
-                        )
-                        await self._emit(ctx, error)
-                        return error
+                        if work_claimed or poisoned and not recovered:
+                            error = Error(
+                                code=ERR_BUSY if work_claimed else ERR_INTERNAL,
+                                message="上下文读取暂不可用，请稍后重试。",
+                                request_id=getattr(cmd, "cmd_id", None),
+                                to=getattr(cmd, "client_id", None),
+                            )
+                            await self._emit(ctx, error)
+                            return error
+                        # A failed metadata read does not invalidate a valid
+                        # sample. Publish the cached reading below, keeping
+                        # its source and without surfacing a global error.
                     else:
                         context_source = "control"
                         exact = refreshed_usage

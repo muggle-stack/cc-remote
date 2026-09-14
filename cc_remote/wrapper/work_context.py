@@ -6,6 +6,7 @@ import os
 from typing import Any
 
 from cc_remote.protocol import MAX_SAFE_WIRE_INTEGER
+from cc_remote.wrapper.claude_compaction import compact_context_usage
 from cc_remote.wrapper.codex_sessions import codex_rollout_path
 from cc_remote.wrapper.stream import _bounded_jsonl_lines, transcript_path
 
@@ -116,6 +117,15 @@ def recover_claude_context_usage(
             record = json.loads(raw)
         except (UnicodeError, ValueError):
             continue
+        if (isinstance(record, dict)
+                and record.get("type") == "system"
+                and record.get("subtype") == "compact_boundary"
+                and record.get("isSidechain") is not True
+                and record.get("parentToolUseID") is None
+                and record.get("parent_tool_use_id") is None):
+            # Never resurrect a pre-compact assistant count when the latest
+            # boundary has no post count (older CLI versions can omit it).
+            return compact_context_usage(record)
         if (not isinstance(record, dict)
                 or record.get("type") != "assistant"
                 or record.get("isSidechain") is True

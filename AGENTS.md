@@ -70,7 +70,7 @@ attachment and optional App-control MCP tools are separate user choices.
   interrupt+drain verification after any upgrade (`SdkHandle.preflight()` guards
   the exact verified patch at startup).
 - **Claude Code is the user's daily CLI, not the SDK bundle**: Claude Code
-  `>=2.1.258` is required and checked before a Claude session starts. The wrapper
+  `>=2.1.263` is required and checked before a Claude session starts. The wrapper
   defaults `CLAUDE_BIN` to `~/.local/bin/claude` and passes that path explicitly
   to the SDK. An empty value keeps this default; only another absolute path may
   override it. Keep that CLI updated and signed in before starting the wrapper.

@@ -50,7 +50,7 @@ class _FakeClaudeClient:
         return {"model": self.options.model or "claude-mythos-5"}
 
     async def _send_control_request(self, request, timeout):
-        assert request == {"subtype": "get_context_usage"}
+        assert request == {"subtype": "get_context_usage", "detail": "summary"}
         assert timeout == 5.0
         return await self.get_context_usage()
 
@@ -404,9 +404,9 @@ def test_claude_model_switch_invalidates_serialized_context_generation(
         release_context: asyncio.Event
 
         async def _send_control_request(self, request, timeout):
-            assert request == {"subtype": "get_context_usage"}
+            assert request == {"subtype": "get_context_usage", "detail": "summary"}
             if self.block_context:
-                assert timeout == 15.0
+                assert timeout == 60.0
                 self.context_started.set()
                 await self.release_context.wait()
             else:
@@ -668,7 +668,7 @@ def test_resumed_claude_connect_skips_the_startup_context_probe(
         probes = 0
 
         async def _send_control_request(self, request, timeout):
-            assert request == {"subtype": "get_context_usage"}
+            assert request == {"subtype": "get_context_usage", "detail": "summary"}
             assert timeout == 5.0
             type(self).probes += 1
             raise Exception("Control request timeout: get_context_usage")
@@ -703,7 +703,7 @@ def test_fresh_claude_probe_timeout_replaces_generation_once(monkeypatch):
         probes = 0
 
         async def _send_control_request(self, request, timeout):
-            assert request == {"subtype": "get_context_usage"}
+            assert request == {"subtype": "get_context_usage", "detail": "summary"}
             assert timeout == 5.0
             type(self).probes += 1
             raise Exception("Control request timeout: get_context_usage")
@@ -721,7 +721,7 @@ def test_fresh_claude_probe_timeout_replaces_generation_once(monkeypatch):
         assert ProbeTimeout.created[0].disconnected is True
         assert handle.client is ProbeTimeout.created[1]
         assert handle.control_plane_failed is False
-        assert handle.context_probe_suppressed is False
+        assert handle.context_probe_suppressed is True
 
         await handle.query("fresh child is ready")
         assert ProbeTimeout.created[1].prompt == "fresh child is ready"
@@ -735,11 +735,11 @@ def test_claude_context_timeout_poisoning_is_generation_scoped(monkeypatch):
         fail_context = False
 
         async def _send_control_request(self, request, timeout):
-            assert request == {"subtype": "get_context_usage"}
+            assert request == {"subtype": "get_context_usage", "detail": "summary"}
             if self.fail_context:
-                assert timeout == 15.0
+                assert timeout == 60.0
                 raise Exception("Control request timeout: get_context_usage")
-            assert timeout in {5.0, 15.0}
+            assert timeout in {5.0, 60.0}
             return {"model": "claude-mythos-5", "totalTokens": 123}
 
     async def go():
@@ -807,9 +807,9 @@ def test_autocompact_reconnect_drops_previous_context_generation(
         fail_context = False
 
         async def _send_control_request(self, request, timeout):
-            assert request == {"subtype": "get_context_usage"}
+            assert request == {"subtype": "get_context_usage", "detail": "summary"}
             if self.fail_context:
-                assert timeout == 15.0
+                assert timeout == 60.0
                 raise Exception("Control request timeout: get_context_usage")
             assert timeout == 5.0
             return {
@@ -861,9 +861,9 @@ def test_claude_context_read_serializes_query_acceptance(monkeypatch):
         release_context: asyncio.Event
 
         async def _send_control_request(self, request, timeout):
-            assert request == {"subtype": "get_context_usage"}
+            assert request == {"subtype": "get_context_usage", "detail": "summary"}
             if self.block_context:
-                assert timeout == 15.0
+                assert timeout == 60.0
                 self.context_started.set()
                 await self.release_context.wait()
             else:

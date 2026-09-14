@@ -90,7 +90,7 @@ class _AutoCompactSdk:
         self,
         *,
         fail_first_reconnect: bool = False,
-        context_total: int | None = 0,
+        context_total: int | None = None,
     ):
         self.auto_compact_mode = "inherit"
         self.auto_compact_threshold_tokens = None
@@ -584,7 +584,7 @@ def test_lowering_never_reconnects_without_a_real_compact_boundary():
     asyncio.run(run())
 
 
-def test_unknown_auto_target_compacts_nontrivial_context_before_reconnect():
+def test_unknown_auto_target_defers_compaction_to_native_cli():
     async def run():
         sdk = _CompactingAutoCompactSdk(context_total=200_000)
         machine, _transport, _ctx = _machine_with_sdk(sdk)
@@ -594,7 +594,7 @@ def test_unknown_auto_target_compacts_nontrivial_context_before_reconnect():
             mode="auto",
         ))
 
-        assert sdk.queries == ["/compact"]
+        assert sdk.queries == []
         assert sdk.reconnects[0][0:2] == ("auto", None)
         assert event.pending is False
         assert event.applied_mode == "auto"
@@ -602,7 +602,7 @@ def test_unknown_auto_target_compacts_nontrivial_context_before_reconnect():
     asyncio.run(run())
 
 
-def test_unknown_legacy_window_compacts_once_before_adopting_default():
+def test_unknown_legacy_usage_does_not_force_compaction():
     async def run():
         sdk = _CompactingAutoCompactSdk(context_total=None)
         sdk.auto_compact_mode = "custom"
@@ -615,7 +615,7 @@ def test_unknown_legacy_window_compacts_once_before_adopting_default():
             _ctx, reason="legacy default migration",
         )
 
-        assert sdk.queries == ["/compact"]
+        assert sdk.queries == []
         assert sdk.reconnects[0][0:2] == ("custom", 500_000)
         assert applied is True
         assert event.pending is False
@@ -645,7 +645,7 @@ def test_external_growth_reloads_under_applied_window_before_lowering():
         ]
         assert sdk.reconnects[0][2]["preserve_model"] is True
         assert sdk.reconnects[1][2]["apply_pending_auto_compact"] is True
-        assert sdk.queries == ["/compact"]
+        assert sdk.queries == []
         assert event.pending is False
         assert ctx.needs_reload is False
 
@@ -834,7 +834,7 @@ def test_busy_or_queued_claude_context_refresh_is_deferred():
     asyncio.run(run())
 
 
-def test_context_control_timeout_preserves_cache_but_returns_error():
+def test_context_control_timeout_publishes_last_valid_sample():
     class ContextSdk(_AutoCompactSdk):
         control_plane_failed = False
         context_probe_suppressed = False
@@ -875,14 +875,14 @@ def test_context_control_timeout_preserves_cache_but_returns_error():
             client_id="browser-one",
         ))
 
-        assert isinstance(report, Error)
-        assert report.code == "internal"
+        assert isinstance(report, ContextReport)
+        assert report.source == "recent_turn"
+        assert report.total_tokens == 88_259
+        assert report.max_tokens == 500_000
+        assert report.categories == []
         assert report.request_id == "context-command"
-        assert report.to == "browser-one"
         assert transport.sent[-1] == report
-        assert not any(
-            isinstance(item, ContextReport) for item in transport.sent
-        )
+        assert not any(isinstance(item, Error) for item in transport.sent)
         assert sdk.context_calls == 1
         assert sdk.cached_context_usage()["totalTokens"] == 80_000
         assert sdk.cached_recent_context_usage()["totalTokens"] == 88_259
@@ -890,7 +890,7 @@ def test_context_control_timeout_preserves_cache_but_returns_error():
     asyncio.run(run())
 
 
-def test_context_control_timeout_without_cache_reports_error():
+def test_context_control_timeout_without_cache_reports_unavailable():
     class ContextSdk(_AutoCompactSdk):
         control_plane_failed = False
         context_probe_suppressed = False
@@ -914,13 +914,11 @@ def test_context_control_timeout_without_cache_reports_error():
             client_id="browser-one",
         ))
 
-        assert isinstance(report, Error)
-        assert report.code == "internal"
+        assert isinstance(report, ContextReport)
+        assert report.available is False
         assert report.request_id == "context-command"
-        assert report.to == "browser-one"
         assert transport.sent[-1] == report
-        assert not any(
-            isinstance(item, ContextReport) for item in transport.sent)
+        assert not any(isinstance(item, Error) for item in transport.sent)
 
     asyncio.run(run())
 
@@ -949,17 +947,16 @@ def test_malformed_context_control_response_is_not_reported_as_success():
             client_id="browser-one",
         ))
 
-        assert isinstance(report, Error)
-        assert report.code == "internal"
+        assert isinstance(report, ContextReport)
+        assert report.source == "recent_turn"
+        assert report.total_tokens == 123
         assert report.request_id == "context-malformed"
-        assert report.to == "browser-one"
-        assert not any(
-            isinstance(item, ContextReport) for item in transport.sent)
+        assert not any(isinstance(item, Error) for item in transport.sent)
 
     asyncio.run(run())
 
 
-def test_poisoned_context_generation_reconnects_once_then_can_refresh():
+def test_poisoned_context_recovery_waits_for_normal_traffic_before_refresh():
     class ContextSdk(_AutoCompactSdk):
         control_plane_failed = False
         context_probe_suppressed = False
@@ -1003,9 +1000,10 @@ def test_poisoned_context_generation_reconnects_once_then_can_refresh():
             client_id="browser-one",
         ))
 
-        assert isinstance(failed, Error)
+        assert isinstance(failed, ContextReport)
+        assert failed.available is False
         assert failed.request_id == "context-timeout"
-        assert "安全恢复" in failed.message
+        assert sdk.context_probe_suppressed is True
         assert len(sdk.reconnects) == 1
         assert sdk.reconnects[0][2] == {
             "resume_id": SESSION_ID,
@@ -1014,6 +1012,13 @@ def test_poisoned_context_generation_reconnects_once_then_can_refresh():
             "fork": False,
         }
 
+        deferred = await machine._handle_get_context(GetContext(
+            sid=SESSION_ID, refresh=True, cmd_id="context-reopen"))
+        assert deferred.available is False
+        assert sdk.context_calls == 1
+        assert len(sdk.reconnects) == 1
+        # SdkHandle clears suppression on the next successful ResultMessage.
+        sdk.context_probe_suppressed = False
         report = await machine._handle_get_context(GetContext(
             sid=SESSION_ID,
             refresh=True,
@@ -1027,7 +1032,7 @@ def test_poisoned_context_generation_reconnects_once_then_can_refresh():
         assert report.max_tokens == 500_000
         assert report.request_id == "context-retry"
         assert len(sdk.reconnects) == 1
-        assert transport.sent[-2:] == [failed, report]
+        assert transport.sent[-3:] == [failed, deferred, report]
 
     asyncio.run(run())
 

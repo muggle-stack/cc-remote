@@ -182,7 +182,7 @@ development/builds use **Python 3.13 and Node 24**, matching CI and [`.nvmrc`](.
 
 Prepare at least one working engine:
 
-- **Claude:** daily Claude Code `>= 2.1.258`, normally at `~/.local/bin/claude`.
+- **Claude:** daily Claude Code `>= 2.1.263`, normally at `~/.local/bin/claude`.
   Wrapper launches that CLI; the Python Agent SDK is pinned to `0.2.151`.
 - **Codex:** an authenticated official CLI. Shared control requires both
   `codex app-server daemon --help` and `codex app-server proxy --help`.

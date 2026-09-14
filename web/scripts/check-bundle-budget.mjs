@@ -32,8 +32,10 @@ const DIST = resolve(import.meta.dirname, "../dist");
 // Native subagent continuation metadata and its persistent timeline cue add
 // <1 KiB compressed. Allocate that increment without changing the raw-byte,
 // entry or initial-request caps; no new startup dependency is introduced.
+// Native compaction animation and exact boundary replacement add <1 KiB of
+// startup JS. Keep entry, compressed-size and request-count limits unchanged.
 const MAX_ENTRY_BYTES = 537 * 1024;
-const MAX_INITIAL_BYTES = 937 * 1024;
+const MAX_INITIAL_BYTES = 938 * 1024;
 const MAX_INITIAL_GZIP_BYTES = 281 * 1024;
 const MAX_INITIAL_JS_FILES = 4;
 

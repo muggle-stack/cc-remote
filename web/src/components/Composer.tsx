@@ -793,7 +793,8 @@ export function Composer(p: Props) {
   // A background read may temporarily return billing usage or no estimate.
   // Keep the last native reading until another arrives. Runtime invalidation
   // already clears both reports when the session's model or capacity changes.
-  const exactContextReport = currentContextReport?.source !== "recent_turn" && currentContextReport
+  const exactContextReport = currentContextReport
+    && (p.engine !== "codex" || currentContextReport.source !== "recent_turn")
     ? currentContextReport : retainedContextReport ?? currentContextReport;
   const codexEstimate = p.engine !== "codex"
     || exactContextReport?.source === "native_estimate";
