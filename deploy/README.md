@@ -235,6 +235,15 @@ state. Public TLS + WebSocket termination stays with your existing front.
 and proxies the `/ws` WebSocket to `127.0.0.1:8765`. Keep it loopback-only:
 the relay trusts forwarded transport metadata only from loopback peers.
 
+**Proxy on a non-loopback address.** If your front end cannot reach the relay
+over loopback — a Tailscale/LAN address, a Docker bridge gateway — add those
+addresses to `FORWARDED_ALLOW_IPS` (comma-separated IPs or CIDR networks).
+Without it uvicorn ignores `X-Forwarded-Proto`, the relay computes an `http`
+request target while the browser's Origin says `https`, and every WebSocket is
+rejected with 403 while page loads and `/api/*` keep working. Only your own
+reverse proxy's addresses belong there: a trusted peer may claim any client IP
+and any scheme, so the relay must stay unreachable from anywhere else.
+
 **Mainland-China mirrors.** The Docker build defaults to PyPI.org. Behind the
 GFW, build with Aliyun as the primary index and TUNA as the fallback (both
 carry the sdist-only `http-ece` wheel):

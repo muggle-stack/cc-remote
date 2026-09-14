@@ -6,6 +6,10 @@
 # deliberately trusts forwarded transport metadata only from loopback peers, so
 # nginx MUST run on the same host and proxy to the relay's loopback address
 # (with the Docker compose file, that is 127.0.0.1:8765 on host networking).
+# If nginx instead reaches the relay from a non-loopback address (Tailscale,
+# LAN, a Docker bridge gateway), add ONLY that address to the relay's
+# FORWARDED_ALLOW_IPS; otherwise uvicorn ignores the proxy headers above and
+# every WebSocket is rejected with 403.
 #
 # Bootstrap on a fresh host:
 #   1. Point an A/AAAA record for cc-remote.example.com at this VPS and open

@@ -4,6 +4,11 @@
 
 ## 未发布
 
+- 反向代理若从非 loopback 地址访问 relay（Tailscale、内网地址、Docker 网桥
+  网关），可通过 `FORWARDED_ALLOW_IPS` 追加信任的 IP 或 CIDR 网段（内置的
+  loopback 默认值始终保留）。此前只信任 loopback 代理，uvicorn 会忽略
+  `X-Forwarded-Proto`，导致页面和 `/api/*` 正常、WebSocket 全部返回 403。
+  通配符和非法条目在启动时直接拒绝，而不是静默不生效。
 - 整合 DSH 分支中的通用改进，保留 Claude/Codex 双引擎（protocol v66）：圆角
   Goal 小窗等待原生保存确认，恢复手机键盘收起后的布局；目录链接接入 `/open`，
   XLSX 可预览已保存的单元格、切换工作表并下载原文件。

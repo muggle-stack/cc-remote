@@ -74,7 +74,11 @@ a separate choice; sharing alone does not authorize them.
   private/loopback IPs on `RELAY_PORT`, and their scheme/host/port must match
   the effective request target. Cookie `Secure` follows that trusted request
   transport, never the caller's Origin. Uvicorn trusts forwarded transport
-  metadata only from loopback Caddy. Never put tokens in URLs or protocol
+  metadata only from loopback Caddy, plus any address listed in
+  `FORWARDED_ALLOW_IPS` (comma-separated IPs/CIDRs appended to the loopback
+  defaults) — only for a proxy that cannot reach the relay over loopback; a
+  trusted peer can claim any client IP and scheme, so never use `*`/`/0` and
+  keep direct relay access restricted. Never put tokens in URLs or protocol
   message bodies; logging redacts token/password fields.
 - **History scroll anchoring lives in `@tanstack/virtual-core`, not in
   `react-virtual`**: `web/package.json` pins `@tanstack/react-virtual`, but

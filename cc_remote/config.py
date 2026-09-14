@@ -7,6 +7,7 @@ only env changes.
 """
 from __future__ import annotations
 
+import ipaddress
 import math
 import json
 import os
@@ -54,6 +55,29 @@ def _bool(key: str, default: bool = False) -> bool:
     if value is None or not value.strip():
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Loopback peers are always trusted to supply X-Forwarded-*: the bundled relay
+# binds loopback behind a same-host Caddy/nginx. Extra entries are opt-in.
+LOOPBACK_PROXY_IPS = ("127.0.0.1", "::1")
+
+
+def _forwarded_allow_ips() -> str:
+    """Trusted proxy allowlist for uvicorn's proxy-headers middleware.
+
+    Keeps the loopback defaults and appends FORWARDED_ALLOW_IPS entries. An
+    entry may be a single IP or a CIDR network. Order is preserved and
+    duplicates (including the loopback defaults) are dropped so an operator
+    cannot accidentally widen or reorder what is already trusted.
+    """
+    entries: list[str] = list(LOOPBACK_PROXY_IPS)
+    seen = set(entries)
+    for raw in _env("FORWARDED_ALLOW_IPS", "").split(","):
+        entry = raw.strip()
+        if entry and entry not in seen:
+            seen.add(entry)
+            entries.append(entry)
+    return ",".join(entries)
 
 
 def device_config_path() -> Path:
@@ -196,6 +220,15 @@ class RelayConfig:
     # their mandatory first Hello frame.
     max_clients: int = field(default_factory=lambda: _int("MAX_CLIENTS", 8))
     client_hello_timeout: float = field(default_factory=lambda: _float("CLIENT_HELLO_TIMEOUT", 10.0))
+    # Extra peers allowed to supply X-Forwarded-Proto / X-Forwarded-For, appended
+    # to the built-in loopback defaults (comma-separated IPs or CIDR networks).
+    # Only for a same-host proxy the relay is not reachable without, and only
+    # because uvicorn otherwise ignores the headers when that proxy connects
+    # over a non-loopback address (Tailscale, LAN, Docker bridge gateway). A
+    # trusted peer can name itself as any client and claim any scheme, so direct
+    # relay access must stay restricted and this list must never widen to a
+    # network the relay is publicly reachable from. Never "*".
+    forwarded_allow_ips: str = field(default_factory=_forwarded_allow_ips)
     # Exact browser Origin accepted for cookie-authenticated WebSockets, for
     # example https://remote.example.com (no path or trailing slash).
     public_origin: str = field(default_factory=lambda: _env("PUBLIC_ORIGIN", ""))
@@ -461,6 +494,43 @@ def validate_relay_config(cfg: RelayConfig) -> None:
         errors.append("WS_MAX_SIZE_BYTES must be between 12582912 and 67108864")
     if cfg.client_queue_bytes < cfg.ws_max_size_bytes:
         errors.append("CLIENT_QUEUE_BYTES must be at least WS_MAX_SIZE_BYTES")
+
+    # Validate every operator-supplied entry against uvicorn's own parse rules.
+    # uvicorn turns anything that is not a valid IP or CIDR into a literal that
+    # is compared against a peer address, so a typo or a hostname would start
+    # cleanly and then silently never match -- the exact undiagnosable failure
+    # this setting exists to fix. Reject instead of silently trusting less.
+    entries = [
+        entry.strip() for entry in cfg.forwarded_allow_ips.split(",") if entry.strip()
+    ]
+    if len(entries) > 64:
+        errors.append(
+            "FORWARDED_ALLOW_IPS must not exceed 64 trusted proxies in total "
+            "(the loopback defaults count toward this)"
+        )
+    for entry in entries:
+        if entry == "*":
+            errors.append(
+                "FORWARDED_ALLOW_IPS must not be '*': it would trust every peer "
+                "to supply X-Forwarded-Proto and X-Forwarded-For"
+            )
+            continue
+        try:
+            network = (
+                ipaddress.ip_network(entry) if "/" in entry
+                else ipaddress.ip_address(entry)
+            )
+        except ValueError:
+            errors.append(
+                f"FORWARDED_ALLOW_IPS entry {entry!r} is not a valid IP address "
+                "or CIDR network"
+            )
+            continue
+        if getattr(network, "prefixlen", None) == 0:
+            errors.append(
+                f"FORWARDED_ALLOW_IPS entry {entry!r} trusts every peer; "
+                "list only the addresses your reverse proxy connects from"
+            )
 
     push_values = (
         cfg.push_vapid_public_key,

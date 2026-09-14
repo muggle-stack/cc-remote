@@ -26,7 +26,7 @@ def main() -> None:
         log_config=uvicorn_log_config(),
         access_log=False,
         proxy_headers=True,
-        forwarded_allow_ips="127.0.0.1,::1",
+        forwarded_allow_ips=cfg.forwarded_allow_ips,
         ws_max_size=cfg.ws_max_size_bytes,
         ws_max_queue=2,
     )
