@@ -15,6 +15,32 @@ from cc_remote.claude_service.client import RemoteClient
 from cc_remote.claude_service.server import Service
 
 
+def test_private_socket_registration_and_explicit_override(tmp_path, monkeypatch):
+    from cc_remote.config import WrapperConfig, _claude_service_socket, wrapper_config
+
+    monkeypatch.setenv("CC_REMOTE_STATE_DIR", str(tmp_path))
+    monkeypatch.delenv("CC_REMOTE_CLAUDE_SERVICE_SOCKET", raising=False)
+    assert _claude_service_socket() == ""
+    registration = tmp_path / "claude-service.json"
+    registration.write_text('{"socket": "/private/service.sock"}')
+    registration.chmod(0o600)
+    assert _claude_service_socket() == "/private/service.sock"
+    assert wrapper_config().claude_service_socket == "/private/service.sock"
+    assert WrapperConfig().claude_service_socket == ""
+    monkeypatch.setenv("CC_REMOTE_CLAUDE_SERVICE_SOCKET", "/override.sock")
+    assert _claude_service_socket() == "/override.sock"
+    monkeypatch.setenv("CC_REMOTE_CLAUDE_SERVICE_SOCKET", "")
+    assert _claude_service_socket() == ""
+    monkeypatch.delenv("CC_REMOTE_CLAUDE_SERVICE_SOCKET")
+    registration.chmod(0o644)
+    with pytest.raises(ValueError):
+        _claude_service_socket()
+    registration.unlink()
+    registration.symlink_to(tmp_path / "missing.json")
+    with pytest.raises(OSError):
+        _claude_service_socket()
+
+
 class FakeClient:
     def __init__(self, *, options, **kwargs):
         self.options = options

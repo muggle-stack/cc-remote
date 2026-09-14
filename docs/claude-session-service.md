@@ -49,6 +49,15 @@ CC_REMOTE_CLAUDE_SERVICE_SOCKET=<private-wrapper-state>/claude-service/service.s
 ```
 
 An empty setting retains the previous in-process SDK behavior. The service
+can also be registered without editing a root-owned environment file: add
+`--register-wrapper "<private-wrapper-state>"` to the installer command. This
+writes a private `claude-service.json` inside the Wrapper's `CC_REMOTE_STATE_DIR`
+(normally `~/.cc-remote`). The socket environment variable takes precedence;
+an explicitly empty value disables the registration. Merely starting the service
+without either configuration does not enable it for the Wrapper. Registration
+is read at Wrapper startup, so the first-migration drain still applies.
+
+The service
 directory must belong to the Wrapper user and be mode 0700; its socket and
 journals are private. Both ends check the local protocol and exact SDK version.
 Profile config roots are part of session identity, so equal native UUIDs in

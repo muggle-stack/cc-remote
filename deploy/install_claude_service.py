@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import plistlib
 import subprocess
@@ -101,11 +102,28 @@ def install(source: Path, state_dir: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", type=Path, required=True)
+    parser.add_argument("--register-wrapper", type=Path,
+                        help="write an explicit registration inside this Wrapper state directory")
     args = parser.parse_args()
     if os.getuid() == 0:
         parser.error("run as the Wrapper user, not root")
     source = Path(__file__).resolve().parents[1]
-    install(source, args.state_dir.expanduser().absolute())
+    state_dir = args.state_dir.expanduser().absolute()
+    install(source, state_dir)
+    if args.register_wrapper is not None:
+        directory = args.register_wrapper.expanduser().absolute()
+        private_directory(directory)
+        destination = directory / "claude-service.json"
+        payload = {"socket": str(state_dir / "service.sock")}
+        if destination.exists() or destination.is_symlink():
+            if (destination.is_symlink() or destination.stat().st_uid != os.getuid()
+                    or destination.stat().st_mode & 0o077
+                    or json.loads(destination.read_text()) != payload):
+                raise RuntimeError("existing Claude registration differs; inspect it before changing it")
+        else:
+            fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w") as out:
+                json.dump(payload, out)
 
 
 if __name__ == "__main__":

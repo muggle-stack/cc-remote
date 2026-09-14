@@ -147,6 +147,29 @@ def _claude_profiles_json() -> str:
     return payload.strip()
 
 
+def _claude_service_socket() -> str:
+    explicit = os.environ.get("CC_REMOTE_CLAUDE_SERVICE_SOCKET")
+    if explicit is not None:
+        return explicit.strip()
+    # A system-managed Wrapper can use its user's private registration without
+    # granting that user permission to rewrite root-owned service credentials.
+    directory = Path(_env("CC_REMOTE_STATE_DIR", str(Path.home() / ".cc-remote"))).expanduser()
+    path = directory / "claude-service.json"
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return ""
+    with os.fdopen(fd, "r") as source:
+        info = os.fstat(source.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o077 or info.st_size > 4096):
+            raise ValueError("Claude service registration must be a private user-owned file")
+        payload = json.loads(source.read(4097))
+    if not isinstance(payload, dict) or not isinstance(payload.get("socket"), str):
+        raise ValueError("invalid Claude service registration")
+    return payload["socket"]
+
+
 def _default_device_db_path() -> str:
     push_path = _env("PUSH_DB_PATH", "").strip()
     if push_path:
@@ -558,7 +581,9 @@ def validate_relay_config(cfg: RelayConfig) -> None:
 
 
 def wrapper_config() -> WrapperConfig:
-    return WrapperConfig()
+    # Read the opt-in installation registration only at actual Wrapper startup;
+    # constructing test/development config objects must not attach live workers.
+    return WrapperConfig(claude_service_socket=_claude_service_socket())
 
 
 def validate_wrapper_config(cfg: WrapperConfig) -> None:
