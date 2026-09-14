@@ -37,6 +37,8 @@ Multi-session model:
 """
 from __future__ import annotations
 
+from cc_remote.wrapper import claude_service
+
 import asyncio
 import base64
 import codecs
@@ -6282,6 +6284,7 @@ class WrapperMachine:
             lambda error: self._on_claude_message_pump_failure(ctx, error))
         sdk.lifecycle_reset_callback = (
             lambda: self._reset_claude_task_lifecycle(ctx))
+        claude_service.configure(self, ctx)
 
     @staticmethod
     def _copy_claude_runtime_options(
@@ -8914,6 +8917,11 @@ class WrapperMachine:
             # first; recovery may temporarily exceed the normal resident cap
             # because those native turns are already consuming daemon capacity.
             await self._restore_codex_owned_turns()
+            try:
+                await claude_service.restore(self)
+            except Exception as exc:
+                log.warning("Claude service recovery unavailable; no private SDK fallback",
+                            error_type=type(exc).__name__)
             ctx = (
                 self._ctx_by_sid(bootstrap_wire_sid)
                 if bootstrap_wire_sid else None
@@ -9142,7 +9150,11 @@ class WrapperMachine:
             for c in list(self.sessions.values()):
                 disconnected = False
                 try:
-                    await c.sdk.disconnect()
+                    detach = getattr(c.sdk, "detach_for_shutdown", None)
+                    if detach is not None:
+                        await detach()
+                    else:
+                        await c.sdk.disconnect()
                     disconnected = True
                 except Exception:
                     pass
@@ -12880,6 +12892,14 @@ class WrapperMachine:
                 "default_config_dir": str(
                     (Path.home() / ".claude").resolve(strict=False)),
             }
+        service_owners = {
+            identity for ctx in self.sessions.values()
+            if ctx.engine == "claude"
+            and (identity := getattr(
+                getattr(ctx.sdk, "client", None), "owner_identity", None)) is not None
+        }
+        if service_owners:
+            profile_kwargs["owner_identities"] = service_owners
         scan = await asyncio.to_thread(
             claude_session_holders,
             paths,
@@ -21477,7 +21497,18 @@ class WrapperMachine:
                             item_commands=ctx.claude_item_commands,
                         )
                         ctx.claude_background_translator = translator
-                    for event in translator.feed(message):
+                    events = translator.feed(message)
+                    claude_service.preserve_timestamp(events, message)
+                    projection = ctx.claude_service_background_replay
+                    if projection is not None:
+                        projection.add(events)
+                        if (getattr(message, "_cc_service_seq", 0) >= projection.head
+                                or is_result):
+                            events = projection.drain()
+                            ctx.claude_service_background_replay = None
+                        else:
+                            events = []
+                    for event in events:
                         if isinstance(event, TurnEnd):
                             # Persist the real autonomous boundary without
                             # inventing another visible main-turn completion.
@@ -24343,6 +24374,22 @@ class WrapperMachine:
         to: str | None = None,
     ) -> str | list[str]:
         """Run one question while the caller owns ``ctx.ask_lock``."""
+        service_client = getattr(ctx.sdk, "client", None)
+        if ask_id is None and hasattr(service_client, "description"):
+            from cc_remote.claude_service.client import callback_identity
+
+            origin = callback_identity.get()
+            try:
+                origin = f"mcp-{ctx.sdk.ask_server.request_context.request_id}"
+            except (AttributeError, LookupError):
+                pass
+            if origin is not None:
+                stable = json.dumps([service_client.id, origin, question, options, header],
+                                    ensure_ascii=False, sort_keys=True)
+                ask_id = "ask-" + hashlib.sha256(stable.encode()).hexdigest()[:32]
+                cached = await service_client.call("question_answer", {"ask_id": ask_id})
+                if cached["found"]:
+                    return cached["answer"]
         # ask_id is an identity, not a downstream sequence.  Consuming next_seq
         # here would leave an invisible hole before _emit assigns AskUser.seq;
         # reconnect replay would then appear to have lost a frame.
@@ -24767,6 +24814,15 @@ class WrapperMachine:
             ):
                 return await reject_locked(
                     ERR_BAD_PROMPT, "回答不属于该问题的可选项")
+
+            service_client = getattr(ctx.sdk, "client", None)
+            if hasattr(service_client, "description"):
+                try:
+                    await service_client.call("remember_answer", {
+                        "ask_id": cmd.ask_id, "answer": normalized,
+                    }, request_id="question-answer-" + cmd.ask_id, timeout=5)
+                except (ConnectionError, RuntimeError, TimeoutError):
+                    return await reject_locked(ERR_INTERNAL, "回答尚未送达会话，请稍后重试。")
 
             await self._close_pending_ask_locked(
                 ctx,
@@ -34818,7 +34874,9 @@ class WrapperMachine:
                      service_tier: Optional[str] = None,
                      space: str = "code",
                      work_id: Optional[str] = None,
-                     raise_on_failure: bool = False) -> Optional[SessionContext]:
+                     raise_on_failure: bool = False,
+                     _service_recovering: bool = False,
+                     _service_worker_id: str | None = None) -> Optional[SessionContext]:
         """Create a SessionContext, connect its SDK subprocess, load history.
         Returns the ctx (added to the pool under its real or temp key) or None
         on legacy-route failure (an Error has been emitted). NewSession uses
@@ -34977,7 +35035,7 @@ class WrapperMachine:
         # non-focused session (tear down its subprocess; the client keeps its
         # runtime and re-spawns on re-focus). Only reject if ALL are running —
         # so merely browsing between sessions never wedges you.
-        if not bootstrap and len(self.sessions) >= self.cfg.max_concurrent_sessions:
+        if not bootstrap and not _service_recovering and len(self.sessions) >= self.cfg.max_concurrent_sessions:
             victim = next((k for k, c in self.sessions.items()
                            if k != self.focused_sid and c.state == "idle"
                            and not c.btw and not c.queued_queries
@@ -35605,6 +35663,9 @@ class WrapperMachine:
         # handles approvals through its own app-server protocol, so skip it.
         if engine != "codex" and broker_handle is None:
             self._configure_claude_sdk_callbacks(ctx, ctx.sdk)
+            ctx.sdk.service_defer_events = True
+            if _service_worker_id is not None:
+                ctx.sdk.service_metadata["service_id"] = _service_worker_id
         elif engine == "codex":
             ctx.sdk.approval_callback = (
                 lambda method, params: self._on_codex_approval(
@@ -35890,7 +35951,11 @@ class WrapperMachine:
 
         # cc model is a runtime switch on the live subprocess (set_model), so apply
         # a pre-selected model now that we're connected. codex was set pre-connect.
-        if model and engine != "codex":
+        service_attached = bool(getattr(
+            getattr(ctx.sdk, "client", None), "description", {}).get("attached"))
+        if service_attached:
+            model = getattr(ctx.sdk, "model", None)
+        if model and engine != "codex" and not service_attached:
             try:
                 await ctx.sdk.set_model(model)
             except Exception as e:
@@ -35939,6 +36004,13 @@ class WrapperMachine:
         )
         self.sessions[key] = ctx
         ctx.key = key
+        if service_attached and not ctx.session_id:
+            old_key = ctx.sdk.client.description["metadata"].get("key")
+            if isinstance(old_key, str) and old_key.startswith("tmp-"):
+                self.sessions.pop(key)
+                key = old_key
+                ctx.key = key
+                self.sessions[key] = ctx
         if resume_id:
             route_sid = key if engine in {"claude", "codex"} else resume_id
             self._watch_session(route_sid)
@@ -35988,6 +36060,8 @@ class WrapperMachine:
                 await self._publish_claude_auto_compact(ctx, force=True)
         log.info("session spawned", resume=resume_id, cwd=target_cwd, key=key,
                  resident=len(self.sessions))
+        if engine == "claude" and broker_handle is None:
+            await claude_service.activate(self, ctx)
         return ctx
 
     async def _spawn_btw(
@@ -37020,9 +37094,22 @@ class WrapperMachine:
         files: Optional[list] = None,
         *,
         launch_receipt: asyncio.Future[bool] | None = None,
+        _recover_service: bool = False,
     ) -> None:
         is_codex = ctx.engine == "codex"
         is_codex_shared = self._codex_shared_affinity(ctx)
+        service_client = getattr(ctx.sdk, "client", None)
+        service_replay = (
+            claude_service.ReplayProjection(service_client.description["head"])
+            if _recover_service else None
+        )
+        if not is_codex:
+            ctx.sdk.service_turn_metadata = {
+                "id": ctx.active_msg_id, "prompt": prompt,
+                "images": images,
+                "files": ([{"filename": item.get("filename", "attachment")}
+                           for item in (files or [])] or None),
+            }
         display_prompt = prompt
         ctx.translator = (CodexStreamTranslator(self.cfg.tool_result_max) if is_codex
                           else StreamTranslator(
@@ -37525,209 +37612,134 @@ class WrapperMachine:
             await self._publish_claude_auto_compact(ctx)
 
         try:
-            # An EXTERNAL process (a native `claude`/`codex` in the user's terminal)
-            # appended to this session's transcript since we resumed it, so our child's
-            # in-memory context is STALE — continuing from it would fork the
-            # conversation. Reload by resuming afresh before issuing the turn.
-            if ctx.needs_reload and ctx.session_id and is_codex_shared:
-                # Rollout growth from another official proxy is already in the
-                # shared daemon's authoritative thread state. Reconnecting here
-                # only risks falling back to a private stdio process and creating
-                # the split-brain this mode exists to avoid.
-                ctx.needs_reload = False
-            elif ctx.needs_reload and ctx.session_id:
-                log.info("reloading session after external transcript change",
-                         sid=ctx.session_id)
-                if is_codex:
-                    if ctx.codex_checkpoint not in (None, False):
-                        await self._retire_codex_checkpoint(
-                            ctx,
-                            reason="external transcript change before query",
-                            allow_restart=True,
-                        )
-                    await self._refresh_codex_collaboration_mode(ctx)
-                    await ctx.sdk.force_reconnect(
-                        resume_id=ctx.session_id, cwd=ctx.cwd,
-                        reason="external transcript change")
-                    await self._publish_codex_model_effort(ctx)
+            if not _recover_service:
+                # An EXTERNAL process (a native `claude`/`codex` in the user's terminal)
+                # appended to this session's transcript since we resumed it, so our child's
+                # in-memory context is STALE — continuing from it would fork the
+                # conversation. Reload by resuming afresh before issuing the turn.
+                if ctx.needs_reload and ctx.session_id and is_codex_shared:
+                    # Rollout growth from another official proxy is already in the
+                    # shared daemon's authoritative thread state. Reconnecting here
+                    # only risks falling back to a private stdio process and creating
+                    # the split-brain this mode exists to avoid.
                     ctx.needs_reload = False
-                else:
-                    # Clear first so a watcher that observes a new external write
-                    # during reconnect can set it again without being overwritten.
-                    ctx.needs_reload = False
-                    await reconnect_claude("external transcript change")
-            # A get_context_usage timeout leaves the request running inside the
-            # Claude child even after the SDK has dropped its local waiter. That
-            # generation must never receive a prompt: resume first, with the
-            # handle's context probe suppression carried into the replacement.
-            if (
-                not is_codex
-                and getattr(ctx.sdk, "control_plane_failed", False)
-            ):
-                log.warning(
-                    "recovering failed Claude control plane before query",
-                    sid=ctx.session_id,
-                )
-                await reconnect_claude("control plane failure")
-            # A failed sole SDK reader cannot be reused even though its Claude
-            # child may have kept writing the transcript. External transcript
-            # authority above takes precedence when both conditions are present;
-            # otherwise resume now before accepting another prompt. Never replay
-            # the failed prompt automatically because it may already have run.
-            if (
-                not is_codex
-                and getattr(ctx.sdk, "message_pump_failed", False)
-            ):
-                log.warning(
-                    "recovering failed Claude SDK message pump before query",
-                    sid=ctx.session_id,
-                )
-                await reconnect_claude("message pump failure")
-            if (not is_codex
-                    and self._claude_auto_compact_event(ctx).pending):
-                async with ctx.query_lock:
-                    auto_event, _ = await self._apply_pending_claude_auto_compact(
-                        ctx, reason="autocompact before next turn")
-                if auto_event.pending:
-                    await self._emit(ctx, Error(
-                        code=ERR_BUSY,
-                        message=(
-                            auto_event.error
-                            or "自动压缩设置尚未安全生效，本次消息未发送。"
-                        ),
-                        msg_id=ctx.active_msg_id,
-                    ))
-                    await close_unsubmitted_turn()
-                    return
-            # apply a pending effort change: --effort is spawn-time, so respawn the
-            # cc subprocess (resume preserves context) before issuing this turn. Only
-            # fires when the level actually changed since the live client was spawned;
-            # costs one resume (cold prompt cache) on the first turn after a change.
-            if not is_codex and ctx.sdk.effort != ctx.sdk.applied_effort:
-                log.info("applying effort change via reconnect", sid=ctx.session_id,
-                         effort=ctx.sdk.effort, was=ctx.sdk.applied_effort)
-                await reconnect_claude("effort change")
-            # Serialize the final launch window against interrupt().  An interrupt
-            # may have arrived while one of the reconnects above was in flight; in
-            # that case it targeted no live turn and we must not submit the prompt
-            # afterwards. Re-check after every later ownership/reconnect await as
-            # well; UserMsg is published only after the engine accepts the query.
-            async with ctx.launch_lock:
-                if ctx.interrupt_event.is_set() or ctx.state == "interrupting":
-                    # Other clients do not have the origin's optimistic turn. Echo
-                    # it before the terminal marker so TurnEnd cannot accidentally
-                    # close the previous visible turn on those clients.
-                    await close_unsubmitted_turn()
-                    return
-
-                stage_images = bool(images and (
-                    is_codex or ctx.space == "work"))
-                staged_image_paths: list[str] = []
-                if ctx.space == "work" and (files or stage_images):
-                    prompt, staged_image_paths, temp_dir = (
-                        self._stash_work_attachments(
-                            prompt,
-                            files,
-                            images if stage_images else None,
-                            ctx.cwd,
-                            ctx.active_msg_id or uuid4().hex,
-                            ctx.engine,
-                        )
+                elif ctx.needs_reload and ctx.session_id:
+                    log.info("reloading session after external transcript change",
+                             sid=ctx.session_id)
+                    if is_codex:
+                        if ctx.codex_checkpoint not in (None, False):
+                            await self._retire_codex_checkpoint(
+                                ctx,
+                                reason="external transcript change before query",
+                                allow_restart=True,
+                            )
+                        await self._refresh_codex_collaboration_mode(ctx)
+                        await ctx.sdk.force_reconnect(
+                            resume_id=ctx.session_id, cwd=ctx.cwd,
+                            reason="external transcript change")
+                        await self._publish_codex_model_effort(ctx)
+                        ctx.needs_reload = False
+                    else:
+                        # Clear first so a watcher that observes a new external write
+                        # during reconnect can set it again without being overwritten.
+                        ctx.needs_reload = False
+                        await reconnect_claude("external transcript change")
+                # A get_context_usage timeout leaves the request running inside the
+                # Claude child even after the SDK has dropped its local waiter. That
+                # generation must never receive a prompt: resume first, with the
+                # handle's context probe suppression carried into the replacement.
+                if (
+                    not is_codex
+                    and getattr(ctx.sdk, "control_plane_failed", False)
+                ):
+                    log.warning(
+                        "recovering failed Claude control plane before query",
+                        sid=ctx.session_id,
                     )
-                    persistent_attachments = True
-                else:
-                    if files or stage_images:
-                        temp_dir = tempfile.mkdtemp(prefix="cc-remote-turn-")
-                        os.chmod(temp_dir, 0o700)
-                    if files:
-                        prompt = self._stash_files(
-                            prompt, files, temp_dir, ctx.engine)
-                    if stage_images:
-                        staged_image_paths = self._stash_images(images, temp_dir)
-                if ctx.interrupt_event.is_set() or ctx.state == "interrupting":
-                    await close_unsubmitted_turn()
-                    return
-                if not is_codex and ctx.session_id:
-                    # A terminal can append after _handle_query's probe but before
-                    # this task reaches sdk.query(). Consume both process state and
-                    # transcript growth again at the final launch boundary.
-                    external = await self._prime_claude_ownership(ctx.session_id)
-                    if (ctx.interrupt_event.is_set()
-                            or ctx.state == "interrupting"):
-                        await close_unsubmitted_turn()
-                        return
-                    if external:
+                    await reconnect_claude("control plane failure")
+                # A failed sole SDK reader cannot be reused even though its Claude
+                # child may have kept writing the transcript. External transcript
+                # authority above takes precedence when both conditions are present;
+                # otherwise resume now before accepting another prompt. Never replay
+                # the failed prompt automatically because it may already have run.
+                if (
+                    not is_codex
+                    and getattr(ctx.sdk, "message_pump_failed", False)
+                ):
+                    log.warning(
+                        "recovering failed Claude SDK message pump before query",
+                        sid=ctx.session_id,
+                    )
+                    await reconnect_claude("message pump failure")
+                if (not is_codex
+                        and self._claude_auto_compact_event(ctx).pending):
+                    async with ctx.query_lock:
+                        auto_event, _ = await self._apply_pending_claude_auto_compact(
+                            ctx, reason="autocompact before next turn")
+                    if auto_event.pending:
                         await self._emit(ctx, Error(
                             code=ERR_BUSY,
-                            message=("该 Claude 会话刚被本机终端打开，本次发送已取消；"
-                                     "请退出终端或点击『接管』后重试"),
+                            message=(
+                                auto_event.error
+                                or "自动压缩设置尚未安全生效，本次消息未发送。"
+                            ),
                             msg_id=ctx.active_msg_id,
                         ))
-                        await self._set_idle_after_managed_turn(ctx)
+                        await close_unsubmitted_turn()
                         return
-                    if ctx.needs_reload:
-                        log.info(
-                            "reloading Claude session after transcript change "
-                            "found at final preflight",
-                            sid=ctx.session_id,
-                        )
-                        ctx.needs_reload = False
-                        await reconnect_claude(
-                            "external transcript change at final preflight")
-                        if (ctx.interrupt_event.is_set()
-                                or ctx.state == "interrupting"):
-                            await close_unsubmitted_turn()
-                            return
-                        external = await self._prime_claude_ownership(
-                            ctx.session_id)
-                        if (ctx.interrupt_event.is_set()
-                                or ctx.state == "interrupting"):
-                            await close_unsubmitted_turn()
-                            return
-                        if external or ctx.needs_reload:
-                            message = (
-                                "该 Claude 会话在重载期间又被本机终端更新，"
-                                "本次发送已取消；请退出终端后重试"
-                                if external else
-                                "该 Claude 会话在重载期间仍有未归属的内容更新，"
-                                "本次发送已取消；请稍后重试"
+                # apply a pending effort change: --effort is spawn-time, so respawn the
+                # cc subprocess (resume preserves context) before issuing this turn. Only
+                # fires when the level actually changed since the live client was spawned;
+                # costs one resume (cold prompt cache) on the first turn after a change.
+                if not is_codex and ctx.sdk.effort != ctx.sdk.applied_effort:
+                    log.info("applying effort change via reconnect", sid=ctx.session_id,
+                             effort=ctx.sdk.effort, was=ctx.sdk.applied_effort)
+                    await reconnect_claude("effort change")
+                # Serialize the final launch window against interrupt().  An interrupt
+                # may have arrived while one of the reconnects above was in flight; in
+                # that case it targeted no live turn and we must not submit the prompt
+                # afterwards. Re-check after every later ownership/reconnect await as
+                # well; UserMsg is published only after the engine accepts the query.
+                async with ctx.launch_lock:
+                    if ctx.interrupt_event.is_set() or ctx.state == "interrupting":
+                        # Other clients do not have the origin's optimistic turn. Echo
+                        # it before the terminal marker so TurnEnd cannot accidentally
+                        # close the previous visible turn on those clients.
+                        await close_unsubmitted_turn()
+                        return
+
+                    stage_images = bool(images and (
+                        is_codex or ctx.space == "work"))
+                    staged_image_paths: list[str] = []
+                    if ctx.space == "work" and (files or stage_images):
+                        prompt, staged_image_paths, temp_dir = (
+                            self._stash_work_attachments(
+                                prompt,
+                                files,
+                                images if stage_images else None,
+                                ctx.cwd,
+                                ctx.active_msg_id or uuid4().hex,
+                                ctx.engine,
                             )
-                            await self._emit(ctx, Error(
-                                code=ERR_BUSY,
-                                message=message,
-                                msg_id=ctx.active_msg_id,
-                            ))
-                            await self._set_idle_after_managed_turn(ctx)
-                            return
-                if not is_codex:
-                    # Freeze the exact transcript source/inode/byte boundary at
-                    # the final launch point. Claude creates its native user UUID
-                    # inside the child and may append it long before the SDK
-                    # replays that row through receive_response().
-                    self._start_claude_client_alias_probe(ctx)
-                if is_codex:
-                    # codex: images -> private temp dir -> localImage items; files already
-                    # referenced by path in the prompt text above.
-                    img_paths = staged_image_paths
-                    # Keep the final ownership check adjacent to turn/start. A
-                    # short native turn can finish between the earlier reload and
-                    # this probe: no holder remains, but consuming its markers sets
-                    # needs_reload. Reconnect once, then probe again before sending.
-                    if (
-                        is_codex_shared
-                        and not await self._ensure_codex_daemon_generation(
-                            ctx, reason="final query preflight")
-                    ):
-                        await self._emit(ctx, Error(
-                            code=ERR_NOT_RUNNING,
-                            message="Codex 共享通道重连失败，本次未发送；请重试",
-                            msg_id=ctx.active_msg_id,
-                        ))
-                        await self._set_idle_after_managed_turn(ctx)
+                        )
+                        persistent_attachments = True
+                    else:
+                        if files or stage_images:
+                            temp_dir = tempfile.mkdtemp(prefix="cc-remote-turn-")
+                            os.chmod(temp_dir, 0o700)
+                        if files:
+                            prompt = self._stash_files(
+                                prompt, files, temp_dir, ctx.engine)
+                        if stage_images:
+                            staged_image_paths = self._stash_images(images, temp_dir)
+                    if ctx.interrupt_event.is_set() or ctx.state == "interrupting":
+                        await close_unsubmitted_turn()
                         return
-                    route_sid = self._ctx_wire_sid(ctx)
-                    if route_sid and not is_codex_shared:
-                        external = await self._prime_codex_ownership(route_sid)
+                    if not is_codex and ctx.session_id:
+                        # A terminal can append after _handle_query's probe but before
+                        # this task reaches sdk.query(). Consume both process state and
+                        # transcript growth again at the final launch boundary.
+                        external = await self._prime_claude_ownership(ctx.session_id)
                         if (ctx.interrupt_event.is_set()
                                 or ctx.state == "interrupting"):
                             await close_unsubmitted_turn()
@@ -37735,7 +37747,7 @@ class WrapperMachine:
                         if external:
                             await self._emit(ctx, Error(
                                 code=ERR_BUSY,
-                                message=("该 Codex 会话刚被本机终端打开，本次发送已取消；"
+                                message=("该 Claude 会话刚被本机终端打开，本次发送已取消；"
                                          "请退出终端或点击『接管』后重试"),
                                 msg_id=ctx.active_msg_id,
                             ))
@@ -37743,129 +37755,205 @@ class WrapperMachine:
                             return
                         if ctx.needs_reload:
                             log.info(
-                                "reloading session after external transcript change "
+                                "reloading Claude session after transcript change "
                                 "found at final preflight",
                                 sid=ctx.session_id,
                             )
-                            if ctx.codex_checkpoint not in (None, False):
-                                await self._retire_codex_checkpoint(
-                                    ctx,
-                                    reason=("external transcript change at final "
-                                            "query preflight"),
-                                    allow_restart=True,
-                                )
-                            await self._refresh_codex_collaboration_mode(ctx)
-                            await ctx.sdk.force_reconnect(
-                                resume_id=ctx.session_id, cwd=ctx.cwd,
-                                reason="external transcript change at final preflight",
-                            )
-                            await self._publish_codex_model_effort(ctx)
                             ctx.needs_reload = False
+                            await reconnect_claude(
+                                "external transcript change at final preflight")
                             if (ctx.interrupt_event.is_set()
                                     or ctx.state == "interrupting"):
                                 await close_unsubmitted_turn()
                                 return
-                            external = await self._prime_codex_ownership(
-                                route_sid)
+                            external = await self._prime_claude_ownership(
+                                ctx.session_id)
                             if (ctx.interrupt_event.is_set()
                                     or ctx.state == "interrupting"):
                                 await close_unsubmitted_turn()
                                 return
                             if external or ctx.needs_reload:
+                                message = (
+                                    "该 Claude 会话在重载期间又被本机终端更新，"
+                                    "本次发送已取消；请退出终端后重试"
+                                    if external else
+                                    "该 Claude 会话在重载期间仍有未归属的内容更新，"
+                                    "本次发送已取消；请稍后重试"
+                                )
                                 await self._emit(ctx, Error(
                                     code=ERR_BUSY,
-                                    message=("该 Codex 会话在重载期间又被本机终端更新，"
-                                             "本次发送已取消；请退出终端或点击『接管』后重试"),
+                                    message=message,
                                     msg_id=ctx.active_msg_id,
                                 ))
                                 await self._set_idle_after_managed_turn(ctx)
                                 return
-                    await self._resolve_codex_session_effort(ctx)
-                    await self._begin_codex_checkpoint(ctx)
-                    if ctx.interrupt_event.is_set() or ctx.state == "interrupting":
-                        await self._abort_codex_checkpoint(ctx)
-                        await close_unsubmitted_turn()
-                        return
-                    query_generation = getattr(ctx.sdk, "_generation", None)
-                    native_turn_id = await ctx.sdk.query(
-                        prompt,
-                        images=img_paths,
-                        client_user_message_id=ctx.active_msg_id,
-                    )
-                    # Publish only after the native acceptance boundary. A
-                    # Claude autonomous guard (and every earlier preflight)
-                    # must not turn an unsent queued prompt into conversation
-                    # history merely because its runner became visible.
-                    await self._emit(ctx, UserMsg(
-                        msg_id=ctx.active_msg_id or uuid4().hex,
-                        prompt=display_prompt,
-                        images=images,
-                        files=file_meta,
-                    ))
-                    settle_launch(True)
-                    current_query_generation = getattr(
-                        ctx.sdk, "_generation", None)
-                    codex_query_reconnected = bool(
-                        isinstance(query_generation, int)
-                        and isinstance(current_query_generation, int)
-                        and current_query_generation != query_generation
-                    )
-                    # CodexHandle marks turn/start failure by raising with
-                    # turn_active=False. Reaching here is the authoritative
-                    # acceptance boundary, including an ultra-fast turn that
-                    # already completed before the RPC coroutine resumed.
-                    if native_turn_id:
-                        self._claim_codex_turn(
-                            ctx, native_turn_id, ctx.active_msg_id)
-                        await self._remember_codex_initial_turn_alias(
-                            ctx, native_turn_id)
-                    if native_turn_id and ctx.active_msg_id:
-                        await self._emit(ctx, TurnBinding(
-                            msg_id=ctx.active_msg_id,
-                            turn_id=native_turn_id,
-                        ))
-                    if (
-                        is_codex_shared
-                        and native_turn_id
-                        and ctx.codex_daemon_epoch
-                    ):
-                        codex_restart_watch_task = asyncio.create_task(
-                            self._wait_for_codex_account_switch(
-                                ctx,
-                                starting_epoch=ctx.codex_daemon_epoch,
-                            )
+                    if not is_codex:
+                        # Freeze the exact transcript source/inode/byte boundary at
+                        # the final launch point. Claude creates its native user UUID
+                        # inside the child and may append it long before the SDK
+                        # replays that row through receive_response().
+                        self._start_claude_client_alias_probe(ctx)
+                    if is_codex:
+                        # codex: images -> private temp dir -> localImage items; files already
+                        # referenced by path in the prompt text above.
+                        img_paths = staged_image_paths
+                        # Keep the final ownership check adjacent to turn/start. A
+                        # short native turn can finish between the earlier reload and
+                        # this probe: no holder remains, but consuming its markers sets
+                        # needs_reload. Reconnect once, then probe again before sending.
+                        if (
+                            is_codex_shared
+                            and not await self._ensure_codex_daemon_generation(
+                                ctx, reason="final query preflight")
+                        ):
+                            await self._emit(ctx, Error(
+                                code=ERR_NOT_RUNNING,
+                                message="Codex 共享通道重连失败，本次未发送；请重试",
+                                msg_id=ctx.active_msg_id,
+                            ))
+                            await self._set_idle_after_managed_turn(ctx)
+                            return
+                        route_sid = self._ctx_wire_sid(ctx)
+                        if route_sid and not is_codex_shared:
+                            external = await self._prime_codex_ownership(route_sid)
+                            if (ctx.interrupt_event.is_set()
+                                    or ctx.state == "interrupting"):
+                                await close_unsubmitted_turn()
+                                return
+                            if external:
+                                await self._emit(ctx, Error(
+                                    code=ERR_BUSY,
+                                    message=("该 Codex 会话刚被本机终端打开，本次发送已取消；"
+                                             "请退出终端或点击『接管』后重试"),
+                                    msg_id=ctx.active_msg_id,
+                                ))
+                                await self._set_idle_after_managed_turn(ctx)
+                                return
+                            if ctx.needs_reload:
+                                log.info(
+                                    "reloading session after external transcript change "
+                                    "found at final preflight",
+                                    sid=ctx.session_id,
+                                )
+                                if ctx.codex_checkpoint not in (None, False):
+                                    await self._retire_codex_checkpoint(
+                                        ctx,
+                                        reason=("external transcript change at final "
+                                                "query preflight"),
+                                        allow_restart=True,
+                                    )
+                                await self._refresh_codex_collaboration_mode(ctx)
+                                await ctx.sdk.force_reconnect(
+                                    resume_id=ctx.session_id, cwd=ctx.cwd,
+                                    reason="external transcript change at final preflight",
+                                )
+                                await self._publish_codex_model_effort(ctx)
+                                ctx.needs_reload = False
+                                if (ctx.interrupt_event.is_set()
+                                        or ctx.state == "interrupting"):
+                                    await close_unsubmitted_turn()
+                                    return
+                                external = await self._prime_codex_ownership(
+                                    route_sid)
+                                if (ctx.interrupt_event.is_set()
+                                        or ctx.state == "interrupting"):
+                                    await close_unsubmitted_turn()
+                                    return
+                                if external or ctx.needs_reload:
+                                    await self._emit(ctx, Error(
+                                        code=ERR_BUSY,
+                                        message=("该 Codex 会话在重载期间又被本机终端更新，"
+                                                 "本次发送已取消；请退出终端或点击『接管』后重试"),
+                                        msg_id=ctx.active_msg_id,
+                                    ))
+                                    await self._set_idle_after_managed_turn(ctx)
+                                    return
+                        await self._resolve_codex_session_effort(ctx)
+                        await self._begin_codex_checkpoint(ctx)
+                        if ctx.interrupt_event.is_set() or ctx.state == "interrupting":
+                            await self._abort_codex_checkpoint(ctx)
+                            await close_unsubmitted_turn()
+                            return
+                        query_generation = getattr(ctx.sdk, "_generation", None)
+                        native_turn_id = await ctx.sdk.query(
+                            prompt,
+                            images=img_paths,
+                            client_user_message_id=ctx.active_msg_id,
                         )
-                    await self._accept_codex_checkpoint(ctx)
-                elif images:
-                    content: list = []
-                    if prompt:
-                        content.append({"type": "text", "text": prompt})
-                    for img in images:
-                        content.append({"type": "image", "source": {
-                            "type": "base64",
-                            "media_type": img.get("media_type", "image/png"),
-                            "data": img.get("data", ""),
-                        }})
+                        # Publish only after the native acceptance boundary. A
+                        # Claude autonomous guard (and every earlier preflight)
+                        # must not turn an unsent queued prompt into conversation
+                        # history merely because its runner became visible.
+                        await self._emit(ctx, UserMsg(
+                            msg_id=ctx.active_msg_id or uuid4().hex,
+                            prompt=display_prompt,
+                            images=images,
+                            files=file_meta,
+                        ))
+                        settle_launch(True)
+                        current_query_generation = getattr(
+                            ctx.sdk, "_generation", None)
+                        codex_query_reconnected = bool(
+                            isinstance(query_generation, int)
+                            and isinstance(current_query_generation, int)
+                            and current_query_generation != query_generation
+                        )
+                        # CodexHandle marks turn/start failure by raising with
+                        # turn_active=False. Reaching here is the authoritative
+                        # acceptance boundary, including an ultra-fast turn that
+                        # already completed before the RPC coroutine resumed.
+                        if native_turn_id:
+                            self._claim_codex_turn(
+                                ctx, native_turn_id, ctx.active_msg_id)
+                            await self._remember_codex_initial_turn_alias(
+                                ctx, native_turn_id)
+                        if native_turn_id and ctx.active_msg_id:
+                            await self._emit(ctx, TurnBinding(
+                                msg_id=ctx.active_msg_id,
+                                turn_id=native_turn_id,
+                            ))
+                        if (
+                            is_codex_shared
+                            and native_turn_id
+                            and ctx.codex_daemon_epoch
+                        ):
+                            codex_restart_watch_task = asyncio.create_task(
+                                self._wait_for_codex_account_switch(
+                                    ctx,
+                                    starting_epoch=ctx.codex_daemon_epoch,
+                                )
+                            )
+                        await self._accept_codex_checkpoint(ctx)
+                    elif images:
+                        content: list = []
+                        if prompt:
+                            content.append({"type": "text", "text": prompt})
+                        for img in images:
+                            content.append({"type": "image", "source": {
+                                "type": "base64",
+                                "media_type": img.get("media_type", "image/png"),
+                                "data": img.get("data", ""),
+                            }})
 
-                    async def msg_stream():
-                        yield {"type": "user", "message": {"role": "user", "content": content},
-                               "parent_tool_use_id": None}
+                        async def msg_stream():
+                            yield {"type": "user", "message": {"role": "user", "content": content},
+                                   "parent_tool_use_id": None}
 
-                    ctx.sdk.next_turn_id = ctx.active_msg_id
-                    ctx.claude_write_active = True
-                    await ctx.sdk.query(msg_stream())
-                else:
-                    ctx.sdk.next_turn_id = ctx.active_msg_id
-                    ctx.claude_write_active = True
-                    await ctx.sdk.query(prompt)
-                if not is_codex:
-                    await self._emit(ctx, UserMsg(
-                        msg_id=ctx.active_msg_id or uuid4().hex,
-                        prompt=display_prompt,
-                        images=images,
-                        files=file_meta,
-                    ))
-                    settle_launch(True)
+                        ctx.sdk.next_turn_id = ctx.active_msg_id
+                        ctx.claude_write_active = True
+                        await ctx.sdk.query(msg_stream())
+                    else:
+                        ctx.sdk.next_turn_id = ctx.active_msg_id
+                        ctx.claude_write_active = True
+                        await ctx.sdk.query(prompt)
+                    if not is_codex:
+                        await self._emit(ctx, UserMsg(
+                            msg_id=ctx.active_msg_id or uuid4().hex,
+                            prompt=display_prompt,
+                            images=images,
+                            files=file_meta,
+                        ))
+                        settle_launch(True)
             # Codex sessions don't emit a Model event like cc's init SystemMessage,
             # so announce the configured codex model (gpt-*) once — else the header
             # would keep showing a stale Claude model.
@@ -38069,11 +38157,24 @@ class WrapperMachine:
                                 too_large_kind),
                             msg_id=ctx.active_msg_id,
                         ))
-                for ev in ctx.translator.feed(msg):
+                events = ctx.translator.feed(msg)
+                claude_service.preserve_timestamp(events, msg)
+                if service_replay is not None:
+                    service_replay.add(events)
+                    if (getattr(msg, "_cc_service_seq", 0) >= service_replay.head
+                            or isinstance(msg, ResultMessage)):
+                        events = service_replay.drain()
+                        service_replay = None
+                    else:
+                        events = []
+                for ev in events:
                     await self._emit(ctx, ev)
 
                 if isinstance(msg, ResultMessage):
                     await self._flush_claude_client_message_ids(ctx)
+                    ack = getattr(ctx.sdk, "ack_service_message", None)
+                    if ack is not None:
+                        await ack(msg, turn_id=ctx.active_msg_id)
                     break
 
             if not is_codex:

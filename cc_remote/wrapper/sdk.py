@@ -208,6 +208,10 @@ class SdkHandle:
         self.claude_config_dir = claude_config_dir
         self.isolate_account_env = isolate_account_env
         self.client: ClaudeSDKClient | None = None
+        self.service_metadata: dict | None = None
+        self.service_recovery: dict | None = None
+        self.service_turn_metadata: dict | None = None
+        self.service_defer_events = False
         # reasoning effort is a spawn-time flag (--effort), not a runtime setter.
         # `effort` is the desired level; `applied_effort` is what the live client
         # was spawned with — they differ after set_effort until the next reconnect.
@@ -548,7 +552,20 @@ class SdkHandle:
             auto_compact_override=launch_auto_compact,
             effort_override=launch_effort,
         )
-        if self.isolate_account_env:
+        if self.cfg.claude_service_socket and self.service_metadata is not None:
+            from cc_remote.claude_service.client import RemoteClient
+
+            self.client = RemoteClient(
+                self.cfg.claude_service_socket,
+                options=opts,
+                metadata={
+                    **self.service_metadata, "session_id": resume_id,
+                    "applied_auto_compact": list(launch_auto_compact),
+                    "applied_effort": launch_effort,
+                },
+                isolated=self.isolate_account_env,
+            )
+        elif self.isolate_account_env:
             self.client = ClaudeSDKClient(
                 options=opts,
                 transport=account_isolated_transport(opts),
@@ -557,6 +574,15 @@ class SdkHandle:
             self.client = ClaudeSDKClient(options=opts)
         self._conversation_rewind_capability = None
         await self.client.connect()
+        self.service_recovery = getattr(self.client, "recovery", None)
+        description = getattr(self.client, "description", {})
+        if description.get("attached"):
+            controls = description["controls"]
+            self.model = controls.get("model")
+            self.permission_mode = controls.get("permission_mode") or self.permission_mode
+            metadata = description["metadata"]
+            launch_effort = metadata.get("applied_effort")
+            launch_auto_compact = tuple(metadata["applied_auto_compact"])
         if fork:
             # A fork creates a new native conversation even though this handle
             # may be reused while a private BTW id is still being captured.
@@ -583,6 +609,7 @@ class SdkHandle:
         # learning its provider-selected model and (for Work) startup baseline.
         eager_context_probe = bool(
             not _suppress_context_probe and resume_id is None and not fork
+            and self.service_recovery is None
         )
         if eager_context_probe:
             try:
@@ -642,6 +669,14 @@ class SdkHandle:
         self.applied_auto_compact_threshold_tokens = (
             launch_auto_compact[1])
         self._start_message_pump()
+        if self.service_recovery is not None:
+            self._turn_active = True
+            self._turn_origin_id = self.service_recovery["id"]
+            self._message_route_owner = "managed"
+        elif hasattr(self.client, "description"):
+            self._turn_origin_id = self.client.description.get("origin_id")
+        if not self.service_defer_events:
+            self.start_service_events()
         log.info("sdk connected", resume=bool(resume_id), fork=fork, cwd=opts.cwd,
                  effort=launch_effort, permission_mode=self.permission_mode,
                  auto_compact=launch_auto_compact[0],
@@ -915,6 +950,11 @@ class SdkHandle:
                     # activated only when the pump sees this submitted turn.
                     self._pending_turn_background_release = asyncio.Event()
                     self._pending_turn_origin_id = self.next_turn_id
+                    if hasattr(client, "next_turn"):
+                        client.next_turn = {
+                            **(self.service_turn_metadata or {}),
+                            "id": self.next_turn_id,
+                        }
                     self._pending_compact = bool(
                         isinstance(prompt, str)
                         and prompt.split(maxsplit=1)[:1] == ["/compact"]
@@ -1316,9 +1356,24 @@ class SdkHandle:
                 source = client.receive_messages()
                 parse_raw = False
             async for data in source:
+                service_seed = bool(parse_raw and isinstance(data, dict)
+                                    and "__cc_service_origin" in data)
+                service_origin = data.pop("__cc_service_origin", None) if service_seed else None
+                service_seq = (
+                    data.pop("__cc_service_seq", None)
+                    if parse_raw and isinstance(data, dict) else None
+                )
+                service_ts = (
+                    data.pop("__cc_service_ts", None)
+                    if parse_raw and isinstance(data, dict) else None
+                )
                 message = self._parse_compat_message(data) if parse_raw else data
                 if message is None:
                     continue
+                if service_seq is not None:
+                    message._cc_service_seq = service_seq
+                if service_ts is not None:
+                    message._cc_service_ts = service_ts
                 self._observe_recent_context_usage(message)
                 self._observe_context_boundary(message)
                 self._observe_model_fallback(message)
@@ -1331,7 +1386,9 @@ class SdkHandle:
                         isinstance(message, UserMessage)
                         and not message.parent_tool_use_id
                     )
-                    if top_level_user:
+                    if service_seed:
+                        owner = "background"
+                    elif top_level_user:
                         if origin_kind is not None and origin_kind != "human":
                             owner = "background"
                         elif self._turn_active:
@@ -1412,7 +1469,7 @@ class SdkHandle:
                     self._background_callbacks_drained.clear()
                     try:
                         await self._background_messages.put(
-                            (message, release, self._turn_origin_id))
+                            (message, release, service_origin if service_seed else self._turn_origin_id))
                     except BaseException:
                         self._background_callback_completed()
                         raise
@@ -1479,6 +1536,7 @@ class SdkHandle:
                     and self._message_pump_error is None
                 ):
                     await callback(message, turn_id)
+                    await self.ack_service_message(message)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1530,6 +1588,31 @@ class SdkHandle:
         if self._message_pump_task is not None:
             return self._receive_response_pumped()
         return self._receive_response_compat()
+
+    def start_service_events(self) -> None:
+        """Release native replay only after the machine installed its routing."""
+        ready = getattr(self.client, "ready", None)
+        if ready is not None:
+            ready.set()
+
+    async def ack_service_message(self, message, *, turn_id=None) -> None:
+        seq = getattr(message, "_cc_service_seq", None)
+        if seq is None or not hasattr(self.client, "call"):
+            return
+        if turn_id is not None:
+            await self.client.call("commit", {"turn_id": turn_id, "seq": seq})
+            self.service_recovery = None
+        else:
+            await self.client.call("ack", {"seq": seq})
+
+    async def detach_for_shutdown(self) -> None:
+        detach = getattr(self.client, "detach", None)
+        if detach is None:
+            await self.disconnect()
+            return
+        await detach()
+        await self._stop_message_pump()
+        self.client = None
 
     async def _stop_message_pump(self) -> None:
         release = self._turn_background_release

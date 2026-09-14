@@ -41,6 +41,13 @@ and keep a decline or pending answer separate from deployment success. App
 attachment and optional App-control MCP tools are separate user choices.
 
 ## Critical constraints / traps
+- **Claude service lifetime**: when `CC_REMOTE_CLAUDE_SERVICE_SOCKET` is set,
+  regular Claude Code/Work SDK processes belong to the separate local service.
+  Wrapper shutdown detaches; explicit stop/reconnect/eviction still has its
+  deliberate native lifecycle. Never resubmit an accepted query during recovery,
+  treat a background Result as the human terminal, or restart the service during
+  an ordinary Wrapper deploy. See `docs/claude-session-service.md` for first
+  migration, remaining in-process tasks, queue drain and version boundaries.
 - **DSH is optional Code only**: `dsh_runtime.py` connects to the operator's
   DSH 0.1.5-rc.2 Web profile. Model credentials and process ownership stay in
   DSH. Pairing Cookies remain in a private local file and never cross the relay.

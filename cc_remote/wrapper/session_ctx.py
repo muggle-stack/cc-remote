@@ -234,6 +234,7 @@ class SessionContext:
     # inherits its context. Never persisted, excluded from the session list, and
     # discarded on close. Its turns reuse the normal _run_turn path.
     btw: bool = False
+    claude_service_background_replay: object | None = None
     parent_sid: Optional[str] = None
     # Relay-authenticated account identity for a private side chat. The legacy
     # attribute name is retained for state/test compatibility; this is not a

@@ -50,6 +50,7 @@ _WRAPPER_DEPLOY = (
     "com.muggle.cc-remote.wrapper.plist.in",
     "env.wrapper.example",
     "install-wrapper.sh",
+    "install_claude_service.py",
     "prepare_wrapper_stage.py",
     "python-version.txt",
     "release_manifest.py",

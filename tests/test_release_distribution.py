@@ -179,6 +179,8 @@ def test_release_bundles_are_deterministic_and_role_scoped(
         assert not any("/web/" in name for name in members)
         assert f"{prefix}/requirements-wrapper.lock" in members
         assert f"{prefix}/deploy/install-wrapper.sh" in members
+        assert f"{prefix}/deploy/install_claude_service.py" in members
+        assert f"{prefix}/cc_remote/claude_service/server.py" in members
         assert f"{prefix}/deploy/work_registry_snapshot.py" in members
         assert f"{prefix}/scripts/codex-auth-daemon-restart" in members
         assert f"{prefix}/deploy/setup-vps.sh" not in members

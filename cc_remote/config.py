@@ -280,6 +280,10 @@ class WrapperConfig:
     # direct native Claude owners are mirrored read-only and explicitly taken
     # over by the SDK instead of sharing a PTY input state machine.
     claude_broker_socket: str = field(default_factory=default_socket_path)
+    # Installed separately from the Wrapper's service/cgroup. An empty value
+    # retains the in-process SDK for unmanaged development installations.
+    claude_service_socket: str = field(
+        default_factory=lambda: _env("CC_REMOTE_CLAUDE_SERVICE_SOCKET", ""))
     experimental_claude_broker: bool = field(
         default_factory=lambda: _bool(
             "CC_REMOTE_EXPERIMENTAL_CLAUDE_BROKER", False))
@@ -641,6 +645,13 @@ def validate_wrapper_config(cfg: WrapperConfig) -> None:
         elif not os.path.isabs(os.path.expanduser(cfg.claude_broker_socket)):
             errors.append(
                 "CC_REMOTE_CLAUDE_BROKER_SOCKET must be an absolute path")
+    if cfg.claude_service_socket:
+        service_socket = os.path.expanduser(cfg.claude_service_socket)
+        if (not os.path.isabs(service_socket) or "\x00" in service_socket
+                or len(os.fsencode(service_socket)) > 103):
+            errors.append("CC_REMOTE_CLAUDE_SERVICE_SOCKET must be an absolute Unix socket path of at most 103 bytes")
+        if cfg.experimental_claude_broker:
+            errors.append("Claude SDK service and experimental PTY broker cannot be enabled together")
 
     if not (12 * 1024 * 1024 <= cfg.ws_max_size_bytes <= 64 * 1024 * 1024):
         errors.append("WS_MAX_SIZE_BYTES must be between 12582912 and 67108864")

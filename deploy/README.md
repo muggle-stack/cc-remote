@@ -41,6 +41,14 @@ Before changing a live service:
    outside immutable release trees. Never upload secrets as part of a source
    snapshot.
 
+For Claude, follow [session-service installation and acceptance](../docs/claude-session-service.md)
+before planning a non-interrupting Wrapper upgrade. Keep an existing SDK service
+outside the Wrapper activation transaction. First migration, remaining
+in-process turns (including private `/btw` forks), and deferred queries must
+drain first; daemon readiness alone does not prove an old child was adopted.
+If the local service protocol or pinned SDK changes, stage first and defer the
+service's own restart until native work and pending callbacks have finished.
+
 Activate a coordinated protocol change in the order documented by the current
 protocol note below: stop incompatible old Wrappers, activate Relay + Web as one
 transaction, then activate/start every Wrapper and hard-refresh clients. Use the
