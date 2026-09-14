@@ -32,14 +32,16 @@ def commands(source: Path, state_dir: Path) -> list[str]:
 
 def unit_text(source: Path, state_dir: Path) -> str:
     def quote(value):
-        return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
+        return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$") + '"'
     argv = " ".join(quote(value) for value in commands(source, state_dir))
+    # Unlike ExecStart's argument list, WorkingDirectory is one unquoted path.
+    working_directory = str(source).replace("\\", "\\\\").replace("%", "%%").replace("\n", "\\n").replace("\r", "\\r")
     return f"""[Unit]
 Description=cc-remote persistent Claude SDK sessions
 
 [Service]
 Type=simple
-WorkingDirectory={quote(source)}
+WorkingDirectory={working_directory}
 ExecStart={argv}
 UMask=0077
 Restart=on-failure
