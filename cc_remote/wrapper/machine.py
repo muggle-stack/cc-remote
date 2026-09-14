@@ -20561,7 +20561,41 @@ class WrapperMachine:
         async with ctx.query_lock:
             if not self._is_resident_context(ctx):
                 return await self._missing_session_error(cmd, "读取上下文")
-            return await self._handle_get_context_locked(ctx, cmd)
+            sdk = ctx.sdk
+            live_summary = bool(
+                ctx.engine == "claude" and getattr(cmd, "refresh", False)
+                and self._claude_context_work_active(ctx)
+                and callable(getattr(sdk, "get_context_summary", None))
+                and not getattr(sdk, "is_claude_broker", False)
+                and not getattr(sdk, "control_plane_failed", False)
+                and not getattr(sdk, "context_probe_suppressed", False)
+                and ctx.write_state == "writable" and not ctx.needs_reload
+            )
+            if not live_summary:
+                return await self._handle_get_context_locked(ctx, cmd)
+            client = getattr(sdk, "client", None)
+            revision = getattr(sdk, "context_revision", None)
+
+        # This capability is the regular SDK's bounded, local-only summary.
+        # Release query_lock before the RPC: the stream's terminal/background
+        # callbacks may need it while the control reply travels through the sole
+        # SDK reader. Never adopt, resume, or repair an engine from this path.
+        summary = None
+        try:
+            summary = await sdk.get_context_summary()
+            if not _has_claude_context_total(summary):
+                summary = None
+        except Exception as exc:
+            log.warning("live Claude context summary unavailable",
+                        error_type=type(exc).__name__, session_id=ctx.session_id)
+        async with ctx.query_lock:
+            if not self._is_resident_context(ctx):
+                return await self._missing_session_error(cmd, "读取上下文")
+            if (ctx.sdk is not sdk or getattr(sdk, "client", None) is not client
+                    or getattr(sdk, "context_revision", None) != revision):
+                summary = None
+            return await self._handle_get_context_locked(
+                ctx, cmd, prefer_cached_claude=True, claude_summary=summary)
 
     @staticmethod
     def _claude_context_model(
@@ -20815,6 +20849,7 @@ class WrapperMachine:
         cmd,
         *,
         prefer_cached_claude: bool = False,
+        claude_summary: dict | None = None,
     ):
         if ctx.engine == "codex":
             await self._publish_codex_context(ctx)
@@ -20975,6 +21010,10 @@ class WrapperMachine:
                         exact = refreshed_usage
                         usage = refreshed_usage
                         recent = None
+
+                if claude_summary is not None and recent is None:
+                    usage = claude_summary
+                    context_source = "control"
 
                 if context_source != "control":
                     if recent is not None:

@@ -795,6 +795,7 @@ export function Composer(p: Props) {
   // already clears both reports when the session's model or capacity changes.
   const exactContextReport = currentContextReport
     && (p.engine !== "codex" || currentContextReport.source !== "recent_turn")
+    && (currentContextReport.max_tokens > 0 || (retainedContextReport?.max_tokens ?? 0) <= 0)
     ? currentContextReport : retainedContextReport ?? currentContextReport;
   const codexEstimate = p.engine !== "codex"
     || exactContextReport?.source === "native_estimate";

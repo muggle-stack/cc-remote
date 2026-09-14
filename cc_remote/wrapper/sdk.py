@@ -212,6 +212,7 @@ class SdkHandle:
         self.service_recovery: dict | None = None
         self.service_turn_metadata: dict | None = None
         self.service_defer_events = False
+        self._context_revision = 0
         # reasoning effort is a spawn-time flag (--effort), not a runtime setter.
         # `effort` is the desired level; `applied_effort` is what the live client
         # was spawned with — they differ after set_effort until the next reconnect.
@@ -825,6 +826,10 @@ class SdkHandle:
             return None
         return dict(self._last_context_usage)
 
+    @property
+    def context_revision(self) -> int:
+        return self._context_revision
+
     def invalidate_context_usage_cache(self) -> None:
         """Discard readings after the native transcript changes identity/depth.
 
@@ -833,6 +838,7 @@ class SdkHandle:
         those cases the machine calls this at the mutation boundary so the next
         cache-only read must recover from the current transcript.
         """
+        self._context_revision += 1
         self._last_context_usage = None
         self._last_recent_context_usage = None
         self.effective_auto_compact_threshold_tokens = None
@@ -844,7 +850,12 @@ class SdkHandle:
             return
         recovered = claude_recent_context_usage(message.usage)
         if recovered is not None:
-            self._last_recent_context_usage = recovered
+            capacity = {
+                key: value for key, value in (self._last_recent_context_usage or {}).items()
+                if key in {"maxTokens", "rawMaxTokens", "autoCompactThreshold",
+                           "isAutoCompactEnabled", "model"}
+            }
+            self._last_recent_context_usage = {**capacity, **recovered}
 
     def _observe_context_boundary(self, message: Any) -> None:
         """Replace pre-compact counts while retaining this child's capacity."""
@@ -856,8 +867,12 @@ class SdkHandle:
             and message.data.get("parentToolUseID") is None
             and message.data.get("isSidechain") is not True
         ):
+            self._context_revision += 1
             capacity = {
-                key: value for key, value in (self._last_context_usage or {}).items()
+                key: value for key, value in {
+                    **(self._last_context_usage or {}),
+                    **(self._last_recent_context_usage or {}),
+                }.items()
                 if key in {"maxTokens", "rawMaxTokens", "autoCompactThreshold",
                            "isAutoCompactEnabled", "model"}
             }
@@ -1022,6 +1037,43 @@ class SdkHandle:
             raise RuntimeError("Claude context refresh is awaiting normal traffic")
         usage = await self._read_context_usage_control(detail=detail)
         self._record_context_usage(usage, update_model=True)
+        return usage
+
+    async def get_context_summary(self) -> dict:
+        """Read the CLI's local summary without waiting for a model turn.
+
+        Unlike the full category breakdown, summary uses local estimates and
+        the last API usage; it never invokes the provider's token-count API.
+        Keep this a separate capability so broker/older adapters cannot route a
+        running read through their potentially expensive context operation.
+        """
+        if self.context_probe_suppressed:
+            raise RuntimeError("Claude context refresh is awaiting normal traffic")
+        if self._control_request_lock.locked():
+            # Metadata must not queue behind a launch/setter that can itself be
+            # waiting for a machine callback to finish accepting the next turn.
+            raise RuntimeError("Claude control request is already in progress")
+        client, revision = self.client, self._context_revision
+        previous_recent = self._last_recent_context_usage
+        usage = await self._read_context_usage_control(
+            timeout=_CONTEXT_STARTUP_TIMEOUT, detail="summary")
+        if self.client is not client or self._context_revision != revision:
+            raise RuntimeError("Claude context changed during summary read")
+        total, maximum = usage.get("totalTokens"), usage.get("maxTokens")
+        if (not isinstance(total, int) or isinstance(total, bool)
+                or not 0 <= total <= MAX_SAFE_WIRE_INTEGER
+                or not isinstance(maximum, int) or isinstance(maximum, bool)
+                or not 0 < maximum <= MAX_SAFE_WIRE_INTEGER):
+            raise ValueError("Claude summary omitted a valid total or capacity")
+        latest_recent = self._last_recent_context_usage
+        self._record_context_usage(usage, update_model=True)
+        if latest_recent is not previous_recent and latest_recent is not None:
+            # The sole stream reader may have received a newer assistant while
+            # the control response was in flight. Keep its total and only borrow
+            # this generation's capacity, never the older category breakdown.
+            self._last_recent_context_usage = latest_recent
+            usage = {**usage, **latest_recent, "categories": []}
+            usage["percentage"] = latest_recent["totalTokens"] / maximum * 100
         return usage
 
     async def rewind_files(self, user_message_id: str) -> None:

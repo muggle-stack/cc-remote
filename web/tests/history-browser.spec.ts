@@ -184,12 +184,13 @@ type PanelRelayEvent<T = ServerEvent> = T extends ServerEvent
 async function mockRightPanelRelay(
   page: import("@playwright/test").Page,
   { visible = false, retained = true, engine = "codex", seedTurns = [],
-    secondParent = false, btwReadOnly = false, imageAssets = false, imageData, externalPreview, historyReply }: {
+    secondParent = false, parentState = "idle", btwReadOnly = false, imageAssets = false, imageData, externalPreview, historyReply }: {
     visible?: boolean;
     retained?: boolean;
     engine?: "codex" | "claude";
     seedTurns?: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]>;
     secondParent?: boolean;
+    parentState?: "idle" | "running";
     btwReadOnly?: boolean;
     imageAssets?: boolean;
     imageData?: { data: string; width: number; height: number };
@@ -226,7 +227,7 @@ async function mockRightPanelRelay(
     }));
     const snapshot = (sid: string) => {
       emit({ type: "snapshot", sid, cc_session_id: sid,
-        state: sid === btwSid && !btwReadOnly ? "running" : "idle", tail_text: "",
+        state: sid === btwSid ? (btwReadOnly ? "idle" : "running") : parentState, tail_text: "",
         cwd: "/tmp/layout", generation: "layout-generation",
         ...(sid === btwSid && btwReadOnly ? { control: {
           v: PROTOCOL_VERSION, ts: 1, type: "session_control" as const,
@@ -253,7 +254,7 @@ async function mockRightPanelRelay(
           request_id: String(command.cmd_id),
           sessions: command.space === "work" ? [] : [{ session_id: parentSid,
             engine, space: "code", summary: "Layout parent",
-            cwd: "/tmp/layout", state: "idle", last_modified: "100" },
+            cwd: "/tmp/layout", state: parentState, last_modified: "100" },
           ...(secondParent ? [{ session_id: "layout-other", engine,
             space: "code" as const, summary: "Second parent", cwd: "/tmp/other",
             state: "idle" as const, last_modified: "50" }] : [])] });
@@ -802,6 +803,56 @@ test("session workspace refreshes native context during a running turn", async (
   await expect.poll(async () => Number(await ring.locator(".hr-fill").getAttribute("stroke-dashoffset")))
     .toBeCloseTo(4.7775325);
   expect(relay.commands.some(c => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
+});
+
+test("session workspace Claude context refreshes while running and keeps its last reading silently", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, {
+    retained: false, engine: "claude", parentState: "running",
+  });
+  await page.goto("/");
+  const reads = () => relay.commands.filter(c => c.type === "get_context");
+  await expect.poll(() => reads().length).toBeGreaterThan(0);
+  // Cold restored workers need an actual summary to recover their capacity.
+  expect(reads().at(-1)?.refresh).toBe(true);
+  const report: PanelRelayEvent<Extract<ServerEvent, { type: "context_report" }>> = {
+    type: "context_report", sid: "layout-parent", model: "claude-fable-5-1",
+    total_tokens: 242701, max_tokens: 0, percentage: 0,
+    categories: [], source: "recent_turn",
+  };
+  relay.emit({ ...report, request_id: String(reads().at(-1)!.cmd_id) });
+  const ring = page.getByRole("button", { name: "上下文占用", exact: true });
+  const before = reads().length;
+  await ring.click();
+  await expect.poll(() => reads().length).toBeGreaterThan(before);
+  const opened = reads().at(-1)!;
+  expect(opened.refresh).toBe(true);
+  const fullReport = { ...report, max_tokens: 500000,
+    raw_max_tokens: 1000000, percentage: 48.5402, source: "control" as const };
+  relay.emit({ ...fullReport, request_id: String(opened.cmd_id) });
+  const popover = page.getByRole("dialog", { name: "上下文占用", exact: true });
+  await expect(popover).toContainText("242,701 / 500,000 (49%)");
+  const count = reads().length;
+  await expect.poll(() => reads().length, { timeout: 8000 }).toBeGreaterThan(count);
+  const poll = reads().at(-1)!;
+  expect(poll.refresh).toBe(false);
+  relay.emit({ ...fullReport, request_id: String(poll.cmd_id),
+    source: "recent_turn", total_tokens: 339685, percentage: 67.937 });
+  await expect(popover).toContainText("339,685 / 500,000 (68%)");
+  const offset = await ring.locator(".hr-fill").getAttribute("stroke-dashoffset");
+  await ring.click();
+  const closedCount = reads().length;
+  await ring.click();
+  await expect.poll(() => reads().length).toBeGreaterThan(closedCount);
+  relay.emit({ ...report, request_id: String(reads().at(-1)!.cmd_id),
+    total_tokens: 0, available: false });
+  await expect(popover).toContainText("339,685 / 500,000 (68%)");
+  relay.emit({ ...report, total_tokens: 350000 });
+  await expect(popover).toContainText("339,685 / 500,000 (68%)");
+  await expect(ring.locator(".hr-fill")).toHaveAttribute("stroke-dashoffset", offset!);
+  await expect(popover.locator(".ctx-pop-status")).toHaveCount(0);
+  await expect(popover).not.toContainText("正在读取");
+  await expect(ring.locator("text")).toHaveCount(0);
+  expect(relay.commands.some(c => ["query", "steer", "interrupt", "new_session"].includes(String(c.type)))).toBe(false);
 });
 
 test("turn regressions App routes file pages by exact request and opens the archived diff", async ({ page }) => {

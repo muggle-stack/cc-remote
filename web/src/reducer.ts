@@ -525,7 +525,7 @@ export type Action =
   | { type: "set_collaboration_mode"; mode: CollaborationModeName }
   | { type: "set_context"; report: ContextReport }
   | { type: "clear_context" }
-  | { type: "begin_context_request"; sid: string; requestId: string }
+  | { type: "begin_context_request"; sid: string; requestId: string; refresh?: boolean }
   | { type: "defer_context_request"; sid: string }
   | { type: "begin_status_request"; sid: string; requestId: string }
   | { type: "set_turns"; sid: string; turns: Turn[] }
@@ -2519,7 +2519,7 @@ export function reduce(state: AppState, action: Action): AppState {
     case "begin_context_request":
       return patch(state, action.sid, (rt) => {
         rt.contextRequestId = action.requestId;
-        rt.contextRefreshDeferred = false;
+        if (action.refresh !== false) rt.contextRefreshDeferred = false;
         rt.contextError = null;
       });
     case "defer_context_request":
@@ -5521,7 +5521,10 @@ function reduceEvent(
       return patch(state, e.sid, (rt) => {
         rt.contextReport = e;
         if (e.available !== false && (e.source !== "recent_turn"
-            || rt.contextExactReport?.source !== "native_estimate")) {
+            || rt.contextExactReport?.source !== "native_estimate")
+            && !(e.max_tokens <= 0 && (rt.contextExactReport?.max_tokens ?? 0) > 0)) {
+          // A recovering worker may know only the total. Keep the last complete
+          // reading until capacity returns; model/window changes clear it above.
           rt.contextExactReport = e;
         }
         // Reports are broadcast so every viewer benefits from the fresh value,
@@ -5537,7 +5540,8 @@ function reduceEvent(
           && e.source === "control";
         if (matchesRequest || satisfiesDeferred) {
           rt.contextRequestId = null;
-          rt.contextRefreshDeferred = false;
+          rt.contextRefreshDeferred = rt.contextRefreshDeferred
+            && e.source !== "control";
           rt.contextError = null;
         } else if (rt.contextRequestId === null
             && !rt.contextRefreshDeferred) {
@@ -5786,7 +5790,6 @@ function reduceEvent(
               rt.contextRefreshDeferred = true;
               rt.contextError = null;
             } else {
-              rt.contextRefreshDeferred = false;
               rt.contextError = presentCommandProblem(e);
             }
           });

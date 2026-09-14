@@ -18206,9 +18206,8 @@ assert.match(appSource, /legacyExternal=\{!rt\.control && !!rt\.external\}/,
   "rolling-deploy compatibility keeps legacy external ownership actionable");
 assert.match(appSource, /sessionControlLocksInput\(rt\.control\)/,
   "Shift+Tab must not mutate controls while the authoritative session is read-only");
-assert.match(appSource,
-  /state\.connState !== "connected" \|\| !state\.wrapperOnline\) return;[\s\S]{0,520}sendContextRequestTo\(focusedSid, deferred\)/,
-  "a focused session must prime its context ring after initial sync and reconnect");
+// Context priming and live refresh are exercised through the real App in the
+// session workspace browser tests, including cold Claude capacity recovery.
 assert.doesNotMatch(appSource, /className="work-artifacts-btn"/);
 assert.doesNotMatch(appSource, /className="work-head-manage"/);
 assert.doesNotMatch(appSource, /sendSetWorkGrant|目录授权/);
