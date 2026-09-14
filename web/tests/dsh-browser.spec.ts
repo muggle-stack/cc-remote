@@ -158,6 +158,49 @@ async function chooseEngine(page: Page, engine: string) {
   await expect(page.getByRole("menu", { name: "会话引擎" })).toHaveCount(0);
 }
 
+test("DSH long running narrative stays in the process timeline across history recovery", async ({ page }) => {
+  const relay = await openDsh(page, { running: true });
+  let sequence = 0;
+  const emit = (event: Record<string, unknown>) => relay.emit({ sid, seq: ++sequence, ...event });
+  emit({ type: "turn_binding", msg_id: "native-prompt", turn_id: "dsh-seq-5" });
+  const process: Record<string, unknown>[] = [];
+  for (let step = 0; step < 64; step++) {
+    for (const [channel, text] of [["thinking", `Reasoning ${step}`], ["commentary", `Checking item ${step}`]]) {
+      const message = `step-${step}-${channel}`;
+      emit({ type: "assistant_msg_start", turn_id: "dsh-seq-5", message_id: message, channel });
+      emit({ type: "delta", turn_id: "dsh-seq-5", message_id: message, channel, text, replace: true });
+      emit({ type: "assistant_msg_end", turn_id: "dsh-seq-5", message_id: message, channel });
+      process.push({ kind: "text", message_id: message, channel, text, done: true });
+    }
+  }
+  const header = page.locator(".turn-process-head").last();
+  await expect(header).toBeVisible();
+  if (await header.getAttribute("aria-expanded") !== "true") await header.click();
+  await expect(page.locator(".process-commentary").getByText("Checking item 63", { exact: true })).toBeVisible();
+  await expect(page.locator(".assistant-answer-segment")).not.toContainText("Checking item");
+  const row = { id: "native-prompt", clientMsgId: "native-prompt", prompt: "验证图片、引导与原生控件", done: false,
+    blocks: process.slice(-24), processDetailState: "present", detailReasons: ["process"], detailEventCount: 128, detailLoaded: false };
+  relay.setHistory([row]);
+  emit({ type: "history", session_id: sid, revision: "dsh-history", generation: "dsh-generation",
+    build_seq: 1, live_seq: sequence, authoritative: true, detail: "summary", events: [], turns: [row],
+    newest_id: "native-prompt", in_progress: true, has_more: false });
+  await expect(page.getByText("该轮未正常结束", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".process-commentary").getByText("Checking item 63", { exact: true })).toBeVisible();
+  await expect(page.locator(".process-reasoning")).not.toHaveCount(0);
+  await expect(page.getByText("加载更早的历史", { exact: true })).toHaveCount(0);
+  emit({ type: "assistant_msg_start", turn_id: "dsh-seq-5", message_id: "final-step", channel: "commentary" });
+  emit({ type: "delta", turn_id: "dsh-seq-5", message_id: "final-step", channel: "commentary", text: "Inspection complete" });
+  emit({ type: "assistant_msg_start", turn_id: "dsh-seq-5", message_id: "final-step", channel: "final" });
+  emit({ type: "delta", turn_id: "dsh-seq-5", message_id: "final-step", channel: "final", text: "Inspection complete", replace: true });
+  emit({ type: "assistant_msg_end", turn_id: "dsh-seq-5", message_id: "final-step", channel: "final" });
+  await expect(page.locator(".assistant-answer-segment").getByText("Inspection complete", { exact: true })).toBeVisible();
+  await expect(page.locator(".process-commentary").getByText("Inspection complete", { exact: true })).toHaveCount(0);
+  emit({ type: "turn_end", turn_id: "dsh-seq-5", result: { subtype: "success", duration_ms: 64000, is_error: false } });
+  emit({ type: "state", state: "idle" });
+  await expect(header).toContainText("已处理");
+  await expect(page.getByText("该轮未正常结束", { exact: true })).toHaveCount(0);
+});
+
 for (const running of [false, true]) {
   test(`DSH path-prefixed prompts send verbatim as ${running ? "steering" : "a new message"}`, async ({ page }) => {
     const relay = await openDsh(page, { running });

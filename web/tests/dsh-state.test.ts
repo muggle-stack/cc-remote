@@ -94,6 +94,44 @@ try {
   emit({ type: "models", engine: "dsh", models: [{ id: "native-model", display_name: "Native" }], dsh_presets: [] });
   emit({ type: "models", engine: "dsh", models: [], dsh_presets: [], error: "未连接" });
   assert.deepEqual(state.catalog.dsh, []);
+
+  state = { ...initialState, engine: "dsh", focusedSid: sid, sessions: [
+    { session_id: sid, engine: "dsh", space: "code", state: "running", last_modified: "1" },
+  ], runtimes: { [sid]: createRuntime() } };
+  emit({ type: "snapshot", generation: "recovery", state: "idle", cc_session_id: sid });
+  emit({ type: "user_msg", msg_id: "recover", client_msg_id: "recover", prompt: "long task" });
+  emit({ type: "turn_binding", msg_id: "recover", turn_id: "dsh-seq-2" });
+  emit({ type: "assistant_msg_start", turn_id: "dsh-seq-2", message_id: "work", channel: "commentary" });
+  emit({ type: "delta", turn_id: "dsh-seq-2", message_id: "work", channel: "commentary", text: "still checking" });
+  emit({ type: "assistant_msg_end", turn_id: "dsh-seq-2", message_id: "work", channel: "commentary" });
+  const runningRow = { id: "recover", clientMsgId: "recover", prompt: "long task", done: false,
+    blocks: [{ kind: "text", message_id: "work", channel: "commentary", text: "still checking", done: true }],
+    processDetailState: "present", detailReasons: ["process"], detailEventCount: 1, detailLoaded: false };
+  const nativeHistory = { type: "history", session_id: sid, revision: "recovery", generation: "recovery",
+    authoritative: true, detail: "summary", events: [], turns: [runningRow], newest_id: "recover", has_more: false };
+  // The old wrapper emitted an idle History before applying its running
+  // native snapshot. Reproduce that already-painted false terminal first.
+  emit({ ...nativeHistory, build_seq: 1, live_seq: seq, in_progress: false });
+  assert.equal(state.runtimes[sid].turns[0].terminalSource, "idle_history_recovery");
+  assert.ok(state.runtimes[sid].turns[0].error);
+  emit({ type: "state", state: "running" });
+  emit({ type: "ask_user", ask_id: "question", question: "Continue?", allow_text: true, options: [] });
+  emit({ ...nativeHistory, build_seq: 2, live_seq: seq, in_progress: true });
+  emit({ type: "turn_binding", msg_id: "recover", turn_id: "dsh-seq-2" });
+  assert.equal(state.runtimes[sid].turns[0].error, undefined,
+    "fresh native running history repairs a browser-only idle failure");
+  assert.equal(state.runtimes[sid].turns[0].done, false);
+  assert.notEqual(state.runtimes[sid].turns[0].interrupted, true);
+  assert.equal(state.runtimes[sid].pendingQuestion.ask_id, "question");
+  emit({ type: "turn_end", turn_id: "dsh-seq-2", result: {
+    subtype: "error_blocked", duration_ms: 10, is_error: true, error: "native failure",
+  } });
+  const terminalError = state.runtimes[sid].turns[0].error;
+  assert.ok(terminalError);
+  emit({ ...nativeHistory, build_seq: 3, live_seq: seq - 2, in_progress: true });
+  assert.equal(state.runtimes[sid].turns[0].error, terminalError,
+    "stale running history cannot undo a real native failure");
+  assert.equal(state.runtimes[sid].turns[0].done, true);
   console.log("DSH identity, retry, autonomous round and scoped state regressions passed");
 } finally {
   await harness.close();

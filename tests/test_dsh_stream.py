@@ -54,6 +54,25 @@ def test_cold_history_and_live_stream_have_same_final_identity_and_text():
     assert summaries[0][0]["blocks"] == summaries[1][0]["blocks"]
 
 
+@pytest.mark.parametrize("has_tool", [False, True])
+def test_native_settlement_refines_provisional_text_without_changing_its_identity(has_tool):
+    p = DshProjection()
+    record(p, "turn/start", {"turn": 1})
+    user(p, "prompt")
+    p.frame({"type": "start", "attemptId": "a", "turn": 1, "step": 1, "revision": 1})
+    live = p.frame({"type": "chunk", "attemptId": "a", "revision": 2, "index": 0,
+        "chunk": {"type": "text-delta", "index": 0, "text": "checking"}})
+    assert all(e.channel == "commentary" for e in live)
+    blocks = [{"type": "text", "text": "checking complete"}]
+    if has_tool:
+        blocks.append({"type": "tool-call", "toolCallId": "ask", "toolName": "ask_user_question"})
+    committed = record(p, "assistant/message", {"turn": 1, "step": 1, "message": {"content": blocks}})
+    prose = [e for e in committed if e.channel != "thinking"]
+    assert all(e.channel == ("commentary" if has_tool else "final") for e in prose)
+    assert {e.message_id for e in live + prose} == {"dsh-step-1-1-unknown"}
+    assert p.running and not any(e.type == "turn_end" for e in committed)
+
+
 def test_context_without_a_route_capacity_does_not_reuse_the_previous_models_window():
     p = DshProjection()
     p.context_pressure({"contextWindow": 1000000, "projectedTokens": 593, "pressureTokens": 550})

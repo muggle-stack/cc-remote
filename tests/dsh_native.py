@@ -274,6 +274,32 @@ async def exercise(installation: Path, root: Path):
         assert (await machine._handle(GetHistory(session_id=cold, detail="summary", client_id="native-test"))).authoritative
         print("PASS native search, references, subagents, export, archive, diagnostics and directory links", flush=True)
 
+        # Recreate only the Wrapper while DSH is blocked on a real native
+        # question. The new empty pool must recover its owner and pending card
+        # without a browser focus or resubmitting the original prompt.
+        await machine._handle(Query(sid=ctx.key, msg_id="native-recover-question", prompt="compatibility:ask"))
+        await eventually(lambda: ctx.pending_asks, "question before Wrapper restart")
+        target, ask_id = ctx.key, next(iter(ctx.pending_asks))
+        connection = runtime.client.connection
+        await runtime.close()
+        machine, transport = _mk_machine()
+        runtime = machine._dsh
+        runtime.client = DshClient(connection)
+        await runtime.connection()
+        await eventually(lambda: target in machine.sessions and machine.sessions[target].pending_asks,
+                         "native pending-question replay into a cold Wrapper")
+        ctx = machine.sessions[target]
+        assert machine.focused_sid is None
+        assert next(iter(ctx.pending_asks)) == ask_id
+        await eventually(lambda: ctx.sdk.ready.is_set() and ctx.sdk.connected, "recovered follow")
+        histories = [m for m in transport.sent if m.type == "history" and m.sid == target]
+        assert histories and histories[-1].in_progress and not histories[-1].turns[-1].done
+        await machine._handle(AnswerQuestion(sid=target, ask_id=ask_id, answer="继续", client_id="native-test"))
+        await eventually(lambda: ctx.state == "idle" and not ctx.pending_asks and ends(), "native continuation after recovery")
+        assert ends()[-1].result.subtype == "success"
+        assert not any(m.type == "state" and m.state == "idle" for m in transport.sent[:transport.sent.index(ends()[-1])])
+        print("PASS native Wrapper restart: pending question, running history, continuation and exact terminal", flush=True)
+
     except BaseException:
         shutil.copyfile(log_path, installation / "native-test-last-error.log")
         os.chmod(installation / "native-test-last-error.log", 0o600)

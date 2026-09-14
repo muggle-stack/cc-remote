@@ -1024,10 +1024,14 @@ def materialize_history_turns(
                 and (started_ms is None or started_ms > done_ms)):
             started_ms = max(0, done_ms - (duration_ms or 0))
         blocks = []
-        final_block_count = sum(
-            bool("".join(texts.get(message_id, ())))
-            for message_id in final_ids
-        )
+        # A turn may contain arbitrarily many native answers/questions. The
+        # wire summary is bounded by both characters and block count; full
+        # source events remain available through GetTurnDetail.
+        final_ids = [message_id for message_id in final_ids
+                     if any(texts.get(message_id, ()))]
+        summary_truncated = len(final_ids) > _SUMMARY_BLOCK_MAX
+        final_ids = final_ids[-_SUMMARY_BLOCK_MAX:]
+        final_block_count = len(final_ids)
         notice_limit = max(0, _SUMMARY_BLOCK_MAX - final_block_count)
         notices = list(model_notices.values())[-notice_limit:] if notice_limit else []
         image_limit = max(0, _SUMMARY_BLOCK_MAX - final_block_count - len(notices))
@@ -1113,7 +1117,6 @@ def materialize_history_turns(
         blocks.extend(notices)
         blocks.extend(image_summaries)
         remaining_summary_chars = _SUMMARY_TEXT_MAX_CHARS
-        summary_truncated = False
         for message_id in final_ids:
             text = "".join(texts.get(message_id, ()))
             if text:

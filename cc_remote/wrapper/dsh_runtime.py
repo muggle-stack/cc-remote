@@ -7,6 +7,7 @@ an Agent subscription. Detaching closes subscriptions, not native Agents.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import OrderedDict
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -20,7 +21,9 @@ from cc_remote.protocol import (
     SessionList, SessionListInvalidated, StateEvent, TurnBinding, TurnDetail,
     TurnEnd, UserMsg,
 )
+from cc_remote.log import logger
 from cc_remote.wrapper.command_router import UNHANDLED_COMMAND
+from cc_remote.wrapper.claude_questions import AskUnavailable
 from cc_remote.wrapper.dsh_client import (
     DshClient, DshConnection, DshError, native_session_id, wire_session_id,
 )
@@ -36,6 +39,7 @@ _COMMON = frozenset({
     "answer_question", "acknowledge_completion", "cancel_queued_query",
     "get_queued_query", "update_queued_query", "query",
 })
+log = logger("dsh_runtime")
 
 
 @dataclass
@@ -71,11 +75,13 @@ class DshRuntime:
         self.machine = machine
         self.client = client
         self.lock = asyncio.Lock()
+        self.context_lock = asyncio.Lock()
         self.events_task: asyncio.Task | None = None
         self.control_task: asyncio.Task | None = None
         self.events_ready = asyncio.Event()
         self.event_client: str | None = None
         self.questions: dict[str, asyncio.Task] = {}
+        self.question_progress: OrderedDict[str, dict] = OrderedDict()
         self.catalog: list[dict] = []
         self.presets: list[dict] = []
         self.default_model: str | None = None
@@ -195,6 +201,13 @@ class DshRuntime:
         return msg
 
     async def ctx(self, sid) -> SessionContext:
+        # Native pending-event replay can race a browser focus after restart.
+        # Both must share one context and its question futures, never overwrite
+        # an independently restored owner after an awaited cold read.
+        async with self.context_lock:
+            return await self._ctx(sid)
+
+    async def _ctx(self, sid) -> SessionContext:
         if sid is None:
             ctx = self.machine._focused_ctx()
             if ctx is None or ctx.engine != "dsh":
@@ -225,8 +238,9 @@ class DshRuntime:
         ctx = SessionContext(session_id=sid, key=sid, sdk=handle, cwd=snapshot["header"]["cwd"],
                              engine="dsh", buffer=RingBuffer(
                                  self.machine.cfg.ring_max_events, self.machine.cfg.ring_max_bytes))
-        self.machine.sessions[sid] = ctx
         self._project(snapshot, handle.projection)
+        ctx.state = "running" if handle.projection.running else "idle"
+        self.machine.sessions[sid] = ctx
         handle.model, handle.effort = handle.projection.model, handle.projection.effort
         await self.snapshot_projections(ctx, snapshot)
         return ctx
@@ -298,7 +312,7 @@ class DshRuntime:
         projection, frames = self._project(snapshot)
         events = history_events(frames)
         self._cache_history(sid, snapshot, projection, events)
-        rows = list(materialize_history_turns(events))
+        rows = list(materialize_history_turns(events, include_live_detail=True))
         for row in rows:
             if row.get("forkPointId") not in projection.fork_seqs:
                 row.pop("forkPointId", None)
@@ -316,7 +330,9 @@ class DshRuntime:
             before=cmd.before, has_more=snapshot["hasMore"],
             oldest_id=f"dsh-seq-{snapshot['records'][0]['event']['seq']}" if snapshot["records"] else None,
             newest_id=rows[-1]["id"] if rows else None,
-            in_progress=bool(ctx and ctx.state != "idle"),
+            # Cold reads and the first follow snapshot can precede resident
+            # State(running). Only the native source owns this lifecycle fence.
+            in_progress=projection.running,
             control=self.machine._session_control(ctx) if ctx else None,
         )
         await self.machine.transport.send(result)
@@ -894,6 +910,7 @@ class DshRuntime:
                         snapshot = await self.client.history_snapshot(ctx.key, through_seq=frame["cursor"], max_messages=100)
                         projection, _ = self._project(snapshot)
                         handle.projection = projection
+                        ctx.state = "running" if projection.running else "idle"
                         handle.connected = True
                         handle.state.connected, handle.state.error = True, None
                         await self.machine._set_session_control(ctx, control_mode="remote",
@@ -903,8 +920,22 @@ class DshRuntime:
                         self.set_commands(ctx, commands)
                         await self.machine._emit(ctx, handle.state.model_copy(deep=True))
                         # Reconnect restores the canonical tail before additional deltas.
-                        await self.handle_get_history(SimpleNamespace(
-                            session_id=ctx.key, before=None, limit=4, detail="summary", client_id=None))
+                        history_cmd = SimpleNamespace(type="get_history",
+                            session_id=ctx.key, before=None, limit=4, detail="summary", client_id=None)
+                        try:
+                            await self.handle_get_history(history_cmd)
+                        except DshError as exc:
+                            # A failed history read must not detach a healthy
+                            # live stream or turn a running Agent read-only.
+                            await self.error(history_cmd, exc)
+                        if projection.running and projection.owner:
+                            # The original user echo can be outside live replay.
+                            # Bind after History has installed its row; an open
+                            # DSH summary deliberately has no fork point yet.
+                            await self.emit(ctx, TurnBinding(
+                                msg_id=projection.client_id or projection.owner,
+                                turn_id=projection.owner, autonomous=projection.client_id is None,
+                                continuation=projection.continuation))
                         for message in projection.baseline(frame.get("assistantStream") or {}):
                             await self.emit(ctx, message)
                         ctx.state = "running" if projection.running else "idle"
@@ -932,6 +963,8 @@ class DshRuntime:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                log.warning("DSH follow resynchronizing", sid=ctx.key,
+                            error_type=type(exc).__name__, code=getattr(exc, "code", None))
                 handle.connected = False
                 handle.goal_activation = None
                 handle.goal_epoch += 1
@@ -1028,6 +1061,7 @@ class DshRuntime:
                         if event_id not in self.questions:
                             self.questions[event_id] = asyncio.create_task(self._question(frame, self.event_client))
                     elif kind == "cancel":
+                        self.question_progress.pop(frame["eventId"], None)
                         task = self.questions.pop(frame["eventId"], None)
                         if task:
                             task.cancel()
@@ -1068,64 +1102,111 @@ class DshRuntime:
             if not self.closed:
                 await asyncio.sleep(2)
 
+    async def question_ctx(self, sid):
+        ctx = self.machine.sessions.get(sid)
+        if ctx is not None:
+            return ctx if ctx.engine == "dsh" else None
+        # Pending native questions are replayed after reconnect, often before
+        # the user focuses their session. Restore only a catalog-proven owner
+        # with a cold read; do not focus it, activate it or promote a subagent.
+        items = {item["sessionId"]: item for item in await self.client.list_sessions()}
+        native = native_session_id(sid)
+        for _ in range(8):
+            item = items.get(native)
+            if item is None:
+                return None
+            if item.get("origin") != "subagent":
+                ctx = await self.ctx(wire_session_id(native))
+                if item.get("running") and (ctx.sdk.watch is None or ctx.sdk.watch.done()):
+                    # This Agent is already executing and waiting for input.
+                    # Follow its continuation/terminal even if never focused.
+                    ctx.sdk.watch = asyncio.create_task(self._follow(ctx))
+                return ctx
+            native = item.get("parentSessionId")
+            if not native:
+                return None
+            ctx = self.machine.sessions.get(wire_session_id(native))
+            if ctx is not None:
+                return ctx if ctx.engine == "dsh" else None
+        return None
+
+    async def question_outcome(self, ctx, frame, progress):
+        if ctx is None:
+            return {"kind": "next"}
+        request, event = frame.get("request", {}), frame.get("event")
+        # Native event identity survives a $events transport reconnect. Never
+        # ask already-answered pages again or bind answers to a client socket.
+        ask_key = progress["signature"]
+        if event == "approval/request":
+            answer = await self.machine._on_ask_optional(
+                ctx, f"DSH 请求使用工具：{request.get('toolName', '工具')}\n{request.get('reason', '')}"[:16000],
+                [{"label": "允许一次", "ds": "仅批准这一次工具调用"}, {"label": "拒绝", "ds": "不执行这次调用"}],
+                ask_id=identity(ask_key, "dsh-ask"))
+            return {"kind": "result", "value": "allowed-once" if answer == "允许一次" else "rejected" if answer else "cancelled"}
+        if event != "user-questions/request":
+            return {"kind": "next"}
+        answers = progress["answers"]
+        async with ctx.ask_lock:
+            for index, q in enumerate(request.get("questions", [])):
+                if index < len(answers):
+                    continue
+                options = [{"label": o["label"], "ds": o.get("description", "")} for o in q.get("options", [])]
+                plan_review = q.get("intent", {}).get("kind") == "plan-review"
+                question = ("是否批准以下计划并开始执行？" if plan_review else q["question"]) + ("\n\n" + q["detail"] if q.get("detail") else "")
+                if len(options) > 5:
+                    question += "\n其余选项可在回答框填写：\n" + "\n".join(o["label"] + ": " + o["ds"] for o in options[5:])
+                answer = await self.machine._on_ask_locked(
+                    ctx, question, options[:5], header="计划确认" if plan_review else q.get("header"), allow_text=True,
+                    multi_select=q.get("multiSelect", False), ask_id=identity(f"{ask_key}:{index}", "dsh-ask"))
+                selected = answer if isinstance(answer, list) else [answer]
+                labels = {o["label"] for o in options}
+                answers.append({"id": q["id"], "selected": [a for a in selected if a in labels],
+                                **({"custom": "\n".join(a for a in selected if a not in labels)} if any(a not in labels for a in selected) else {})})
+        return {"kind": "result", "value": {"answers": answers}}
+
     async def _question(self, frame, client_id):
         event_id = frame["eventId"]
+        signature = identity(json.dumps(frame, sort_keys=True, ensure_ascii=False))
+        progress = self.question_progress.get(event_id)
+        if progress is None or progress["signature"] != signature:
+            progress = {"signature": signature, "answers": [], "outcome": None}
+            self.question_progress[event_id] = progress
+        self.question_progress.move_to_end(event_id)
+        while len(self.question_progress) > 128:
+            self.question_progress.popitem(last=False)
         try:
-            sid = wire_session_id(frame.get("agentId", ""))
-            ctx = self.machine.sessions.get(sid)
-            if ctx is None:
-                # Native delegated agents ask in their own scope. Display their
-                # question on a proven resident ancestor, never on current focus.
-                items = {item["sessionId"]: item for item in await self.client.list_sessions()}
-                native = native_session_id(sid)
-                for _ in range(8):
-                    item = items.get(native, {})
-                    if item.get("origin") != "subagent" or not item.get("parentSessionId"):
-                        break
-                    native = item["parentSessionId"]
-                    ctx = self.machine.sessions.get(wire_session_id(native))
-                    if ctx is not None:
-                        break
-            outcome = {"kind": "next"}
-            if ctx is not None and ctx.engine == "dsh":
-                request = frame.get("request", {})
-                event = frame.get("event")
-                if event == "approval/request":
-                    answer = await self.machine._on_ask_optional(
-                        ctx, f"DSH 请求使用工具：{request.get('toolName', '工具')}\n{request.get('reason', '')}"[:16000],
-                        [{"label": "允许一次", "ds": "仅批准这一次工具调用"}, {"label": "拒绝", "ds": "不执行这次调用"}],
-                        ask_id=identity(f"{client_id}:{event_id}", "dsh-ask"))
-                    outcome = {"kind": "result", "value": "allowed-once" if answer == "允许一次" else "rejected" if answer else "cancelled"}
-                elif event == "user-questions/request":
-                    answers = []
-                    async with ctx.ask_lock:
-                        for index, q in enumerate(request.get("questions", [])):
-                            options = [{"label": o["label"], "ds": o.get("description", "")} for o in q.get("options", [])]
-                            plan_review = q.get("intent", {}).get("kind") == "plan-review"
-                            question = ("是否批准以下计划并开始执行？" if plan_review else q["question"]) + ("\n\n" + q["detail"] if q.get("detail") else "")
-                            if len(options) > 5:
-                                question += "\n其余选项可在回答框填写：\n" + "\n".join(o["label"] + ": " + o["ds"] for o in options[5:])
-                            answer = await self.machine._on_ask_locked(
-                                ctx, question,
-                                options[:5], header="计划确认" if plan_review else q.get("header"), allow_text=True,
-                                multi_select=q.get("multiSelect", False),
-                                ask_id=identity(f"{client_id}:{event_id}:{index}", "dsh-ask"))
-                            selected = answer if isinstance(answer, list) else [answer]
-                            labels = {o["label"] for o in options}
-                            answers.append({"id": q["id"], "selected": [a for a in selected if a in labels],
-                                            **({"custom": "\n".join(a for a in selected if a not in labels)} if any(a not in labels for a in selected) else {})})
-                    outcome = {"kind": "result", "value": {"answers": answers}}
-            if client_id == self.event_client:
-                await self.client.rpc("$events/result", {"clientId": client_id, "eventId": event_id, "outcome": outcome})
+            while not self.closed and client_id == self.event_client:
+                try:
+                    if progress["outcome"] is None:
+                        ctx = await self.question_ctx(wire_session_id(frame.get("agentId", "")))
+                        try:
+                            progress["outcome"] = await self.question_outcome(ctx, frame, progress)
+                        except AskUnavailable:
+                            progress["outcome"] = {"kind": "next"}
+                    if client_id != self.event_client:
+                        return
+                    await self.client.rpc("$events/result", {"clientId": client_id, "eventId": event_id,
+                                                             "outcome": progress["outcome"]})
+                    self.question_progress.pop(event_id, None)
+                    return
+                except (DshError, ConnectionError, TimeoutError):
+                    # A transient catalog/read/result failure is not a user
+                    # skip. Retain this delivery and retry, or let the native
+                    # pending-event replay resume it on the next connection.
+                    await asyncio.sleep(2)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            log.warning("DSH question projection failed", event_id=event_id,
+                        error_type=type(exc).__name__)
             if client_id == self.event_client:
                 with suppress(DshError):
                     await self.client.rpc("$events/result", {"clientId": client_id, "eventId": event_id,
                                                              "outcome": {"kind": "next"}})
+            self.question_progress.pop(event_id, None)
         finally:
-            self.questions.pop(event_id, None)
+            if self.questions.get(event_id) is asyncio.current_task():
+                self.questions.pop(event_id, None)
 
     async def close(self):
         self.closed = True

@@ -377,6 +377,186 @@ async def test_history_page_fence_excludes_live_events_arriving_during_read():
     assert result.live_seq == before and ctx.seq > before
 
 
+async def long_native_snapshot(client, *, completed=False, steps=64):
+    snapshot = await Client.history_snapshot(client, "dsh@session")
+    records = snapshot["records"]
+    def add(kind, data):
+        records.append({"event": {"seq": len(records), "time": 1000 * (len(records) + 1),
+                                  "type": kind, "data": data}})
+    add("turn/start", {"turn": 1})
+    add("user/message", {"id": "prompt", "source": {"kind": "user", "rpcId": "prompt"},
+                         "content": [{"type": "text", "text": "inspect the project"}]})
+    for step in range(steps):
+        add("step/start", {"turn": 1, "step": step})
+        add("assistant/message", {"turn": 1, "step": step, "message": {"content": [
+            {"type": "reasoning", "text": f"reasoning {step}"},
+            {"type": "text", "text": f"checking item {step}"},
+            {"type": "tool-call", "toolCallId": f"read-{step}", "toolName": "read", "input": "{}"},
+        ]}})
+        add("tool/call", {"turn": 1, "step": step, "callId": f"read-{step}", "name": "read", "arguments": "{}"})
+        add("tool/result", {"turn": 1, "step": step, "message": {"content": [
+            {"type": "tool-result", "toolCallId": f"read-{step}", "content": [{"type": "text", "text": "contents"}]},
+        ]}})
+        add("step/end", {"turn": 1, "step": step})
+    if completed:
+        add("assistant/message", {"turn": 1, "step": steps, "message": {"content": [
+            {"type": "text", "text": "inspection complete"},
+        ]}})
+        add("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
+    snapshot["cursor"] = len(records) - 1
+    snapshot["projections"]["asOfSeq"] = snapshot["cursor"]
+    return snapshot
+
+
+@pytest.mark.parametrize("completed", [False, True])
+@pytest.mark.asyncio
+async def test_long_first_turn_has_bounded_summary_and_complete_process_detail(completed):
+    machine, _, runtime, client = setup_runtime()
+    snapshot = await long_native_snapshot(client, completed=completed)
+    async def read(*args, **kwargs):
+        return snapshot
+    client.history_snapshot = read
+    result = await machine._handle(GetHistory(session_id="dsh@session", detail="summary"))
+    assert deserialize(serialize(result)) == result
+    assert not result.has_more and not result.error
+    assert result.in_progress is not completed
+    assert not machine.sessions, "reading history must not activate a native Agent"
+    assert len(result.turns) == 1
+    row = result.turns[0].model_dump()
+    assert row["done"] is completed and not row.get("error")
+    assert len(row["blocks"]) <= 32
+    finals = [block["text"] for block in row["blocks"] if block.get("channel") == "final"]
+    assert finals == (["inspection complete"] if completed else [])
+    assert any(block.get("channel") == "commentary" for block in row["blocks"])
+    assert row["processDetailState"] == "present" and row["detailEventCount"] >= 64
+    events, cursor = [], None
+    for _ in range(8):
+        detail = await machine._handle(GetTurnDetail(session_id="dsh@session", turn_id=row["id"], before=cursor, limit=256))
+        events = detail.events + events
+        if not detail.has_more:
+            break
+        cursor = detail.oldest_cursor
+    comments = [e for e in events if e["type"] == "delta" and e.get("channel") == "commentary"]
+    thoughts = [e for e in events if e["type"] == "delta" and e.get("channel") == "thinking"]
+    assert len(comments) == len(thoughts) == 64
+    assert comments[0]["text"] == "checking item 0" and comments[-1]["text"] == "checking item 63"
+    assert not detail.has_more
+
+
+@pytest.mark.parametrize("history_fails", [False, True])
+@pytest.mark.asyncio
+async def test_follow_recovers_running_native_turn_without_false_idle_or_read_only(history_fails):
+    _, transport, runtime, client = setup_runtime()
+    ctx = await runtime.ctx("dsh@session")
+    assert ctx.state == "idle"
+    snapshot = await long_native_snapshot(client)
+    async def read(*args, **options):
+        if history_fails and "through_seq" not in options:
+            raise DshError("disconnected", "temporary history read failure")
+        return snapshot
+    async def stream(*args, **kwargs):
+        yield {"type": "snapshot", "cursor": snapshot["cursor"]}
+        await asyncio.Future()
+    async def rpc(endpoint, *args):
+        assert endpoint == "commands/list"
+        return []
+    client.history_snapshot, client.stream, client.rpc = read, stream, rpc
+    ctx.sdk.watch = asyncio.create_task(runtime._follow(ctx))
+    try:
+        await asyncio.wait_for(ctx.sdk.ready.wait(), 2)
+        assert ctx.sdk.connected and ctx.sdk.state.connected
+        assert ctx.state == "running"
+        assert not ctx.sdk.state.error
+        assert not any(e.type == "state" and e.state == "idle" for e in transport.sent)
+        assert not any(e.type == "session_control" and e.write_state == "read_only" for e in transport.sent)
+        assert ctx.active_turn_binding.msg_id == "prompt"
+        assert ctx.active_turn_binding.turn_id == "dsh-seq-1"
+        histories = [e for e in transport.sent if e.type == "history"]
+        assert histories
+        if history_fails:
+            assert histories[-1].error and not histories[-1].authoritative
+        else:
+            assert histories[-1].in_progress and not histories[-1].turns[-1].done
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.parametrize("delegated", [False, True])
+@pytest.mark.asyncio
+async def test_pending_question_restores_cold_owner_without_focus_or_activation(delegated):
+    machine, _, runtime, client = setup_runtime()
+    machine.focused_sid = "other-session"
+    async def catalog():
+        return [{"sessionId": "root", "running": True},
+                {"sessionId": "child", "origin": "subagent", "parentSessionId": "root", "running": True}]
+    client.list_sessions = catalog
+    async def follow(ctx):
+        await asyncio.Future()
+    runtime._follow = follow
+    captured = []
+    async def ask(ctx, question, options, **fields):
+        captured.append((ctx.key, question))
+        return "Yes"
+    machine._on_ask_locked = ask
+    runtime.event_client = "listener"
+    await runtime._question({"eventId": "pending", "event": "user-questions/request",
+        "agentId": "child" if delegated else "root", "request": {"questions": [
+            {"id": "choice", "question": "Continue?", "options": [{"label": "Yes"}, {"label": "No"}]},
+        ]}}, runtime.event_client)
+    assert captured == [("dsh@root", "Continue?")]
+    assert machine.focused_sid == "other-session" and list(machine.sessions) == ["dsh@root"]
+    assert machine.sessions["dsh@root"].sdk.watch is not None
+    assert [call[0] for call in client.calls] == ["snapshot", "$events/result"]
+    assert client.calls[-1][1]["outcome"] == {"kind": "result", "value": {"answers": [
+        {"id": "choice", "selected": ["Yes"]},
+    ]}}
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_question_reconnect_preserves_answers_and_unanswered_page_identity():
+    machine, _, runtime, client = setup_runtime()
+    await runtime.ctx("dsh@root")
+    seen = []
+    async def ask(ctx, question, options, **fields):
+        seen.append((question, fields["ask_id"]))
+        if len(seen) == 2:
+            raise asyncio.CancelledError
+        return "Yes" if question == "First?" else "Custom answer"
+    machine._on_ask_locked = ask
+    frame = {"eventId": "pending", "event": "user-questions/request", "agentId": "root", "request": {"questions": [
+        {"id": "first", "question": "First?", "options": [{"label": "Yes"}, {"label": "No"}]},
+        {"id": "second", "question": "Second?", "options": []},
+    ]}}
+    runtime.event_client = "old-listener"
+    with pytest.raises(asyncio.CancelledError):
+        await runtime._question(frame, runtime.event_client)
+    assert not any(call[0] == "$events/result" for call in client.calls)
+    runtime.event_client = "new-listener"
+    await runtime._question(frame, runtime.event_client)
+    assert [q for q, _ in seen] == ["First?", "Second?", "Second?"]
+    assert seen[1][1] == seen[2][1]
+    assert not runtime.question_progress
+    assert client.calls[-1][1] == {"clientId": "new-listener", "eventId": "pending", "outcome": {
+        "kind": "result", "value": {"answers": [
+            {"id": "first", "selected": ["Yes"]},
+            {"id": "second", "selected": [], "custom": "Custom answer"},
+        ]},
+    }}
+
+
+@pytest.mark.asyncio
+async def test_question_owner_recovery_and_browser_focus_share_one_context():
+    machine, _, runtime, client = setup_runtime()
+    async def read(*args, **kwargs):
+        await asyncio.sleep(0)
+        return await Client.history_snapshot(client, *args, **kwargs)
+    client.history_snapshot = read
+    first, second = await asyncio.gather(runtime.ctx("dsh@root"), runtime.ctx("dsh@root"))
+    assert first is second is machine.sessions["dsh@root"]
+    assert len(client.calls) == 1
+
+
 @pytest.mark.parametrize("action", ["create", "edit", "pause", "resume", "complete", "clear"])
 @pytest.mark.asyncio
 async def test_goal_actions_forward_native_round_caps_and_exact_client_ref(action):

@@ -1523,6 +1523,29 @@ def test_materialized_turn_bounds_initial_final_text_and_advertises_detail():
     assert turns[0]["detailReasons"] == ["answer_truncated"]
 
 
+@pytest.mark.parametrize("channel", ["unknown", "final"])
+@pytest.mark.parametrize("include_live_detail", [False, True])
+def test_many_short_answers_cannot_exceed_summary_wire_block_budget(channel, include_live_detail):
+    from cc_remote.protocol import History, deserialize, serialize
+
+    events = [{"type": "user_msg", "msg_id": "prompt", "prompt": "many replies"}]
+    for index in range(70):
+        events.extend([
+            {"type": "assistant_msg_start", "message_id": f"reply-{index}", "channel": channel},
+            {"type": "delta", "message_id": f"reply-{index}", "channel": channel, "text": f"answer {index}"},
+            {"type": "assistant_msg_end", "message_id": f"reply-{index}", "channel": channel},
+        ])
+    turns = materialize_history_turns(events, include_live_detail=include_live_detail)
+    assert len(turns[0]["blocks"]) == 32
+    assert turns[0]["blocks"][-1]["text"] == "answer 69"
+    assert "answer_truncated" in turns[0]["detailReasons"]
+    assert turns[0]["detailEventCount"] >= 1
+    summary = History(session_id="session", revision="revision", detail="summary", turns=turns)
+    assert deserialize(serialize(summary)) == summary
+    # Materialization is a projection: the full source detail remains intact.
+    assert sum(event["type"] == "delta" for event in events) == 70
+
+
 def test_materialized_turn_defers_images_and_bounds_large_prompt():
     turns = materialize_history_turns([
         {"type": "user_msg", "msg_id": "message-1",

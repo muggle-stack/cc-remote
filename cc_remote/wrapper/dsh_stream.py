@@ -124,6 +124,10 @@ class DshProjection:
 
     @staticmethod
     def message_id(turn: int, step: int, channel: str) -> str:
+        # A provisional narrative can become the final answer on settlement.
+        # Keep its existing wire identity across that refinement and upgrades.
+        if channel in {"commentary", "final"}:
+            channel = "unknown"
         return f"dsh-step-{turn}-{step}-{channel}"
 
     def context(self) -> ContextReport:
@@ -368,7 +372,13 @@ class DshProjection:
 
     def _replace_text(self, data, owner, blocks, *, settled=True):
         out = []
-        for channel, kind in (("thinking", "reasoning"), ("unknown", "text")):
+        # Native DSH continues the step loop when the assembled assistant
+        # message contains tool calls. Its accompanying text is a preamble,
+        # including text before ask_user_question, not a finished answer.
+        channel = "final" if settled and not any(
+            b.get("type") == "tool-call" for b in blocks
+        ) else "commentary"
+        for channel, kind in (("thinking", "reasoning"), (channel, "text")):
             text = text_content(blocks, kind)
             message_id = self.message_id(data["turn"], data["step"], channel)
             # An empty replacement only retires a provisional block already seen.
@@ -426,7 +436,7 @@ class DshProjection:
         attempt = self.attempt
         if attempt is None or chunk.get("type") not in {"text-delta", "reasoning-delta"}:
             return []
-        channel = "thinking" if chunk["type"] == "reasoning-delta" else "unknown"
+        channel = "thinking" if chunk["type"] == "reasoning-delta" else "commentary"
         index = chunk.get("index", 0)
         text = str(chunk.get("text", ""))
         _, old = attempt.text.get(index, (channel, ""))
