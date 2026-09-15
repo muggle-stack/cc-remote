@@ -191,7 +191,9 @@ class TranscriptViewport(Container):
     def project(self, text, starts, identity):
         self.reset(identity)
         self.projection = ImageProjection()
-        self.projection.content = MarkdownProjection(text)
+        self.projection.content = MarkdownProjection(
+            text, self.app.client.keys.label("diagram_browser"),
+        )
         self.render_width = max(8, self.reader.wrap_width)
         markdown, markdown_starts = self.projection.content.project(
             starts, self.render_width
