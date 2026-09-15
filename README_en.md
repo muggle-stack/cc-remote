@@ -306,6 +306,18 @@ policy is not a replacement for separate OS users, containers or virtual machine
 | [Codex App tools](docs/codex-app-tools.md) | Optional App-control MCP |
 | [Changelog](CHANGELOG.md) | Version changes and migrations |
 
+## Terminal workspace (preview)
+
+The built-in Python/Textual TUI shares relay/wrapper sessions with Web. It
+provides session tabs, a Space e directory tree with search, Vim-style reading
+and input modes, message jumps, and copy/quote actions that retain the reading
+position. Thinking/tool/process
+details, elapsed time, Goal/Plan, usage, queue editing and shared session
+controls are available. Markdown and compatible-terminal image previews are
+built in; other graphical content has an explicit Web handoff.
+See the [terminal workspace guide](docs/tui.md) for installation, keys and
+terminal boundaries. Use `--line-mode` for the original line-oriented client.
+
 ## Development
 
 Use Node 24 for the web client and the repository's Python dependency locks.
