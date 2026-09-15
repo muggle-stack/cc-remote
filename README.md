@@ -267,6 +267,17 @@ Code 默认权限较宽；Work 的私有目录策略不能替代独立系统用�
 | [Codex App 工具](docs/codex-app-tools.md) | 可选 App-control MCP |
 | [更新记录](CHANGELOG_zh.md) | 版本变化与迁移记录 |
 
+## 终端工作台（预览）
+
+不习惯网页时，可以使用内置的 Python/Textual 全屏 TUI。它与网页共享
+relay/wrapper 会话，提供会话标签、Space e 目录树及搜索、Vim 风格阅读与输入
+模式、消息跳转，以及不改变阅读位置的复制和引用。
+支持思考/工具/进程详情、运行计时、Goal/Plan、
+用量、队列编辑及共享会话控制；支持 Markdown 预览和兼容终端的图片显示，
+其他图形内容保留明确的网页入口。
+安装、快捷键及终端边界见
+[终端工作台中文指南](docs/tui_zh.md)。原逐行客户端可用 `--line-mode` 启动。
+
 ## 开发
 
 前端使用 Node 24；Python 依赖按仓库锁文件安装。常用零模型测试：

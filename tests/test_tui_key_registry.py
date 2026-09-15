@@ -80,8 +80,11 @@ def test_example_covers_every_registered_action_with_current_defaults():
     data = tomllib.loads(path.read_text())
     defaults = KeyConfig().index()
     assert {f"{layer}.{name}" for layer, section in data.items()
-            for name in section} == {row["id"] for row in defaults}
+            for name in section if layer != "vim"} == {
+                row["id"] for row in defaults
+            }
     assert KeyConfig(data).index() == defaults
+    assert KeyConfig(data).yank_highlight_ms == KeyConfig().yank_highlight_ms
 
 
 @pytest.mark.parametrize("row", KeyConfig().index(), ids=lambda row: row["id"])
