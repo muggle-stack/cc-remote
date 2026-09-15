@@ -13,7 +13,7 @@
 
 ### Claude
 
-Wrapper 使用日常 Claude Code，默认 `~/.local/bin/claude`，最低版本 `2.1.258`。
+Wrapper 使用日常 Claude Code，默认 `~/.local/bin/claude`，最低版本 `2.1.263`。
 `CLAUDE_BIN` 留空仍使用该路径；显式覆盖必须是绝对路径。Agent SDK 固定为
 `0.2.151`，不会使用 SDK 自带 CLI 替代你的日常安装。
 

@@ -403,6 +403,16 @@ export function ProcessActivity({ block, onOpenFile, imageAssets, onLoadImage,
   onInteractionEnd?: (token: number, followOutput?: boolean) => void;
   onOpenAgent?: (runId: string, title?: string) => void;
 }) {
+  if (block.processKind === "compaction" && !block.done && block.status === "running") {
+    return (
+      <div className="process-activity process-compaction-running" role="status">
+        <span className="compact-motion" aria-hidden="true">
+          <i /><i /><i /><i /><i />
+        </span>
+        <span className="process-item-title">正在压缩上下文</span>
+      </div>
+    );
+  }
   if (block.processKind === "agent" && onOpenAgent) {
     return (
       <button type="button"

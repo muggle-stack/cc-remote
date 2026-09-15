@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createServer } from "vite";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   normalizeAutoCompactSelection,
@@ -385,8 +387,8 @@ try {
   });
   assert.equal(contextState.runtimes[sid].contextReport?.total_tokens, 180,
     "the lightweight ring may track the latest turn estimate");
-  assert.equal(contextState.runtimes[sid].contextExactReport?.total_tokens, 160,
-    "a recent-turn estimate must not overwrite the popover's exact reading");
+  assert.equal(contextState.runtimes[sid].contextExactReport?.total_tokens, 180,
+    "newer Claude usage must replace the older control reading in the popover");
 
   contextState = reduce(contextState, {
     type: "begin_context_request",
@@ -408,8 +410,8 @@ try {
     "a busy native read must remain queued for the next terminal boundary");
   assert.equal(contextState.runtimes[sid].contextError, null,
     "a deferred refresh is not a user-visible failure");
-  assert.equal(contextState.runtimes[sid].contextExactReport?.total_tokens, 160,
-    "deferral must preserve the last exact report");
+  assert.equal(contextState.runtimes[sid].contextExactReport?.total_tokens, 180,
+    "deferral must preserve the latest usable report");
 
   contextState = reduce(contextState, {
     type: "event",
@@ -499,6 +501,56 @@ try {
     "an unrequested broadcast should clear an obsolete local error");
   assert.equal(unrequestedContextState.runtimes[sid].contextReport?.total_tokens,
     160);
+
+  let compactState = {
+    ...initialState, focusedSid: "compact-session",
+    runtimes: { "compact-session": createRuntime() },
+  };
+  const compactEvent = (body: Record<string, unknown>) => ({
+    type: "event", event: event({ sid: "compact-session", ...body }),
+  });
+  compactState = reduce(compactState, compactEvent({
+    type: "context_report", source: "control", total_tokens: 600_000,
+    max_tokens: 800_000, percentage: 75, categories: [],
+  }));
+  compactState = reduce(compactState, compactEvent({
+    type: "context_report", source: "recent_turn", total_tokens: 8_000,
+    max_tokens: 800_000, percentage: 1, categories: [],
+  }));
+  compactState = reduce(compactState, compactEvent({
+    type: "context_report", available: false, total_tokens: 0,
+    max_tokens: 0, percentage: 0, categories: [],
+  }));
+  assert.equal(compactState.runtimes["compact-session"].contextExactReport.total_tokens, 8_000,
+    "a transient read failure retains the new post-compact count, never the old control sample");
+
+  const start = { type: "process", kind: "compaction", item_id: "compact-status",
+    phase: "start", status: "running", turn_id: "compact-turn", title: "压缩上下文" };
+  compactState = reduce(compactState, compactEvent(start));
+  const { ProcessActivity } = await reducerHarness.ssrLoadModule(
+    "/src/components/ProcessTimeline.tsx");
+  const getCompactBlock = () => compactState.runtimes["compact-session"].turns
+    .flatMap((turn: { blocks: unknown[] }) => turn.blocks)[0];
+  const runningMarkup = renderToStaticMarkup(createElement(ProcessActivity, {
+    block: getCompactBlock(),
+  }));
+  assert.match(runningMarkup, /process-compaction-running/);
+  assert.match(runningMarkup, /正在压缩上下文/);
+  const end = { ...start, item_id: "native-boundary", phase: "end", status: "succeeded",
+    summary: "手动压缩 · 600,000 → 8,000 tokens", duration_ms: 20_000,
+    input: { compaction_started_id: "compact-status" } };
+  compactState = reduce(compactState, compactEvent(end));
+  compactState = reduce(compactState, compactEvent(end));
+  assert.equal(compactState.runtimes["compact-session"].turns.length, 1);
+  assert.equal(compactState.runtimes["compact-session"].turns[0].blocks.length, 1,
+    "a completed native boundary replaces its exact status placeholder once");
+  const compactBlock = getCompactBlock() as { item_id: string; done: boolean; input?: unknown };
+  assert.equal(compactBlock.item_id, "native-boundary");
+  assert.equal(compactBlock.done, true);
+  assert.equal(compactBlock.input, undefined, "internal binding metadata stays out of the UI");
+  const completedMarkup = renderToStaticMarkup(createElement(ProcessActivity, { block: compactBlock }));
+  assert.doesNotMatch(completedMarkup, /process-compaction-running/);
+  assert.match(completedMarkup, /600,000 → 8,000 tokens/);
 
   const defaultNewChat = reduce(initialState, {
     type: "enter_new_chat",

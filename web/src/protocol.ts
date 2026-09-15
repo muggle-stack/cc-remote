@@ -190,7 +190,12 @@ export interface SessionMigrated extends Base {
   cwd: string;
   request_id: string;
 }
-export interface UserMsg extends Base { type: "user_msg"; msg_id: string; client_msg_id?: string | null; prompt: string; images?: QueryImg[] | null; files?: { filename: string }[] | null }
+export interface TimedMessage { task_id: string; title: string; scheduled_at: number }
+export interface TimedTaskInfo {
+  task_id: string; title: string; next_message_at: number; interval_seconds: number;
+  sent_count: number; total_count: number; valid_until: number;
+}
+export interface UserMsg extends Base { type: "user_msg"; msg_id: string; client_msg_id?: string | null; timed_task?: TimedMessage | null; prompt: string; images?: QueryImg[] | null; files?: { filename: string }[] | null }
 export interface TurnSteered extends Base { type: "turn_steered"; msg_id: string; turn_id: string; prompt: string; images?: QueryImg[] | null; files?: { filename: string }[] | null }
 export interface AssistantMsgStart extends Base { type: "assistant_msg_start"; message_id: string; turn_id?: string | null; background?: boolean | null; channel?: AssistantChannel }
 export interface Delta extends Base { type: "delta"; message_id: string; turn_id?: string | null; background?: boolean | null; text: string; channel?: AssistantChannel }
@@ -315,6 +320,7 @@ export interface ClaudeProfileInfo {
 }
 export interface SessionInfo {
   session_id: string;
+  timed_tasks?: TimedTaskInfo[];
   summary?: string | null;
   last_modified?: string | null;
   first_prompt?: string | null;
@@ -482,7 +488,7 @@ export interface GetHistory extends Base { type: "get_history"; session_id: stri
 export interface ConversationImageRef { image_id: string; media_type: QueryImg["media_type"]; width: number; height: number; byte_size: number }
 export type ProcessDetailState = "none" | "present" | "unknown";
 export type TurnDetailReason = "process" | "prompt_truncated" | "answer_truncated" | "image_deferred";
-export interface ConversationTurn { id: string; clientMsgId?: string | null; prompt: string; blocks: unknown[]; done: boolean; forkPointId?: string | null; checkpointId?: string | null; interrupted?: boolean | null; error?: string | null; images?: QueryImg[] | null; imageRefs?: ConversationImageRef[] | null; files?: QueryFile[] | null; ts?: number | null; doneTs?: number | null; durationMs?: number | null; processDetailState?: ProcessDetailState; detailReasons?: TurnDetailReason[]; processStartedTs?: number | null; processDoneTs?: number | null; detailEventCount: number; detailLoaded: boolean; fileChanges?: TurnChangeSummary | null }
+export interface ConversationTurn { id: string; timedTask?: TimedMessage | null; clientMsgId?: string | null; prompt: string; blocks: unknown[]; done: boolean; forkPointId?: string | null; checkpointId?: string | null; interrupted?: boolean | null; error?: string | null; images?: QueryImg[] | null; imageRefs?: ConversationImageRef[] | null; files?: QueryFile[] | null; ts?: number | null; doneTs?: number | null; durationMs?: number | null; processDetailState?: ProcessDetailState; detailReasons?: TurnDetailReason[]; processStartedTs?: number | null; processDoneTs?: number | null; detailEventCount: number; detailLoaded: boolean; fileChanges?: TurnChangeSummary | null }
 export interface CodexTerminalFence { turn_id: string; status: "completed" | "interrupted" | "failed"; duration_ms?: number | null; completed_at?: number | null }
 export interface History extends Base { type: "history"; session_id: string; revision: string; generation?: string | null; continuity_revision?: string | null; build_seq?: number; live_seq?: number | null; authoritative?: boolean; error?: string | null; events: ServerEvent[]; turns?: ConversationTurn[]; detail?: "summary" | "full"; has_more: boolean; oldest_id?: string | null; newest_id?: string | null; before?: string | null; control?: SessionControl | null; external?: boolean; takeover_pending?: boolean; in_progress?: boolean; compaction_continuation_turn_ids?: string[]; terminal_fences?: CodexTerminalFence[]; reset?: boolean }
 export interface GetTurnDetail extends Base { type: "get_turn_detail"; session_id: string; turn_id: string; client_id?: string | null; revision?: string | null; before?: string | null; limit?: number | null }

@@ -31,6 +31,7 @@ import type {
   ThreadGoal,
 } from "../src/protocol";
 import { PROTOCOL_VERSION } from "../src/protocol";
+import { TimedMessageTag } from "../src/components/TimedMessageTag";
 import {
   ChatView,
 } from "../src/components/ChatView";
@@ -2121,6 +2122,11 @@ function ProfileSidebarFixture() {
   );
   const [newProfileId, setNewProfileId] = useState("none");
   const [activeSessionId, setActiveSessionId] = useState("profile-sidebar-active");
+  const [timedTasks, setTimedTasks] = useState(() => params.has("timed-tasks") ? [{
+    task_id: "timer-test", title: "每分钟向当前会话发送测试",
+    next_message_at: Date.now() / 1000 + 42, interval_seconds: 60,
+    sent_count: 2, total_count: 3, valid_until: Date.now() / 1000 + 90,
+  }] : []);
   useEffect(() => {
     const root = document.documentElement;
     const previousEngine = root.dataset.engine;
@@ -2150,6 +2156,7 @@ function ProfileSidebarFixture() {
     codex_profile_label: "Stack",
   }, {
     session_id: "profile-sidebar-default",
+    timed_tasks: timedTasks,
     summary: "cc-remote 派生",
     cwd: "/repo/cc-remote",
     state: "idle",
@@ -2162,6 +2169,13 @@ function ProfileSidebarFixture() {
   return (
     <>
       <output data-testid="new-work-profile" hidden>{newProfileId}</output>
+      {params.has("timed-tasks") && <div style={{ position: "fixed", left: 400, top: 80 }}>
+        <button data-testid="finish-timed-task" onClick={() => setTimedTasks([])}>结束定时任务</button>
+        <div className="ubub"><TimedMessageTag task={{
+          task_id: "timer-test", title: "每分钟向当前会话发送测试", scheduled_at: Date.now() / 1000,
+        }} />测试</div>
+        <div className="ubub">测试</div>
+      </div>}
       <SessionsSidebar
         open
         engine="codex"

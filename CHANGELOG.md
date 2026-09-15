@@ -17,6 +17,19 @@
   TUI editing, cancellation and ordering controls. Reject stale queue snapshots
   and changes while a message is starting. Deploy Relay, Web, Wrapper and TUI
   together; protocol v66 clients cannot connect to protocol v67 services.
+- Track Claude compaction through native status and boundary events, preserve
+  valid context readings during refresh failures, and show the applied automatic
+  compaction threshold separately from model capacity. Hide internal command
+  messages and keep completed-turn timestamps stable when rebuilding history.
+  Require Claude Code 2.1.263 or newer for the verified control APIs.
+- Keep account-specific Claude controls attached to the correct session and
+  omit transient Codex thread notifications that have no readable history from
+  the session list.
+- Show explicit timed-message tags, a rounded moving session outline and the
+  next scheduled send time. Tasks use account-scoped native queue receipts
+  independently of Goals (protocol v67). Session menus and task popovers
+  avoid the sidebar footer and the mobile visual viewport.
+
 - Backport shared improvements from the DSH branch without adding a third
   engine (protocol v66): rounded Claude/Codex Goal dialogs with native save
   confirmation and mobile keyboard recovery; directory links open `/open`, and

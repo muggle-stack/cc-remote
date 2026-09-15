@@ -834,6 +834,25 @@ class BtwClosed(_Base):
     revision: int = Field(ge=0, le=9_007_199_254_740_991)
 
 
+class TimedMessage(BaseModel):
+    """Explicit local scheduler receipt, never inferred from message text."""
+    model_config = ConfigDict(extra="forbid")
+    task_id: WireId
+    title: str = Field(min_length=1, max_length=120)
+    scheduled_at: float = Field(ge=0, le=MAX_SAFE_WIRE_TIMESTAMP_SECONDS)
+
+
+class TimedTaskInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    task_id: WireId
+    title: str = Field(min_length=1, max_length=120)
+    next_message_at: float = Field(ge=0, le=MAX_SAFE_WIRE_TIMESTAMP_SECONDS)
+    interval_seconds: float = Field(ge=1, le=31_536_000)
+    sent_count: int = Field(ge=0, le=1000)
+    total_count: int = Field(ge=1, le=1000)
+    valid_until: float = Field(ge=0, le=MAX_SAFE_WIRE_TIMESTAMP_SECONDS)
+
+
 class UserMsg(_Base):
     """A user's query, broadcast to all clients so every device sees the full
     conversation (prompt + response). The originating client dedups by msg_id
@@ -846,6 +865,7 @@ class UserMsg(_Base):
     # a source-derived id. Carry both so a history-first race can deduplicate
     # the later live echo.
     client_msg_id: Optional[WireId] = None
+    timed_task: Optional[TimedMessage] = None
     prompt: str
     images: Optional[list[QueryImage]] = Field(default=None, max_length=MAX_ATTACHMENT_COUNT)
     # Metadata only: file bodies stay out of replay/cache, while names remain
@@ -1184,6 +1204,7 @@ class SessionInfo(BaseModel):
     """A row in the sessions sidebar (subset of SDK SDKSessionInfo)."""
     model_config = ConfigDict(extra="forbid")
     session_id: WireId
+    timed_tasks: list[TimedTaskInfo] = Field(default_factory=list, max_length=32)
     summary: Optional[str] = None
     last_modified: Optional[str] = None
     first_prompt: Optional[str] = None
@@ -2430,6 +2451,7 @@ class ConversationTurn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: WireId
     clientMsgId: Optional[WireId] = None
+    timedTask: Optional[TimedMessage] = None
     prompt: str = Field(default="", max_length=128 * 1024)
     blocks: list[dict[str, Any]] = Field(default_factory=list, max_length=32)
     done: bool = False

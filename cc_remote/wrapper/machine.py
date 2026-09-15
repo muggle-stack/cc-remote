@@ -101,18 +101,19 @@ from cc_remote.codex_daemon_restart import (
 )
 from cc_remote.audio_preview import AUDIO_PREVIEW_MEDIA_TYPES, validate_audio_preview
 from cc_remote.log import logger
+from cc_remote.timed_tasks import TimedTaskStore
 from cc_remote.workspaces import (
     WORK_UPLOADS_MARKER,
     WORK_UPLOADS_MARKER_PAYLOAD,
     WorkStores,
 )
 from cc_remote.protocol import (
+    TimedMessage,
     ASK_OPTION_MAX_COUNT, ARTIFACT_PREVIEW_MAX_BYTES, FILE_PREVIEW_MAX_BYTES,
     MAX_BACKGROUND_PROCESS_COMMAND_CHARS,
     MAX_BACKGROUND_PROCESS_CWD_CHARS,
     MAX_BACKGROUND_PROCESS_ITEMS,
     MAX_BACKGROUND_PROCESS_SUMMARY_CHARS,
-    MIN_AUTO_COMPACT_TOKENS,
     MAX_SAFE_WIRE_INTEGER,
     MAX_QUERY_QUEUE_BYTES, MAX_QUERY_QUEUE_ITEMS, PREVIEW_ASSET_MAX_BYTES,
     Error, Hello, Query, QueryQueueState, QueuedQueryDetail, QueuedQueryInfo,
@@ -2012,6 +2013,8 @@ class WrapperMachine:
 
     def __init__(self, cfg: WrapperConfig, transport: WrapperTransport):
         self.cfg = cfg
+        self._timed_tasks = TimedTaskStore(cfg.state_dir)
+        self._timed_task_catalog = {}
         self.transport = transport
         self._command_router = CommandRouter(self)
         self.instance_id = uuid4().hex
@@ -7114,30 +7117,10 @@ class WrapperMachine:
         """Whether applying a smaller custom window first needs /compact."""
         total = cls._claude_cached_context_total(ctx)
         target = event.threshold_tokens if event.mode == "custom" else None
-        if target is None:
-            # ``auto`` and ``inherit`` reveal their effective threshold only in
-            # the replacement child. A prior custom window may already hold
-            # more context than that unknown target. Avoid reconnecting into an
-            # oversized first request; only a known context below the smallest
-            # selectable threshold can safely skip the boundary.
-            return total is None or total >= MIN_AUTO_COMPACT_TOKENS
-        if total is not None:
-            return total >= target
-        current_threshold = (
-            event.applied_threshold_tokens
-            if event.applied_mode == "custom" else
-            getattr(ctx.sdk, "effective_auto_compact_threshold_tokens", None)
-        )
-        # Unknown usage while reducing a proven larger window is not permission
-        # to gamble the next provider request. Compact conservatively once.
-        if (
-            isinstance(current_threshold, int)
-            and not isinstance(current_threshold, bool)
-        ):
-            return current_threshold >= target
-        # ``inherit``/``auto`` without a successful control reading is an
-        # unknown upper bound, not proof that the current context fits.
-        return event.applied_mode in {"inherit", "auto", None}
+        # Missing usage/capacity is not evidence of overflow. Apply the native
+        # CLI option without issuing a speculative model call; Claude will
+        # enforce its own threshold when the next normal turn starts.
+        return total is not None and target is not None and total >= target
 
     async def _compact_managed_claude_context(
         self,
@@ -7179,17 +7162,13 @@ class WrapperMachine:
                 native_sid = extract_session_id(message)
                 if native_sid and not ctx.session_id:
                     await self._capture_session_id(ctx, native_sid)
-                if (
-                    isinstance(message, SystemMessage)
-                    and message.subtype == "compact_boundary"
-                ):
-                    for event in translator.feed(message):
-                        if (
-                            isinstance(event, ProcessEvent)
-                            and event.kind == "compaction"
-                        ):
+                for event in translator.feed(message):
+                    if (isinstance(event, ProcessEvent)
+                            and event.kind == "compaction"):
+                        if (isinstance(message, SystemMessage)
+                                and message.subtype == "compact_boundary"):
                             compact_event = event
-                            await self._emit(ctx, event)
+                        await self._emit(ctx, event)
                 if isinstance(message, ResultMessage):
                     terminal = message
                     break
@@ -7200,7 +7179,7 @@ class WrapperMachine:
                 release_background()
             ctx.claude_write_active = False
             if ctx.session_id:
-                self._resync_watch(ctx.session_id)
+                self._resync_watch(self._ctx_wire_sid(ctx))
 
         if terminal is None:
             raise RuntimeError("Claude compact ended without ResultMessage")
@@ -7216,7 +7195,10 @@ class WrapperMachine:
             raise RuntimeError(
                 "Claude reported compact success without compact_boundary")
 
-        self._invalidate_claude_context_usage(ctx)
+        # SdkHandle already replaced the old count at the native boundary.
+        # Do not discard its post-compaction sample again after the result.
+        if not isinstance(ctx.sdk, SdkHandle):
+            self._invalidate_claude_context_usage(ctx)
         ctx.claude_compaction_revision += 1
         log.info(
             "Claude native context compacted",
@@ -7326,8 +7308,8 @@ class WrapperMachine:
             except Exception as compact_exc:
                 ctx.auto_compact_phase = "blocked"
                 ctx.auto_compact_error = (
-                    "当前上下文高于目标窗口，但原生压缩未产生有效边界；"
-                    "仍保留原阈值，未发送新的模型请求。可以 Fork/新建会话后继续。"
+                    "尚未确认原生压缩完成，暂时保留原阈值。"
+                    "请检查压缩结果后重试。"
                 )
                 await self._persist_claude_session_controls(ctx)
                 event, _ = await self._publish_claude_auto_compact(
@@ -7529,7 +7511,7 @@ class WrapperMachine:
             # their engine mutations in either order; each durable write must
             # therefore reflect the newest complete SDK state at its own
             # serialized boundary, never a snapshot captured while waiting.
-            session_id = ctx.session_id
+            session_id = self._ctx_wire_sid(ctx)
             if (ctx.engine != "claude" or not session_id or ctx.btw
                     or getattr(ctx.sdk, "is_claude_broker", False)
                     or (ctx.key is not None
@@ -7597,7 +7579,7 @@ class WrapperMachine:
                 # keeps the user's desired value until compact + reconnect make
                 # it safe to publish here as applied.
                 await self._claude_broker.set_preferences(
-                    session_id,
+                    ctx.session_id,
                     model=model,
                     effort=effort,
                     permission_mode=permission_mode,
@@ -10222,6 +10204,16 @@ class WrapperMachine:
         # treats an absent ``to`` as broadcast, so fail closed for an impossible
         # ownerless fork rather than leaking its contents.
         msg.sid = self._ctx_wire_sid(ctx) or ctx.key
+        if isinstance(msg, UserMsg) and ctx.engine == "codex" and not ctx.btw:
+            try:
+                profile, native_sid = self._codex_target(msg.sid)
+                source = await asyncio.to_thread(
+                    self._timed_tasks.source, str(profile.home), native_sid,
+                    [msg.msg_id, msg.client_msg_id], bind=msg.msg_id)
+                if source:
+                    msg.timed_task = TimedMessage(**source)
+            except Exception:
+                log.warning("Timed message receipt unavailable", sid=msg.sid)
         if ctx.btw:
             if not ctx.owner_client_id:
                 log.error("dropping frame for ownerless btw", sid=ctx.key,
@@ -13859,6 +13851,7 @@ class WrapperMachine:
                             and ctx.session_id not in self._watch):
                         self._watch_session(ctx.session_id)
                 await self._poll_watches_once()
+                await self._refresh_timed_tasks()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -13897,6 +13890,53 @@ class WrapperMachine:
         return summaries
 
     async def _build_history(
+        self, sid: str, before=None, limit=None, cwd_hint=None,
+        detail: str = "full",
+        *, allow_stale: bool = False,
+    ) -> History:
+        history = await self._build_history_source(
+            sid, before, limit, cwd_hint, detail, allow_stale=allow_stale)
+        return await self._annotate_timed_history(sid, history)
+
+    async def _annotate_timed_history(self, sid: str, history: History) -> History:
+        """Overlay local receipts regardless of the native history provider."""
+        ctx = self._ctx_by_sid(sid)
+        if ctx is not None and ctx.engine != "codex":
+            return history
+        try:
+            profile, native_sid = self._codex_target(sid)
+            def annotate():
+                for turn in history.turns:
+                    source = self._timed_tasks.source(
+                        str(profile.home), native_sid, [turn.id, turn.clientMsgId])
+                    if source:
+                        turn.timedTask = TimedMessage(**source)
+                for event in history.events:
+                    if event.get("type") != "user_msg":
+                        continue
+                    source = self._timed_tasks.source(
+                        str(profile.home), native_sid,
+                        [event.get("msg_id"), event.get("client_msg_id")])
+                    if source:
+                        event["timed_task"] = source
+            await asyncio.to_thread(annotate)
+        except Exception:
+            log.warning("Timed history receipts unavailable", sid=sid)
+        return history
+
+    async def _refresh_timed_tasks(self) -> dict:
+        try:
+            current = await asyncio.to_thread(self._timed_tasks.active)
+        except Exception:
+            # Receipt I/O must not disrupt ordinary transcript mirroring.
+            return self._timed_task_catalog
+        if current != self._timed_task_catalog:
+            self._timed_task_catalog = current
+            await self._invalidate_session_list("codex", "code")
+            await self._invalidate_session_list("codex", "work")
+        return current
+
+    async def _build_history_source(
         self, sid: str, before=None, limit=None, cwd_hint=None,
         detail: str = "full",
         *, allow_stale: bool = False,
@@ -15932,6 +15972,7 @@ class WrapperMachine:
             try:
                 history = await self._build_official_codex_history(
                     sid, before=before, limit=limit)
+                history = await self._annotate_timed_history(sid, history)
                 if (
                     not _background and before is None
                     and history.authoritative is False
@@ -20751,6 +20792,9 @@ class WrapperMachine:
                     reason=reason,
                     fork=fork,
                 )
+                # One recovery is enough. A normal ResultMessage re-enables
+                # inspection; reopening the popover must not restart again.
+                expected_sdk.context_probe_suppressed = True
             except Exception as reconnect_exc:
                 log.warning(
                     "Claude context timeout recovery failed",
@@ -20818,8 +20862,7 @@ class WrapperMachine:
                 recent_reader = getattr(
                     ctx.sdk, "cached_recent_context_usage", None)
                 recent = recent_reader() if callable(recent_reader) else None
-                if (not _has_claude_context_total(recent)
-                        or recent.get("totalTokens") == 0):
+                if not _has_claude_context_total(recent):
                     recent = None
                 # A successful generation probe is newer than the transcript
                 # it resumed. Read disk only when no exact/live cache exists.
@@ -20843,6 +20886,7 @@ class WrapperMachine:
                 refresh = bool(
                     getattr(cmd, "refresh", False)
                     and not prefer_cached_claude
+                    and not getattr(ctx.sdk, "context_probe_suppressed", False)
                 )
                 refresh_readiness: Literal[
                     "ready", "busy", "external", "stale", "changed"
@@ -20945,20 +20989,18 @@ class WrapperMachine:
                                 )
                             )
                         work_claimed = self._claude_context_work_active(ctx)
-                        error = Error(
-                            code=ERR_BUSY if work_claimed else ERR_INTERNAL,
-                            message=(
-                                "Claude 已开始处理后台任务结果，将在空闲后重试。"
-                                if work_claimed else
-                                "上下文读取超时，Claude 会话已安全恢复，请重试。"
-                                if poisoned and recovered else
-                                "上下文读取暂不可用，请稍后重试。"
-                            ),
-                            request_id=getattr(cmd, "cmd_id", None),
-                            to=getattr(cmd, "client_id", None),
-                        )
-                        await self._emit(ctx, error)
-                        return error
+                        if work_claimed or poisoned and not recovered:
+                            error = Error(
+                                code=ERR_BUSY if work_claimed else ERR_INTERNAL,
+                                message="上下文读取暂不可用，请稍后重试。",
+                                request_id=getattr(cmd, "cmd_id", None),
+                                to=getattr(cmd, "client_id", None),
+                            )
+                            await self._emit(ctx, error)
+                            return error
+                        # A failed metadata read does not invalidate a valid
+                        # sample. Publish the cached reading below, keeping
+                        # its source and without surfacing a global error.
                     else:
                         context_source = "control"
                         exact = refreshed_usage
@@ -26445,41 +26487,11 @@ class WrapperMachine:
                             item["summary"] = "派生会话"
                     normalized.append(item)
 
-            materialized_native_ids = {
-                row.get("native_session_id")
-                for row in normalized
-                if isinstance(row.get("native_session_id"), str)
-            }
-            # ``thread/started`` is an account-scoped, source-filtered native
-            # event. During the very small state-DB commit gap it is sufficient
-            # to keep a fresh CLI row discoverable; older hints remain gated by
-            # an exact DB hit so an externally deleted thread cannot live forever.
-            for native_sid, candidate_info in profile_candidates.items():
-                if (
-                    native_sid in materialized_native_ids
-                    or not candidate_info.get("hint_fresh")
-                ):
-                    continue
-                try:
-                    wire_sid = self._codex_wire_sid(profile, native_sid)
-                except ValueError:
-                    continue
-                normalized.append({
-                    "session_id": wire_sid,
-                    "native_session_id": native_sid,
-                    "summary": "新会话",
-                    "first_prompt": None,
-                    "cwd": None,
-                    "last_modified": str(time.time()),
-                    "git_branch": None,
-                    "forked_from_id": candidate_info.get("forked_from_id"),
-                    "status": None,
-                    "tag": None,
-                    "codex_profile_id": profile.id,
-                    "codex_profile_label": profile.label,
-                    _CODEX_CATALOG_PRIORITY: 2,
-                })
-                materialized_native_ids.add(native_sid)
+            # A sibling thread/started is only a discovery hint. Native
+            # ephemeral helpers can emit it without ever creating a resumable
+            # rollout. Keep the exact DB repair above, but never manufacture a
+            # clickable row from the hint alone. Resident threads below carry
+            # their own live handle and remain visible during catalog lag.
 
             # A just-started resident is stronger evidence than a lagging DB
             # projection: thread/start already returned its durable id and this
@@ -26761,6 +26773,7 @@ class WrapperMachine:
             # BTW fork can finish connecting during one of those awaits, so
             # close that race immediately before the synchronous wire build.
             raw = self._filter_private_codex_btw_rows(raw)
+            timed_catalog = await self._refresh_timed_tasks()
             sessions = []
             for row in raw:
                 wire_sid = row["session_id"]
@@ -26772,6 +26785,8 @@ class WrapperMachine:
                     continue
                 sessions.append(SessionInfo(
                     session_id=wire_sid,
+                    timed_tasks=timed_catalog.get((
+                        str(self._codex_target(wire_sid)[0].home), native_sid), []),
                     summary=(record.title if record and record.title
                              else row.get("summary")),
                     first_prompt=row.get("first_prompt"),
@@ -38663,7 +38678,7 @@ class WrapperMachine:
             # preflight/query/reader failures must not hide an external append.
             ctx.claude_write_active = False
             if not is_codex and claude_turn_completed and ctx.session_id:
-                self._resync_watch(ctx.session_id)
+                self._resync_watch(self._ctx_wire_sid(ctx))
             if temp_dir is not None and not persistent_attachments:
                 try:
                     shutil.rmtree(temp_dir)

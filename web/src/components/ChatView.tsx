@@ -22,6 +22,7 @@ import type {
 import type { Space } from "../protocol";
 import type { LoadTurnFilePage } from "../turn-file-pages";
 import { MessageBlock } from "./MessageBlock";
+import { TimedMessageTag } from "./TimedMessageTag";
 import { Icon, ClaudeMark, ClaudeWorking, ClaudeSpark } from "../icons";
 import { canForkTurn } from "../session-worktree";
 import {
@@ -2838,7 +2839,9 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
               }}>
             {(t.prompt || (t.images && t.images.length) || (t.imageRefs && t.imageRefs.length) || (t.files && t.files.length)) && (
               <div className="ubub-wrap">
-                {t.prompt && <div className="ubub">{supplemental.replies.has(t.id)
+                {t.prompt && <div className="ubub">
+                  {t.timedTask && <TimedMessageTag task={t.timedTask} />}
+                  {supplemental.replies.has(t.id)
                   ? <div className="supplemental-answer">
                       <details className="supplemental-answer-context">
                         <summary><Icon name="message" size={13} />查看问题<Icon name="chev" size={12} /></summary>

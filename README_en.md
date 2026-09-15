@@ -167,7 +167,7 @@ development/builds use **Python 3.13 and Node 24**, matching CI and [`.nvmrc`](.
 
 Prepare at least one working engine:
 
-- **Claude:** daily Claude Code `>= 2.1.258`, normally at `~/.local/bin/claude`.
+- **Claude:** daily Claude Code `>= 2.1.263`, normally at `~/.local/bin/claude`.
   Wrapper launches that CLI; the Python Agent SDK is pinned to `0.2.151`.
 - **Codex:** an authenticated official CLI. Shared control requires both
   `codex app-server daemon --help` and `codex app-server proxy --help`.
@@ -304,6 +304,7 @@ policy is not a replacement for separate OS users, containers or virtual machine
 | [Remote Viewer](docs/remote-viewer.md) | Interactive static pages, Bridge/Isolated modes |
 | Codex App: [macOS](docs/codex-desktop-launcher.md) / [Linux](docs/codex-desktop-linux.md) | Optional App, daily CLI and Wrapper on one daemon |
 | [Codex App tools](docs/codex-app-tools.md) | Optional App-control MCP |
+| [Timed messages](docs/timed-messages.md) | Scheduled queue receipts, message tags and countdown UI |
 | [Changelog](CHANGELOG.md) | Version changes and migrations |
 
 ## Terminal workspace (preview)

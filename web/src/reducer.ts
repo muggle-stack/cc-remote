@@ -2502,7 +2502,7 @@ export function reduce(state: AppState, action: Action): AppState {
         rt.contextReport = action.report;
         if (action.report.available !== false
             && (action.report.source !== "recent_turn"
-              || !rt.contextExactReport || rt.contextExactReport.source === "recent_turn")) {
+              || rt.contextExactReport?.source !== "native_estimate")) {
           rt.contextExactReport = action.report;
         }
       });
@@ -5509,7 +5509,7 @@ function reduceEvent(
       return patch(state, e.sid, (rt) => {
         rt.contextReport = e;
         if (e.available !== false && (e.source !== "recent_turn"
-            || !rt.contextExactReport || rt.contextExactReport.source === "recent_turn")) {
+            || rt.contextExactReport?.source !== "native_estimate")) {
           rt.contextExactReport = e;
         }
         // Reports are broadcast so every viewer benefits from the fresh value,
@@ -5936,6 +5936,7 @@ function reduceEvent(
         const stamp = e.ts ? Math.round(e.ts * 1000) : undefined;
         if (existing) {
           if (!existing.prompt && e.prompt) existing.prompt = e.prompt;
+          if (e.timed_task) existing.timedTask = e.timed_task;
           if (!existing.images && imgs) existing.images = imgs;
           if (fileMeta) existing.files = fileMeta;
           else if (existing.files) existing.files = existing.files.map(
@@ -5949,6 +5950,7 @@ function reduceEvent(
           turns.push({
             id: e.msg_id,
             clientMsgId: e.client_msg_id ?? undefined,
+            timedTask: e.timed_task ?? undefined,
             prompt: e.prompt,
             images: imgs,
             files: fileMeta,
@@ -6336,10 +6338,19 @@ function reduceEvent(
         const turns = cloneTurns(rt.turns);
         let owner: Turn | undefined;
         let block: ProcessBlock | undefined;
+        const compactStart = e.kind === "compaction" && e.phase === "end"
+          && typeof e.input?.compaction_started_id === "string"
+          ? e.input.compaction_started_id : undefined;
         for (const candidate of turns) {
           const found = mutableTurnBlocks(candidate).find((b) => b.kind === "process"
-            && b.item_id === e.item_id) as ProcessBlock | undefined;
-          if (found) { owner = candidate; block = found; break; }
+            && (b.item_id === e.item_id
+              || b.item_id === compactStart && b.processKind === "compaction"
+                && !b.done && b.turn_id === e.turn_id)) as ProcessBlock | undefined;
+          if (found) {
+            owner = candidate; block = found;
+            block.item_id = e.item_id;
+            break;
+          }
         }
         // Background task/hook events may arrive after their originating turn
         // ended and after a newer query opened. Prefer their explicit parent or
@@ -6375,7 +6386,7 @@ function reduceEvent(
         block.title = e.title || block.title;
         if (e.summary != null) block.summary = e.summary;
         if (e.detail != null) block.detail = e.detail;
-        if (e.input != null) block.input = e.input;
+        if (e.input != null && !compactStart) block.input = e.input;
         if (e.output != null) block.output = e.output;
         if (e.diff != null) block.diff = e.diff;
         if (e.progress != null) block.progress = e.progress;

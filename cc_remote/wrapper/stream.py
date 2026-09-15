@@ -39,6 +39,7 @@ from cc_remote.protocol import (
     TurnEnd, TurnResult, UserMsg,
 )
 from cc_remote.wrapper.sanitize import bounded_text, bounded_tool_input
+from cc_remote.wrapper.claude_compaction import compact_metadata
 from cc_remote.wrapper.claude_model_fallback import FALLBACK_TOOL, model_fallback_event
 from cc_remote.wrapper.turn_changes import native_claude_diff
 
@@ -716,6 +717,7 @@ class StreamTranslator:
         # transcript UUID. Keep it separate from the browser's optimistic turn
         # id and from tool-result user envelopes.
         self._last_user_uuid: str | None = None
+        self._compaction_id: str | None = None
 
     def _remember_turn(self, item_id: str, parent_id: str | None = None) -> str | None:
         turn = (self.item_turns.get(item_id)
@@ -1436,7 +1438,36 @@ class StreamTranslator:
         if event is None:
             return []
         event.turn_id = self.turn_id
+        if self._compaction_id is not None:
+            # Status UUIDs and persisted boundary UUIDs differ. Bind the live
+            # placeholder to its actual boundary so later history deduplicates.
+            event.input = {"compaction_started_id": self._compaction_id}
+            self._compaction_id = None
         return [event]
+
+    def _feed_compaction_status(self, msg: SystemMessage) -> list[ProcessEvent]:
+        data = msg.data if isinstance(msg.data, dict) else {}
+        if data.get("status") != "compacting":
+            if data.get("compact_error") and self._compaction_id is not None:
+                return self._end_unfinished_compaction("failed")
+            return []
+        if self._compaction_id is not None:
+            return []  # Native heartbeats do not create new animations.
+        self._compaction_id = _wire_id(
+            data.get("uuid") or str(uuid.uuid4()), "compaction")
+        return [ProcessEvent(
+            item_id=self._compaction_id, kind="compaction", phase="start",
+            status="running", title="压缩上下文", turn_id=self.turn_id,
+        )]
+
+    def _end_unfinished_compaction(self, status: str) -> list[ProcessEvent]:
+        if self._compaction_id is None:
+            return []
+        item_id, self._compaction_id = self._compaction_id, None
+        return [ProcessEvent(
+            item_id=item_id, kind="compaction", phase="end", status=status,
+            title="压缩上下文", turn_id=self.turn_id,
+        )]
 
     def _feed_hook(self, msg: HookEventMessage) -> list:
         data = msg.data if isinstance(msg.data, dict) else {}
@@ -1512,9 +1543,14 @@ class StreamTranslator:
                 return self._feed_background_tasks_changed(msg)
             if msg.subtype == "compact_boundary":
                 return self._feed_compaction(msg)
+            if msg.subtype == "status":
+                return self._feed_compaction_status(msg)
             return []
         if isinstance(msg, ResultMessage):
-            events = []
+            # A terminal without a boundary must not leave an eternal spinner
+            # or invent a successful compact (including interrupted commands).
+            events = self._end_unfinished_compaction(
+                "interrupted" if msg.is_error else "failed")
             if (not msg.is_error and not self._has_final_text
                     and self._ambiguous_final_mid is not None):
                 events.append(AssistantMsgEnd(
@@ -2625,12 +2661,10 @@ def _compaction_event_from_row(row: dict[str, Any]) -> ProcessEvent | None:
         and _SAFE_WIRE_ID.fullmatch(uid)
     ):
         return None
-    metadata = row.get("compactMetadata")
-    if not isinstance(metadata, dict):
-        metadata = {}
+    metadata = compact_metadata(row)
     trigger = metadata.get("trigger")
-    pre_tokens = metadata.get("preTokens")
-    post_tokens = metadata.get("postTokens")
+    pre_tokens = metadata.get("pre_tokens")
+    post_tokens = metadata.get("post_tokens")
     summary_bits: list[str] = []
     if trigger == "auto":
         summary_bits.append("自动压缩")
@@ -2641,7 +2675,7 @@ def _compaction_event_from_row(row: dict[str, Any]) -> ProcessEvent | None:
         for value in (pre_tokens, post_tokens)
     ):
         summary_bits.append(f"{pre_tokens:,} → {post_tokens:,} tokens")
-    duration = metadata.get("durationMs")
+    duration = metadata.get("duration_ms")
     duration_ms = (
         duration
         if isinstance(duration, int) and not isinstance(duration, bool)
@@ -3003,6 +3037,13 @@ def translate_history(
                     current_turn_id = message_uid
                     background_followup = False
             elif isinstance(content, list):
+                if content and all(
+                    isinstance(block, dict) and block.get("type") == "text"
+                    and isinstance(block.get("text"), str)
+                    and _is_meta_user_text(block["text"])
+                    for block in content
+                ):
+                    continue
                 if _is_interrupted_user_content(content):
                     misplaced_alias = client_message_ids.get(message_uid)
                     pending_interrupted_alias = (
@@ -3108,6 +3149,10 @@ def translate_history(
         elif role == "system":
             internal_event = (internal_user_events or {}).get(source_uid)
             if internal_event is not None:
+                # Manual compaction can finish minutes after an answer. Keep
+                # its process timestamp without retiming the settled response.
+                if settled_answer_seen or ambiguous_final_mid is not None:
+                    advance_terminal_clock = False
                 event = internal_event.model_copy(deep=True)
                 event.turn_id = event.turn_id or current_turn_id
                 timestamp = _ts(source_uid)
@@ -3562,6 +3607,7 @@ def _is_meta_user_text(text: str) -> bool:
         or t.startswith("<command-name>")
         or t.startswith("<command-message>")
         or t.startswith("<command-args>")
+        or t.startswith("<local-command-caveat>")
         or t.startswith("<local-command-stdout>")
         or t.startswith("<local-command-stderr>")
     )

@@ -146,7 +146,7 @@ Wrapper 主动出站连接 Relay，设备不需要开放公网入站端口。Rel
 
 至少准备一个可用引擎：
 
-- **Claude**：日常 Claude Code `>= 2.1.258`，默认路径 `~/.local/bin/claude`。
+- **Claude**：日常 Claude Code `>= 2.1.263`，默认路径 `~/.local/bin/claude`。
   Wrapper 使用该 CLI；Python Agent SDK 固定为 `0.2.151`。
 - **Codex**：已登录的官方 CLI。共享控制需要同时支持
   `codex app-server daemon --help` 和 `codex app-server proxy --help`。
@@ -265,6 +265,7 @@ Code 默认权限较宽；Work 的私有目录策略不能替代独立系统用�
 | [远程 Viewer](docs/remote-viewer.md) | 交互式静态页面、Bridge／Isolated 模式 |
 | Codex App 接入：[macOS](docs/codex-desktop-launcher.md)／[Linux](docs/codex-desktop-linux.md) | 可选桌面 App、日常 CLI 与 Wrapper 共用 daemon |
 | [Codex App 工具](docs/codex-app-tools.md) | 可选 App-control MCP |
+| [定时消息 UI](docs/timed-messages.md) | 定时发送入口、消息标签、光圈与下次时间 |
 | [更新记录](CHANGELOG_zh.md) | 版本变化与迁移记录 |
 
 ## 终端工作台（预览）

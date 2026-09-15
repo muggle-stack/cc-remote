@@ -1670,6 +1670,64 @@ test("async question dialog retains an IME draft when control becomes read-only"
   expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
 });
 
+for (const managed of [false, true]) {
+test(`Claude native compaction animates once and settles at the persisted boundary (${managed ? "maintenance" : "turn"})`, async ({ page }, testInfo) => {
+  const relay = await mockRightPanelRelay(page, {
+    engine: "claude", retained: false, historyReply: () => null,
+  });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  const sid = "layout-parent";
+  if (!managed) {
+    relay.emit({ type: "user_msg", sid, msg_id: "compact-request", prompt: "/compact" });
+    relay.emit({ type: "turn_binding", sid, msg_id: "compact-request", turn_id: "compact-turn" });
+    relay.emit({ type: "state", sid, state: "running" });
+  }
+  const start: PanelRelayEvent<Extract<ServerEvent, { type: "process" }>> = {
+    type: "process", sid, turn_id: managed ? undefined : "compact-turn", item_id: "compact-status",
+    kind: "compaction", phase: "start", status: "running", title: "压缩上下文",
+  };
+  relay.emit(start);
+  relay.emit(start);
+  const turn = page.locator(`[data-turn-id="${managed ? "compact-status" : "compact-request"}"]`);
+  const running = turn.locator(".process-compaction-running");
+  await expect(running).toHaveCount(1);
+  await expect(running).toBeVisible();
+  await expect(running).toHaveText("正在压缩上下文");
+  const bar = running.locator(".compact-motion i").first();
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await expect(bar).toHaveCSS("animation-name", "compact-fold");
+  const firstTransform = await bar.evaluate(node => getComputedStyle(node).transform);
+  await expect.poll(() => bar.evaluate(node => getComputedStyle(node).transform)).not.toBe(firstTransform);
+  await expect(running).toHaveCSS("border-radius", "16px");
+  await page.screenshot({ path: testInfo.outputPath("claude-compacting-dark.png") });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(bar).toHaveCSS("animation-name", "none");
+  const end: typeof start = { ...start, item_id: "native-boundary", phase: "end",
+    status: "succeeded", summary: "手动压缩 · 600,000 → 8,000 tokens", duration_ms: 20_000,
+    input: { compaction_started_id: "compact-status" } };
+  relay.emit(end);
+  relay.emit(end);
+  if (!managed) {
+    relay.emit({ type: "turn_end", sid, turn_id: "compact-turn", result: { subtype: "success", is_error: false } });
+    relay.emit({ type: "state", sid, state: "idle" });
+  }
+  await expect(running).toHaveCount(0);
+  const head = turn.locator(".turn-process-head");
+  await expect(head).toContainText("已处理");
+  if (await head.getAttribute("aria-expanded") === "false") await head.click();
+  const completed = turn.locator(".process-activity");
+  await expect(completed).toHaveCount(1);
+  await completed.locator("summary").click();
+  await expect(completed).toContainText("手动压缩 · 600,000 → 8,000 tokens");
+  await expect(completed).not.toContainText("compaction_started_id");
+  await expect(turn.locator(".turn-working")).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("claude-compacted-dark.png") });
+  expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toHaveLength(0);
+});
+}
+
 for (const staleProcess of [false, true]) {
 test(`turn regressions compaction steer clears phantom detail failure across history and reload (${staleProcess ? "foreign process" : "clock only"})`, async ({ page }, testInfo) => {
   const seedTurns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = [{
@@ -9724,4 +9782,183 @@ test("Goal editor restores after a late keyboard viewport correction without ano
     const bodyBox = node.closest(".goal-sheet-scroll")!.getBoundingClientRect();
     return editorBox.top >= bodyBox.top && editorBox.bottom <= bodyBox.bottom;
   })).toBe(true);
+});
+
+for (const viewport of [{ width: 390, height: 560 }, { width: 1280, height: 500 }]) {
+  test(`timed task popover stays above the footer at ${viewport.width}px without making the session busy`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/tests/history-browser.html?profile-sidebar=code&timed-tasks");
+    const card = page.locator(".scard").last();
+    const trigger = card.getByRole("button", { name: "查看定时任务" });
+    await trigger.click();
+    const panel = page.getByRole("tooltip");
+    await expect(panel).toContainText("定时任务仍在处理");
+    await expect(panel).toContainText("已发送 2/3 次");
+    await expect(card.locator(".pill.running")).toHaveCount(0);
+    await expect(card.locator(".timed-task-orbit")).toHaveCount(1);
+    const geometry = await panel.evaluate(element => {
+      const box = element.getBoundingClientRect();
+      return { top: box.top, bottom: box.bottom, left: box.left, right: box.right,
+        footer: document.querySelector(".s-foot")!.getBoundingClientRect().top };
+    });
+    expect(geometry.top).toBeGreaterThanOrEqual(8);
+    expect(geometry.left).toBeGreaterThanOrEqual(8);
+    expect(geometry.right).toBeLessThanOrEqual(viewport.width - 8);
+    expect(geometry.bottom).toBeLessThan(geometry.footer);
+    await page.screenshot({ path: testInfo.outputPath("timed-task-popover.png") });
+    await page.keyboard.press("Escape");
+    await expect(panel).toHaveCount(0);
+    await card.getByRole("button", { name: "更多操作" }).click();
+    await expect(panel).toHaveCount(0);
+    await expect(page.locator(".card-menu")).toHaveAttribute("data-placement", "above");
+  });
+}
+
+test("timed task completion and stale helper stop the orbit while message tags remain", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.clock.install();
+  await page.goto("/tests/history-browser.html?profile-sidebar=code&timed-tasks");
+  await expect(page.locator(".timed-task-orbit")).toHaveCount(1);
+  await expect(page.locator(".timed-message-tag")).toHaveCount(1);
+  await expect(page.locator(".ubub").last().locator(".timed-message-tag")).toHaveCount(0);
+  await page.locator(".scard").last().hover();
+  await expect(page.getByRole("tooltip")).toBeVisible();
+  await page.clock.fastForward(91_000);
+  await expect(page.locator(".timed-task-orbit")).toHaveCount(0);
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+  await expect(page.locator(".timed-message-tag")).toHaveCount(1);
+  await page.reload();
+  await expect(page.locator(".timed-task-orbit")).toHaveCount(1);
+  await page.getByTestId("finish-timed-task").click();
+  await expect(page.locator(".timed-task-orbit")).toHaveCount(0);
+  await expect(page.locator(".timed-message-tag")).toHaveCount(1);
+});
+
+test("timed task reduced motion keeps a stationary outline", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/tests/history-browser.html?profile-sidebar=code&timed-tasks&theme=dark");
+  const orbit = page.locator(".timed-task-orbit");
+  await expect(orbit).toHaveCount(1);
+  expect(await orbit.evaluate(element => getComputedStyle(element).animationName)).toBe("none");
+  await page.getByRole("button", { name: "查看定时任务" }).focus();
+  await expect(page.getByRole("tooltip")).toBeVisible();
+});
+
+for (const viewport of [{ width: 390, height: 560 }, { width: 1280, height: 500 }]) {
+  test(`session action menu opens upward above the footer at ${viewport.width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/tests/history-browser.html?profile-sidebar=code&theme=dark");
+    const trigger = page.locator(".scard").last().getByRole("button", { name: "更多操作" });
+    await trigger.click();
+    const menu = page.locator(".card-menu");
+    await expect(menu).toHaveAttribute("data-placement", "above");
+    const geometry = await menu.evaluate(element => {
+      const box = element.getBoundingClientRect();
+      const trigger = document.querySelector('.scard-act[aria-expanded="true"]')!.getBoundingClientRect();
+      const footer = document.querySelector(".s-foot")!.getBoundingClientRect();
+      return {
+        top: box.top, bottom: box.bottom, triggerTop: trigger.top, footerTop: footer.top,
+        actionsVisible: [...element.querySelectorAll("button")].every(button => {
+          const rect = button.getBoundingClientRect();
+          return button.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
+        }),
+      };
+    });
+    expect(geometry.top).toBeGreaterThanOrEqual(8);
+    expect(geometry.bottom).toBeLessThan(geometry.triggerTop);
+    expect(geometry.bottom).toBeLessThan(geometry.footerTop);
+    expect(geometry.actionsVisible).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath("session-menu.png") });
+    await menu.getByRole("button", { name: "归档", exact: true }).click();
+    await expect(menu).toHaveCount(0);
+    await expect(page.locator(".scard.active")).toContainText("看看当前仓库");
+  });
+}
+
+test("session action menu follows viewport changes and scrolls in a short viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  await page.goto("/tests/history-browser.html?profile-sidebar=code");
+  const trigger = page.locator(".scard").first().getByRole("button", { name: "更多操作" });
+  await trigger.click();
+  const menu = page.locator(".card-menu");
+  await expect(menu).toHaveAttribute("data-placement", "below");
+  // iOS can change its visible region without resizing the layout viewport.
+  await page.evaluate(() => {
+    Object.defineProperties(window.visualViewport!, {
+      height: { configurable: true, value: 330 },
+      offsetTop: { configurable: true, value: 80 },
+    });
+    window.visualViewport!.dispatchEvent(new Event("resize"));
+  });
+  await expect(menu).toHaveAttribute("data-placement", "above");
+  const short = await menu.evaluate(element => ({
+    top: element.getBoundingClientRect().top,
+    bottom: element.getBoundingClientRect().bottom,
+    height: element.clientHeight, content: element.scrollHeight,
+  }));
+  expect(short.top).toBeGreaterThanOrEqual(88);
+  expect(short.bottom).toBeLessThanOrEqual(402);
+  expect(short.content).toBeGreaterThan(short.height);
+  // Reaching the last action must scroll the menu, not the page underneath it.
+  const listScroll = await page.locator(".s-scroll").evaluate(element => element.scrollTop);
+  await menu.getByRole("button", { name: "归档", exact: true }).scrollIntoViewIfNeeded();
+  expect(await menu.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+  expect(await page.locator(".s-scroll").evaluate(element => element.scrollTop)).toBe(listScroll);
+  await page.evaluate(() => {
+    Object.defineProperties(window.visualViewport!, {
+      height: { configurable: true, value: 900 },
+      offsetTop: { configurable: true, value: 0 },
+    });
+    window.visualViewport!.dispatchEvent(new Event("resize"));
+  });
+  await expect(menu).toHaveAttribute("data-placement", "below");
+  const restored = await menu.evaluate(element => ({ height: element.clientHeight, content: element.scrollHeight }));
+  expect(restored.height).toBe(restored.content);
+  await page.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+});
+
+test("session action menu long press stays above the footer and dismisses outside", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 560 });
+  await page.goto("/tests/history-browser.html?profile-sidebar=code");
+  const card = page.locator(".scard").last();
+  await card.evaluate(element => {
+    const box = element.getBoundingClientRect();
+    const event = new Event("touchstart", { bubbles: true });
+    Object.defineProperty(event, "touches", { value: [{ clientX: box.x + 10, clientY: box.y + 10 }] });
+    element.dispatchEvent(event);
+  });
+  await expect(card).toHaveClass(/lifting/);
+  await card.dispatchEvent("touchend");
+  const menu = page.locator(".card-menu");
+  await expect(menu).toHaveAttribute("data-placement", "above");
+  await menu.getByRole("button", { name: "标记为未读" }).click();
+  await expect(menu).toHaveCount(0);
+  await expect(card.locator(".pill.completed")).toHaveText("未读");
+  await card.getByRole("button", { name: "更多操作" }).click();
+  await page.getByRole("button", { name: "新会话", exact: true }).click();
+  await expect(menu).toHaveCount(0);
+});
+
+test("session action menu keeps keyboard navigation and closes when its card scrolls away", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 350 });
+  await page.goto("/tests/history-browser.html?profile-sidebar=code");
+  const trigger = page.locator(".scard").first().getByRole("button", { name: "更多操作" });
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+  const menu = page.locator(".card-menu");
+  await expect(menu.getByRole("button", { name: "重命名" })).toBeFocused();
+  await page.keyboard.press("End");
+  await expect(menu.getByRole("button", { name: "归档", exact: true })).toBeFocused();
+  await page.keyboard.press("Home");
+  await expect(menu.getByRole("button", { name: "重命名" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  await trigger.click();
+  await page.locator(".s-scroll").evaluate(element => { element.scrollTop = element.scrollHeight; });
+  expect(await trigger.evaluate(element => element.getBoundingClientRect().bottom
+    <= element.closest(".s-scroll")!.getBoundingClientRect().top)).toBe(true);
+  await expect(menu).toHaveCount(0);
 });

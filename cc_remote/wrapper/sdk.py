@@ -48,6 +48,7 @@ from cc_remote.wrapper.claude_rewind import (
 )
 from cc_remote.wrapper.claude_runtime import inspect_claude_runtime
 from cc_remote.wrapper.claude_model_fallback import model_fallback_event
+from cc_remote.wrapper.claude_compaction import compact_context_usage, compact_metadata
 from cc_remote.wrapper.claude_controls import (
     CLAUDE_DEFAULT_AUTO_COMPACT_MODE,
     claude_auto_compact_cli_value,
@@ -82,7 +83,7 @@ _CLAUDE_1M_MODEL_PINS = {
     "claude-mythos-5-1[1m]": "claude-mythos-5-1[1m]",
 }
 _CONVERSATION_REWIND_PROBE_UUID = "00000000-0000-0000-0000-000000000000"
-_CONTEXT_CONTROL_TIMEOUT = 15.0
+_CONTEXT_CONTROL_TIMEOUT = 60.0
 _CONTEXT_STARTUP_TIMEOUT = 5.0
 _CURRENT_LAUNCH_VALUE = object()
 
@@ -253,10 +254,9 @@ class SdkHandle:
         # process and stdout reader still look alive.
         self.control_plane_failed = False
         # Compatibility/public state for adapters which expose whether context
-        # inspection is temporarily unavailable. A timed-out generation is now
-        # replaced instead of quarantining its successor until another model
-        # turn: the replacement skips only its eager startup probe and is safe
-        # for an explicit user read immediately.
+        # inspection is temporarily unavailable. After a hard timeout, keep the
+        # replacement usable for normal work and pause optional inspection
+        # until a successful turn proves normal traffic has resumed.
         self.context_probe_suppressed = False
         self._last_context_usage: dict[str, Any] | None = None
         # Unlike the rich control response, the latest main-chain assistant
@@ -315,6 +315,7 @@ class SdkHandle:
         self._turn_background_release: asyncio.Event | None = None
         self._pending_turn_background_release: asyncio.Event | None = None
         self._pending_turn_origin_id: str | None = None
+        self._pending_compact = False
         self._message_pump_error: BaseException | None = None
         self._message_route_lock = asyncio.Lock()
         self._background_callbacks_pending = 0
@@ -566,6 +567,11 @@ class SdkHandle:
         # ordinary same-session reconnect; explicit transcript mutations and
         # fresh forks invalidate it through invalidate_context_usage_cache().
         self._last_context_usage = None
+        if self._last_recent_context_usage is not None:
+            # Counts survive a same-session reconnect; the old capacity does
+            # not (the reconnect may be applying a different native window).
+            self._last_recent_context_usage = {
+                "totalTokens": self._last_recent_context_usage["totalTokens"]}
         self.effective_auto_compact_threshold_tokens = None
         self.raw_context_max_tokens = None
         self.control_plane_failed = False
@@ -611,6 +617,7 @@ class SdkHandle:
                         _launch_auto_compact=launch_auto_compact,
                         _launch_effort=launch_effort,
                     )
+                    self.context_probe_suppressed = True
                     return
                 # Model readout is useful control state, but a semantic or
                 # capability failure does not poison an otherwise live child.
@@ -644,6 +651,7 @@ class SdkHandle:
 
     async def _read_context_usage_control(
         self, *, timeout: float = _CONTEXT_CONTROL_TIMEOUT,
+        detail: str = "summary",
     ) -> dict:
         """Issue one bounded read on the pinned SDK control protocol."""
         async with self._control_request_lock:
@@ -652,16 +660,17 @@ class SdkHandle:
             client = self.client
             if client is None:
                 raise RuntimeError("Claude SDK is not connected")
-            # The public helper hardcodes a 60-second timeout. A timeout cannot
-            # be cancelled in the child, so bound it tightly and poison this
-            # exact generation rather than letting later controls pile up.
+            # The pinned Python helper omits detail and defaults to full,
+            # which calls the provider's token-count API for each category.
+            # The ring needs the CLI's local summary, with the SDK's normal
+            # deadline. Keep a hard timeout guard for a truly stalled child.
             query = getattr(client, "_query", None)
             send_control = getattr(query, "_send_control_request", None)
             if not callable(send_control):
                 raise RuntimeError("bounded model control request unavailable")
             try:
                 usage = await send_control(
-                    {"subtype": "get_context_usage"},
+                    {"subtype": "get_context_usage", "detail": detail},
                     timeout=timeout,
                 )
             except Exception as exc:
@@ -719,14 +728,15 @@ class SdkHandle:
         capture_work_baseline: bool = False,
     ) -> None:
         """Cache one successful reading and update generation metadata."""
-        self._last_context_usage = dict(usage)
         total_tokens = usage.get("totalTokens")
-        if (isinstance(total_tokens, int)
-                and not isinstance(total_tokens, bool)
-                and 0 <= total_tokens <= MAX_SAFE_WIRE_INTEGER):
+        usable = (isinstance(total_tokens, int)
+                  and not isinstance(total_tokens, bool)
+                  and 0 <= total_tokens <= MAX_SAFE_WIRE_INTEGER)
+        if usable:
             # Only a semantically usable exact response supersedes the latest
             # live/transcript fallback. A malformed successful control envelope
             # must not erase the last truthful reading.
+            self._last_context_usage = dict(usage)
             self._last_recent_context_usage = None
         if update_model:
             model = usage.get("model") if isinstance(usage, dict) else None
@@ -754,19 +764,18 @@ class SdkHandle:
                 # A session with no selection yet takes the branch above, which
                 # is how a fresh session learns its provider-selected model.
         auto_threshold = usage.get("autoCompactThreshold")
-        self.effective_auto_compact_threshold_tokens = (
-            auto_threshold
-            if isinstance(auto_threshold, int)
-            and not isinstance(auto_threshold, bool)
-            and auto_threshold >= 0 else None
-        )
+        if (isinstance(auto_threshold, int)
+                and not isinstance(auto_threshold, bool)
+                and 0 <= auto_threshold <= MAX_SAFE_WIRE_INTEGER):
+            self.effective_auto_compact_threshold_tokens = auto_threshold
+        elif usable:
+            self.effective_auto_compact_threshold_tokens = None
         raw_max = usage.get("rawMaxTokens")
-        self.raw_context_max_tokens = (
-            raw_max
-            if isinstance(raw_max, int)
-            and not isinstance(raw_max, bool)
-            and raw_max >= 0 else None
-        )
+        if (isinstance(raw_max, int) and not isinstance(raw_max, bool)
+                and 0 <= raw_max <= MAX_SAFE_WIRE_INTEGER):
+            self.raw_context_max_tokens = raw_max
+        elif usable:
+            self.raw_context_max_tokens = None
         if (capture_work_baseline and self.work_mode
                 and self.work_context_baseline_tokens is None):
             total_tokens = usage.get("totalTokens")
@@ -803,18 +812,31 @@ class SdkHandle:
             self._last_recent_context_usage = recovered
 
     def _observe_context_boundary(self, message: Any) -> None:
-        """Invalidate cached usage at every real native compact boundary."""
+        """Replace pre-compact counts while retaining this child's capacity."""
         if (
             isinstance(message, SystemMessage)
             and message.subtype == "compact_boundary"
+            and isinstance(message.data, dict)
+            and message.data.get("parent_tool_use_id") is None
+            and message.data.get("parentToolUseID") is None
+            and message.data.get("isSidechain") is not True
         ):
-            self.invalidate_context_usage_cache()
+            capacity = {
+                key: value for key, value in (self._last_context_usage or {}).items()
+                if key in {"maxTokens", "rawMaxTokens", "autoCompactThreshold",
+                           "isAutoCompactEnabled", "model"}
+            }
+            self._last_context_usage = None
+            usage = compact_context_usage(message.data)
+            self._last_recent_context_usage = (
+                {**capacity, **usage} if usage is not None else None
+            )
 
     def remember_recent_context_usage(self, usage: dict[str, Any]) -> None:
         """Seed a source-validated transcript fallback after cold resume."""
         total = usage.get("totalTokens") if isinstance(usage, dict) else None
         if (not isinstance(total, int) or isinstance(total, bool)
-                or total <= 0 or total > MAX_SAFE_WIRE_INTEGER):
+                or total < 0 or total > MAX_SAFE_WIRE_INTEGER):
             return
         self._last_recent_context_usage = dict(usage)
 
@@ -839,6 +861,7 @@ class SdkHandle:
             release.set()
         self._pending_turn_background_release = None
         self._pending_turn_origin_id = None
+        self._pending_compact = False
 
     async def query(self, prompt) -> None:
         """Send a request. `prompt` is a string, or an async iterable of user-
@@ -892,6 +915,10 @@ class SdkHandle:
                     # activated only when the pump sees this submitted turn.
                     self._pending_turn_background_release = asyncio.Event()
                     self._pending_turn_origin_id = self.next_turn_id
+                    self._pending_compact = bool(
+                        isinstance(prompt, str)
+                        and prompt.split(maxsplit=1)[:1] == ["/compact"]
+                    )
                     self.next_turn_id = None
                     self._turn_active = True
                     try:
@@ -947,9 +974,13 @@ class SdkHandle:
         self.auto_compact_mode = checked_mode
         self.auto_compact_threshold_tokens = checked_threshold
 
-    async def get_context_usage(self) -> dict:
+    async def get_context_usage(self, *, detail: str = "summary") -> dict:
         """Return the cc session's context window usage (matches CLI /context)."""
-        usage = await self._read_context_usage_control()
+        if detail not in {"summary", "full"}:
+            raise ValueError("invalid Claude context detail")
+        if self.context_probe_suppressed:
+            raise RuntimeError("Claude context refresh is awaiting normal traffic")
+        usage = await self._read_context_usage_control(detail=detail)
         self._record_context_usage(usage, update_model=True)
         return usage
 
@@ -1264,6 +1295,7 @@ class SdkHandle:
         self._turn_background_release = initial_release
         self._pending_turn_background_release = None
         self._pending_turn_origin_id = None
+        self._pending_compact = False
         client = self.client
         assert client is not None
         self._message_pump_task = asyncio.create_task(
@@ -1308,6 +1340,29 @@ class SdkHandle:
                         else:
                             owner = "background"
                         self._message_route_owner = owner
+                    elif (
+                        isinstance(message, SystemMessage)
+                        and self._turn_active
+                        and self._pending_compact
+                        and origin_kind in {None, "human"}
+                        and self._message_route_owner != "background"
+                        and isinstance(message.data, dict)
+                        and message.data.get("parent_tool_use_id") is None
+                        and message.data.get("parentToolUseID") is None
+                        and (
+                            (message.subtype == "compact_boundary"
+                             and compact_metadata(message.data).get("trigger") == "manual")
+                            or (message.subtype == "status"
+                                and message.data.get("status") == "compacting")
+                        )
+                    ):
+                        # Native /compact can emit its boundary before replaying
+                        # the submitted UserMessage. Only this pending command
+                        # may claim it; ordinary prompts and autonomous turns
+                        # keep their existing provenance-based routing.
+                        owner = "managed"
+                        self._activate_pending_turn_route()
+                        self._message_route_owner = owner
                     elif isinstance(message, ResultMessage):
                         # Result.origin is the authoritative boundary in the
                         # pinned SDK. A non-human result closes only the injected
@@ -1346,6 +1401,7 @@ class SdkHandle:
                         await self._turn_messages.put(message)
                         if isinstance(message, ResultMessage):
                             self._turn_active = False
+                            self._pending_compact = False
                             self._message_route_owner = None
                         continue
                     release = self._turn_background_release

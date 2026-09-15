@@ -14,7 +14,7 @@
 ### Claude
 
 Wrapper uses daily Claude Code, normally `~/.local/bin/claude`, with a minimum
-version of `2.1.258`. Empty `CLAUDE_BIN` still selects this path; an explicit
+version of `2.1.263`. Empty `CLAUDE_BIN` still selects this path; an explicit
 override must be absolute. Agent SDK is pinned to `0.2.151`; its bundled CLI does
 not replace your daily installation.
 

@@ -29,8 +29,10 @@ const DIST = resolve(import.meta.dirname, "../dist");
 // The card has no new dependencies; gzip and initial request caps stay unchanged.
 // Quota failure copy and validated native retry dates add <1 KiB at startup.
 // Keep entry, compressed-size, and request-count caps unchanged.
+// Native compaction animation and exact boundary replacement add <1 KiB of
+// startup JS. Keep entry, compressed-size and request-count limits unchanged.
 const MAX_ENTRY_BYTES = 537 * 1024;
-const MAX_INITIAL_BYTES = 937 * 1024;
+const MAX_INITIAL_BYTES = 938 * 1024;
 const MAX_INITIAL_GZIP_BYTES = 280 * 1024;
 const MAX_INITIAL_JS_FILES = 4;
 

@@ -676,6 +676,17 @@ button.message-image-error{ font:inherit; cursor:pointer; }
 .process-reasoning-body{ padding:4px 10px 7px 29px; color:var(--dim); }
 .process-reasoning-body .prose{ font-size:12.5px; line-height:1.55; }
 .process-item-ic{ width:23px; height:23px; display:grid; place-items:center; flex:none; color:var(--faint); }
+.process-activity.process-compaction-running{ width:fit-content; gap:10px; border-radius:16px;
+  color:var(--accent); background:color-mix(in srgb,var(--accent) 7%,transparent); }
+.compact-motion{ display:flex; align-items:center; justify-content:center; gap:3px;
+  width:31px; height:23px; flex:none; }
+.compact-motion i{ width:3px; height:13px; border-radius:3px; background:currentColor;
+  animation:compact-fold 1.6s ease-in-out infinite; }
+.compact-motion i:nth-child(2),.compact-motion i:nth-child(4){ animation-delay:.13s; }
+.compact-motion i:nth-child(3){ animation-delay:.26s; }
+@keyframes compact-fold{ 0%,100%{ transform:scaleY(1); opacity:.45; }
+  50%{ transform:scaleY(.35); opacity:1; } }
+@media(prefers-reduced-motion:reduce){ .compact-motion i{ animation:none; } }
 .process-item-title{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:inherit; }
 .process-item-status{ margin-left:auto; display:grid; place-items:center; color:var(--ok); }
 .process-failed .process-item-status,.process-declined .process-item-status,.process-cancelled .process-item-status,.process-interrupted .process-item-status{ color:var(--danger); }
@@ -1847,8 +1858,9 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .scard-act{ width:28px; height:28px; border-radius:10px; display:grid; place-items:center; color:var(--faint); background:var(--surface); border:1px solid var(--border); }
 .scard-act:hover{ background:var(--accent-weak); color:var(--accent-ink); }
 .scard-act svg{ width:15px; height:15px; }
-.card-menu{ position:absolute; top:36px; right:8px; z-index:5; min-width:152px; background:var(--surface);
-  border:1px solid var(--border); border-radius:14px; box-shadow:var(--shadow); padding:5px; }
+.card-menu{ position:fixed; z-index:40; width:max-content; min-width:152px; background:var(--surface);
+  border:1px solid var(--border); border-radius:14px; box-shadow:var(--shadow); padding:5px;
+  overflow-y:auto; overscroll-behavior:contain; visibility:hidden; }
 .card-menu button{ display:flex; align-items:center; gap:9px; width:100%; text-align:left; padding:8px 10px; border-radius:8px; font-size:13px; color:var(--text); }
 .card-menu button:hover{ background:var(--accent-weak); }
 .card-menu button.danger{ color:var(--danger); }
