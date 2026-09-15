@@ -37,6 +37,9 @@ NORMAL = {
         "jump_history(1)", "Jump forward (Tab)", ("ctrl+i", "tab")
     ),
     "preview": Shortcut("preview_files", "Preview files", ("space v",)),
+    "diagram_browser": Shortcut(
+        "diagram_browser", "Open diagram session in browser", ("space B",)
+    ),
     "help": Shortcut("panel('Help')", "Help", ("space h",)),
     "goal": Shortcut("panel('Goal / Plan')", "Goal/Plan", ("space g",)),
     "usage": Shortcut("panel('Usage / Context')", "Usage", ("space u",)),
@@ -94,7 +97,7 @@ NORMAL = {
 def key_label(value: str) -> str:
     labels = {"space": "Space", "enter": "Enter", "escape": "Esc",
               "comma": ",", "colon": ":", "slash": "/"}
-    return " ".join(labels.get(k, k.replace("ctrl+", "Ctrl+"))
+    return " ".join(labels.get(k, k.replace("ctrl+", "Ctrl+").replace("alt+", "Alt+"))
                     for k in value.split())
 
 
@@ -150,6 +153,7 @@ LAYERS = {
     },
     "preview": {
         "close": Shortcut("cancel", "Back", ("escape",)),
+        "browser": Shortcut("browser", "Open session in browser", ("alt+b",)),
         "refresh": Shortcut("refresh", "Reload file", ("r",)),
         "authorize": Shortcut("authorize", "Allow exact file read", ("a",)),
     },
@@ -349,7 +353,7 @@ class KeyConfig:
                     raise ValueError(f"Invalid TUI chord for {name}")
                 for token in tokens:
                     if token not in known and not re.fullmatch(
-                        r"(?:ctrl\+)?[a-zA-Z0-9@]", token
+                        r"(?:(?:ctrl|alt)\+)?[a-zA-Z0-9@]", token
                     ):
                         raise ValueError(f"Invalid TUI key: {token}")
                 if not normal and not (

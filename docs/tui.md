@@ -524,6 +524,56 @@ but skip image-only spacing. Stored messages retain their original Markdown.
 Source anchors preserve navigation across rendering and reflow. Render caches
 are bounded; excessive link expansion falls back to literal Markdown.
 
+### Mermaid terminal diagrams
+
+Mermaid remains selectable terminal text, not a raster image. Chat and local
+Markdown previews share the projection and its bounded render cache. Bare
+diagram headers and `mermaid` fences are recognized; ordinary prose/code is
+not reinterpreted. Unicode labels and `<br/>` wrap to the available width.
+
+The projection catalog covers the families registered by Web's pinned
+Mermaid dependency, plus ZenUML text: flowcharts, sequence, class, state, ER,
+requirements, C4, architecture, blocks, swimlanes, event modeling, git graphs,
+journeys, timelines, Gantt, pie, XY, radar, quadrants, Sankey, packets,
+mindmaps, Kanban, tree views, treemaps, Ishikawa, Venn, Wardley, Cynefin and
+railroad/EBNF/ABNF/PEG. Their terminal representations differ:
+
+- Flowcharts use boxes, subgraph membership and annotated edges, including
+  bidirectional arrows, edge labels and grouped/chained endpoints.
+- Sequence diagrams use horizontal participant columns, vertical lifelines,
+  solid/dashed message arrows, self-call loops, notes and nested fragments.
+  Labels wrap by terminal cell width, including CJK text. Activation is a
+  heavy lifeline; creation/destruction bounds its lifetime. Message numbers
+  appear only with `autonumber`. If even four cells per participant cannot
+  fit, an explicit narrow-terminal record view preserves the messages.
+- UML/ER/architecture retain member blocks, relationships and cardinalities.
+- Pie/XY data use numbers and relative bars; radar/quadrants preserve values
+  and coordinates, Sankey preserves weighted edges, packets show bit ranges.
+- Hierarchies use indented trees. Gantt displays exact scheduling expressions
+  without pretending to resolve calendars/exclusions into a graphical axis.
+- Git graphs show branch/commit events; railroad views retain productions.
+
+This is not a complete Mermaid grammar validator or a pixel-equivalent port.
+Some advanced constructs still display marked `Source` rows with a Web hint;
+unknown families, malformed flowcharts and oversized input retain source.
+Family recognition alone must not be interpreted as full syntax support.
+Limits are 32 KiB source, 500 source lines/statements, 128 KiB rendered text,
+and (for flowcharts) 64 nodes / 128 edges. Shared targets/cycles use references.
+
+Click handlers, animation, CSS and graphical configuration never execute in
+the terminal. Detected directives show the configured browser shortcut next
+to the diagram: **Space B** in main Normal/Visual mode, **Alt+b** in file
+previews. They open the current session in authenticated cc-remote Web using
+its device/engine/space route, not a third-party Mermaid site. No diagram text
+or credentials enter the URL. Browser launch requires an explicit key press;
+if no browser is available, the URL is shown for manual opening. Web retains
+its existing strict security policy, so arbitrary callbacks are not enabled.
+The handoff opens the session, not an exact diagram anchor.
+
+Configure `normal.diagram_browser`, `preview.browser` and `image.browser` in
+the shortcut file; Help and inline hints read the same registry. No headless
+browser, JavaScript runtime or external renderer is needed for terminal text.
+
 ### Managing the server queue
 
 Open `Space l`: `j/k` select, `Enter` reads the full prompt, and `i`

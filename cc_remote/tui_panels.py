@@ -142,12 +142,12 @@ class DetailPanel(Overlay):
                 "Actions use named fields; structured data has an explicit advanced editor.\n"
                 "Closing TUI never stops server tasks.\n\n"
                 "File previews use numbered hints and read-only Vim navigation.\n"
-                "PDF/Mermaid and interactive Viewer use the explicit Web handoff.\n"
+                "Mermaid uses terminal text; graphical/interactive details use Web.\n"
                 "This is a terminal presentation of the shared session, not another model process."
             )
         elif self.panel_name == "Web handoff":
             text = (
-                "Images, PDF/Mermaid and interactive Viewer require a browser.\n"
+                "PDF, graphical Mermaid details and interactive Viewer use Web.\n"
                 "Open this address manually; no browser is launched automatically:\n\n"
                 + self.client.web_url()
                 + "\n\nSession: "

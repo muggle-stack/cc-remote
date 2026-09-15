@@ -2871,6 +2871,17 @@ class WorkspaceApp(App, inherit_bindings=False):
                 ActionPicker(self.client, self.client.attached_sid)
             )
 
+    async def action_diagram_browser(self) -> None:
+        if len(self.screen_stack) != 1 or not self.client.attached_sid:
+            return
+        from cc_remote.tui_diagram_browser import open_session_browser
+        try:
+            self.client.notice = await open_session_browser(
+                self.client, self.client.attached_sid,
+            )
+        except ValueError as error:
+            self.client.notice = str(error)
+
     def action_preview_files(self) -> None:
         if len(self.screen_stack) != 1 or not self.client.attached_sid:
             return

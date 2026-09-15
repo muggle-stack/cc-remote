@@ -3,7 +3,6 @@
 from functools import partial
 
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.text import Text
 from textual.containers import Vertical
 from textual.widgets import Label, OptionList, Static
@@ -16,6 +15,7 @@ from cc_remote.tui_preview import preview_request
 from cc_remote.tui_inline_images import decode_async
 from cc_remote.tui_image_viewer import ImageCanvas
 from cc_remote.tui_keys import LAYERS
+from cc_remote.tui_markdown import render_markdown
 
 
 class FileHints(Overlay):
@@ -99,8 +99,11 @@ class MarkdownReader(PanelReader):
     def reflow(self):
         width = max(10, self.size.width - 2)
         console = Console(width=width)
+        browser_key = (self.app.client.keys.layer_label("preview", "browser")
+                       if self.is_mounted else "Space B")
         lines = console.render_lines(
-            Markdown(self.source, hyperlinks=False), console.options, pad=False
+            render_markdown(self.source, width, browser_key)[0],
+            console.options, pad=False,
         )
         self.rich_lines = [
             Text.assemble(*((s.text, s.style) for s in line if not s.control))
@@ -135,7 +138,16 @@ class FilePreviewScreen(Overlay):
     FilePreviewScreen #preview-status { height: auto; }
     """
     key_layer = "preview"
-    local_actions = {"cancel", "refresh"}
+    local_actions = {"cancel", "refresh", "browser"}
+
+    async def action_browser(self):
+        from cc_remote.tui_diagram_browser import open_session_browser
+        try:
+            self.client.notice = await open_session_browser(self.client, self.sid)
+        except ValueError as error:
+            self.client.notice = str(error)
+        if self.is_mounted:
+            self.query_one("#preview-status", Static).update(self.client.notice)
 
     def __init__(self, client, sid, ref, graphics=None):
         super().__init__()
@@ -224,7 +236,7 @@ class FilePreviewScreen(Overlay):
         if self.worker:
             self.worker.cancel()
         self.challenge = None
-        self.local_actions = {"cancel", "refresh"}
+        self.local_actions = {"cancel", "refresh", "browser"}
         self.update_hint()
         self.worker = self.run_worker(partial(self.load, self.revision))
 
@@ -253,7 +265,7 @@ class FilePreviewScreen(Overlay):
                     "authorization_id": result["authorization_id"],
                     "request_id": result["request_id"],
                 }
-                self.local_actions = {"cancel", "refresh", "authorize"}
+                self.local_actions = {"cancel", "refresh", "authorize", "browser"}
                 self.update_hint()
                 status.update(
                     "Outside session directory. "
@@ -263,7 +275,7 @@ class FilePreviewScreen(Overlay):
                 )
                 return
             self.challenge = None
-            self.local_actions = {"cancel", "refresh"}
+            self.local_actions = {"cancel", "refresh", "browser"}
             self.update_hint()
             self.wrapper_truncated = bool(result.get("truncated"))
             reader = self.query_one(MarkdownReader)
@@ -311,7 +323,7 @@ class FilePreviewScreen(Overlay):
     def action_authorize(self):
         if self.challenge:
             authorization, self.challenge = self.challenge, None
-            self.local_actions = {"cancel", "refresh"}
+            self.local_actions = {"cancel", "refresh", "browser"}
             self.update_hint()
             self.worker = self.run_worker(
                 partial(self.load, self.revision, authorization)

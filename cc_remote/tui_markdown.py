@@ -15,6 +15,7 @@ from rich.table import Table
 from rich.text import Text
 
 from cc_remote.tui import _safe_remote_text
+from cc_remote.tui_mermaid import render_diagram
 
 MAX_RENDER_CHARS = 256 * 1024
 
@@ -224,16 +225,19 @@ def table_text(tokens, width):
 
 
 @lru_cache(maxsize=256)
-def render_markdown(source, width):
+def render_markdown(source, width, browser_key="Space B"):
     """Cache bounded message bodies, not every tick or the entire transcript."""
     try:
-        return _render_markdown(source, width)
+        return _render_markdown(source, width, browser_key)
     except RenderLimit:
         return Text(_safe_remote_text(source)), False, ()
 
 
-def _render_markdown(source, width):
+def _render_markdown(source, width, browser_key):
     source = _safe_remote_text(source)
+    diagram = render_diagram(source, width, browser_key, standalone=True)
+    if diagram is not None:
+        return diagram, True, ((len(source), len(diagram)),)
     parser = MarkdownIt("commonmark").enable("table").enable("strikethrough")
     env = {}
     tokens = parser.parse(source, env)
@@ -280,9 +284,20 @@ def _render_markdown(source, width):
             language = (
                 token.info.split(None, 1)[0] if token.info.strip() else "text"
             )
-            rendered = Syntax(
-                token.content, language, theme="ansi_dark"
-            ).highlight(_safe_remote_text(token.content))
+            rendered = (render_diagram(token.content, width, browser_key)
+                        if language.lower() == "mermaid" else None)
+            if rendered is not None:
+                has_table = True  # Diagrams reflow with the terminal width.
+            else:
+                rendered = Syntax(
+                    token.content, language, theme="ansi_dark"
+                ).highlight(_safe_remote_text(token.content))
+                if language.lower() == "mermaid":
+                    notice = Text(
+                        "[Unsupported diagram; showing source]\n"
+                        f"[{browser_key}: open session in browser]\n", "dim"
+                    )
+                    rendered = notice + rendered
         elif token.type == "hr" and token.map:
             rendered = Text("─" * min(width, 60) + "\n", "bright_black")
             has_table = True  # Like tables, rules need width-aware reflow.
@@ -349,8 +364,9 @@ class Replacement:
 class MarkdownProjection:
     """Compose source-preserving Markdown with the existing image projection."""
 
-    def __init__(self, source=""):
+    def __init__(self, source="", browser_key="Space B"):
         self.original = source
+        self.browser_key = browser_key
         self.replacements = []
         self.responsive = False
         self.ends = {}
@@ -435,7 +451,9 @@ class MarkdownProjection:
         result, previous = Text(), 0
         for a, b in edits:
             result.append(source[previous:a])
-            rendered, responsive, ends = render_markdown(source[a:b], width)
+            rendered, responsive, ends = render_markdown(
+                source[a:b], width, self.browser_key,
+            )
             self.responsive |= responsive
             self.ends.update({a + x: len(result) + y for x, y in ends})
             if source[a:b] != rendered.plain:

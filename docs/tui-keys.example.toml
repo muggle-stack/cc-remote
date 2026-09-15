@@ -22,6 +22,7 @@ quit = ["ctrl+q"]
 jump_back = ["ctrl+o"]
 jump_forward = ["ctrl+i", "tab"]
 preview = ["space v"]
+diagram_browser = ["space B"] # Open the current session in authenticated Web.
 help = ["space h"]
 goal = ["space g"]
 usage = ["space u"]
@@ -147,6 +148,7 @@ next_field = ["tab"]
 previous_field = ["shift+tab"]
 
 [preview]
+browser = ["alt+b"]
 close = ["escape"]
 refresh = ["r"]
 authorize = ["a"] # Only when an exact-file authorization is required
@@ -154,6 +156,7 @@ next_field = ["tab"]
 previous_field = ["shift+tab"]
 
 [image]
+browser = ["alt+b"]
 close = ["escape"]
 refresh = ["r"]
 authorize = ["a"]
