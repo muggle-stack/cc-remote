@@ -4,7 +4,7 @@
 
 Self-hosted · Multiple sessions and devices · Live tool activity · Code / Work · PWA
 
-**Product version: v3.0.0** · Wire protocol v67
+**Product version: v3.0.0** · Wire protocol v68
 
 [中文](README.md) · [Engine comparison](#engines-and-features) · [Quick start](#quick-start) ·
 [Install and upgrade](#install-and-upgrade) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)
@@ -31,8 +31,8 @@ features or wire protocol across different commits.
   a task. History is paged, with tool details loaded when expanded.
 - **Follow the work.** Read streaming replies, engine-provided reasoning
   summaries, plans, tool calls, command output, file changes and approvals.
-  Codex and DSH support steering or queueing while busy; Claude supports
-  interrupt-and-send or queueing.
+  Claude, Codex and DSH support steering or queueing while busy. Steering adds
+  instructions to the current task without interrupting running tools.
 - **Manage longer tasks.** `/goal` exposes each engine's native progress, budget
   and controls. Claude and Codex also offer temporary `/btw` side conversations
   while the main task continues.
@@ -327,6 +327,7 @@ policy is not a replacement for separate OS users, containers or virtual machine
 | [Remote Viewer](docs/remote-viewer.md) | Interactive static pages, Bridge/Isolated modes |
 | Codex App: [macOS](docs/codex-desktop-launcher.md) / [Linux](docs/codex-desktop-linux.md) | Optional App, daily CLI and Wrapper on one daemon |
 | [Codex App tools](docs/codex-app-tools.md) | Optional App-control MCP |
+| [Timed messages](docs/timed-messages.md) | Scheduled queue receipts, message tags and countdown UI |
 | [Changelog](CHANGELOG.md) | Version changes and migrations |
 
 ## Terminal workspace (preview)

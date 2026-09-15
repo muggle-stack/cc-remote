@@ -1,5 +1,5 @@
-type Schedule = (callback: () => void, delayMs: number) => number;
-type Cancel = (timer: number) => void;
+type Schedule<Timer> = (callback: () => void, delayMs: number) => Timer;
+type Cancel<Timer> = (timer: Timer) => void;
 
 /** A small, bounded repair cycle for a non-authoritative history/detail read.
  *
@@ -8,21 +8,20 @@ type Cancel = (timer: number) => void;
  * broken source into a polling loop. A later explicit read starts a fresh
  * cycle after this one is exhausted.
  */
-export class RecoverableReadCoordinator {
+export class RecoverableReadCoordinator<Timer = number> {
   private readonly state = new Map<string, {
     attempts: number;
-    scheduled: boolean;
+    timer?: Timer;
   }>();
-  private readonly timers = new Map<string, number>();
-  private readonly schedule: Schedule;
-  private readonly cancel: Cancel;
+  private readonly schedule: Schedule<Timer>;
+  private readonly cancel: Cancel<Timer>;
   private readonly delayMs: number;
   private readonly maxAttempts: number;
   private readonly backoff: number;
 
   constructor(
-    schedule: Schedule,
-    cancel: Cancel,
+    schedule: Schedule<Timer>,
+    cancel: Cancel<Timer>,
     delayMs = 250,
     maxAttempts = 3,
     backoff = 4,
@@ -35,8 +34,8 @@ export class RecoverableReadCoordinator {
   }
 
   retry(key: string, read: () => void, delayMs = this.delayMs): boolean {
-    const state = this.state.get(key) ?? { attempts: 0, scheduled: false };
-    if (state.scheduled) return false;
+    const state = this.state.get(key) ?? { attempts: 0 };
+    if (state.timer !== undefined) return false;
     // Callers using a long custom watchdog intentionally ask for one probe,
     // not the ordinary short flush-repair sequence.
     const maxAttempts = delayMs === this.delayMs ? this.maxAttempts : 1;
@@ -44,33 +43,26 @@ export class RecoverableReadCoordinator {
       this.state.delete(key);
       return false;
     }
-    state.scheduled = true;
     this.state.set(key, state);
     const attemptDelay = delayMs === this.delayMs
       ? delayMs * this.backoff ** state.attempts
       : delayMs;
-    const timer = this.schedule(() => {
-      this.timers.delete(key);
-      const current = this.state.get(key);
-      if (current !== state || !current.scheduled) return;
-      current.scheduled = false;
-      current.attempts += 1;
+    state.timer = this.schedule(() => {
+      if (this.state.get(key) !== state) return;
+      state.timer = undefined;
+      state.attempts += 1;
       read();
     }, attemptDelay);
-    this.timers.set(key, timer);
     return true;
   }
 
   complete(key: string): void {
-    const timer = this.timers.get(key);
+    const timer = this.state.get(key)?.timer;
     if (timer !== undefined) this.cancel(timer);
-    this.timers.delete(key);
     this.state.delete(key);
   }
 
   clear(): void {
-    for (const timer of this.timers.values()) this.cancel(timer);
-    this.timers.clear();
-    this.state.clear();
+    for (const key of this.state.keys()) this.complete(key);
   }
 }

@@ -1890,8 +1890,9 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .scard-act{ width:28px; height:28px; border-radius:10px; display:grid; place-items:center; color:var(--faint); background:var(--surface); border:1px solid var(--border); }
 .scard-act:hover{ background:var(--accent-weak); color:var(--accent-ink); }
 .scard-act svg{ width:15px; height:15px; }
-.card-menu{ position:absolute; top:36px; right:8px; z-index:5; min-width:152px; background:var(--surface);
-  border:1px solid var(--border); border-radius:14px; box-shadow:var(--shadow); padding:5px; }
+.card-menu{ position:fixed; z-index:40; width:max-content; min-width:152px; background:var(--surface);
+  border:1px solid var(--border); border-radius:14px; box-shadow:var(--shadow); padding:5px;
+  overflow-y:auto; overscroll-behavior:contain; visibility:hidden; }
 .card-menu button{ display:flex; align-items:center; gap:9px; width:100%; text-align:left; padding:8px 10px; border-radius:8px; font-size:13px; color:var(--text); }
 .card-menu button:hover{ background:var(--accent-weak); }
 .card-menu button.danger{ color:var(--danger); }

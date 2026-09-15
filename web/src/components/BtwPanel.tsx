@@ -301,7 +301,6 @@ export function BtwPanel(p: Props) {
       if (action === "enqueue") {
         if (!p.onEnqueue(query)) return;
       } else {
-        if (action === "interrupt-and-replace") p.onInterrupt();
         if (!p.onSetPending(query)) return;
       }
       clearDraft();
@@ -338,14 +337,11 @@ export function BtwPanel(p: Props) {
   const effortName = effortNameForDisplay(p.rt?.effort);
   const stopping = runtimeBusy && !hasText;
   const interruptSettling = isInterruptSettling(submitState);
-  const primaryIsInterrupt = p.engine !== "codex";
   const sendIcon = !runtimeBusy ? "send"
     : stopping ? "stop" : p.sendMode === "steer"
-      ? (primaryIsInterrupt ? "bolt" : "send") : "queue";
+      ? "send" : "queue";
   const sendClass = "btw-send"
-    + ((stopping || (runtimeBusy && p.sendMode === "steer"
-      && primaryIsInterrupt && hasText))
-      ? " interrupt" : "");
+    + (stopping ? " interrupt" : "");
   const sendDisabled = inputLocked || awaitingFirstChat || !p.sid
     || (!runtimeBusy && !hasText)
     || isSettlingStopDisabled(submitState, hasText);
@@ -470,8 +466,7 @@ export function BtwPanel(p: Props) {
             <div className="seg">
               <button className={p.sendMode === "steer" ? "on" : ""}
                 onClick={() => p.onSetSendMode("steer")}>
-                <Icon name={primaryIsInterrupt ? "bolt" : "send"} size={14} />
-                {primaryIsInterrupt ? "打断并发送" : "引导"}
+                <Icon name="send" size={14} />引导
               </button>
               <button className={p.sendMode === "queue" ? "on" : ""}
                 onClick={() => p.onSetSendMode("queue")}>
@@ -486,9 +481,7 @@ export function BtwPanel(p: Props) {
             value={input}
             placeholder={lockReason ?? (awaitingFirstChat ? "正在打开…"
               : runtimeBusy
-                ? (primaryIsInterrupt
-                  ? "可输入后打断并发送或排队…"
-                  : "输入以引导当前任务，或选择排队…")
+                ? "输入以引导当前任务，或选择排队…"
                 : "问点什么")}
             rows={1}
             disabled={inputLocked || awaitingFirstChat || !p.sid}

@@ -69,6 +69,12 @@ attachment and optional App-control MCP tools are separate user choices.
   to the terminal ResultMessage; state only returns to `idle` (and the next
   query is only accepted) after that break. Reject-while-busy prevents a second
   query racing the drain.
+- **Claude steering**: send `priority="next"` through streaming input, keeping
+  the one session reader. Rebind the visible turn only on the exact native user
+  UUID echo. A Result before an accepted input is consumed is intermediate;
+  the persistent service journals this distinction and commits the original
+  root turn identity. Explicit Stop uses `interrupt(cancel_queued=true)` when
+  advertised and pending inputs exist, then drains the real Result as above.
 - **cwd must match resume**: a session's jsonl lives at
   `~/.claude/projects/<cwd-with-/-as->/<uuid>.jsonl`. `ClaudeAgentOptions.cwd`
   MUST equal the original session's cwd or `resume` can't find it.
@@ -112,7 +118,7 @@ attachment and optional App-control MCP tools are separate user choices.
   transport, never the caller's Origin. Uvicorn trusts forwarded transport
   metadata only from loopback Caddy. Never put tokens in URLs or protocol
   message bodies; logging redacts token/password fields.
-- **Protocol version gate**: current wire protocol v67 is declared by
+- **Protocol version gate**: current wire protocol v68 is declared by
   `PROTOCOL_VERSION` in both `protocol.py` and `web/src/protocol.ts`.
   `deserialize` hard-rejects a version mismatch, and
   `_Base` is `extra="forbid"`, so ANY protocol change must be deployed to all

@@ -676,6 +676,7 @@ class StreamTranslator:
         self.item_commands = (
             item_commands if item_commands is not None else {})
         self._message_ids: dict[str, str] = {}
+        self._message_turn_id: str | None = None
         self._started_channels: set[str] = set()
         # Only the emitted prefix LENGTH is needed to deduplicate the assembled
         # AssistantMessage after streaming deltas.  Retaining and repeatedly
@@ -719,6 +720,14 @@ class StreamTranslator:
         self._last_user_uuid: str | None = None
         self._compaction_id: str | None = None
 
+    def rebind_turn(self, turn_id: str) -> None:
+        """Advance at a native input echo while retaining unfinished item owners."""
+        self.turn_id = turn_id
+        self._ambiguous_final_mid = None
+        self._has_final_text = False
+        self._last_assistant_uuid = None
+        self._last_user_uuid = None
+
     def _remember_turn(self, item_id: str, parent_id: str | None = None) -> str | None:
         turn = (self.item_turns.get(item_id)
                 or (self.item_turns.get(parent_id) if parent_id else None)
@@ -756,8 +765,10 @@ class StreamTranslator:
                         suggested: str | None = None) -> str:
         mid = self._message_id(channel_key, suggested)
         if channel_key not in self._started_channels:
+            if not self._started_channels:
+                self._message_turn_id = self.turn_id
             events.append(AssistantMsgStart(
-                message_id=mid, turn_id=self.turn_id, channel=channel))
+                message_id=mid, turn_id=self._message_turn_id, channel=channel))
             self._started_channels.add(channel_key)
         return mid
 
@@ -770,7 +781,7 @@ class StreamTranslator:
             return
         mid = self._ensure_channel(events, channel_key, channel, suggested)
         events.append(Delta(
-            message_id=mid, turn_id=self.turn_id,
+            message_id=mid, turn_id=self._message_turn_id,
             text=bounded, channel=channel))
         self._emitted[channel_key] += len(bounded)
 
@@ -778,11 +789,11 @@ class StreamTranslator:
         if "thinking" in self._started_channels:
             events.append(AssistantMsgEnd(
                 message_id=self._message_ids["thinking"],
-                turn_id=self.turn_id, channel="thinking"))
+                turn_id=self._message_turn_id, channel="thinking"))
         if "text" in self._started_channels:
             events.append(AssistantMsgEnd(
                 message_id=self._message_ids["text"],
-                turn_id=self.turn_id, channel=text_channel))
+                turn_id=self._message_turn_id, channel=text_channel))
         self._message_ids.clear()
         self._started_channels.clear()
         self._emitted = {"thinking": 0, "text": 0}
@@ -3037,6 +3048,13 @@ def translate_history(
                     current_turn_id = message_uid
                     background_followup = False
             elif isinstance(content, list):
+                if content and all(
+                    isinstance(block, dict) and block.get("type") == "text"
+                    and isinstance(block.get("text"), str)
+                    and _is_meta_user_text(block["text"])
+                    for block in content
+                ):
+                    continue
                 if _is_interrupted_user_content(content):
                     misplaced_alias = client_message_ids.get(message_uid)
                     pending_interrupted_alias = (
@@ -3142,6 +3160,10 @@ def translate_history(
         elif role == "system":
             internal_event = (internal_user_events or {}).get(source_uid)
             if internal_event is not None:
+                # Manual compaction can finish minutes after an answer. Keep
+                # its process timestamp without retiming the settled response.
+                if settled_answer_seen or ambiguous_final_mid is not None:
+                    advance_terminal_clock = False
                 event = internal_event.model_copy(deep=True)
                 event.turn_id = event.turn_id or current_turn_id
                 timestamp = _ts(source_uid)
@@ -3596,6 +3618,7 @@ def _is_meta_user_text(text: str) -> bool:
         or t.startswith("<command-name>")
         or t.startswith("<command-message>")
         or t.startswith("<command-args>")
+        or t.startswith("<local-command-caveat>")
         or t.startswith("<local-command-stdout>")
         or t.startswith("<local-command-stderr>")
     )

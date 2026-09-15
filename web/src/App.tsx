@@ -4671,7 +4671,7 @@ export default function App() {
     prompt: string, images?: QueryImg[], files?: QueryFile[],
   ): boolean => {
     const ws = wsRef.current;
-    if (!ws || !focusedSid || (focusedEngine !== "codex" && focusedEngine !== "dsh")) return false;
+    if (!ws || !focusedSid || runtimeIsReadOnly(focusedSid)) return false;
     const runtime = stateRef.current.runtimes[focusedSid];
     if (ws.pendingQueryFor(focusedSid) || runtime?.acceptancePending) {
       return false;
@@ -5389,7 +5389,7 @@ export default function App() {
   const steerBtw = (prompt: string): boolean => {
     const sid = activeBtwSid;
     const ws = wsRef.current;
-    if (!sid || !ws || activeBtw?.engine !== "codex" || runtimeIsReadOnly(sid)) return false;
+    if (!sid || !ws || runtimeIsReadOnly(sid)) return false;
     const runtime = stateRef.current.runtimes[sid];
     if (ws.pendingQueryFor(sid) || runtime?.acceptancePending) return false;
     const msg_id = uuid();

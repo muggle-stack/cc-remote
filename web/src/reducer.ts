@@ -5951,6 +5951,7 @@ function reduceEvent(
         const stamp = e.ts ? Math.round(e.ts * 1000) : undefined;
         if (existing) {
           if (!existing.prompt && e.prompt) existing.prompt = e.prompt;
+          if (e.timed_task) existing.timedTask = e.timed_task;
           if (!existing.images && imgs) existing.images = imgs;
           if (fileMeta) existing.files = fileMeta;
           else if (existing.files) existing.files = existing.files.map(
@@ -5964,6 +5965,7 @@ function reduceEvent(
           turns.push({
             id: e.msg_id,
             clientMsgId: e.client_msg_id ?? undefined,
+            timedTask: e.timed_task ?? undefined,
             prompt: e.prompt,
             images: imgs,
             files: fileMeta,

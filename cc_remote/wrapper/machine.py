@@ -103,12 +103,14 @@ from cc_remote.codex_daemon_restart import (
 )
 from cc_remote.audio_preview import AUDIO_PREVIEW_MEDIA_TYPES, validate_audio_preview
 from cc_remote.log import logger
+from cc_remote.timed_tasks import TimedTaskStore
 from cc_remote.workspaces import (
     WORK_UPLOADS_MARKER,
     WORK_UPLOADS_MARKER_PAYLOAD,
     WorkStores,
 )
 from cc_remote.protocol import (
+    TimedMessage,
     ASK_OPTION_MAX_COUNT, ARTIFACT_PREVIEW_MAX_BYTES, FILE_PREVIEW_MAX_BYTES,
     MAX_BACKGROUND_PROCESS_COMMAND_CHARS,
     MAX_BACKGROUND_PROCESS_CWD_CHARS,
@@ -2014,6 +2016,8 @@ class WrapperMachine:
 
     def __init__(self, cfg: WrapperConfig, transport: WrapperTransport):
         self.cfg = cfg
+        self._timed_tasks = TimedTaskStore(cfg.state_dir)
+        self._timed_task_catalog = {}
         self.transport = transport
         self._command_router = CommandRouter(self)
         self._dsh = DshRuntime(self)
@@ -5026,6 +5030,7 @@ class WrapperMachine:
         *,
         expected_msg_id: str | None = None,
         expected_generation: int | None = None,
+        emit_binding: bool = True,
     ) -> bool:
         client_message_id = expected_msg_id or ctx.active_msg_id
         if (
@@ -5059,10 +5064,11 @@ class WrapperMachine:
                 error_type=type(exc).__name__,
             )
         try:
-            await self._emit(ctx, TurnBinding(
-                msg_id=client_message_id,
-                turn_id=native_message_id,
-            ))
+            if emit_binding:
+                await self._emit(ctx, TurnBinding(
+                    msg_id=client_message_id,
+                    turn_id=native_message_id,
+                ))
         except Exception as exc:
             log.warning(
                 "Claude turn binding could not be published",
@@ -7180,7 +7186,7 @@ class WrapperMachine:
                 release_background()
             ctx.claude_write_active = False
             if ctx.session_id:
-                self._resync_watch(ctx.session_id)
+                self._resync_watch(self._ctx_wire_sid(ctx))
 
         if terminal is None:
             raise RuntimeError("Claude compact ended without ResultMessage")
@@ -7512,7 +7518,7 @@ class WrapperMachine:
             # their engine mutations in either order; each durable write must
             # therefore reflect the newest complete SDK state at its own
             # serialized boundary, never a snapshot captured while waiting.
-            session_id = ctx.session_id
+            session_id = self._ctx_wire_sid(ctx)
             if (ctx.engine != "claude" or not session_id or ctx.btw
                     or getattr(ctx.sdk, "is_claude_broker", False)
                     or (ctx.key is not None
@@ -7580,7 +7586,7 @@ class WrapperMachine:
                 # keeps the user's desired value until compact + reconnect make
                 # it safe to publish here as applied.
                 await self._claude_broker.set_preferences(
-                    session_id,
+                    ctx.session_id,
                     model=model,
                     effort=effort,
                     permission_mode=permission_mode,
@@ -8801,6 +8807,18 @@ class WrapperMachine:
         for session_id, entry in list(self._private_btw_sessions.items()):
             await self._delete_private_btw(session_id, entry["cwd"])
 
+    async def _delete_claude_btw_transcripts(
+        self, ctx: SessionContext, *, forget: bool,
+    ) -> None:
+        if ctx.engine != "claude":
+            return
+        for sid in dict.fromkeys((ctx.btw_real_id, ctx.btw_reserved_id)):
+            if sid:
+                await self._delete_private_btw(
+                    sid, ctx.cwd, forget=forget,
+                    claude_profile_id=ctx.claude_profile_id,
+                )
+
     # ---- lifecycle ----
 
     async def prepare_codex_daemons(self) -> None:
@@ -9160,13 +9178,9 @@ class WrapperMachine:
                     pass
                 finally:
                     await self._cleanup_codex_steer_attachments(c)
-                if c.btw and c.engine != "codex" and c.btw_real_id:
-                    await self._delete_private_btw(
-                        c.btw_real_id,
-                        c.cwd,
-                        forget=disconnected,
-                        claude_profile_id=c.claude_profile_id,
-                    )
+                if c.btw:
+                    await self._delete_claude_btw_transcripts(
+                        c, forget=disconnected)
             terminal_tasks = list(self._codex_terminal_persist_tasks)
             # Stop every producer first, then give the remaining small fsyncs a
             # chance to finish. Draining earlier could miss a terminal emitted
@@ -10215,6 +10229,16 @@ class WrapperMachine:
         # treats an absent ``to`` as broadcast, so fail closed for an impossible
         # ownerless fork rather than leaking its contents.
         msg.sid = self._ctx_wire_sid(ctx) or ctx.key
+        if isinstance(msg, UserMsg) and ctx.engine == "codex" and not ctx.btw:
+            try:
+                profile, native_sid = self._codex_target(msg.sid)
+                source = await asyncio.to_thread(
+                    self._timed_tasks.source, str(profile.home), native_sid,
+                    [msg.msg_id, msg.client_msg_id], bind=msg.msg_id)
+                if source:
+                    msg.timed_task = TimedMessage(**source)
+            except Exception:
+                log.warning("Timed message receipt unavailable", sid=msg.sid)
         if ctx.btw:
             if not ctx.owner_client_id:
                 log.error("dropping frame for ownerless btw", sid=ctx.key,
@@ -13867,6 +13891,7 @@ class WrapperMachine:
                             and ctx.session_id not in self._watch):
                         self._watch_session(ctx.session_id)
                 await self._poll_watches_once()
+                await self._refresh_timed_tasks()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -13905,6 +13930,53 @@ class WrapperMachine:
         return summaries
 
     async def _build_history(
+        self, sid: str, before=None, limit=None, cwd_hint=None,
+        detail: str = "full",
+        *, allow_stale: bool = False,
+    ) -> History:
+        history = await self._build_history_source(
+            sid, before, limit, cwd_hint, detail, allow_stale=allow_stale)
+        return await self._annotate_timed_history(sid, history)
+
+    async def _annotate_timed_history(self, sid: str, history: History) -> History:
+        """Overlay local receipts regardless of the native history provider."""
+        ctx = self._ctx_by_sid(sid)
+        if ctx is not None and ctx.engine != "codex":
+            return history
+        try:
+            profile, native_sid = self._codex_target(sid)
+            def annotate():
+                for turn in history.turns:
+                    source = self._timed_tasks.source(
+                        str(profile.home), native_sid, [turn.id, turn.clientMsgId])
+                    if source:
+                        turn.timedTask = TimedMessage(**source)
+                for event in history.events:
+                    if event.get("type") != "user_msg":
+                        continue
+                    source = self._timed_tasks.source(
+                        str(profile.home), native_sid,
+                        [event.get("msg_id"), event.get("client_msg_id")])
+                    if source:
+                        event["timed_task"] = source
+            await asyncio.to_thread(annotate)
+        except Exception:
+            log.warning("Timed history receipts unavailable", sid=sid)
+        return history
+
+    async def _refresh_timed_tasks(self) -> dict:
+        try:
+            current = await asyncio.to_thread(self._timed_tasks.active)
+        except Exception:
+            # Receipt I/O must not disrupt ordinary transcript mirroring.
+            return self._timed_task_catalog
+        if current != self._timed_task_catalog:
+            self._timed_task_catalog = current
+            await self._invalidate_session_list("codex", "code")
+            await self._invalidate_session_list("codex", "work")
+        return current
+
+    async def _build_history_source(
         self, sid: str, before=None, limit=None, cwd_hint=None,
         detail: str = "full",
         *, allow_stale: bool = False,
@@ -15940,6 +16012,7 @@ class WrapperMachine:
             try:
                 history = await self._build_official_codex_history(
                     sid, before=before, limit=limit)
+                history = await self._annotate_timed_history(sid, history)
                 if (
                     not _background and before is None
                     and history.authoritative is False
@@ -17874,7 +17947,7 @@ class WrapperMachine:
             turn_task.add_done_callback(settle_unstarted_launch)
 
     async def _handle_steer(self, cmd):
-        """Append one user instruction to the exact active Codex turn.
+        """Append one user instruction to the exact active engine turn.
 
         Steering is neither a new engine turn nor an interrupt.  The successful
         narrative echo is replayable so every browser splits the visible task at
@@ -17893,7 +17966,8 @@ class WrapperMachine:
                 sid=self._ctx_wire_sid(ctx) if ctx is not None else sid,
             )
             log.info(
-                "Codex steer not accepted",
+                "steer not accepted",
+                engine=ctx.engine if ctx else None,
                 session_id=error.sid,
                 msg_id=error.msg_id,
                 error_code=code,
@@ -17908,11 +17982,10 @@ class WrapperMachine:
         if ctx is None:
             return await reject(
                 ERR_NOT_STEERABLE, "该会话未启动，无法引导当前任务")
-        if ctx.engine != "codex":
-            return await reject(
-                ERR_NOT_STEERABLE,
-                "Claude 当前不支持无打断引导；请使用打断并发送或排队。",
-            )
+        if ctx.engine == "claude":
+            from cc_remote.wrapper import claude_steer
+
+            return await claude_steer.handle(self, ctx, cmd, reject)
         if ctx.state != "running":
             return await reject(
                 ERR_NOT_STEERABLE, "当前没有可引导的 Codex 任务")
@@ -19907,13 +19980,8 @@ class WrapperMachine:
         # Codex forks are ephemeral (no rollout). Claude fork_session persists a
         # transcript under btw_real_id; keep its tombstone on deletion failure so
         # it stays hidden and cannot be cold-resumed.
-        if ctx.engine != "codex" and ctx.btw_real_id:
-            await self._delete_private_btw(
-                ctx.btw_real_id,
-                ctx.cwd,
-                forget=disconnected,
-                claude_profile_id=ctx.claude_profile_id,
-            )
+        await self._delete_claude_btw_transcripts(
+            ctx, forget=disconnected)
         log.info("btw closed", btw_sid=sid)
         return close_event
 
@@ -25575,12 +25643,12 @@ class WrapperMachine:
             )
             await self.transport.send(error)
             return error
-        # Claude may create the fork transcript before its init/session id reaches
-        # our turn consumer. Until capture durably tombstones that real id, scanning
-        # the global session store could publish it to another client. Fail closed
-        # for this one requester; never broadcast a control-plane privacy error.
+        # New Claude BTW forks reserve a durably hidden native id before startup.
+        # Only a legacy/unidentified fork needs this guard: waiting for the first
+        # user message on a correctly reserved empty fork must not block catalogs.
         if any(
             ctx.btw and ctx.engine != "codex" and not ctx.btw_real_id
+            and not ctx.btw_reserved_id
             for ctx in self.sessions.values()
         ):
             client_id = getattr(cmd, "client_id", None)
@@ -26531,41 +26599,11 @@ class WrapperMachine:
                             item["summary"] = "派生会话"
                     normalized.append(item)
 
-            materialized_native_ids = {
-                row.get("native_session_id")
-                for row in normalized
-                if isinstance(row.get("native_session_id"), str)
-            }
-            # ``thread/started`` is an account-scoped, source-filtered native
-            # event. During the very small state-DB commit gap it is sufficient
-            # to keep a fresh CLI row discoverable; older hints remain gated by
-            # an exact DB hit so an externally deleted thread cannot live forever.
-            for native_sid, candidate_info in profile_candidates.items():
-                if (
-                    native_sid in materialized_native_ids
-                    or not candidate_info.get("hint_fresh")
-                ):
-                    continue
-                try:
-                    wire_sid = self._codex_wire_sid(profile, native_sid)
-                except ValueError:
-                    continue
-                normalized.append({
-                    "session_id": wire_sid,
-                    "native_session_id": native_sid,
-                    "summary": "新会话",
-                    "first_prompt": None,
-                    "cwd": None,
-                    "last_modified": str(time.time()),
-                    "git_branch": None,
-                    "forked_from_id": candidate_info.get("forked_from_id"),
-                    "status": None,
-                    "tag": None,
-                    "codex_profile_id": profile.id,
-                    "codex_profile_label": profile.label,
-                    _CODEX_CATALOG_PRIORITY: 2,
-                })
-                materialized_native_ids.add(native_sid)
+            # A sibling thread/started is only a discovery hint. Native
+            # ephemeral helpers can emit it without ever creating a resumable
+            # rollout. Keep the exact DB repair above, but never manufacture a
+            # clickable row from the hint alone. Resident threads below carry
+            # their own live handle and remain visible during catalog lag.
 
             # A just-started resident is stronger evidence than a lagging DB
             # projection: thread/start already returned its durable id and this
@@ -26847,6 +26885,7 @@ class WrapperMachine:
             # BTW fork can finish connecting during one of those awaits, so
             # close that race immediately before the synchronous wire build.
             raw = self._filter_private_codex_btw_rows(raw)
+            timed_catalog = await self._refresh_timed_tasks()
             sessions = []
             for row in raw:
                 wire_sid = row["session_id"]
@@ -26858,6 +26897,8 @@ class WrapperMachine:
                     continue
                 sessions.append(SessionInfo(
                     session_id=wire_sid,
+                    timed_tasks=timed_catalog.get((
+                        str(self._codex_target(wire_sid)[0].home), native_sid), []),
                     summary=(record.title if record and record.title
                              else row.get("summary")),
                     first_prompt=row.get("first_prompt"),
@@ -36127,7 +36168,7 @@ class WrapperMachine:
         pending_private_forks = sum(
             1 for resident in self.sessions.values()
             if resident.btw and resident.engine != "codex"
-            and not resident.btw_real_id
+            and not resident.btw_real_id and not resident.btw_reserved_id
         )
         if (len(self._private_btw_sessions) + pending_private_forks
                 >= self.PRIVATE_BTW_CAP):
@@ -36364,6 +36405,21 @@ class WrapperMachine:
                     ctx, thread_id))
             ctx.sdk.runtime_event_callback = (
                 lambda event: self._on_codex_runtime_event(ctx, event))
+        if engine == "claude":
+            reserved_id = str(uuid4())
+            try:
+                # SDK session_id pins the native fork identity before any
+                # transcript can appear. Persist first, including on crashes
+                # during connect; never launch an unregistered private writer.
+                self._remember_private_btw(
+                    self._claude_wire_sid(claude_profile, reserved_id),
+                    ctx.cwd,
+                )
+            except Exception as exc:
+                raise _BtwSpawnFailure(
+                    ERR_INTERNAL, "侧边对话的私有状态暂时无法保存，请稍后重试。",
+                ) from exc
+            ctx.btw_reserved_id = ctx.sdk.fork_session_id = reserved_id
         try:
             await ctx.sdk.connect(
                 resume_id=parent_id, cwd=parent.cwd, fork=True)
@@ -36400,20 +36456,28 @@ class WrapperMachine:
                     ctx, preferred=BTW_DEFAULT_EFFORT)
             await self._stamp_codex_daemon_epoch(ctx)
         except asyncio.CancelledError:
+            disconnected = False
             try:
                 await ctx.sdk.disconnect()
+                disconnected = True
             except Exception:
                 log.warning("btw fork cancellation cleanup failed")
+            await self._delete_claude_btw_transcripts(
+                ctx, forget=disconnected)
             raise
         except Exception as e:
             # connect() can fail after starting a private app-server/SDK child,
             # and the post-connect effort probe can fail too. The context is not
             # resident yet, so no later pool cleanup can reach that partial
             # handle; close it here before returning the correlated rejection.
+            disconnected = False
             try:
                 await ctx.sdk.disconnect()
+                disconnected = True
             except Exception:
                 log.warning("btw fork failure cleanup failed")
+            await self._delete_claude_btw_transcripts(
+                ctx, forget=disconnected)
             log.exception("btw fork initialization failed", error=str(e))
             raise _BtwSpawnFailure(
                 ERR_CC_CRASH, "临时侧边会话暂时无法打开，请稍后重试。"
@@ -38170,6 +38234,10 @@ class WrapperMachine:
                     continue
 
                 native_user_id = replayed_user_message_id(msg)
+                from cc_remote.wrapper import claude_steer
+
+                steer_event = await claude_steer.apply_echo(
+                    self, ctx, msg, native_user_id)
                 if native_user_id is not None:
                     await self._remember_claude_client_message_id(
                         ctx, native_user_id)
@@ -38196,7 +38264,7 @@ class WrapperMachine:
                                 too_large_kind),
                             msg_id=ctx.active_msg_id,
                         ))
-                events = ctx.translator.feed(msg)
+                events = ([steer_event] if steer_event else []) + ctx.translator.feed(msg)
                 claude_service.preserve_timestamp(events, msg)
                 if service_replay is not None:
                     service_replay.add(events)
@@ -38228,6 +38296,9 @@ class WrapperMachine:
                 # finally. Query/send or reader failures remain ambiguous and
                 # their growth must be consumed as a reload on the next probe.
                 claude_turn_completed = True
+                from cc_remote.wrapper import claude_steer
+
+                claude_steer.cleanup(ctx)
 
             if not is_codex and ctx.session_id:
                 goal = await ctx.sdk.refresh_goal(ctx.session_id)
@@ -38794,7 +38865,7 @@ class WrapperMachine:
             # preflight/query/reader failures must not hide an external append.
             ctx.claude_write_active = False
             if not is_codex and claude_turn_completed and ctx.session_id:
-                self._resync_watch(ctx.session_id)
+                self._resync_watch(self._ctx_wire_sid(ctx))
             if temp_dir is not None and not persistent_attachments:
                 try:
                     shutil.rmtree(temp_dir)

@@ -1142,8 +1142,8 @@ assert.equal(classifyBusySubmit("running", "steer", "codex", true), "steer",
   "the default Codex busy submit appends input to its active native turn");
 assert.equal(
   classifyBusySubmit("running", "steer", "claude", true),
-  "interrupt-and-replace",
-  "Claude retains interrupt-and-replace because it cannot steer an active turn",
+  "steer",
+  "Claude submits native non-interrupting input while its task continues",
 );
 assert.equal(classifyBusySubmit(
   "interrupting", "steer", "codex", true), "replace",
@@ -19552,6 +19552,87 @@ assert.equal(coalescedRefresh.type, "list_sessions");
 assert.notEqual(coalescedRefresh.cmd_id, invalidationRefresh.cmd_id,
   "one dirty bit schedules exactly one follow-up after the first refresh ACK");
 listOwnershipRelay.stop();
+
+// An empty private Claude fork used to defer the automatic list read on a
+// harness switch. Keep that failure local, without hiding mutation failures.
+function testDeferredSessionListReads(): void {
+  const originalTimeout = globalThis.setTimeout;
+  const originalClear = globalThis.clearTimeout;
+  const timers = new Map<ReturnType<typeof setTimeout>, {
+    run: () => void; delay: number;
+  }>();
+  globalThis.setTimeout = ((run: () => void, delay: number) => {
+    const timer = {} as ReturnType<typeof setTimeout>;
+    timers.set(timer, { run, delay });
+    return timer;
+  }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: ReturnType<typeof setTimeout>) => {
+    timers.delete(timer);
+  }) as typeof clearTimeout;
+  const events: ServerEvent[] = [];
+  const relay = new RelayWs({
+    onEvent: event => { events.push(event); }, onConnState: () => {},
+  });
+  try {
+    relay.start();
+    const socket = FakeWebSocket.instances.at(-1)!;
+    socket.onopen?.();
+    const lastCommand = () => JSON.parse(socket.sent.at(-1)!);
+    const busy = () => socket.receive({
+      type: "error", code: "busy", message: "private fork initializing",
+      request_id: lastCommand().cmd_id,
+    });
+    relay.sendListSessions("claude");
+    for (const delay of [250, 1000, 4000]) {
+      const count = socket.sent.length;
+      busy();
+      busy(); // A retransmitted response cannot schedule a second retry.
+      assert.equal(events.length, 0);
+      assert.equal(timers.size, 1);
+      const [timer, retry] = [...timers][0];
+      assert.equal(retry.delay, delay);
+      timers.delete(timer);
+      retry.run();
+      assert.equal(socket.sent.length, count + 1);
+      assert.equal(lastCommand().type, "list_sessions");
+      assert.equal(lastCommand().engine, "claude");
+    }
+    busy();
+    assert.equal(timers.size, 0, "list deferral retries are bounded");
+    relay.sendListSessions("claude");
+    busy();
+    assert.equal(timers.size, 1);
+    socket.receive({ type: "session_list", engine: "claude",
+      request_id: lastCommand().cmd_id, sessions: [] });
+    assert.equal(timers.size, 0, "a successful response cancels deferral");
+    relay.sendListSessions("claude");
+    busy();
+    relay.setSurface("codex", "code");
+    assert.equal(timers.size, 0, "switching harness cancels old-surface retries");
+    const beforeStale = events.length;
+    busy();
+    assert.equal(events.length, beforeStale);
+    assert.equal(timers.size, 0);
+    relay.setSurface("claude", "code");
+    relay.sendRenameSession("parent", "title", "claude", "code");
+    busy();
+    assert.equal(events.at(-1)?.type, "error", "a failed mutation stays visible");
+    const beforeInternal = events.length;
+    relay.sendListSessions("claude");
+    socket.receive({ type: "error", code: "internal", message: "catalog failed",
+      request_id: lastCommand().cmd_id });
+    assert.equal(events.length, beforeInternal + 1);
+    busy();
+    assert.equal(timers.size, 1);
+    relay.stop();
+    assert.equal(timers.size, 0, "disconnect cleanup cancels the timer");
+  } finally {
+    relay.stop();
+    globalThis.setTimeout = originalTimeout;
+    globalThis.clearTimeout = originalClear;
+  }
+}
+testDeferredSessionListReads();
 
 const stoppedEvents: ServerEvent[] = [];
 const stoppedStates: string[] = [];

@@ -12,7 +12,7 @@ const CODEX_UPDATE_INTERRUPTION =
 const CODEX_CONNECTION_INTERRUPTION =
   "与 Codex 的连接中断，本轮未确认完成。请检查已有结果后继续。";
 // Exact authored causes only; never expose an arbitrary upstream diagnostic.
-const STEER_REJECTION_MESSAGES = /^(?:该会话(?:未启动，无法引导当前任务|当前为只读状态，无法从 Remote 引导)|Claude 当前不支持无打断引导；请使用打断并发送或排队。|Codex (?:(?:自动压缩|Review|当前阶段)不支持引导，或任务已经切换；本次未发送。|正在核对当前回合归属，本次引导未发送；请稍后重试。|当前回合不支持引导，请等待后重试。)|消息内容为空，请输入内容或添加附件。|附件不符合要求，请调整后重试。)$/;
+const STEER_REJECTION_MESSAGES = /^(?:该会话(?:未启动，无法引导当前任务|当前为只读状态，无法从 Remote 引导)|本次引导已取消。|Claude 当前无法接收引导，本次未发送；请稍后重试或排队。|Codex (?:(?:自动压缩|Review|当前阶段)不支持引导，或任务已经切换；本次未发送。|正在核对当前回合归属，本次引导未发送；请稍后重试。|当前回合不支持引导，请等待后重试。)|消息内容为空，请输入内容或添加附件。|附件不符合要求，请调整后重试。)$/;
 const CODEX_USAGE_LIMIT_FAILURE =
   "本轮使用的 Codex 账号额度已用完。可切换账号、补充额度，或等待恢复后重试。";
 const CODEX_USAGE_LIMIT_RETRY =
@@ -164,7 +164,7 @@ export function presentCommandProblem(
         : "本次引导未发送，请稍后重试。";
     }
     case "steer_outcome_unknown":
-      return "引导已发出，Codex 尚未确认是否生效。请先查看后续结果。";
+      return "引导已发出，尚未确认是否生效。请先查看后续结果。";
     default:
       return "操作未完成，请稍后重试。";
   }

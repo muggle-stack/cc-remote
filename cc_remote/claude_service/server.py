@@ -18,6 +18,8 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
+from cc_remote.claude_steering import PendingSteers, steer_message
+
 from .wire import decode_sdk, encode_sdk, private_directory, read_frame, same_user, write_frame
 
 MAX_SESSIONS = 64
@@ -86,6 +88,7 @@ class Session:
         self.callback_answers: dict[str, object] = {}
         self.initializers: dict[str, dict] = {}
         self.turn: dict | None = None
+        self.steers = PendingSteers()
         self.origin_id: str | None = None
         self.ack = 0
         self.terminal_seq: int | None = None
@@ -181,6 +184,9 @@ class Session:
             async for value in self.client._query.receive_messages():
                 if self.closed:
                     return
+                value = self.steers.annotate(value)
+                if "__cc_steer" in value:
+                    self.origin_id = value["__cc_steer"]["id"]
                 # The journal is on disk, like Claude's own transcript. Do not
                 # stop the sole native reader at a per-turn byte cap: an offline
                 # long turn could then never deliver the Result that frees it.
@@ -204,7 +210,8 @@ class Session:
                 sid = value.get("session_id")
                 if isinstance(sid, str) and sid:
                     self.metadata["session_id"] = sid
-                if self.turn is not None and _human_result(value):
+                if (self.turn is not None and _human_result(value)
+                        and not value.get("__cc_steer_intermediate")):
                     self.terminal_seq = seq
                 await self.notify()
         except asyncio.CancelledError:
@@ -226,6 +233,7 @@ class Session:
             "initializers": self.initializers, "failure": self.failure,
             "head": self.journal.seq, "controls": self.controls, "pid": os.getpid(),
             "task_seeds": list(self.task_seeds.values()),
+            "native_steering": True,
         }
 
     async def events(self, after: int) -> dict:
@@ -251,7 +259,14 @@ class Session:
     async def mutate(self, request_id: str, method: str, params: dict):
         # Accepted writes outlive their connection. A lost acknowledgement may
         # be retried with the same ID but must never submit a second model turn.
-        fingerprint = hashlib.sha256(json.dumps([method, params], sort_keys=True).encode()).hexdigest()
+        identity = [method, params]
+        if method == "steer" and params.get("metadata", {}).get("fingerprint"):
+            # A controller replacement may stage identical attachment bytes at
+            # another private path. Compare the original browser payload digest,
+            # not those incidental paths; the first mutation keeps its payload.
+            identity = [method, params["turn_id"], params["native_id"],
+                        params["metadata"]["fingerprint"]]
+        fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
         previous = self.mutation_fingerprints.get(request_id)
         if previous is not None and previous != fingerprint:
             raise ValueError("Claude request identity was reused with different data")
@@ -286,7 +301,7 @@ class Session:
                 raise ValueError("Claude callback is no longer pending")
             return None
         if method == "interrupt":
-            return await self.client.interrupt()
+            return await self.steers.interrupt(self.client)
         if method == "control":
             result = await self.client._query._send_control_request(
                 params["request"], timeout=params.get("timeout", 60))
@@ -297,6 +312,17 @@ class Session:
                 self.controls["permission_mode"] = request.get("mode")
             return result
         async with self.lock:
+            if method == "steer":
+                if (self.turn is None or self.terminal_seq is not None
+                        or self.failure or params["turn_id"] != self.turn["id"]):
+                    return False
+                self.steers.add(params["native_id"], params["metadata"])
+
+                async def stream():
+                    yield steer_message(params["prompt"], params["native_id"])
+
+                await self.client.query(stream())
+                return True
             if method == "query":
                 if params["turn"]["id"] in self.submitted_turns:
                     raise ValueError("Claude turn was already submitted")

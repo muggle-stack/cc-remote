@@ -4,6 +4,20 @@
 
 ## Unreleased
 
+- Use native Claude steering without interrupting the running turn, including
+  persistent-service and BTW sessions. Preserve message ownership and pending
+  input across turn transitions and reconnects.
+- Reserve private Claude BTW identities before launch and retry transient
+  session-list reads when switching engines. Keep account-specific controls on
+  the correct session and omit unreadable transient Codex thread notifications.
+- Hide Claude internal compaction messages from history, preserve completed-turn
+  timestamps, and show the applied automatic compaction threshold separately
+  from model capacity.
+- Show explicit timed-message tags, a rounded moving session outline and the
+  next scheduled send time. Tasks use account-scoped native queue receipts
+  independently of Goals (protocol v68). Session menus and task popovers
+  avoid the sidebar footer and the mobile visual viewport.
+
 - Fix DSH subagent history reads and top-level session filtering, suppress false
   older-history pagination on the first task, and preserve a rounded continuation
   cue when a child result wakes the parent. Live bindings and history summaries

@@ -32,6 +32,7 @@ from claude_agent_sdk.types import (
 from mcp.server import Server
 
 from cc_remote.config import WrapperConfig
+from cc_remote.claude_steering import ClaudeSteerRejected, PendingSteers, steer_message
 from cc_remote.log import logger
 from cc_remote.protocol import MAX_SAFE_WIRE_INTEGER
 from cc_remote.wrapper.child_env import claude_profile_child_env
@@ -212,6 +213,8 @@ class SdkHandle:
         self.service_recovery: dict | None = None
         self.service_turn_metadata: dict | None = None
         self.service_defer_events = False
+        self._steers = PendingSteers()
+        self._turn_root_id: str | None = None
         self._context_revision = 0
         # reasoning effort is a spawn-time flag (--effort), not a runtime setter.
         # `effort` is the desired level; `applied_effort` is what the live client
@@ -233,6 +236,10 @@ class SdkHandle:
         # may expose a proxy's upstream model (for example glm-5.2), so recover
         # this from the SDK control plane and preserve it across reconnects.
         self.model: str | None = None
+        # Private BTW forks reserve and tombstone this identity before the CLI
+        # starts. An unqueried fork may reconnect from its parent using the same
+        # reservation; ordinary resumes must not pass --session-id again.
+        self.fork_session_id: str | None = None
         # Desired and live Claude permission mode. Runtime changes update this
         # only after the CLI accepts them; every later reconnect passes the same
         # value back through ClaudeAgentOptions instead of silently reverting.
@@ -452,6 +459,7 @@ class SdkHandle:
             cwd=session_cwd,                      # dynamic: must match the resumed session's cwd
             cli_path=_explicit_cli_path(self.cfg.claude_bin),
             resume=resume_id or None,
+            session_id=self.fork_session_id if fork else None,
             # fork_session=True resumes `resume_id`'s context but writes new turns to
             # a FRESH session id, leaving the original transcript untouched — used for
             # ephemeral /btw side-forks.
@@ -672,6 +680,7 @@ class SdkHandle:
         self._start_message_pump()
         if self.service_recovery is not None:
             self._turn_active = True
+            self._turn_root_id = self.service_recovery["id"]
             self._turn_origin_id = self.service_recovery["id"]
             self._message_route_owner = "managed"
         elif hasattr(self.client, "description"):
@@ -965,6 +974,7 @@ class SdkHandle:
                     # activated only when the pump sees this submitted turn.
                     self._pending_turn_background_release = asyncio.Event()
                     self._pending_turn_origin_id = self.next_turn_id
+                    self._turn_root_id = self.next_turn_id
                     if hasattr(client, "next_turn"):
                         client.next_turn = {
                             **(self.service_turn_metadata or {}),
@@ -987,9 +997,33 @@ class SdkHandle:
             # going through connect(). Real SDK connections always use the sole pump.
             await client.query(prompt)
 
+    async def steer(self, prompt, *, native_id: str, metadata: dict) -> None:
+        """Write `priority=next` without interrupting or creating another reader."""
+        async with self._control_request_lock:
+            async with self._message_route_lock:
+                client = self.client
+                if (client is None or self.control_plane_failed
+                        or self.message_pump_failed or not self._turn_active
+                        or self._message_pump_task is None):
+                    raise ClaudeSteerRejected("Claude has no active response")
+                if hasattr(client, "steer"):
+                    # The persistent owner checks its live boundary too; its
+                    # terminal may already be ahead of this controller's poll.
+                    await client.steer(prompt, native_id=native_id,
+                                       metadata=metadata, turn_id=self._turn_root_id)
+                else:
+                    self._steers.add(native_id, metadata)
+
+                    async def stream():
+                        yield steer_message(prompt, native_id)
+
+                    # Keep registration on uncertain writes: a late exact echo
+                    # can still confirm acceptance. Never retry this as Query.
+                    await client.query(stream())
+
     async def interrupt(self) -> None:
         assert self.client is not None
-        await self.client.interrupt()
+        await self._steers.interrupt(self.client)
 
     async def set_model(self, model: str) -> None:
         """Switch the model for the live cc subprocess (takes effect next query,
@@ -1376,6 +1410,8 @@ class SdkHandle:
         self._background_messages = asyncio.Queue(maxsize=cap)
         self._turn_active = False
         self._turn_consumer_active = False
+        self._steers = PendingSteers()
+        self._turn_root_id = None
         self._message_route_owner = None
         self._message_pump_error = None
         self._message_route_lock = asyncio.Lock()
@@ -1419,6 +1455,10 @@ class SdkHandle:
                     data.pop("__cc_service_ts", None)
                     if parse_raw and isinstance(data, dict) else None
                 )
+                if parse_raw and isinstance(data, dict):
+                    data = self._steers.annotate(data)
+                steer = data.get("__cc_steer") if parse_raw else None
+                intermediate = bool(parse_raw and data.get("__cc_steer_intermediate"))
                 message = self._parse_compat_message(data) if parse_raw else data
                 if message is None:
                     continue
@@ -1426,6 +1466,10 @@ class SdkHandle:
                     message._cc_service_seq = service_seq
                 if service_ts is not None:
                     message._cc_service_ts = service_ts
+                if steer is not None:
+                    message._cc_steer = steer
+                if parse_raw and data.get("__cc_steer_cancelled"):
+                    message._cc_steer_cancelled = data["__cc_steer_cancelled"]
                 self._observe_recent_context_usage(message)
                 self._observe_context_boundary(message)
                 self._observe_model_fallback(message)
@@ -1440,6 +1484,10 @@ class SdkHandle:
                     )
                     if service_seed:
                         owner = "background"
+                    elif getattr(message, "_cc_steer_cancelled", None) and self._turn_active:
+                        owner = "managed"
+                        self._activate_pending_turn_route()
+                        self._message_route_owner = owner
                     elif top_level_user:
                         if origin_kind is not None and origin_kind != "human":
                             owner = "background"
@@ -1507,6 +1555,13 @@ class SdkHandle:
                             )
 
                     if owner == "managed":
+                        if isinstance(message, ResultMessage) and (
+                                intermediate or self._steers.pending):
+                            # The original response ended just before an accepted
+                            # input was consumed. Keep the same sole consumer.
+                            continue
+                        if steer is not None:
+                            self._turn_origin_id = steer["id"]
                         await self._turn_messages.put(message)
                         if isinstance(message, ResultMessage):
                             self._turn_active = False
@@ -1652,7 +1707,8 @@ class SdkHandle:
         if seq is None or not hasattr(self.client, "call"):
             return
         if turn_id is not None:
-            await self.client.call("commit", {"turn_id": turn_id, "seq": seq})
+            await self.client.call("commit", {
+                "turn_id": self._turn_root_id or turn_id, "seq": seq})
             self.service_recovery = None
         else:
             await self.client.call("ack", {"seq": seq})

@@ -9,6 +9,8 @@ import dataclasses
 import os
 from uuid import uuid4
 
+from cc_remote.claude_steering import ClaudeSteerRejected
+
 from .wire import decode_sdk, encode_sdk, read_frame, write_frame
 
 callback_identity: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -175,6 +177,16 @@ class RemoteClient:
                            "__cc_service_seq": event["seq"]}
             if result["failure"] and not result["events"]:
                 raise RuntimeError("Claude SDK stream ended: " + result["failure"])
+
+    async def steer(self, prompt, *, native_id, metadata, turn_id):
+        if not self.description.get("native_steering"):
+            raise ClaudeSteerRejected("Claude service requires a steering upgrade")
+        accepted = await self.call("steer", {
+            "prompt": prompt, "native_id": native_id,
+            "metadata": metadata, "turn_id": turn_id,
+        }, request_id="steer-" + native_id)
+        if not accepted:
+            raise ClaudeSteerRejected("Claude response has already ended")
 
     async def _callbacks(self) -> None:
         await self.ready.wait()

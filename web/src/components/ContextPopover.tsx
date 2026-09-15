@@ -1,4 +1,4 @@
-import type { CodexContext, ContextReport } from "../protocol";
+import type { AutoCompact, CodexContext, ContextReport } from "../protocol";
 import { workContextMetrics } from "../work-context";
 export const CODEX_CONTEXT_USAGE_NOTE =
   "进度按 Codex 原生上下文估算显示；后台刷新期间保留最近有效读数。";
@@ -9,6 +9,7 @@ interface Props {
   work?: boolean;
   onAutoCompact?: () => void;
   codexContext?: CodexContext | null;
+  autoCompact?: AutoCompact | null;
   codex?: boolean;
   dsh?: boolean;
 }
@@ -85,6 +86,17 @@ export default function ContextPopover(p: Props) {
           {p.report.model && <div className="ctx-pop-foot">{p.report.model}</div>}
         </>
       ) : <div className="ctx-pop-row"><span>上下文窗口</span><span className="ctx-pop-nums">—</span></div>}
+      {p.autoCompact && <>
+        <div className="ctx-pop-row"><span>生效压缩阈值</span>
+          <span className="ctx-pop-nums">{p.autoCompact.applied_mode === "custom"
+            ? p.autoCompact.applied_threshold_tokens?.toLocaleString() ?? "待确认"
+            : p.report?.auto_compact_threshold_tokens?.toLocaleString() ?? "Claude 默认值"}</span>
+        </div>
+        {p.autoCompact.pending && <div className="ctx-pop-status" role="status">
+          已保存 {p.autoCompact.mode === "custom"
+            ? p.autoCompact.threshold_tokens?.toLocaleString() : "默认值"}，等待生效
+        </div>}
+      </>}
       {p.codexContext && <>
         <div className="ctx-pop-row"><span>生效压缩阈值</span>
           <span className="ctx-pop-nums">{(p.report?.source === "native_estimate"

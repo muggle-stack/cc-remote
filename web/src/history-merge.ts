@@ -1039,6 +1039,7 @@ function mergeTurn(
     ...history,
     id: live.id,
     clientMsgId: history.clientMsgId ?? live.clientMsgId,
+    timedTask: history.timedTask ?? live.timedTask,
     historyTurnId,
     forkPointId: history.forkPointId ?? live.forkPointId,
     forkAvailable: history.forkAvailable ?? live.forkAvailable,

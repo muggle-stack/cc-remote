@@ -151,7 +151,7 @@ to a pre-steer question stays under that question, including after refresh.
 Autonomous goal rounds get their own rows. Disconnects preserve the unfinished
 state with a connection notice until the native terminal is known.
 
-The Web, relay and Wrapper must all run **protocol v67**. Wrapper release bundles
+The Web, relay and Wrapper must all run **protocol v68**. Wrapper release bundles
 include this bridge; DSH and its patch/configuration are independently managed.
 Use [the repository release procedure](../../deploy/README.md) for deployment.
 

@@ -35,7 +35,9 @@ const DIST = resolve(import.meta.dirname, "../dist");
 // Native compaction animation and exact boundary replacement add <1 KiB of
 // startup JS. Keep entry, compressed-size and request-count limits unchanged.
 const MAX_ENTRY_BYTES = 537 * 1024;
-const MAX_INITIAL_BYTES = 938 * 1024;
+// Timed-message provenance and its small disclosure add <1 KiB. The task
+// popover and session action menu stay lazy; gzip/request limits stay fixed.
+const MAX_INITIAL_BYTES = 939 * 1024;
 const MAX_INITIAL_GZIP_BYTES = 281 * 1024;
 const MAX_INITIAL_JS_FILES = 4;
 

@@ -1,6 +1,6 @@
 import type { DshRead } from "../dsh-api";
 import DshSearch from "./DshSearch";
-import { useEffect, useRef, useState, type TouchEvent } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type TouchEvent } from "react";
 import type { ClaudeProfileInfo, CodexProfileInfo, Engine, SessionInfo, Space, State } from "../protocol";
 import type { CompletionBadgeKind } from "../completion-badges";
 const NO_ACCOUNT_PROFILES: never[] = [];
@@ -22,6 +22,8 @@ import { codexProfilePresentation } from "../codex-profile-presentation";
 import { newWorkProfileForSidebarFilter } from "../work-profile-selection";
 import { manualUnreadKey } from "../manual-unread";
 import { useManualUnread } from "../use-manual-unread";
+const TimedTaskIndicator = lazy(() => import("./TimedTaskIndicator").then(module => ({ default: module.TimedTaskIndicator })));
+const SessionCardMenu = lazy(() => import("./SessionCardMenu").then(module => ({ default: module.SessionCardMenu })));
 
 interface Props {
   readDsh?: DshRead;
@@ -85,6 +87,7 @@ export function SessionsSidebar({ open, engine, space, readDsh, onDshSearch,
   const manualUnread = useManualUnread();
   const [q, setQ] = useState("");
   const [menuCardId, setMenuCardId] = useState<string | null>(null);
+  const menuAnchor = useRef<HTMLButtonElement>(null);
   const [lifting, setLifting] = useState(false);
   const [renaming, setRenaming] = useState<{ id: string; value: string } | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -335,6 +338,7 @@ export function SessionsSidebar({ open, engine, space, readDsh, onDshSearch,
             {s.summary || (s.first_prompt || "").slice(0, 40) || s.session_id.slice(0, 8)}
           </span>
           {isActive && <span className="pill idle"><span className="sd" />当前</span>}
+          {!isArchived && !!s.timed_tasks?.length && <Suspense fallback={null}><TimedTaskIndicator tasks={s.timed_tasks} hidden={isMenu} /></Suspense>}
           {sessionBusy && (
             <span className={"pill " + st}><span className="sd" />{st === "running" ? "运行" : "中断"}</span>
           )}
@@ -350,13 +354,14 @@ export function SessionsSidebar({ open, engine, space, readDsh, onDshSearch,
         )}
         {s.first_prompt && !s.summary && <div className="scard-prev">{s.first_prompt}</div>}
         <div className="scard-actions">
-          <button className="scard-act" aria-label="更多操作"
+          <button ref={isMenu ? menuAnchor : undefined} className="scard-act" aria-label="更多操作"
+            aria-expanded={isMenu}
             onClick={(e) => { e.stopPropagation(); setMenuCardId(isMenu ? null : s.session_id); setLifting(false); }}>
             <Icon name="dots" size={15} />
           </button>
         </div>
         {isMenu && (
-          <div className="card-menu" onClick={(e) => e.stopPropagation()}>
+          <Suspense fallback={null}><SessionCardMenu anchor={menuAnchor} onClose={closeMenu}>
             {capabilities.rename && (
               <button onClick={() => startRename(s)}><Icon name="edit" size={15} />重命名</button>
             )}
@@ -395,7 +400,7 @@ export function SessionsSidebar({ open, engine, space, readDsh, onDshSearch,
                 <Icon name="trash" size={15} />{space === "work" ? "删除工作" : "删除会话"}
               </button>
             )}
-          </div>
+          </SessionCardMenu></Suspense>
         )}
       </div>
     );

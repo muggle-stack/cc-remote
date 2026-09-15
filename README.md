@@ -4,7 +4,7 @@
 
 自托管 · 多会话 · 多设备 · 实时工具过程 · Code / Work · PWA
 
-**产品版本：v3.0.0** · Wire protocol v67
+**产品版本：v3.0.0** · Wire protocol v68
 
 [English](README_en.md) · [功能对照](#引擎与功能) · [快速开始](#快速开始) ·
 [安装与升级](#安装与升级) · [文档](#文档) · [更新记录](CHANGELOG_zh.md)
@@ -26,7 +26,7 @@ cc-remote 把本机 agent 的会话、工具过程、文件和运行控制带到
 - **同时处理多个任务**：会话按目录分组，支持搜索、置顶、重命名和后台运行。
   切换页面不会停止任务；历史按需加载，工具细节展开后再读取。
 - **跟进完整过程**：查看流式回复、引擎公开的思考摘要、计划、工具调用、命令输出、
-  文件改动和审批。Codex 与 DSH 运行中支持引导或排队；Claude 支持打断并发送或排队。
+  文件改动和审批。Claude、Codex 与 DSH 运行中均支持引导或排队；引导会补充当前任务，不会打断正在执行的工具。
 - **管理长任务**：通过 `/goal` 设置目标，查看进展并使用各引擎原生的预算与控制。
   Claude、Codex 还支持 `/btw` 临时侧聊，主任务继续运行。
 - **直接查看文件**：聊天里的文件和目录链接连接到 `/open` 与预览面板，支持源码、
@@ -284,6 +284,7 @@ Code 默认权限较宽；Work 的私有目录策略不能替代独立系统用�
 | [远程 Viewer](docs/remote-viewer.md) | 交互式静态页面、Bridge／Isolated 模式 |
 | Codex App 接入：[macOS](docs/codex-desktop-launcher.md)／[Linux](docs/codex-desktop-linux.md) | 可选桌面 App、日常 CLI 与 Wrapper 共用 daemon |
 | [Codex App 工具](docs/codex-app-tools.md) | 可选 App-control MCP |
+| [定时消息 UI](docs/timed-messages.md) | 定时发送入口、消息标签、光圈与下次时间 |
 | [更新记录](CHANGELOG_zh.md) | 版本变化与迁移记录 |
 
 ## 终端工作台（预览）
