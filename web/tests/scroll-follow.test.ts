@@ -591,14 +591,9 @@ const threadShellRule = css.match(/\.thread-shell\{[^}]+\}/)?.[0] ?? "";
 assert.match(threadShellRule, /position:relative/);
 const threadFrameRule = css.match(/\.thread-frame\{[^}]+\}/)?.[0] ?? "";
 assert.match(threadFrameRule, /position:relative/,
-  "the scroll-to-bottom overlay must be scoped above the thread, not the task dock");
+  "the scroll-to-bottom overlay must stay scoped to the thread");
 assert.match(threadFrameRule, /min-height:0/,
-  "the task dock must not force the scroll viewport beyond the composer");
-assert.match(
-  chatViewSource,
-  /className="thread-frame"[\s\S]*className="scroll-bottom-wrap"[\s\S]*<BackgroundProcessDock/,
-  "the floating scroll control must close with the thread frame before the dock",
-);
+  "the scroll viewport must be able to shrink above the composer");
 const threadRule = css.match(/\.thread\{[^}]+\}/)?.[0] ?? "";
 assert.match(threadRule, /overflow-anchor:none/,
   "the keyed layout transaction must be the only history scroll owner");
@@ -612,11 +607,5 @@ assert.match(threadInRule, /padding:0 16px/,
 const scrollBottomRule = css.match(/\.scroll-bottom-wrap\{[^}]+\}/)?.[0] ?? "";
 assert.match(scrollBottomRule, /position:absolute/);
 assert.doesNotMatch(scrollBottomRule, /position:sticky/);
-const backgroundItemsRule = css.match(
-  /\.background-process-items\{[^}]+\}/,
-)?.[0] ?? "";
-assert.match(backgroundItemsRule, /max-height:min\(32vh,240px\)/);
-assert.match(backgroundItemsRule, /overflow-y:auto/,
-  "many detached tasks must scroll inside a bounded dock");
 
 console.log("scroll follow tests passed");

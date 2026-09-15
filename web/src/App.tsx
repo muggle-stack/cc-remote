@@ -32,6 +32,7 @@ import { TurnFilePageRequests, type LoadTurnFilePage } from "./turn-file-pages";
 import { Icon } from "./icons";
 import { ChatView } from "./components/ChatView";
 import { Composer } from "./components/Composer";
+const BackgroundTaskControl = lazy(() => import("./components/BackgroundTaskControl"));
 import type { QueuedQueryEditor } from "./components/QueuedQueryDialog";
 import { ReconnectBanner } from "./components/ReconnectBanner";
 import { NoticeStack } from "./components/NoticeStack";
@@ -5814,8 +5815,6 @@ export default function App() {
                 turnId: planProgress.turnId,
                 itemId: planProgress.block.item_id,
               } : null}
-              backgroundProcesses={focusedEngine === "claude"
-                ? rt.backgroundProcesses : []}
               activeTurnId={activeTurnId}
               ambiguousActiveTurnIds={ambiguousActiveTurnIds}
               onOpenAgent={focusedEngine === "claude" && space === "code"
@@ -5884,6 +5883,13 @@ export default function App() {
             <Composer
           draftKey={focusedComposerDraftKey}
           draftStore={composerDraftsRef.current}
+          backgroundTasks={focusedEngine === "claude" && rt.backgroundProcesses.length > 0
+            ? <Suspense fallback={null}>
+                <BackgroundTaskControl key={focusedComposerDraftKey}
+                  processes={rt.backgroundProcesses}
+                  onOpenFile={historyView.recovering ? undefined : previewFile}
+                  onOpenAgent={space === "code" ? openAgentDetail : undefined} />
+              </Suspense> : null}
           surface={space}
           state={rt.state}
           catalog={focusedCatalog}

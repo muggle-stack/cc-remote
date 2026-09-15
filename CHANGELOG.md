@@ -17,6 +17,10 @@
   TUI editing, cancellation and ordering controls. Reject stale queue snapshots
   and changes while a message is starting. Deploy Relay, Web, Wrapper and TUI
   together; protocol v66 clients cannot connect to protocol v67 services.
+- Replace Claude's persistent background-task panel with a compact composer
+  indicator. Open details above the trigger on desktop or in a centered mobile
+  dialog; native task completion removes finished items and closes the indicator
+  when no tasks remain, independently of the parent reply's completion.
 - Track Claude compaction through native status and boundary events, preserve
   valid context readings during refresh failures, and show the applied automatic
   compaction threshold separately from model capacity. Hide internal command

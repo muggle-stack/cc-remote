@@ -2703,6 +2703,7 @@ test("right panel layout preserves Claude agent detail priority over side chats"
     items: [{ item_id: "layout-agent", kind: "agent", status: "running",
       title: "Layout child agent" }] });
   const agentCard = page.getByRole("button", { name: "Layout child agent" });
+  await page.getByRole("button", { name: /后台任务，\d+ 项进行中/ }).click();
   await agentCard.click();
   await expect(page.locator(".agent-detail-panel")).toBeVisible();
   await expect(page.locator(".btw-panel")).toHaveCount(0);
@@ -2712,6 +2713,7 @@ test("right panel layout preserves Claude agent detail priority over side chats"
   await expectRightPanelSpace(page, true);
   await page.getByRole("button", { name: "收起侧边对话", exact: true }).click();
   await expectRightPanelSpace(page, false);
+  await page.getByRole("button", { name: /后台任务，\d+ 项进行中/ }).click();
   await agentCard.click();
   await expect(page.locator(".agent-detail-panel")).toBeVisible();
   await expectRightPanelSpace(page, true);
@@ -2731,6 +2733,7 @@ async function coverBtwPanel(
     relay.emit({ type: "background_process_sync", sid: "layout-parent",
       items: [{ item_id: "layout-agent", kind: "agent", status: "running",
         title: "Layout child agent" }] });
+    await page.getByRole("button", { name: /后台任务，\d+ 项进行中/ }).click();
     await page.getByRole("button", { name: "Layout child agent" }).click();
     await expect(page.locator(".agent-detail-panel")).toBeVisible();
   } else {
