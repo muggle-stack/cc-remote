@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Resolve the checkout owning this launcher, including when installed by symlink.
+set -euo pipefail
+launcher=${BASH_SOURCE[0]}
+[[ $launcher = /* ]] || launcher="$PWD/$launcher"
+for ((depth = 0; depth < 40; depth++)); do
+    source_dir=$(CDPATH='' cd -P -- "${launcher%/*}" && pwd)
+    launcher="$source_dir/${launcher##*/}"
+    [[ -L $launcher ]] || break
+    target=$(readlink "$launcher")
+    case $target in
+        /*) launcher=$target ;;
+        *) launcher="$source_dir/$target" ;;
+    esac
+done
+if [[ -L $launcher ]]; then
+    echo "Too many launcher symlinks." >&2
+    exit 1
+fi
+source_root=$(CDPATH='' cd -P -- "${launcher%/*}/.." && pwd)
+cd -- "$source_root"
+if [[ ! -x .venv/bin/python ]]; then
+    echo "Missing checkout virtualenv; see docs/tui.md." >&2
+    exit 1
+fi
+exec .venv/bin/python -m cc_remote.tui "$@"
