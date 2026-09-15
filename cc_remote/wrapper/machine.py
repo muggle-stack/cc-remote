@@ -28331,6 +28331,7 @@ class WrapperMachine:
                 code=ERR_AUTH,
                 message="只能删除已注册的 Work 会话",
                 sid=sid,
+                request_id=getattr(cmd, "cmd_id", None),
                 to=getattr(cmd, "client_id", None),
             )
             await self.transport.send(error)
@@ -28348,6 +28349,7 @@ class WrapperMachine:
                 code=ERR_BUSY,
                 message="Work 会话仍在运行或有排队消息，请先停止并取消排队后再删除",
                 sid=sid,
+                request_id=getattr(cmd, "cmd_id", None),
                 to=getattr(cmd, "client_id", None),
             )
             await self.transport.send(error)
@@ -28404,6 +28406,7 @@ class WrapperMachine:
                 code=ERR_INTERNAL,
                 message="Work 会话删除失败，原始资料未被删除",
                 sid=sid,
+                request_id=getattr(cmd, "cmd_id", None),
                 to=getattr(cmd, "client_id", None),
             )
             await self.transport.send(error)

@@ -1348,12 +1348,55 @@ def test_rejected_codex_work_delete_preserves_registry_and_context(
         result = await machine._handle_delete_work_session(command)
 
         assert isinstance(result, Error)
+        assert result.request_id == command.cmd_id
         assert handle.calls == [("delete", "codex-thread")]
         assert machine.sessions == {ctx.key: ctx}
         assert store.get_by_session(
             "codex-thread",
             codex_profile_id=profile_id,
         ) is not None
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["missing", "running", "queued", "rpc"])
+def test_work_delete_errors_are_correlated_to_request(monkeypatch, failure):
+    async def run():
+        machine, transport = _mk_machine()
+        store = machine._work.for_engine("codex")
+        profile_id = machine._codex_profiles.default.id
+        if failure != "missing":
+            record = store.create_session(codex_profile_id=profile_id)
+            store.bind_session(record.work_id, "codex-thread",
+                               codex_profile_id=profile_id)
+        if failure in {"running", "queued"}:
+            ctx = _mk_ctx("codex-thread", "codex-thread")
+            ctx.engine, ctx.space = "codex", "work"
+            ctx.work_id, ctx.codex_profile_id = record.work_id, profile_id
+            ctx.sdk = _DeleteHandle()
+            if failure == "running":
+                ctx.state = "running"
+            else:
+                ctx.queued_query_starting_msg_id = "queued"
+            machine.sessions[ctx.key] = ctx
+
+        async def reject(*args, **kwargs):
+            raise OSError("delete unavailable")
+
+        monkeypatch.setattr(machine, "_codex_rpc_for_wire", reject)
+        command = DeleteWorkSession(
+            session_id="codex-thread", engine="codex",
+            cmd_id="delete-work-failed", client_id="client-1",
+        )
+        result = await machine._handle_delete_work_session(command)
+        assert isinstance(result, Error)
+        assert result.request_id == command.cmd_id
+        assert result.to == command.client_id
+        assert result.sid == command.session_id
+        assert result in transport.sent
+        if failure != "missing":
+            assert store.get_by_session("codex-thread",
+                                        codex_profile_id=profile_id) is not None
 
     asyncio.run(run())
 
