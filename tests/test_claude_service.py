@@ -78,12 +78,13 @@ async def environment():
         server = await asyncio.start_unix_server(service.connection, path)
         clients = []
 
-        async def attach(*, profile="primary", permission=None, mcp_server=None):
+        async def attach(*, profile="primary", permission=None, mcp_server=None,
+                         session_id="native-session"):
             options = ClaudeAgentOptions(can_use_tool=permission, mcp_servers=(
                 {"ask": {"type": "sdk", "name": "ask", "instance": mcp_server}}
                 if mcp_server is not None else {}))
             client = RemoteClient(str(path), options=options, metadata={
-                "profile_root": profile, "session_id": "native-session", "space": "code",
+                "profile_root": profile, "session_id": session_id, "space": "code",
                 "applied_auto_compact": ["inherit", None], "applied_effort": "max",
             })
             clients.append(client)
@@ -106,6 +107,89 @@ async def released(session):
     async with asyncio.timeout(2):
         while session.controller is not None:
             await asyncio.sleep(0.001)
+
+
+@pytest.mark.parametrize("control_error", [None, "unsupported", "timeout"])
+def test_attached_summary_opt_in_keeps_running_turn_and_native_child(
+    monkeypatch, control_error,
+):
+    from cc_remote.config import WrapperConfig
+    from cc_remote.protocol import Delta, TurnEnd
+    from cc_remote.wrapper.sdk import SdkHandle
+    from tests.test_claude_autocompact import SESSION_ID, _machine_with_sdk
+
+    calls = []
+
+    async def control(client, request, timeout):
+        calls.append((request, timeout))
+        if control_error == "unsupported":
+            raise RuntimeError("unknown control subtype")
+        if control_error == "timeout":
+            raise TimeoutError("control request timeout")
+        return {}
+
+    monkeypatch.setattr(FakeClient, "_send_control_request", control, raising=False)
+
+    async def go():
+        async with environment() as (service, attach):
+            first = await attach(session_id=SESSION_ID)
+            first.next_turn = {"id": "browser-msg", "prompt": "hello"}
+            await first.query("hello")
+            worker = service.sessions[first.id]
+            native = worker.client
+            original_controls = worker.controls.copy()
+            await first.detach()
+            await released(worker)
+
+            handle = SdkHandle(WrapperConfig(claude_service_socket=first.connection.socket_path))
+            handle.service_metadata = worker.metadata.copy()
+            handle.service_defer_events = True
+            try:
+                await handle.connect(resume_id=SESSION_ID, cwd="/tmp")
+                assert handle.client.description["attached"] is True
+                assert calls == [({
+                    "subtype": "set_max_thinking_tokens",
+                    "thinking_display": "summarized",
+                }, 2.0)]
+                assert worker.client is native
+                assert native.closed is False and native.interrupts == 0
+                assert native.prompts == ["hello"]
+                assert worker.controls == original_controls
+                assert handle.service_recovery["id"] == "browser-msg"
+
+                # A display rejection/timeout must still let the original
+                # stream and terminal cross the service and Wrapper boundary.
+                # This injected delta verifies transport, not native timing:
+                # an active CLI loop may defer summaries to the next query.
+                channel = "text" if control_error else "thinking"
+                await native.queue.put({
+                    "type": "stream_event", "uuid": "summary-1", "session_id": SESSION_ID,
+                    "event": {"type": "content_block_delta", "index": 0, "delta": {
+                        "type": f"{channel}_delta", channel: "Inspecting the build configuration.",
+                    }},
+                })
+                await native.queue.put({
+                    "type": "result", "subtype": "success", "duration_ms": 20,
+                    "duration_api_ms": 19, "is_error": False, "num_turns": 1,
+                    "session_id": SESSION_ID,
+                })
+                machine, transport, ctx = _machine_with_sdk(handle)
+                ctx.active_msg_id = "browser-msg"
+                ctx.state = "running"
+                handle.start_service_events()
+                await asyncio.wait_for(machine._run_turn(ctx, "hello", _recover_service=True), 3)
+                deltas = [item for item in transport.sent if isinstance(item, Delta)]
+                assert any(item.text == "Inspecting the build configuration." for item in deltas)
+                if not control_error:
+                    assert any(item.channel == "thinking" for item in deltas)
+                assert len([item for item in transport.sent if isinstance(item, TurnEnd)]) == 1
+                assert native.prompts == ["hello"]
+                assert native.interrupts == 0 and native.closed is False
+                assert worker.turn is None
+            finally:
+                await handle.detach_for_shutdown()
+
+    asyncio.run(go())
 
 
 def test_running_query_and_offline_terminal_survive_wrapper_disconnect():

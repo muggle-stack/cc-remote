@@ -379,7 +379,14 @@ class SdkHandle:
             "enter plan mode for them.\n"
             "Modes: default, acceptEdits, plan, auto, bypassPermissions."
         )
-        extra_args = {"replay-user-messages": None}
+        # showThinkingSummaries is an interactive CLI preference. SDK sessions
+        # must request the readable summary explicitly. Pass only display here:
+        # setting thinking={type: adaptive, ...} would also override the user's
+        # native thinking mode/budget instead of just making its output visible.
+        extra_args = {
+            "replay-user-messages": None,
+            "thinking-display": "summarized",
+        }
         auto_compact_mode, auto_compact_threshold = (
             auto_compact_override
             if auto_compact_override is not None
@@ -592,6 +599,7 @@ class SdkHandle:
             metadata = description["metadata"]
             launch_effort = metadata.get("applied_effort")
             launch_auto_compact = tuple(metadata["applied_auto_compact"])
+            await self._enable_attached_thinking_summaries()
         if fork:
             # A fork creates a new native conversation even though this handle
             # may be reused while a private BTW id is still being captured.
@@ -693,6 +701,34 @@ class SdkHandle:
                  auto_compact_threshold=launch_auto_compact[1],
                  context_probe_suppressed=self.context_probe_suppressed,
                  sdk_version=SDK_VERSION)
+
+    async def _enable_attached_thinking_summaries(self) -> None:
+        """Opt a service-owned child into summaries without replacing its turn."""
+        # Reattaching does not apply new launch options to the resident CLI.
+        # The pinned SDK has no public setter, but its native control protocol
+        # can update display. cc-remote never sets a runtime thinking-token
+        # budget; omitting it retains the child's spawn-time default (including
+        # disabled thinking) and leaves effort, model and permission untouched.
+        # Claude Code 2.1.269 acknowledges this during a running turn, but that
+        # agent loop keeps its original config. Summaries apply to the next
+        # top-level query; steering does not restart the loop. Do not interrupt
+        # an active turn just to make this display preference take effect.
+        sender = getattr(getattr(self.client, "_query", None),
+                         "_send_control_request", None)
+        if not callable(sender):
+            return
+        try:
+            async with self._control_request_lock:
+                await sender({
+                    "subtype": "set_max_thinking_tokens",
+                    "thinking_display": "summarized",
+                }, timeout=2.0)
+        except Exception as exc:
+            # Display is optional. Never interrupt, resubmit, replace the child,
+            # or make stream recovery fail for an older/unresponsive control.
+            # A later normal child launch still receives --thinking-display.
+            log.warning("Claude thinking summary update unavailable",
+                        error_type=type(exc).__name__)
 
     async def _read_context_usage_control(
         self, *, timeout: float = _CONTEXT_CONTROL_TIMEOUT,

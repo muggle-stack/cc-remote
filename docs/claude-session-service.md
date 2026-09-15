@@ -76,6 +76,24 @@ restart only the Wrapper through its immutable activation transaction. Restore
 service-owned sessions before creating a bootstrap session. Do not classify
 their separate SDK process tree as an unrelated terminal owner.
 
+The Wrapper requests readable thinking summaries at SDK child launch with
+`--thinking-display summarized`. Claude Code's `showThinkingSummaries` setting
+applies to interactive terminals and does not enable this in SDK mode. When
+reattaching to an existing service-owned child, the Wrapper also tries a bounded
+native display control; it does not restart the child or replay the prompt to
+apply this preference. Native thinking mode, token budget and effort remain in
+effect. Claude Code 2.1.269 acknowledges a display update during a running turn,
+but the active agent loop keeps its original configuration, including across
+tool continuations and steering. The updated display applies to the next
+top-level query after that turn ends naturally. A successful control response
+does not prove that the current turn will return summaries; never interrupt it
+to force this preference to apply.
+
+An unsupported or timed-out display update does not fail attachment;
+the launch option applies on the next ordinary child start. Only subsequently
+returned summaries can be displayed, and provider support still determines
+whether the CLI receives readable thinking content.
+
 The current integration covers regular Claude Code and Work sessions. Private
 `/btw` forks retain their existing lifetime. They, any other in-process Claude
 instance, and Wrapper-owned deferred queries must drain before restarting the

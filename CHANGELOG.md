@@ -4,6 +4,13 @@
 
 ## Unreleased
 
+- Request readable Claude thinking summaries in SDK sessions and show returned
+  text in the existing thinking timeline. Preserve native thinking mode,
+  token budget and effort; reattached service-owned sessions opt in through a
+  bounded native control without restarting their child or resubmitting a turn.
+  A running native loop keeps its prior display until the next top-level query.
+  Unsupported display controls do not prevent recovery of the running session.
+
 - Replace Claude's persistent background-task panel with a compact composer
   indicator. Open details above the trigger on desktop or in a centered mobile
   dialog; native task completion removes finished items and closes the indicator
