@@ -861,8 +861,17 @@ async def test_logout_and_removal_revoke_previews(tmp_path, publication):
     async with live_viewer(tmp_path, publication) as (client, app, cfg, site):
         grant = await create_grant(client, cfg)
         await activate_grant(client, cfg, grant)
-        publication[1].write_text('{"sites":[]}')
-        assert (await client.get(grant["origin"] + site.entry)).status_code == 403
+        # Match the CLI's atomic registry update. Truncating a file that the
+        # catalog worker is reading can intentionally disconnect the peer.
+        with edit_sites(publication[1]) as sites:
+            sites.clear()
+        # Before catalog propagation the Wrapper denies the read; afterwards
+        # the Relay expires the old publication. Neither may serve bytes.
+        assert (await client.get(grant["origin"] + site.entry)).status_code in {403, 410}
+        async with asyncio.timeout(5):
+            while app.state.viewers.peers["device"].publication(site.id):
+                await asyncio.sleep(0.01)
+        assert (await client.get(grant["origin"] + site.entry)).status_code == 410
         await client.post("/api/logout", headers={"Origin": cfg.public_origin})
         assert (await client.get(grant["origin"] + site.entry)).status_code == 401
 
