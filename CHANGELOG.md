@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+- Request readable Claude thinking summaries in SDK sessions and show returned
+  text in the existing thinking timeline. Preserve native thinking mode,
+  token budget and effort across new sessions, resume and private forks.
+
 - Accept provider-native Claude model ids (e.g. `glm-5.2` behind a custom
   `ANTHROPIC_BASE_URL` gateway) as explicit model selections: they are handed
   to Claude Code, persisted in the private session store, and restored across

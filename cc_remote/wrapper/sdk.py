@@ -367,7 +367,14 @@ class SdkHandle:
             "enter plan mode for them.\n"
             "Modes: default, acceptEdits, plan, auto, bypassPermissions."
         )
-        extra_args = {"replay-user-messages": None}
+        # showThinkingSummaries is an interactive CLI preference. SDK sessions
+        # must request the readable summary explicitly. Pass only display here:
+        # setting thinking={type: adaptive, ...} would also override the user's
+        # native thinking mode/budget instead of just making its output visible.
+        extra_args = {
+            "replay-user-messages": None,
+            "thinking-display": "summarized",
+        }
         auto_compact_mode, auto_compact_threshold = (
             auto_compact_override
             if auto_compact_override is not None
