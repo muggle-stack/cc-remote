@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 66
+PROTOCOL_VERSION = 67
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -376,6 +376,25 @@ class CancelQueuedQuery(_Command):
     client_id: WireId
 
 
+class ReorderQueuedQueries(_Command):
+    """Compare-and-swap the server queue order without resubmitting prompts."""
+
+    type: Literal["reorder_queued_queries"] = "reorder_queued_queries"
+    sid: WireId
+    cmd_id: WireId
+    client_id: WireId
+    expected: list[WireId] = Field(max_length=MAX_QUERY_QUEUE_ITEMS)
+    order: list[WireId] = Field(max_length=MAX_QUERY_QUEUE_ITEMS)
+
+    @model_validator(mode="after")
+    def permutation(self):
+        if (len(set(self.expected)) != len(self.expected)
+                or len(set(self.order)) != len(self.order)
+                or set(self.expected) != set(self.order)):
+            raise ValueError("queue order must be a unique permutation")
+        return self
+
+
 class GetQueuedQuery(_Command):
     """Read one wrapper-owned query without putting its payload in the ring."""
 
@@ -436,7 +455,7 @@ class QueuedQueryInfo(BaseModel):
 
 
 class QueryQueueState(_Base):
-    """Authoritative per-session wrapper queue, newest replacement first."""
+    """Authoritative per-session wrapper queue in execution order."""
 
     type: Literal["query_queue"] = "query_queue"
     items: list[QueuedQueryInfo] = Field(
@@ -2806,6 +2825,7 @@ class CompletionState(_Base):
 
 
 AnyMessage = Union[
+    ReorderQueuedQueries,
     BrowseFiles, FilesListed, SetCodexContext, CodexContext,
     GetTurnFileChanges, TurnFileChangesPage,
     Hello, Query, CancelQueuedQuery, GetQueuedQuery, QueuedQueryDetail, UpdateQueuedQuery, QueuedQueryUpdated, QueryQueueState, Steer, Interrupt, Takeover, TakeoverState, SessionControl, SetModel, SetEffort, SetAutoCompact, SetServiceTier, SetCollaborationMode, SetPerm, GetPermissionProfiles, SetPermissionProfile, SetWebSearch, Fast, CollaborationMode, OpenBtw, CloseBtw, SyncBtw, BtwOpened, BtwSync, BtwClosed, GetContext, GetStatus, ConsumeRateLimitResetCredit, GetDiff, GetFilePreview, SaveMarkdown, GetPreviewAsset, AuthorizePreview, GetHistory, GetTurnDetail, GetAgentDetail, GetHistoryImage, GetModels, GetEngineCapabilities, ManageEnginePlugin, ManageEngineSkill, ManageEngineHook, ListSessions, SwitchSession, NewSession, DeleteWorkSession, DeleteSession, RollbackSession, RollbackResult, CompactSession, StartReview, GetWorkDashboard, CreateWorkProject, DeleteWorkProject, AddWorkSource, DeleteWorkSource, CreateWorkPlugin, DeleteWorkPlugin, CreateWorkSchedule, DeleteWorkSchedule, GetWorkArtifacts, ListDir, Ping, Pong, CommandAck,
@@ -2842,6 +2862,7 @@ _TYPE_MAP: dict[str, type[BaseModel]] = {
     "hello": Hello,
     "query": Query,
     "cancel_queued_query": CancelQueuedQuery,
+    "reorder_queued_queries": ReorderQueuedQueries,
     "get_queued_query": GetQueuedQuery,
     "queued_query_detail": QueuedQueryDetail,
     "update_queued_query": UpdateQueuedQuery,

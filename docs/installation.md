@@ -166,7 +166,7 @@ npm --prefix web run build   # 产出 web/dist/
 网页构建不需要任何登录密钥。
 
 **所有目标先 staging，再改动线上服务。** 下文分别描述 Relay 和 Wrapper，
-不能在 Wrapper staging 未验证时先激活 Relay。协议 v66 不允许混用旧客户端：
+不能在 Wrapper staging 未验证时先激活 Relay。协议 v67 不允许混用旧客户端：
 停止不兼容的旧 Wrapper，激活 Relay + Web，再激活 Wrapper 并硬刷新网页。
 Wrapper 激活须通过 `deploy/work_registry_snapshot.py` 保存 Work SQLite 与私有账号
 控制状态，不再按“是否来自某个旧协议”决定是否保护。回滚先恢复匹配状态，再启动
@@ -224,7 +224,7 @@ sudo bash ~/cc-remote-upload/deploy/setup-vps.sh \
 脚本会：装 `python3-venv` + Caddy、建 `ccremote` 系统用户、创建不可变 release
 和 release-local venv、合并 Caddy 配置、原子切换 `current`，再重启 relay。若新
 relay 重启或健康检查失败，`current`、Caddyfile、systemd unit 会作为一个事务全部
-恢复，并验证旧 release 的 `/healthz`。成功后再启动 v66 wrapper。
+恢复，并验证旧 release 的 `/healthz`。成功后再启动 v67 wrapper。
 
 验证：
 

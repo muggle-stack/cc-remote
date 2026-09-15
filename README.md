@@ -4,7 +4,7 @@
 
 自托管 · 多会话 · 多设备 · 实时工具过程 · Code / Work · PWA
 
-**产品版本：v3.0.0** · Wire protocol v66
+**产品版本：v3.0.0** · Wire protocol v67
 
 [English](README_en.md) · [功能对照](#引擎与功能) · [快速开始](#快速开始) ·
 [安装与升级](#安装与升级) · [文档](#文档) · [更新记录](CHANGELOG_zh.md)

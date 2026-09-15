@@ -49,6 +49,7 @@ ACTION_CLASSES = (
     p.GetQueuedQuery,
     p.UpdateQueuedQuery,
     p.CancelQueuedQuery,
+    p.ReorderQueuedQueries,
     p.OpenBtw,
     p.CloseBtw,
     p.GetDiff,

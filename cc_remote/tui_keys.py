@@ -175,10 +175,11 @@ LAYERS = {
     "form": {
         "close": Shortcut("cancel", "Normal / Back", ("escape",)),
         "help": Shortcut("field_help", "Field help", ("question_mark",)),
-        "confirm": Shortcut("submit", "Confirm reviewed action", ("enter",)),
+        "confirm": Shortcut("submit", "Apply / confirm action", ("enter",)),
+        "advanced": Shortcut("advanced", "Edit structured field as JSON", ("ctrl+r",)),
     },
     "confirmation": {
-        "yes": Shortcut("yes", "Yes / delete", ("y",)),
+        "yes": Shortcut("yes", "Yes / confirm", ("y",)),
         "close": Shortcut("cancel", "No / cancel", ("n", "escape")),
         "choose": Shortcut("choose", "Confirm highlighted choice", ("enter",)),
         "down": Shortcut("down", "Next choice", ("j", "down")),
@@ -207,11 +208,22 @@ LAYERS["question"] = {
     "previous": Shortcut("question(-1)", "Previous question", ("ctrl+left",)),
 }
 
+LAYERS["queue"] = {
+    "close": Shortcut("cancel", "Back", ("escape",)),
+    "down": Shortcut("down", "Next message", ("j", "down")),
+    "up": Shortcut("up", "Previous message", ("k", "up")),
+    "choose": Shortcut("choose", "Read full prompt", ("enter",)),
+    "edit": Shortcut("edit", "Edit prompt", ("i",)),
+    "delete": Shortcut("delete", "Cancel message (confirm)", ("d",)),
+    "move_up": Shortcut("move(-1)", "Move earlier", ("K",)),
+    "move_down": Shortcut("move(1)", "Move later", ("J",)),
+}
+
 MODAL_LAYERS = {
     "panel", "picker", "form", "file_hints", "preview", "confirmation",
-    "image", "question",
+    "image", "question", "queue",
 }
-for _layer in ("picker", "file_hints"):
+for _layer in ("picker", "file_hints", "queue"):
     LAYERS[_layer].update({
         "first": Shortcut("first", "First result", ("home",)),
         "last": Shortcut("last", "Last result", ("end",)),
@@ -233,6 +245,7 @@ SCOPES = {
     "form": "Form Normal", "file_hints": "File hints", "preview": "File preview",
     "confirmation": "Deletion confirmation", "image": "Image preview",
     "question": "Async question",
+    "queue": "Server queue",
 }
 
 

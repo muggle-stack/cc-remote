@@ -1981,7 +1981,8 @@ class WrapperMachine:
     # the owner check before its handler is allowed to read or mutate state.
     BTW_SID_COMMANDS = frozenset({
         "query", "cancel_queued_query", "get_queued_query",
-        "update_queued_query", "steer", "interrupt", "takeover",
+        "update_queued_query", "reorder_queued_queries",
+        "steer", "interrupt", "takeover",
         "set_model", "set_effort", "set_auto_compact", "set_codex_context",
         "set_service_tier", "set_collaboration_mode", "open_btw", "close_btw",
         "sync_btw",
@@ -10764,6 +10765,39 @@ class WrapperMachine:
             )
         self._schedule_query_queue_drain(ctx)
         return None
+
+    async def _handle_reorder_queued_queries(self, cmd):
+        """Reorder only an unchanged pending queue, under the drain lock."""
+        ctx = self._ctx_for(cmd.sid)
+        if ctx is None:
+            return await self._missing_session_error(cmd, "调整排队顺序")
+        error = None
+        async with ctx.emit_lock:
+            async with ctx.queued_query_lock:
+                current = [q.msg_id for q in ctx.queued_queries]
+                if current != cmd.expected:
+                    error = "队列已变化，请按最新列表重试。"
+                elif ctx.queued_query_starting_msg_id:
+                    error = "排队消息正在启动，请稍后再调整顺序。"
+                else:
+                    queries = {q.msg_id: q for q in ctx.queued_queries}
+                    ctx.queued_queries[:] = [queries[mid] for mid in cmd.order]
+                try:
+                    await self._emit_locked(ctx, self._query_queue_state(ctx))
+                except Exception as exc:
+                    log.warning(
+                        "query queue reorder projection delayed",
+                        session_id=self._ctx_wire_sid(ctx),
+                        error_type=type(exc).__name__,
+                    )
+        if error:
+            result = Error(
+                sid=self._ctx_wire_sid(ctx), request_id=cmd.cmd_id,
+                code="queue_changed", message=error, to=cmd.client_id,
+            )
+            await self.transport.send(result)
+            return result
+        self._schedule_query_queue_drain(ctx)
 
     async def _handle_cancel_queued_query(self, cmd) -> None:
         ctx = self._ctx_for(getattr(cmd, "sid", None))

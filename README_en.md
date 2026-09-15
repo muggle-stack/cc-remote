@@ -4,7 +4,7 @@
 
 Self-hosted · Multiple sessions and devices · Live tool activity · Code / Work · PWA
 
-**Product version: v3.0.0** · Wire protocol v66
+**Product version: v3.0.0** · Wire protocol v67
 
 [中文](README.md) · [Engine comparison](#engines-and-features) · [Quick start](#quick-start) ·
 [Install and upgrade](#install-and-upgrade) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)

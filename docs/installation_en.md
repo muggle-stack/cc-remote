@@ -188,7 +188,7 @@ as described in the deployment contract. No browser secret is needed for a build
 
 **Stage every target before changing live services.** The commands below describe
 the Relay and Wrapper separately; do not activate Relay until every Wrapper stage
-has passed validation. Protocol v66 cannot be mixed with older clients. Stop old
+has passed validation. Protocol v67 cannot be mixed with older clients. Stop old
 incompatible Wrappers, activate Relay + Web, then activate Wrappers and hard-refresh
 browser tabs. Wrapper activation must snapshot Work SQLite and private profile
 control state with `deploy/work_registry_snapshot.py`; this is not limited to
@@ -250,7 +250,7 @@ The script installs `python3-venv` + Caddy, creates the `ccremote` service user,
 builds an immutable release and its venv, merges Caddy configuration, atomically
 switches `current`, and restarts the relay. If restart/readiness fails, `current`,
 the Caddyfile, and the systemd unit roll back as one transaction and the previous
-release's `/healthz` is verified. Start the v66 wrapper after success.
+release's `/healthz` is verified. Start the v67 wrapper after success.
 
 Verify:
 

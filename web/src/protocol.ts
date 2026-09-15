@@ -60,6 +60,7 @@ export interface QueryImg { media_type: "image/png" | "image/jpeg" | "image/jpg"
 export interface QueryFile { filename: string; data: string }
 export interface Query extends Base { type: "query"; prompt: string; msg_id: string; images?: QueryImg[] | null; files?: QueryFile[] | null; delivery?: "immediate" | "queue" | "replace" }
 export interface CancelQueuedQuery extends Base { type: "cancel_queued_query"; sid: string; msg_id: string; cmd_id: string; client_id: string }
+export interface ReorderQueuedQueries extends Base { type: "reorder_queued_queries"; sid: string; cmd_id: string; client_id: string; expected: string[]; order: string[] }
 export interface GetQueuedQuery extends Base { type: "get_queued_query"; sid: string; msg_id: string; cmd_id: string; client_id: string }
 export interface QueuedQueryDetail extends Base {
   type: "queued_query_detail";
@@ -710,7 +711,7 @@ export type ServerEvent = FilesListed | CodexContext
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 66;
+export const PROTOCOL_VERSION = 67;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

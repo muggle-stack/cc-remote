@@ -13,6 +13,10 @@
   Claude-branded observations keep working, including Vertex/enterprise forms
   such as `claude-sonnet-4-5@20250929`. Official `claude-*` selections and
   native takeover are unchanged.
+- Add atomic server-owned queue reordering (protocol v67), with configurable
+  TUI editing, cancellation and ordering controls. Reject stale queue snapshots
+  and changes while a message is starting. Deploy Relay, Web, Wrapper and TUI
+  together; protocol v66 clients cannot connect to protocol v67 services.
 - Backport shared improvements from the DSH branch without adding a third
   engine (protocol v66): rounded Claude/Codex Goal dialogs with native save
   confirmation and mobile keyboard recovery; directory links open `/open`, and
