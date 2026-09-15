@@ -11,6 +11,7 @@ import {
   Suspense,
   useRef,
   useState,
+  type ReactNode,
   type ClipboardEvent,
   type SetStateAction,
 } from "react";
@@ -78,6 +79,7 @@ interface Props {
   onDshCommand?: (line: string, images?: QueryImg[], files?: QueryFile[]) => string | null;
   draftKey: string;
   draftStore: ComposerDraftStore;
+  backgroundTasks?: ReactNode;
   surface?: "code" | "work";
   state: State;
   connState: ConnState;
@@ -979,9 +981,10 @@ export function Composer(p: Props) {
           </div>
         )}
 
-        {busy && (
+        {(busy || p.backgroundTasks) && (
           <div className="runbar show">
-            <div className="seg">
+            {p.backgroundTasks}
+            {busy && <div className="seg">
               <button className={p.sendMode === "steer" ? "on" : ""}
                 onClick={() => p.setSendMode("steer")}>
                 <Icon name="send" size={14} />引导
@@ -989,7 +992,7 @@ export function Composer(p: Props) {
               <button className={p.sendMode === "queue" ? "on" : ""} onClick={() => p.setSendMode("queue")}>
                 <Icon name="queue" size={14} />排队
               </button>
-            </div>
+            </div>}
           </div>
         )}
 

@@ -344,19 +344,6 @@ body{
 /* THREAD */
 .thread-shell{ flex:1; min-height:0; position:relative; display:flex; flex-direction:column; }
 .thread-frame{ flex:1; min-height:0; position:relative; display:flex; }
-.background-process-dock{ flex:none; position:relative; z-index:3; width:min(760px,calc(100% - 32px));
-  margin:0 auto 10px; padding:9px 11px; border:1px solid var(--line); border-radius:14px;
-  background:color-mix(in srgb,var(--raised) 94%,transparent); box-shadow:0 8px 24px rgba(0,0,0,.08); }
-.background-process-head{ display:flex; align-items:center; gap:8px; min-height:24px; color:var(--muted);
-  font-size:12px; font-weight:650; }
-.background-process-pulse{ width:8px; height:8px; border-radius:50%; background:var(--accent);
-  box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 42%,transparent); animation:background-process-pulse 1.6s ease-out infinite; }
-.background-process-count{ margin-left:auto; min-width:20px; padding:1px 6px; border-radius:999px;
-  background:var(--surface); color:var(--muted); text-align:center; }
-.background-process-items{ display:flex; flex-direction:column; gap:3px; margin-top:4px;
-  max-height:min(32vh,240px); overflow-y:auto; overscroll-behavior:contain; scrollbar-width:thin; }
-.background-process-items .process-activity{ margin:0; }
-@keyframes background-process-pulse{ 70%,100%{ box-shadow:0 0 0 7px transparent; } }
 .assistant-answer-segment{ display:contents; }
 .background-followup-boundary{ display:flex; align-items:center; flex-wrap:wrap; gap:7px; margin:14px 0 8px;
   padding-top:10px; border-top:1px solid var(--line); color:var(--muted); font-size:11px; line-height:1.4; }
@@ -1532,7 +1519,7 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .auto-compact-sheet .auto-compact-options button{ min-height:38px; font-size:12px; }
 .auto-compact-sheet .auto-compact-meta{ font-size:11px; }
 
-/* run bar (running only) */
+/* Composer activity: send mode and independently running background tasks. */
 .runbar{ display:none; align-items:center; gap:8px; padding:2px 2px 9px; }
 .runbar.show{ display:flex; }
 .stopbtn{ display:inline-flex; align-items:center; gap:7px; font-size:13px; font-weight:600;

@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+- Replace Claude's persistent background-task panel with a compact composer
+  indicator. Open details above the trigger on desktop or in a centered mobile
+  dialog; native task completion removes finished items and closes the indicator
+  when no tasks remain, independently of the parent reply's completion.
 - Use native Claude steering without interrupting the running turn, including
   persistent-service and BTW sessions. Preserve message ownership and pending
   input across turn transitions and reconnects.

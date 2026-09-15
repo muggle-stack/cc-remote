@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import { createRoot } from "react-dom/client";
+import { BackgroundTasksFixture } from "./fixtures/background-tasks";
 
 import "../src/index.css";
 import "../src/App.css";
@@ -2088,6 +2089,7 @@ function HistoryConversationBrowserFixture() {
 
 export function HistoryBrowserFixture() {
   const params = new URLSearchParams(window.location.search);
+  if (params.has("background-tasks")) return <BackgroundTasksFixture />;
   const planUi = params.get("plan-ui");
   if (params.has("profile-sidebar")) return <ProfileSidebarFixture />;
   if (planUi) return <PlanUiFixture mode={planUi} />;

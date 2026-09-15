@@ -149,27 +149,6 @@ try {
     "untrusted edge volume cannot grow the detached-task dock past protocol bounds",
   );
 
-  const dockMarkup = renderToStaticMarkup(createElement(ChatView, {
-    sid: "background-dock",
-    turns: [],
-    engine: "claude",
-    backgroundProcesses: [{
-      kind: "process",
-      item_id: "bash-task",
-      processKind: "task",
-      phase: "snapshot",
-      status: "running",
-      title: "Run verification",
-      command: "make verify",
-      background: true,
-      done: false,
-    }],
-  }));
-  assert.match(dockMarkup, /后台任务正在运行/);
-  assert.match(dockMarkup, /Run verification/);
-  assert.match(dockMarkup, /make verify/,
-    "the detached Bash card reuses the expandable command UI");
-
   const followupMarkup = renderToStaticMarkup(createElement(ChatView, {
     sid: "followup-history",
     engine: "claude",

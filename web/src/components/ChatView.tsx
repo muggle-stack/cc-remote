@@ -26,7 +26,6 @@ import { TimedMessageTag } from "./TimedMessageTag";
 import { Icon, ClaudeMark, ClaudeWorking, ClaudeSpark } from "../icons";
 import { canForkTurn } from "../session-worktree";
 import {
-  BackgroundProcessDock,
   GeneratedImagePreview,
   ProcessTimeline,
 } from "./ProcessTimeline";
@@ -365,7 +364,6 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
   historyImageAssets, onLoadHistoryImage,
   onTextSelectionGuardChange,
   externalPlanProgress,
-  backgroundProcesses = [],
   onOpenAgent,
   activeTurnId = null,
   ambiguousActiveTurnIds = [],
@@ -426,7 +424,6 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
     turnId: string;
     itemId: string;
   } | null;
-  backgroundProcesses?: ProcessBlock[];
   /** Exact displayed row owned by the still-running native task. Runtime-only:
    * never infer this from array position, final text, or historical activity. */
   activeTurnId?: string | null;
@@ -2598,8 +2595,6 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
             <div className="spinner" aria-label="加载中" />
             <p className="loading-tx">加载会话历史…</p>
           </div>
-          <BackgroundProcessDock processes={backgroundProcesses}
-            onOpenFile={onOpenFile} onOpenAgent={onOpenAgent} />
         </div>
       );
     }
@@ -2613,8 +2608,6 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
             ? "添加资料并描述成果，我会把生成的文档和文件留在这项工作的私有目录。"
             : <>发一条消息开始，或用 <code>/</code> 唤起命令面板（Plan mode、review、技能…）。</>}</p>
         </div>
-        <BackgroundProcessDock processes={backgroundProcesses}
-          onOpenFile={onOpenFile} onOpenAgent={onOpenAgent} />
       </div>
     );
   }
@@ -3115,8 +3108,6 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
           </div>
         )}
       </div>
-      <BackgroundProcessDock processes={backgroundProcesses}
-        onOpenFile={onOpenFile} onOpenAgent={onOpenAgent} />
       {openAsyncQuestion?.scope === asyncQuestionScope && <Suspense fallback={null}>
         <AsyncQuestionHost key={asyncQuestionScope}
           messageId={openAsyncQuestion.messageId}
