@@ -5355,7 +5355,9 @@ export default function App() {
     if (!parentSid) return;
     dispatch({ type: "select_btw", parentSid, btwSid: sid });
   };
-  const sendBtw = (prompt: string): boolean => {
+  const sendBtw = (
+    prompt: string, images?: QueryImg[], files?: QueryFile[], steer = false,
+  ): boolean => {
     const sid = activeBtwSid;
     const ws = wsRef.current;
     if (!sid || !ws || runtimeIsReadOnly(sid)) return false;
@@ -5363,10 +5365,11 @@ export default function App() {
     const awaitingAcceptance = !!(
       ws.pendingQueryFor(sid) || runtime?.acceptancePending
     );
-    if (awaitingAcceptance || runtime?.queue.length || runtime?.pendingSend) {
+    if (steer && awaitingAcceptance) return false;
+    const query = { prompt, images, files };
+    if (!steer && (awaitingAcceptance || runtime?.queue.length || runtime?.pendingSend)) {
       const delivery = awaitingAcceptance && activeBtwSendMode !== "queue"
         ? "replace" : "queue";
-      const query = { prompt };
       const currentState = stateRef.current;
       const unconfirmed = collectUnconfirmedQueries(
         currentState.runtimes,
@@ -5381,25 +5384,17 @@ export default function App() {
       return sendDeferredQuery(sid, query, delivery);
     }
     const msg_id = uuid();
-    if (!ws.sendQueryTo(sid, prompt, msg_id)) return false;
+    const accepted = steer
+      ? ws.sendSteerTo(sid, prompt, msg_id, images, files)
+      : ws.sendQueryTo(sid, prompt, msg_id, images, files);
+    if (!accepted) return false;
     dispatch({
-      type: "query_sent", sid, prompt, msg_id, ts: Date.now(),
+      type: steer ? "steer_sent" : "query_sent", sid, ...query, msg_id, ts: Date.now(),
     });
     return true;
   };
-  const steerBtw = (prompt: string): boolean => {
-    const sid = activeBtwSid;
-    const ws = wsRef.current;
-    if (!sid || !ws || runtimeIsReadOnly(sid)) return false;
-    const runtime = stateRef.current.runtimes[sid];
-    if (ws.pendingQueryFor(sid) || runtime?.acceptancePending) return false;
-    const msg_id = uuid();
-    if (!ws.sendSteerTo(sid, prompt, msg_id)) return false;
-    dispatch({
-      type: "steer_sent", sid, prompt, msg_id, ts: Date.now(),
-    });
-    return true;
-  };
+  const steerBtw = (prompt: string, images?: QueryImg[], files?: QueryFile[]): boolean =>
+    sendBtw(prompt, images, files, true);
   const interruptBtw = (sid: string) => {
     if (runtimeIsReadOnly(sid)) return;
     wsRef.current?.sendInterruptTo(sid);
@@ -6205,6 +6200,11 @@ export default function App() {
             }}
             onSetEffort={(effort) => {
               if (activeBtwSid) setBtwEffort(activeBtwSid, effort);
+            }}
+            onSetServiceTier={(tier) => {
+              if (!activeBtwSid || activeBtw?.engine !== "codex"
+                  || runtimeIsReadOnly(activeBtwSid)) return false;
+              return wsRef.current?.sendSetServiceTier(tier, activeBtwSid) ?? false;
             }}
             onSetAutoCompact={(selection) => activeBtwSid
               ? setBtwAutoCompact(activeBtwSid, selection) : false}

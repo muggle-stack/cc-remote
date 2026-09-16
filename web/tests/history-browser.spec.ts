@@ -1033,6 +1033,145 @@ test("policy refusal remains specific through live delivery and history reload",
   }
 });
 
+for (const [engine, delivery] of [
+  ["codex", "query"], ["codex", "steer"], ["codex", "queue"], ["claude", "query"],
+] as const) {
+  test(`side chat scope attachments send complete payloads through ${engine} ${delivery}`, async ({ page }) => {
+    const relay = await mockRightPanelRelay(page, { visible: true, engine });
+    await page.goto("/");
+    const panel = page.locator(".btw-panel");
+    await expect(panel.getByRole("textbox")).toBeEnabled();
+    await expect(panel.locator(".btw-runbar")).toBeVisible();
+    if (delivery === "query") {
+      relay.emit({ type: "state", sid: "btw-layout-child", state: "idle" });
+      await expect(panel.locator(".btw-runbar")).toHaveCount(0);
+    } else if (delivery === "queue") {
+      await panel.getByRole("button", { name: "排队", exact: true }).click();
+    }
+    await panel.getByRole("button", { name: "添加附件", exact: true }).click();
+    const chooser = page.getByRole("dialog", { name: "添加附件", exact: true });
+    await expect(chooser.getByRole("button", { name: /从相册选择图片/ })).toBeVisible();
+    await expect(chooser.getByRole("button", { name: /使用相机拍摄照片/ })).toBeVisible();
+    const picker = page.waitForEvent("filechooser");
+    await chooser.getByRole("button", { name: /添加文档、表格或其他文件/ }).click();
+    await (await picker).setFiles([
+      { name: "side.png", mimeType: "image/png", buffer: staticPng() },
+      { name: "side.txt", mimeType: "text/plain", buffer: Buffer.from("side evidence") },
+    ]);
+    await expect(panel.locator(".attach-image-preview")).toHaveCount(1);
+    await expect(panel.locator(".attach-file")).toHaveText("side.txt");
+    await expect(page.locator(".composer .attach-file, .composer .attach-image-preview")).toHaveCount(0);
+    // An attachment-only click sends payload; it must never stop the active turn.
+    await panel.getByRole("button", { name: "发送", exact: true }).click();
+    await expect.poll(() => relay.commands.filter(c => c.type === "query" || c.type === "steer").length).toBe(1);
+    const sent = relay.commands.find(c => c.type === "query" || c.type === "steer")!;
+    expect(sent.sid).toBe("btw-layout-child");
+    expect(sent.type).toBe(delivery === "steer" ? "steer" : "query");
+    expect(sent.delivery).toBe(delivery === "queue" ? "queue" : undefined);
+    expect(sent.images).toEqual([{ media_type: "image/png", data: staticPng().toString("base64") }]);
+    expect(sent.files).toEqual([{ filename: "side.txt", data: Buffer.from("side evidence").toString("base64") }]);
+    expect(relay.commands.some(c => c.type === "interrupt")).toBe(false);
+    await expect(panel.locator(".attach-image-preview, .attach-file")).toHaveCount(0);
+  });
+}
+
+test("side chat scope attachments follow the drop location and accept clipboard images", async ({ page }) => {
+  await page.setViewportSize({ width: 1400, height: 850 });
+  await mockRightPanelRelay(page, { visible: true });
+  await page.goto("/");
+  const panel = page.locator(".btw-panel");
+  await expect(panel.getByRole("textbox")).toBeEnabled();
+  const main = page.locator(".composer");
+  await main.getByRole("textbox").fill("main draft");
+  const transfer = await page.evaluateHandle(encoded => {
+    const data = new DataTransfer();
+    data.items.add(new File(["drop evidence"], "drop.txt", { type: "text/plain" }));
+    data.items.add(new File([Uint8Array.from(atob(encoded), c => c.charCodeAt(0))], "drop.png", { type: "image/png" }));
+    return data;
+  }, staticPng().toString("base64"));
+  await panel.dispatchEvent("dragover", { dataTransfer: transfer });
+  await expect(panel.locator(".drop-overlay")).toContainText("添加到侧边对话");
+  await expect(main.locator(".drop-overlay")).toHaveCount(0);
+  await panel.dispatchEvent("drop", { dataTransfer: transfer });
+  await expect(panel.locator(".attach-file")).toHaveText("drop.txt");
+  await expect(panel.locator(".attach-image-preview")).toHaveCount(1);
+  await expect(main.locator(".attach-file, .attach-image-preview")).toHaveCount(0);
+  await panel.getByRole("textbox").fill("side draft");
+  await main.dispatchEvent("dragover", { dataTransfer: transfer });
+  await expect(main.locator(".drop-overlay")).toBeVisible();
+  await expect(panel.locator(".drop-overlay")).toHaveCount(0);
+  await main.dispatchEvent("drop", { dataTransfer: transfer });
+  await expect(main.locator(".attach-file")).toHaveText("drop.txt");
+  await expect(page.locator(".drop-overlay")).toHaveCount(0);
+  await transfer.dispose();
+  await panel.getByRole("textbox").evaluate((textarea, encoded) => {
+    const data = new DataTransfer();
+    data.items.add(new File([Uint8Array.from(atob(encoded), c => c.charCodeAt(0))], "paste.png", { type: "image/png" }));
+    textarea.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data }));
+    data.items.clear();
+  }, staticPng().toString("base64"));
+  await expect(panel.locator(".attach-image-preview")).toHaveCount(2);
+  await expect(main.locator(".attach-image-preview")).toHaveCount(1);
+  await expect(main.getByRole("textbox")).toHaveValue("main draft");
+  await expect(panel.getByRole("textbox")).toHaveValue("side draft");
+});
+
+test("side chat scope attachments stay with the original tab while importing", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { visible: true });
+  await page.addInitScript(() => {
+    const original = FileReader.prototype.readAsDataURL;
+    FileReader.prototype.readAsDataURL = function(blob) {
+      Object.assign(window, { releaseSideImport: () => original.call(this, blob) });
+    };
+  });
+  await page.goto("/");
+  const panel = page.locator(".btw-panel");
+  await expect(panel.getByRole("textbox")).toBeEnabled();
+  await panel.getByLabel("添加文件", { exact: true }).setInputFiles({
+    name: "slow.txt", mimeType: "text/plain", buffer: Buffer.from("original tab"),
+  });
+  await expect.poll(() => page.evaluate(() => typeof Reflect.get(window, "releaseSideImport"))).toBe("function");
+  await panel.getByRole("textbox").fill("wait for import");
+  await panel.getByRole("textbox").press("Enter");
+  expect(relay.commands.some(c => c.type === "query" || c.type === "steer")).toBe(false);
+  relay.emit({ type: "btw_sync", generation: "layout-generation", revision: 2, sessions: [
+    { btw_sid: "btw-layout-child", parent_sid: "layout-parent", engine: "codex", created_at: 1, state: "running" },
+    { btw_sid: "btw-next-child", parent_sid: "layout-parent", engine: "codex", created_at: 2, state: "idle" },
+  ] });
+  await expect(panel.getByRole("tab")).toHaveCount(2);
+  await panel.getByRole("tab").nth(1).click();
+  await page.evaluate(() => Reflect.get(window, "releaseSideImport")());
+  // Completion of the import must write the old draft, not the selected tab.
+  await expect(panel.getByRole("button", { name: "添加附件", exact: true })).toBeEnabled();
+  await expect(panel.locator(".attach-file")).toHaveCount(0);
+  await panel.getByRole("tab").first().click();
+  await expect(panel.locator(".attach-file")).toHaveText("slow.txt");
+  await expect(panel.getByRole("textbox")).toHaveValue("wait for import");
+});
+
+test("side chat scope service tier toggles only its fork and waits for the reported value", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { visible: true });
+  await page.goto("/");
+  const panel = page.locator(".btw-panel");
+  const control = panel.getByRole("button", { name: "BTW 服务档位", exact: true });
+  await expect(control).toBeEnabled();
+  relay.emit({ type: "fast", sid: "layout-parent", on: false });
+  relay.emit({ type: "fast", sid: "btw-layout-child", on: false });
+  await expect(control).toHaveText("标准");
+  await control.click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "set_service_tier").length).toBe(1);
+  expect(relay.commands.find(c => c.type === "set_service_tier")).toMatchObject({ sid: "btw-layout-child", service_tier: "toggle" });
+  await expect(control).toHaveText("标准");
+  relay.emit({ type: "fast", sid: "btw-layout-child", on: true });
+  await expect(control).toHaveText("快速");
+  await expect(page.locator(".composer .fast-chip")).toHaveText("标准");
+  await panel.getByRole("textbox").fill("/fast");
+  await panel.getByRole("textbox").press("Enter");
+  await expect.poll(() => relay.commands.filter(c => c.type === "set_service_tier").length).toBe(2);
+  expect(relay.commands.filter(c => c.type === "set_service_tier").every(c => c.sid === "btw-layout-child")).toBe(true);
+  expect(relay.commands.some(c => c.type === "query" || c.type === "steer")).toBe(false);
+});
+
 test("destroyed BTW stays readable after refresh with disabled input and a working new-chat button", async ({ page }, testInfo) => {
   const relay = await mockRightPanelRelay(page, { visible: true, btwReadOnly: true });
   await page.goto("/");
@@ -1048,6 +1187,13 @@ test("destroyed BTW stays readable after refresh with disabled input and a worki
     await expect(panel.locator(".btw-send")).toBeDisabled();
     await expect(panel.locator(".btw-controls button").first()).toBeDisabled();
     await expect(panel.locator(".btw-controls button").last()).toBeDisabled();
+    await expect(panel.getByRole("button", { name: "添加附件", exact: true })).toBeDisabled();
+    await panel.evaluate(node => {
+      const data = new DataTransfer();
+      data.items.add(new File(["locked"], "locked.txt", { type: "text/plain" }));
+      node.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: data }));
+    });
+    await expect(page.locator(".attach-file")).toHaveCount(0);
     await expect(panel.getByRole("button", { name: "新建侧边对话" })).toBeEnabled();
     await expect(panel.locator(".btw-chat-close")).toBeEnabled();
   }
