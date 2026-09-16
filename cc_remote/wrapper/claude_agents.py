@@ -171,6 +171,7 @@ class ClaudeAgentRegistry:
         self.run_by_tool: dict[str, str] = {}
         self.run_by_agent: dict[str, str] = {}
         self.tool_owner: dict[str, str] = {}
+        self.task_owner: dict[str, str] = {}
 
     def _ensure_run(
         self,
@@ -354,6 +355,21 @@ class ClaudeAgentRegistry:
         )):
             run = self._run_for_task(message)
             if run is None:
+                # Child Bash tasks are forwarded as top-level SDK system
+                # messages, without parent_tool_use_id. Their tool identity
+                # still belongs to the child. Keep later task-id-only updates
+                # there too; they cannot reserve a response in the main turn.
+                tool_id = _tool_id_from_data(message)
+                task_id = getattr(message, "task_id", None)
+                owner = self.runs.get(
+                    self.tool_owner.get(tool_id or "", "")
+                    or self.task_owner.get(task_id, ""))
+                if owner is not None:
+                    if isinstance(task_id, str) and task_id:
+                        self.task_owner[task_id] = owner.run_id
+                        while len(self.task_owner) > _MAX_AGENT_TOOL_OWNERS:
+                            self.task_owner.pop(next(iter(self.task_owner)))
+                    return self._record_detail_events(owner, message)
                 return AgentRoute("main")
             if isinstance(message, TaskStartedMessage):
                 self._bind_agent(run, message.task_id)

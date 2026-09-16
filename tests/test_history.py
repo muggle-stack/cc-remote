@@ -8791,6 +8791,48 @@ def test_late_internal_task_notification_does_not_extend_completed_answer():
     assert terminal.result.duration_ms == 10_000
 
 
+def test_background_replies_advance_answer_clock_but_late_bookkeeping_does_not():
+    ids = [f"{n:08d}-1111-4111-8111-111111111111" for n in range(1, 8)]
+    prompt, original, first_notice, first_reply, second_notice, final, late = ids
+    rows = [
+        {"uuid": prompt, "type": "user", "message": {
+            "role": "user", "content": "review"}},
+    ]
+    notices = {}
+    for uid, is_notice, text in (
+        (original, False, "two reviews are running"),
+        (first_notice, True, "first review completed"),
+        (first_reply, False, "waiting for the second review"),
+        (second_notice, True, "second review completed"),
+        (final, False, "consolidated review"),
+        (late, True, "old command stopped after resume"),
+    ):
+        rows.append({"uuid": uid, "type": "user" if is_notice else "assistant",
+                     "message": {"role": "user" if is_notice else "assistant",
+                                 "content": text if is_notice else [{"type": "text", "text": text}],
+                                 "stop_reason": None if is_notice else "end_turn"}})
+        if is_notice:
+            notices[uid] = ProcessEvent(
+                item_id=uid, kind="task", phase="end", status="succeeded",
+                title=text, background=True)
+    events = translate_history(
+        [_session_message(row) for row in rows], 10_000,
+        timestamps=dict(zip(ids, (1_000, 1_010, 2_000, 2_010, 3_000, 3_010, 40_000))),
+        internal_user_events=notices)
+    terminals = [event for event in events if isinstance(event, TurnEnd)]
+    assert len(terminals) == 1
+    assert terminals[0].ts == 3_010
+    assert terminals[0].turn_id == final
+    assert terminals[0].result.duration_ms == 2_010_000
+    replies = [event for event in events if isinstance(event, Delta)]
+    assert [(event.text, event.ts) for event in replies] == [
+        ("two reviews are running", 1_010),
+        ("waiting for the second review", 2_010),
+        ("consolidated review", 3_010),
+    ]
+    assert [event.background for event in replies] == [None, True, True]
+
+
 def test_history_hides_cancelled_command_placeholders_without_hiding_real_text():
     user_id = "11111111-1111-4111-8111-111111111111"
     answer_id = "22222222-2222-4222-8222-222222222222"
