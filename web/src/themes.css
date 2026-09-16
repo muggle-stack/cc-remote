@@ -1,0 +1,133 @@
+/* Approved low-saturation palettes. The miniature cards and the application
+   share these tokens; engine-specific classic skins remain the default. */
+:root[data-engine][data-theme][data-palette="amber"],
+[data-preview-palette="amber"] {
+  --bg:#F6F4EF;
+  --surface:#FCFAF6;
+  --sidebar:#EDE8DF;
+  --raised:#F0ECE5;
+  --text:#302D28;
+  --dim:#696054;
+  --faint:#847B6F;
+  --border:#DED8CE;
+  --border-strong:#CEC4B6;
+  --divider:#E6E0D7;
+  --accent:#AA9982;
+  --accent-ink:#756048;
+  --accent-weak:#EBE2D4;
+  --accent-line:#CEBEA8;
+  --on-accent:#29241E;
+}
+
+:root[data-engine][data-theme][data-palette="moss"],
+[data-preview-palette="moss"] {
+  --bg:#F2F4EF;
+  --surface:#F8F9F5;
+  --sidebar:#E7EBE2;
+  --raised:#EBEFE6;
+  --text:#2C312A;
+  --dim:#5D6856;
+  --faint:#77816F;
+  --border:#D6DDD0;
+  --border-strong:#C3CEBA;
+  --divider:#E0E5DA;
+  --accent:#96A28B;
+  --accent-ink:#55654A;
+  --accent-weak:#E0E7D9;
+  --accent-line:#BCC9B1;
+  --on-accent:#232C1F;
+}
+
+:root[data-engine][data-theme][data-palette="rose"],
+[data-preview-palette="rose"] {
+  --bg:#F6F1F2;
+  --surface:#FCF8F9;
+  --sidebar:#EFE5E8;
+  --raised:#F1E9EC;
+  --text:#332D30;
+  --dim:#705F67;
+  --faint:#88757F;
+  --border:#E1D5DA;
+  --border-strong:#D3C0C8;
+  --divider:#E9DFE3;
+  --accent:#B69BA5;
+  --accent-ink:#795566;
+  --accent-weak:#EBDDE1;
+  --accent-line:#D3B8C2;
+  --on-accent:#30222A;
+}
+
+:root[data-engine][data-theme][data-palette="lagoon"],
+[data-preview-palette="lagoon"] {
+  --bg:#242B2D;
+  --surface:#2E383B;
+  --sidebar:#202729;
+  --raised:#333F42;
+  --text:#E2E6E5;
+  --dim:#ABB9BA;
+  --faint:#94A3A5;
+  --border:#414D50;
+  --border-strong:#536266;
+  --divider:#354144;
+  --accent:#9AB1B3;
+  --accent-ink:#B1C7C9;
+  --accent-weak:#364447;
+  --accent-line:#5C7377;
+  --on-accent:#202729;
+}
+
+:root[data-engine][data-theme][data-palette="bordeaux"],
+[data-preview-palette="bordeaux"] {
+  --bg:#2D282B;
+  --surface:#3A3338;
+  --sidebar:#262225;
+  --raised:#40373D;
+  --text:#E8E2E5;
+  --dim:#B8ACB2;
+  --faint:#A999A2;
+  --border:#4B4147;
+  --border-strong:#64535D;
+  --divider:#3D343A;
+  --accent:#B7A0AA;
+  --accent-ink:#CFB7C2;
+  --accent-weak:#463B42;
+  --accent-line:#7A606E;
+  --on-accent:#292126;
+}
+
+:root[data-engine][data-theme][data-palette="heritage"],
+[data-preview-palette="heritage"] {
+  --bg:#272D28;
+  --surface:#343D35;
+  --sidebar:#222824;
+  --raised:#3A443B;
+  --text:#E1E6DE;
+  --dim:#B2BDAC;
+  --faint:#9EAE97;
+  --border:#475146;
+  --border-strong:#5A6956;
+  --divider:#394238;
+  --accent:#AAB79F;
+  --accent-ink:#C2CFB8;
+  --accent-weak:#404A40;
+  --accent-line:#697961;
+  --on-accent:#222824;
+}
+
+:root[data-engine][data-theme][data-palette]:not([data-palette="classic"]) {
+  --accent-text:var(--accent-ink);
+}
+:root[data-palette]:not([data-palette="classic"])[data-theme="light"] {
+  --ok:#4A7158; --ok-weak:#E4EBE4; --warn:#856623; --warn-weak:#EDE6D8;
+  --danger:#A44F49; --danger-weak:#F0E1DF; --on-danger:#FFFFFF;
+  --shadow-sm:0 1px 2px rgb(40 40 40 / .08);
+  --shadow:0 8px 28px -12px rgb(40 40 40 / .18);
+  --shadow-lg:0 18px 54px -14px rgb(40 40 40 / .24);
+}
+:root[data-palette]:not([data-palette="classic"])[data-theme="dark"] {
+  --ok:#A1BAA7; --ok-weak:#344239; --warn:#C9B88E; --warn-weak:#443F33;
+  --danger:#D3A29D; --danger-weak:#48383A; --on-danger:#292126;
+  --shadow-sm:0 1px 2px rgb(0 0 0 / .08);
+  --shadow:0 8px 28px -12px rgb(0 0 0 / .18);
+  --shadow-lg:0 18px 54px -14px rgb(0 0 0 / .55);
+}

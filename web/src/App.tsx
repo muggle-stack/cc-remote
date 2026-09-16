@@ -52,7 +52,6 @@ import { WorkDashboardSheet } from "./components/WorkDashboardSheet";
 import type { HookDraft, SkillDraft } from "./components/CapabilitiesSheet";
 import { TerminalControl } from "./components/TerminalControl";
 import { DeviceSheet, type PairingState, type RemoteDevice } from "./components/DeviceSheet";
-import { HeaderMenu } from "./components/HeaderMenu";
 import { EngineSelector } from "./components/EngineSelector";
 import {
   claudeProfileIdForSession,
@@ -116,11 +115,11 @@ import {
   withoutForkFocusPlaceholder,
 } from "./session-worktree";
 import { matchesBtwRequest,
-  normalizeDiffTheme, normalizeEngine, type Snapshot, type QueryImg,
+  normalizeEngine, type Snapshot, type QueryImg,
   type QueryFile, type SessionInfo, type CodexPermissionMode,
   type CodexWebSearchMode, type PermissionProfileInfo,
   type CodexServiceTier, type CollaborationModeName,
-  type DiffTheme, type Engine, type Space,
+  type Engine, type Space,
   type SessionControl, type History,
   sessionControlLocksInput } from "./protocol";
 import type { EngineCapabilities, EngineCapabilityItem, EngineCapabilityKind, WorkArtifactInfo, WorkDashboard } from "./protocol";
@@ -255,8 +254,13 @@ import {
 import type { AgentDetail, FilesListed } from "./protocol";
 import type { AgentDetailSelection } from "./components/AgentDetailController";
 import type { RightPanelView } from "./components/PanelTabs";
+import { useTheme } from "./use-theme";
+import { useBoldText } from "./use-bold-text";
 
-const THEME_KEY = "cc_remote_theme";
+const HeaderMenu = lazy(() => import("./components/HeaderMenu").then(
+  ({ HeaderMenu: Menu }) => ({ default: Menu }),
+));
+
 const ENGINE_KEY = "cc_remote_engine";  // which backend the NEXT new session uses
 const MACHINE_KEY = "cc_remote_machine";
 const DshGoalPanel = lazy(() => import("./components/DshGoalPanel"));
@@ -331,11 +335,11 @@ function catalogForEngineProfile(
 }
 
 export default function App() {
-  const [theme, setTheme] = useState<DiffTheme>(
-    () => normalizeDiffTheme(localStorage.getItem(THEME_KEY)));
   const initialEngineRef = useRef(normalizeEngine(localStorage.getItem(ENGINE_KEY)));
   const initialSpacesRef = useRef(readEngineSpaces(localStorage, initialEngineRef.current));
   const [engine, setEngine] = useState<Engine>(initialEngineRef.current);
+  const { mode: theme, choice: themeChoice, selectTheme } = useTheme(engine);
+  const { boldText, setBoldText } = useBoldText();
   const [space, setSpace] = useState<Space>(initialSpacesRef.current[initialEngineRef.current]);
   const spacesByEngineRef = useRef<Record<Engine, Space>>(initialSpacesRef.current);
   const [authed, setAuthed] = useState(false);
@@ -1646,16 +1650,12 @@ export default function App() {
   };
 
   useEffect(() => {
-    document.documentElement.setAttribute("data-theme", theme);
-    localStorage.setItem(THEME_KEY, theme);
-  }, [theme]);
-  useEffect(() => {
     try {
       sessionStorage.setItem(
         BTW_PANEL_SCOPES_KEY, JSON.stringify(btwPanelScopes));
     } catch { /* storage is best-effort in private browsing */ }
   }, [btwPanelScopes]);
-  const toggleTheme = () => setTheme((t) => (t === "dark" ? "light" : "dark"));
+  const toggleTheme = () => selectTheme(theme === "dark" ? "light" : "dark");
 
   // `engine` selects the backend (Claude Code / Codex): the whole UI re-skins via
   // data-engine, and the sidebar re-lists that engine's own sessions.
@@ -5719,9 +5719,11 @@ export default function App() {
             <span>{activeDevice?.label ?? machineId}</span><i />
           </button>
           <EngineSelector engine={engine} onChange={toggleEngine} />
-          <HeaderMenu
+          <Suspense fallback={<span className="iconbtn" aria-hidden="true"><Icon name="dots" /></span>}><HeaderMenu
             engine={engine}
             theme={theme}
+            themeChoice={themeChoice}
+            boldText={boldText} onBoldText={setBoldText}
             notificationMode={notificationMode}
             notificationBinding={pushBinding.state}
             notificationAvailable={typeof Notification !== "undefined"}
@@ -5730,9 +5732,9 @@ export default function App() {
             onOpenUsageActivity={openUsageActivity}
             onOpenViewer={visibleParentSid ? () => openViewer() : undefined}
             onOpenFiles={visibleParentSid && !archivedBrowse && state.wrapperOnline ? () => openFiles() : undefined}
-            onToggleTheme={toggleTheme}
+            onSelectTheme={selectTheme}
             onLogout={() => void logout()}
-          />
+          /></Suspense>
         </header>
 
         <ReconnectBanner banner={state.banner}

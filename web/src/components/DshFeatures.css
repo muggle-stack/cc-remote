@@ -10,7 +10,7 @@
 .dsh-panel-actions{display:flex;flex-wrap:wrap;gap:4px;align-items:center;padding:8px 16px;color:var(--dim);border-bottom:1px solid var(--divider)}
 .dsh-panel-body{overflow:auto;flex:1;min-height:0;padding:8px 20px 20px;overscroll-behavior:contain}
 .dsh-feature-row{padding:14px 0;border-bottom:1px solid var(--divider);overflow-wrap:anywhere}
-.dsh-feature-row .dsh-feature-link{display:inline;text-align:left;padding:0;color:var(--accent-ink);font-size:14px;font-weight:600;white-space:normal}
+.dsh-feature-row .dsh-feature-link{display:inline;text-align:left;padding:0;color:var(--accent-ink);font-size:14px;font-weight:var(--font-weight-600);white-space:normal}
 .dsh-feature-row>strong{font-size:14px}
 .dsh-feature-row>small{font-size:12px;color:var(--dim);margin-left:10px}
 .dsh-feature-row p{font-size:13px;color:var(--dim);margin:5px 0;white-space:pre-wrap}
@@ -29,7 +29,7 @@
 .dsh-references [role=option]{width:100%;display:flex;align-items:center;gap:9px;border:0;background:transparent;border-radius:6px;text-align:left;padding:9px;cursor:pointer}
 .dsh-references [role=option][aria-selected=true]{background:var(--accent-weak)}
 .dsh-references [role=option] span,.dsh-references [role=option] small{color:var(--dim);font-size:11px;flex-shrink:0}
-.dsh-references [role=option] b{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.dsh-references [role=option] b{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:var(--font-weight-500)}
 .dsh-references [role=option] small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;text-align:right}
 .dsh-references p,.dsh-search>p{color:var(--dim);font-size:12px;padding:4px 9px}
 .dsh-search{border-bottom:1px solid var(--divider);padding-bottom:10px;margin-bottom:10px}
