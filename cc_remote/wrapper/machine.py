@@ -34964,7 +34964,8 @@ class WrapperMachine:
                      work_id: Optional[str] = None,
                      raise_on_failure: bool = False,
                      _service_recovering: bool = False,
-                     _service_worker_id: str | None = None) -> Optional[SessionContext]:
+                     _service_worker_id: str | None = None,
+                     _service_socket: str | None = None) -> Optional[SessionContext]:
         """Create a SessionContext, connect its SDK subprocess, load history.
         Returns the ctx (added to the pool under its real or temp key) or None
         on legacy-route failure (an Error has been emitted). NewSession uses
@@ -35754,6 +35755,7 @@ class WrapperMachine:
             ctx.sdk.service_defer_events = True
             if _service_worker_id is not None:
                 ctx.sdk.service_metadata["service_id"] = _service_worker_id
+                ctx.sdk.service_socket_override = _service_socket
         elif engine == "codex":
             ctx.sdk.approval_callback = (
                 lambda method, params: self._on_codex_approval(

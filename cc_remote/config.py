@@ -147,8 +147,10 @@ def _claude_profiles_json() -> str:
     return payload.strip()
 
 
-def _claude_service_socket() -> str:
-    explicit = os.environ.get("CC_REMOTE_CLAUDE_SERVICE_SOCKET")
+def _claude_service_socket(key: str = "socket") -> str:
+    env_key = ("CC_REMOTE_CLAUDE_SERVICE_SOCKET" if key == "socket"
+               else "CC_REMOTE_CLAUDE_SERVICE_DRAIN_SOCKET")
+    explicit = os.environ.get(env_key)
     if explicit is not None:
         return explicit.strip()
     # A system-managed Wrapper can use its user's private registration without
@@ -167,7 +169,10 @@ def _claude_service_socket() -> str:
         payload = json.loads(source.read(4097))
     if not isinstance(payload, dict) or not isinstance(payload.get("socket"), str):
         raise ValueError("invalid Claude service registration")
-    return payload["socket"]
+    value = payload.get(key, "")
+    if not isinstance(value, str):
+        raise ValueError("invalid Claude service registration")
+    return value
 
 
 def _default_device_db_path() -> str:
@@ -307,6 +312,10 @@ class WrapperConfig:
     # retains the in-process SDK for unmanaged development installations.
     claude_service_socket: str = field(
         default_factory=lambda: _env("CC_REMOTE_CLAUDE_SERVICE_SOCKET", ""))
+    # During an SDK-service upgrade, existing native work may finish on the
+    # previous service while newly opened sessions use the primary socket.
+    claude_service_drain_socket: str = field(
+        default_factory=lambda: _env("CC_REMOTE_CLAUDE_SERVICE_DRAIN_SOCKET", ""))
     experimental_claude_broker: bool = field(
         default_factory=lambda: _bool(
             "CC_REMOTE_EXPERIMENTAL_CLAUDE_BROKER", False))
@@ -583,7 +592,8 @@ def validate_relay_config(cfg: RelayConfig) -> None:
 def wrapper_config() -> WrapperConfig:
     # Read the opt-in installation registration only at actual Wrapper startup;
     # constructing test/development config objects must not attach live workers.
-    return WrapperConfig(claude_service_socket=_claude_service_socket())
+    return WrapperConfig(claude_service_socket=_claude_service_socket(),
+                         claude_service_drain_socket=_claude_service_socket("drain_socket"))
 
 
 def validate_wrapper_config(cfg: WrapperConfig) -> None:
@@ -677,6 +687,12 @@ def validate_wrapper_config(cfg: WrapperConfig) -> None:
             errors.append("CC_REMOTE_CLAUDE_SERVICE_SOCKET must be an absolute Unix socket path of at most 103 bytes")
         if cfg.experimental_claude_broker:
             errors.append("Claude SDK service and experimental PTY broker cannot be enabled together")
+    if cfg.claude_service_drain_socket:
+        drain_socket = os.path.expanduser(cfg.claude_service_drain_socket)
+        if (not cfg.claude_service_socket or not os.path.isabs(drain_socket)
+                or "\x00" in drain_socket or len(os.fsencode(drain_socket)) > 103
+                or drain_socket == os.path.expanduser(cfg.claude_service_socket)):
+            errors.append("CC_REMOTE_CLAUDE_SERVICE_DRAIN_SOCKET requires a distinct absolute Unix socket path")
 
     if not (12 * 1024 * 1024 <= cfg.ws_max_size_bytes <= 64 * 1024 * 1024):
         errors.append("WS_MAX_SIZE_BYTES must be between 12582912 and 67108864")

@@ -210,6 +210,7 @@ class SdkHandle:
         self.isolate_account_env = isolate_account_env
         self.client: ClaudeSDKClient | None = None
         self.service_metadata: dict | None = None
+        self.service_socket_override: str | None = None
         self.service_recovery: dict | None = None
         self.service_turn_metadata: dict | None = None
         self.service_defer_events = False
@@ -572,7 +573,7 @@ class SdkHandle:
             from cc_remote.claude_service.client import RemoteClient
 
             self.client = RemoteClient(
-                self.cfg.claude_service_socket,
+                self.service_socket_override or self.cfg.claude_service_socket,
                 options=opts,
                 metadata={
                     **self.service_metadata, "session_id": resume_id,

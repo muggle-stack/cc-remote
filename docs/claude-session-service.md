@@ -116,6 +116,22 @@ Journals contain private task data and belong with private runtime state.
 
 ## Acceptance
 
+For an urgent service fix while native work is still running, start the new
+immutable release in a separate user-managed service and state directory. Keep
+the previous service alive. The private Wrapper registration can specify
+`socket` (new sessions) and `drain_socket` (existing sessions); the equivalent
+explicit override is `CC_REMOTE_CLAUDE_SERVICE_DRAIN_SOCKET`. Wrapper recovery
+reattaches each session to its original service and rejects duplicate native
+identities across the two services. SDK versions must still match.
+
+While the Wrapper is paused, only close old sessions proven idle, with no
+pending callbacks, background work or unacknowledged output. Never discard an
+unknown query delivery. A diagnosed pre-send failure may be removed only after
+preserving its original private payload and proving the native query was never
+written. Existing active sessions remain on the draining service until their
+work finishes. Retain the old service registration for rollback; remove its
+drain registration only after all sessions have safely migrated.
+
 - Keep the same SDK-service and native CLI PIDs across a Wrapper restart.
 - Restore the original session and message ID without another query.
 - Verify output, offline completion, permission/MCP-question recovery and

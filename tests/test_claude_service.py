@@ -109,6 +109,69 @@ async def released(session):
             await asyncio.sleep(0.001)
 
 
+def test_materialized_image_prompt_reaches_real_sdk_transport(tmp_path):
+    import json
+    from types import SimpleNamespace
+    from claude_agent_sdk import ClaudeSDKClient
+    from cc_remote.claude_service.server import Session
+
+    async def run():
+        writes = []
+
+        class Transport:
+            async def write(self, payload):
+                writes.append(json.loads(payload))
+
+        session = Session(tmp_path, {})
+        client = ClaudeSDKClient()
+        client._query = SimpleNamespace()
+        client._transport = Transport()
+        session.client = client
+        message = {"type": "user", "message": {"role": "user", "content": [
+            {"type": "text", "text": "inspect attachment"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA=="}},
+        ]}}
+        try:
+            await session.mutate("request", "query", {"turn": {"id": "image"}, "prompt": [message]})
+            assert len(writes) == 1
+            assert writes[0]["message"] == message["message"]
+            assert session.turn["id"] == "image"
+            session.terminal_seq = session.journal.append({"type": "result"})
+            await session.mutate("commit", "commit", {"turn_id": "image", "seq": session.terminal_seq})
+            await session.mutate("next", "query", {"turn": {"id": "text"}, "prompt": "next"})
+            assert len(writes) == 2
+        finally:
+            session.journal.close()
+
+    asyncio.run(run())
+
+
+def test_invalid_prompt_does_not_claim_turn_but_unknown_delivery_does(tmp_path):
+    from types import SimpleNamespace
+    from cc_remote.claude_service.server import Session
+
+    async def run():
+        async def uncertain_delivery(prompt):
+            raise ConnectionError("write may have reached native CLI")
+
+        session = Session(tmp_path, {})
+        session.client = SimpleNamespace(query=uncertain_delivery)
+        try:
+            with pytest.raises(ValueError):
+                await session.mutate("bad", "query", {"turn": {"id": "bad"}, "prompt": [42]})
+            assert session.turn is None
+            assert not session.submitted_turns
+            with pytest.raises(ConnectionError):
+                await session.mutate("unknown", "query", {"turn": {"id": "unknown"}, "prompt": "hi"})
+            assert session.turn["id"] == "unknown"
+            with pytest.raises(RuntimeError):
+                await session.mutate("new", "query", {"turn": {"id": "new"}, "prompt": "next"})
+        finally:
+            session.journal.close()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("control_error", [None, "unsupported", "timeout"])
 def test_attached_summary_opt_in_keeps_running_turn_and_native_child(
     monkeypatch, control_error,

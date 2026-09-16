@@ -68,32 +68,54 @@ def configure(machine, ctx) -> None:
 async def restore(machine) -> None:
     if not machine.cfg.claude_service_socket:
         return
-    connection = Connection(machine.cfg.claude_service_socket)
+    sockets = [machine.cfg.claude_service_socket]
+    if machine.cfg.claude_service_drain_socket:
+        sockets.insert(0, machine.cfg.claude_service_drain_socket)
+    sessions = []
+    identities = set()
+    for socket in sockets:
+        for item in await _list_sessions(socket):
+            metadata = item["metadata"]
+            identity = (metadata.get("profile_root"), metadata.get("session_id"),
+                        metadata.get("space"), metadata.get("work_id"), metadata.get("btw"))
+            if metadata.get("session_id") and identity in identities:
+                raise RuntimeError("Claude session exists in both SDK services")
+            identities.add(identity)
+            sessions.append((socket, item))
+    for socket, item in sessions:
+        await _restore_session(machine, socket, item)
+
+
+async def _list_sessions(socket):
+    connection = Connection(socket)
     await connection.connect()
     try:
-        sessions = await connection.call("list")
+        return await connection.call("list")
     finally:
         await connection.disconnect()
-    for item in sessions:
-        metadata = item["metadata"]
-        if metadata.get("btw"):
-            continue
-        # Resolve the current registry, then bind its native account root. A
-        # changed profile name must never attach an old account's SDK by UUID.
-        try:
-            profile = machine._claude_profile(metadata["profile_id"])
-        except (ValueError, KeyError):
-            continue
-        if Path(profile.config_dir).resolve() != Path(metadata["profile_root"]).resolve():
-            continue
-        ctx = await machine._spawn(
-            resume_id=metadata.get("session_id"), cwd=metadata["cwd"],
-            claude_profile_id=profile.id, space=metadata["space"],
-            work_id=metadata.get("work_id"), _service_recovering=True,
-            _service_worker_id=item["id"],
-        )
-        if ctx is None:
-            raise RuntimeError("could not reattach a persistent Claude session")
+
+
+async def _restore_session(machine, socket, item) -> None:
+    metadata = item["metadata"]
+    if metadata.get("btw"):
+        return
+    # Resolve the current registry, then bind its native account root. A
+    # changed profile name must never attach an old account's SDK by UUID.
+    try:
+        profile = machine._claude_profile(metadata["profile_id"])
+    except (ValueError, KeyError):
+        return
+    if Path(profile.config_dir).resolve() != Path(metadata["profile_root"]).resolve():
+        return
+    ctx = await machine._spawn(
+        resume_id=metadata.get("session_id"), cwd=metadata["cwd"],
+        claude_profile_id=profile.id, space=metadata["space"],
+        work_id=metadata.get("work_id"), _service_recovering=True,
+        _service_worker_id=item["id"],
+        _service_socket=socket,
+    )
+    if ctx is None:
+        raise RuntimeError("could not reattach a persistent Claude session")
 
 
 async def activate(machine, ctx) -> None:

@@ -26,6 +26,13 @@ MAX_SESSIONS = 64
 MAX_CALLS = 64
 
 
+async def _prompt_messages(messages: list[dict]):
+    # Bind the materialized list as an argument. Closing over a variable that
+    # is then replaced by this iterator makes the iterator try to iterate itself.
+    for message in messages:
+        yield message
+
+
 class Journal:
     def __init__(self, path: Path):
         self.db = sqlite3.connect(path)
@@ -328,6 +335,16 @@ class Session:
                     raise ValueError("Claude turn was already submitted")
                 if self.turn is not None or self.background_start is not None or self.failure:
                     raise RuntimeError("Claude session is busy or unavailable")
+                prompt = params["prompt"]
+                if isinstance(prompt, list):
+                    if not prompt or not all(isinstance(item, dict) for item in prompt):
+                        raise ValueError("Claude prompt must contain message objects")
+                    # Validate before claiming the turn. Once a transport write
+                    # starts, an exception cannot prove that delivery failed.
+                    json.dumps(prompt)
+                    prompt = _prompt_messages(prompt)
+                elif not isinstance(prompt, str):
+                    raise ValueError("Claude prompt must be text or message objects")
                 self.turn = {**params["turn"], "start_seq": self.journal.seq, "started_at": time.time()}
                 self.origin_id = self.turn["id"]
                 self.terminal_seq = None
@@ -337,12 +354,6 @@ class Session:
                     key: seed for key, seed in self.task_seeds.items()
                     if seed["data"].get("subtype") != "task_notification"
                 }
-                prompt = params["prompt"]
-                if isinstance(prompt, list):
-                    async def stream():
-                        for item in prompt:
-                            yield item
-                    prompt = stream()
                 # Retain the accepted operation even on a transport exception:
                 # acceptance may be unknown, so automatic resubmission is unsafe.
                 await self.client.query(prompt)
