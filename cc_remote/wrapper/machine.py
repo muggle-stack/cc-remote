@@ -71,6 +71,7 @@ from claude_agent_sdk.types import (
     ResultMessage, SystemMessage, TaskNotificationMessage,
     TaskProgressMessage, TaskStartedMessage, TaskUpdatedMessage,
     RateLimitEvent, TERMINAL_TASK_STATUSES, UserMessage,
+    ToolResultBlock, ServerToolResultBlock,
 )
 
 from cc_remote.attachments import (
@@ -6512,6 +6513,17 @@ class WrapperMachine:
                 return True
         return False
 
+    @staticmethod
+    def _claude_injected_user_boundary(message: object) -> bool:
+        if not isinstance(message, UserMessage) or message.parent_tool_use_id:
+            return False
+        origin = getattr(message, "origin", None)
+        if not isinstance(origin, dict) or origin.get("kind") in (None, "human"):
+            return False
+        return not (isinstance(message.content, list) and any(
+            isinstance(block, (ToolResultBlock, ServerToolResultBlock))
+            for block in message.content))
+
     def _observe_claude_task_lifecycle(
         self,
         ctx: SessionContext,
@@ -6549,16 +6561,7 @@ class WrapperMachine:
             return
 
         if isinstance(message, UserMessage):
-            origin = getattr(message, "origin", None)
-            origin_kind = (
-                origin.get("kind") if isinstance(origin, dict) else None
-            )
-            if (
-                background
-                and isinstance(origin_kind, str)
-                and origin_kind != "human"
-                and not getattr(message, "parent_tool_use_id", None)
-            ):
+            if background and self._claude_injected_user_boundary(message):
                 # The pinned SDK marks every injected turn at its replayed
                 # top-level user boundary. This is stronger than inferring a
                 # continuation only from the last active task: channel/peer
@@ -6592,11 +6595,15 @@ class WrapperMachine:
                 # injected turn: that owner still requires its exact Result.
                 if ctx.claude_background_followups.get(key) == "notified":
                     ctx.claude_background_followups.pop(key, None)
-            elif background and isinstance(message, TaskNotificationMessage):
+            elif (background and isinstance(message, TaskNotificationMessage)
+                  and not getattr(message, "_cc_service_seed", False)):
                 # A task_updated terminal is a task status, not evidence of a
                 # new model response. In particular killed tasks often emit no
                 # notification and no Result at all. Only a real notification
                 # can reserve the subsequent injected User/Result boundary.
+                # Reattach seeds describe already-consumed task state, not a
+                # fresh notification. Any unacknowledged continuation follows
+                # separately in the service's ordered User/Result replay.
                 overflowed = self._claim_claude_followup_notification(
                     ctx, task_id)
                 if overflowed:
@@ -21563,20 +21570,6 @@ class WrapperMachine:
         await self._observe_claude_model_fallback(ctx, message)
         is_result = isinstance(message, ResultMessage)
         followup_was_pending = self._claude_autonomous_followup_pending(ctx)
-        self._observe_claude_task_lifecycle(
-            ctx, message, background=True)
-        followup_is_pending = self._claude_autonomous_followup_pending(ctx)
-        if not is_result and followup_is_pending and not followup_was_pending:
-            # Parent Result may already have published idle, or may still be in
-            # its finalizer. Either way the autonomous continuation is now the
-            # real running owner and Stop must remain available.
-            if ctx.state == "idle":
-                await self._set_state(ctx, "running")
-            elif ctx.state in {"interrupting", "draining"}:
-                # Stop was accepted against the parent just before the task
-                # notification exposed its autonomous continuation. Extend the
-                # same absolute drain deadline to that newly-visible owner.
-                self._schedule_claude_autonomous_interrupt_watchdog(ctx)
         try:
             thread_id = self._ctx_wire_sid(ctx)
             route = AgentRoute("main")
@@ -21593,8 +21586,23 @@ class WrapperMachine:
                 await self._publish_claude_agent_route(ctx, route)
 
                 if route.target != "detail":
+                    self._observe_claude_task_lifecycle(
+                        ctx, message, background=True)
+                    followup_is_pending = self._claude_autonomous_followup_pending(ctx)
+                    if not is_result and followup_is_pending and not followup_was_pending:
+                        # Only a main-session continuation owns its running
+                        # state. A child's background command has its own
+                        # notification/Result consumer inside that Agent.
+                        if ctx.state == "idle":
+                            await self._set_state(ctx, "running")
+                        elif ctx.state in {"interrupting", "draining"}:
+                            self._schedule_claude_autonomous_interrupt_watchdog(ctx)
                     translator = ctx.claude_background_translator
-                    if translator is None:
+                    if translator is None or self._claude_injected_user_boundary(message):
+                        # Idle system updates can create a translator before
+                        # any user turn exists. Rebind at the native injected
+                        # boundary so the answer extends its actual owner,
+                        # never a prompt-less row with a stale/empty identity.
                         translator = StreamTranslator(
                             self.cfg.tool_result_max,
                             turn_id=turn_id,
@@ -38223,7 +38231,6 @@ class WrapperMachine:
                 if goal_changed and ctx.goal_visible:
                     await self._emit(ctx, GoalState(goal=goal))
 
-                self._observe_claude_task_lifecycle(ctx, msg)
                 registry = ctx.claude_agents
                 route = (
                     registry.route(msg)
@@ -38232,6 +38239,7 @@ class WrapperMachine:
                 await self._publish_claude_agent_route(ctx, route)
                 if route.target == "detail":
                     continue
+                self._observe_claude_task_lifecycle(ctx, msg)
 
                 native_user_id = replayed_user_message_id(msg)
                 from cc_remote.wrapper import claude_steer

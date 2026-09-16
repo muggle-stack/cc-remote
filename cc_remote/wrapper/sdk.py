@@ -1498,6 +1498,8 @@ class SdkHandle:
                 message = self._parse_compat_message(data) if parse_raw else data
                 if message is None:
                     continue
+                if service_seed:
+                    message._cc_service_seed = True
                 if service_seq is not None:
                     message._cc_service_seq = service_seq
                 if service_ts is not None:

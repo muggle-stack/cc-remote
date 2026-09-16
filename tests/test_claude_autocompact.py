@@ -2113,11 +2113,16 @@ def test_unrelated_result_cannot_retire_an_autonomous_followup():
     asyncio.run(run())
 
 
-def test_autonomous_followup_streams_text_and_tools_without_duplicate_turn_end():
+@pytest.mark.parametrize("stale_owner", [None, "previous-human-turn"])
+def test_autonomous_followup_streams_text_and_tools_without_duplicate_turn_end(stale_owner):
     async def run():
         machine, transport, ctx = _machine_with_sdk(_AutoCompactSdk())
         origin = {"kind": "task-notification"}
         assistant_id = "77777777-7777-4777-8777-777777777777"
+        # Idle task/status messages may have constructed this translator long
+        # before the current human prompt. Its text owner must be rebound.
+        ctx.claude_background_translator = StreamTranslator(
+            1024, turn_id=stale_owner)
 
         await machine._on_claude_background_message(
             ctx,
@@ -2169,7 +2174,7 @@ def test_autonomous_followup_streams_text_and_tools_without_duplicate_turn_end()
                     content="contents",
                     is_error=False,
                 )],
-                parent_tool_use_id="background-read",
+                origin=origin,
             ),
             "origin-turn",
         )
@@ -2212,6 +2217,113 @@ def test_autonomous_followup_streams_text_and_tools_without_duplicate_turn_end()
         assert ctx.claude_background_translator is None
         assert ctx.claude_background_followup_pending is False
         assert ctx.state == "idle"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("child_command", [False, True])
+def test_managed_turn_tracks_only_its_own_background_commands(child_command):
+    from cc_remote.wrapper.claude_agents import ClaudeAgentRegistry
+
+    async def run():
+        class TaskSdk(_AutoCompactSdk):
+            async def query(self, _prompt):
+                return None
+
+            async def refresh_goal(self, _session_id):
+                return None
+
+            async def receive_response(self):
+                if child_command:
+                    yield AssistantMessage(
+                        content=[ToolUseBlock(id="review", name="Agent", input={})],
+                        model="claude-test")
+                yield AssistantMessage(
+                    content=[ToolUseBlock(id="check", name="Bash", input={
+                        "command": "make check", "run_in_background": True})],
+                    model="claude-test",
+                    parent_tool_use_id="review" if child_command else None)
+                yield TaskStartedMessage(
+                    subtype="task_started", data={}, task_id="check-task",
+                    tool_use_id="check", task_type="local_bash",
+                    description="checks", uuid="check-start", session_id=SESSION_ID)
+                yield ResultMessage(
+                    subtype="success", duration_ms=1, duration_api_ms=1,
+                    is_error=False, num_turns=1, session_id=SESSION_ID)
+
+        machine, transport, ctx = _machine_with_sdk(TaskSdk())
+        ctx.claude_agents = ClaudeAgentRegistry(1024)
+        ctx.state = "running"
+        ctx.active_msg_id = "managed-review"
+        await asyncio.wait_for(machine._run_turn(ctx, "review"), timeout=1)
+        assert not [event for event in transport.sent if isinstance(event, Error)]
+        assert ctx.state == "idle"
+        assert ctx.claude_active_tasks == (set() if child_command else {"check-task"})
+
+    asyncio.run(run())
+
+
+def test_child_background_command_does_not_claim_a_main_followup():
+    from cc_remote.wrapper.claude_agents import ClaudeAgentRegistry
+    from cc_remote.wrapper.stream import public_agent_run_id
+
+    async def run():
+        machine, transport, ctx = _machine_with_sdk(_AutoCompactSdk())
+        registry = ctx.claude_agents = ClaudeAgentRegistry(1024)
+        registry.route(AssistantMessage(
+            content=[ToolUseBlock(id="review", name="Agent", input={})],
+            model="claude-test"))
+        registry.route(AssistantMessage(
+            content=[ToolUseBlock(id="child-check", name="Bash", input={
+                "command": "make check", "run_in_background": True})],
+            model="claude-test", parent_tool_use_id="review"))
+        # Preserve the real parent task while isolating all of the child's
+        # background lifecycle, including an update without a tool-use id.
+        ctx.claude_active_tasks.add("review-task")
+        messages = [
+            TaskStartedMessage(
+                subtype="task_started", data={}, task_id="child-task",
+                tool_use_id="child-check", task_type="local_bash",
+                description="checks", uuid="child-start", session_id=SESSION_ID),
+            TaskUpdatedMessage(
+                subtype="task_updated", data={}, task_id="child-task",
+                patch={"status": "running"}, status="running"),
+            TaskNotificationMessage(
+                subtype="task_notification", data={}, task_id="child-task",
+                tool_use_id="child-check", status="completed", output_file="",
+                summary="checks passed", uuid="child-end", session_id=SESSION_ID),
+        ]
+        for message in messages:
+            await machine._on_claude_background_message(ctx, message, "human-turn")
+            assert ctx.claude_background_followups == {}
+            assert ctx.claude_active_tasks == {"review-task"}
+            assert ctx.state == "idle"
+        assert not any(isinstance(event, ProcessEvent) for event in transport.sent)
+        child = registry.snapshot(public_agent_run_id("review"))
+        assert child is not None
+        assert any(event.get("item_id") == "child-task" for event in child.events)
+
+    asyncio.run(run())
+
+
+def test_completed_service_seed_does_not_reopen_an_idle_session():
+    async def run():
+        machine, _transport, ctx = _machine_with_sdk(_AutoCompactSdk())
+        message = TaskNotificationMessage(
+            subtype="task_notification", data={}, task_id="old-task",
+            status="completed", output_file="", summary="already done",
+            uuid="seed", session_id=SESSION_ID, tool_use_id="old-tool")
+        message._cc_service_seed = True
+        await machine._on_claude_background_message(ctx, message, "old-turn")
+        assert ctx.claude_background_followups == {}
+        assert ctx.state == "idle"
+        # An actual unacknowledged continuation is still authoritative even
+        # when its preceding notification was only a reattachment seed.
+        await machine._on_claude_background_message(ctx, UserMessage(
+            content="task completed", origin={
+                "kind": "task-notification", "taskId": "old-task"}), "old-turn")
+        assert ctx.claude_background_followup_pending is True
+        assert ctx.state == "running"
 
     asyncio.run(run())
 

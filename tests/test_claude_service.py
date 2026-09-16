@@ -563,6 +563,35 @@ def test_machine_recovers_background_followup_without_a_new_human_completion():
                 assert ctx.state == "idle"
             finally:
                 await handle.detach_for_shutdown()
+            await released(worker)
+            # A later deployment replays only the completed task seed. It must
+            # not reserve another autonomous Result which will never arrive.
+            # Older persistent services retain these acknowledged seeds even
+            # after a newer controller has committed the autonomous turn.
+            worker.task_seeds["task-1"] = {
+                "data": rows[0], "origin_id": "origin-human", "seq": 3,
+            }
+            restored = SdkHandle(WrapperConfig(claude_service_socket=first.connection.socket_path))
+            restored.service_metadata = worker.metadata.copy()
+            restored.service_defer_events = True
+            await restored.connect(resume_id=SESSION_ID, cwd="/tmp")
+            machine2, _transport2, ctx2 = _machine_with_sdk(restored)
+            observed_seed = asyncio.Event()
+
+            async def background(message, turn):
+                await machine2._on_claude_background_message(ctx2, message, turn)
+                if getattr(message, "_cc_service_seed", False):
+                    observed_seed.set()
+
+            restored.background_message_callback = background
+            try:
+                await claude_service.activate(machine2, ctx2)
+                await asyncio.wait_for(observed_seed.wait(), timeout=2)
+                assert ctx2.claude_background_followups == {}
+                assert ctx2.state == "idle"
+                assert native.prompts == ["hello"]
+            finally:
+                await restored.detach_for_shutdown()
     asyncio.run(go())
 
 

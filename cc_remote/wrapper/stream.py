@@ -3412,7 +3412,10 @@ def translate_history(
         if (
             mts is not None
             and advance_terminal_clock
-            and not background_followup
+            # A notification alone cannot extend a settled answer. Actual
+            # assistant output after it is a new conversational continuation
+            # and must advance the footer to its real source time.
+            and (not background_followup or role == "assistant")
         ):
             last_ts = mts
     # Claude's transcript does not persist the SDK ResultMessage. EOF normally
