@@ -4,6 +4,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type ClipboardEvent,
   type SetStateAction,
 } from "react";
 import { ChatView } from "./ChatView";
@@ -53,6 +54,16 @@ import {
 import { AutoCompactControl } from "./AutoCompactControl";
 import { QuestionSheet } from "./QuestionSheet";
 import { sessionControlLocksInput } from "../protocol";
+import type { QueryImg, QueryFile } from "../protocol";
+import { AttachmentPicker } from "./AttachmentPicker";
+import { PendingImageAttachments } from "./PendingImageAttachments";
+import { attachmentBytes, snapshotAttachmentFiles } from "../img";
+import {
+  readClipboardImport, resolveClipboardImport, insertClipboardText,
+  type ClipboardImport,
+} from "../clipboard-import";
+import { useAttachmentDrop } from "../use-attachment-drop";
+import "./BtwPanel.css";
 
 interface Props {
   sid?: string;
@@ -81,8 +92,8 @@ interface Props {
   onNew: () => void;
   onSelect: (sid: string) => void;
   onCloseChat: (sid: string) => void;
-  onSend: (prompt: string) => boolean;
-  onSteer: (prompt: string) => boolean;
+  onSend: (prompt: string, images?: QueryImg[], files?: QueryFile[]) => boolean;
+  onSteer: (prompt: string, images?: QueryImg[], files?: QueryFile[]) => boolean;
   onReplyAsyncQuestion?: (prompt: string) => Promise<QueryAcceptanceResult> | null;
   onInterrupt: () => void;
   onSetSendMode: (mode: SendMode) => void;
@@ -92,6 +103,7 @@ interface Props {
   onInspectQueued: (query: PendingQuery) => void;
   onSetModel: (model: string) => void;
   onSetEffort: (effort: string) => void;
+  onSetServiceTier: (tier: string) => boolean;
   onSetAutoCompact: (selection: AutoCompactSelection) => boolean;
   onOpenFile?: (path: string, line?: number) => void;
   imageAssets?: Record<string, InlineImageAsset>;
@@ -119,11 +131,14 @@ export function BtwPanel(p: Props) {
     useState<"models" | "efforts" | null>(null);
   const [autoCompactOpen, setAutoCompactOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const importingRef = useRef(false);
   const noticeTimerRef = useRef<number | null>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const imeSubmitRef = useRef(new ImeSubmitGuard());
   const buttonSendTimerRef = useRef<number | null>(null);
   const input = draft.input;
+  const { images, files, pastes } = draft;
   const chats = p.chats;
   const turns = p.rt?.turns ?? [];
   const runtimeState = p.rt?.state ?? "idle";
@@ -135,6 +150,7 @@ export function BtwPanel(p: Props) {
   const inputLockedRef = useRef(inputLocked);
   inputLockedRef.current = inputLocked;
   const awaitingFirstChat = !!p.opening && !p.sid;
+  const attachmentsLocked = inputLocked || awaitingFirstChat || !p.sid;
   const activeTurnCandidates = activeTurnCandidateIds(
     turns,
     displayActiveTurnOwnerId(
@@ -156,6 +172,8 @@ export function BtwPanel(p: Props) {
   const runtimeBusy = isComposerBusy(submitState);
   const busy = awaitingFirstChat || runtimeBusy;
   const hasText = input.trim().length > 0 || draft.pastes.length > 0;
+  const hasAttachments = images.length > 0 || files.length > 0;
+  const hasContent = hasText || hasAttachments;
 
   const updateDraft = useCallback((
     update: (current: ComposerDraft) => ComposerDraft,
@@ -210,7 +228,7 @@ export function BtwPanel(p: Props) {
     }
   }, []);
 
-  const flash = (message: string) => {
+  const flash = (message: string, duration = 2200) => {
     setNotice(message);
     if (noticeTimerRef.current !== null) {
       window.clearTimeout(noticeTimerRef.current);
@@ -218,7 +236,56 @@ export function BtwPanel(p: Props) {
     noticeTimerRef.current = window.setTimeout(() => {
       noticeTimerRef.current = null;
       setNotice(null);
-    }, 2200);
+    }, duration);
+  };
+  const onPickFiles = async (
+    selected: FileList | File[] | null, clipboard?: ClipboardImport,
+  ) => {
+    if (attachmentsLocked) return;
+    if (importingRef.current) { flash("附件正在导入，请稍候"); return; }
+    const targetKey = draftKeyRef.current;
+    importingRef.current = true;
+    setImporting(true);
+    try {
+      // Capture the browser's FileList before the picker/drop event returns.
+      const [{ pickFiles }, imported] = await Promise.all([
+        import("../attachment-import"),
+        clipboard ? resolveClipboardImport(clipboard)
+          : Promise.resolve(snapshotAttachmentFiles(selected, images.length + files.length)),
+      ]);
+      const batch = await pickFiles(
+        imported.files, images.length + files.length, attachmentBytes(images, files));
+      const append = (current: ComposerDraft): ComposerDraft => ({
+        ...current,
+        images: [...current.images, ...batch.images],
+        files: [...current.files, ...batch.files],
+      });
+      if (draftKeyRef.current === targetKey) updateDraft(append);
+      else p.draftStore.set(targetKey, append(p.draftStore.get(targetKey)));
+      const errors = [...imported.errors, ...batch.errors];
+      if (errors.length && draftKeyRef.current === targetKey) flash(errors.join("；"), 10_000);
+    } catch {
+      if (draftKeyRef.current === targetKey) {
+        flash("附件导入失败，请重新添加；已输入的文字会保留。", 10_000);
+      }
+    } finally {
+      importingRef.current = false;
+      setImporting(false);
+    }
+  };
+  const dragOver = useAttachmentDrop("btw", attachmentsLocked || importing, onPickFiles);
+  const onPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (attachmentsLocked) return;
+    const clipboard = readClipboardImport(event.clipboardData, images.length + files.length);
+    const { text } = clipboard;
+    const attachments = clipboard.files.length || clipboard.images.length || clipboard.errors.length;
+    if (!attachments && text.length <= LONG_PASTE_THRESHOLD) return;
+    event.preventDefault();
+    if (text.length > LONG_PASTE_THRESHOLD) {
+      const paste = makeComposerPaste(text, uuid());
+      updateDraft((current) => ({ ...current, pastes: [...current.pastes, paste] }));
+    } else if (text) insertClipboardText(event.currentTarget, text, setInput);
+    if (attachments) void onPickFiles(null, clipboard);
   };
   const resetTaHeight = () => {
     if (taRef.current) taRef.current.style.height = "auto";
@@ -233,7 +300,15 @@ export function BtwPanel(p: Props) {
 
   const submit = (value = taRef.current?.value ?? input) => {
     if (awaitingFirstChat || !p.sid || inputLockedRef.current) return;
+    if (importingRef.current) { flash("请等待附件导入完成"); return; }
     const command = parseSlash(value.trim());
+    if (command?.slash === "fast" && p.engine === "codex") {
+      if (p.onSetServiceTier("toggle")) {
+        setInput("");
+        resetTaHeight();
+      } else flash("服务档位设置暂未发送，请稍后重试。");
+      return;
+    }
     if (command?.slash === "open") {
       flash("请在主会话打开文件目录。");
       setInput("");
@@ -276,15 +351,18 @@ export function BtwPanel(p: Props) {
       return;
     }
     const prompt = composed.prompt;
-    const query: PendingQuery = { prompt };
+    const query: PendingQuery = {
+      prompt, images: images.length ? images : undefined,
+      files: files.length ? files : undefined,
+    };
     if (runtimeBusy) {
       const action = classifyBusySubmit(
         submitState, p.sendMode,
         p.engine === "codex" ? "codex" : "claude",
-        prompt.length > 0);
+        prompt.length > 0 || hasAttachments);
       if (action === "noop") return;
       if (action === "steer") {
-        if (p.onSteer(prompt)) {
+        if (p.onSteer(prompt, query.images, query.files)) {
           clearDraft();
           resetTaHeight();
         }
@@ -308,21 +386,21 @@ export function BtwPanel(p: Props) {
       resetTaHeight();
       return;
     }
-    if (!prompt) return;
-    if (p.onSend(prompt)) {
+    if (!prompt && !hasAttachments) return;
+    if (p.onSend(prompt, query.images, query.files)) {
       clearDraft();
       resetTaHeight();
     }
   };
   const requestButtonAction = () => {
-    if (inputLockedRef.current || buttonSendTimerRef.current !== null) return;
+    if (inputLockedRef.current || importingRef.current || buttonSendTimerRef.current !== null) return;
     buttonSendTimerRef.current = window.setTimeout(() => {
       buttonSendTimerRef.current = null;
-      if (inputLockedRef.current) return;
+      if (inputLockedRef.current || importingRef.current) return;
       const value = taRef.current?.value ?? input;
       // Stopping is an explicit button action. Empty Enter goes through submit
       // and remains a no-op.
-      if (runtimeBusy && !value.trim() && draft.pastes.length === 0) {
+      if (runtimeBusy && !value.trim() && pastes.length === 0 && !hasAttachments) {
         if (runtimeState === "running") p.onInterrupt();
         return;
       }
@@ -336,7 +414,7 @@ export function BtwPanel(p: Props) {
       ?? { id: p.rt.model, name: p.rt.model, ds: "", ic: "cpu" })
     : null;
   const effortName = effortNameForDisplay(p.rt?.effort);
-  const stopping = runtimeBusy && !hasText;
+  const stopping = runtimeBusy && !hasContent;
   const interruptSettling = isInterruptSettling(submitState);
   const primaryIsInterrupt = p.engine !== "codex";
   const sendIcon = !runtimeBusy ? "send"
@@ -344,14 +422,14 @@ export function BtwPanel(p: Props) {
       ? (primaryIsInterrupt ? "bolt" : "send") : "queue";
   const sendClass = "btw-send"
     + ((stopping || (runtimeBusy && p.sendMode === "steer"
-      && primaryIsInterrupt && hasText))
+      && primaryIsInterrupt && hasContent))
       ? " interrupt" : "");
-  const sendDisabled = inputLocked || awaitingFirstChat || !p.sid
-    || (!runtimeBusy && !hasText)
-    || isSettlingStopDisabled(submitState, hasText);
+  const sendDisabled = attachmentsLocked || importing
+    || (!runtimeBusy && !hasContent)
+    || isSettlingStopDisabled(submitState, hasContent);
 
   return (
-    <div className="btw-panel" data-lock-horizontal-swipe="true">
+    <div className="btw-panel" data-lock-horizontal-swipe="true" data-attachment-target="btw">
       <PanelResizer ariaLabel="调整 BTW 面板宽度" />
       <div className="btw-head">
         {p.hasArtifact
@@ -456,10 +534,21 @@ export function BtwPanel(p: Props) {
             ))}
           </div>
         )}
-        {draft.pastes.length > 0 && (
+        {(hasAttachments || pastes.length > 0) && (
           <div className="attach show btw-pastes">
-            <PasteCards pastes={draft.pastes}
-              disabled={inputLocked || awaitingFirstChat || !p.sid}
+            <PendingImageAttachments key={p.draftKey} images={images}
+              onRemove={(index) => updateDraft(current => ({
+                ...current, images: current.images.filter((_, candidate) => candidate !== index),
+              }))} />
+            {files.map((file, index) => <span key={index} className="attach-file">
+              <Icon name="read" size={14} /><span className="attach-fn">{file.filename}</span>
+              <button type="button" className="attach-x" aria-label={`移除 ${file.filename}`}
+                onClick={() => updateDraft(current => ({
+                  ...current, files: current.files.filter((_, candidate) => candidate !== index),
+                }))}><Icon name="close" size={12} /></button>
+            </span>)}
+            <PasteCards pastes={pastes}
+              disabled={attachmentsLocked}
               onChange={(pastes) => updateDraft((current) => ({
                 ...current, pastes,
               }))} />
@@ -481,6 +570,8 @@ export function BtwPanel(p: Props) {
           </div>
         )}
         <div className="btw-input">
+          <AttachmentPicker key={p.draftKey} onPick={onPickFiles}
+            disabled={attachmentsLocked || importing} />
           <textarea
             ref={taRef}
             value={input}
@@ -501,18 +592,7 @@ export function BtwPanel(p: Props) {
               imeSubmitRef.current.endComposition();
               setInput(event.currentTarget.value);
             }}
-            onPaste={(event) => {
-              const text = event.clipboardData.getData("text/plain");
-              if (text.length <= LONG_PASTE_THRESHOLD) return;
-              event.preventDefault();
-              updateDraft((current) => ({
-                ...current,
-                pastes: [
-                  ...current.pastes,
-                  makeComposerPaste(text, uuid()),
-                ],
-              }));
-            }}
+            onPaste={onPaste}
             onKeyDown={(event) => {
               if (!imeSubmitRef.current.shouldSubmitKey({
                 key: event.key,
@@ -543,8 +623,22 @@ export function BtwPanel(p: Props) {
             disabled={inputLocked || busy || !p.sid}>{model?.name ?? "模型读取中"}</button>
           <button className="hint-ctl" onClick={() => setSheetKind("efforts")}
             disabled={inputLocked || busy || !p.sid}>{effortName ?? "强度读取中"}</button>
+          {p.engine === "codex" && <button type="button"
+            className={"hint-ctl fast-chip" + (p.rt?.fast ? " on" : "")}
+            aria-label="BTW 服务档位" aria-pressed={!!p.rt?.fast}
+            disabled={attachmentsLocked} title="仅设置此侧边对话，下条消息生效"
+            onClick={() => {
+              if (!p.onSetServiceTier("toggle")) flash("服务档位设置暂未发送，请稍后重试。");
+            }}>{p.rt?.fast == null ? "档位读取中" : p.rt.fast ? "快速" : "标准"}</button>}
         </div>
       </div>
+      {dragOver && <div className="drop-overlay drop-overlay-btw" aria-hidden="true">
+        <div className="drop-card">
+          <span className="dc-ic"><Icon name="plus" size={32} /></span>
+          <div className="dc-tx">添加到侧边对话</div>
+          <div className="dc-sub">松开以添加图片或文件</div>
+        </div>
+      </div>}
       <CommandSheet
         open={sheetKind !== null}
         kind={sheetKind ?? "models"}

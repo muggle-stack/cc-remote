@@ -30,6 +30,7 @@ import {
 } from "../data";
 const CommandSheet = lazy(() => import("./CommandSheet").then(m => ({ default: m.CommandSheet })));
 import { attachmentBytes, snapshotAttachmentFiles } from "../img";
+import { useAttachmentDrop } from "../use-attachment-drop";
 import {
   readClipboardImport, resolveClipboardImport, insertClipboardText,
   type ClipboardImport,
@@ -199,14 +200,10 @@ export function Composer(p: Props) {
   const noticeTimer = useRef<number | null>(null);
   const [importing, setImporting] = useState(false);
   const importingRef = useRef(false);
-  const [dragDepth, setDragDepth] = useState(0);
-  const dragOver = dragDepth > 0;
   const taRef = useRef<HTMLTextAreaElement>(null);
   const imeSubmitRef = useRef(new ImeSubmitGuard());
   const buttonSendTimerRef = useRef<number | null>(null);
   const requestedSkillScopeRef = useRef<string | null>(null);
-  const pickFilesRef = useRef<(files: FileList | File[] | null) => Promise<void>>(
-    async () => {});
 
   useLayoutEffect(() => {
     if (draftKeyRef.current === p.draftKey) return;
@@ -381,6 +378,7 @@ export function Composer(p: Props) {
   const onPickFiles = async (
     fl: FileList | File[] | null, clipboard?: ClipboardImport,
   ) => {
+    if (locked) return;
     if (importingRef.current) { flash("附件正在导入，请稍候"); return; }
     const targetDraftKey = draftKeyRef.current;
     importingRef.current = true;
@@ -417,33 +415,7 @@ export function Composer(p: Props) {
       setImporting(false);
     }
   };
-  pickFilesRef.current = onPickFiles;
-
-  // Whole-window drag-drop overlay. The effect is refreshed with the current
-  // attachment limits/import state so its async drop handler never uses a stale
-  // count or appends after a send.
-  useEffect(() => {
-    const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types || []).includes("Files");
-    const onEnter = (e: DragEvent) => { if (hasFiles(e)) setDragDepth((d) => d + 1); };
-    const onLeave = (e: DragEvent) => { if (hasFiles(e)) setDragDepth((d) => Math.max(0, d - 1)); };
-    const onOver = (e: DragEvent) => { if (hasFiles(e)) e.preventDefault(); };
-    const onDrop = (e: DragEvent) => {
-      if (!hasFiles(e)) return;
-      e.preventDefault();
-      setDragDepth(0);
-      if (e.dataTransfer?.files?.length) void pickFilesRef.current(e.dataTransfer.files);
-    };
-    window.addEventListener("dragenter", onEnter);
-    window.addEventListener("dragleave", onLeave);
-    window.addEventListener("dragover", onOver);
-    window.addEventListener("drop", onDrop);
-    return () => {
-      window.removeEventListener("dragenter", onEnter);
-      window.removeEventListener("dragleave", onLeave);
-      window.removeEventListener("dragover", onOver);
-      window.removeEventListener("drop", onDrop);
-    };
-  }, []);
+  const dragOver = useAttachmentDrop("main", locked || importing, onPickFiles);
 
   // Keep the native textarea for reliable selection/undo/IME. Large text is
   // retained privately by the draft and represented only by an editable card.
@@ -1179,7 +1151,7 @@ export function Composer(p: Props) {
       /></Suspense>}
 
       {dragOver && (
-        <div className="drop-overlay" aria-hidden="true">
+        <div className="drop-overlay drop-overlay-main" aria-hidden="true">
           <div className="drop-card">
             <span className="dc-ic"><Icon name="plus" size={36} /></span>
             <div className="dc-tx">拖拽文件到此处发送</div>

@@ -821,8 +821,8 @@ export class RelayWs {
     });
   }
 
-  sendSetServiceTier(service_tier: string): void {
-    this.send({ v: PROTOCOL_VERSION, type: "set_service_tier", service_tier, ts: nowTs(), ...this.sidObj() });
+  sendSetServiceTier(service_tier: string, sid?: string): boolean {
+    return this.send({ v: PROTOCOL_VERSION, type: "set_service_tier", service_tier, ts: nowTs(), ...this.sidObj(sid) });
   }
 
   sendSetCollaborationMode(mode: "default" | "plan"): void {
