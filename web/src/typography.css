@@ -1,6 +1,7 @@
 /* Use these weights for app text, including font shorthands, so the reading
    preference also reaches lazy dialogs. The normal scale preserves existing
    typography exactly; bold text raises each weight without flattening it.
+   A fine text stroke also strengthens fallback fonts with limited weights.
    Embedded previews keep their own document and typography. */
 :root{
   --font-weight-400:400;
@@ -11,17 +12,23 @@
   --font-weight-650:650;
   --font-weight-700:700;
   --font-weight-750:750;
+  --reading-text-stroke:0px;
 }
 :root[data-bold-text="true"]{
-  --font-weight-400:600;
-  --font-weight-500:700;
-  --font-weight-550:750;
-  --font-weight-560:760;
+  --font-weight-400:700;
+  --font-weight-500:750;
+  --font-weight-550:775;
+  --font-weight-560:780;
   --font-weight-600:800;
   --font-weight-650:850;
   --font-weight-700:900;
   --font-weight-750:950;
+  --reading-text-stroke:0.3px;
 }
 
 body,select{font-weight:var(--font-weight-400)}
+body{-webkit-text-stroke:var(--reading-text-stroke) currentColor}
+/* Icons and inline diagrams retain their own geometry. Iframes are separate
+   documents and never inherit the app's reading preference. */
+svg{-webkit-text-stroke:0}
 h1,h2,h3,h4,h5,h6,th{font-weight:var(--font-weight-700)}
