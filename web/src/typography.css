@@ -1,0 +1,27 @@
+/* Use these weights for app text, including font shorthands, so the reading
+   preference also reaches lazy dialogs. The normal scale preserves existing
+   typography exactly; bold text raises each weight without flattening it.
+   Embedded previews keep their own document and typography. */
+:root{
+  --font-weight-400:400;
+  --font-weight-500:500;
+  --font-weight-550:550;
+  --font-weight-560:560;
+  --font-weight-600:600;
+  --font-weight-650:650;
+  --font-weight-700:700;
+  --font-weight-750:750;
+}
+:root[data-bold-text="true"]{
+  --font-weight-400:600;
+  --font-weight-500:700;
+  --font-weight-550:750;
+  --font-weight-560:760;
+  --font-weight-600:800;
+  --font-weight-650:850;
+  --font-weight-700:900;
+  --font-weight-750:950;
+}
+
+body,select{font-weight:var(--font-weight-400)}
+h1,h2,h3,h4,h5,h6,th{font-weight:var(--font-weight-700)}

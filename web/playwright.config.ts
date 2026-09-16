@@ -25,7 +25,7 @@ const WEBKIT_GENERAL_EXCLUSIONS = [
 
 export default defineConfig({
   testDir: "./tests",
-  testMatch: ["history-browser.spec.ts", "background-tasks.spec.ts"],
+  testMatch: ["history-browser.spec.ts", "background-tasks.spec.ts", "themes.spec.ts"],
   fullyParallel: false,
   workers: 1,
   retries: process.env.CI ? 2 : 0,

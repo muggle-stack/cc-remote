@@ -6,7 +6,7 @@ import "./CenteredSheet.css";
 
 /** Shared selection surface, centered in the visible chat on every device. */
 export function CenteredSheet({ open, label, onClose, children, className = "",
-  maxWidth = 520, maxHeight = 720, header = true, returnFocusRef }: {
+  maxWidth = 520, maxHeight = 720, minimumHeight = 360, header = true, returnFocusRef }: {
   open: boolean;
   label: string;
   onClose: () => void;
@@ -14,6 +14,8 @@ export function CenteredSheet({ open, label, onClose, children, className = "",
   className?: string;
   maxWidth?: number;
   maxHeight?: number;
+  /** Allow content-heavy pickers to use the visible viewport when chat space is short. */
+  minimumHeight?: number;
   header?: boolean;
   /** Touch browsers may leave the trigger unfocused when opening a dialog. */
   returnFocusRef?: RefObject<HTMLElement | null>;
@@ -22,7 +24,7 @@ export function CenteredSheet({ open, label, onClose, children, className = "",
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
   const geometry = useChatDialogGeometry({
-    open, maxWidth, maxHeight, minimumHeight: 360,
+    open, maxWidth, maxHeight, minimumHeight,
   });
   const visible = open && !!geometry;
   useEffect(() => {
@@ -58,7 +60,7 @@ export function CenteredSheet({ open, label, onClose, children, className = "",
   const content = <>
     <div className="scrim show centered-sheet-scrim" onClick={onClose} />
     <section ref={ref} tabIndex={-1} className={`sheet show centered-sheet ${className}`}
-      role="dialog" aria-modal="true" aria-label={label} style={geometry ?? undefined}>
+      role="dialog" aria-modal="true" aria-label={label} style={geometry ?? undefined} data-lock-horizontal-swipe>
       {header && <header className="centered-sheet-head">
         <span className="sheet-title">{label}</span>
         <button type="button" onClick={onClose} aria-label={`关闭${label}`}>

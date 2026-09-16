@@ -59,6 +59,7 @@ import {
 } from "../src/components/QueuedQueryDialog";
 import { DirPicker } from "../src/components/DirPicker";
 import { HeaderMenu } from "../src/components/HeaderMenu";
+import { useBoldText } from "../src/use-bold-text";
 import { UsageActivitySheet } from "../src/components/UsageActivitySheet";
 import { displayHistoryProjection } from "../src/history-recovery";
 import { summaryHistoryTurns } from "../src/history-summary";
@@ -536,6 +537,7 @@ function UsageActivityBrowserFixture({
   engine: "claude" | "codex";
 }) {
   const [activityOpen, setActivityOpen] = useState(false);
+  const { boldText, setBoldText } = useBoldText();
   const report = useMemo(fixtureUsageReport, []);
   useEffect(() => {
     document.documentElement.dataset.engine = engine;
@@ -546,12 +548,14 @@ function UsageActivityBrowserFixture({
       <HeaderMenu
         engine={engine}
         theme="dark"
+        themeChoice="dark"
+        boldText={boldText} onBoldText={setBoldText}
         notificationMode="off"
         notificationBinding="off"
         notificationAvailable
         onNotificationMode={async () => true}
         onOpenUsageActivity={() => setActivityOpen(true)}
-        onToggleTheme={() => {}}
+        onSelectTheme={() => {}}
         onLogout={() => {}}
       />
     </header>

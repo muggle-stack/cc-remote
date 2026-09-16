@@ -29,11 +29,11 @@
   border-radius: 20px; box-shadow: var(--shadow); background: var(--surface); color: var(--text);
   font-size: 13px; line-height: 1.5;
 }
-.timed-task-heading { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--accent-ink); }
+.timed-task-heading { display: flex; align-items: center; gap: 8px; font-weight: var(--font-weight-600); color: var(--accent-ink); }
 .timed-task-title { color: var(--dim); margin-top: 9px; overflow-wrap: anywhere; }
 .timed-task-title span { color: var(--faint); }
 .timed-task-next { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-top: 17px; color: var(--dim); }
-.timed-task-next strong { font-family: var(--mono); font-size: 19px; font-weight: 500; color: var(--text); }
+.timed-task-next strong { font-family: var(--mono); font-size: 19px; font-weight: var(--font-weight-500); color: var(--text); }
 .timed-task-countdown { text-align: right; color: var(--accent-ink); font-variant-numeric: tabular-nums; }
 .timed-task-progress { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 11px; color: var(--dim); font-size: 12px; }
 .timed-message-tag { font-size: 12px; line-height: 1.5; color: var(--dim); margin-bottom: 8px; white-space: normal; }
@@ -42,4 +42,4 @@
 .timed-message-tag summary:hover { color: var(--accent-ink); }
 .timed-message-tag[open] summary svg:last-child { transform: rotate(180deg); }
 .timed-message-tag > div { display: flex; flex-direction: column; gap: 3px; border-top: 1px solid var(--accent-line); margin-top: 8px; padding-top: 8px; }
-.timed-message-tag strong { font-weight: 500; color: var(--text); }
+.timed-message-tag strong { font-weight: var(--font-weight-500); color: var(--text); }

@@ -1,12 +1,18 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "../icons";
 import type { NotificationMode } from "../notification-mode";
 import type { PushBindingState } from "../push";
+import { themeLabel, type ThemeChoice } from "../themes";
+
+const ThemePicker = lazy(() => import("./ThemePicker"));
 
 interface Props {
   engine: "claude" | "codex";
   theme: "light" | "dark";
+  themeChoice: ThemeChoice;
+  boldText: boolean;
+  onBoldText: (enabled: boolean) => void;
   notificationMode: NotificationMode;
   notificationBinding: PushBindingState;
   notificationAvailable: boolean;
@@ -14,7 +20,7 @@ interface Props {
   onOpenUsageActivity: () => void;
   onOpenViewer?: () => void;
   onOpenFiles?: () => void;
-  onToggleTheme: () => void;
+  onSelectTheme: (choice: ThemeChoice) => void;
   onLogout: () => void;
 }
 
@@ -32,6 +38,9 @@ const MODE_LABELS: Record<NotificationMode, string> = {
 export function HeaderMenu({
   engine,
   theme,
+  themeChoice,
+  boldText,
+  onBoldText,
   notificationMode,
   notificationBinding,
   notificationAvailable,
@@ -39,13 +48,14 @@ export function HeaderMenu({
   onOpenUsageActivity,
   onOpenViewer,
   onOpenFiles,
-  onToggleTheme,
+  onSelectTheme,
   onLogout,
 }: Props) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const cardRef = useRef<HTMLElement>(null);
   const firstRef = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
+  const [themeOpen, setThemeOpen] = useState(false);
   const [page, setPage] = useState<"main" | "notifications">("main");
   const [changingMode, setChangingMode] = useState(false);
   const [position, setPosition] = useState<Position>({ top: 58, right: 8 });
@@ -184,9 +194,17 @@ export function HeaderMenu({
                     <Icon name="chevron-right" size={16} />
                   </button>
                   <button type="button" className="header-menu-item"
-                    onClick={onToggleTheme}>
+                    onClick={() => { close(); setThemeOpen(true); }}>
                     <Icon name={theme === "dark" ? "sun" : "moon"} size={18} />
-                    <span><b>主题</b><small>{theme === "dark" ? "深色" : "浅色"}</small></span>
+                    <span><b>主题</b><small>{themeLabel(themeChoice)}</small></span>
+                    <Icon name="chevron-right" size={16} />
+                  </button>
+                  <button type="button" className="header-menu-item" role="switch"
+                    aria-label="加粗字体" aria-checked={boldText}
+                    onClick={() => onBoldText(!boldText)}>
+                    <Icon name="bold" size={18} />
+                    <span><b>加粗字体</b><small>整页文字加粗，更易阅读</small></span>
+                    <span className="header-menu-switch" aria-hidden="true" />
                   </button>
                   <button type="button" className="header-menu-item danger"
                     onClick={onLogout}>
@@ -234,6 +252,10 @@ export function HeaderMenu({
         </div>,
         document.body,
       )}
+      {themeOpen && <Suspense fallback={null}>
+        <ThemePicker engine={engine} choice={themeChoice} onSelect={onSelectTheme}
+          onClose={() => setThemeOpen(false)} returnFocusRef={triggerRef} />
+      </Suspense>}
     </>
   );
 }
