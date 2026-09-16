@@ -139,7 +139,8 @@ const textSamples = ["body", ".prose p", ".prose h3", ".prose strong", ".prose p
 async function sampleTypography(page: Page) {
   return Promise.all(textSamples.map(selector => page.locator(selector).first().evaluate(node => {
     const style = getComputedStyle(node);
-    return { weight: Number(style.fontWeight), size: style.fontSize, family: style.fontFamily };
+    return { weight: Number(style.fontWeight), size: style.fontSize, family: style.fontFamily,
+      stroke: parseFloat(style.webkitTextStrokeWidth) };
   })));
 }
 
@@ -157,8 +158,22 @@ test("bold text preserves hierarchy and drafts across engines, themes and reload
   await expect(page.locator("html")).toHaveAttribute("data-bold-text", "true");
   const bold = await sampleTypography(page);
   for (let index = 0; index < normal.length; index++) {
-    expect(bold[index], textSamples[index]).toEqual({ ...normal[index], weight: normal[index].weight + 200 });
+    const sample = bold[index];
+    expect(sample.size, textSamples[index]).toBe(normal[index].size);
+    expect(sample.family, textSamples[index]).toBe(normal[index].family);
+    expect(sample.weight, textSamples[index]).toBeGreaterThan(normal[index].weight);
+    expect(sample.weight, textSamples[index]).toBeGreaterThanOrEqual(700);
+    expect(sample.stroke, textSamples[index]).toBeGreaterThan(0);
+    expect(sample.stroke, textSamples[index]).toBeLessThanOrEqual(0.35);
+    // Emphasis must remain distinguishable from ordinary body text.
+    for (let other = 0; other < normal.length; other++) {
+      if (normal[index].weight > normal[other].weight) {
+        expect(sample.weight).toBeGreaterThan(bold[other].weight);
+      }
+    }
   }
+  await expect(page.locator(".prose p").first()).toHaveCSS("font-weight", "700");
+  await expect(page.locator(".c-head svg").first()).toHaveCSS("-webkit-text-stroke-width", "0px");
   await expect(input).toHaveValue("保留草稿，调整阅读效果");
   await page.screenshot({ path: info.outputPath("bold-text-menu.png"), animations: "disabled" });
   await page.keyboard.press("Escape");
@@ -169,12 +184,12 @@ test("bold text preserves hierarchy and drafts across engines, themes and reload
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "切换新会话引擎" }).click();
   await page.getByRole("menuitemradio", { name: "Claude" }).click();
-  await expect(page.locator(".prose p").first()).toHaveCSS("font-weight", "600");
+  await expect(page.locator(".prose p").first()).toHaveCSS("font-weight", "700");
   await page.getByRole("button", { name: "切换新会话引擎" }).click();
   const dsh = page.getByRole("menuitemradio", { name: "DSH" });
   if (await dsh.count()) {
     await dsh.click();
-    await expect(page.locator(".prose p").first()).toHaveCSS("font-weight", "600");
+    await expect(page.locator(".prose p").first()).toHaveCSS("font-weight", "700");
     await page.getByRole("button", { name: "切换新会话引擎" }).click();
   }
   await page.getByRole("menuitemradio", { name: "Codex" }).click();
@@ -197,7 +212,7 @@ test("bold text syncs between browser tabs and works without storage", async ({ 
   await other.goto("/tests/theme-preview.html?engine=claude");
   await page.getByRole("button", { name: "更多设置", exact: true }).click();
   await page.getByRole("switch", { name: "加粗字体", exact: true }).click();
-  await expect(other.locator(".prose p").first()).toHaveCSS("font-weight", "600");
+  await expect(other.locator(".prose p").first()).toHaveCSS("font-weight", "700");
   await other.getByRole("button", { name: "更多设置", exact: true }).click();
   await expect(other.getByRole("switch", { name: "加粗字体", exact: true })).toBeChecked();
   await other.getByRole("switch", { name: "加粗字体", exact: true }).click();
@@ -212,6 +227,6 @@ test("bold text syncs between browser tabs and works without storage", async ({ 
   await page.reload();
   await page.getByRole("button", { name: "更多设置", exact: true }).click();
   await page.getByRole("switch", { name: "加粗字体", exact: true }).click();
-  await expect(page.locator(".prose p").first()).toHaveCSS("font-weight", "600");
+  await expect(page.locator(".prose p").first()).toHaveCSS("font-weight", "700");
   expect(errors).toEqual([]);
 });
