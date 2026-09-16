@@ -42,6 +42,7 @@ from cc_remote.wrapper.sanitize import bounded_text, bounded_tool_input
 from cc_remote.wrapper.claude_compaction import compact_metadata
 from cc_remote.wrapper.claude_model_fallback import FALLBACK_TOOL, model_fallback_event
 from cc_remote.wrapper.turn_changes import native_claude_diff
+from cc_remote.wrapper.token_usage import UsageLedger, native_usage
 
 _SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$")
 _SAFE_WIRE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$")
@@ -719,9 +720,13 @@ class StreamTranslator:
         # id and from tool-result user envelopes.
         self._last_user_uuid: str | None = None
         self._compaction_id: str | None = None
+        self._usage = UsageLedger()
+        self._usage_message: tuple[str, str | None] | None = None
+        self._usage_rebound = False
 
     def rebind_turn(self, turn_id: str) -> None:
         """Advance at a native input echo while retaining unfinished item owners."""
+        self._usage_rebound = True
         self.turn_id = turn_id
         self._ambiguous_final_mid = None
         self._has_final_text = False
@@ -1095,6 +1100,21 @@ class StreamTranslator:
     def _feed_stream_event(self, msg: StreamEvent) -> list:
         events: list = []
         ev = msg.event if isinstance(msg.event, dict) else {}
+        if not msg.parent_tool_use_id:
+            if ev.get("type") == "message_start":
+                message = ev.get("message")
+                if not isinstance(message, dict):
+                    self._usage_message = None
+                    return events
+                mid = message.get("id")
+                self._usage_message = (mid, self.turn_id) if isinstance(mid, str) else None
+                if self._usage_message:
+                    events.extend(self._usage.update(self.turn_id, mid,
+                        native_usage(message.get("usage"), "claude", output=False)))
+            elif ev.get("type") == "message_delta" and self._usage_message:
+                mid, owner = self._usage_message
+                events.extend(self._usage.update(owner, mid,
+                    native_usage(ev.get("usage"), "claude")))
         if ev.get("type") != "content_block_delta":
             return events
         delta = ev.get("delta") if isinstance(ev.get("delta"), dict) else {}
@@ -1110,6 +1130,13 @@ class StreamTranslator:
 
     def _feed_assistant(self, msg: AssistantMessage) -> list:
         events: list = []
+        if not msg.parent_tool_use_id and msg.message_id:
+            owner = (self._usage_message[1] if self._usage_message
+                     and self._usage_message[0] == msg.message_id else self.turn_id)
+            # Assembled blocks repeat the message-start usage, including an
+            # output placeholder. Only message_delta/Result can supply output.
+            events.extend(self._usage.update(owner, msg.message_id,
+                native_usage(msg.usage, "claude", output=False)))
         if (isinstance(msg.uuid, str)
                 and _CLAUDE_MESSAGE_UUID.fullmatch(msg.uuid)):
             self._last_assistant_uuid = msg.uuid
@@ -1562,6 +1589,9 @@ class StreamTranslator:
             # or invent a successful compact (including interrupted commands).
             events = self._end_unfinished_compaction(
                 "interrupted" if msg.is_error else "failed")
+            if not self._usage_rebound and not msg.is_error:
+                events.extend(self._usage.replace(self.turn_id,
+                    native_usage(msg.usage, "claude")))
             if (not msg.is_error and not self._has_final_text
                     and self._ambiguous_final_mid is not None):
                 events.append(AssistantMsgEnd(

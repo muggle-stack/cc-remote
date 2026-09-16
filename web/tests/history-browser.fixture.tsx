@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import { createRoot } from "react-dom/client";
+import { TurnUsageFixture } from "./fixtures/turn-usage";
 import { BackgroundTasksFixture } from "./fixtures/background-tasks";
 
 import "../src/index.css";
@@ -3042,7 +3043,8 @@ function CodexFileCitationFixture() {
 
 const rootParams = new URLSearchParams(window.location.search);
 createRoot(document.getElementById("root")!).render(
-  rootParams.has("artifact-audio")
+  rootParams.has("turn-usage") ? <TurnUsageFixture />
+    : rootParams.has("artifact-audio")
     ? <AudioPreviewFixture />
     : rootParams.has("artifact-html")
     ? <ArtifactPreviewFixture kind="html" />

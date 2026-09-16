@@ -494,6 +494,7 @@ export function BtwPanel(p: Props) {
               </div>
             : <ChatView sid={p.sid ?? null} turns={turns}
                 engine={p.engine}
+                turnUsage={p.rt?.turnUsage}
                 activeTurnId={activeTurnId}
                 onEdit={() => {}} onGetDiff={() => {}}
                 onOpenFile={p.onOpenFile}

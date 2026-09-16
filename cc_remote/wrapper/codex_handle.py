@@ -36,6 +36,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from cc_remote import __version__
 from cc_remote.log import logger
+from cc_remote.wrapper.token_usage import CodexUsageTracker
 from cc_remote.protocol import (
     MAX_SAFE_WIRE_INTEGER,
     MAX_SAFE_WIRE_TIMESTAMP_SECONDS,
@@ -1144,7 +1145,7 @@ _MODEL_TURN_METHODS = frozenset({
     "model/verification",
 })
 _TURN_QUEUE_METHODS = frozenset({
-    "error", "thread/compacted", *_MODEL_TURN_METHODS,
+    "error", "thread/compacted", "thread/tokenUsage/updated", *_MODEL_TURN_METHODS,
 })
 
 
@@ -1645,6 +1646,7 @@ class CodexHandle:
         self._http_provider_repair_tasks: set[asyncio.Task] = set()
         self._http_provider_repair_stop = asyncio.Event()
         self.last_token_usage: Optional[dict] = None
+        self._turn_usage = CodexUsageTracker()
         self._context_usage_turn_id: Optional[str] = None
         self.context_window: Optional[int] = None
         self._rollout_context_recovery_attempted = False
@@ -2044,6 +2046,7 @@ class CodexHandle:
         self._compaction_continuation_turn_id = None
         self._discard_managed_compaction_continuation()
         self.last_token_usage = None
+        self._turn_usage = CodexUsageTracker()
         self._context_usage_turn_id = None
         self.context_window = None
         self._rollout_context_recovery_attempted = False
@@ -7117,6 +7120,14 @@ class CodexHandle:
         )
         managed_queue_message = self._logicalize_managed_compaction_notification(
             m)
+        usage = self._turn_usage.feed(managed_queue_message)
+        if usage is not None:
+            # Keep accounting on the same logical owner across a native
+            # compaction continuation, just like the narrative stream.
+            fields = {"_cc_remote_usage": usage.usage.model_dump()}
+            m = {**m, **fields}
+            managed_queue_message = {**managed_queue_message, **fields}
+            raw_size = self._notification_wire_size(m)
         managed_queue_raw_size = (
             raw_size
             if managed_queue_message is m

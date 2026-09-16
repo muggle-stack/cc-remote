@@ -16,6 +16,7 @@ from cc_remote.protocol import (
     ProcessEvent, ToolResult, ToolUse, TurnBinding, TurnEnd, TurnPlan, TurnResult,
     UserMsg,
 )
+from cc_remote.wrapper.token_usage import UsageLedger, native_usage
 from cc_remote.wrapper.dsh_client import DshError
 
 
@@ -109,6 +110,7 @@ class DshProjection:
         self.context_projection_seq = -1
         self.image_refs: dict[str, list[dict]] = {}
         self.fork_seqs: dict[str, int] = {}
+        self.usage = UsageLedger()
 
     def owner_for(self, data: dict) -> str:
         key = (data.get("turn", self.turn), data.get("step", 0))
@@ -278,6 +280,18 @@ class DshProjection:
         if kind in {"assistant/message", "assistant/attempt"}:
             opening = self.autonomous(data["turn"])
             owner = self.owner_for(data)
+            usage_key = f"record-{seq}"
+            if self.attempt and (self.attempt.turn, self.attempt.step) == (data["turn"], data["step"]):
+                self.usage.settle(owner, self.attempt.id, usage_key)
+            usage = native_usage(data.get("usage"), "dsh")
+            # Failed attempts can report usage only in their recorded stream.
+            if usage is None:
+                stream = data.get("stream")
+                for packed in stream if isinstance(stream, list) else []:
+                    chunk = packed.get("chunk") if isinstance(packed, dict) else None
+                    if isinstance(chunk, dict) and chunk.get("type") == "usage":
+                        usage = native_usage(chunk.get("usage"), "dsh") or usage
+            opening += self.usage.update(owner, usage_key, usage)
             if kind == "assistant/attempt":
                 result = self._replace_text(data, owner, [], settled=False)
                 result.append(ProcessEvent(
@@ -434,6 +448,9 @@ class DshProjection:
 
     def _chunk(self, chunk):
         attempt = self.attempt
+        if attempt is not None and chunk.get("type") == "usage":
+            return self.usage.update(attempt.owner, attempt.id,
+                                     native_usage(chunk.get("usage"), "dsh"))
         if attempt is None or chunk.get("type") not in {"text-delta", "reasoning-delta"}:
             return []
         channel = "thinking" if chunk["type"] == "reasoning-delta" else "commentary"

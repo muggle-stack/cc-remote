@@ -21,6 +21,7 @@ import type {
 } from "../domain/conversation";
 import type { Space } from "../protocol";
 import type { LoadTurnFilePage } from "../turn-file-pages";
+import { usageForTurn, type TurnUsageReadings } from "../turn-usage";
 import { MessageBlock } from "./MessageBlock";
 import { TimedMessageTag } from "./TimedMessageTag";
 import { Icon, ClaudeMark, ClaudeWorking, ClaudeSpark } from "../icons";
@@ -85,6 +86,7 @@ import { mergeDetailWithLiveTail } from "../history-merge";
 import { presentAsyncQuestionReplies } from "../async-question-presentation";
 import type { QueryAcceptanceResult } from "../outbox";
 
+const TurnUsageIndicator = lazy(() => import("./TurnUsageIndicator").then(m => ({ default: m.TurnUsageIndicator })));
 const DshProducedFiles = lazy(() => import("./DshProducedFiles"));
 const AsyncQuestionCard = lazy(() => import("./AsyncQuestionCard"));
 const AsyncQuestionHost = lazy(() => import("./AsyncQuestionDialog"));
@@ -348,7 +350,7 @@ function detailTurnFingerprint(turn: Turn): string {
   ].join("\u0000");
 }
 
-export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading,
+export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claude", loading,
   hasMore: incomingHasMore,
   historyPagingReady = true,
   historyRevision = null, historyViewRevision = historyRevision,
@@ -368,6 +370,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
   activeTurnId = null,
   ambiguousActiveTurnIds = [],
   surface = "code" }: {
+  turnUsage?: TurnUsageReadings;
   sid: string | null;
   turns: Turn[];
   surface?: Space;
@@ -3081,6 +3084,9 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                 <div className="turn-working" role="status" aria-live="polite">
                   <ClaudeWorking size={24} />
                   <span className="turn-working-tx">{workingLabel}</span>
+                  {usageForTurn(t, turnUsage) && <Suspense fallback={null}>
+                    <TurnUsageIndicator usage={usageForTurn(t, turnUsage)} />
+                  </Suspense>}
                   {!showCompletionFooter && <Suspense fallback={null}>
                     <PagePreviewLinks turn={t} sid={sid} />
                   </Suspense>}

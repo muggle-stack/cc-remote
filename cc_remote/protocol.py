@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 68
+PROTOCOL_VERSION = 69
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -675,6 +675,22 @@ class CommandAck(_Base):
 
 # ---- wrapper -> client (via relay); all carry seq ----
 
+class TokenUsage(BaseModel):
+    """Native token counts. Input includes cache reads/writes; null is unknown."""
+    model_config = ConfigDict(extra="forbid")
+    input_tokens: Optional[int] = Field(default=None, ge=0, le=MAX_SAFE_WIRE_INTEGER, strict=True)
+    output_tokens: Optional[int] = Field(default=None, ge=0, le=MAX_SAFE_WIRE_INTEGER, strict=True)
+    cache_read_tokens: Optional[int] = Field(default=None, ge=0, le=MAX_SAFE_WIRE_INTEGER, strict=True)
+    cache_write_tokens: Optional[int] = Field(default=None, ge=0, le=MAX_SAFE_WIRE_INTEGER, strict=True)
+
+
+class TurnUsage(_Base):
+    """Replace-only totals for one exact native/logical turn, never a delta."""
+    type: Literal["turn_usage"] = "turn_usage"
+    turn_id: WireId
+    usage: TokenUsage
+
+
 class ReplayStart(_Base):
     type: Literal["replay_start"] = "replay_start"
     from_seq: int
@@ -692,6 +708,7 @@ class ReplayEnd(_Base):
     type: Literal["replay_end"] = "replay_end"
     to_seq: int
     truncated: bool
+    turn_usage: list[TurnUsage] = Field(default_factory=list, max_length=8)
 
 
 class Snapshot(_Base):
@@ -705,6 +722,7 @@ class Snapshot(_Base):
     # a live SessionControl event; embedding it here closes reconnect races when
     # the corresponding control event has already fallen out of the ring.
     control: Optional[SessionControl] = None
+    turn_usage: list[TurnUsage] = Field(default_factory=list, max_length=8)
 
 
 class StateEvent(_Base):
@@ -3053,7 +3071,7 @@ AnyMessage = Union[
     AcknowledgeCompletion, CompletionState,
     UserMsg, TurnSteered, AssistantMsgStart, Delta, ToolUse, ToolDelta, ToolResult,
     AssistantMsgEnd, ProcessEvent, TurnPlan, TurnDiff, TurnFileChanges, TurnBinding,
-    TurnEnd, Error, WrapperDisconnected, WrapperReconnected,
+    TurnUsage, TurnEnd, Error, WrapperDisconnected, WrapperReconnected,
 ]
 
 # Session-narrative events the wrapper seqs and buffers. Replay/snapshot/
@@ -3067,7 +3085,7 @@ DOWNSTREAM_TYPES = frozenset({
     "collaboration_mode", "session_control", "query_queue", "btw_opened",
     "assistant_msg_start", "delta", "tool_use", "tool_delta", "tool_result",
     "assistant_msg_end", "process", "turn_plan", "turn_diff", "turn_file_changes", "turn_binding",
-    "turn_end", "completion_state",
+    "turn_usage", "turn_end", "completion_state",
     "error", "ask_user", "ask_user_closed", "history_invalidated", "artifact_invalidated",
 })
 
@@ -3230,6 +3248,7 @@ _TYPE_MAP: dict[str, type[BaseModel]] = {
     "turn_file_changes": TurnFileChanges,
     "turn_binding": TurnBinding,
     "turn_end": TurnEnd,
+    "turn_usage": TurnUsage,
     "error": Error,
     "wrapper_disconnected": WrapperDisconnected,
     "wrapper_reconnected": WrapperReconnected,

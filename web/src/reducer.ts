@@ -92,6 +92,8 @@ import {
   type Turn,
 } from "./domain/conversation.ts";
 
+import { rememberTurnUsage, type TurnUsageReadings } from "./turn-usage";
+
 const DETAIL_PARSE_ERROR = "过程解析失败";
 
 export type {
@@ -199,6 +201,7 @@ export interface Artifact {
 }
 
 export interface SessionRuntime {
+  turnUsage?: TurnUsageReadings;
   dsh?: DshState;
   dshCommandResult?: DshCommandResult;
   turns: Turn[];
@@ -2160,6 +2163,7 @@ function switchControlGeneration(
     runtime.pendingLiveBinding = null;
     runtime.pendingTerminalFences = null;
     runtime.legacyLiveFallbackBlocked = true;
+    runtime.turnUsage = undefined;
     runtime.backgroundProcesses = [];
     runtime.backgroundLevelEmpty = false;
     runtime.backgroundLevelTs = undefined;
@@ -3404,6 +3408,9 @@ function reduceEvent(
       // initial explicit switch.
       return { ...patch(state, key, (rt) => {
         switchControlGeneration(rt, e.generation);
+        for (const usage of e.turn_usage ?? []) {
+          rt.turnUsage = rememberTurnUsage(rt.turnUsage, usage);
+        }
         rt.state = e.state;
         rt.syncReady = true;
         rt.ccSessionId = e.cc_session_id ?? rt.ccSessionId;
@@ -5749,6 +5756,9 @@ function reduceEvent(
     }
     case "replay_end":
       return { ...patch(state, e.sid, (rt) => {
+        for (const usage of e.turn_usage ?? []) {
+          rt.turnUsage = rememberTurnUsage(rt.turnUsage, usage);
+        }
         rt.replaying = false;
         rt.syncReady = true;
         rt.truncated = rt.truncated || e.truncated;
@@ -6528,6 +6538,10 @@ function reduceEvent(
         t.progress = undefined;
         if (boundCompletedTurns) limitTurnBlocks(t);
         rt.turns = turns;
+      });
+    case "turn_usage":
+      return patch(state, e.sid, (rt) => {
+        rt.turnUsage = rememberTurnUsage(rt.turnUsage, e);
       });
     case "turn_binding":
       return patch(state, e.sid, (rt) => {

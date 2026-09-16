@@ -5864,6 +5864,7 @@ export default function App() {
                 turnId: planProgress.turnId,
                 itemId: planProgress.block.item_id,
               } : null}
+              turnUsage={rt.turnUsage}
               activeTurnId={activeTurnId}
               ambiguousActiveTurnIds={ambiguousActiveTurnIds}
               onOpenAgent={focusedEngine === "claude" && space === "code"
