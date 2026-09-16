@@ -10211,6 +10211,8 @@ class WrapperMachine:
         # treats an absent ``to`` as broadcast, so fail closed for an impossible
         # ownerless fork rather than leaking its contents.
         msg.sid = self._ctx_wire_sid(ctx) or ctx.key
+        if isinstance(msg, Snapshot):
+            msg.turn_usage = ctx.buffer.latest_turn_usage()
         if isinstance(msg, UserMsg) and ctx.engine == "codex" and not ctx.btw:
             try:
                 profile, native_sid = self._codex_target(msg.sid)
@@ -11515,6 +11517,7 @@ class WrapperMachine:
             if ctx is not None:
                 replay.state = ctx.buffer.latest_state() or ctx.state
                 replay.tail_text = ctx.buffer.latest_tail_text()
+                replay.turn_usage = ctx.buffer.latest_turn_usage()
                 replay.cc_session_id = self._ctx_wire_sid(ctx)
                 replay.cwd = ctx.cwd
                 replay.generation = self.instance_id
@@ -11990,6 +11993,7 @@ class WrapperMachine:
                         cc_session_id=sid,
                         state=st,
                         tail_text=tail,
+                        turn_usage=ctx.buffer.latest_turn_usage(),
                         cwd=ctx.cwd,
                         generation=self.instance_id,
                         control=self._session_control(ctx),

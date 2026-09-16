@@ -123,8 +123,10 @@ export interface Ping extends Base { type: "ping"; n: number }
 export interface Pong extends Base { type: "pong"; n: number }
 export interface CommandAck extends Base { type: "command_ack"; cmd_id: string; client_id: string }
 export interface ReplayStart extends Base { type: "replay_start"; from_seq: number; to_seq: number; truncated: boolean; rebuild?: boolean; generation?: string | null }
-export interface ReplayEnd extends Base { type: "replay_end"; to_seq: number; truncated: boolean }
-export interface Snapshot extends Base { type: "snapshot"; cc_session_id?: string | null; state: State; tail_text: string; cwd?: string | null; generation?: string | null; control?: SessionControl | null }
+export interface ReplayEnd extends Base { type: "replay_end"; to_seq: number; truncated: boolean; turn_usage?: TurnUsage[] }
+export interface TokenUsage { input_tokens?: number | null; output_tokens?: number | null; cache_read_tokens?: number | null; cache_write_tokens?: number | null }
+export interface TurnUsage extends Base { type: "turn_usage"; turn_id: string; usage: TokenUsage }
+export interface Snapshot extends Base { type: "snapshot"; cc_session_id?: string | null; state: State; tail_text: string; cwd?: string | null; generation?: string | null; control?: SessionControl | null; turn_usage?: TurnUsage[] }
 export interface StateEvent extends Base {
   type: "state";
   state: State;
@@ -715,9 +717,9 @@ export type ServerEvent = FilesListed | CodexContext
   | DirList
   | UserMsg | TurnSteered | AssistantMsgStart | Delta | ToolUse | ToolDelta | ToolResult | AssistantMsgEnd
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
-  | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
+  | TurnUsage | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 67;
+export const PROTOCOL_VERSION = 68;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

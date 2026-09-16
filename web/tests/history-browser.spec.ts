@@ -10111,3 +10111,37 @@ test("session action menu keeps keyboard navigation and closes when its card scr
     <= element.closest(".s-scroll")!.getBoundingClientRect().top)).toBe(true);
   await expect(menu).toHaveCount(0);
 });
+
+for (const engine of ["codex", "claude"]) {
+  test(`live token usage ${engine} updates and opens above the composer`, async ({ page, isMobile }, testInfo) => {
+    await page.goto(`/tests/history-browser.html?turn-usage&engine=${engine}&theme=dark`);
+    const trigger = page.getByRole("button", { name: "查看 token 用量" });
+    await expect(trigger).toContainText("↑ 184k");
+    await expect(trigger).toContainText("↓ 2.4k tokens");
+    if (isMobile) await trigger.click();
+    else await trigger.hover();
+    const card = page.getByRole("dialog", { name: "Token 用量", exact: true });
+    await expect(card).toBeVisible();
+    await expect(card).toContainText("184,001");
+    await expect(card).toContainText("180,000");
+    const bounds = await card.boundingBox();
+    const composer = await page.locator(".composer").boundingBox();
+    expect(bounds!.y).toBeGreaterThanOrEqual(0);
+    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(composer!.y + 1);
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+    // Drive a native update without moving the pointer out of the disclosure.
+    await page.getByRole("button", { name: "更新用量" }).evaluate(el => (el as HTMLButtonElement).click());
+    await expect(trigger).toContainText("↓ 5.8k tokens");
+    await expect(card).toContainText("5,820");
+    await expect(card).toContainText("182,000");
+    await page.screenshot({ path: testInfo.outputPath("token-usage.png") });
+    await page.keyboard.press("Escape");
+    await expect(card).toBeHidden();
+    await trigger.click();
+    await expect(card).toBeVisible();
+    await page.getByRole("button", { name: "结束任务" }).click();
+    await expect(trigger).toBeHidden();
+    await expect(card).toBeHidden();
+  });
+}

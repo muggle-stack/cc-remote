@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+- Show native input/output token counts beside the working spark, with exact
+  counts and cache usage on hover or tap. Keep per-turn ownership and
+  replace-only recovery snapshots across reconnects (protocol v68).
+
+
 - Request readable Claude thinking summaries in SDK sessions and show returned
   text in the existing thinking timeline. Preserve native thinking mode,
   token budget and effort across new sessions, resume and private forks.
