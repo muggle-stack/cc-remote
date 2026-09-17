@@ -14,6 +14,12 @@ autonomous results are separate; a background result cannot acknowledge a human
 turn. Answers are saved in the service before the browser receives acceptance,
 including answers to earlier pages of a multi-question tool call.
 
+Pending permission and MCP callbacks retry handler failures with a capped
+backoff while their controller remains connected. Once a handler returns,
+answer retries reuse its result and request identity without executing the
+handler again. Closing the native callback or detaching the controller cancels
+these retries; detaching still leaves pending native requests in the service.
+
 This is a cc-remote SDK service, not Claude Code's terminal background mode or
 the experimental PTY broker. The daily native Claude TUI keeps its existing
 external-ownership rules; this service does not give it shared input ownership.

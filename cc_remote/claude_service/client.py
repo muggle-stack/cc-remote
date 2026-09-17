@@ -10,8 +10,11 @@ import os
 from uuid import uuid4
 
 from cc_remote.claude_steering import ClaudeSteerRejected
+from cc_remote.log import logger
 
 from .wire import decode_sdk, encode_sdk, read_frame, write_frame
+
+log = logger("cc_remote.claude_service.client")
 
 callback_identity: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "claude_service_callback", default=None)
@@ -204,16 +207,36 @@ class RemoteClient:
 
     async def _callback(self, call) -> None:
         token = callback_identity.set(call["id"])
+        handled = False
+        value = None
+        delay = 0.25
         try:
-            if call["kind"] == "permission":
-                value = encode_sdk(await self.options.can_use_tool(
-                    call["name"], call["input"], decode_sdk(call["context"])))
-            elif call["kind"] == "mcp":
-                value = await self._mcp(call["name"], call["message"])
-            else:
-                raise ValueError("unknown Claude callback")
-            await self.call("answer", {"callback_id": call["id"], "value": value},
-                            request_id="answer-" + call["id"])
+            while True:
+                try:
+                    if not handled:
+                        if call["kind"] == "permission":
+                            value = encode_sdk(await self.options.can_use_tool(
+                                call["name"], call["input"], decode_sdk(call["context"])))
+                        elif call["kind"] == "mcp":
+                            value = await self._mcp(call["name"], call["message"])
+                        else:
+                            raise ValueError("unknown Claude callback")
+                        handled = True
+                    # An unknown answer delivery must reuse both the value and
+                    # request identity, never execute the tool a second time.
+                    await self.call("answer", {"callback_id": call["id"], "value": value},
+                                    request_id="answer-" + call["id"])
+                    return
+                except Exception as exc:
+                    if self.connection.task is None or self.connection.task.done():
+                        raise
+                    # Keep this known callback alive until the service closes
+                    # it or the controller detaches. Cancellation must escape.
+                    log.warning("Claude service callback will retry", callback_id=call["id"],
+                                kind=call["kind"], stage="answer" if handled else "handler",
+                                error=type(exc).__name__)
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 5)
         finally:
             callback_identity.reset(token)
 
