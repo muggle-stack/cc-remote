@@ -6,7 +6,10 @@ import asyncio
 from pathlib import Path
 
 from cc_remote.claude_service.client import Connection
+from cc_remote.log import logger
 from cc_remote.protocol import Delta, UserMsg
+
+log = logger("cc_remote.wrapper.claude_service")
 
 
 def preserve_timestamp(events, message) -> None:
@@ -83,7 +86,13 @@ async def restore(machine) -> None:
             identities.add(identity)
             sessions.append((socket, item))
     for socket, item in sessions:
-        await _restore_session(machine, socket, item)
+        try:
+            await _restore_session(machine, socket, item)
+        except Exception as exc:
+            # The global identity check has passed. An unavailable session
+            # must not strand other sessions' already accepted turns.
+            log.warning("persistent Claude session recovery failed",
+                        service_id=item.get("id"), error_type=type(exc).__name__)
 
 
 async def _list_sessions(socket):
