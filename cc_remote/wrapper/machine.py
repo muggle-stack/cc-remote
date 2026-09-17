@@ -225,6 +225,7 @@ from cc_remote.wrapper.sdk import (
     CLAUDE_DEFAULT_EFFORT,
     CLAUDE_DEFAULT_MODEL,
     ClaudeAutonomousFollowupPending,
+    ClaudeServiceReplayRequired,
     SdkHandle,
     normalize_claude_model_selection,
     same_claude_model_selection,
@@ -6899,14 +6900,14 @@ class WrapperMachine:
         ctx: SessionContext,
         error: BaseException,
     ) -> None:
-        """Release an idle/autonomous session whose sole SDK reader stopped."""
+        """Release idle UI claims when native reading or projection stops."""
         self._reset_claude_task_lifecycle(ctx)
         if not self._is_resident_context(ctx):
             return
         managed = ctx.turn_task
         if managed is not None and not managed.done():
-            # The managed reader receives the same failure sentinel and owns its
-            # visible Error/idle transition.  Waking its queue here is enough.
+            # The managed reader or its service commit raises the same failure
+            # and owns its visible Error/idle transition.
             return
         log.warning(
             "Claude idle message pump failed",
@@ -6918,6 +6919,8 @@ class WrapperMachine:
         ctx.interrupt_event.clear()
         if ctx.state != "idle":
             await self._set_state(ctx, "idle")
+        if isinstance(error, ClaudeServiceReplayRequired):
+            await self._emit(ctx, Error(code=ERR_CC_CRASH, message=str(error)))
 
     def _schedule_claude_autonomous_interrupt_watchdog(
         self, ctx: SessionContext,
@@ -37697,6 +37700,9 @@ class WrapperMachine:
 
         async def reconnect_claude(reason: str) -> None:
             """Reconnect without hiding transcript changes during the await."""
+            check_delivery = getattr(ctx.sdk, "check_service_delivery", None)
+            if check_delivery is not None:
+                check_delivery()
             external_change = reason.startswith("external transcript change")
             if external_change:
                 self._invalidate_claude_context_usage(ctx)
@@ -37723,6 +37729,10 @@ class WrapperMachine:
 
         try:
             if not _recover_service:
+                if not is_codex:
+                    check_delivery = getattr(ctx.sdk, "check_service_delivery", None)
+                    if check_delivery is not None:
+                        check_delivery()
                 # An EXTERNAL process (a native `claude`/`codex` in the user's terminal)
                 # appended to this session's transcript since we resumed it, so our child's
                 # in-memory context is STALE — continuing from it would fork the
@@ -38825,6 +38835,7 @@ class WrapperMachine:
                     provider_request_too_large_message(
                         provider_too_large_kind)
                     if provider_too_large_kind is not None else
+                    str(e) if isinstance(e, ClaudeServiceReplayRequired) else
                     "本次回复未完成，请重试。"
                 ),
                 msg_id=ctx.active_msg_id))
