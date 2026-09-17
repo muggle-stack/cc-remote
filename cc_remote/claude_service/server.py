@@ -21,7 +21,10 @@ from uuid import uuid4
 
 from cc_remote.claude_steering import PendingSteers, steer_message
 
-from .wire import decode_sdk, encode_sdk, private_directory, read_frame, same_user, write_frame
+from .wire import (
+    ControllerLeaseConflict, decode_sdk, encode_sdk, private_directory,
+    read_frame, same_user, write_frame,
+)
 
 MAX_SESSIONS = 64
 MAX_CALLS = 64
@@ -482,6 +485,7 @@ class Service:
             from importlib.metadata import version
 
             return {"sdk_version": version("claude-agent-sdk"), "pid": os.getpid(),
+                    "strict_controller_leases": True,
                     "source": str(Path(__file__).resolve().parents[2])}
         if method == "list":
             return [session.description() for session in self.sessions.values() if not session.closed]
@@ -489,6 +493,8 @@ class Service:
             async with self.open_lock:
                 identity = params["metadata"]
                 session = self.sessions.get(params.get("session"))
+                if params.get("strict_session") and params.get("session") is not None and session is None:
+                    raise KeyError("Claude service recovery worker no longer exists")
                 if session is None and identity.get("session_id") and not params.get("fork"):
                     session = next((item for item in self.sessions.values() if all(
                         item.metadata.get(key) == identity.get(key)
@@ -501,7 +507,7 @@ class Service:
                     )):
                         raise PermissionError("Claude session identity mismatch")
                     if session.controller is not None and session.controller is not owner:
-                        raise RuntimeError("Claude service already has a controller")
+                        raise ControllerLeaseConflict("Claude service already has a controller")
                 else:
                     if len(self.sessions) >= MAX_SESSIONS:
                         raise RuntimeError("Claude service session capacity reached")

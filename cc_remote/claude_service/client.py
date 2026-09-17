@@ -12,9 +12,12 @@ from uuid import uuid4
 from cc_remote.claude_steering import ClaudeSteerRejected
 from cc_remote.log import logger
 
-from .wire import decode_sdk, encode_sdk, read_frame, write_frame
+from .wire import ControllerLeaseConflict, decode_sdk, encode_sdk, read_frame, write_frame
 
 log = logger("cc_remote.claude_service.client")
+
+CONTROLLER_LEASE_WAIT_SECONDS = 5.0
+CONTROLLER_LEASE_RETRY_DELAY = 0.1
 
 callback_identity: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "claude_service_callback", default=None)
@@ -41,6 +44,8 @@ class Connection:
                 if future is not None and not future.done():
                     if "error" in reply:
                         error_type = TimeoutError if reply.get("timeout") else RuntimeError
+                        if reply["error"] == "ControllerLeaseConflict":
+                            error_type = ControllerLeaseConflict
                         future.set_exception(error_type("Claude service: " + reply["error"]))
                     else:
                         future.set_result(reply.get("result"))
@@ -131,13 +136,14 @@ class RemoteClient:
                 claude_sdk_process_env(self.options.env, environment)
                 if self.isolated else {**environment, **self.options.env}
             )
-            self.description = await self.connection.call("open", {
+            self.description = await self._open({
                 "options": payload,
                 "metadata": self.metadata,
                 "isolated": self.isolated,
                 "fork": self.options.fork_session,
                 "session": self.metadata.get("service_id"),
-            })
+                "strict_session": bool(hello.get("strict_controller_leases")),
+            }, legacy=not hello.get("strict_controller_leases"))
         except BaseException:
             await self.connection.disconnect()
             raise
@@ -148,6 +154,33 @@ class RemoteClient:
         self.recovery = self.description["turn"]
         self.last_seq = self.description["after"]
         self.callback_task = asyncio.create_task(self._callbacks())
+
+    async def _open(self, params, *, legacy):
+        if params["session"] is None:
+            return await self.connection.call("open", params)
+        # Only recovery of a listed worker may wait for the previous socket's
+        # finally block. Never retry an unknown open response or resubmit Query.
+        async with asyncio.timeout(None) as wait:
+            while True:
+                try:
+                    return await self.connection.call("open", params)
+                except RuntimeError as exc:
+                    conflict = isinstance(exc, ControllerLeaseConflict)
+                    if not conflict and (not legacy or str(exc) != "Claude service: RuntimeError"):
+                        raise
+                    if wait.when() is None:
+                        wait.reschedule(asyncio.get_running_loop().time() + CONTROLLER_LEASE_WAIT_SECONDS)
+                    # Older immutable services report only exception names.
+                    # Their existing-worker open has exactly one RuntimeError:
+                    # an occupied lease. Recheck its full identity before retry.
+                    if not conflict:
+                        sessions = await self.connection.call("list")
+                        if not any(item["id"] == params["session"] and all(
+                            item["metadata"].get(key) == self.metadata.get(key)
+                            for key in ("profile_root", "session_id", "space", "work_id", "btw", "cwd")
+                        ) for item in sessions):
+                            raise
+                await asyncio.sleep(CONTROLLER_LEASE_RETRY_DELAY)
 
     async def call(self, method, params=None, **kwargs):
         return await self.connection.call(method, {"session": self.id, **(params or {})}, **kwargs)

@@ -1796,6 +1796,10 @@ class SdkHandle:
             if self.client is not None:
                 await self._stop_message_pump()
                 await self.client.disconnect()
+                if self.service_metadata is not None:
+                    # A deliberate reconnect may now create a new worker; a
+                    # failed close must retain the original recovery identity.
+                    self.service_metadata.pop("service_id", None)
                 if self.native_close_callback is not None:
                     self.native_close_callback()
         finally:
