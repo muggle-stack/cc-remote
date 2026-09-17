@@ -71,13 +71,19 @@ def configure(machine, ctx) -> None:
 async def restore(machine) -> None:
     if not machine.cfg.claude_service_socket:
         return
-    sockets = [machine.cfg.claude_service_socket]
+    sockets = [("primary", machine.cfg.claude_service_socket)]
     if machine.cfg.claude_service_drain_socket:
-        sockets.insert(0, machine.cfg.claude_service_drain_socket)
+        sockets.insert(0, ("drain", machine.cfg.claude_service_drain_socket))
     sessions = []
     identities = set()
-    for socket in sockets:
-        for item in await _list_sessions(socket):
+    for role, socket in sockets:
+        try:
+            listed = await _list_sessions(socket)
+        except Exception as exc:
+            log.warning("persistent Claude service listing failed",
+                        service_role=role, error_type=type(exc).__name__)
+            continue
+        for item in listed:
             metadata = item["metadata"]
             identity = (metadata.get("profile_root"), metadata.get("session_id"),
                         metadata.get("space"), metadata.get("work_id"), metadata.get("btw"))
@@ -89,7 +95,7 @@ async def restore(machine) -> None:
         try:
             await _restore_session(machine, socket, item)
         except Exception as exc:
-            # The global identity check has passed. An unavailable session
+            # All reachable services passed the identity check. A failed session
             # must not strand other sessions' already accepted turns.
             log.warning("persistent Claude session recovery failed",
                         service_id=item.get("id"), error_type=type(exc).__name__)

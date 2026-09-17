@@ -6289,6 +6289,9 @@ class WrapperMachine:
             lambda error: self._on_claude_message_pump_failure(ctx, error))
         sdk.lifecycle_reset_callback = (
             lambda: self._reset_claude_task_lifecycle(ctx))
+        from cc_remote.wrapper import claude_steer
+
+        sdk.native_close_callback = lambda: claude_steer.cleanup(ctx)
         claude_service.configure(self, ctx)
 
     @staticmethod
