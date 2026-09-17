@@ -200,7 +200,7 @@ export interface TimedTaskInfo {
 export interface UserMsg extends Base { type: "user_msg"; msg_id: string; client_msg_id?: string | null; timed_task?: TimedMessage | null; prompt: string; images?: QueryImg[] | null; files?: { filename: string }[] | null }
 export interface TurnSteered extends Base { type: "turn_steered"; msg_id: string; turn_id: string; prompt: string; images?: QueryImg[] | null; files?: { filename: string }[] | null }
 export interface AssistantMsgStart extends Base { type: "assistant_msg_start"; message_id: string; turn_id?: string | null; background?: boolean | null; channel?: AssistantChannel }
-export interface Delta extends Base { type: "delta"; message_id: string; turn_id?: string | null; background?: boolean | null; text: string; channel?: AssistantChannel }
+export interface Delta extends Base { replace?: boolean; type: "delta"; message_id: string; turn_id?: string | null; background?: boolean | null; text: string; channel?: AssistantChannel }
 export interface ToolUse extends Base {
   type: "tool_use";
   message_id: string;
@@ -719,7 +719,7 @@ export type ServerEvent = FilesListed | CodexContext
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnUsage | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 68;
+export const PROTOCOL_VERSION = 70;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

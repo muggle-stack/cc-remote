@@ -461,7 +461,7 @@ def test_paged_file_migration_rebuilds_summaries_once_without_removing_assets(tm
         connection.execute(f"PRAGMA user_version={old_version}")
     migrated = HistoryIndexStore(tmp_path / "state")
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 41
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 42
         for table in ("history_pages", "history_turn_details"):
             assert connection.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE engine='codex'"
@@ -474,6 +474,28 @@ def test_paged_file_migration_rebuilds_summaries_once_without_removing_assets(tm
     assert migrated.put_page("codex", "codex", source, before=None, limit=4, page=_page("codex"))
     reopened = HistoryIndexStore(tmp_path / "state")
     assert reopened.get_page("codex", "codex", source, before=None, limit=4) is not None
+
+
+def test_v42_summary_migration_preserves_source_details_and_assets(tmp_path):
+    path = tmp_path / "source.jsonl"
+    path.write_text("{}\n")
+    source = HistorySourceFingerprint.capture(path)
+    store = HistoryIndexStore(tmp_path / "state")
+    for engine in ("claude", "codex"):
+        store.put_page(engine, engine, source, before=None, limit=4, page=_page(engine))
+        store.put_image_asset(engine, engine, source, engine, "image",
+                              "thumbnail", "image/png", 1, 1, engine.encode())
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("PRAGMA user_version=41")
+    migrated = HistoryIndexStore(tmp_path / "state")
+    with sqlite3.connect(migrated.path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 42
+        assert connection.execute("SELECT COUNT(*) FROM history_pages").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM history_turn_details").fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM history_image_assets").fetchone()[0] == 2
+    assert migrated.put_page("codex", "codex", source, before=None, limit=4, page=_page("rebuilt"))
+    reopened = HistoryIndexStore(tmp_path / "state")
+    assert reopened.get_page("codex", "codex", source, before=None, limit=4) == _page("rebuilt")
 
 
 @pytest.mark.parametrize("old_version", [34, 35, 36, 37])
@@ -500,7 +522,7 @@ def test_narrative_migration_preserves_assets(tmp_path, old_version):
 
 
 @pytest.mark.parametrize("old_version", [38, 39])
-def test_background_clock_migration_only_rebuilds_claude_narrative(tmp_path, old_version):
+def test_background_and_summary_migrations_preserve_source_assets(tmp_path, old_version):
     path = tmp_path / "source.jsonl"
     path.write_text("{}\n")
     source = HistorySourceFingerprint.capture(path)
@@ -512,8 +534,8 @@ def test_background_clock_migration_only_rebuilds_claude_narrative(tmp_path, old
         connection.execute(f"PRAGMA user_version={old_version}")
     migrated = HistoryIndexStore(tmp_path / "state")
     assert migrated.get_page("claude", "claude", source, before=None, limit=4) is None
-    for engine in ("codex", "dsh"):
-        assert migrated.get_page(engine, engine, source, before=None, limit=4) == _page(engine)
+    assert migrated.get_page("codex", "codex", source, before=None, limit=4) is None
+    assert migrated.get_page("dsh", "dsh", source, before=None, limit=4) == _page("dsh")
     with sqlite3.connect(store.path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM history_image_assets").fetchone()[0] == 3
     migrated.put_page("claude", "claude", source, before=None, limit=4, page=_page("rebuilt"))
@@ -540,7 +562,7 @@ def test_v19_migration_rebuilds_history_and_adds_agent_details(tmp_path):
     assert migrated.get_page(
         "session-1", "claude", source, before=None, limit=4) is None
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 41
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 42
         assert connection.execute(
             "SELECT COUNT(*) FROM history_agent_details").fetchone()[0] == 0
 
@@ -568,7 +590,7 @@ def test_v20_migration_rebuilds_codex_and_claude_identity_projections(tmp_path):
 
     migrated = HistoryIndexStore(state_dir)
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 41
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 42
         for table in ("history_pages", "history_turn_details"):
             assert connection.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE engine='claude'"
@@ -629,7 +651,7 @@ def test_v21_migration_rebuilds_claude_alias_and_codex_process_projections(
 
     migrated = HistoryIndexStore(state_dir)
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 41
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 42
         for table in ("history_pages", "history_turn_details"):
             assert connection.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE engine='claude'"
@@ -686,7 +708,7 @@ def test_v22_migration_applies_codex_and_claude_projection_repairs(
 
     migrated = HistoryIndexStore(state_dir)
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 41
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 42
         for table in ("history_pages", "history_turn_details"):
             assert connection.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE engine='claude'"
@@ -748,7 +770,7 @@ def test_recent_migration_applies_codex_and_claude_projection_repairs(
 
     migrated = HistoryIndexStore(state_dir)
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 41
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 42
         for table in ("history_pages", "history_turn_details"):
             assert connection.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE engine='claude'"
@@ -819,7 +841,7 @@ def test_async_question_migration_preserves_assets(
 
     migrated = HistoryIndexStore(state_dir)
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 41
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 42
         for table in ("history_pages", "history_turn_details"):
             assert connection.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE engine='claude'"
@@ -928,7 +950,7 @@ def test_legacy_migration_rebuilds_all_derived_history_rows(
 
     migrated = HistoryIndexStore(state_dir)
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 41
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 42
         for table in (
             "history_pages",
             "history_turn_details",
@@ -975,7 +997,7 @@ def test_v10_migration_invalidates_changed_projection_rows(tmp_path):
 
     migrated = HistoryIndexStore(state_dir)
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 41
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 42
         for table in (
             "history_pages", "history_turn_details", "history_image_assets",
         ):
@@ -1026,7 +1048,7 @@ def test_v11_migration_invalidates_claude_pages_and_adds_compact_index(
         "claude-session", "claude", source, before=None, limit=4,
     ) is None
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 41
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 42
         tables = {
             row[0] for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
@@ -1072,7 +1094,7 @@ def test_recent_migration_invalidates_changed_projection_rows(
 
     migrated = HistoryIndexStore(state_dir)
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 41
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 42
         for table in (
             "history_pages", "history_turn_details", "history_image_assets",
         ):
@@ -1114,7 +1136,7 @@ def test_owner_and_interrupt_alias_migration_invalidates_both_projections(
 
     migrated = HistoryIndexStore(state_dir)
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 41
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 42
         for table in ("history_pages", "history_turn_details"):
             assert connection.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE engine='claude'"
@@ -1178,7 +1200,7 @@ def test_recent_summary_migration_rebuilds_pages_but_preserves_source_assets(
 
     migrated = HistoryIndexStore(state_dir)
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 41
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 42
         assert connection.execute(
             "SELECT COUNT(*) FROM history_pages"
         ).fetchone()[0] == 0
@@ -1543,6 +1565,59 @@ def test_materialized_turn_bounds_initial_final_text_and_advertises_detail():
     assert turns[0]["detailEventCount"] == 1
     assert turns[0]["processDetailState"] == "none"
     assert turns[0]["detailReasons"] == ["answer_truncated"]
+
+
+@pytest.mark.parametrize("channel,include_live_detail", [
+    ("final", False), ("final", True), ("commentary", True),
+])
+def test_recovered_text_replaces_partial_prefix_before_live_tail(
+    channel, include_live_detail,
+):
+    from cc_remote.protocol import Delta, deserialize, serialize
+
+    recovered = deserialize(serialize(Delta(
+        sid="session", message_id="reply", channel=channel,
+        text="first recovered", replace=True,
+    ))).model_dump(mode="json")
+    events = [
+        {"type": "user_msg", "msg_id": "prompt", "prompt": "continue"},
+        {"type": "assistant_msg_start", "message_id": "reply", "channel": channel},
+        {"type": "delta", "message_id": "reply", "channel": channel, "text": "first "},
+        recovered,
+        recovered,  # A second reconnect must remain idempotent.
+        {"type": "delta", "message_id": "reply", "channel": channel, "text": " tail"},
+        {"type": "assistant_msg_end", "message_id": "reply", "channel": channel},
+        {"type": "turn_end", "result": {
+            "subtype": "success", "duration_ms": 1, "is_error": False,
+        }},
+    ]
+    turn = materialize_history_turns(events, include_live_detail=include_live_detail)[0]
+    assert [(block["text"], block["done"]) for block in turn["blocks"]] == [
+        ("first recovered tail", True),
+    ]
+
+
+@pytest.mark.parametrize("channel", ["unknown", "final"])
+@pytest.mark.parametrize("include_live_detail", [False, True])
+def test_many_short_answers_cannot_exceed_summary_wire_block_budget(channel, include_live_detail):
+    from cc_remote.protocol import History, deserialize, serialize
+
+    events = [{"type": "user_msg", "msg_id": "prompt", "prompt": "many replies"}]
+    for index in range(70):
+        events.extend([
+            {"type": "assistant_msg_start", "message_id": f"reply-{index}", "channel": channel},
+            {"type": "delta", "message_id": f"reply-{index}", "channel": channel, "text": f"answer {index}"},
+            {"type": "assistant_msg_end", "message_id": f"reply-{index}", "channel": channel},
+        ])
+    turns = materialize_history_turns(events, include_live_detail=include_live_detail)
+    assert len(turns[0]["blocks"]) == 32
+    assert turns[0]["blocks"][-1]["text"] == "answer 69"
+    assert "answer_truncated" in turns[0]["detailReasons"]
+    assert turns[0]["detailEventCount"] >= 1
+    summary = History(session_id="session", revision="revision", detail="summary", turns=turns)
+    assert deserialize(serialize(summary)) == summary
+    # Materialization is a projection: the full source detail remains intact.
+    assert sum(event["type"] == "delta" for event in events) == 70
 
 
 def test_materialized_turn_defers_images_and_bounds_large_prompt():

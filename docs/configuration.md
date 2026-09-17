@@ -151,6 +151,7 @@ hook 和 Wrapper 应使用相同的 `CC_REMOTE_STATE_DIR`；日志默认为
 | `CC_REMOTE_MACHINE_ID` | `default` | 多机器 relay 中的稳定路由 id；使用 `WRAPPER_TOKENS_JSON` 时必须匹配对应键。 |
 | `CC_REMOTE_DEVICE_CONFIG` | `~/.cc-remote/device.json` | 交互配对凭据路径；文件必须仅当前用户可读。显式的 `RELAY_URL` / `WRAPPER_TOKEN` / `CC_REMOTE_MACHINE_ID` 优先。 |
 | `CLAUDE_BIN` | `~/.local/bin/claude` | wrapper 实际启动的日常 Claude Code；空值仍使用该默认路径。只有 CLI 安装在别处时才设为另一个绝对路径。 |
+| `CC_REMOTE_CLAUDE_SERVICE_SOCKET` | 空 | 可选独立 Claude SDK 服务的 Unix socket。先按 [会话服务指南](claude-session-service.md) 安装；常规 Code/Work 任务可跨 Wrapper 重启继续运行。首次迁移和尚未迁移的任务须等待空闲。 |
 | `CC_REMOTE_CLAUDE_PROFILES_JSON` | 空 | 可选 Claude 多账号注册表；格式为 `{profile_id:{"label":"…","config_dir":"/绝对/CLAUDE_CONFIG_DIR","default":true}}`。最多 32 项、目录必须唯一，且必须且只能有一个默认项。Code、Work 与定时任务均可选择账号；空值保持当前单账号行为。显式 JSON 优先于文件。 |
 | `CC_REMOTE_CLAUDE_PROFILES_FILE` | 空（macOS LaunchAgent 为 `~/.cc-remote/claude-profiles.json`） | 可选注册表 JSON 文件；必须是有上限的普通文件。文件不存在等同单账号，便于先安装再配置。 |
 | `CC_REMOTE_CODEX_PROXY` | 空 | 仅注入 wrapper 启动的 Codex 子进程的 HTTP(S)/SOCKS5 代理；不改 wrapper 到 relay 的连接，也不影响用户终端里的 `codex`。例如 `http://127.0.0.1:8080`。 |

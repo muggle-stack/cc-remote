@@ -32,6 +32,7 @@ from claude_agent_sdk.types import (
 from mcp.server import Server
 
 from cc_remote.config import WrapperConfig
+from cc_remote.claude_steering import ClaudeSteerRejected, PendingSteers, steer_message
 from cc_remote.log import logger
 from cc_remote.protocol import MAX_SAFE_WIRE_INTEGER
 from cc_remote.wrapper.child_env import claude_profile_child_env
@@ -208,6 +209,14 @@ class SdkHandle:
         self.claude_config_dir = claude_config_dir
         self.isolate_account_env = isolate_account_env
         self.client: ClaudeSDKClient | None = None
+        self.service_metadata: dict | None = None
+        self.service_socket_override: str | None = None
+        self.service_recovery: dict | None = None
+        self.service_turn_metadata: dict | None = None
+        self.service_defer_events = False
+        self._steers = PendingSteers()
+        self._turn_root_id: str | None = None
+        self._context_revision = 0
         # reasoning effort is a spawn-time flag (--effort), not a runtime setter.
         # `effort` is the desired level; `applied_effort` is what the live client
         # was spawned with — they differ after set_effort until the next reconnect.
@@ -228,6 +237,10 @@ class SdkHandle:
         # may expose a proxy's upstream model (for example glm-5.2), so recover
         # this from the SDK control plane and preserve it across reconnects.
         self.model: str | None = None
+        # Private BTW forks reserve and tombstone this identity before the CLI
+        # starts. An unqueried fork may reconnect from its parent using the same
+        # reservation; ordinary resumes must not pass --session-id again.
+        self.fork_session_id: str | None = None
         # Desired and live Claude permission mode. Runtime changes update this
         # only after the CLI accepts them; every later reconnect passes the same
         # value back through ClaudeAgentOptions instead of silently reverting.
@@ -454,6 +467,7 @@ class SdkHandle:
             cwd=session_cwd,                      # dynamic: must match the resumed session's cwd
             cli_path=_explicit_cli_path(self.cfg.claude_bin),
             resume=resume_id or None,
+            session_id=self.fork_session_id if fork else None,
             # fork_session=True resumes `resume_id`'s context but writes new turns to
             # a FRESH session id, leaving the original transcript untouched — used for
             # ephemeral /btw side-forks.
@@ -555,7 +569,20 @@ class SdkHandle:
             auto_compact_override=launch_auto_compact,
             effort_override=launch_effort,
         )
-        if self.isolate_account_env:
+        if self.cfg.claude_service_socket and self.service_metadata is not None:
+            from cc_remote.claude_service.client import RemoteClient
+
+            self.client = RemoteClient(
+                self.service_socket_override or self.cfg.claude_service_socket,
+                options=opts,
+                metadata={
+                    **self.service_metadata, "session_id": resume_id,
+                    "applied_auto_compact": list(launch_auto_compact),
+                    "applied_effort": launch_effort,
+                },
+                isolated=self.isolate_account_env,
+            )
+        elif self.isolate_account_env:
             self.client = ClaudeSDKClient(
                 options=opts,
                 transport=account_isolated_transport(opts),
@@ -564,6 +591,16 @@ class SdkHandle:
             self.client = ClaudeSDKClient(options=opts)
         self._conversation_rewind_capability = None
         await self.client.connect()
+        self.service_recovery = getattr(self.client, "recovery", None)
+        description = getattr(self.client, "description", {})
+        if description.get("attached"):
+            controls = description["controls"]
+            self.model = controls.get("model")
+            self.permission_mode = controls.get("permission_mode") or self.permission_mode
+            metadata = description["metadata"]
+            launch_effort = metadata.get("applied_effort")
+            launch_auto_compact = tuple(metadata["applied_auto_compact"])
+            await self._enable_attached_thinking_summaries()
         if fork:
             # A fork creates a new native conversation even though this handle
             # may be reused while a private BTW id is still being captured.
@@ -590,6 +627,7 @@ class SdkHandle:
         # learning its provider-selected model and (for Work) startup baseline.
         eager_context_probe = bool(
             not _suppress_context_probe and resume_id is None and not fork
+            and self.service_recovery is None
         )
         if eager_context_probe:
             try:
@@ -649,12 +687,49 @@ class SdkHandle:
         self.applied_auto_compact_threshold_tokens = (
             launch_auto_compact[1])
         self._start_message_pump()
+        if self.service_recovery is not None:
+            self._turn_active = True
+            self._turn_root_id = self.service_recovery["id"]
+            self._turn_origin_id = self.service_recovery["id"]
+            self._message_route_owner = "managed"
+        elif hasattr(self.client, "description"):
+            self._turn_origin_id = self.client.description.get("origin_id")
+        if not self.service_defer_events:
+            self.start_service_events()
         log.info("sdk connected", resume=bool(resume_id), fork=fork, cwd=opts.cwd,
                  effort=launch_effort, permission_mode=self.permission_mode,
                  auto_compact=launch_auto_compact[0],
                  auto_compact_threshold=launch_auto_compact[1],
                  context_probe_suppressed=self.context_probe_suppressed,
                  sdk_version=SDK_VERSION)
+
+    async def _enable_attached_thinking_summaries(self) -> None:
+        """Opt a service-owned child into summaries without replacing its turn."""
+        # Reattaching does not apply new launch options to the resident CLI.
+        # The pinned SDK has no public setter, but its native control protocol
+        # can update display. cc-remote never sets a runtime thinking-token
+        # budget; omitting it retains the child's spawn-time default (including
+        # disabled thinking) and leaves effort, model and permission untouched.
+        # Claude Code 2.1.269 acknowledges this during a running turn, but that
+        # agent loop keeps its original config. Summaries apply to the next
+        # top-level query; steering does not restart the loop. Do not interrupt
+        # an active turn just to make this display preference take effect.
+        sender = getattr(getattr(self.client, "_query", None),
+                         "_send_control_request", None)
+        if not callable(sender):
+            return
+        try:
+            async with self._control_request_lock:
+                await sender({
+                    "subtype": "set_max_thinking_tokens",
+                    "thinking_display": "summarized",
+                }, timeout=2.0)
+        except Exception as exc:
+            # Display is optional. Never interrupt, resubmit, replace the child,
+            # or make stream recovery fail for an older/unresponsive control.
+            # A later normal child launch still receives --thinking-display.
+            log.warning("Claude thinking summary update unavailable",
+                        error_type=type(exc).__name__)
 
     async def _read_context_usage_control(
         self, *, timeout: float = _CONTEXT_CONTROL_TIMEOUT,
@@ -797,6 +872,10 @@ class SdkHandle:
             return None
         return dict(self._last_context_usage)
 
+    @property
+    def context_revision(self) -> int:
+        return self._context_revision
+
     def invalidate_context_usage_cache(self) -> None:
         """Discard readings after the native transcript changes identity/depth.
 
@@ -805,6 +884,7 @@ class SdkHandle:
         those cases the machine calls this at the mutation boundary so the next
         cache-only read must recover from the current transcript.
         """
+        self._context_revision += 1
         self._last_context_usage = None
         self._last_recent_context_usage = None
         self.effective_auto_compact_threshold_tokens = None
@@ -816,7 +896,12 @@ class SdkHandle:
             return
         recovered = claude_recent_context_usage(message.usage)
         if recovered is not None:
-            self._last_recent_context_usage = recovered
+            capacity = {
+                key: value for key, value in (self._last_recent_context_usage or {}).items()
+                if key in {"maxTokens", "rawMaxTokens", "autoCompactThreshold",
+                           "isAutoCompactEnabled", "model"}
+            }
+            self._last_recent_context_usage = {**capacity, **recovered}
 
     def _observe_context_boundary(self, message: Any) -> None:
         """Replace pre-compact counts while retaining this child's capacity."""
@@ -828,8 +913,12 @@ class SdkHandle:
             and message.data.get("parentToolUseID") is None
             and message.data.get("isSidechain") is not True
         ):
+            self._context_revision += 1
             capacity = {
-                key: value for key, value in (self._last_context_usage or {}).items()
+                key: value for key, value in {
+                    **(self._last_context_usage or {}),
+                    **(self._last_recent_context_usage or {}),
+                }.items()
                 if key in {"maxTokens", "rawMaxTokens", "autoCompactThreshold",
                            "isAutoCompactEnabled", "model"}
             }
@@ -922,6 +1011,12 @@ class SdkHandle:
                     # activated only when the pump sees this submitted turn.
                     self._pending_turn_background_release = asyncio.Event()
                     self._pending_turn_origin_id = self.next_turn_id
+                    self._turn_root_id = self.next_turn_id
+                    if hasattr(client, "next_turn"):
+                        client.next_turn = {
+                            **(self.service_turn_metadata or {}),
+                            "id": self.next_turn_id,
+                        }
                     self._pending_compact = bool(
                         isinstance(prompt, str)
                         and prompt.split(maxsplit=1)[:1] == ["/compact"]
@@ -939,9 +1034,33 @@ class SdkHandle:
             # going through connect(). Real SDK connections always use the sole pump.
             await client.query(prompt)
 
+    async def steer(self, prompt, *, native_id: str, metadata: dict) -> None:
+        """Write `priority=next` without interrupting or creating another reader."""
+        async with self._control_request_lock:
+            async with self._message_route_lock:
+                client = self.client
+                if (client is None or self.control_plane_failed
+                        or self.message_pump_failed or not self._turn_active
+                        or self._message_pump_task is None):
+                    raise ClaudeSteerRejected("Claude has no active response")
+                if hasattr(client, "steer"):
+                    # The persistent owner checks its live boundary too; its
+                    # terminal may already be ahead of this controller's poll.
+                    await client.steer(prompt, native_id=native_id,
+                                       metadata=metadata, turn_id=self._turn_root_id)
+                else:
+                    self._steers.add(native_id, metadata)
+
+                    async def stream():
+                        yield steer_message(prompt, native_id)
+
+                    # Keep registration on uncertain writes: a late exact echo
+                    # can still confirm acceptance. Never retry this as Query.
+                    await client.query(stream())
+
     async def interrupt(self) -> None:
         assert self.client is not None
-        await self.client.interrupt()
+        await self._steers.interrupt(self.client)
 
     async def set_model(self, model: str) -> None:
         """Switch the model for the live cc subprocess (takes effect next query,
@@ -989,6 +1108,43 @@ class SdkHandle:
             raise RuntimeError("Claude context refresh is awaiting normal traffic")
         usage = await self._read_context_usage_control(detail=detail)
         self._record_context_usage(usage, update_model=True)
+        return usage
+
+    async def get_context_summary(self) -> dict:
+        """Read the CLI's local summary without waiting for a model turn.
+
+        Unlike the full category breakdown, summary uses local estimates and
+        the last API usage; it never invokes the provider's token-count API.
+        Keep this a separate capability so broker/older adapters cannot route a
+        running read through their potentially expensive context operation.
+        """
+        if self.context_probe_suppressed:
+            raise RuntimeError("Claude context refresh is awaiting normal traffic")
+        if self._control_request_lock.locked():
+            # Metadata must not queue behind a launch/setter that can itself be
+            # waiting for a machine callback to finish accepting the next turn.
+            raise RuntimeError("Claude control request is already in progress")
+        client, revision = self.client, self._context_revision
+        previous_recent = self._last_recent_context_usage
+        usage = await self._read_context_usage_control(
+            timeout=_CONTEXT_STARTUP_TIMEOUT, detail="summary")
+        if self.client is not client or self._context_revision != revision:
+            raise RuntimeError("Claude context changed during summary read")
+        total, maximum = usage.get("totalTokens"), usage.get("maxTokens")
+        if (not isinstance(total, int) or isinstance(total, bool)
+                or not 0 <= total <= MAX_SAFE_WIRE_INTEGER
+                or not isinstance(maximum, int) or isinstance(maximum, bool)
+                or not 0 < maximum <= MAX_SAFE_WIRE_INTEGER):
+            raise ValueError("Claude summary omitted a valid total or capacity")
+        latest_recent = self._last_recent_context_usage
+        self._record_context_usage(usage, update_model=True)
+        if latest_recent is not previous_recent and latest_recent is not None:
+            # The sole stream reader may have received a newer assistant while
+            # the control response was in flight. Keep its total and only borrow
+            # this generation's capacity, never the older category breakdown.
+            self._last_recent_context_usage = latest_recent
+            usage = {**usage, **latest_recent, "categories": []}
+            usage["percentage"] = latest_recent["totalTokens"] / maximum * 100
         return usage
 
     async def rewind_files(self, user_message_id: str) -> None:
@@ -1291,6 +1447,8 @@ class SdkHandle:
         self._background_messages = asyncio.Queue(maxsize=cap)
         self._turn_active = False
         self._turn_consumer_active = False
+        self._steers = PendingSteers()
+        self._turn_root_id = None
         self._message_route_owner = None
         self._message_pump_error = None
         self._message_route_lock = asyncio.Lock()
@@ -1323,9 +1481,34 @@ class SdkHandle:
                 source = client.receive_messages()
                 parse_raw = False
             async for data in source:
+                service_seed = bool(parse_raw and isinstance(data, dict)
+                                    and "__cc_service_origin" in data)
+                service_origin = data.pop("__cc_service_origin", None) if service_seed else None
+                service_seq = (
+                    data.pop("__cc_service_seq", None)
+                    if parse_raw and isinstance(data, dict) else None
+                )
+                service_ts = (
+                    data.pop("__cc_service_ts", None)
+                    if parse_raw and isinstance(data, dict) else None
+                )
+                if parse_raw and isinstance(data, dict):
+                    data = self._steers.annotate(data)
+                steer = data.get("__cc_steer") if parse_raw else None
+                intermediate = bool(parse_raw and data.get("__cc_steer_intermediate"))
                 message = self._parse_compat_message(data) if parse_raw else data
                 if message is None:
                     continue
+                if service_seed:
+                    message._cc_service_seed = True
+                if service_seq is not None:
+                    message._cc_service_seq = service_seq
+                if service_ts is not None:
+                    message._cc_service_ts = service_ts
+                if steer is not None:
+                    message._cc_steer = steer
+                if parse_raw and data.get("__cc_steer_cancelled"):
+                    message._cc_steer_cancelled = data["__cc_steer_cancelled"]
                 self._observe_recent_context_usage(message)
                 self._observe_context_boundary(message)
                 self._observe_model_fallback(message)
@@ -1338,7 +1521,13 @@ class SdkHandle:
                         isinstance(message, UserMessage)
                         and not message.parent_tool_use_id
                     )
-                    if top_level_user:
+                    if service_seed:
+                        owner = "background"
+                    elif getattr(message, "_cc_steer_cancelled", None) and self._turn_active:
+                        owner = "managed"
+                        self._activate_pending_turn_route()
+                        self._message_route_owner = owner
+                    elif top_level_user:
                         if origin_kind is not None and origin_kind != "human":
                             owner = "background"
                         elif self._turn_active:
@@ -1405,6 +1594,13 @@ class SdkHandle:
                             )
 
                     if owner == "managed":
+                        if isinstance(message, ResultMessage) and (
+                                intermediate or self._steers.pending):
+                            # The original response ended just before an accepted
+                            # input was consumed. Keep the same sole consumer.
+                            continue
+                        if steer is not None:
+                            self._turn_origin_id = steer["id"]
                         await self._turn_messages.put(message)
                         if isinstance(message, ResultMessage):
                             self._turn_active = False
@@ -1419,7 +1615,7 @@ class SdkHandle:
                     self._background_callbacks_drained.clear()
                     try:
                         await self._background_messages.put(
-                            (message, release, self._turn_origin_id))
+                            (message, release, service_origin if service_seed else self._turn_origin_id))
                     except BaseException:
                         self._background_callback_completed()
                         raise
@@ -1486,6 +1682,7 @@ class SdkHandle:
                     and self._message_pump_error is None
                 ):
                     await callback(message, turn_id)
+                    await self.ack_service_message(message)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1537,6 +1734,32 @@ class SdkHandle:
         if self._message_pump_task is not None:
             return self._receive_response_pumped()
         return self._receive_response_compat()
+
+    def start_service_events(self) -> None:
+        """Release native replay only after the machine installed its routing."""
+        ready = getattr(self.client, "ready", None)
+        if ready is not None:
+            ready.set()
+
+    async def ack_service_message(self, message, *, turn_id=None) -> None:
+        seq = getattr(message, "_cc_service_seq", None)
+        if seq is None or not hasattr(self.client, "call"):
+            return
+        if turn_id is not None:
+            await self.client.call("commit", {
+                "turn_id": self._turn_root_id or turn_id, "seq": seq})
+            self.service_recovery = None
+        else:
+            await self.client.call("ack", {"seq": seq})
+
+    async def detach_for_shutdown(self) -> None:
+        detach = getattr(self.client, "detach", None)
+        if detach is None:
+            await self.disconnect()
+            return
+        await detach()
+        await self._stop_message_pump()
+        self.client = None
 
     async def _stop_message_pump(self) -> None:
         release = self._turn_background_release

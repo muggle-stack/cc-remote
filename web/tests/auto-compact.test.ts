@@ -64,7 +64,7 @@ assert.doesNotMatch(newChatSource, /auto-compact-chip/,
 assert.doesNotMatch(btwSource, /压缩 ·/,
   "BTW autocompact must remain command-only");
 assert.match(appSource,
-  /const requestContext = \(\) => \{[\s\S]{0,620}defer_context_request[\s\S]{0,420}sendContextRequestTo\(focusedSid, true\)/,
+  /const requestContext = \(\) => \{[\s\S]{0,1000}sendContextRequestTo\(focusedSid, true\)/,
   "opening the context popover must explicitly request the native reading");
 assert.doesNotMatch(appSource,
   /runtime\?\.contextRequestId\s*\|\|\s*runtime\?\.contextRefreshDeferred/,
@@ -442,6 +442,22 @@ try {
   assert.equal(contextState.runtimes[sid].contextRefreshDeferred, true,
     "a cached old-generation report must not consume an exact refresh intent");
 
+  let pollingDeferred = reduce(contextState, {
+    type: "begin_context_request", sid, requestId: "cache-poll", refresh: false,
+  });
+  assert.equal(pollingDeferred.runtimes[sid].contextRefreshDeferred, true);
+  pollingDeferred = reduce(pollingDeferred, {
+    type: "event", event: event({
+      type: "context_report", sid, request_id: "cache-poll",
+      total_tokens: 198, max_tokens: 1_000, percentage: 19.8,
+      source: "recent_turn", categories: [],
+    }),
+  });
+  assert.equal(pollingDeferred.runtimes[sid].contextRequestId, null);
+  assert.equal(pollingDeferred.runtimes[sid].contextRefreshDeferred, true,
+    "a matching cache-only poll must not cancel an idle-only native refresh");
+  assert.equal(pollingDeferred.runtimes[sid].contextExactReport?.total_tokens, 198);
+
   const deferredSatisfied = reduce(contextState, {
     type: "event",
     event: event({
@@ -523,6 +539,12 @@ try {
   }));
   assert.equal(compactState.runtimes["compact-session"].contextExactReport.total_tokens, 8_000,
     "a transient read failure retains the new post-compact count, never the old control sample");
+  compactState = reduce(compactState, compactEvent({
+    type: "context_report", source: "recent_turn", total_tokens: 9_000,
+    max_tokens: 0, percentage: 0, categories: [],
+  }));
+  assert.equal(compactState.runtimes["compact-session"].contextExactReport.total_tokens, 8_000,
+    "temporary capacity loss keeps the complete last reading until native summary recovers");
 
   const start = { type: "process", kind: "compaction", item_id: "compact-status",
     phase: "start", status: "running", turn_id: "compact-turn", title: "压缩上下文" };

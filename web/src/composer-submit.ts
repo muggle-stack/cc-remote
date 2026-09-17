@@ -3,7 +3,6 @@ import type { State } from "./protocol";
 export type SendMode = "steer" | "queue";
 
 export type BusySubmitAction =
-  | "interrupt-and-replace"
   | "steer"
   | "replace"
   | "enqueue"
@@ -19,14 +18,14 @@ export type BusySubmitAction =
 export function classifyBusySubmit(
   state: State,
   mode: SendMode,
-  engine: "claude" | "codex",
+  _engine: "claude" | "codex",
   hasPayload: boolean,
 ): BusySubmitAction {
   if (state === "idle") return "noop";
   if (!hasPayload) return "noop";
   if (mode === "queue") return "enqueue";
   if (state !== "running") return "replace";
-  return engine === "codex" ? "steer" : "interrupt-and-replace";
+  return "steer";
 }
 
 export function isComposerBusy(state: State): boolean {

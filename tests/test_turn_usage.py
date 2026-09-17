@@ -41,9 +41,12 @@ def test_claude_usage_is_cumulative_per_response_not_per_block_or_replay():
     assert tr.feed(delta)[0].usage.output_tokens == 80
     assert tr.feed(stream({"type": "message_delta", "usage": {"output_tokens": 999}},
                           parent="subagent")) == []
-    other = StreamTranslator(8000, turn_id="user-b")
-    assert other.feed(start("m3"))[0].turn_id == "user-b"
-    assert other.feed(delta)[0].usage.output_tokens == 40
+    tr.rebind_turn("user-b")
+    late = tr.feed(stream({"type": "message_delta", "usage": {"output_tokens": 50}}))[0]
+    assert late.turn_id == "user-a"
+    assert late.usage.output_tokens == 90
+    assert tr.feed(start("m3"))[0].turn_id == "user-b"
+    assert tr.feed(delta)[0].usage.output_tokens == 40
 
 
 def test_claude_result_supplies_usage_when_partial_usage_is_unavailable():

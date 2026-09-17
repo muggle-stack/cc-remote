@@ -677,6 +677,7 @@ class StreamTranslator:
         self.item_commands = (
             item_commands if item_commands is not None else {})
         self._message_ids: dict[str, str] = {}
+        self._message_turn_id: str | None = None
         self._started_channels: set[str] = set()
         # Only the emitted prefix LENGTH is needed to deduplicate the assembled
         # AssistantMessage after streaming deltas.  Retaining and repeatedly
@@ -721,6 +722,16 @@ class StreamTranslator:
         self._compaction_id: str | None = None
         self._usage = UsageLedger()
         self._usage_message: tuple[str, str | None] | None = None
+        self._usage_rebound = False
+
+    def rebind_turn(self, turn_id: str) -> None:
+        """Advance at a native input echo while retaining unfinished item owners."""
+        self._usage_rebound = True
+        self.turn_id = turn_id
+        self._ambiguous_final_mid = None
+        self._has_final_text = False
+        self._last_assistant_uuid = None
+        self._last_user_uuid = None
 
     def _remember_turn(self, item_id: str, parent_id: str | None = None) -> str | None:
         turn = (self.item_turns.get(item_id)
@@ -759,8 +770,10 @@ class StreamTranslator:
                         suggested: str | None = None) -> str:
         mid = self._message_id(channel_key, suggested)
         if channel_key not in self._started_channels:
+            if not self._started_channels:
+                self._message_turn_id = self.turn_id
             events.append(AssistantMsgStart(
-                message_id=mid, turn_id=self.turn_id, channel=channel))
+                message_id=mid, turn_id=self._message_turn_id, channel=channel))
             self._started_channels.add(channel_key)
         return mid
 
@@ -773,7 +786,7 @@ class StreamTranslator:
             return
         mid = self._ensure_channel(events, channel_key, channel, suggested)
         events.append(Delta(
-            message_id=mid, turn_id=self.turn_id,
+            message_id=mid, turn_id=self._message_turn_id,
             text=bounded, channel=channel))
         self._emitted[channel_key] += len(bounded)
 
@@ -781,11 +794,11 @@ class StreamTranslator:
         if "thinking" in self._started_channels:
             events.append(AssistantMsgEnd(
                 message_id=self._message_ids["thinking"],
-                turn_id=self.turn_id, channel="thinking"))
+                turn_id=self._message_turn_id, channel="thinking"))
         if "text" in self._started_channels:
             events.append(AssistantMsgEnd(
                 message_id=self._message_ids["text"],
-                turn_id=self.turn_id, channel=text_channel))
+                turn_id=self._message_turn_id, channel=text_channel))
         self._message_ids.clear()
         self._started_channels.clear()
         self._emitted = {"thinking": 0, "text": 0}
@@ -1576,7 +1589,7 @@ class StreamTranslator:
             # or invent a successful compact (including interrupted commands).
             events = self._end_unfinished_compaction(
                 "interrupted" if msg.is_error else "failed")
-            if not msg.is_error:
+            if not self._usage_rebound and not msg.is_error:
                 events.extend(self._usage.replace(self.turn_id,
                     native_usage(msg.usage, "claude")))
             if (not msg.is_error and not self._has_final_text

@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 68
+PROTOCOL_VERSION = 70
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -468,7 +468,7 @@ class QueryQueueState(_Base):
 
 
 class Steer(_Command):
-    """Append input to the active Codex turn without interrupting it."""
+    """Append input to the active engine turn without interrupting it."""
     type: Literal["steer"] = "steer"
     # Steer has no pre-v21 compatibility form. Requiring the reliable identity
     # prevents an ACK-lost retry from appending the same instruction twice.
@@ -892,7 +892,7 @@ class UserMsg(_Base):
 
 
 class TurnSteered(_Base):
-    """A user message appended to the active Codex turn."""
+    """A user message accepted by the active engine turn."""
     type: Literal["turn_steered"] = "turn_steered"
     msg_id: WireId
     turn_id: WireId
@@ -912,6 +912,8 @@ class AssistantMsgStart(_Base):
 
 
 class Delta(_Base):
+    # Replace a replayed message prefix with its authoritative text.
+    replace: bool = False
     type: Literal["delta"] = "delta"
     message_id: WireId
     turn_id: Optional[WireId] = None

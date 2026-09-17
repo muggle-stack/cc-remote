@@ -234,6 +234,7 @@ class SessionContext:
     # inherits its context. Never persisted, excluded from the session list, and
     # discarded on close. Its turns reuse the normal _run_turn path.
     btw: bool = False
+    claude_service_background_replay: object | None = None
     parent_sid: Optional[str] = None
     # Relay-authenticated account identity for a private side chat. The legacy
     # attribute name is retained for state/test compatibility; this is not a
@@ -252,6 +253,10 @@ class SessionContext:
     # cc fork_session persists a transcript under a new id (unlike codex's
     # ephemeral fork); capture it here so close_btw can hard-delete it.
     btw_real_id: Optional[str] = None
+    # Claude's native --session-id, durably hidden before fork startup. Keep it
+    # separate from btw_real_id: before the first turn no transcript exists to
+    # resume, so reconnect must still fork from the parent with this same id.
+    btw_reserved_id: Optional[str] = None
     announced_model: Optional[str] = None
     announced_effort: Optional[str] = None
     # Claude autocompact is a spawn-time session option.  Keep the last public
@@ -306,6 +311,7 @@ class SessionContext:
     # response. Keep Code's private attachment directories alive until the
     # enclosing native turn reaches its authoritative terminal boundary.
     codex_steer_attachment_dirs: list[str] = field(default_factory=list)
+    claude_steer_attachment_dirs: list[str] = field(default_factory=list)
     # A timed-out turn/steer may still have been accepted by app-server. Keep
     # exactly one bounded user boundary until an authoritative userMessage item
     # with the same clientId confirms it, or the enclosing turn terminates.

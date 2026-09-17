@@ -41,6 +41,14 @@ Before changing a live service:
    outside immutable release trees. Never upload secrets as part of a source
    snapshot.
 
+For Claude, follow [session-service installation and acceptance](../docs/claude-session-service.md)
+before planning a non-interrupting Wrapper upgrade. Keep an existing SDK service
+outside the Wrapper activation transaction. First migration, remaining
+in-process turns (including private `/btw` forks), and deferred queries must
+drain first; daemon readiness alone does not prove an old child was adopted.
+If the local service protocol or pinned SDK changes, stage first and defer the
+service's own restart until native work and pending callbacks have finished.
+
 Activate a coordinated protocol change in the order documented by the current
 protocol note below: stop incompatible old Wrappers, activate Relay + Web as one
 transaction, then activate/start every Wrapper and hard-refresh clients. Use the
@@ -152,11 +160,11 @@ deployment.
   migration transaction, restores matching pre-release data before an older
   wrapper is restarted, and verifies both engines' Work ownership backfills.
 
-Protocol v68 is a coordinated upgrade: publish freshly built Relay/Web and
+Protocol v70 is a coordinated upgrade: publish freshly built Relay/Web and
 Wrapper artifacts from the same tagged commit. The strict protocol gate is
 intentional and mixed protocol versions will not communicate. `setup-vps.sh`
 rejects a missing or mismatched web build manifest. Stop the wrapper first;
-activate the v68 relay/web release; then start the v68 wrapper.
+activate the v70 relay/web release; then start the v70 wrapper.
 
 The wrapper installer treats local Work data and versioned private control state
 as part of the release
@@ -169,8 +177,8 @@ the previous code. If data restoration fails, it leaves the
 wrapper stopped instead of running old code against a new schema. A manual or
 legacy-layout deployment must use the same order: stop the wrapper, run
 `work_registry_snapshot.py snapshot` from the new staging tree, activate and
-verify v68, and retain that snapshot with the previous release. To roll back,
-stop v68, run `work_registry_snapshot.py restore`, then switch and start the old
+verify v70, and retain that snapshot with the previous release. To roll back,
+stop v70, run `work_registry_snapshot.py restore`, then switch and start the old
 release. Never copy only `registry.sqlite3` while the wrapper is live because
 committed state may still be in its WAL file. Restoring a pre-release snapshot
 also restores pre-release Work metadata: sessions, projects, or schedule state

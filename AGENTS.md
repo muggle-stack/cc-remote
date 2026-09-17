@@ -41,6 +41,13 @@ and keep a decline or pending answer separate from deployment success. App
 attachment and optional App-control MCP tools are separate user choices.
 
 ## Critical constraints / traps
+- **Claude service lifetime**: when `CC_REMOTE_CLAUDE_SERVICE_SOCKET` is set,
+  regular Claude Code/Work SDK processes belong to the separate local service.
+  Wrapper shutdown detaches; explicit stop/reconnect/eviction still has its
+  deliberate native lifecycle. Never resubmit an accepted query during recovery,
+  treat a background Result as the human terminal, or restart the service during
+  an ordinary Wrapper deploy. See `docs/claude-session-service.md` for first
+  migration, remaining in-process tasks, queue drain and version boundaries.
 - **Drain footgun**: after `ClaudeSDKClient.interrupt()`, the SDK does NOT kill
   the session — the current turn's stream still emits a terminal
   `ResultMessage(subtype="error_during_execution")`. You MUST keep consuming
@@ -50,6 +57,12 @@ attachment and optional App-control MCP tools are separate user choices.
   to the terminal ResultMessage; state only returns to `idle` (and the next
   query is only accepted) after that break. Reject-while-busy prevents a second
   query racing the drain.
+- **Claude steering**: send `priority="next"` through streaming input, keeping
+  the one session reader. Rebind the visible turn only on the exact native user
+  UUID echo. A Result before an accepted input is consumed is intermediate;
+  the persistent service journals this distinction and commits the original
+  root turn identity. Explicit Stop uses `interrupt(cancel_queued=true)` when
+  advertised and pending inputs exist, then drains the real Result as above.
 - **cwd must match resume**: a session's jsonl lives at
   `~/.claude/projects/<cwd-with-/-as->/<uuid>.jsonl`. `ClaudeAgentOptions.cwd`
   MUST equal the original session's cwd or `resume` can't find it.
@@ -93,7 +106,7 @@ attachment and optional App-control MCP tools are separate user choices.
   transport, never the caller's Origin. Uvicorn trusts forwarded transport
   metadata only from loopback Caddy. Never put tokens in URLs or protocol
   message bodies; logging redacts token/password fields.
-- **Protocol version gate**: current wire protocol v68 is declared by
+- **Protocol version gate**: current wire protocol v70 is declared by
   `PROTOCOL_VERSION` in both `protocol.py` and `web/src/protocol.ts`.
   `deserialize` hard-rejects a version mismatch, and
   `_Base` is `extra="forbid"`, so ANY protocol change must be deployed to all

@@ -184,17 +184,19 @@ type PanelRelayEvent<T = ServerEvent> = T extends ServerEvent
 async function mockRightPanelRelay(
   page: import("@playwright/test").Page,
   { visible = false, retained = true, engine = "codex", seedTurns = [],
-    secondParent = false, btwReadOnly = false, imageAssets = false, imageData, externalPreview, historyReply }: {
+    secondParent = false, parentState = "idle", btwReadOnly = false, imageAssets = false, imageData, externalPreview, historyReply, listReply }: {
     visible?: boolean;
     retained?: boolean;
     engine?: "codex" | "claude";
     seedTurns?: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]>;
     secondParent?: boolean;
+    parentState?: "idle" | "running";
     btwReadOnly?: boolean;
     imageAssets?: boolean;
     imageData?: { data: string; width: number; height: number };
     externalPreview?: "allow" | "replace";
     historyReply?: (command: Record<string, unknown>) => PanelRelayEvent<Extract<ServerEvent, { type: "history" }>> | null;
+    listReply?: (command: Record<string, unknown>) => PanelRelayEvent | undefined;
   } = {},
 ) {
   const parentSid = "layout-parent";
@@ -226,7 +228,7 @@ async function mockRightPanelRelay(
     }));
     const snapshot = (sid: string) => {
       emit({ type: "snapshot", sid, cc_session_id: sid,
-        state: sid === btwSid && !btwReadOnly ? "running" : "idle", tail_text: "",
+        state: sid === btwSid ? (btwReadOnly ? "idle" : "running") : parentState, tail_text: "",
         cwd: "/tmp/layout", generation: "layout-generation",
         ...(sid === btwSid && btwReadOnly ? { control: {
           v: PROTOCOL_VERSION, ts: 1, type: "session_control" as const,
@@ -247,13 +249,15 @@ async function mockRightPanelRelay(
             engine, created_at: 1, state: "running" }] : [] });
         snapshot(parentSid);
       } else if (command.type === "list_sessions") {
+        const response = listReply?.(command);
+        if (response) { emit(response); return; }
         emit({ type: "session_list",
           engine: command.engine === "codex" ? "codex" : "claude",
           space: command.space === "work" ? "work" : "code",
           request_id: String(command.cmd_id),
           sessions: command.space === "work" ? [] : [{ session_id: parentSid,
             engine, space: "code", summary: "Layout parent",
-            cwd: "/tmp/layout", state: "idle", last_modified: "100" },
+            cwd: "/tmp/layout", state: parentState, last_modified: "100" },
           ...(secondParent ? [{ session_id: "layout-other", engine,
             space: "code" as const, summary: "Second parent", cwd: "/tmp/other",
             state: "idle" as const, last_modified: "50" }] : [])] });
@@ -350,6 +354,61 @@ for (const running of [false, true]) {
     await expect(input).toHaveValue("");
     await expect(page.locator(".composer-notice")).toHaveCount(0);
     expect(relay.commands.some((command) => command.type === "browse_files")).toBe(false);
+  });
+}
+
+for (const side of [false, true]) {
+  test(`side chat scope Claude native steering keeps output and queue separate (${side ? "BTW" : "main"})`, async ({ page }) => {
+    const relay = await mockRightPanelRelay(page, {
+      engine: "claude", retained: side, visible: side, parentState: "running",
+    });
+    await page.goto("/");
+    const sid = side ? "btw-layout-child" : "layout-parent";
+    const surface = page.locator(side ? ".btw-panel" : ".composer");
+    const input = surface.locator("textarea");
+    await expect(input).toBeVisible();
+    await expect(surface.getByRole("button", { name: "引导", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "打断并发送", exact: true })).toHaveCount(0);
+    relay.emit({ type: "user_msg", sid, msg_id: "claude-root", prompt: "检查输入" });
+    relay.emit({ type: "state", sid, state: "running", msg_id: "claude-root" });
+    relay.emit({ type: "assistant_msg_start", sid, message_id: "claude-old-output",
+      turn_id: "claude-root", channel: "commentary" });
+    relay.emit({ type: "delta", sid, message_id: "claude-old-output",
+      turn_id: "claude-root", channel: "commentary", text: "原任务输出" });
+    await input.fill("补充检查网络");
+    await input.press("Enter");
+    await expect.poll(() => relay.commands.filter(c => c.type === "steer").length).toBe(1);
+    const command = relay.commands.find(c => c.type === "steer")!;
+    expect(command.sid).toBe(sid);
+    await expect(input).toHaveValue("");
+    // Native next waits for its input boundary; old deltas still belong to the
+    // old row while command acceptance and user echo are separate events.
+    relay.emit({ type: "delta", sid, message_id: "claude-old-output",
+      turn_id: "claude-root", channel: "commentary", text: "继续完整显示。" });
+    relay.emit({ type: "assistant_msg_end", sid, message_id: "claude-old-output",
+      turn_id: "claude-root", channel: "commentary" });
+    relay.emit({ type: "turn_steered", sid, msg_id: String(command.msg_id),
+      turn_id: "claude-native-guide", prompt: String(command.prompt) });
+    relay.emit({ type: "assistant_msg_start", sid, message_id: "claude-guided-output",
+      turn_id: String(command.msg_id), channel: "final" });
+    relay.emit({ type: "delta", sid, message_id: "claude-guided-output",
+      turn_id: String(command.msg_id), channel: "final", text: "已经收到网络检查引导。" });
+    await expect(page.getByText("已经收到网络检查引导。", { exact: true })).toBeVisible();
+    if (!side) {
+      const original = page.locator('.turn[data-turn-id="claude-root"]');
+      await original.locator(".turn-process-head").click();
+      await expect(original)
+        .toContainText("原任务输出继续完整显示。");
+      await expect(page.locator(`.turn[data-turn-id="${String(command.msg_id)}"]`))
+        .not.toContainText("原任务输出");
+    }
+    await surface.getByRole("button", { name: "排队", exact: true }).click();
+    await input.fill("完成后再检查磁盘");
+    await input.press("Enter");
+    await expect.poll(() => relay.commands.filter(c => c.type === "query"
+      && c.delivery === "queue" && c.sid === sid).length).toBe(1);
+    expect(relay.commands.filter(c => c.type === "interrupt")).toHaveLength(0);
+    expect(relay.commands.filter(c => c.type === "steer")).toHaveLength(1);
   });
 }
 
@@ -802,6 +861,92 @@ test("session workspace refreshes native context during a running turn", async (
   await expect.poll(async () => Number(await ring.locator(".hr-fill").getAttribute("stroke-dashoffset")))
     .toBeCloseTo(4.7775325);
   expect(relay.commands.some(c => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
+});
+
+test("session workspace Claude harness switch keeps history during a deferred private-fork catalog read", async ({ page }) => {
+  let deferClaude = false;
+  let busyResponses = 0;
+  const relay = await mockRightPanelRelay(page, {
+    retained: false, engine: "claude",
+    seedTurns: [{ id: "kept-turn", prompt: "保留原会话内容", done: true, blocks: [] }],
+    listReply: command => {
+      if (command.engine === "codex") return {
+        type: "session_list", engine: "codex", space: "code",
+        request_id: String(command.cmd_id), sessions: [{
+          session_id: "codex-parent", engine: "codex", space: "code",
+          summary: "Codex parent", cwd: "/tmp/codex", state: "idle",
+        }],
+      };
+      if (deferClaude && busyResponses++ === 0) return {
+        type: "error", code: "busy", request_id: String(command.cmd_id),
+        message: "临时 btw 会话正在初始化，请稍后刷新会话列表",
+      };
+    },
+  });
+  await page.goto("/");
+  await expect(page.getByText("保留原会话内容", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "切换新会话引擎" }).click();
+  await page.getByRole("menuitemradio", { name: "Codex", exact: true }).click();
+  await expect.poll(() => relay.commands.some(c => c.type === "switch_session"
+    && c.session_id === "codex-parent")).toBe(true);
+  deferClaude = true;
+  await page.getByRole("button", { name: "切换新会话引擎" }).click();
+  await page.getByRole("menuitemradio", { name: "Claude", exact: true }).click();
+  await expect.poll(() => busyResponses).toBeGreaterThanOrEqual(2);
+  await expect(page.getByText("保留原会话内容", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "切换新会话引擎" })).toContainText("Claude");
+  await expect(page.getByText("当前操作暂时无法执行，请稍后重试。", { exact: true })).toHaveCount(0);
+  expect(relay.commands.some(c => ["query", "steer", "interrupt", "new_session"].includes(String(c.type)))).toBe(false);
+});
+
+test("session workspace Claude context refreshes while running and keeps its last reading silently", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, {
+    retained: false, engine: "claude", parentState: "running",
+  });
+  await page.goto("/");
+  const reads = () => relay.commands.filter(c => c.type === "get_context");
+  await expect.poll(() => reads().length).toBeGreaterThan(0);
+  // Cold restored workers need an actual summary to recover their capacity.
+  expect(reads().at(-1)?.refresh).toBe(true);
+  const report: PanelRelayEvent<Extract<ServerEvent, { type: "context_report" }>> = {
+    type: "context_report", sid: "layout-parent", model: "claude-fable-5-1",
+    total_tokens: 242701, max_tokens: 0, percentage: 0,
+    categories: [], source: "recent_turn",
+  };
+  relay.emit({ ...report, request_id: String(reads().at(-1)!.cmd_id) });
+  const ring = page.getByRole("button", { name: "上下文占用", exact: true });
+  const before = reads().length;
+  await ring.click();
+  await expect.poll(() => reads().length).toBeGreaterThan(before);
+  const opened = reads().at(-1)!;
+  expect(opened.refresh).toBe(true);
+  const fullReport = { ...report, max_tokens: 500000,
+    raw_max_tokens: 1000000, percentage: 48.5402, source: "control" as const };
+  relay.emit({ ...fullReport, request_id: String(opened.cmd_id) });
+  const popover = page.getByRole("dialog", { name: "上下文占用", exact: true });
+  await expect(popover).toContainText("242,701 / 500,000 (49%)");
+  const count = reads().length;
+  await expect.poll(() => reads().length, { timeout: 8000 }).toBeGreaterThan(count);
+  const poll = reads().at(-1)!;
+  expect(poll.refresh).toBe(false);
+  relay.emit({ ...fullReport, request_id: String(poll.cmd_id),
+    source: "recent_turn", total_tokens: 339685, percentage: 67.937 });
+  await expect(popover).toContainText("339,685 / 500,000 (68%)");
+  const offset = await ring.locator(".hr-fill").getAttribute("stroke-dashoffset");
+  await ring.click();
+  const closedCount = reads().length;
+  await ring.click();
+  await expect.poll(() => reads().length).toBeGreaterThan(closedCount);
+  relay.emit({ ...report, request_id: String(reads().at(-1)!.cmd_id),
+    total_tokens: 0, available: false });
+  await expect(popover).toContainText("339,685 / 500,000 (68%)");
+  relay.emit({ ...report, total_tokens: 350000 });
+  await expect(popover).toContainText("339,685 / 500,000 (68%)");
+  await expect(ring.locator(".hr-fill")).toHaveAttribute("stroke-dashoffset", offset!);
+  await expect(popover.locator(".ctx-pop-status")).toHaveCount(0);
+  await expect(popover).not.toContainText("正在读取");
+  await expect(ring.locator("text")).toHaveCount(0);
+  expect(relay.commands.some(c => ["query", "steer", "interrupt", "new_session"].includes(String(c.type)))).toBe(false);
 });
 
 test("turn regressions App routes file pages by exact request and opens the archived diff", async ({ page }) => {
@@ -2529,7 +2674,7 @@ test("async question unknown steer outcome keeps the draft and prevents duplicat
   const steer = relay.commands.find(c => c.type === "steer")!;
   relay.emit({ type: "error", sid: "layout-parent", msg_id: String(steer.msg_id),
     code: "steer_outcome_unknown", message: "private transport detail" });
-  await expect(dialog.getByRole("status")).toHaveText("引导已发出，Codex 尚未确认是否生效。请先查看后续结果。");
+  await expect(dialog.getByRole("status")).toHaveText("引导已发出，尚未确认是否生效。请先查看后续结果。");
   await expect(dialog.getByLabel("你的回答", { exact: true })).toHaveValue("只发一次");
   await expect(dialog.getByRole("button", { name: "发送回答" })).toBeDisabled();
   await dialog.getByRole("form").evaluate((form: HTMLFormElement) => form.requestSubmit());
@@ -9835,7 +9980,7 @@ test("profile session card manual unread survives refresh until explicit opening
   await page.goto("/tests/history-browser.html?profile-sidebar=code");
   const active = page.locator(".scard").filter({ hasText: "看看当前仓库" });
   await active.getByRole("button", { name: "更多操作" }).click();
-  await active.getByRole("button", { name: "标记为未读" }).click();
+  await page.locator(".card-menu").getByRole("button", { name: "标记为未读" }).click();
   await expect(active).toHaveClass(/active/);
   await expect(active.locator(".pill.completed")).toHaveText("未读");
   await page.reload();
@@ -9883,7 +10028,7 @@ test("profile session card manual unread stays usable when storage is unavailabl
     await page.goto(`/tests/history-browser.html?profile-sidebar=code&unread-storage=${mode}&machine=storage-${mode}`);
     const active = page.locator(".scard").filter({ hasText: "看看当前仓库" });
     await active.getByRole("button", { name: "更多操作" }).click();
-    await active.getByRole("button", { name: "标记为未读" }).click();
+    await page.locator(".card-menu").getByRole("button", { name: "标记为未读" }).click();
     await expect(active.locator(".pill.completed")).toHaveText("未读");
     await page.evaluate(() => {
       // A storage event must not crash or erase local state if access is denied;
@@ -9895,7 +10040,7 @@ test("profile session card manual unread stays usable when storage is unavailabl
     await active.click();
     await expect(active.locator(".pill.completed")).toHaveCount(0);
     await active.getByRole("button", { name: "更多操作" }).click();
-    await active.getByRole("button", { name: "标记为未读" }).click();
+    await page.locator(".card-menu").getByRole("button", { name: "标记为未读" }).click();
     await expect(active.locator(".pill.completed")).toHaveText("未读");
     await page.reload();
     await expect(active.locator(".pill.completed")).toHaveCount(0);
@@ -9911,12 +10056,12 @@ test("profile session card manual unread still synchronizes across tabs", async 
     const active = page.locator(".scard").filter({ hasText: "看看当前仓库" });
     const otherActive = other.locator(".scard").filter({ hasText: "看看当前仓库" });
     await active.getByRole("button", { name: "更多操作" }).click();
-    await active.getByRole("button", { name: "标记为未读" }).click();
+    await page.locator(".card-menu").getByRole("button", { name: "标记为未读" }).click();
     await expect(otherActive.locator(".pill.completed")).toHaveText("未读");
     await otherActive.click();
     await expect(active.locator(".pill.completed")).toHaveCount(0);
     await active.getByRole("button", { name: "更多操作" }).click();
-    await active.getByRole("button", { name: "标记为未读" }).click();
+    await page.locator(".card-menu").getByRole("button", { name: "标记为未读" }).click();
     await expect(otherActive.locator(".pill.completed")).toHaveText("未读");
     await other.evaluate(() => localStorage.clear());
     await expect(active.locator(".pill.completed")).toHaveCount(0);
@@ -10068,6 +10213,9 @@ for (const engine of ["codex", "claude"] as const) {
     await page.setViewportSize({ width: 390, height: 844 });
     const relay = await mockRightPanelRelay(page, { retained: false, engine });
     await page.goto("/");
+    // Initial focus restores the session's composer scope. Wait for that
+    // boundary before entering the command whose keyboard layout we test.
+    await expect(page.locator(".scard.active")).toContainText("Layout parent");
     const composer = page.locator(".composer textarea");
     await composer.fill("/goal");
     await composer.press("Enter");

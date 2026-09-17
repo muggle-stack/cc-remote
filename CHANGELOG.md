@@ -4,6 +4,15 @@
 
 ## Unreleased
 
+- Add an optional independent Claude session service: Wrapper reconnects recover
+  accepted turns and pending questions without resubmitting prompts. Include a
+  separate service installer and preserve account isolation.
+- Support native Claude steering during active work, retaining message, attachment
+  and token ownership. Reserve private BTW identities before launch, refresh live
+  context without overwriting newer readings, and retry busy session-list reads.
+- Replace replayed text prefixes and bound history summaries. Protocol v70
+  requires Wrapper, Relay and Web to be upgraded together.
+
 - Preview `.mmd` and `.mermaid` Work artifacts as diagrams, with a source view.
 
 - Keep Claude's internal recovery prompts hidden after compaction and rebuild

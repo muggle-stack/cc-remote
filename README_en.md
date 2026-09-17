@@ -4,7 +4,7 @@
 
 Self-hosted · Multiple sessions and devices · Live tool activity · Code / Work · PWA
 
-**Product version: v3.0.0** · Wire protocol v68
+**Product version: v3.0.0** · Wire protocol v70
 
 [中文](README.md) · [Engine comparison](#engines-and-features) · [Quick start](#quick-start) ·
 [Install and upgrade](#install-and-upgrade) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)
@@ -28,8 +28,8 @@ features or wire protocol across different commits.
   a task. History is paged, with tool details loaded when expanded.
 - **Follow the work.** Read streaming replies, engine-provided reasoning
   summaries, plans, tool calls, command output, file changes and approvals.
-  Codex supports steering or queueing while busy; Claude supports
-  interrupt-and-send or queueing.
+  Claude and Codex support steering or queueing while busy. Steering adds
+  instructions to the current task without interrupting running tools.
 - **Manage longer tasks.** `/goal` exposes each engine's native progress, budget
   and controls. Claude and Codex also offer temporary `/btw` side conversations
   while the main task continues.

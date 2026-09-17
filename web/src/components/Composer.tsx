@@ -478,7 +478,6 @@ export function Composer(p: Props) {
         }
         return;
       }
-      if (action === "interrupt-and-replace") p.onInterrupt();
       if (p.onSetPending(query)) {
         clearDraft(); resetTaHeight();
       }
@@ -693,13 +692,10 @@ export function Composer(p: Props) {
 
   const stopping = busy && !hasText && !hasAttachments;
   const interruptSettling = isInterruptSettling(p.state);
-  const primaryIsInterrupt = (p.engine ?? "claude") !== "codex";
   const sendIcon = !busy ? "send" : stopping ? "stop"
-    : p.sendMode === "steer" ? (primaryIsInterrupt ? "bolt" : "send")
+    : p.sendMode === "steer" ? "send"
       : "queue";
-  const sendClass = "sendbtn" + ((stopping
-    || (busy && p.sendMode === "steer" && primaryIsInterrupt
-      && (hasText || hasAttachments))) ? " interrupt" : "");
+  const sendClass = "sendbtn" + (stopping ? " interrupt" : "");
   const disabled = locked || importing || (!busy && !hasText && !hasAttachments)
     || isSettlingStopDisabled(p.state, hasText || hasAttachments);
   // Fall back to the raw id (not MODELS[0]) so a hidden model set via
@@ -713,6 +709,7 @@ export function Composer(p: Props) {
   // already clears both reports when the session's model or capacity changes.
   const exactContextReport = currentContextReport
     && (p.engine !== "codex" || currentContextReport.source !== "recent_turn")
+    && (currentContextReport.max_tokens > 0 || (retainedContextReport?.max_tokens ?? 0) <= 0)
     ? currentContextReport : retainedContextReport ?? currentContextReport;
   const codexEstimate = p.engine !== "codex"
     || exactContextReport?.source === "native_estimate";
@@ -892,8 +889,7 @@ export function Composer(p: Props) {
             {busy && <div className="seg">
               <button className={p.sendMode === "steer" ? "on" : ""}
                 onClick={() => p.setSendMode("steer")}>
-                <Icon name={primaryIsInterrupt ? "bolt" : "send"} size={14} />
-                {primaryIsInterrupt ? "打断并发送" : "引导"}
+                <Icon name="send" size={14} />引导
               </button>
               <button className={p.sendMode === "queue" ? "on" : ""} onClick={() => p.setSendMode("queue")}>
                 <Icon name="queue" size={14} />排队

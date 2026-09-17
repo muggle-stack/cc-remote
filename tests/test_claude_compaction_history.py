@@ -81,7 +81,8 @@ def test_internal_recovery_stays_in_human_turn_across_compact_pages(tmp_path, bl
                 db.execute("PRAGMA user_version=40")
             store = HistoryIndexStore(tmp_path / "index")
             assert store.get_page(SID, "claude", fingerprint, before=None, limit=4) is None
-            assert store.get_page(SID, "codex", fingerprint, before=None, limit=4) == _page("codex")
+            # v42 also rebuilds bounded Codex summaries while retaining assets.
+            assert store.get_page(SID, "codex", fingerprint, before=None, limit=4) is None
             with sqlite3.connect(store.path) as db:
                 assert db.execute("SELECT count(*) FROM claude_compact_records").fetchone()[0] == 0
                 assert db.execute("SELECT count(*) FROM history_image_assets").fetchone()[0] == 2
@@ -143,7 +144,8 @@ def test_manual_compact_replay_preserves_answer_and_pagination(tmp_path, blocks)
                 db.execute("PRAGMA user_version=38")
             store = HistoryIndexStore(tmp_path / "index")
             assert store.get_page(SID, "claude", fingerprint, before=None, limit=4) is None
-            assert store.get_page(SID, "codex", fingerprint, before=None, limit=4) == _page("codex")
+            # v42 also rebuilds bounded Codex summaries while retaining assets.
+            assert store.get_page(SID, "codex", fingerprint, before=None, limit=4) is None
             with sqlite3.connect(store.path) as db:
                 assert db.execute("SELECT count(*) FROM claude_compact_records").fetchone()[0] == 0
                 assert db.execute("SELECT count(*) FROM history_image_assets").fetchone()[0] == 2

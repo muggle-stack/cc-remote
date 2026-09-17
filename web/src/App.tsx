@@ -518,7 +518,7 @@ export default function App() {
     const requestId = transport?.sendGetContextTo(sid, refresh) ?? null;
     if (!requestId) return null;
     contextRequestLaunchesRef.current.set(sid, requestId);
-    dispatch({ type: "begin_context_request", sid, requestId });
+    dispatch({ type: "begin_context_request", sid, requestId, refresh });
     return requestId;
   }, []);
   const resumeListedSession = useCallback((
@@ -4291,15 +4291,21 @@ export default function App() {
     const deferred = contextRuntime?.contextRefreshDeferred === true;
     if (!contextRuntime?.contextRequestId
         && (!deferred || focusedEngine === "claude" && contextRuntime?.state === "idle")) {
-      sendContextRequestTo(focusedSid, deferred);
+      // A resumed Claude child has no capacity cache until its first native
+      // summary. The Wrapper selects its safe local read, including while busy.
+      sendContextRequestTo(focusedSid, deferred || focusedEngine === "claude"
+        && (contextRuntime?.contextReport?.max_tokens ?? 0) <= 0);
     }
-    // A long Codex turn can compact before TurnEnd. These visible-session
-    // reads are bounded and never invoke a model or resume an engine.
-    if (focusedEngine !== "codex") return;
+    // Both engines receive usage during a long turn. Poll cached totals; Claude
+    // only needs a native summary again if its generation's capacity is absent.
+    if (focusedEngine !== "codex" && focusedEngine !== "claude") return;
     const timer = window.setInterval(() => {
+      const runtime = stateRef.current.runtimes[focusedSid];
       if (document.visibilityState === "visible"
-          && stateRef.current.runtimes[focusedSid]?.state === "running") {
-        sendContextRequestTo(focusedSid, false);
+          && runtime?.state === "running") {
+        sendContextRequestTo(focusedSid, focusedEngine === "claude"
+          && !runtime.contextRefreshDeferred
+          && (runtime.contextReport?.max_tokens ?? 0) <= 0);
       }
     }, 5000);
     return () => window.clearInterval(timer);
@@ -4632,7 +4638,7 @@ export default function App() {
     prompt: string, images?: QueryImg[], files?: QueryFile[],
   ): boolean => {
     const ws = wsRef.current;
-    if (!ws || !focusedSid || focusedEngine !== "codex") return false;
+    if (!ws || !focusedSid || runtimeIsReadOnly(focusedSid)) return false;
     const runtime = stateRef.current.runtimes[focusedSid];
     if (ws.pendingQueryFor(focusedSid) || runtime?.acceptancePending) {
       return false;
@@ -5053,11 +5059,8 @@ export default function App() {
     const runtime = stateRef.current.runtimes[focusedSid];
     if (runtime?.contextRequestId
         || contextRequestLaunchesRef.current.has(focusedSid)) return;
-    if (focusedEngine === "claude" && runtime
-        && (runtime.state !== "idle" || runtime.queue.length > 0)) {
-      dispatch({ type: "defer_context_request", sid: focusedSid });
-      return;
-    }
+    // The Wrapper knows whether this Claude handle supports a live local
+    // summary. Let it choose, rather than suppress every running read here.
     // Closing and reopening is an explicit retry even if a previous busy
     // response exhausted its automatic finalizer catch-up attempts.
     contextDeferredRetryAttemptsRef.current.delete(focusedSid);
@@ -5325,7 +5328,6 @@ export default function App() {
     const sid = activeBtwSid;
     const ws = wsRef.current;
     if (!sid || !ws || runtimeIsReadOnly(sid)) return false;
-    if (steer && activeBtw?.engine !== "codex") return false;
     const runtime = stateRef.current.runtimes[sid];
     const awaitingAcceptance = !!(
       ws.pendingQueryFor(sid) || runtime?.acceptancePending

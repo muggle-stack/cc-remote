@@ -492,7 +492,7 @@ try {
   assert.equal(presentTurnOutcome("interrupted", "Codex updated; private diagnostic"), "已打断");
   assert.equal(presentTurnOutcome("failed", hiddenDiagnostic), "回复未完成");
   assert.equal(presentCommandProblem({ code: "steer_outcome_unknown", message: hiddenDiagnostic }),
-    "引导已发出，Codex 尚未确认是否生效。请先查看后续结果。");
+    "引导已发出，尚未确认是否生效。请先查看后续结果。");
   assert.equal(presentCommandProblem({ code: "not_steerable", message: "当前没有可引导的 Codex 任务" }),
     "当前没有可引导的任务，本次未发送。请在会话空闲后重试。");
   assert.equal(presentCommandProblem({ code: "not_steerable", message: "Codex 任务已结束，本次引导未发送。" }),

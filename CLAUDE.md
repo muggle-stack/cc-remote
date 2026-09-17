@@ -28,6 +28,15 @@ this optional step does not block core deployment. App-control MCP tools require
 a separate choice; sharing alone does not authorize them.
 
 ## Critical constraints / traps
+- **Claude service lifetime**: when `CC_REMOTE_CLAUDE_SERVICE_SOCKET` is set,
+  regular Claude Code/Work SDK processes belong to the separate local service.
+  Wrapper shutdown detaches; never resubmit an accepted query during recovery
+  or restart the service during an ordinary Wrapper deploy. See
+  `docs/claude-session-service.md` for first migration and drain boundaries.
+- **Claude steering**: send `priority="next"` through the sole streaming-input
+  reader and rebind only on the exact native user UUID echo. A Result before
+  an accepted input is consumed is intermediate. Explicit Stop cancels queued
+  inputs when supported, then drains the real terminal Result.
 - **Drain footgun**: after `ClaudeSDKClient.interrupt()`, the SDK does NOT kill
   the session — the current turn's stream still emits a terminal
   `ResultMessage(subtype="error_during_execution")`. You MUST keep consuming
@@ -88,7 +97,7 @@ a separate choice; sharing alone does not authorize them.
   `useLayoutEffect` is deliberately dependency-free — late virtualizer/image
   measurements settle without a React render, and constraining it to its read
   set reintroduces a full-viewport jump on touch release.
-- **Protocol version gate**: current wire protocol v68 is declared by
+- **Protocol version gate**: current wire protocol v70 is declared by
   `PROTOCOL_VERSION` in both `protocol.py` and `web/src/protocol.ts`.
   `deserialize` hard-rejects a version mismatch, and
   `_Base` is `extra="forbid"`, so ANY protocol change must be deployed to all
