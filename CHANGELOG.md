@@ -4,8 +4,21 @@
 
 ## Unreleased
 
+- Preview `.mmd` and `.mermaid` Work artifacts as diagrams, with a source view.
+
+- Keep Claude's internal recovery prompts hidden after compaction and rebuild
+  stale projections. Show autonomous replies after agent completion in separate
+  live process sections, with their own thinking, tools and working indicator.
+- Stream subagent text without waiting for whole messages. Recover agent-detail
+  read errors and timeouts, refresh active source-backed agents, and show each
+  agent's own running state.
+- Use a subdued text shimmer for active process and tool summaries. Present
+  readable command/search inputs and structured tool output, with raw data
+  available on demand.
+
 - Show native input/output token counts beside the working spark, with exact
-  counts and cache usage on hover or tap. Keep per-turn ownership and
+  counts and cache usage on click or tap. Use subdued counters that show
+  the latest readings directly. Keep per-turn ownership and
   replace-only recovery snapshots across reconnects (protocol v68).
 
 

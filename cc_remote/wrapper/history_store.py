@@ -65,7 +65,8 @@ from cc_remote.wrapper.usage_limit import is_usage_limit_failure
 # v39 hides local command caveats and preserves the pre-compact answer clock.
 # v40 gives real Claude background replies their source completion time while
 # retaining the old boundary for task bookkeeping without a reply.
-_SCHEMA_VERSION = 40
+# v41 keeps native isMeta recovery prompts inside their original human turn.
+_SCHEMA_VERSION = 41
 _FINGERPRINT_SAMPLE_BYTES = 64 * 1024
 _DEFAULT_MAX_ENTRIES = 128
 _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
@@ -1286,6 +1287,16 @@ class HistoryIndexStore:
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
             current = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if current in range(10, 41):
+                # isMeta changes both turn boundaries and the visible-user
+                # graph without changing native bytes. Rebuild Claude's derived
+                # narrative/index only; retain Codex and source-bound assets.
+                for table in ("history_pages", "history_turn_details"):
+                    connection.execute(f"DELETE FROM {table} WHERE engine='claude'")
+                for table in (
+                    "claude_compact_sources", "claude_compact_records", "claude_compact_queue",
+                ):
+                    connection.execute(f"DROP TABLE IF EXISTS {table}")
             if current in range(10, 40):
                 # Real background replies had the original answer's timestamp.
                 # Only Claude narrative changes; keep all source-bound assets.
@@ -1424,8 +1435,8 @@ class HistoryIndexStore:
                 for table in ("history_pages", "history_turn_details"):
                     connection.execute(
                         f"DELETE FROM {table} WHERE engine='codex'")
-            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39):
-                # The independent v22-v40 invalidations above suffice.
+            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40):
+                # The independent v22-v41 invalidations above suffice.
                 pass
             elif current not in (0, _SCHEMA_VERSION):
                 # v9 changes the invariant of history_turn_details: those rows

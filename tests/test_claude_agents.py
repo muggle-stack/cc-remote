@@ -9,6 +9,7 @@ import pytest
 
 from claude_agent_sdk.types import (
     AssistantMessage,
+    StreamEvent,
     TaskStartedMessage,
     TaskUpdatedMessage,
     TextBlock,
@@ -37,6 +38,42 @@ def _assistant(content, *, parent=None):
         model="claude-test",
         parent_tool_use_id=parent,
     )
+
+
+def test_agent_partial_output_is_live_coalesced_and_not_duplicated(monkeypatch):
+    registry = ClaudeAgentRegistry(64 * 1024)
+    tick = [10.0]
+    monkeypatch.setattr(agent_module.time, "monotonic", lambda: tick[0])
+
+    def delta(text):
+        return registry.route(StreamEvent(
+            uuid="child-message", session_id="session",
+            parent_tool_use_id="root-agent", event={
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": text},
+            },
+        ))
+
+    first = delta("First ")
+    assert any(event.get("text") == "First " for event in first.events)
+    tick[0] += 0.01
+    assert delta("second ").events == ()
+    tick[0] += 0.01
+    assert delta("third ").events == ()
+    tick[0] += 0.2
+    spaced = delta("fourth ")
+    assert [event["text"] for event in spaced.events
+            if event["type"] == "delta"] == ["second third fourth "]
+    tick[0] += 0.01
+    assert delta("last").events == ()
+    assembled = registry.route(_assistant(
+        [TextBlock(text="First second third fourth last")], parent="root-agent"))
+    assert [event["text"] for event in assembled.events
+            if event["type"] == "delta"] == ["last"]
+    run = registry.snapshot(public_agent_run_id("root-agent"))
+    assert "".join(event["text"] for event in run.events
+                   if event["type"] == "delta") == "First second third fourth last"
+    assert run.pending_stream_events == []
 
 
 def test_registry_separates_root_and_nested_agent_messages():

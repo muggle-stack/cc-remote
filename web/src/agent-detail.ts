@@ -17,6 +17,7 @@ export interface AgentDetailRun {
   oldestCursor: string | null;
   hasNewer: boolean;
   newerCursor: string | null;
+  viewingOlder?: boolean;
 }
 
 export interface AgentDetailPanelState {
@@ -190,5 +191,6 @@ export function acceptAgentDetail(
     hasMore: message.has_more ?? false,
     oldestCursor: message.oldest_cursor ?? null,
     hasNewer: message.has_newer ?? false,
-    newerCursor: message.newer_cursor ?? null };
+    newerCursor: message.newer_cursor ?? null,
+    viewingOlder: older };
 }

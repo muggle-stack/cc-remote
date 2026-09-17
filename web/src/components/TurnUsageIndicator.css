@@ -1,11 +1,10 @@
 .turn-working{ flex-wrap:wrap; row-gap:4px; }
 .turn-usage-trigger{ display:inline-flex; align-items:center; gap:12px; padding:3px 0;
-  margin-left:5px; border:0; border-radius:4px; background:transparent; color:var(--accent-ink);
-  font:inherit; font-size:12.5px; font-weight:var(--font-weight-600); cursor:pointer;
+  margin-left:5px; border:0; border-radius:4px; background:transparent; color:var(--dim);
+  font:inherit; font-size:12.5px; font-weight:var(--font-weight-400); cursor:pointer;
   font-variant-numeric:tabular-nums; white-space:nowrap; line-height:1.5; }
-.turn-usage-trigger:hover{ color:var(--text); }
-.turn-usage-trigger:focus-visible{ outline:2px solid var(--accent); outline-offset:4px; }
-.turn-usage-unit{ font-weight:var(--font-weight-600); }
+.turn-usage-trigger:focus-visible{ outline:2px solid var(--dim); outline-offset:4px; }
+.turn-usage-unit{ font-weight:inherit; }
 .turn-usage-popover{ position:fixed; z-index:90; box-sizing:border-box; overflow:auto;
   transform:translate(-50%,-100%); padding:16px 18px; border:1px solid var(--border);
   border-radius:16px; background:var(--surface); color:var(--text);

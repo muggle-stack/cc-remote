@@ -36,6 +36,17 @@ from cc_remote.wrapper.preview_capabilities import PreviewCapabilityStore
 from tests.test_multisession import _mk_ctx, _mk_machine
 
 
+@pytest.mark.parametrize("extension", ["mmd", "MERMAID"])
+def test_mermaid_artifact_reads_exact_source_as_text(tmp_path, extension):
+    source = "flowchart TD\n  camera[双目相机] --> decoder[硬件解码]\n"
+    path = tmp_path / f"camera_navigation_pipeline.{extension}"
+    path.write_text(source, encoding="utf-8")
+    preview = machine_module.WrapperMachine._read_file_preview(str(tmp_path), path.name)
+    assert preview["format"] == "text"
+    assert preview["content"] == source
+    assert preview["truncated"] is False
+
+
 @pytest.mark.parametrize("engine", ["claude", "codex"])
 @pytest.mark.parametrize("foreign_owner", [False, True])
 def test_code_open_reads_os_readable_files_outside_session(

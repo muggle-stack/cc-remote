@@ -1162,6 +1162,222 @@ test("async question compact styling shows each question once on desktop and mob
   await expect(card.getByLabel("你的回答", { exact: true })).toHaveValue("三指拖拽");
 });
 
+test("active process text shimmers and readable tool output settles without replaying animation", async ({ page }, info) => {
+  const relay = await mockRightPanelRelay(page, { engine: "claude", historyReply: () => null });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some((c) => c.type === "get_history")).toBe(true);
+  const sid = "layout-parent";
+  relay.emit({ type: "user_msg", sid, msg_id: "shimmer-user", prompt: "检查输出显示" });
+  relay.emit({ type: "turn_binding", sid, msg_id: "shimmer-user", turn_id: "shimmer-user" });
+  relay.emit({ type: "state", sid, state: "running" });
+  relay.emit({ type: "tool_use", sid, message_id: "command-message", tool_use_id: "readable-command",
+    turn_id: "shimmer-user", tool: "Bash", category: "command", title: "运行命令",
+    input: { command: "/bin/zsh -lc 'rg -n needle src'", cwd: "/repo" } });
+  const turn = page.locator('.turn[data-turn-id="shimmer-user"]');
+  const label = turn.locator(".turn-process-label");
+  const tools = turn.locator(".tool-group-label");
+  await expect(label).toHaveClass(/is-active/);
+  await expect(tools).toHaveClass(/is-active/);
+  await expect(label).toHaveCSS("animation-name", "status-text-sweep");
+  await expect(turn.locator(".tool-group-ic, .turn-process-state")).toHaveCount(0);
+  const before = await label.evaluate((node) => getComputedStyle(node).backgroundPositionX);
+  await expect.poll(() => label.evaluate((node) => getComputedStyle(node).backgroundPositionX))
+    .not.toBe(before);
+  await turn.locator(".tool-group-h").click();
+  const card = turn.locator(".tool");
+  await expect(card.locator(".tool-arg")).toHaveText("rg -n needle src");
+  await card.locator(".tool-h").click();
+  await expect(card.locator(".tool-pre").first()).toHaveText("rg -n needle src");
+  const raw = JSON.stringify({ chunk_id: "transport-chunk", output: "src/main.ts:12: needle", exit_code: 0 });
+  relay.emit({ type: "tool_result", sid, tool_use_id: "readable-command", content: raw,
+    turn_id: "shimmer-user", is_error: false });
+  await expect(card.locator(".tool-pre").last()).toHaveText("src/main.ts:12: needle");
+  await expect(card).not.toContainText("transport-chunk");
+  await card.getByText("原始结果", { exact: true }).click();
+  await expect(card).toContainText("transport-chunk");
+  await card.getByText("原始结果", { exact: true }).click();
+  await expect(tools).not.toHaveClass(/is-active/);
+  await expect(label).toHaveClass(/is-active/);
+  await page.screenshot({ path: info.outputPath("text-shimmer-light.png") });
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  await page.screenshot({ path: info.outputPath("text-shimmer-dark.png") });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(label).toHaveCSS("animation-name", "none");
+  await expect(label).not.toHaveCSS("-webkit-text-fill-color", "rgba(0, 0, 0, 0)");
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  relay.emit({ type: "turn_end", sid, turn_id: "shimmer-user",
+    result: { subtype: "success", duration_ms: 5000, is_error: false } });
+  relay.emit({ type: "state", sid, state: "idle" });
+  await expect(label).toContainText("已处理");
+  await expect(turn.locator(".status-shimmer.is-active")).toHaveCount(0);
+});
+
+test("Claude resumes a separate live process after an idle background task", async ({ page }, info) => {
+  const relay = await mockRightPanelRelay(page, { engine: "claude", historyReply: () => null });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some((c) => c.type === "get_history")).toBe(true);
+  const sid = "layout-parent";
+  const turnId = "background-parent";
+  relay.emit({ type: "user_msg", sid, msg_id: turnId, prompt: "检查两个任务" });
+  relay.emit({ type: "turn_binding", sid, msg_id: turnId, turn_id: turnId });
+  relay.emit({ type: "state", sid, state: "running" });
+  relay.emit({ type: "process", sid, turn_id: turnId, item_id: "agent-a", kind: "agent",
+    phase: "start", status: "running", title: "检查结构", background: true });
+  relay.emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "interim", channel: "final" });
+  relay.emit({ type: "delta", sid, turn_id: turnId, message_id: "interim", channel: "final", text: "中间结果先给你，两路探索还在跑。" });
+  relay.emit({ type: "assistant_msg_end", sid, turn_id: turnId, message_id: "interim", channel: "final" });
+  relay.emit({ type: "turn_end", sid, turn_id: turnId, result: { subtype: "success", duration_ms: 3000, is_error: false } });
+  relay.emit({ type: "state", sid, state: "idle" });
+  const turn = page.locator(`.turn[data-turn-id="${turnId}"]`);
+  await expect(turn.locator(".turn-working")).toHaveCount(0);
+  await expect(turn.locator(".turn-process-head").first()).toHaveAttribute("aria-expanded", "false");
+  relay.emit({ type: "process", sid, turn_id: turnId, item_id: "agent-a", kind: "agent",
+    phase: "end", status: "succeeded", title: "检查结构", summary: "Raw agent report must stay in details", background: true });
+  await expect(turn.locator(".turn-working")).toHaveCount(0);
+  await expect(turn.locator(".background-followup")).toHaveCount(0);
+
+  relay.emit({ type: "state", sid, state: "running" });
+  relay.emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "follow-thinking", channel: "thinking", background: true });
+  relay.emit({ type: "delta", sid, turn_id: turnId, message_id: "follow-thinking", channel: "thinking", text: "Fixture continuation reasoning", background: true });
+  const continuation = turn.locator(".background-followup").first();
+  await expect(turn.locator(".turn-working")).toBeVisible();
+  await expect(continuation.locator(".turn-process-head")).toHaveAttribute("aria-expanded", "true");
+  await expect(continuation.locator(".turn-process-label")).toHaveClass(/is-active/);
+  await expect(continuation.locator(".process-reasoning")).toBeVisible();
+  await expect(turn.locator(".turn-process-head").first()).toHaveAttribute("aria-expanded", "false");
+  await expect(continuation).not.toContainText("Raw agent report");
+  relay.emit({ type: "assistant_msg_end", sid, turn_id: turnId, message_id: "follow-thinking", channel: "thinking", background: true });
+  relay.emit({ type: "tool_use", sid, turn_id: turnId, message_id: "follow-tool", tool_use_id: "verify", tool: "Bash", category: "command", input: { command: "verify camera" }, background: true });
+  await expect(continuation.locator(".tool-group-label")).toContainText("正在调用 1 个工具");
+  await page.screenshot({ path: info.outputPath("claude-live-continuation.png") });
+  relay.emit({ type: "tool_result", sid, turn_id: turnId, tool_use_id: "verify", content: "Verified", is_error: false, background: true });
+  relay.emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "follow-answer", channel: "final", background: true });
+  relay.emit({ type: "delta", sid, turn_id: turnId, message_id: "follow-answer", channel: "final", text: "第一路检查完成。", background: true });
+  relay.emit({ type: "assistant_msg_end", sid, turn_id: turnId, message_id: "follow-answer", channel: "final", background: true });
+  relay.emit({ type: "state", sid, state: "idle" });
+  await expect(turn.locator(".turn-working")).toHaveCount(0);
+  await expect(continuation.locator(".turn-process-head")).toHaveAttribute("aria-expanded", "false");
+  await expect(continuation).toContainText("第一路检查完成。");
+
+  relay.emit({ type: "state", sid, state: "running" });
+  relay.emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "second-thinking", channel: "thinking", background: true });
+  relay.emit({ type: "delta", sid, turn_id: turnId, message_id: "second-thinking", channel: "thinking", text: "Fixture second continuation", background: true });
+  await expect(turn.locator(".background-followup")).toHaveCount(2);
+  await expect(turn.locator(".background-followup").last().locator(".turn-process-head")).toHaveAttribute("aria-expanded", "true");
+  await expect(continuation.locator(".turn-process-head")).toHaveAttribute("aria-expanded", "false");
+  await expect(turn.locator(".turn-working")).toHaveCount(1);
+});
+
+test("Claude agent detail recovers stale revisions and follows its own live status", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { engine: "claude" });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some((c) => c.type === "get_history")).toBe(true);
+  const sid = "layout-parent";
+  relay.emit({ type: "user_msg", sid, msg_id: "agent-parent", prompt: "运行子代理" });
+  relay.emit({ type: "process", sid, turn_id: "agent-parent", item_id: "agent-detail-run", kind: "agent",
+    phase: "start", status: "running", title: "检查相机链路", background: true });
+  await page.locator(".process-agent-card").click();
+  const panel = page.getByRole("complementary", { name: "协作代理详情" });
+  await expect(panel.locator(".agent-detail-working")).toBeVisible();
+  const requests = () => relay.commands.filter((c) => c.type === "get_agent_detail");
+  await expect.poll(() => requests().length).toBe(1);
+  const reply = (extra: Record<string, unknown> = {}) => relay.emit({
+    type: "agent_detail", sid, session_id: sid, run_id: "agent-detail-run",
+    request_id: String(requests().at(-1)!.request_id), revision: "fresh-history",
+    detail_revision: "live-agent-1", authoritative: true, title: "检查相机链路",
+    status: "running", events: [], through_seq: 0, ...extra,
+  } as PanelRelayEvent<Extract<ServerEvent, { type: "agent_detail" }>>);
+  reply({ authoritative: false, error: "会话历史已更新，请重新打开协作代理" });
+  await expect(panel.getByRole("alert")).toContainText("会话记录已更新");
+  await expect(panel).not.toContainText("正在读取协作代理过程");
+  await panel.getByRole("button", { name: "重试", exact: true }).click();
+  await expect.poll(() => requests().length).toBe(2);
+  expect(requests().at(-1)!.revision).toBeUndefined();
+  expect(requests().at(-1)!.detail_revision).toBeUndefined();
+  reply();
+  await expect(panel.locator(".agent-detail-status")).toHaveText("运行中");
+  await expect(panel.locator(".agent-detail-working")).toBeVisible();
+  reply({ live: true, request_id: null, through_seq: 1, events: [
+    { v: PROTOCOL_VERSION, ts: 10, type: "assistant_msg_start", message_id: "child-note", channel: "commentary" },
+    { v: PROTOCOL_VERSION, ts: 10, type: "delta", message_id: "child-note", channel: "commentary", text: "子代理正在核对驱动接口" },
+  ] });
+  await expect(panel).toContainText("子代理正在核对驱动接口");
+  reply({ live: true, request_id: null, through_seq: 1, status: "succeeded", events: [] });
+  await expect(panel.locator(".agent-detail-status")).toHaveText("已完成");
+  await expect(panel.locator(".agent-detail-working")).toHaveCount(0);
+});
+
+test("Claude agent detail reads a fresh revision and refreshes active native history", async ({ page }) => {
+  await page.clock.install();
+  const relay = await mockRightPanelRelay(page, { engine: "claude" });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some((c) => c.type === "get_history")).toBe(true);
+  const sid = "layout-parent";
+  relay.emit({ type: "user_msg", sid, msg_id: "native-agent-parent", prompt: "查看原生子代理" });
+  relay.emit({ type: "process", sid, turn_id: "native-agent-parent", item_id: "native-agent", kind: "agent",
+    phase: "start", status: "running", title: "原生子代理", background: true });
+  await page.locator(".process-agent-card").click();
+  const panel = page.getByRole("complementary", { name: "协作代理详情" });
+  const requests = () => relay.commands.filter((c) => c.type === "get_agent_detail");
+  await expect.poll(() => requests().length).toBe(1);
+  expect(requests()[0].revision).toBeUndefined();
+  const reply = (status: "running" | "succeeded", detailRevision: string) => relay.emit({
+    type: "agent_detail", sid, session_id: sid, run_id: "native-agent",
+    request_id: String(requests().at(-1)!.request_id), revision: "new-native-history",
+    detail_revision: detailRevision, authoritative: true, title: "原生子代理",
+    status, events: [], through_seq: 0,
+  });
+  reply("running", "source-version-1");
+  await expect(panel.locator(".agent-detail-status")).toHaveText("运行中");
+  await expect(panel.getByRole("alert")).toHaveCount(0);
+  await page.clock.fastForward(3500);
+  await expect.poll(() => requests().length).toBe(2);
+  expect(requests().at(-1)!.detail_revision).toBeUndefined();
+  reply("succeeded", "source-version-2");
+  await expect(panel.locator(".agent-detail-status")).toHaveText("已完成");
+  await expect(panel.locator(".agent-detail-working")).toHaveCount(0);
+  await page.clock.fastForward(7000);
+  expect(requests()).toHaveLength(2);
+});
+
+for (const extension of ["mmd", "MERMAID"]) {
+  test(`Work Mermaid artifact opens a diagram and its source (${extension})`, async ({ page }) => {
+    await page.goto(`/tests/history-browser.html?artifact-mermaid=1&ext=${extension}`);
+    const sheet = page.getByRole("dialog", { name: "Artifacts", exact: true });
+    const file = sheet.getByRole("button", { name: new RegExp(`camera_navigation_pipeline\\.${extension}`) });
+    await expect(file).toBeEnabled();
+    await expect(file).toContainText("Mermaid 图表");
+    await file.click();
+    const panel = page.locator(".artifact-panel");
+    await expect(panel.locator(".mermaid-svg svg")).toBeVisible();
+    await expect(panel.locator(".mermaid-svg")).toContainText("双目相机");
+    await expect(panel.locator(".mermaid-svg")).toContainText("路径规划");
+    await panel.getByRole("button", { name: "源码", exact: true }).click();
+    await expect(panel.locator(".mermaid-svg")).toHaveCount(0);
+    await expect(panel.locator(".artifact-body")).toContainText("flowchart TD");
+    await panel.getByRole("button", { name: "预览", exact: true }).click();
+    await expect(panel.locator(".mermaid-svg svg")).toBeVisible();
+  });
+}
+
+test("Claude agent detail stops waiting on a lost response and retries", async ({ page }) => {
+  await page.clock.install();
+  const relay = await mockRightPanelRelay(page, { engine: "claude" });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some((c) => c.type === "get_history")).toBe(true);
+  relay.emit({ type: "user_msg", sid: "layout-parent", msg_id: "agent-timeout-parent", prompt: "检查" });
+  relay.emit({ type: "process", sid: "layout-parent", turn_id: "agent-timeout-parent", item_id: "timeout-agent", kind: "agent",
+    phase: "start", status: "running", title: "检查慢请求", background: true });
+  await page.locator(".process-agent-card").click();
+  const panel = page.getByRole("complementary", { name: "协作代理详情" });
+  await expect(panel).toContainText("正在读取协作代理过程");
+  await page.clock.fastForward(31_000);
+  await expect(panel.getByRole("alert")).toContainText("读取协作代理超时");
+  await expect(panel).not.toContainText("正在读取协作代理过程");
+  await panel.getByRole("button", { name: "重试", exact: true }).click();
+  await expect.poll(() => relay.commands.filter((c) => c.type === "get_agent_detail").length).toBe(2);
+});
+
 test("generated image live snapshot renders outside collapsed process and duplicate events stay idempotent", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { imageAssets: true });
   await page.goto("/");
@@ -5402,7 +5618,7 @@ test("session cache rejects stale Claude and replay-orphan rows", async ({
         savedAt: Date.now(),
       }, missingAnswerV25Sid);
       tx.objectStore("sessions").put({
-        v: 26,
+        v: 27,
         turns: [{
           id: "active-before-steer",
           prompt: "first prompt",
@@ -10118,11 +10334,16 @@ for (const engine of ["codex", "claude"]) {
     const trigger = page.getByRole("button", { name: "查看 token 用量" });
     await expect(trigger).toContainText("↑ 184k");
     await expect(trigger).toContainText("↓ 2.4k tokens");
-    if (isMobile) await trigger.click();
-    else await trigger.hover();
     const card = page.getByRole("dialog", { name: "Token 用量", exact: true });
+    if (!isMobile) await trigger.hover();
+    await trigger.focus();
+    await expect(card).toBeHidden();
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await trigger.click();
     await expect(card).toBeVisible();
     await expect(card).toContainText("184,001");
+    await expect(trigger).toHaveCSS("color", await card.locator(".turn-usage-heading > span")
+      .evaluate(node => getComputedStyle(node).color));
     await expect(card).toContainText("180,000");
     const bounds = await card.boundingBox();
     const composer = await page.locator(".composer").boundingBox();
@@ -10130,13 +10351,17 @@ for (const engine of ["codex", "claude"]) {
     expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(composer!.y + 1);
     expect(bounds!.x).toBeGreaterThanOrEqual(0);
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
-    // Drive a native update without moving the pointer out of the disclosure.
+    // The compact counter and detail show the latest native reading directly.
     await page.getByRole("button", { name: "更新用量" }).evaluate(el => (el as HTMLButtonElement).click());
-    await expect(trigger).toContainText("↓ 5.8k tokens");
     await expect(card).toContainText("5,820");
     await expect(card).toContainText("182,000");
+    await expect(trigger).toContainText("↓ 5.8k tokens");
     await page.screenshot({ path: testInfo.outputPath("token-usage.png") });
     await page.keyboard.press("Escape");
+    await expect(card).toBeHidden();
+    await trigger.click();
+    await expect(card).toBeVisible();
+    await trigger.click();
     await expect(card).toBeHidden();
     await trigger.click();
     await expect(card).toBeVisible();
@@ -10145,3 +10370,25 @@ for (const engine of ["codex", "claude"]) {
     await expect(card).toBeHidden();
   });
 }
+
+test("live token usage updates immediately and supports explicit keyboard activation", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.clock.install({ time: new Date("2026-09-16T10:00:00Z") });
+  await page.goto("/tests/history-browser.html?turn-usage&engine=claude");
+  const trigger = page.getByRole("button", { name: "查看 token 用量" });
+  const card = page.getByRole("dialog", { name: "Token 用量", exact: true });
+  await expect(trigger).toContainText("↑ 184k");
+  await expect(trigger).toContainText("↓ 2.4k tokens");
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+  await trigger.focus();
+  await expect(card).toBeHidden();
+  await trigger.press("Enter");
+  await expect(card).toBeVisible();
+  await trigger.press("Space");
+  await expect(card).toBeHidden();
+  await trigger.press("Enter");
+  await page.getByRole("button", { name: "更新用量" }).evaluate(el => (el as HTMLButtonElement).click());
+  await expect(trigger).toContainText("↓ 5.8k tokens");
+  await page.locator(".composer").dispatchEvent("pointerdown");
+  await expect(card).toBeHidden();
+});

@@ -8,6 +8,7 @@ import {
   releaseDraggedPointer,
 } from "../pointer-tap";
 import { isToolFailure, presentTool } from "../tool-presentation";
+import { ToolInput, ToolOutput } from "./ToolDetails";
 
 function EditDiff({ oldString, newString, serverDiff }: {
   oldString: string; newString: string; serverDiff?: string | null;
@@ -118,10 +119,7 @@ export function ToolCallCard({ block }: { block: ToolBlock }) {
             <pre className="tool-pre">{inp.content}</pre>
           </>
         ) : hasInput ? (
-          <>
-            <div className="tool-lbl">输入</div>
-            <pre className="tool-pre">{JSON.stringify(block.input, null, 2)}</pre>
-          </>
+          <ToolInput input={block.input} />
         ) : null}
         {diff && !isEdit && (
           <>
@@ -130,13 +128,9 @@ export function ToolCallCard({ block }: { block: ToolBlock }) {
           </>
         )}
         {output && (
-          <>
-            <div className="tool-lbl">输出{block.result?.is_error ? " (error)" : ""}</div>
-            <pre className="tool-pre">
-              {output}
-              {block.result?.truncated && "\n…(truncated)"}
-            </pre>
-          </>
+          <ToolOutput output={output} truncated={block.result?.truncated}
+            label={block.result?.is_error ? "输出（失败）"
+              : presentation.group === "搜索" ? "搜索结果" : "输出"} />
         )}
         {block.result && (block.result.exit_code != null || block.result.duration_ms != null) && (
           <div className="tool-meta">

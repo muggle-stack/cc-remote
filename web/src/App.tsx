@@ -5200,8 +5200,12 @@ export default function App() {
     if (!focusedSid || focusedEngine !== "claude" || space !== "code"
         || !rt.historyRevision) return;
     closeViewer();
+    const agent = rt.backgroundProcesses.find((block) => block.item_id === runId)
+      ?? rt.turns.flatMap((turn) => turn.blocks).find((block) =>
+        block.kind === "process" && block.item_id === runId);
     setAgentPanel({ sid: focusedSid, revision: rt.historyRevision,
-      runId, title: title || "协作代理" });
+      runId, title: title || "协作代理",
+      status: agent?.kind === "process" ? agent.status : undefined });
   };
   const previewAgentFile = (file: string, line?: number) => {
     if (previewFileForSid(focusedSid, file, line)) setAgentPanel(null);
@@ -6059,7 +6063,7 @@ export default function App() {
           return <Suspense fallback={null}>
             <AgentDetailController
               key={`${agentPanel.sid}:${agentPanel.revision}:${agentPanel.runId}`}
-              selection={agentPanel} ws={wsRef.current}
+              selection={{ ...agentPanel, revision: rt.historyRevision || agentPanel.revision }} ws={wsRef.current}
               onListen={setAgentDetailListener}
               onClose={() => setAgentPanel(null)}
               onOpenFile={previewAgentFile} />

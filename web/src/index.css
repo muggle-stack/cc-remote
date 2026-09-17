@@ -329,8 +329,6 @@ body{
 .assistant-answer-segment{ display:contents; }
 .background-followup-boundary{ display:flex; align-items:center; flex-wrap:wrap; gap:7px; margin:14px 0 8px;
   padding-top:10px; border-top:1px solid var(--line); color:var(--muted); font-size:11px; line-height:1.4; }
-.background-followup-icon{ display:grid; place-items:center; width:19px; height:19px; border-radius:50%;
-  color:var(--ok); background:var(--ok-weak); }
 .background-followup-boundary time{ color:var(--dim); font-variant-numeric:tabular-nums; }
 .thread{ flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; overflow-anchor:none; -webkit-overflow-scrolling:touch; padding:0; position:relative; z-index:1;
   color-scheme:light; scrollbar-width:thin;
@@ -561,12 +559,14 @@ button.message-image-error{ font:inherit; cursor:pointer; }
 .tool-meta{ display:flex; gap:10px; margin-top:8px; color:var(--faint); font-family:var(--mono); font-size:10.5px; }
 .tool-diff{ max-height:340px; background:var(--raised); }
 .tool-diff-note{ margin-top:6px; color:var(--faint); font-size:11px; line-height:1.45; }
+.tool-raw{ margin-top:8px; color:var(--faint); font-size:11px; }
+.tool-raw>summary{ cursor:pointer; padding:4px 0; }
 
 /* One turn-level process timeline. The final answer stays outside this shell. */
 .turn-process{ margin:5px 0 10px; color:var(--dim); }
 .turn-process-controls{ position:relative; display:flex; align-items:center; gap:3px; width:100%; }
 .turn-process-head{ display:flex; align-items:center; gap:7px; width:100%; min-height:38px;
-  padding:6px 8px; border-radius:10px; color:var(--dim); text-align:left; font-size:13px; font-weight:var(--font-weight-600);
+  padding:6px 8px 6px 0; border-radius:10px; color:var(--dim); text-align:left; font-size:13px; font-weight:var(--font-weight-600);
   touch-action:pan-y; user-select:none; -webkit-user-select:none; }
 .turn-process-controls>.turn-process-head{ width:auto; min-width:0; flex:1; }
 @media (hover:hover) and (pointer:fine){
@@ -582,10 +582,31 @@ button.message-image-error{ font:inherit; cursor:pointer; }
 }
 .turn-process-head > svg{ margin-left:2px; color:var(--faint); transition:transform .18s ease; }
 .turn-process.open .turn-process-head > svg{ transform:rotate(180deg); }
-.turn-process-state{ width:17px; height:17px; display:grid; place-items:center; flex:none; color:var(--ok); }
-.turn-process-state.running{ color:var(--accent-text,var(--accent)); }
+.turn-process-state{ width:17px; height:17px; display:grid; place-items:center; flex:none; color:var(--dim); }
 .turn-process-state.failed{ color:var(--warn); }
 .turn-process-state.interrupted{ color:var(--dim); }
+.turn-process-label,.tool-group-label{ min-width:0; }
+/* One light band crosses the whole label, including its nested tool summary.
+   Only native activity enables it; historical/settled rows stay static. */
+@supports ((background-clip:text) or (-webkit-background-clip:text)){
+  .status-shimmer.is-active{
+    --status-shimmer-light:color-mix(in srgb,var(--dim) 40%,var(--surface));
+    background-image:linear-gradient(100deg,var(--dim) 40%,var(--status-shimmer-light) 50%,var(--dim) 60%);
+    background-size:250% 100%; background-repeat:no-repeat;
+    background-clip:text; -webkit-background-clip:text;
+    color:transparent; -webkit-text-fill-color:transparent;
+    animation:status-text-sweep 2.4s ease-in-out infinite;
+  }
+  :root[data-theme="dark"] .status-shimmer.is-active{ --status-shimmer-light:var(--text); }
+}
+@keyframes status-text-sweep{
+  0%{ background-position:100% 0; }
+  80%,100%{ background-position:0% 0; }
+}
+@media (prefers-reduced-motion:reduce), (forced-colors:active){
+  .status-shimmer.is-active{ animation:none; background:none;
+    color:var(--dim); -webkit-text-fill-color:currentColor; }
+}
 .turn-process-count{ margin-left:auto; color:var(--faint); font-size:11px; font-weight:var(--font-weight-500); }
 .turn-detail-entry{ display:flex; align-items:center; gap:8px; min-height:30px; margin:3px 0 8px; color:var(--dim); }
 .turn-detail-entry-btn{ display:inline-flex; align-items:center; gap:6px; min-height:30px; padding:4px 8px;
@@ -717,13 +738,8 @@ button.message-image-error{ font:inherit; cursor:pointer; }
   font-size:12.5px; color:var(--dim); border-radius:9px; touch-action:pan-y;
   user-select:none; -webkit-user-select:none; }
 .tool-group-h::-webkit-details-marker{ display:none; }
-.tool-group-ic{ display:grid; place-items:center; width:16px; height:16px; flex:none; color:var(--faint); }
-.tool-group-ic.running{ color:var(--accent-text,var(--accent)); }
-.tool-group-ic .spin-dot{ width:11px; height:11px; border-radius:50%; border:2px solid var(--accent);
-  border-right-color:transparent; animation:spin .7s linear infinite; display:block; }
-.tool-group-ic svg{ width:13px; height:13px; color:var(--ok); }
 .tool-group-nm{ font-weight:var(--font-weight-600); }
-.tool-group-sub{ font-family:var(--mono); font-size:11.5px; color:var(--faint); }
+.tool-group-sub{ margin-left:8px; font-family:var(--mono); font-size:11.5px; color:var(--faint); }
 .tool-group-err{ color:var(--danger); }
 .tool-group-chev{ margin-left:auto; color:var(--faint); transition:transform .2s; }
 .tool-group[open] .tool-group-chev{ transform:rotate(90deg); }

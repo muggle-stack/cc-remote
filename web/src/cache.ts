@@ -67,7 +67,8 @@ const SCHEMA = 1;
 // resume bookkeeping, and projections bloated by automatic full-detail paging.
 // v25 reprojects native async questions instead of preserving plain-answer shells.
 // v26 discards summaries where those questions hid ordinary unphased replies.
-const CACHE_VER = 26;
+// v27 removes Claude turns split by native isMeta recovery prompts.
+const CACHE_VER = 27;
 const MAX_CACHE_SESSIONS = 64;
 const MAX_CACHE_TURNS = 100;
 const MAX_CACHE_BYTES = 2 * 1024 * 1024;

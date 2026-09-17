@@ -20,6 +20,8 @@ import { MessageBlock } from "./MessageBlock";
 import { PreviewAuthorizationPrompt } from "./PreviewAuthorizationPrompt";
 import { HistoryUserImage } from "./HistoryUserImage";
 import { ToolGroup } from "./ToolGroup";
+import { ToolInput, ToolOutput } from "./LazyToolDetails";
+import { displayCommand } from "../tool-command";
 import {
   hasActiveProcess,
   presentableProcessBlocks,
@@ -472,11 +474,11 @@ export function ProcessActivity({ block, onOpenFile, imageAssets, onLoadImage,
           ))}
         </ol>
       )}
-      {block.command && <pre className="tool-pre process-command">$ {block.command}</pre>}
+      {block.command && <pre className="tool-pre process-command">$ {displayCommand(block.command)}</pre>}
       {block.cwd && <div className="process-meta">{block.cwd}</div>}
       {block.summary && !imageView
         && <div className="process-copy">{block.summary}</div>}
-      {block.detail && <pre className="tool-pre">{block.detail}</pre>}
+      {block.detail && <ToolOutput output={block.detail} label="详情" />}
       {onOpenFile && filePaths.map((filePath) => (
         <button key={filePath} type="button" className="process-file-link"
           onClick={() => onOpenFile(filePath)}>
@@ -495,9 +497,12 @@ export function ProcessActivity({ block, onOpenFile, imageAssets, onLoadImage,
       )}
       {block.input && Object.keys(block.input).length > 0
         && filePaths.length === 0 && !imageView && (
-        <pre className="tool-pre">{JSON.stringify(block.input, null, 2)}</pre>
+        <ToolInput input={block.input} omit={[
+          ...(block.command ? ["command", "cmd"] : []),
+          ...(block.cwd ? ["cwd", "workdir"] : []),
+        ]} />
       )}
-      {block.output && <pre className="tool-pre">{block.output}{block.truncated ? "\n…(truncated)" : ""}</pre>}
+      {block.output && <ToolOutput output={block.output} truncated={block.truncated} />}
       {block.diff && <pre className="tool-pre tool-diff">{block.diff}</pre>}
       {(block.exit_code != null || block.duration_ms != null) && (
         <div className="tool-meta">
@@ -947,13 +952,14 @@ export function ProcessTimeline({ blocks, done, active, outcome, problem, durati
             }
             toggle();
           }}>
-          <span className={`turn-process-state ${terminalOutcome ?? (processSettled ? "done" : "running")}`}>
+          {(terminalOutcome || (detailLoading && !processActive)) && <span
+            className={`turn-process-state ${terminalOutcome ?? "loading"}`}>
             {detailLoading && !processActive
               ? <span className="process-spin" />
-              : <Icon name={processActive ? "spark" : terminalOutcome === "failed"
-                ? "info" : terminalOutcome === "interrupted" ? "stop" : "verify"} size={14} />}
-          </span>
-          <span>{terminalOutcome ? presentTurnOutcome(terminalOutcome, problem)
+              : <Icon name={terminalOutcome === "interrupted" ? "stop" : "info"} size={14} />}
+          </span>}
+          <span className={`turn-process-label ${processActive ? "running" : "done"} status-shimmer${processActive ? " is-active" : ""}`}>
+            {terminalOutcome ? presentTurnOutcome(terminalOutcome, problem)
             : processSettled ? "已处理" : "正在处理"}
             {elapsed == null ? null : ` ${durationLabel(elapsed)}`}</span>
           <span className="turn-process-count">{countLabel}</span>
@@ -1002,7 +1008,8 @@ export function ProcessTimeline({ blocks, done, active, outcome, problem, durati
         )}
         {rows.map((row) => (
           row.kind === "tools"
-            ? <ToolGroup key={`tools-${row.tools[0].tool_use_id}`} tools={row.tools} />
+            ? <ToolGroup key={`tools-${row.tools[0].tool_use_id}`} tools={row.tools}
+                active={processActive} />
             : <TimelineItem key={row.block.kind === "text"
                 ? `text-${row.block.message_id}` : `process-${row.block.item_id}`}
                 block={row.block} onOpenFile={onOpenFile}
