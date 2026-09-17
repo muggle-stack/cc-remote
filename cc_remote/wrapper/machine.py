@@ -21690,6 +21690,8 @@ class WrapperMachine:
         self, ctx: SessionContext, route: AgentRoute,
     ) -> None:
         """Send unbuffered Agent detail hints only to interested browsers."""
+        if not route.events and not route.touched_run_ids:
+            return
         registry = ctx.claude_agents
         sid = self._ctx_wire_sid(ctx)
         if registry is None or not sid:

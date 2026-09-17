@@ -9,6 +9,7 @@ import {
 import { createRoot } from "react-dom/client";
 import { TurnUsageFixture } from "./fixtures/turn-usage";
 import { BackgroundTasksFixture } from "./fixtures/background-tasks";
+import { MermaidArtifactFixture } from "./fixtures/mermaid-artifact";
 
 import "../src/index.css";
 import "../src/App.css";
@@ -3044,6 +3045,8 @@ function CodexFileCitationFixture() {
 const rootParams = new URLSearchParams(window.location.search);
 createRoot(document.getElementById("root")!).render(
   rootParams.has("turn-usage") ? <TurnUsageFixture />
+    : rootParams.has("artifact-mermaid")
+    ? <MermaidArtifactFixture />
     : rootParams.has("artifact-audio")
     ? <AudioPreviewFixture />
     : rootParams.has("artifact-html")

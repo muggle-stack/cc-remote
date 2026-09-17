@@ -2006,6 +2006,19 @@ function markTurnAsLive(
   }
 }
 
+function claimClaudeContinuation(
+  runtime: SessionRuntime, turn: Turn, event: ServerEvent, liveEvent: boolean,
+): void {
+  // An idle parent keeps its completion receipt. Actual main-agent content
+  // after a native injected prompt can nevertheless own the running spark.
+  // Child ProcessEvents and history/replay into an idle runtime are not proof.
+  if (!liveEvent || runtime.state === "idle" || !turn.done
+      || !("background" in event) || event.background !== true
+      || !("turn_id" in event) || !event.turn_id) return;
+  markTurnAsLive(runtime, turn.id, true, event.seq);
+  runtime.liveOwner = { turnId: turn.id, seq: event.seq ?? runtime.lastLiveSeq };
+}
+
 const MAX_LIVE_DETAIL_TURN_IDS = 128;
 
 function isStateVisibleProcessBlock(block: Block): boolean {
@@ -6122,6 +6135,7 @@ function reduceEvent(
         if (!detachedBackground) {
           markTurnAsLive(rt, t.id, boundCompletedTurns, e.seq);
         }
+        else claimClaudeContinuation(rt, t, e, boundCompletedTurns);
         t.progress = undefined;
         const block = mutableTurnBlocks(t).find((b) => b.kind === "text"
           && b.message_id === e.message_id) as TextBlock | undefined;
@@ -6163,6 +6177,7 @@ function reduceEvent(
         if (!detachedBackground) {
           markTurnAsLive(rt, t.id, boundCompletedTurns, e.seq);
         }
+        else claimClaudeContinuation(rt, t, e, boundCompletedTurns);
         t.progress = undefined;
         let block = mutableTurnBlocks(t).find((b) => b.kind === "text"
           && b.message_id === e.message_id) as TextBlock | undefined;
@@ -6214,6 +6229,7 @@ function reduceEvent(
         if (!detachedBackground) {
           markTurnAsLive(rt, t.id, boundCompletedTurns, e.seq);
         }
+        else claimClaudeContinuation(rt, t, e, boundCompletedTurns);
         markTurnDetailAsLive(rt, t.id, boundCompletedTurns);
         t.progress = undefined;
         const existing = mutableTurnBlocks(t).find((b) => b.kind === "tool"

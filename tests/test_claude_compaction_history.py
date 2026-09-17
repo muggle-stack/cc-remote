@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from cc_remote.protocol import ProcessEvent, TurnEnd, UserMsg
+from cc_remote.protocol import Delta, ProcessEvent, TurnEnd, UserMsg
 from cc_remote.wrapper.history_store import HistoryIndexStore, HistorySourceFingerprint
 from tests.test_history_store import _page
 from cc_remote.wrapper.stream import (
@@ -14,6 +14,77 @@ from cc_remote.wrapper.stream import (
 )
 
 SID = "11111111-1111-4111-8111-111111111111"
+
+
+@pytest.mark.parametrize("blocks", [False, True])
+def test_internal_recovery_stays_in_human_turn_across_compact_pages(tmp_path, blocks):
+    recovery = (
+        "Your response above was cut off mid-stream. Resume directly from where "
+        "it stops — no apology, no recap. If none of it survived, answer the "
+        "request from the start."
+    )
+
+    def row(uid, role, content, parent, second, **extra):
+        return {"uuid": uid, "type": role, "parentUuid": parent,
+                "timestamp": f"2026-09-16T11:20:{second:02d}Z",
+                "message": {"role": role, "content": content}, **extra}
+
+    records = [
+        row("older", "user", "Earlier question", None, 0),
+        row("old-answer", "assistant", [{"type": "text", "text": "Earlier answer"}],
+            "older", 1),
+        {"uuid": "boundary", "type": "system", "subtype": "compact_boundary",
+         "parentUuid": None, "logicalParentUuid": "old-answer",
+         "timestamp": "2026-09-16T11:20:02Z",
+         "compactMetadata": {"trigger": "auto", "preTokens": 500_000}},
+        row("summary", "user", "This session is being continued from a previous conversation.",
+            "boundary", 2, isCompactSummary=True),
+        row("human", "user", "Analyze the wake acknowledgement", "summary", 3),
+        row("recovery", "user", [{"type": "text", "text": recovery}] if blocks else recovery,
+            "human", 4, isMeta=True),
+        row("answer", "assistant", [{"type": "text", "text": "The complete analysis"}],
+            "recovery", 5),
+        # Identical text really sent by a human must remain visible.
+        row("literal-human", "user", recovery, "answer", 6),
+        row("literal-answer", "assistant", [{"type": "text", "text": "Literal reply"}],
+            "literal-human", 7),
+    ]
+    source = tmp_path / f"{SID}.jsonl"
+    source.write_text("".join(json.dumps(r) + "\n" for r in records))
+    store = HistoryIndexStore(tmp_path / "index")
+    for iteration in range(3):  # Cold read, cached graph, then a v40 migration.
+        messages, timestamps, internal = transcript_compact_snapshot(
+            SID, path=str(source), index_store=store)
+        events = translate_history(messages, 4096, timestamps, internal)
+        assert [e.msg_id for e in events if isinstance(e, UserMsg)] == [
+            "older", "human", "literal-human"]
+        assert [e.checkpoint_id for e in events if isinstance(e, TurnEnd)] == [
+            "older", "human", "literal-human"]
+        assert [e.text for e in events if isinstance(e, Delta)].count(
+            "The complete analysis") == 1
+        page = transcript_compact_history_page(
+            SID, path=str(source), index_store=store, before="literal-human", limit=1)
+        assert page is not None
+        assert page.oldest_cursor == "human"
+        projected = translate_history(page.messages, 4096, page.timestamps, page.internal_events)
+        assert [e.prompt for e in projected if isinstance(e, UserMsg)] == [
+            "Analyze the wake acknowledgement"]
+        assert any(isinstance(e, Delta) and e.text == "The complete analysis" for e in projected)
+        if iteration == 1:
+            fingerprint = HistorySourceFingerprint.capture(source)
+            for engine in ("claude", "codex"):
+                store.put_page(SID, engine, fingerprint, before=None, limit=4, page=_page(engine))
+                store.put_image_asset(SID, engine, fingerprint, engine, "image",
+                                      "thumbnail", "image/png", 1, 1, b"image")
+            with sqlite3.connect(store.path) as db:
+                db.execute("UPDATE claude_compact_records SET visible_user=1 WHERE uuid='recovery'")
+                db.execute("PRAGMA user_version=40")
+            store = HistoryIndexStore(tmp_path / "index")
+            assert store.get_page(SID, "claude", fingerprint, before=None, limit=4) is None
+            assert store.get_page(SID, "codex", fingerprint, before=None, limit=4) == _page("codex")
+            with sqlite3.connect(store.path) as db:
+                assert db.execute("SELECT count(*) FROM claude_compact_records").fetchone()[0] == 0
+                assert db.execute("SELECT count(*) FROM history_image_assets").fetchone()[0] == 2
 
 
 @pytest.mark.parametrize("blocks", [False, True])

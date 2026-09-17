@@ -11,6 +11,7 @@ import glob
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any
@@ -116,6 +117,8 @@ class AgentRunProjection:
     revision_epoch: int = 0
     subscribers: dict[str, None] = field(default_factory=dict)
     owned_tool_ids: set[str] = field(default_factory=set)
+    pending_stream_events: list[dict[str, Any]] = field(default_factory=list)
+    last_stream_flush: float | None = None
 
     def ensure_translator(self, tool_result_max: int) -> StreamTranslator:
         if self.translator is None:
@@ -290,11 +293,6 @@ class ClaudeAgentRegistry:
     def _record_detail_events(
         self, run: AgentRunProjection, message: object,
     ) -> AgentRoute:
-        # Partial deltas are intentionally not retained here. The assembled
-        # AssistantMessage follows with the exact same content and prevents a
-        # token-rate AgentDetail broadcast from flooding the relay.
-        if isinstance(message, StreamEvent):
-            return AgentRoute("detail", run.run_id)
         translator = run.ensure_translator(self.tool_result_max)
         translated = translator.feed(self._without_direct_parent(message))
         public_events = []
@@ -312,6 +310,31 @@ class ClaudeAgentRegistry:
                         parent_run_id=run.run_id,
                     )
             public_events.append(event.model_dump(mode="json"))
+        # Show child output before its complete AssistantMessage arrives.
+        # Coalesce the burst rather than broadcasting an empty status packet
+        # for every native token. Assembled/tool messages flush pending text;
+        # StreamTranslator already deduplicates their repeated content.
+        for event in public_events:
+            previous = run.pending_stream_events[-1] if run.pending_stream_events else None
+            if (previous and event["type"] == previous["type"] == "delta"
+                    and event.get("message_id") == previous.get("message_id")
+                    and event.get("channel") == previous.get("channel")
+                    and len(previous["text"]) + len(event["text"]) <= 32 * 1024):
+                previous["text"] += event["text"]
+            else:
+                run.pending_stream_events.append(event)
+        now = time.monotonic()
+        if (isinstance(message, StreamEvent)
+                and run.last_stream_flush is not None
+                and now - run.last_stream_flush < 0.1
+                and sum(len(event.get("text", ""))
+                        for event in run.pending_stream_events) < 32 * 1024):
+            return AgentRoute("detail", run.run_id)
+        public_events = run.pending_stream_events
+        run.pending_stream_events = []
+        if not public_events:
+            return AgentRoute("detail", run.run_id)
+        run.last_stream_flush = now
         seq = run.append(public_events)
         return AgentRoute(
             "detail", run.run_id, tuple(public_events), seq, (run.run_id,))

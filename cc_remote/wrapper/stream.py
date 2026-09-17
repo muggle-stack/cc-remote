@@ -1805,6 +1805,7 @@ def _compact_visible_user(row: dict[str, Any]) -> bool:
     origin = row.get("origin")
     if (
         row.get("type") != "user"
+        or bool(row.get("isMeta"))
         or origin == "task-notification"
         or (
             isinstance(origin, dict)
@@ -2221,6 +2222,7 @@ def _delayed_retry_tail(
                 if isinstance(row.get("sessionId"), str) else None
             ),
             message=message,
+            is_meta=bool(row.get("isMeta")),
             parent_tool_use_id=(
                 row.get("parentToolUseID")
                 or row.get("parent_tool_use_id")
@@ -2460,6 +2462,7 @@ def _load_compact_chain_messages(
                         uuid=uid,
                         session_id=session_id,
                         message=message,
+                        is_meta=bool(row.get("isMeta")),
                         parent_tool_use_id=(
                             row.get("parentToolUseID")
                             or row.get("parent_tool_use_id")
@@ -3043,6 +3046,12 @@ def translate_history(
         message_uid = _history_id(source_uid, "msg", str(message_index))
 
         if role == "user":
+            if (getattr(m, "is_meta", False)
+                    and source_uid not in (internal_user_events or {})):
+                # Native recovery/continuation prompts are part of the current
+                # human turn. Match the SDK's isMeta filter even when reading
+                # raw compact ancestry, without guessing from prompt text.
+                continue
             if isinstance(content, str):
                 internal_event = (internal_user_events or {}).get(source_uid)
                 if internal_event is not None:

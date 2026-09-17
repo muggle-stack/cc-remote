@@ -36,14 +36,14 @@ _CODEX_PROFILE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
 _WORK_ARTIFACT_PREVIEW_SUFFIXES = frozenset({
     ".c", ".cc", ".conf", ".cpp", ".css", ".csv", ".go", ".h", ".hpp",
     ".htm", ".html", ".ini", ".java", ".js", ".json", ".jsonl", ".log", ".md",
-    ".mdown", ".markdown", ".mjs", ".py", ".rs", ".sh", ".sql", ".svg",
+    ".mdown", ".markdown", ".mmd", ".mermaid", ".mjs", ".py", ".rs", ".sh", ".sql", ".svg",
     ".toml", ".ts", ".tsx", ".txt", ".xml", ".yaml", ".yml",
     ".avif", ".doc", ".docx", ".gif", ".jpeg", ".jpg", ".odp", ".ods",
     ".odt", ".pdf", ".png", ".ppt", ".pptx", ".rtf", ".webp", ".xls",
     ".xlsx",
 })
 _WORK_ARTIFACT_KIND_SUFFIXES = {
-    "document": frozenset({".doc", ".docx", ".md", ".odt", ".rtf", ".txt"}),
+    "document": frozenset({".doc", ".docx", ".md", ".mmd", ".mermaid", ".odt", ".rtf", ".txt"}),
     "spreadsheet": frozenset({".csv", ".ods", ".xls", ".xlsx"}),
     "presentation": frozenset({".odp", ".ppt", ".pptx"}),
     "image": frozenset({".avif", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"}),

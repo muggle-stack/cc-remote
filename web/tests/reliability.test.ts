@@ -1410,8 +1410,8 @@ assert.match(historyAppSource,
 assert.match(historyAppSource,
   /requestHistoryTurnDetail = useCallback\([\s\S]{0,120}autoLoad = false/,
   "every detail entry point must default to one bounded page");
-assert.match(cacheSource, /const CACHE_VER = 26/,
-  "async-question repair must invalidate browser summaries missing unphased replies");
+assert.match(cacheSource, /const CACHE_VER = 27/,
+  "native recovery repair must invalidate browser summaries split by internal prompts");
 assert.match(cacheSource, /objectStore\(STORE\)\.delete\(sessionId\)/);
 assert.match(cacheSource, /job\.epoch !== sessionEpoch\(job\.sid\)/,
   "a debounced pre-marker write must not recreate the deleted cache row");
@@ -15441,7 +15441,7 @@ try {
   }));
   assert.match(answeringAfterProcessMarkup, /class="turn-process open"/,
     "the process disclosure stays open until the turn terminal boundary");
-  assert.match(answeringAfterProcessMarkup, /turn-process-state done/,
+  assert.match(answeringAfterProcessMarkup, /turn-process-label done status-shimmer/,
     "a settled process shell cannot keep spinning while the answer streams");
   assert.match(answeringAfterProcessMarkup, /class="turn-working"[\s\S]*回答中/);
   assert.equal(
@@ -15467,7 +15467,7 @@ try {
       onEdit: () => {}, onGetDiff: () => {},
     },
   ));
-  assert.match(commentaryWhileAnsweringMarkup, /turn-process-state running/);
+  assert.match(commentaryWhileAnsweringMarkup, /turn-process-label running status-shimmer is-active/);
   assert.match(
     commentaryWhileAnsweringMarkup,
     /class="turn-working"[\s\S]*处理中/,
@@ -16436,7 +16436,7 @@ try {
     "detached Agent work cannot reopen the completed turn's top-level spark");
   assert.match(
     backgroundMarkup,
-    /turn-process-state done"><svg/,
+    /turn-process-label done status-shimmer/,
     "the completed parent header stays settled while Agent detail remains live",
   );
   assert.match(backgroundMarkup, /class="turn-done-mark"/);

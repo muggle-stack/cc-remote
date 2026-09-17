@@ -1,4 +1,5 @@
 import type { ToolBlock } from "./domain/conversation";
+import { displayCommand } from "./tool-command";
 import {
   filePathsFromInput,
   mutatedFilePaths,
@@ -41,7 +42,7 @@ export function presentTool(block: ToolBlock): ToolPresentation {
   const input = block.input;
   const file = mutatedFilePaths(block.tool, input)[0]
     || value(input, "file_path", "path");
-  const command = value(input, "command", "cmd");
+  const command = displayCommand(input.command ?? input.cmd);
   const pattern = value(input, "pattern", "query");
   const url = value(input, "url");
   const explicit = block.title?.trim();
