@@ -479,13 +479,6 @@ export default function App() {
   const stateRef = useRef(state);
   stateRef.current = state;
   const wsRef = useRef<RelayWs | null>(null);
-  const goalApiRef = useRef<GoalApi | null>(null);
-  const getGoalApi = useCallback(async () => {
-    const transport = wsRef.current;
-    const { GoalApi } = await import("./goal-api");
-    if (!transport || transport !== wsRef.current) throw new Error("连接已切换，请重试。");
-    return goalApiRef.current ??= new GoalApi(() => wsRef.current);
-  }, []);
   const [dshApi] = useState(() => new DshApi(() => wsRef.current));
   const goalApiRef = useRef<GoalApi | null>(null);
   const getGoalApi = useCallback(async () => {
@@ -986,7 +979,6 @@ export default function App() {
     }),
   ) as Record<string, CompletionBadgeKind>;
   const activeScopeKey = sessionScopeKey(machineId, engine, space);
-  useEffect(() => () => goalApiRef.current?.reset(), [activeScopeKey]);
   useEffect(() => () => dshApi.reset(), [activeScopeKey, dshApi]);
   useEffect(() => () => goalApiRef.current?.reset(), [activeScopeKey]);
   const activeWorkDashboard = workDashboardMachineId === machineId
@@ -2216,7 +2208,6 @@ export default function App() {
         onEvent: (msg, ownership) => {
           if (!acceptsLifecycle()) return;
           if (turnFileRequestsRef.current.accept(msg)) return;
-          if (goalApiRef.current?.accept(msg)) return;
           if (dshApi.accept(msg)) return;
           if (goalApiRef.current?.accept(msg)) return;
           const settlesContextRequest = !!(
@@ -3696,7 +3687,6 @@ export default function App() {
           dispatch({ type: "conn", connState: s, detail });
           if (s !== "connected") {
             turnFileRequestsRef.current.clear();
-            goalApiRef.current?.reset();
             dshApi.reset();
             goalApiRef.current?.reset();
             skillCatalogRequestsRef.current?.resetReads();

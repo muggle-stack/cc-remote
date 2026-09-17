@@ -5,7 +5,7 @@ import pytest
 from cc_remote import tui, tui_app
 
 
-@pytest.mark.parametrize("engine", ["CODEX", "foo", "codex "])
+@pytest.mark.parametrize("engine", ["CODEX", "foo", "codex ", "dsh"])
 @pytest.mark.parametrize("line", [False, True])
 def test_invalid_engine_fails_before_client_start(monkeypatch, capsys, engine, line):
     monkeypatch.setenv("ENGINE", engine)

@@ -46,7 +46,7 @@ async function mockDshRelay(page: Page, { running = false, commandSuccess = fals
       emit({ type: "model", sid, model: "dsh:deepseek-official:deepseek-flash" });
       emit({ type: "effort", sid, effort: "off" });
       emit({ type: "perm", sid, mode: "read-only" });
-      emit({ type: "context_report", sid, total_tokens: 24000, max_tokens: 64000, percentage: 37.5, available: true, source: "recent_turn" });
+      emit(context);
       emit({ type: "replay_end", sid, to_seq: 0, truncated: false });
     };
     socket.onMessage(raw => {

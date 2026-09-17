@@ -738,7 +738,7 @@ export type ServerEvent = FilesListed | CodexContext
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnUsage | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 69;
+export const PROTOCOL_VERSION = 72;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

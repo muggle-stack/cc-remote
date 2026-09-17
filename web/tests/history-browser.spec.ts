@@ -10392,6 +10392,7 @@ for (const engine of ["codex", "claude"] as const) {
     await page.setViewportSize({ width: 390, height: 844 });
     const relay = await mockRightPanelRelay(page, { retained: false, engine });
     await page.goto("/");
+    await expect(page.locator(".scard.active")).toContainText("Layout parent");
     const composer = page.locator(".composer textarea");
     await composer.fill("/goal");
     await composer.press("Enter");

@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 69
+PROTOCOL_VERSION = 72
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a

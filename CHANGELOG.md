@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+- Rebase DSH on the terminal-workspace master while preserving Web controls,
+  attachment import limits and native session recovery. Protocol v72 combines
+  DSH frames, queue reordering and replacement deltas; TUI replay replaces
+  recovered text instead of appending it twice.
+
 - Preview `.mmd` and `.mermaid` Work artifacts as diagrams, with a source view.
 
 - Keep Claude's internal recovery prompts hidden after compaction and rebuild
@@ -90,6 +95,7 @@
 - Reorganize the bilingual setup documentation around source deployment and
   document shared Codex App, CLI and Wrapper daemons on macOS and Linux.
 
+- Repair process ownership and empty details when steering during Codex compaction, including refresh and session reload.
 - Align the Codex context gauge with native compaction estimates (protocol v62).
   Match bounded local log reads to the account, thread and latest rollout sample;
   invalidate estimates after compaction and show recent request usage without a

@@ -786,7 +786,7 @@ def test_old_user_replay_does_not_retire_completed_goal():
     assert view.presentation.visible_goal() is not None
 
 
-def test_all_existing_command_surfaces_are_exposed_or_owned_by_core_ui():
+def test_command_surfaces_have_explicit_terminal_or_web_ownership():
     from typing import get_args
 
     commands = {
@@ -803,7 +803,17 @@ def test_all_existing_command_surfaces_are_exposed_or_owned_by_core_ui():
         "get_turn_detail",
         "answer_question",
     }
-    assert commands == set(ACTIONS) | core
+    # The terminal selects only Claude/Codex. Keep DSH's native controls in
+    # Web until the TUI has an engine-specific adapter for them; new commands
+    # still need an explicit disposition here instead of disappearing silently.
+    web_only = {
+        "read_dsh",
+        "act_dsh_subagent",
+        "act_dsh_goal",
+        "download_dsh",
+    }
+    assert not web_only & (set(ACTIONS) | core)
+    assert commands == set(ACTIONS) | core | web_only
 
 
 @pytest.mark.asyncio

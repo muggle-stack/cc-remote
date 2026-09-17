@@ -6,6 +6,9 @@ The terminal workspace is a client of the same relay and wrapper as Web.
 It does not launch another Codex/Claude process or take over a native writer.
 Closing the client does not stop wrapper-owned tasks or deferred queries.
 
+The TUI supports Claude and Codex. DSH sessions and their native controls use
+the Web client; this terminal does not yet offer a DSH engine selector.
+
 Only the transcript viewport position controls auto-follow: exactly at the
 bottom before new output, it follows; anywhere above it, it stays put. Focus
 in the draft or transcript, Vim mode, and selections do not change this rule.
@@ -586,7 +589,7 @@ All these keys are configurable under `[queue]` and listed in Help.
 The wrapper owns the order and broadcasts changes to Web and other TUIs.
 Reordering compares the displayed queue against the server queue atomically;
 if another client changes it or a message is starting, refresh and retry.
-This requires coordinated protocol v67 Relay/Web/Wrapper/TUI deployment.
+This requires coordinated protocol v72 Relay/Web/Wrapper/TUI deployment.
 
 ### Markdown and image previews
 
