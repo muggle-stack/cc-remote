@@ -15,6 +15,10 @@ VERSION = 1
 MAX_FRAME = 32 * 1024 * 1024
 
 
+class ControllerLeaseConflict(RuntimeError):
+    """An existing native worker still belongs to another controller."""
+
+
 async def read_frame(reader: asyncio.StreamReader) -> dict:
     size = struct.unpack("!I", await reader.readexactly(4))[0]
     if not 0 < size <= MAX_FRAME:

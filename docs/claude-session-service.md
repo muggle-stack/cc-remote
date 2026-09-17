@@ -25,6 +25,14 @@ logged without blocking recovery from reachable services. Duplicate native
 identities across the returned listings are rejected before any attachment;
 each recovered session stays bound to its original socket and worker ID. After
 that check, a failed session attachment does not stop the remaining recoveries.
+If the previous controller's socket is still being cleaned up, attachment to
+that exact worker retries lease conflicts for at most five seconds. This does
+not replace a live controller, resubmit a prompt or retry an unknown response.
+Older services' coarse conflict errors are checked against the listed worker's
+full identity before retry. When strict leases are negotiated, a missing explicit
+worker is rejected; only confirmed native close clears the Wrapper's worker
+identity for a deliberate reconnect. Older controllers keep their existing
+reconnect behavior without opting into strict leases.
 
 Accepted steering uploads survive reader/control failures and ordinary service
 detach because their native turn may still need them. A confirmed native close
