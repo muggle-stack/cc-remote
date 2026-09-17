@@ -18,6 +18,31 @@ def test_projection_folds_completed_tools_without_losing_payload():
     assert "echo hello" in view.render()[0]
 
 
+@pytest.mark.parametrize("channel", ["final", "commentary", "thinking"])
+def test_recovery_replaces_text_without_duplicate_prefixes(channel):
+    view = SessionView(active_turn="turn")
+    delta = dict(type="delta", message_id="answer", turn_id="turn",
+                 channel=channel)
+    view.event(dict(delta, text="old prefix"))
+    view.event(dict(delta, message_id="other", text="unrelated message"))
+
+    for _ in range(2):
+        view.event(dict(delta, text="recovered answer", replace=True))
+        assert next(b for b in view.blocks if b.id == "answer").text == (
+            "recovered answer"
+        )
+
+    view.event(dict(delta, text=" and live tail"))
+    assert next(b for b in view.blocks if b.id == "answer").text == (
+        "recovered answer and live tail"
+    )
+    assert next(b for b in view.blocks if b.id == "other").text == (
+        "unrelated message"
+    )
+    view.event(dict(delta, text="", replace=True))
+    assert next(b for b in view.blocks if b.id == "answer").text == ""
+
+
 def test_rekey_preserves_local_draft_and_read_position():
     state = WorkspaceState()
     view = state.view("temporary")

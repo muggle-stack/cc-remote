@@ -107,6 +107,7 @@ def test_local_secret_is_not_reused_for_other_targets(target):
 
 
 def test_unavailable_service_does_not_read_process_environment(monkeypatch):
+    monkeypatch.setattr(tui_local.sys, "platform", "linux")
     monkeypatch.setattr(tui_local.subprocess, "run", lambda *a, **k: SimpleNamespace(
         stdout="MainPID=0\nActiveState=inactive\n"))
     monkeypatch.setattr(tui_local.os, "open", lambda *a, **k: pytest.fail("opened proc"))
@@ -114,6 +115,7 @@ def test_unavailable_service_does_not_read_process_environment(monkeypatch):
 
 
 def test_different_user_service_is_not_read(monkeypatch):
+    monkeypatch.setattr(tui_local.sys, "platform", "linux")
     monkeypatch.setattr(tui_local.subprocess, "run", lambda *a, **k: SimpleNamespace(
         stdout="MainPID=123\nActiveState=active\n"))
     opened = []

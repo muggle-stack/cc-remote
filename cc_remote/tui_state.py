@@ -845,7 +845,7 @@ class SessionView:
                     seq,
                     data=data,
                 ),
-                append=True,
+                append=not (kind == "delta" and event.get("replace")),
             )
         elif kind == "tool_use":
             inputs = bounded(event.get("input") or {})

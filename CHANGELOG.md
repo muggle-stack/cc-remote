@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+- Combine terminal queue controls and session recovery under protocol v71.
+  Upgrade Relay, Wrapper, Web and TUI together. TUI recovery replaces replayed
+  text without duplicating existing output.
+
 - Add an optional independent Claude session service: Wrapper reconnects recover
   accepted turns and pending questions without resubmitting prompts. Include a
   separate service installer and preserve account isolation.

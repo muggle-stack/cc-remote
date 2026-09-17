@@ -586,7 +586,7 @@ All these keys are configurable under `[queue]` and listed in Help.
 The wrapper owns the order and broadcasts changes to Web and other TUIs.
 Reordering compares the displayed queue against the server queue atomically;
 if another client changes it or a message is starting, refresh and retry.
-This requires coordinated protocol v67 Relay/Web/Wrapper/TUI deployment.
+This requires coordinated protocol v71 Relay/Web/Wrapper/TUI deployment.
 
 ### Markdown and image previews
 
