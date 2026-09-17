@@ -14,6 +14,12 @@ autonomous results are separate; a background result cannot acknowledge a human
 turn. Answers are saved in the service before the browser receives acceptance,
 including answers to earlier pages of a multi-question tool call.
 
+If background projection or acknowledgement fails, the controller stops advancing
+acknowledgements and accepting new prompts. Human terminal commits also wait for
+pending background delivery, so they cannot prune a failed notification. The
+native reader keeps running; restart only the Wrapper to reattach and replay the
+retained output. This does not interrupt the task or resubmit an accepted prompt.
+
 Pending permission and MCP callbacks retry handler failures with a capped
 backoff while their controller remains connected. Once a handler returns,
 answer retries reuse its result and request identity without executing the

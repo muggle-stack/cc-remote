@@ -143,6 +143,16 @@ class ClaudeAutonomousFollowupPending(RuntimeError):
     """A background Claude continuation owns the next response boundary."""
 
 
+class ClaudeServiceReplayRequired(RuntimeError):
+    """The controller must replay retained output before accepting more work."""
+
+    def __init__(self):
+        super().__init__(
+            "Claude 后台消息同步失败，任务记录仍由会话服务保留。"
+            "请重启 Wrapper 以恢复消息。"
+        )
+
+
 def _message_origin_kind(message: Any) -> str | None:
     """Return the SDK's authoritative turn provenance when one is present."""
     origin = getattr(message, "origin", None)
@@ -333,6 +343,9 @@ class SdkHandle:
         self._pending_turn_origin_id: str | None = None
         self._pending_compact = False
         self._message_pump_error: BaseException | None = None
+        self._service_delivery_error: Exception | None = None
+        self._service_pending_commit: dict | None = None
+        self._service_ack_lock = asyncio.Lock()
         self._message_route_lock = asyncio.Lock()
         self._background_callbacks_pending = 0
         self._background_callbacks_drained = asyncio.Event()
@@ -966,6 +979,7 @@ class SdkHandle:
         """Send a request. `prompt` is a string, or an async iterable of user-
         message dicts (used for multimodal input — text + image blocks)."""
         async with self._control_request_lock:
+            self.check_service_delivery()
             if self.control_plane_failed:
                 raise RuntimeError("Claude SDK control plane is unhealthy")
             client = self.client
@@ -990,6 +1004,7 @@ class SdkHandle:
                             "Claude SDK message pump is not running"
                         ) from self._message_pump_error
                     await self._background_callbacks_drained.wait()
+                    self.check_service_delivery()
                     if (
                         self._message_pump_error is not None
                         or self._message_pump_task.done()
@@ -1041,6 +1056,7 @@ class SdkHandle:
         """Write `priority=next` without interrupting or creating another reader."""
         async with self._control_request_lock:
             async with self._message_route_lock:
+                self.check_service_delivery()
                 client = self.client
                 if (client is None or self.control_plane_failed
                         or self.message_pump_failed or not self._turn_active
@@ -1454,6 +1470,9 @@ class SdkHandle:
         self._turn_root_id = None
         self._message_route_owner = None
         self._message_pump_error = None
+        self._service_delivery_error = None
+        self._service_pending_commit = None
+        self._service_ack_lock = asyncio.Lock()
         self._message_route_lock = asyncio.Lock()
         self._background_callbacks_pending = 0
         self._background_callbacks_drained = asyncio.Event()
@@ -1683,17 +1702,22 @@ class SdkHandle:
                 if (
                     callback is not None
                     and self._message_pump_error is None
+                    and self._service_delivery_error is None
                 ):
                     await callback(message, turn_id)
                     await self.ack_service_message(message)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                # One malformed/background notification must not kill the sole
-                # SDK reader and make the next user query hang forever.
                 log.warning(
                     "Claude background message callback failed",
                     error_type=type(exc).__name__)
+                if (getattr(message, "_cc_service_seq", None) is not None
+                        or getattr(message, "_cc_service_seed", False)):
+                    # ACK is cumulative. Keep reading (the native task is
+                    # healthy), but do not project/ack past this hole. A fresh
+                    # controller reconstructs state from the retained journal.
+                    await self._fail_service_delivery(exc)
             finally:
                 self._background_callback_completed()
 
@@ -1744,16 +1768,47 @@ class SdkHandle:
         if ready is not None:
             ready.set()
 
+    def check_service_delivery(self) -> None:
+        if self._service_delivery_error is not None:
+            raise ClaudeServiceReplayRequired() from self._service_delivery_error
+
+    async def _fail_service_delivery(self, error: Exception) -> None:
+        if self._service_delivery_error is None:
+            self._service_delivery_error = error
+            # Retire stale UI claims without poisoning the native reader: its
+            # failure flag triggers a destructive reconnect before the next query.
+            await self._notify_message_pump_failure(ClaudeServiceReplayRequired())
+
     async def ack_service_message(self, message, *, turn_id=None) -> None:
         seq = getattr(message, "_cc_service_seq", None)
-        if seq is None or not hasattr(self.client, "call"):
+        if not hasattr(self.client, "call"):
             return
-        if turn_id is not None:
-            await self.client.call("commit", {
-                "turn_id": self._turn_root_id or turn_id, "seq": seq})
-            self.service_recovery = None
-        else:
-            await self.client.call("ack", {"seq": seq})
+        async with self._service_ack_lock:
+            self.check_service_delivery()
+            try:
+                if turn_id is not None:
+                    if seq is None:
+                        return
+                    self._service_pending_commit = {
+                        "turn_id": self._turn_root_id or turn_id, "seq": seq}
+                    # A Result can overtake an earlier background callback.
+                    # Defer its cumulative commit instead of waiting here:
+                    # callbacks may still need the managed Result's release.
+                    if self._background_callbacks_pending:
+                        return
+                elif seq is not None:
+                    await self.client.call("ack", {"seq": seq})
+                # The background worker still counts the delivered callback
+                # until this method returns (including replay seeds with no seq).
+                remaining = self._background_callbacks_pending - (1 if turn_id is None else 0)
+                if (self._service_pending_commit is not None
+                        and remaining <= 0):
+                    await self.client.call("commit", self._service_pending_commit)
+                    self._service_pending_commit = None
+                    self.service_recovery = None
+            except Exception as exc:
+                await self._fail_service_delivery(exc)
+                self.check_service_delivery()
 
     async def detach_for_shutdown(self) -> None:
         detach = getattr(self.client, "detach", None)
