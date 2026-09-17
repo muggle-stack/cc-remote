@@ -672,4 +672,7 @@ Install `requirements-dev.txt`, which includes the optional TUI dependency.
 `python -m pytest tests/test_tui*.py` runs model-free state, transport and
 headless keyboard/resize regressions, including public-event parity and an
 inventory test for all protocol commands. No live model is needed.
-The repository's complete local gate still applies before a PR.
+Maintainer-authored PRs follow the complete local gate in
+[AGENTS.md](../AGENTS.md#commit-and-pr-gate). Other contributors can submit the
+checks they performed. PR CI automatically builds Web and runs pytest;
+Playwright is not part of CI or the required local PR gate.

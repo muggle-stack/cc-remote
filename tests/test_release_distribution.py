@@ -31,8 +31,7 @@ def test_release_workflow_materializes_web_before_python_bundle_tests():
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
     python_job = workflow.split("\n  python:\n", 1)[1].split(
         "\n  web:\n", 1)[0]
-    web_job = workflow.split("\n  web:\n", 1)[1].split(
-        "\n  deploy:\n", 1)[0]
+    web_job = workflow.split("\n  web:\n", 1)[1]
 
     assert "uses: ./.github/workflows/ci.yml" in release
     assert "needs: web" in python_job
@@ -453,14 +452,12 @@ def test_role_locks_and_release_workflow_are_versioned_inputs():
     assert "npm --prefix web run build" in workflow
     assert "uses: ./.github/workflows/ci.yml" in workflow
     assert "pytest" in source_workflow
-    assert "test:reliability" in source_workflow
-    assert "test:viewer" in source_workflow
     assert "actions/attest" in workflow
     assert "gh release upload" in workflow
     uv_version = (ROOT / "deploy" / "uv-version.txt").read_text().strip()
     assert (
         workflow + source_workflow
-    ).count(f'version: "{uv_version}"') == 3
+    ).count(f'version: "{uv_version}"') == 2
     python_version = (
         ROOT / "deploy" / "python-version.txt"
     ).read_text().strip()
