@@ -132,20 +132,88 @@ def test_duplicate_scan_finishes_before_attaching_any_session(tmp_path, monkeypa
     asyncio.run(go())
 
 
-def test_unavailable_service_listing_aborts_before_attaching_sessions(tmp_path, monkeypatch):
+@pytest.mark.parametrize("unavailable", ["primary", "drain"])
+def test_unavailable_service_does_not_strand_other_services_turns(unavailable, monkeypatch):
+    async def go():
+        warnings = []
+        monkeypatch.setattr(claude_service, "log", SimpleNamespace(
+            warning=lambda message, **fields: warnings.append((message, fields))))
+
+        async def allow(*args):
+            return PermissionResultAllow()
+
+        async with environment() as (service, attach):
+            profile = SimpleNamespace(id="primary", config_dir=service.directory / "profile")
+            original = await attach(permission=allow)
+            await original.call("metadata", {"value": {
+                "profile_id": profile.id, "profile_root": str(profile.config_dir),
+                "cwd": str(service.directory),
+            }})
+            original.next_turn = {"id": "original-turn"}
+            await original.query("accepted once")
+            worker = service.sessions[original.id]
+            await original.detach()
+            await released(worker)
+            permission = asyncio.create_task(worker.client.options.can_use_tool(
+                "Bash", {"command": "true"}, ToolPermissionContext(tool_use_id="tool")))
+            recovered = []
+
+            async def spawn(**kwargs):
+                assert kwargs["_service_recovering"] is True
+                assert kwargs["_service_worker_id"] == worker.id
+                assert kwargs["_service_socket"] == original.connection.socket_path
+                client = RemoteClient(kwargs["_service_socket"], options=original.options,
+                                      metadata=worker.metadata.copy())
+                recovered.append(client)
+                await client.connect()
+                client.ready.set()
+                return SimpleNamespace(sdk=SimpleNamespace(client=client))
+
+            sockets = {"primary": original.connection.socket_path,
+                       "drain": original.connection.socket_path}
+            sockets[unavailable] = str(service.directory / "missing.sock")
+            machine = recovery_machine(profile, spawn, socket=sockets["primary"],
+                                       drain_socket=sockets["drain"])
+            try:
+                await claude_service.restore(machine)
+                assert isinstance(await asyncio.wait_for(permission, 2), PermissionResultAllow)
+                assert len(recovered) == 1 and worker.controller is not None
+                assert worker.client.prompts == ["accepted once"]
+                assert worker.turn["id"] == "original-turn" and not worker.client.closed
+                assert len(warnings) == 1
+                assert warnings[0][1] == {
+                    "service_role": unavailable, "error_type": "FileNotFoundError"}
+            finally:
+                for client in recovered:
+                    await client.detach()
+                permission.cancel()
+                await asyncio.gather(permission, return_exceptions=True)
+
+    asyncio.run(go())
+
+
+def test_all_unavailable_services_do_not_spawn_a_replacement(tmp_path, monkeypatch):
     async def go():
         profile = SimpleNamespace(id="primary", config_dir=tmp_path)
-
-        async def list_sessions(socket):
-            if socket == "current":
-                raise ConnectionError("cannot finish the global identity scan")
-            return [session_item(profile, "healthy")]
-
-        monkeypatch.setattr(claude_service, "_list_sessions", list_sessions)
+        listing = AsyncMock(side_effect=ConnectionError("private socket details"))
+        monkeypatch.setattr(claude_service, "_list_sessions", listing)
         spawn = AsyncMock()
-        machine = recovery_machine(profile, spawn, drain_socket="drain")
-        with pytest.raises(ConnectionError):
-            await claude_service.restore(machine)
+        await claude_service.restore(recovery_machine(profile, spawn, drain_socket="drain"))
+        assert [call.args[0] for call in listing.await_args_list] == ["drain", "current"]
+        spawn.assert_not_awaited()
+
+    asyncio.run(go())
+
+
+def test_service_listing_cancellation_stops_recovery(tmp_path, monkeypatch):
+    async def go():
+        profile = SimpleNamespace(id="primary", config_dir=tmp_path)
+        listing = AsyncMock(side_effect=asyncio.CancelledError())
+        monkeypatch.setattr(claude_service, "_list_sessions", listing)
+        spawn = AsyncMock()
+        with pytest.raises(asyncio.CancelledError):
+            await claude_service.restore(recovery_machine(profile, spawn, drain_socket="drain"))
+        assert listing.await_count == 1
         spawn.assert_not_awaited()
 
     asyncio.run(go())

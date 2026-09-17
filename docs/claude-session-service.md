@@ -20,9 +20,18 @@ answer retries reuse its result and request identity without executing the
 handler again. Closing the native callback or detaching the controller cancels
 these retries; detaching still leaves pending native requests in the service.
 
-Startup first lists all configured services and rejects duplicate native
-identities before attaching any session. After that check, a failed session
-attachment is logged and the remaining sessions are still restored.
+Startup lists each configured service independently. An unreachable service is
+logged without blocking recovery from reachable services. Duplicate native
+identities across the returned listings are rejected before any attachment;
+each recovered session stays bound to its original socket and worker ID. After
+that check, a failed session attachment does not stop the remaining recoveries.
+
+Accepted steering uploads survive reader/control failures and ordinary service
+detach because their native turn may still need them. A confirmed native close
+(including eviction and drain-timeout reconnect) or the exact human terminal
+releases them. The service also retains attachment ownership across controller
+replacement, so closing before replaying a steering echo still removes its
+files. An unconfirmed close does not authorize deleting live-task attachments.
 
 This is a cc-remote SDK service, not Claude Code's terminal background mode or
 the experimental PTY broker. The daily native Claude TUI keeps its existing

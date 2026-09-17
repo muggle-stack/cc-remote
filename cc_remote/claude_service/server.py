@@ -13,6 +13,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import time
 from pathlib import Path
@@ -96,6 +97,9 @@ class Session:
         self.initializers: dict[str, dict] = {}
         self.turn: dict | None = None
         self.steers = PendingSteers()
+        # Controller replacement may happen before an attachment's native echo.
+        # Keep ownership here until exact terminal commit or explicit close.
+        self.steer_attachment_dirs: set[str] = set()
         self.origin_id: str | None = None
         self.ack = 0
         self.terminal_seq: int | None = None
@@ -324,6 +328,9 @@ class Session:
                         or self.failure or params["turn_id"] != self.turn["id"]):
                     return False
                 self.steers.add(params["native_id"], params["metadata"])
+                directory = params["metadata"].get("attachment_dir")
+                if directory:
+                    self.steer_attachment_dirs.add(directory)
 
                 async def stream():
                     yield steer_message(params["prompt"], params["native_id"])
@@ -364,6 +371,7 @@ class Session:
                         raise ValueError("Claude terminal was not acknowledged exactly")
                     self.ack = max(self.ack, self.terminal_seq)
                     self.turn = None
+                    self._cleanup_steer_attachments()
                     self.journal.prune(
                         min(self.ack, self.background_start)
                         if self.background_start is not None else self.ack)
@@ -395,6 +403,11 @@ class Session:
                 return None
         raise ValueError("unknown Claude service operation")
 
+    def _cleanup_steer_attachments(self) -> None:
+        for directory in self.steer_attachment_dirs:
+            shutil.rmtree(directory, ignore_errors=True)
+        self.steer_attachment_dirs.clear()
+
     async def close(self) -> None:
         self.closed = True
         await self.notify()
@@ -403,6 +416,7 @@ class Session:
             await asyncio.gather(self.reader, return_exceptions=True)
         if self.client is not None:
             await self.client.disconnect()
+        self._cleanup_steer_attachments()
         for _, future in self.callbacks.values():
             future.cancel()
         self.journal.close()

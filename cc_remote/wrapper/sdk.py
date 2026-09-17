@@ -308,6 +308,9 @@ class SdkHandle:
         # invalidates that whole generation, so give it one synchronous reset
         # hook rather than leaving stale task ids on the resident context.
         self.lifecycle_reset_callback: Callable[[], None] | None = None
+        # Release native resources only after confirmed close, never after a
+        # lost control connection or ordinary persistent-service detach.
+        self.native_close_callback: Callable[[], None] | None = None
         # Machine sets this immediately before query(). It is copied onto every
         # post-Result background envelope so even a parentless Stop hook or a
         # newly-announced task remains attached to the turn that spawned it.
@@ -1793,6 +1796,8 @@ class SdkHandle:
             if self.client is not None:
                 await self._stop_message_pump()
                 await self.client.disconnect()
+                if self.native_close_callback is not None:
+                    self.native_close_callback()
         finally:
             self.client = None
             self._conversation_rewind_capability = None
