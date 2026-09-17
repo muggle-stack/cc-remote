@@ -20,6 +20,10 @@ answer retries reuse its result and request identity without executing the
 handler again. Closing the native callback or detaching the controller cancels
 these retries; detaching still leaves pending native requests in the service.
 
+Startup first lists all configured services and rejects duplicate native
+identities before attaching any session. After that check, a failed session
+attachment is logged and the remaining sessions are still restored.
+
 This is a cc-remote SDK service, not Claude Code's terminal background mode or
 the experimental PTY broker. The daily native Claude TUI keeps its existing
 external-ownership rules; this service does not give it shared input ownership.
