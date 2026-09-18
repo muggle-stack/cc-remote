@@ -1,5 +1,8 @@
 """Quiet status-line hierarchy: neutral text, one accent, semantic warnings."""
 
+from rich.cells import get_character_cell_size
+from rich.color import Color
+from rich.style import Style
 from rich.text import Text
 
 from cc_remote.tui import _safe_remote_text
@@ -7,6 +10,28 @@ from cc_remote.tui import _safe_remote_text
 ACCENT = "#94afc4"
 WARNING = "#c4aa80"
 MUTED = "dim"
+
+
+def activity_sweep(text: Text, start: int, end: int, phase: float,
+                   base: Style, highlight: Style) -> None:
+    """Sweep foreground color in terminal cells, preserving text and backgrounds."""
+    widths = [get_character_cell_size(char) for char in text.plain[start:end]]
+    width = sum(widths)
+    if not width or not base.color or not highlight.color:
+        return
+    text.stylize(Style(color=base.color, dim=False), start, end)
+    radius = max(3, min(12, width * 0.18))
+    center = -radius + (width + 2 * radius) * phase
+    low, high = base.color.get_truecolor(), highlight.color.get_truecolor()
+    cell = 0
+    for index, cells in enumerate(widths, start):
+        strength = max(0, 1 - abs(cell + cells / 2 - center) / radius)
+        if strength:
+            color = Color.from_rgb(*(
+                round(a + (b - a) * strength) for a, b in zip(low, high)
+            ))
+            text.stylize(Style(color=color, dim=False), index, index + 1)
+        cell += cells
 
 
 def setting_style(kind, value):

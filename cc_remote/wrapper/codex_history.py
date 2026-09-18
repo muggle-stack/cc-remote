@@ -17,6 +17,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable
 
 from cc_remote.protocol import TurnEnd, TurnResult, UserMsg
+from cc_remote.wrapper.claude_compaction import compact_completion_events
 from cc_remote.wrapper.codex_history_prefetch import CodexHistoryPrefetch
 from cc_remote.wrapper.codex_rpc import (
     CodexRpcRejected,
@@ -389,6 +390,12 @@ def _translate_segment(
     final_segment = segment_index == segment_count - 1
     status = turn["status"]
     if final_segment and status != "inProgress":
+        if (status == "completed"
+                and any(item.get("type") == "contextCompaction" for item in segment)
+                and any(item.get("type") == "userMessage"
+                        and _user_message(item, ts=started_ts).prompt == "/compact" for item in segment)):
+            events.extend(serialized(event, completed_ts)
+                          for event in compact_completion_events(native_turn_id, native_turn_id))
         translated = translator.feed({
             "method": "turn/completed",
             "params": {

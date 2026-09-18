@@ -141,7 +141,14 @@ async def activate(machine, ctx) -> None:
     await client.call("metadata", {"value": {"key": ctx.key}})
     if client.description["head"] > client.description["after"]:
         ctx.claude_service_background_replay = ReplayProjection(client.description["head"])
-    if recovery is not None:
+    if recovery is not None and recovery.get("background_steer"):
+        await machine._set_state(ctx, "running")
+    elif recovery is not None:
+        # Older maintenance controllers left a successful compact uncommitted
+        # and reused the preceding prompt's metadata. Replay/commit its retained
+        # native terminal; never resubmit either that prompt or /compact.
+        if recovery["id"].startswith("compact-"):
+            recovery = {**recovery, "prompt": "/compact", "images": None, "files": None}
         ctx.active_msg_id = recovery["id"]
         ctx.claude_write_active = True
         ctx.needs_reload = False

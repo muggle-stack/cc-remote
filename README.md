@@ -1,13 +1,13 @@
 # cc-remote
 
-**在手机和浏览器里，继续使用你机器上的 Claude Code 和 Codex。**
+**在手机、浏览器和终端里，继续使用你机器上的 Claude Code 和 Codex。**
 
-自托管 · 多会话 · 多设备 · 实时工具过程 · Code / Work · PWA
+自托管 · 多会话 · 多设备 · 实时工具过程 · Code / Work · Web / PWA / TUI
 
 **产品版本：v3.0.0** · Wire protocol v71
 
 [English](README_en.md) · [功能对照](#引擎与功能) · [快速开始](#快速开始) ·
-[安装与升级](#安装与升级) · [文档](#文档) · [更新记录](CHANGELOG_zh.md)
+[终端工作台](#terminal-workspace) · [安装与升级](#安装与升级) · [文档](#文档) · [更新记录](CHANGELOG_zh.md)
 
 cc-remote 把本机 agent 的会话、工具过程、文件和运行控制带到远端。你可以在电脑上
 开始任务，用手机查看进度、回答询问、补充指令，再回到原来的会话继续工作。
@@ -32,6 +32,9 @@ cc-remote 把本机 agent 的会话、工具过程、文件和运行控制带到
   可配置独立账号，分别使用原生登录、会话和扩展目录。
 - **适合手机使用**：紧凑的引擎菜单、明暗主题、图片缩放、PWA 和可选后台通知。
   通知默认只显示通用状态，显示会话名称需要主动开启。
+- **也能在终端继续工作**：全屏 TUI 支持 Claude/Codex 的 Code / Work，共享网页
+  会话、运行状态和队列；提供 Vim 风格操作、会话树、标签与工具详情。
+  [安装与启动](#terminal-workspace)。
 
 ### Code 与 Work
 
@@ -51,6 +54,7 @@ cc-remote 把本机 agent 的会话、工具过程、文件和运行控制带到
 |---|---|---|
 | 接入方式 | 日常 Claude CLI + Agent SDK | 官方 app-server，共享 daemon |
 | Code / Work | 两者支持 | 两者支持 |
+| 全屏终端 TUI | 支持 | 支持 |
 | 模型与思考 | 原生模型与支持的档位 | 原生模型、思考强度、服务档位 |
 | Plan | 原生 Plan 模式 | 原生 Plan 协作模式 |
 | Goal | 完成条件、检查轮次、最近检查结果、Token 用量和耗时 | 目标、可选 Token 预算、暂停／继续、完成和清除 |
@@ -127,6 +131,7 @@ Relay 不落盘原文件或预览结果。Viewer 默认复用主站地址，不�
 ```mermaid
 flowchart LR
   browser["手机 / 浏览器"] <-->|HTTPS / WSS| relay["Relay + Web 静态文件"]
+  terminal["终端 TUI"] <-->|WSS| relay
   subgraph device["你的机器"]
     wrapper["Wrapper"] <--> engine["Claude SDK / Codex app-server"]
   end
@@ -266,18 +271,45 @@ Code 默认权限较宽；Work 的私有目录策略不能替代独立系统用�
 | Codex App 接入：[macOS](docs/codex-desktop-launcher.md)／[Linux](docs/codex-desktop-linux.md) | 可选桌面 App、日常 CLI 与 Wrapper 共用 daemon |
 | [Codex App 工具](docs/codex-app-tools.md) | 可选 App-control MCP |
 | [定时消息 UI](docs/timed-messages.md) | 定时发送入口、消息标签、光圈与下次时间 |
+| [终端工作台](docs/tui_zh.md) | TUI 安装、连接、Vim 操作、会话树、文件预览与终端限制 |
 | [更新记录](CHANGELOG_zh.md) | 版本变化与迁移记录 |
+
+<a id="terminal-workspace"></a>
 
 ## 终端工作台（预览）
 
-不习惯网页时，可以使用内置的 Python/Textual 全屏 TUI。它与网页共享
-relay/wrapper 会话，提供会话标签、Space e 目录树及搜索、Vim 风格阅读与输入
-模式、消息跳转，以及不改变阅读位置的复制和引用。
-支持思考/工具/进程详情、运行计时、Goal/Plan、
-用量、队列编辑及共享会话控制；支持 Markdown 预览和兼容终端的图片显示，
-其他图形内容保留明确的网页入口。
-安装、快捷键及终端边界见
-[终端工作台中文指南](docs/tui_zh.md)。原逐行客户端可用 `--line-mode` 启动。
+内置的 Python/Textual 全屏 TUI 支持 **Claude/Codex 的 Code / Work**，连接与网页
+相同的 Relay 和 Wrapper。会话、运行状态和队列来自同一控制链路；关闭 TUI
+不会停止已运行的任务或已接收的排队消息。原生客户端的会话写入权限仍然生效。
+
+完成上面的源码依赖安装后，再安装可选终端依赖：
+
+```bash
+.venv/bin/python -m pip install -r requirements-tui.txt
+# 离线体验，不连接服务器，也不调用模型。
+./scripts/cc-remote-tui --demo
+# 连接自己的 Relay；按提示输入登录口令，替换示例域名。
+./scripts/cc-remote-tui --engine codex --url wss://cc.example.com/ws
+```
+
+`--engine claude` 切换引擎，`--space work` 进入 Work；可附加会话 ID，
+或用 `--machine <id>` 选择已授权设备。TUI 与 Relay、Wrapper 必须使用相同的
+源码／协议版本。登录配置、本机自动认证及固定启动命令见
+[终端工作台中文指南](docs/tui_zh.md)。
+
+| 操作 | 默认按键 |
+|---|---|
+| 会话目录树与搜索 | Normal 模式下 `Space e`，树内 `/` 搜索 |
+| 切换已打开会话 | Normal 模式下 `H` / `L`；`Space ,` 搜索标签 |
+| 切换阅读区／输入框 | `Ctrl+k` / `Ctrl+j` |
+| 输入与发送 | `i` 进入 Insert，`Esc` 回 Normal，Normal 下 `Enter` 发送 |
+| 排队／停止当前轮 | `Ctrl+e` / `Ctrl+x` |
+| 查看当前快捷键 | `Space h` |
+
+支持 Vim 选择、复制和引用，按需展开思考／工具／进程详情，以及运行计时、
+Goal / Plan、用量与队列编辑。运行状态文字从左向右扫光，完成或中断后停止；
+`TEXTUAL_ANIMATIONS=none` 可关闭动画。Markdown 可在终端预览，图片取决于终端
+图形协议；其他内容提供网页入口。原逐行客户端仍可通过 `--line-mode` 启动。
 
 ## 开发
 

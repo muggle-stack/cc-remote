@@ -2,8 +2,49 @@
 from __future__ import annotations
 
 from typing import Any
+import hashlib
+import re
 
-from cc_remote.protocol import MAX_SAFE_WIRE_INTEGER
+from cc_remote.protocol import (
+    MAX_SAFE_WIRE_INTEGER, AssistantMsgEnd, AssistantMsgStart, Delta,
+)
+
+
+def manual_compact_prompt(content: object) -> str | None:
+    """Recognize only the native /compact command, never other slash commands."""
+    if isinstance(content, list):
+        if any((block.get("type") != "text" if isinstance(block, dict)
+                else not isinstance(getattr(block, "text", None), str)) for block in content):
+            return None
+        texts = (
+            block.get("text", "") if isinstance(block, dict)
+            else getattr(block, "text", "")
+            for block in content
+        )
+        content = "".join(text for text in texts if isinstance(text, str))
+    if not isinstance(content, str):
+        return None
+    text = content.strip()
+    if text == "/compact":
+        return text
+    if not text.startswith(("<command-name>", "<command-message>")):
+        return None
+    name = re.search(r"<command-name>(.*?)</command-name>", text, re.S)
+    if name is None or name[1].strip() != "/compact":
+        return None
+    args = re.search(r"<command-args>(.*?)</command-args>", text, re.S)
+    return "/compact" + (" " + args[1].strip() if args and args[1].strip() else "")
+
+
+def compact_completion_events(boundary_id: str, turn_id: str | None) -> list:
+    """A stable UI receipt for a proven manual compact, shared by live/history."""
+    message_id = "compact-result-" + hashlib.sha256(boundary_id.encode()).hexdigest()[:24]
+    return [
+        AssistantMsgStart(message_id=message_id, turn_id=turn_id, channel="final"),
+        Delta(message_id=message_id, turn_id=turn_id, channel="final",
+              text="上下文已压缩，可以继续当前会话。"),
+        AssistantMsgEnd(message_id=message_id, turn_id=turn_id, channel="final"),
+    ]
 
 
 def compact_metadata(row: object) -> dict[str, Any]:

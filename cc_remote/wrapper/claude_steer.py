@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -15,8 +16,7 @@ from cc_remote.protocol import ERR_NOT_STEERABLE, ERR_STEER_UNKNOWN, Error, Turn
 
 
 async def handle(machine, ctx, cmd, reject):
-    if (ctx.state != "running" or ctx.write_state != "writable"
-            or not ctx.active_msg_id or ctx.translator is None):
+    if ctx.state != "running" or ctx.write_state != "writable":
         return await reject(ERR_NOT_STEERABLE, "当前没有可引导的 Claude 任务。")
     if not cmd.prompt and not cmd.images and not cmd.files:
         return await reject(ERR_NOT_STEERABLE, "消息内容为空。")
@@ -87,6 +87,29 @@ async def apply_echo(machine, ctx, message, native_id):
     return TurnSteered(msg_id=metadata["id"], turn_id=native_id,
                        prompt=metadata["prompt"], images=metadata.get("images"),
                        files=metadata.get("files"))
+
+
+def adopt(machine, ctx, metadata):
+    """Consume an already accepted input only after its exact native echo."""
+    previous = ctx.turn_task
+
+    async def run():
+        if previous is not None and not previous.done():
+            await asyncio.shield(previous)
+        ctx.turn_task = asyncio.current_task()
+        origin_key = machine._claude_followup_origin_key(metadata.get("background_origin"))
+        if origin_key is not None:
+            ctx.claude_background_followups.pop(origin_key, None)
+        ctx.active_msg_id = metadata["id"]
+        ctx.claude_write_active = True
+        ctx.needs_reload = False
+        if ctx.state not in {"interrupting", "draining"}:
+            await machine._set_state(ctx, "running")
+        await machine._run_turn(
+            ctx, metadata.get("prompt", ""), _adopt_steer=True,
+            _recover_service=ctx.sdk.service_recovery is not None)
+
+    ctx.turn_task = asyncio.create_task(run())
 
 
 def cleanup(ctx):

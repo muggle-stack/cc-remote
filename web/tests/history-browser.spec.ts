@@ -1413,6 +1413,69 @@ test("Claude resumes a separate live process after an idle background task", asy
   await expect(turn.locator(".turn-working")).toHaveCount(1);
 });
 
+test("Codex agent detail expands parent reports and still opens nested children", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { engine: "codex" });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some((c) => c.type === "get_history")).toBe(true);
+  const sid = "layout-parent";
+  relay.emit({ type: "user_msg", sid, msg_id: "parent-turn", prompt: "检查周报" });
+  relay.emit({ type: "process", sid, turn_id: "parent-turn", item_id: "native-activity", kind: "agent",
+    phase: "end", status: "succeeded", title: "协作代理有新进展", summary: "/root/weekly_solutions",
+    input: { agent_run_id: "codex-agent:child-thread" } });
+  const card = page.locator(".process-agent-card");
+  await expect(card).toBeVisible();
+  await card.click();
+  const requests = () => relay.commands.filter((c) => c.type === "get_agent_detail");
+  await expect.poll(() => requests().length).toBe(1);
+  expect(requests()[0].run_id).toBe("codex-agent:child-thread");
+  relay.emit({ type: "agent_detail", sid, session_id: sid, run_id: "codex-agent:child-thread",
+    request_id: String(requests()[0].request_id), revision: "layout-history", detail_revision: "source-child",
+    authoritative: true, title: "/root/weekly_solutions", status: "succeeded", events: [
+      { v: PROTOCOL_VERSION, ts: 1, type: "tool_use", tool_use_id: "child-tool", message_id: "child-work",
+        tool: "shell", category: "command", input: { command: "pwd" }, title: "核对工作目录" },
+      { v: PROTOCOL_VERSION, ts: 2, type: "tool_result", tool_use_id: "child-tool", content: "/workspace", is_error: false },
+      { v: PROTOCOL_VERSION, ts: 2, type: "process", item_id: "parent-report", kind: "agent",
+        phase: "end", status: "succeeded", title: "向主代理汇报", summary: "/root",
+        detail: "已核对周报来源，以下是汇报正文。", input: { agent_run_id: null } },
+      { v: PROTOCOL_VERSION, ts: 2, type: "process", item_id: "grandchild-activity", kind: "agent",
+        phase: "end", status: "succeeded", title: "检查周报来源", summary: "/root/weekly_solutions/sources",
+        input: { agent_run_id: "codex-agent:grandchild-thread" } },
+      { v: PROTOCOL_VERSION, ts: 3, type: "assistant_msg_start", message_id: "child-answer", channel: "final" },
+      { v: PROTOCOL_VERSION, ts: 3, type: "delta", message_id: "child-answer", channel: "final", text: "周报方案核对完成" },
+      { v: PROTOCOL_VERSION, ts: 3, type: "assistant_msg_end", message_id: "child-answer", channel: "final" },
+    ], through_seq: 0, has_more: false });
+  const panel = page.getByRole("complementary", { name: "协作代理详情" });
+  await expect(panel).toContainText("周报方案核对完成");
+  await expect(panel.locator(".agent-detail-status")).toHaveText("已完成");
+  await panel.locator(".tool-group-h").click();
+  await expect(panel).toContainText("pwd");
+  const report = panel.locator(".process-activity").filter({ hasText: "向主代理汇报" });
+  await expect(report.getByText("已核对周报来源，以下是汇报正文。", { exact: true })).not.toBeVisible();
+  await report.locator("summary").click();
+  await expect(report.getByText("已核对周报来源，以下是汇报正文。", { exact: true })).toBeVisible();
+  await expect(report).not.toContainText("agent_run_id");
+  await expect(report).not.toContainText("原始参数");
+  expect(requests()).toHaveLength(1);
+  await expect(panel.getByRole("alert")).toHaveCount(0);
+  await panel.getByRole("button", { name: /检查周报来源/ }).click();
+  await expect.poll(() => requests().length).toBe(2);
+  expect(requests()[1].run_id).toBe("codex-agent:grandchild-thread");
+  expect(requests()[1].session_id).toBe(sid);
+  relay.emit({ type: "agent_detail", sid, session_id: sid, run_id: "codex-agent:grandchild-thread",
+    request_id: String(requests()[1].request_id), revision: "layout-history", detail_revision: "source-grandchild",
+    authoritative: true, title: "/root/weekly_solutions/sources", status: "succeeded", events: [
+      { v: PROTOCOL_VERSION, ts: 4, type: "assistant_msg_start", message_id: "grandchild-answer", channel: "final" },
+      { v: PROTOCOL_VERSION, ts: 4, type: "delta", message_id: "grandchild-answer", channel: "final", text: "下级代理核对完成" },
+      { v: PROTOCOL_VERSION, ts: 4, type: "assistant_msg_end", message_id: "grandchild-answer", channel: "final" },
+    ], through_seq: 0, has_more: false });
+  await expect(panel).toContainText("下级代理核对完成");
+  await panel.getByRole("button", { name: "返回上一级协作代理" }).click();
+  await expect(panel).toContainText("周报方案核对完成");
+  await expect(panel.getByRole("alert")).toHaveCount(0);
+  expect(requests()).toHaveLength(2);
+  expect(relay.commands.filter((c) => ["query", "session_resume", "steer"].includes(String(c.type)))).toEqual([]);
+});
+
 test("Claude agent detail recovers stale revisions and follows its own live status", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { engine: "claude" });
   await page.goto("/");
@@ -2232,6 +2295,55 @@ test(`Claude native compaction animates once and settles at the persisted bounda
   await expect(turn.locator(".turn-working")).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("claude-compacted-dark.png") });
   expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toHaveLength(0);
+});
+}
+
+for (const engine of ["claude", "codex"] as const) {
+test(`manual compact keeps the existing spark and accepts the next message (${engine})`, async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, {
+    engine, retained: false, historyReply: () => null,
+  });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
+  const input = page.locator(".composer textarea");
+  await input.fill("/compact");
+  await page.locator(".composer").getByRole("button", { name: "发送", exact: true }).click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "compact_session").length).toBe(1);
+  expect(relay.commands.some(c => c.type === "query")).toBe(false);
+  const sid = "layout-parent";
+  const turnId = "manual-compact";
+  let seq = 0;
+  const emit = (event: PanelRelayEvent) => relay.emit({ ...event, seq: ++seq });
+  emit({ type: "state", sid, state: "running", phase: "waiting", detail: "压缩中", msg_id: turnId });
+  emit({ type: "user_msg", sid, msg_id: turnId, prompt: "/compact" });
+  emit({ type: "process", sid, turn_id: turnId, item_id: "compact-start",
+    kind: "compaction", phase: "start", status: "running", title: "压缩上下文" });
+  const turn = page.locator(`[data-turn-id="${turnId}"]`);
+  await expect(turn).toContainText("/compact");
+  await expect(turn.locator(".turn-working")).toBeVisible();
+  await expect(turn.locator(".turn-working svg")).toHaveAttribute("width", "24");
+  await expect(turn.locator(".process-compaction-running")).toBeVisible();
+  emit({ type: "process", sid, turn_id: turnId, item_id: "compact-boundary",
+    kind: "compaction", phase: "end", status: "succeeded", title: "压缩上下文",
+    input: { compaction_started_id: "compact-start" } });
+  // A completed process item is not the native turn's terminal boundary.
+  await expect(turn.locator(".turn-working")).toBeVisible();
+  emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "compact-result", channel: "final" });
+  emit({ type: "delta", sid, turn_id: turnId, message_id: "compact-result", channel: "final",
+    text: "上下文已压缩，可以继续当前会话。" });
+  emit({ type: "assistant_msg_end", sid, turn_id: turnId, message_id: "compact-result", channel: "final" });
+  emit({ type: "turn_end", sid, turn_id: turnId, checkpoint_id: turnId,
+    result: { subtype: "success", is_error: false, duration_ms: 20_000 } });
+  emit({ type: "state", sid, state: "idle" });
+  await expect(turn).toContainText("上下文已压缩，可以继续当前会话。");
+  await expect(turn).not.toContainText("该轮未正常结束");
+  await expect(turn.locator(".turn-working")).toHaveCount(0);
+  await expect(turn.locator(".turn-done-mark .spark-btn")).toBeVisible();
+  await expect(input).toBeEnabled();
+  await input.fill("继续刚才的问题");
+  await page.locator(".composer").getByRole("button", { name: "发送", exact: true }).click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
+  expect(relay.commands.find(c => c.type === "query")?.prompt).toBe("继续刚才的问题");
 });
 }
 

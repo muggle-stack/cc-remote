@@ -185,7 +185,7 @@ def test_local_background_bash_never_creates_clickable_agent_run():
         public_agent_run_id("unseen-agent-tool"),)
 
 
-def test_agent_detail_fails_closed_for_codex_and_work():
+def test_agent_detail_fails_closed_for_missing_codex_and_work():
     async def run():
         machine, _transport = _mk_machine()
         command = SimpleNamespace(
@@ -199,7 +199,7 @@ def test_agent_detail_fails_closed_for_codex_and_work():
         machine.sessions["session"] = codex
         rejected_codex = await machine._handle_get_agent_detail(command)
         assert rejected_codex.authoritative is False
-        assert "不支持" in rejected_codex.error
+        assert "尚未生成" in rejected_codex.error
 
         work = _mk_ctx("session", "session")
         work.engine = "claude"

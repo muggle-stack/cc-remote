@@ -1212,6 +1212,37 @@ try {
   ), ["new-turn"],
   "query_sent moves the spark directly to the optimistic tail row");
 
+  for (const stateFirst of [true, false]) {
+    let commandState = {
+      ...initialState, focusedSid: sparkSid,
+      runtimes: { [sparkSid]: createRuntime() },
+    };
+    const frames = [
+      { type: "state", sid: sparkSid, state: "running", msg_id: "compact-command" },
+      { type: "user_msg", sid: sparkSid, msg_id: "compact-command", prompt: "/compact" },
+    ];
+    if (!stateFirst) frames.reverse();
+    frames.forEach((frame, index) => {
+      commandState = reduce(commandState, { type: "event", event: event({ ...frame, seq: 30 + index }) });
+    });
+    const runtime = commandState.runtimes[sparkSid];
+    assert.equal(exactActiveTurnId(runtime.turns, runtime.liveOwner?.turnId, true), "compact-command",
+      "a native command has an exact spark owner before its native user UUID echo");
+    commandState = reduce(commandState, { type: "event", event: event({
+      type: "state", sid: sparkSid, state: "running", msg_id: "stale-command", seq: 29,
+    }) });
+    assert.equal(commandState.runtimes[sparkSid].liveOwner?.turnId, "compact-command",
+      "an older named state cannot steal the live command owner");
+    for (const frame of [
+      { type: "turn_end", sid: sparkSid, checkpoint_id: "compact-command", seq: 32,
+        result: { subtype: "success", is_error: false } },
+      { type: "state", sid: sparkSid, state: "idle", seq: 33 },
+      { type: "state", sid: sparkSid, state: "running", msg_id: "compact-command", seq: 34 },
+    ]) commandState = reduce(commandState, { type: "event", event: event(frame) });
+    assert.equal(commandState.runtimes[sparkSid].liveOwner, null,
+      "a completed command cannot be revived by a later progress label");
+  }
+
   for (const liveEvent of [
     event({ type: "state", sid, state: "running", seq: 1 }),
     event({ type: "user_msg", sid,

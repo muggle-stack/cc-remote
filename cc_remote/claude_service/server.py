@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-from cc_remote.claude_steering import PendingSteers, steer_message
+from cc_remote.claude_steering import PendingSteers, steer_message, _origin_key
 
 from .wire import (
     ControllerLeaseConflict, decode_sdk, encode_sdk, private_directory,
@@ -201,6 +201,20 @@ class Session:
                 value = self.steers.annotate(value)
                 if "__cc_steer" in value:
                     self.origin_id = value["__cc_steer"]["id"]
+                    if self.turn is not None:
+                        if self.turn.get("awaiting_steer"):
+                            identity = self.turn.get("background_id")
+                            self.steers.handoff_background(identity)
+                            # The exact human echo transfers this continuation
+                            # to the managed turn. Some native versions emit no
+                            # separate autonomous Result at this safe boundary.
+                            self.background_turns = [t for t in self.background_turns
+                                                     if t.get("identity") != identity]
+                        self.turn.pop("awaiting_steer", None)
+                if (value.get("__cc_steer_cancelled") and not self.steers.pending
+                        and self.turn and self.turn.get("awaiting_steer")):
+                    self.turn = None
+                    self._cleanup_steer_attachments()
                 # The journal is on disk, like Claude's own transcript. Do not
                 # stop the sole native reader at a per-turn byte cap: an offline
                 # long turn could then never deliver the Result that frees it.
@@ -208,10 +222,12 @@ class Session:
                 origin = value.get("origin")
                 kind = origin.get("kind") if isinstance(origin, dict) else None
                 if value.get("type") == "user" and kind not in (None, "human"):
-                    self.background_turns.append({"start_seq": seq - 1, "terminal_seq": None})
+                    self.background_turns.append({"start_seq": seq - 1, "terminal_seq": None,
+                                                  "origin": _origin_key(origin),
+                                                  "identity": self.steers.background_id})
                 if value.get("type") == "result" and kind not in (None, "human"):
                     for turn in reversed(self.background_turns):
-                        if turn["terminal_seq"] is None:
+                        if turn["terminal_seq"] is None and turn.get("origin") == _origin_key(origin):
                             turn["terminal_seq"] = seq
                             break
                 if value.get("type") == "system":
@@ -225,6 +241,7 @@ class Session:
                 if isinstance(sid, str) and sid:
                     self.metadata["session_id"] = sid
                 if (self.turn is not None and _human_result(value)
+                        and not self.turn.get("awaiting_steer")
                         and not value.get("__cc_steer_intermediate")):
                     self.terminal_seq = seq
                 await self.notify()
@@ -248,6 +265,8 @@ class Session:
             "head": self.journal.seq, "controls": self.controls, "pid": os.getpid(),
             "task_seeds": list(self.task_seeds.values()),
             "native_steering": True,
+            "background_steering": True,
+            "pending_steers": {uid: {"id": data["id"]} for uid, data in self.steers.pending.items()},
         }
 
     async def events(self, after: int) -> dict:
@@ -278,7 +297,9 @@ class Session:
             # A controller replacement may stage identical attachment bytes at
             # another private path. Compare the original browser payload digest,
             # not those incidental paths; the first mutation keeps its payload.
-            identity = [method, params["turn_id"], params["native_id"],
+            # The first accepted operation owns its target. Recovery can see
+            # that background continuation already adopted as a human turn.
+            identity = [method, params["native_id"],
                         params["metadata"]["fingerprint"]]
         fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
         previous = self.mutation_fingerprints.get(request_id)
@@ -327,10 +348,20 @@ class Session:
             return result
         async with self.lock:
             if method == "steer":
-                if (self.turn is None or self.terminal_seq is not None
-                        or self.failure or params["turn_id"] != self.turn["id"]):
+                background = self.turn is None and params.get("background_id") is not None
+                if self.failure or (background and params["background_id"] != self.steers.background_id):
+                    return False
+                if not background and (self.turn is None or self.terminal_seq is not None
+                                       or params["turn_id"] != self.turn["id"]):
                     return False
                 self.steers.add(params["native_id"], params["metadata"])
+                if background:
+                    self.turn = {**params["metadata"], "background_steer": True, "awaiting_steer": True,
+                                 "background_id": params["background_id"],
+                                 "background_origin": self.steers.background_origin_data,
+                                 "previous_origin_id": self.origin_id,
+                                 "start_seq": self.journal.seq, "started_at": time.time()}
+                    self.terminal_seq = None
                 directory = params["metadata"].get("attachment_dir")
                 if directory:
                     self.steer_attachment_dirs.add(directory)

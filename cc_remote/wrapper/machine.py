@@ -38,6 +38,7 @@ Multi-session model:
 from __future__ import annotations
 
 from cc_remote.wrapper import claude_service
+from cc_remote.wrapper.claude_compaction import compact_completion_events
 
 import asyncio
 import base64
@@ -6293,6 +6294,7 @@ class WrapperMachine:
         from cc_remote.wrapper import claude_steer
 
         sdk.native_close_callback = lambda: claude_steer.cleanup(ctx)
+        sdk.steer_adoption_callback = lambda metadata: claude_steer.adopt(self, ctx, metadata)
         claude_service.configure(self, ctx)
 
     @staticmethod
@@ -6789,6 +6791,7 @@ class WrapperMachine:
             and (
                 ctx.claude_background_followups
                 or ctx.claude_background_followup_overflow
+                or getattr(ctx.sdk, "autonomous_steer_pending", False)
             )
         )
 
@@ -7172,7 +7175,9 @@ class WrapperMachine:
         )
         compact_event: ProcessEvent | None = None
         terminal: ResultMessage | None = None
-        ctx.sdk.next_turn_id = f"compact-{uuid4().hex}"
+        compact_turn_id = f"compact-{uuid4().hex}"
+        ctx.sdk.next_turn_id = compact_turn_id
+        ctx.sdk.service_turn_metadata = {"id": compact_turn_id, "prompt": "/compact"}
         ctx.claude_write_active = True
         try:
             await ctx.sdk.query("/compact")
@@ -7189,6 +7194,9 @@ class WrapperMachine:
                         await self._emit(ctx, event)
                 if isinstance(message, ResultMessage):
                     terminal = message
+                    ack = getattr(ctx.sdk, "ack_service_message", None)
+                    if ack is not None:
+                        await ack(message, turn_id=compact_turn_id)
                     break
         finally:
             release_background = getattr(
@@ -15401,6 +15409,14 @@ class WrapperMachine:
             self.HISTORY_REFRESH_MAX_INTERVAL_SECONDS,
         )
 
+    def _manual_codex_compact_users(self, sid: str, turn_ids) -> dict[str, UserMsg]:
+        store = getattr(self, "_codex_controls", None)
+        if store is None:
+            return {}
+        commands = set(store.get(sid).manual_compactions)
+        return {turn_id: UserMsg(msg_id=turn_id, prompt="/compact")
+                for turn_id in turn_ids if turn_id in commands}
+
     async def _recover_official_codex_user(
         self,
         sid: str,
@@ -15411,6 +15427,10 @@ class WrapperMachine:
         max_reverse_scan_bytes: int | None = None,
     ) -> UserMsg | None:
         """Recover one exact persisted user row, including inline image bytes."""
+        if user_index == 0:
+            command = self._manual_codex_compact_users(sid, (native_turn_id,)).get(native_turn_id)
+            if command is not None:
+                return command
         path = await asyncio.to_thread(self._codex_rollout_for_wire, sid)
         if not path:
             return None
@@ -15429,13 +15449,17 @@ class WrapperMachine:
         native_turn_ids: tuple[str, ...],
     ) -> dict[str, UserMsg]:
         """Recover assistant-only Goal prompts with one bounded rollout pass."""
+        commands = self._manual_codex_compact_users(sid, native_turn_ids)
+        native_turn_ids = tuple(turn_id for turn_id in native_turn_ids if turn_id not in commands)
+        if not native_turn_ids:
+            return commands
         path = await asyncio.to_thread(self._codex_rollout_for_wire, sid)
         if not path:
-            return {}
+            return commands
         try:
             source_stat = await asyncio.to_thread(os.stat, path)
         except OSError:
-            return {}
+            return commands
         fingerprint = (
             int(source_stat.st_dev),
             int(source_stat.st_ino),
@@ -15461,7 +15485,7 @@ class WrapperMachine:
                 previous_misses[key] = miss
             pending.append(native_turn_id)
         if not pending:
-            return {}
+            return commands
         recovery = await asyncio.to_thread(
             codex_history_turn_users,
             path,
@@ -15493,7 +15517,7 @@ class WrapperMachine:
             > self.CODEX_GOAL_RECOVERY_MISS_CACHE_ENTRIES
         ):
             self._codex_goal_recovery_misses.popitem(last=False)
-        return recovery.users
+        return {**recovery.users, **commands}
 
     async def _build_official_codex_history(
         self,
@@ -16917,7 +16941,7 @@ class WrapperMachine:
         )
 
     async def _handle_get_agent_detail(self, cmd) -> AgentDetail:
-        """Return one read-only Claude Agent process page without resuming it."""
+        """Return one read-only Agent process page without resuming it."""
         started_at = time.perf_counter()
         sid = self._resolve_session_alias(cmd.session_id) or cmd.session_id
         revision = self._history_revision(sid)
@@ -16960,7 +16984,7 @@ class WrapperMachine:
             )
             await self.transport.send(detail)
             log.info(
-                "Claude Agent detail sent",
+                "Agent detail sent",
                 session_id=sid,
                 run_id=cmd.run_id,
                 events=len(detail.events),
@@ -16977,11 +17001,39 @@ class WrapperMachine:
         self._watch_session(sid)
         watch = self._watch.get(sid) or {}
         ctx = self._ctx_by_sid(sid)
-        if ((ctx is not None and ctx.engine != "claude")
-                or (ctx is None and watch.get("engine") == "codex")):
-            return await send(error="当前会话不支持协作代理详情")
         if ctx is not None and ctx.space != "code":
             return await send(error="Work 不提供协作代理详情")
+        if ((ctx is not None and ctx.engine == "codex")
+                or (ctx is None and watch.get("engine") == "codex")):
+            from cc_remote.wrapper.codex_agents import load_detail
+
+            try:
+                profile, native_sid = self._codex_target(sid)
+                if await asyncio.to_thread(
+                        self._work.for_engine("codex").get_by_session,
+                        native_sid, codex_profile_id=profile.id) is not None:
+                    return await send(error="Work 不提供协作代理详情")
+                rows, status, title, source_revision = await asyncio.to_thread(
+                    load_detail, profile.home, native_sid, cmd.run_id,
+                    self.cfg.tool_result_max)
+                if (getattr(cmd, "detail_revision", None)
+                        and cmd.detail_revision != source_revision):
+                    return await send(error="协作代理详情已更新，请重新打开",
+                                      detail_revision=source_revision)
+                page, more, oldest, newer, newest = _turn_detail_page(
+                    rows, before=getattr(cmd, "before", None),
+                    limit=getattr(cmd, "limit", 192),
+                    max_bytes=min(8 * 1024 * 1024,
+                                  max(512 * 1024, self.cfg.ws_max_size_bytes // 2)))
+                return await send(page, title=title, status=status,
+                                  detail_revision=source_revision, has_more=more,
+                                  oldest_cursor=oldest, has_newer=newer, newer_cursor=newest)
+            except ValueError as exc:
+                return await send(error=str(exc)[:4096])
+            except Exception as exc:
+                log.warning("Codex Agent detail read failed", session_id=sid,
+                            error_type=type(exc).__name__)
+                return await send(error="协作代理详情暂时不可用，请稍后重试")
         try:
             claude_profile, native_sid = self._claude_target(sid)
         except ValueError:
@@ -21563,6 +21615,13 @@ class WrapperMachine:
         the autonomous work extends its origin turn rather than creating a new
         visible human turn.
         """
+        if getattr(message, "_cc_steer_cancelled", None):
+            from cc_remote.wrapper import claude_steer
+
+            await self._emit(ctx, await claude_steer.apply_echo(self, ctx, message, None))
+            await self._settle_claude_lifecycle_if_quiescent(ctx)
+            self._schedule_query_queue_drain(ctx)
+            return
         if await self._observe_claude_rate_limit_message(ctx, message):
             return
         await self._observe_claude_model_fallback(ctx, message)
@@ -21915,6 +21974,8 @@ class WrapperMachine:
         repair_history = False
         seen_user_item_ids: set[str] = set()
         anchor_recovery_attempted = False
+        manual_compact = False
+        compact_completed = False
 
         def start_restart_watch() -> None:
             nonlocal restart_watch_task
@@ -22459,6 +22520,29 @@ class WrapperMachine:
 
                 await ctx.codex_steer_gate.wait()
                 await self._confirm_uncertain_codex_steer(ctx, raw)
+                params = raw.get("params") if isinstance(raw.get("params"), dict) else {}
+                item = params.get("item") if isinstance(params.get("item"), dict) else {}
+                is_compaction = (raw.get("method") == "thread/compacted"
+                                 or item.get("type") == "contextCompaction")
+                manual = getattr(ctx.sdk, "manual_compact_for_turn", None)
+                if is_compaction and not manual_compact and manual is not None:
+                    manual_compact = await manual(current_turn_id)
+                    if manual_compact:
+                        user = UserMsg(msg_id=logical_msg_id, prompt="/compact")
+                        sid = self._ctx_wire_sid(ctx) or ctx.key
+                        store = getattr(self, "_codex_controls", None)
+                        if store is not None:
+                            try:
+                                await asyncio.to_thread(store.remember_compaction, sid, current_turn_id)
+                            except CodexControlStoreError:
+                                log.warning("manual compact command could not be persisted", session_id=sid)
+                        self._invalidate_codex_history(sid)
+                        self._codex_history.remember_automatic_user(sid, current_turn_id, user)
+                        ctx.codex_spontaneous_anchor_id = logical_msg_id
+                        ctx.active_msg_id = logical_msg_id
+                        await self._emit(ctx, user)
+                        await self._emit(ctx, StateEvent(
+                            state=ctx.state, phase="waiting", detail="压缩中", msg_id=logical_msg_id))
                 published_user = await publish_live_user(raw)
                 if (
                     not published_user
@@ -22467,7 +22551,13 @@ class WrapperMachine:
                 ):
                     await ensure_automatic_anchor()
                 events = translator.feed(raw)
+                compact_completed = compact_completed or any(
+                    isinstance(event, ProcessEvent) and event.kind == "compaction"
+                    and event.status == "succeeded" for event in events)
                 terminal = is_turn_terminal(raw)
+                if (manual_compact and compact_completed and terminal
+                        and _codex_terminal_status(raw) == "completed"):
+                    events = [*compact_completion_events(current_turn_id, logical_msg_id), *events]
                 completed_after_overflow = (
                     overflowed and terminal
                     and _codex_terminal_status(raw) == "completed"
@@ -32182,26 +32272,36 @@ class WrapperMachine:
                     ctx.claude_compaction_revision != compact_revision
                 )
                 if not compacted_while_waiting:
-                    try:
-                        await self._compact_managed_claude_context(
-                            ctx, reason="manual compact command")
-                    except Exception as exc:
-                        log.warning(
-                            "Claude compact failed",
-                            session_id=ctx.session_id,
-                            error_type=type(exc).__name__,
-                        )
+                    if (ctx.state != "idle"
+                            or getattr(ctx.sdk, "is_claude_broker", False)
+                            or self._claude_has_background_work(ctx)):
                         error = Error(
-                            code=ERR_INTERNAL,
-                            message=(
-                                "Claude 原生上下文压缩失败；"
-                                "当前上下文未被标记为已压缩"
-                            ),
+                            code=ERR_BUSY,
+                            message="Claude 会话正在使用中，暂时无法压缩上下文",
                             sid=self._ctx_wire_sid(ctx),
                             to=getattr(cmd, "client_id", None),
                         )
                         await self.transport.send(error)
                         return error
+                    # A human command has the same ownership, interrupt/drain,
+                    # service commit and reconnect contract as an ordinary turn.
+                    # Background maintenance keeps the internal helper above.
+                    ctx.active_msg_id = f"compact-{uuid4().hex}"
+                    ctx.interrupt_event.clear()
+                    ctx.interrupt_deadline = None
+                    ctx.state = "running"
+                    await self._emit(ctx, StateEvent(
+                        state="running", phase="waiting", detail="压缩中",
+                        msg_id=ctx.active_msg_id))
+                    ctx.turn_task = asyncio.create_task(self._run_turn(ctx, "/compact"))
+                    notice = Notice(
+                        notice_id=f"compact-{uuid4().hex}", severity="info",
+                        category="runtime", title="上下文压缩已启动",
+                        message="Claude 正在压缩当前会话的上下文。",
+                        thread_id=self._ctx_wire_sid(ctx), sid=self._ctx_wire_sid(ctx),
+                        to=getattr(cmd, "client_id", None))
+                    await self.transport.send(notice)
+                    return notice
                 if self._claude_auto_compact_event(ctx).pending:
                     ctx.auto_compact_compaction_done = True
                     ctx.auto_compact_phase = "waiting_terminal"
@@ -32230,7 +32330,10 @@ class WrapperMachine:
             return ctx
         sid = self._ctx_wire_sid(ctx) or cmd.session_id
         try:
-            await ctx.sdk.compact_thread()
+            async with ctx.query_lock, ctx.launch_lock:
+                if ctx.state != "idle":
+                    raise RuntimeError("Codex session is busy")
+                await ctx.sdk.compact_thread()
             notice = Notice(
                 notice_id=f"compact-{uuid4().hex}",
                 severity="info",
@@ -37208,8 +37311,10 @@ class WrapperMachine:
         *,
         launch_receipt: asyncio.Future[bool] | None = None,
         _recover_service: bool = False,
+        _adopt_steer: bool = False,
     ) -> None:
         is_codex = ctx.engine == "codex"
+        manual_compact = not is_codex and prompt.strip() == "/compact" and not images and not files
         is_codex_shared = self._codex_shared_affinity(ctx)
         service_client = getattr(ctx.sdk, "client", None)
         service_replay = (
@@ -37232,6 +37337,7 @@ class WrapperMachine:
                               item_titles=ctx.claude_item_titles,
                               item_meta=ctx.claude_item_meta,
                               item_commands=ctx.claude_item_commands,
+                              manual_compact=manual_compact,
                           ))
         if not is_codex:
             ctx.claude_client_alias_bound_msg_id = None
@@ -37728,7 +37834,7 @@ class WrapperMachine:
             await self._publish_claude_auto_compact(ctx)
 
         try:
-            if not _recover_service:
+            if not _recover_service and not _adopt_steer:
                 if not is_codex:
                     check_delivery = getattr(ctx.sdk, "check_service_delivery", None)
                     if check_delivery is not None:
@@ -37791,7 +37897,7 @@ class WrapperMachine:
                         sid=ctx.session_id,
                     )
                     await reconnect_claude("message pump failure")
-                if (not is_codex
+                if (not is_codex and not manual_compact
                         and self._claude_auto_compact_event(ctx).pending):
                     async with ctx.query_lock:
                         auto_event, _ = await self._apply_pending_claude_auto_compact(
@@ -38074,6 +38180,10 @@ class WrapperMachine:
                             files=file_meta,
                         ))
                         settle_launch(True)
+            if manual_compact and ctx.state == "running":
+                await self._emit(ctx, StateEvent(
+                    state="running", phase="waiting", detail="压缩中",
+                    msg_id=ctx.active_msg_id))
             # Codex sessions don't emit a Model event like cc's init SystemMessage,
             # so announce the configured codex model (gpt-*) once — else the header
             # would keep showing a stale Claude model.
@@ -38299,6 +38409,10 @@ class WrapperMachine:
                     ack = getattr(ctx.sdk, "ack_service_message", None)
                     if ack is not None:
                         await ack(msg, turn_id=ctx.active_msg_id)
+                    if manual_compact and ctx.translator.compact_boundary_id and not msg.is_error:
+                        ctx.claude_compaction_revision += 1
+                        if self._claude_auto_compact_event(ctx).pending:
+                            ctx.auto_compact_compaction_done = True
                     break
 
             if not is_codex:

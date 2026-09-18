@@ -1,4 +1,4 @@
-"""Native manual compaction must not manufacture a human conversation turn."""
+"""Manual /compact owns its native command row; automatic summaries stay hidden."""
 import json
 import sqlite3
 
@@ -121,18 +121,31 @@ def test_manual_compact_replay_preserves_answer_and_pagination(tmp_path, blocks)
         messages, timestamps, internal = transcript_compact_snapshot(
             SID, path=str(source), index_store=store)
         events = translate_history(messages, 4096, timestamps, internal)
-        assert [e.prompt for e in events if isinstance(e, UserMsg)] == ["inspect the code"]
+        assert [e.prompt for e in events if isinstance(e, UserMsg)] == ["inspect the code", "/compact"]
         ends = [e for e in events if isinstance(e, TurnEnd)]
-        assert len(ends) == 1
+        assert len(ends) == 2
         assert ends[0].ts == timestamps["answer"]
         assert ends[0].result.duration_ms == 5_000
+        assert ends[1].checkpoint_id == "command"
+        assert ends[1].ts == timestamps["boundary"]
+        assert ends[1].result.duration_ms == 151_000
+        assert not ends[1].result.is_error
         compact = [e for e in events if isinstance(e, ProcessEvent) and e.kind == "compaction"]
         assert len(compact) == 1
         assert compact[0].ts == timestamps["boundary"]
+        assert compact[0].turn_id == "command"
+        assert any(isinstance(e, Delta) and e.text == "上下文已压缩，可以继续当前会话。" for e in events)
         page = transcript_compact_history_page(SID, path=str(source), index_store=store, limit=1)
         assert page is not None
-        assert not page.has_more
-        assert page.oldest_cursor == "human"
+        assert page.has_more
+        assert page.oldest_cursor == "command"
+        newest = translate_history(page.messages, 4096, page.timestamps, page.internal_events)
+        assert [e.prompt for e in newest if isinstance(e, UserMsg)] == ["/compact"]
+        assert any(isinstance(e, ProcessEvent) and e.item_id == "boundary" for e in newest)
+        older = transcript_compact_history_page(
+            SID, path=str(source), index_store=store, before="command", limit=1)
+        assert older.oldest_cursor == "human"
+        assert not older.has_more
         if iteration == 1:
             fingerprint = HistorySourceFingerprint.capture(source)
             for engine in ("claude", "codex"):
