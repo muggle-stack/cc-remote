@@ -348,14 +348,19 @@ Common tests that do not call a live model:
 .venv/bin/python -m pip install -r requirements-dev.txt
 .venv/bin/python -m pytest
 npm --prefix web run test:reliability
-npm --prefix web run test:history-browser
-npm --prefix web run test:viewer
 npm --prefix web run test:dsh
 npm --prefix web run lint
 npm --prefix web run build
 ```
 
-The complete commit/PR gate is in [AGENTS.md](AGENTS.md#commit-and-pr-gate).
+Maintainers run the complete local gate before submitting a PR; see
+[AGENTS.md](AGENTS.md#commit-and-pr-gate). Other contributors may submit a PR
+with a description of the checks performed and any validation gaps. PRs and
+pushes to `master` automatically run the **Web build and pytest**; releases
+reuse these checks. Playwright is not part of CI or the required local PR gate.
+Its tests remain available for diagnostics when requested. For PR acceptance,
+maintainers check out the requested revision and verify the changed behavior
+in the running application.
 [Live probes](scripts/live/) and [isolated DSH acceptance](integrations/dsh/README.md#verification)
 run separately; live model probes may spend tokens and are not default unit tests.
 Use `npm --prefix web run dev` for the UI dev server, or the built Relay-served

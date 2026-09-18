@@ -244,11 +244,15 @@ attachment and optional App-control MCP tools are separate user choices.
   committing, verify the stored message and scope with
   `git log -1 --format=raw --stat`, then recheck
   `git status --short --branch`.
-- Before opening or updating **every** PR, run the complete local gate below;
-  a docs-only or apparently narrow change does not skip it unless the user
-  explicitly accepts that exception. Every command must exit zero. Expected
-  platform-defined test skips are allowed, but failures or missing tools must
-  be reported rather than silently bypassed.
+- Before opening or updating a maintainer-authored PR (including work prepared
+  by an agent for the maintainer), run the complete local gate below. A docs-only
+  or apparently narrow change does not skip it unless the user explicitly
+  accepts that exception. Every command must exit zero. Expected platform-defined
+  test skips are allowed; report failures or missing tools rather than bypassing
+  them. During development, use checks appropriate to the change.
+- Other contributors may open or update a PR without running the complete local
+  gate. Include the checks performed and any known validation gaps in the PR
+  description. Automatic CI still builds Web and runs pytest for every PR.
 - Run the Web gate with Node 24 (see `.nvmrc`), matching CI. Newer Node
   browser-like globals must not mask missing browser-environment guards.
 
@@ -257,8 +261,6 @@ attachment and optional App-control MCP tools are separate user choices.
 uvx --from ruff==0.15.13 ruff check cc_remote tests deploy
 npm --prefix web run build
 npm --prefix web run test:reliability
-npm --prefix web run test:history-browser
-npm --prefix web run test:viewer
 npm --prefix web run lint
 bash -n \
   deploy/install.sh \
@@ -274,9 +276,15 @@ shellcheck -x \
 git diff --check
 ```
 
-- `.github/workflows/ci.yml` repeats this gate for pushes and PRs. A local pass
-  is required before PR publication and does not replace green remote CI before
-  merge. These checks are zero-token; do not substitute a live model probe.
+- `.github/workflows/ci.yml` automatically runs only the Web build and pytest
+  on PRs and pushes to `master`. Release tags reuse the same CI before packaging
+  and publishing. Pytest waits only for the Web build artifact. Lint, front-end
+  reliability tests and shell checks remain part of the local gate above.
+- Playwright is not part of CI or the required local PR gate. Existing browser
+  tests remain available for explicitly requested diagnostics. When the
+  maintainer asks for PR acceptance, check out the requested revision, run the
+  application and verify the changed behavior; report the actual checks and
+  any remaining gaps. The automated checks above do not call a live model.
 
 ## Run / test
 ```bash
@@ -285,7 +293,6 @@ python -m cc_remote.relay        # terminal 1 (set WEB_STATIC_DIR=web/dist to se
 python -m cc_remote.wrapper      # terminal 2 (on each machine running Claude/Codex)
 pytest                           # zero-token unit tests
 npm --prefix web run test:reliability
-npm --prefix web run test:viewer
 npm --prefix web run lint
 npm --prefix web run build
 ```

@@ -714,4 +714,7 @@ python -m pytest tests/test_tui*.py
 ```
 
 这些测试不调用模型，覆盖状态、传输、无界面键盘操作、终端尺寸变化、
-公开事件对齐以及协议命令清单。提交 PR 前仍须通过仓库要求的完整本地检查。
+公开事件对齐以及协议命令清单。维护者提交 PR 前按
+[AGENTS.md](../AGENTS.md#commit-and-pr-gate) 执行完整本地检查；其他贡献者说明
+已做的验证即可。PR 自动 CI 运行 Web 编译与 pytest，Playwright 不进入 CI 或必跑的
+本地 PR 检查。

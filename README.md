@@ -303,14 +303,16 @@ relay/wrapper 会话，提供会话标签、Space e 目录树及搜索、Vim 风
 .venv/bin/python -m pip install -r requirements-dev.txt
 .venv/bin/python -m pytest
 npm --prefix web run test:reliability
-npm --prefix web run test:history-browser
-npm --prefix web run test:viewer
 npm --prefix web run test:dsh
 npm --prefix web run lint
 npm --prefix web run build
 ```
 
-完整提交／PR 门禁见 [AGENTS.md](AGENTS.md#commit-and-pr-gate)。
+维护者提交 PR 前执行完整本地检查，见 [AGENTS.md](AGENTS.md#commit-and-pr-gate)。
+其他贡献者可直接提交 PR，并说明已做的验证和未验证部分。PR 和推送到 `master` 会
+自动运行 **Web 编译与 pytest**，发布版本也复用这两项检查。
+Playwright 不进入 CI 或必跑的本地 PR 检查，现有用例仅保留供按需诊断。
+需要验收 PR 时，维护者拉取指定版本、实际运行应用并验证改动行为。
 [真实链路脚本](scripts/live/) 与 [DSH 隔离验收](integrations/dsh/README.md#verification)
 单独运行；真实模型探针可能消耗额度，不属于默认单元测试。
 网页开发服务器使用 `npm --prefix web run dev`，同源联调使用构建后的 Relay 网页。
