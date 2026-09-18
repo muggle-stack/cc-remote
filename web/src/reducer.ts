@@ -91,6 +91,8 @@ import {
   type Turn,
 } from "./domain/conversation.ts";
 
+import { rememberTurnUsage, type TurnUsageReadings } from "./turn-usage";
+
 const DETAIL_PARSE_ERROR = "过程解析失败";
 
 export type {
@@ -198,6 +200,7 @@ export interface Artifact {
 }
 
 export interface SessionRuntime {
+  turnUsage?: TurnUsageReadings;
   turns: Turn[];
   state: State;
   // Display-only activity observed from a native/external client. It must not
@@ -520,7 +523,7 @@ export type Action =
   | { type: "set_collaboration_mode"; mode: CollaborationModeName }
   | { type: "set_context"; report: ContextReport }
   | { type: "clear_context" }
-  | { type: "begin_context_request"; sid: string; requestId: string }
+  | { type: "begin_context_request"; sid: string; requestId: string; refresh?: boolean }
   | { type: "defer_context_request"; sid: string }
   | { type: "begin_status_request"; sid: string; requestId: string }
   | { type: "set_turns"; sid: string; turns: Turn[] }
@@ -1998,6 +2001,19 @@ function markTurnAsLive(
   }
 }
 
+function claimClaudeContinuation(
+  runtime: SessionRuntime, turn: Turn, event: ServerEvent, liveEvent: boolean,
+): void {
+  // An idle parent keeps its completion receipt. Actual main-agent content
+  // after a native injected prompt can nevertheless own the running spark.
+  // Child ProcessEvents and history/replay into an idle runtime are not proof.
+  if (!liveEvent || runtime.state === "idle" || !turn.done
+      || !("background" in event) || event.background !== true
+      || !("turn_id" in event) || !event.turn_id) return;
+  markTurnAsLive(runtime, turn.id, true, event.seq);
+  runtime.liveOwner = { turnId: turn.id, seq: event.seq ?? runtime.lastLiveSeq };
+}
+
 const MAX_LIVE_DETAIL_TURN_IDS = 128;
 
 function isStateVisibleProcessBlock(block: Block): boolean {
@@ -2155,6 +2171,7 @@ function switchControlGeneration(
     runtime.pendingLiveBinding = null;
     runtime.pendingTerminalFences = null;
     runtime.legacyLiveFallbackBlocked = true;
+    runtime.turnUsage = undefined;
     runtime.backgroundProcesses = [];
     runtime.backgroundLevelEmpty = false;
     runtime.backgroundLevelTs = undefined;
@@ -2502,7 +2519,7 @@ export function reduce(state: AppState, action: Action): AppState {
         rt.contextReport = action.report;
         if (action.report.available !== false
             && (action.report.source !== "recent_turn"
-              || !rt.contextExactReport || rt.contextExactReport.source === "recent_turn")) {
+              || rt.contextExactReport?.source !== "native_estimate")) {
           rt.contextExactReport = action.report;
         }
       });
@@ -2514,7 +2531,7 @@ export function reduce(state: AppState, action: Action): AppState {
     case "begin_context_request":
       return patch(state, action.sid, (rt) => {
         rt.contextRequestId = action.requestId;
-        rt.contextRefreshDeferred = false;
+        if (action.refresh !== false) rt.contextRefreshDeferred = false;
         rt.contextError = null;
       });
     case "defer_context_request":
@@ -3399,6 +3416,9 @@ function reduceEvent(
       // initial explicit switch.
       return { ...patch(state, key, (rt) => {
         switchControlGeneration(rt, e.generation);
+        for (const usage of e.turn_usage ?? []) {
+          rt.turnUsage = rememberTurnUsage(rt.turnUsage, usage);
+        }
         rt.state = e.state;
         rt.syncReady = true;
         rt.ccSessionId = e.cc_session_id ?? rt.ccSessionId;
@@ -5509,7 +5529,10 @@ function reduceEvent(
       return patch(state, e.sid, (rt) => {
         rt.contextReport = e;
         if (e.available !== false && (e.source !== "recent_turn"
-            || !rt.contextExactReport || rt.contextExactReport.source === "recent_turn")) {
+            || rt.contextExactReport?.source !== "native_estimate")
+            && !(e.max_tokens <= 0 && (rt.contextExactReport?.max_tokens ?? 0) > 0)) {
+          // A recovering worker may know only the total. Keep the last complete
+          // reading until capacity returns; model/window changes clear it above.
           rt.contextExactReport = e;
         }
         // Reports are broadcast so every viewer benefits from the fresh value,
@@ -5525,7 +5548,8 @@ function reduceEvent(
           && e.source === "control";
         if (matchesRequest || satisfiesDeferred) {
           rt.contextRequestId = null;
-          rt.contextRefreshDeferred = false;
+          rt.contextRefreshDeferred = rt.contextRefreshDeferred
+            && e.source !== "control";
           rt.contextError = null;
         } else if (rt.contextRequestId === null
             && !rt.contextRefreshDeferred) {
@@ -5733,6 +5757,9 @@ function reduceEvent(
     }
     case "replay_end":
       return { ...patch(state, e.sid, (rt) => {
+        for (const usage of e.turn_usage ?? []) {
+          rt.turnUsage = rememberTurnUsage(rt.turnUsage, usage);
+        }
         rt.replaying = false;
         rt.syncReady = true;
         rt.truncated = rt.truncated || e.truncated;
@@ -5774,7 +5801,6 @@ function reduceEvent(
               rt.contextRefreshDeferred = true;
               rt.contextError = null;
             } else {
-              rt.contextRefreshDeferred = false;
               rt.contextError = presentCommandProblem(e);
             }
           });
@@ -5936,6 +5962,7 @@ function reduceEvent(
         const stamp = e.ts ? Math.round(e.ts * 1000) : undefined;
         if (existing) {
           if (!existing.prompt && e.prompt) existing.prompt = e.prompt;
+          if (e.timed_task) existing.timedTask = e.timed_task;
           if (!existing.images && imgs) existing.images = imgs;
           if (fileMeta) existing.files = fileMeta;
           else if (existing.files) existing.files = existing.files.map(
@@ -5949,6 +5976,7 @@ function reduceEvent(
           turns.push({
             id: e.msg_id,
             clientMsgId: e.client_msg_id ?? undefined,
+            timedTask: e.timed_task ?? undefined,
             prompt: e.prompt,
             images: imgs,
             files: fileMeta,
@@ -6095,6 +6123,7 @@ function reduceEvent(
         if (!detachedBackground) {
           markTurnAsLive(rt, t.id, boundCompletedTurns, e.seq);
         }
+        else claimClaudeContinuation(rt, t, e, boundCompletedTurns);
         t.progress = undefined;
         const block = mutableTurnBlocks(t).find((b) => b.kind === "text"
           && b.message_id === e.message_id) as TextBlock | undefined;
@@ -6136,6 +6165,7 @@ function reduceEvent(
         if (!detachedBackground) {
           markTurnAsLive(rt, t.id, boundCompletedTurns, e.seq);
         }
+        else claimClaudeContinuation(rt, t, e, boundCompletedTurns);
         t.progress = undefined;
         let block = mutableTurnBlocks(t).find((b) => b.kind === "text"
           && b.message_id === e.message_id) as TextBlock | undefined;
@@ -6160,7 +6190,7 @@ function reduceEvent(
         // use text containment here: repeated prose and bounded History prefixes
         // are both legitimate content and cannot safely prove replay identity.
         if (!block.done) {
-          block.text = appendField(block.text, e.text, MAX_LIVE_TEXT_CHARS);
+          block.text = e.replace ? e.text.slice(0, MAX_LIVE_TEXT_CHARS) : appendField(block.text, e.text, MAX_LIVE_TEXT_CHARS);
         }
         if (block.channel !== "final" && e.text.length > 0) {
           markTurnDetailAsLive(rt, t.id, boundCompletedTurns);
@@ -6187,6 +6217,7 @@ function reduceEvent(
         if (!detachedBackground) {
           markTurnAsLive(rt, t.id, boundCompletedTurns, e.seq);
         }
+        else claimClaudeContinuation(rt, t, e, boundCompletedTurns);
         markTurnDetailAsLive(rt, t.id, boundCompletedTurns);
         t.progress = undefined;
         const existing = mutableTurnBlocks(t).find((b) => b.kind === "tool"
@@ -6336,10 +6367,19 @@ function reduceEvent(
         const turns = cloneTurns(rt.turns);
         let owner: Turn | undefined;
         let block: ProcessBlock | undefined;
+        const compactStart = e.kind === "compaction" && e.phase === "end"
+          && typeof e.input?.compaction_started_id === "string"
+          ? e.input.compaction_started_id : undefined;
         for (const candidate of turns) {
           const found = mutableTurnBlocks(candidate).find((b) => b.kind === "process"
-            && b.item_id === e.item_id) as ProcessBlock | undefined;
-          if (found) { owner = candidate; block = found; break; }
+            && (b.item_id === e.item_id
+              || b.item_id === compactStart && b.processKind === "compaction"
+                && !b.done && b.turn_id === e.turn_id)) as ProcessBlock | undefined;
+          if (found) {
+            owner = candidate; block = found;
+            block.item_id = e.item_id;
+            break;
+          }
         }
         // Background task/hook events may arrive after their originating turn
         // ended and after a newer query opened. Prefer their explicit parent or
@@ -6375,7 +6415,7 @@ function reduceEvent(
         block.title = e.title || block.title;
         if (e.summary != null) block.summary = e.summary;
         if (e.detail != null) block.detail = e.detail;
-        if (e.input != null) block.input = e.input;
+        if (e.input != null && !compactStart) block.input = e.input;
         if (e.output != null) block.output = e.output;
         if (e.diff != null) block.diff = e.diff;
         if (e.progress != null) block.progress = e.progress;
@@ -6502,6 +6542,10 @@ function reduceEvent(
         t.progress = undefined;
         if (boundCompletedTurns) limitTurnBlocks(t);
         rt.turns = turns;
+      });
+    case "turn_usage":
+      return patch(state, e.sid, (rt) => {
+        rt.turnUsage = rememberTurnUsage(rt.turnUsage, e);
       });
     case "turn_binding":
       return patch(state, e.sid, (rt) => {

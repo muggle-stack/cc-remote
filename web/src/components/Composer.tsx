@@ -6,6 +6,7 @@ import {
   Suspense,
   useRef,
   useState,
+  type ReactNode,
   type ClipboardEvent,
   type SetStateAction,
 } from "react";
@@ -29,6 +30,7 @@ import {
 } from "../data";
 const CommandSheet = lazy(() => import("./CommandSheet").then(m => ({ default: m.CommandSheet })));
 import { attachmentBytes, snapshotAttachmentFiles } from "../img";
+import { useAttachmentDrop } from "../use-attachment-drop";
 import {
   readClipboardImport, resolveClipboardImport, insertClipboardText,
   type ClipboardImport,
@@ -66,6 +68,7 @@ const ContextPopover = lazy(() => import("./ContextPopover"));
 interface Props {
   draftKey: string;
   draftStore: ComposerDraftStore;
+  backgroundTasks?: ReactNode;
   surface?: "code" | "work";
   state: State;
   connState: ConnState;
@@ -197,14 +200,10 @@ export function Composer(p: Props) {
   const noticeTimer = useRef<number | null>(null);
   const [importing, setImporting] = useState(false);
   const importingRef = useRef(false);
-  const [dragDepth, setDragDepth] = useState(0);
-  const dragOver = dragDepth > 0;
   const taRef = useRef<HTMLTextAreaElement>(null);
   const imeSubmitRef = useRef(new ImeSubmitGuard());
   const buttonSendTimerRef = useRef<number | null>(null);
   const requestedSkillScopeRef = useRef<string | null>(null);
-  const pickFilesRef = useRef<(files: FileList | File[] | null) => Promise<void>>(
-    async () => {});
 
   useLayoutEffect(() => {
     if (draftKeyRef.current === p.draftKey) return;
@@ -379,6 +378,7 @@ export function Composer(p: Props) {
   const onPickFiles = async (
     fl: FileList | File[] | null, clipboard?: ClipboardImport,
   ) => {
+    if (locked) return;
     if (importingRef.current) { flash("附件正在导入，请稍候"); return; }
     const targetDraftKey = draftKeyRef.current;
     importingRef.current = true;
@@ -415,33 +415,7 @@ export function Composer(p: Props) {
       setImporting(false);
     }
   };
-  pickFilesRef.current = onPickFiles;
-
-  // Whole-window drag-drop overlay. The effect is refreshed with the current
-  // attachment limits/import state so its async drop handler never uses a stale
-  // count or appends after a send.
-  useEffect(() => {
-    const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types || []).includes("Files");
-    const onEnter = (e: DragEvent) => { if (hasFiles(e)) setDragDepth((d) => d + 1); };
-    const onLeave = (e: DragEvent) => { if (hasFiles(e)) setDragDepth((d) => Math.max(0, d - 1)); };
-    const onOver = (e: DragEvent) => { if (hasFiles(e)) e.preventDefault(); };
-    const onDrop = (e: DragEvent) => {
-      if (!hasFiles(e)) return;
-      e.preventDefault();
-      setDragDepth(0);
-      if (e.dataTransfer?.files?.length) void pickFilesRef.current(e.dataTransfer.files);
-    };
-    window.addEventListener("dragenter", onEnter);
-    window.addEventListener("dragleave", onLeave);
-    window.addEventListener("dragover", onOver);
-    window.addEventListener("drop", onDrop);
-    return () => {
-      window.removeEventListener("dragenter", onEnter);
-      window.removeEventListener("dragleave", onLeave);
-      window.removeEventListener("dragover", onOver);
-      window.removeEventListener("drop", onDrop);
-    };
-  }, []);
+  const dragOver = useAttachmentDrop("main", locked || importing, onPickFiles);
 
   // Keep the native textarea for reliable selection/undo/IME. Large text is
   // retained privately by the draft and represented only by an editable card.
@@ -504,7 +478,6 @@ export function Composer(p: Props) {
         }
         return;
       }
-      if (action === "interrupt-and-replace") p.onInterrupt();
       if (p.onSetPending(query)) {
         clearDraft(); resetTaHeight();
       }
@@ -719,13 +692,10 @@ export function Composer(p: Props) {
 
   const stopping = busy && !hasText && !hasAttachments;
   const interruptSettling = isInterruptSettling(p.state);
-  const primaryIsInterrupt = (p.engine ?? "claude") !== "codex";
   const sendIcon = !busy ? "send" : stopping ? "stop"
-    : p.sendMode === "steer" ? (primaryIsInterrupt ? "bolt" : "send")
+    : p.sendMode === "steer" ? "send"
       : "queue";
-  const sendClass = "sendbtn" + ((stopping
-    || (busy && p.sendMode === "steer" && primaryIsInterrupt
-      && (hasText || hasAttachments))) ? " interrupt" : "");
+  const sendClass = "sendbtn" + (stopping ? " interrupt" : "");
   const disabled = locked || importing || (!busy && !hasText && !hasAttachments)
     || isSettlingStopDisabled(p.state, hasText || hasAttachments);
   // Fall back to the raw id (not MODELS[0]) so a hidden model set via
@@ -737,7 +707,9 @@ export function Composer(p: Props) {
   // A background read may temporarily return billing usage or no estimate.
   // Keep the last native reading until another arrives. Runtime invalidation
   // already clears both reports when the session's model or capacity changes.
-  const exactContextReport = currentContextReport?.source !== "recent_turn" && currentContextReport
+  const exactContextReport = currentContextReport
+    && (p.engine !== "codex" || currentContextReport.source !== "recent_turn")
+    && (currentContextReport.max_tokens > 0 || (retainedContextReport?.max_tokens ?? 0) <= 0)
     ? currentContextReport : retainedContextReport ?? currentContextReport;
   const codexEstimate = p.engine !== "codex"
     || exactContextReport?.source === "native_estimate";
@@ -911,18 +883,18 @@ export function Composer(p: Props) {
           </div>
         )}
 
-        {busy && (
+        {(busy || p.backgroundTasks) && (
           <div className="runbar show">
-            <div className="seg">
+            {p.backgroundTasks}
+            {busy && <div className="seg">
               <button className={p.sendMode === "steer" ? "on" : ""}
                 onClick={() => p.setSendMode("steer")}>
-                <Icon name={primaryIsInterrupt ? "bolt" : "send"} size={14} />
-                {primaryIsInterrupt ? "打断并发送" : "引导"}
+                <Icon name="send" size={14} />引导
               </button>
               <button className={p.sendMode === "queue" ? "on" : ""} onClick={() => p.setSendMode("queue")}>
                 <Icon name="queue" size={14} />排队
               </button>
-            </div>
+            </div>}
           </div>
         )}
 
@@ -1129,6 +1101,7 @@ export function Composer(p: Props) {
                 <ContextPopover report={exactContextReport}
                   codex={p.engine === "codex"}
                   codexContext={p.engine === "codex" ? p.codexContext : null}
+                  autoCompact={p.engine === "claude" ? p.autoCompact : null}
                   onAutoCompact={p.engine === "codex" && p.onSetCodexContext
                     ? () => { setCtxOpen(false); setAutoCompactOpen(true); } : undefined} />
               </Suspense>
@@ -1174,7 +1147,7 @@ export function Composer(p: Props) {
       /></Suspense>}
 
       {dragOver && (
-        <div className="drop-overlay" aria-hidden="true">
+        <div className="drop-overlay drop-overlay-main" aria-hidden="true">
           <div className="drop-card">
             <span className="dc-ic"><Icon name="plus" size={36} /></span>
             <div className="dc-tx">拖拽文件到此处发送</div>

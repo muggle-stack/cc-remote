@@ -443,6 +443,15 @@ assert.deepEqual((await reopenedAsyncCache.getPage(scope, staleAsyncPage.pageKey
 ["Question?", "Finished."]);
 
 const claudeScope = { ...scope, engine: "claude" };
+const recoveryStorage = new MemoryStorage();
+const recoveryCache = new HistoryPageCache({ storage: recoveryStorage });
+const recoveryPage = { pageKey: "internal-recovery", turns: [turn("recovery")],
+  hasOlder: false, olderCursor: "recovery" };
+assert.equal((await recoveryCache.putPage(claudeScope, recoveryPage)).ok, true);
+const recoveryKey = recoveryCache.pageKey(claudeScope, recoveryPage.pageKey);
+(recoveryStorage.records.get(recoveryKey) as { version: number }).version = 9;
+assert.equal(await recoveryCache.getPage(claudeScope, recoveryPage.pageKey), null,
+  "cached native recovery prompts must not return as human turns after upgrade");
 const legacyClaudeStorage = new MemoryStorage();
 const legacyClaudeCache = new HistoryPageCache({ storage: legacyClaudeStorage });
 assert.equal((await legacyClaudeCache.putPage(claudeScope, {

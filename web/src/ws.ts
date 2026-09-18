@@ -31,6 +31,7 @@ import {
 } from "./outbox.ts";
 import { probeSession, shouldReconnectAfterSessionProbe } from "./session-auth.ts";
 import { uuid } from "./util.ts";
+import { RecoverableReadCoordinator } from "./recoverable-read.ts";
 
 export type ConnState = "connecting" | "connected" | "reconnecting" | "disconnected";
 
@@ -48,6 +49,9 @@ export interface EventOwnership {
 interface ListRequestOwnership {
   ownership: EventOwnership;
   order: number;
+  // Mutations can also return SessionList; their failures must stay visible.
+  readOnly: boolean;
+  deferred?: boolean;
 }
 
 interface InvalidatedListRefresh {
@@ -190,6 +194,8 @@ export class RelayWs {
   private readonly pendingListOwnershipByRequest =
     new Map<string, ListRequestOwnership>();
   private readonly latestAcceptedListOrderByScope = new Map<string, number>();
+  private readonly listReadRetries = new RecoverableReadCoordinator(
+    (callback, delay) => setTimeout(callback, delay), timer => clearTimeout(timer));
   private readonly invalidatedListRefreshByScope =
     new Map<string, InvalidatedListRefresh>();
   private readonly invalidatedListScopeByRequest = new Map<string, string>();
@@ -244,6 +250,7 @@ export class RelayWs {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.cancelProtocolRecovery();
     this.stopHeartbeat();
+    this.listReadRetries.clear();
     this.invalidatedListRefreshByScope.clear();
     this.invalidatedListScopeByRequest.clear();
     const ws = this.ws;
@@ -477,6 +484,7 @@ export class RelayWs {
     this.activeEngine = engine;
     this.activeSpace = space;
     if (changed) {
+      this.listReadRetries.clear();
       this.surfaceEpoch += 1;
       this.surfaceEpochByScope[
         sessionScopeKey(this.machineId, engine, space)
@@ -821,8 +829,8 @@ export class RelayWs {
     });
   }
 
-  sendSetServiceTier(service_tier: string): void {
-    this.send({ v: PROTOCOL_VERSION, type: "set_service_tier", service_tier, ts: nowTs(), ...this.sidObj() });
+  sendSetServiceTier(service_tier: string, sid?: string): boolean {
+    return this.send({ v: PROTOCOL_VERSION, type: "set_service_tier", service_tier, ts: nowTs(), ...this.sidObj(sid) });
   }
 
   sendSetCollaborationMode(mode: "default" | "plan"): void {
@@ -1270,11 +1278,15 @@ export class RelayWs {
   }
 
   sendListSessions(engine?: "claude" | "codex", space: Space = "code"): boolean {
-    const targetEngine = engine ?? "claude";
-    const obj: Record<string, unknown> = { v: PROTOCOL_VERSION, type: "list_sessions", ts: nowTs() };
-    if (engine && engine !== "claude") obj.engine = engine;
-    if (space !== "code") obj.space = space;
-    return this.sendListRefreshingCommand(obj, targetEngine, space) !== null;
+    return this.sendSessionListRead(engine ?? "claude", space) !== null;
+  }
+
+  private sendSessionListRead(
+    engine: "claude" | "codex", space: Space, retry = false,
+  ): string | null {
+    return this.sendListRefreshingCommand({
+      v: PROTOCOL_VERSION, type: "list_sessions", ts: nowTs(), engine, space,
+    }, engine, space, uuid(), retry);
   }
 
   /** Session mutations return a SessionList correlated to the mutation's own
@@ -1283,21 +1295,22 @@ export class RelayWs {
    * time or be dropped as unowned. */
   private sendListRefreshingCommand(
     obj: Record<string, unknown>, engine: "claude" | "codex", space: Space,
-    commandId = uuid(),
+    commandId = uuid(), retry = false,
   ): string | null {
     const ownership = this.ownershipSnapshot(engine, space);
+    if (!retry) this.listReadRetries.complete(ownership.scopeKey);
     this.pendingListOwnershipByRequest.set(commandId, {
       ownership,
       order: ++this.listRequestOrder,
+      readOnly: obj.type === "list_sessions",
     });
-    while (this.pendingListOwnershipByRequest.size > OUTBOX_MAX_COMMANDS) {
-      const oldest = this.pendingListOwnershipByRequest.keys().next().value;
-      if (typeof oldest !== "string") break;
-      this.pendingListOwnershipByRequest.delete(oldest);
+    // One insertion can evict at most one entry from this bounded map.
+    if (this.pendingListOwnershipByRequest.size > OUTBOX_MAX_COMMANDS) {
+      this.pendingListOwnershipByRequest.delete(this.pendingListOwnershipByRequest.keys().next().value!);
     }
-    const queued = this.sendTracked(obj, commandId) !== null;
+    const queued = this.sendTracked(obj, commandId);
     if (!queued) this.pendingListOwnershipByRequest.delete(commandId);
-    return queued ? commandId : null;
+    return queued;
   }
 
   private refreshInvalidatedSessionList(
@@ -1313,14 +1326,7 @@ export class RelayWs {
       inFlight.dirty = true;
       return;
     }
-    const obj: Record<string, unknown> = {
-      v: PROTOCOL_VERSION,
-      type: "list_sessions",
-      ts: nowTs(),
-    };
-    if (engine !== "claude") obj.engine = engine;
-    if (space !== "code") obj.space = space;
-    const requestId = this.sendListRefreshingCommand(obj, engine, space);
+    const requestId = this.sendSessionListRead(engine, space);
     if (!requestId) return;
     this.invalidatedListRefreshByScope.set(scopeKey, {
       requestId, engine, space, dirty: false,
@@ -1832,6 +1838,7 @@ export class RelayWs {
             // sharing the same order and a truly newer accepted list wins.
             this.latestAcceptedListOrderByScope.set(
               scopeKey, listedRequest.order);
+            this.listReadRetries.complete(scopeKey);
             for (const session of msg.sessions) {
               const sessionOwnership: EventOwnership = {
                 ...listedOwnership,
@@ -1861,6 +1868,29 @@ export class RelayWs {
           }
         }
         if (msg.type === "error" && msg.request_id) {
+          const listedRequest = this.pendingListOwnershipByRequest.get(
+            msg.request_id);
+          if (msg.code === "busy" && listedRequest?.readOnly) {
+            // A temporary catalog guard is a deferred background read. Keep
+            // the current sidebar/focus intact and retry only this surface;
+            // never turn it into an unrelated global operation-failed banner.
+            const { ownership, order } = listedRequest;
+            const { scopeKey, engine, space } = ownership;
+            if (!listedRequest.deferred
+                && this.acceptsOwnership(ownership, socketGeneration)
+                && engine === this.activeEngine && space === this.activeSpace
+                && order > (this.latestAcceptedListOrderByScope.get(scopeKey) ?? 0)) {
+              listedRequest.deferred = true;
+              this.listReadRetries.retry(scopeKey, () => {
+                // Surface changes cancel this coordinator; also reject a
+                // replaced connection before issuing its retry.
+                if (this.acceptsOwnership(ownership, socketGeneration)) {
+                  this.sendSessionListRead(engine, space, true);
+                }
+              });
+            }
+            return;
+          }
           // A failed mutation can deliberately send Error followed by its
           // authoritative SessionList so the sidebar reconciles an uncertain
           // outcome. Keep bounded list ownership for that possible second
@@ -2052,6 +2082,7 @@ export class RelayWs {
     };
     ws.onclose = (ev: CloseEvent) => {
       if (socketGeneration !== this.connectionGeneration || this.ws !== ws) return;
+      this.listReadRetries.clear();
       if (this.ws === ws) this.ws = null;
       this.stopHeartbeat();
       if (ev.code === 4406) {

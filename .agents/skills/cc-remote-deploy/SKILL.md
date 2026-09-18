@@ -30,6 +30,13 @@ and use the repository's immutable activation transactions. Lost connectivity
 means an unknown result: inspect the original operation before retrying. Do not
 overwrite live directories or restart the controlling Wrapper from itself.
 
+For Claude deployments, also read
+[persistent session installation and acceptance](../../../docs/claude-session-service.md).
+An independent SDK service must survive ordinary Wrapper upgrades. Check first
+migration, remaining in-process `/btw` turns, and deferred queues separately;
+wait for them to drain instead of interrupting work. Do not restart or replace
+an active SDK service to satisfy a version/readiness check.
+
 ## Codex CLI sharing is an acceptance check
 
 For every enabled Codex **Code** account, follow

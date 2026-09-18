@@ -91,6 +91,10 @@ def test_spawn_reconnect_and_btw_keep_the_selected_account(
         try:
             assert len(clients) == 3
             assert btw.claude_profile_id == ctx.claude_profile_id
+            assert clients[-1].options.session_id == btw.btw_reserved_id
+            private_sid = machine._claude_wire_sid(
+                machine._claude_profile_for_ctx(btw), btw.btw_reserved_id)
+            assert private_sid in machine._load_private_btw_sessions()
             for client in clients:
                 assert isinstance(client.transport, AccountIsolatedSubprocessCLITransport) is explicit
                 assert client.options.setting_sources == (["user"] if explicit else None)

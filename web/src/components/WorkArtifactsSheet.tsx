@@ -52,7 +52,7 @@ export function WorkArtifactsSheet({ open, artifacts, onOpen, onClose }: Props) 
               <small title={artifact.path}>{artifact.path}</small>
             </span>
             <span className="work-artifact-meta">
-              <b>{LABELS[artifact.kind]}</b>
+              <b>{/\.(?:mmd|mermaid)$/i.test(artifact.path) ? "Mermaid 图表" : LABELS[artifact.kind]}</b>
               <small>{fileSize(artifact.size)}</small>
             </span>
             {artifact.previewable

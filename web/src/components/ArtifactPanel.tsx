@@ -534,6 +534,7 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
 
   const title = artifact.file.split("/").pop()
     || (["md", "file", "html", "image", "pdf", "audio", "spreadsheet"].includes(artifact.kind) ? "文件预览" : "改动");
+  const mermaidFile = artifact.kind === "file" && /\.(?:mmd|mermaid)$/i.test(artifact.file);
   const renderedArtifact = ["image", "pdf", "audio"].includes(artifact.kind)
     || (artifact.kind === "html" && mode === "preview");
 
@@ -547,9 +548,9 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
             onTab={switchPanelTab} />
           : <span className="artifact-title">{title}</span>}
         <span className="artifact-path" title={artifact.file}>{artifact.file || "所有改动"}</span>
-        {["md", "html"].includes(artifact.kind) && !loading && !artifact.error && <div
+        {(["md", "html"].includes(artifact.kind) || mermaidFile) && !loading && !artifact.error && <div
           className="preview-modes" role="group"
-          aria-label={`${artifact.kind === "html" ? "HTML" : "Markdown"} 显示模式`}>
+          aria-label={`${mermaidFile ? "Mermaid" : artifact.kind === "html" ? "HTML" : "Markdown"} 显示模式`}>
           <button className={mode === "preview" ? "on" : ""}
             onClick={() => setModeState({ key: artifactKey, mode: "preview" })}>预览</button>
           <button className={mode === "source" ? "on" : ""}
@@ -657,8 +658,10 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
         ) : artifact.kind === "file" ? (
           <>
             {artifact.truncated && <div className="preview-truncated">文件共 {artifact.size?.toLocaleString()} 字节，仅预览前 512 KiB。</div>}
-            <SourceFile content={artifact.content || ""} targetLine={artifact.line}
-              artifactKey={artifactKey} />
+            {mermaidFile && mode === "preview" && !artifact.truncated
+              ? <MermaidBlock source={artifact.content || ""} />
+              : <SourceFile content={artifact.content || ""} targetLine={artifact.line}
+                  artifactKey={artifactKey} />}
           </>
         ) : artifact.kind === "md" ? (
           <>

@@ -266,12 +266,13 @@ def _is_descendant(
     wrapper_pid: int,
     parent_by_pid: Mapping[int, int] | None = None,
     proc_root: Path | None = None,
+    owned_roots: Collection[int] = (),
 ) -> bool:
     """Return whether pid belongs to the wrapper's complete SDK process tree."""
     seen = {pid}
     current = parent_pid
     for _ in range(64):
-        if current == wrapper_pid:
+        if current == wrapper_pid or current in owned_roots:
             return True
         if current <= 1 or current in seen:
             return False
@@ -336,17 +337,20 @@ def _darwin_claude_session_holders(
     config_dirs: Mapping[str, str] | None,
     native_session_ids: Mapping[str, str] | None,
     default_config_dir: str | None,
+    owner_identities: Collection[ProcessIdentity] = (),
 ) -> HolderScan:
     holders = {sid: set() for sid in paths}
     snapshot, complete = darwin_process_snapshot()
     if not complete:
         return HolderScan(holders, False)
     parent_by_pid = {info[0].pid: info[1] for info in snapshot}
+    owned_roots = {info[0].pid for info in snapshot if info[0] in owner_identities}
     candidates = [
         info for info in snapshot
         if _is_claude_cli(info[3])
         and not _is_descendant(
-            info[0].pid, info[1], wrapper_pid, parent_by_pid=parent_by_pid)
+            info[0].pid, info[1], wrapper_pid, parent_by_pid=parent_by_pid,
+            owned_roots=owned_roots)
     ]
     if len(candidates) > _MAX_DARWIN_CLAUDE_CANDIDATES:
         return HolderScan(holders, False)
@@ -457,6 +461,7 @@ def claude_session_holders(
     config_dirs: Mapping[str, str] | None = None,
     native_session_ids: Mapping[str, str] | None = None,
     default_config_dir: str | None = None,
+    owner_identities: Collection[ProcessIdentity] = (),
 ) -> HolderScan:
     """Return stable external Claude process identities for watched sessions.
 
@@ -489,7 +494,12 @@ def claude_session_holders(
             config_dirs=config_dirs,
             native_session_ids=native_session_ids,
             default_config_dir=default_config_dir,
+            owner_identities=owner_identities,
         )
+    owned_roots = {
+        identity.pid for identity in owner_identities
+        if process_identity(identity.pid, proc_root=proc_root) == identity
+    }
     cwd_sids: dict[str, set[str]] = {}
     for sid in paths:
         cwd = cwds.get(sid)
@@ -522,7 +532,7 @@ def claude_session_holders(
                 continue
             if _is_descendant(
                     int(proc_dir.name), parent_pid, wrapper_pid,
-                    proc_root=root):
+                    proc_root=root, owned_roots=owned_roots):
                 continue
             identity = ProcessIdentity(int(proc_dir.name), start_ticks)
             process_cwd: str | None = None

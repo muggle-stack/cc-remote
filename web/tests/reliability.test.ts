@@ -1119,8 +1119,8 @@ assert.equal(classifyBusySubmit("running", "steer", "codex", true), "steer",
   "the default Codex busy submit appends input to its active native turn");
 assert.equal(
   classifyBusySubmit("running", "steer", "claude", true),
-  "interrupt-and-replace",
-  "Claude retains interrupt-and-replace because it cannot steer an active turn",
+  "steer",
+  "Claude submits native non-interrupting input while its task continues",
 );
 assert.equal(classifyBusySubmit(
   "interrupting", "steer", "codex", true), "replace",
@@ -1387,8 +1387,8 @@ assert.match(historyAppSource,
 assert.match(historyAppSource,
   /requestHistoryTurnDetail = useCallback\([\s\S]{0,120}autoLoad = false/,
   "every detail entry point must default to one bounded page");
-assert.match(cacheSource, /const CACHE_VER = 26/,
-  "async-question repair must invalidate browser summaries missing unphased replies");
+assert.match(cacheSource, /const CACHE_VER = 27/,
+  "native recovery repair must invalidate browser summaries split by internal prompts");
 assert.match(cacheSource, /objectStore\(STORE\)\.delete\(sessionId\)/);
 assert.match(cacheSource, /job\.epoch !== sessionEpoch\(job\.sid\)/,
   "a debounced pre-marker write must not recreate the deleted cache row");
@@ -1591,7 +1591,7 @@ assert.match(layoutCss,
   /\.scard-profile-ribbon\s*\{[^}]*top\s*:\s*-6px[^}]*height\s*:\s*16px[^}]*max-width\s*:\s*64px[^}]*font-family\s*:\s*var\(--mono\)[^}]*font-size\s*:\s*8\.5px/s,
   "profile keycaps must hang compactly from the card edge");
 assert.match(layoutCss,
-  /\.work-profile-owner\s*\{[^}]*max-width\s*:\s*72px[^}]*height\s*:\s*19px[^}]*font\s*:\s*650 9px\/1 var\(--mono\)/s,
+    /\.work-profile-owner\s*\{[^}]*max-width\s*:\s*72px[^}]*height\s*:\s*19px[^}]*font\s*:\s*var\(--font-weight-650\) 9px\/1 var\(--mono\)/s,
   "a multi-account Work owner stays compact in the shared header");
 assert.match(layoutCss,
   /@media \(max-width:980px\)\{\s*\.artifact-panel\{[^}]*top:calc\(var\(--app-offset-top,0px\) \+ 10px\)[^}]*bottom:auto[^}]*height:calc\(var\(--app-height,100dvh\) - 20px\)[^}]*max-height:none/s,
@@ -11246,6 +11246,41 @@ try {
   ["only once"]);
   assert.deepEqual(state.runtimes[otherSid].turns, [untouched]);
 
+  function testClaudeRecoveredText(): void {
+    // A separate Claude worker can replay a complete prefix after the browser
+    // already painted part of it. Repeated recovery replaces that exact message;
+    // subsequent native deltas still append, and completed history stays final.
+    for (const channel of ["commentary", "final"] as const) {
+      const recoveredSid = `claude-recovered-${channel}`;
+      let recoveredState = {
+        ...initialState,
+        engine: "claude" as const,
+        focusedSid: recoveredSid,
+        runtimes: { [recoveredSid]: createRuntime() },
+      };
+      const recovery = {
+        type: "delta", sid: recoveredSid, message_id: "recovered-answer",
+        channel, text: "first recovered", replace: true,
+      };
+      for (const body of [
+        { type: "user_msg", sid: recoveredSid, msg_id: "recovered-user", prompt: "continue" },
+        { type: "assistant_msg_start", sid: recoveredSid, message_id: "recovered-answer", channel },
+        { ...recovery, text: "first ", replace: false },
+        recovery,
+        recovery,
+        { ...recovery, text: " tail", replace: false },
+        { type: "assistant_msg_end", sid: recoveredSid, message_id: "recovered-answer", channel },
+        { ...recovery, text: "delayed stale prefix" },
+      ]) recoveredState = reduce(recoveredState, { type: "event", event: event(body) });
+      assert.equal(recoveredState.runtimes[recoveredSid].turns.length, 1);
+      assert.deepEqual(recoveredState.runtimes[recoveredSid].turns[0].blocks.map(
+        (block: { text?: string; done: boolean }) => [block.text, block.done]),
+      [["first recovered tail", true]],
+      "recovery replaces partial text once and cannot overwrite a completed exact message");
+    }
+  }
+  testClaudeRecoveredText();
+
   // App-server 0.147 can report an interrupted summary for the exact native
   // turn which is still appending after context compaction. A newest
   // authoritative History page says which visible row owns that active head;
@@ -15418,7 +15453,7 @@ try {
   }));
   assert.match(answeringAfterProcessMarkup, /class="turn-process open"/,
     "the process disclosure stays open until the turn terminal boundary");
-  assert.match(answeringAfterProcessMarkup, /turn-process-state done/,
+  assert.match(answeringAfterProcessMarkup, /turn-process-label done status-shimmer/,
     "a settled process shell cannot keep spinning while the answer streams");
   assert.match(answeringAfterProcessMarkup, /class="turn-working"[\s\S]*回答中/);
   assert.equal(
@@ -15444,7 +15479,7 @@ try {
       onEdit: () => {}, onGetDiff: () => {},
     },
   ));
-  assert.match(commentaryWhileAnsweringMarkup, /turn-process-state running/);
+  assert.match(commentaryWhileAnsweringMarkup, /turn-process-label running status-shimmer is-active/);
   assert.match(
     commentaryWhileAnsweringMarkup,
     /class="turn-working"[\s\S]*处理中/,
@@ -16413,7 +16448,7 @@ try {
     "detached Agent work cannot reopen the completed turn's top-level spark");
   assert.match(
     backgroundMarkup,
-    /turn-process-state done"><svg/,
+    /turn-process-label done status-shimmer/,
     "the completed parent header stays settled while Agent detail remains live",
   );
   assert.match(backgroundMarkup, /class="turn-done-mark"/);
@@ -18175,9 +18210,8 @@ assert.match(appSource, /legacyExternal=\{!rt\.control && !!rt\.external\}/,
   "rolling-deploy compatibility keeps legacy external ownership actionable");
 assert.match(appSource, /sessionControlLocksInput\(rt\.control\)/,
   "Shift+Tab must not mutate controls while the authoritative session is read-only");
-assert.match(appSource,
-  /state\.connState !== "connected" \|\| !state\.wrapperOnline\) return;[\s\S]{0,520}sendContextRequestTo\(focusedSid, deferred\)/,
-  "a focused session must prime its context ring after initial sync and reconnect");
+// Context priming and live refresh are exercised through the real App in the
+// session workspace browser tests, including cold Claude capacity recovery.
 assert.doesNotMatch(appSource, /className="work-artifacts-btn"/);
 assert.doesNotMatch(appSource, /className="work-head-manage"/);
 assert.doesNotMatch(appSource, /sendSetWorkGrant|目录授权/);
@@ -19522,6 +19556,87 @@ assert.equal(coalescedRefresh.type, "list_sessions");
 assert.notEqual(coalescedRefresh.cmd_id, invalidationRefresh.cmd_id,
   "one dirty bit schedules exactly one follow-up after the first refresh ACK");
 listOwnershipRelay.stop();
+
+// An empty private Claude fork used to defer the automatic list read on a
+// harness switch. Keep that failure local, without hiding mutation failures.
+function testDeferredSessionListReads(): void {
+  const originalTimeout = globalThis.setTimeout;
+  const originalClear = globalThis.clearTimeout;
+  const timers = new Map<ReturnType<typeof setTimeout>, {
+    run: () => void; delay: number;
+  }>();
+  globalThis.setTimeout = ((run: () => void, delay: number) => {
+    const timer = {} as ReturnType<typeof setTimeout>;
+    timers.set(timer, { run, delay });
+    return timer;
+  }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: ReturnType<typeof setTimeout>) => {
+    timers.delete(timer);
+  }) as typeof clearTimeout;
+  const events: ServerEvent[] = [];
+  const relay = new RelayWs({
+    onEvent: event => { events.push(event); }, onConnState: () => {},
+  });
+  try {
+    relay.start();
+    const socket = FakeWebSocket.instances.at(-1)!;
+    socket.onopen?.();
+    const lastCommand = () => JSON.parse(socket.sent.at(-1)!);
+    const busy = () => socket.receive({
+      type: "error", code: "busy", message: "private fork initializing",
+      request_id: lastCommand().cmd_id,
+    });
+    relay.sendListSessions("claude");
+    for (const delay of [250, 1000, 4000]) {
+      const count = socket.sent.length;
+      busy();
+      busy(); // A retransmitted response cannot schedule a second retry.
+      assert.equal(events.length, 0);
+      assert.equal(timers.size, 1);
+      const [timer, retry] = [...timers][0];
+      assert.equal(retry.delay, delay);
+      timers.delete(timer);
+      retry.run();
+      assert.equal(socket.sent.length, count + 1);
+      assert.equal(lastCommand().type, "list_sessions");
+      assert.equal(lastCommand().engine, "claude");
+    }
+    busy();
+    assert.equal(timers.size, 0, "list deferral retries are bounded");
+    relay.sendListSessions("claude");
+    busy();
+    assert.equal(timers.size, 1);
+    socket.receive({ type: "session_list", engine: "claude",
+      request_id: lastCommand().cmd_id, sessions: [] });
+    assert.equal(timers.size, 0, "a successful response cancels deferral");
+    relay.sendListSessions("claude");
+    busy();
+    relay.setSurface("codex", "code");
+    assert.equal(timers.size, 0, "switching harness cancels old-surface retries");
+    const beforeStale = events.length;
+    busy();
+    assert.equal(events.length, beforeStale);
+    assert.equal(timers.size, 0);
+    relay.setSurface("claude", "code");
+    relay.sendRenameSession("parent", "title", "claude", "code");
+    busy();
+    assert.equal(events.at(-1)?.type, "error", "a failed mutation stays visible");
+    const beforeInternal = events.length;
+    relay.sendListSessions("claude");
+    socket.receive({ type: "error", code: "internal", message: "catalog failed",
+      request_id: lastCommand().cmd_id });
+    assert.equal(events.length, beforeInternal + 1);
+    busy();
+    assert.equal(timers.size, 1);
+    relay.stop();
+    assert.equal(timers.size, 0, "disconnect cleanup cancels the timer");
+  } finally {
+    relay.stop();
+    globalThis.setTimeout = originalTimeout;
+    globalThis.clearTimeout = originalClear;
+  }
+}
+testDeferredSessionListReads();
 
 const stoppedEvents: ServerEvent[] = [];
 const stoppedStates: string[] = [];

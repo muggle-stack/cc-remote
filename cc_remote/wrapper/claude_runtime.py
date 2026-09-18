@@ -17,7 +17,7 @@ import claude_agent_sdk
 
 
 VERIFIED_SDK_VERSION = "0.2.151"
-MINIMUM_CLAUDE_CLI_VERSION = "2.1.258"
+MINIMUM_CLAUDE_CLI_VERSION = "2.1.263"
 _CLI_VERSION_TIMEOUT = 3.0
 _VERSION_RE = re.compile(
     r"(?<!\d)(\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?)"

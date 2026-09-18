@@ -4,7 +4,7 @@
 
 自托管 · 多会话 · 多设备 · 实时工具过程 · Code / Work · PWA
 
-**产品版本：v3.0.0** · Wire protocol v67
+**产品版本：v3.0.0** · Wire protocol v71
 
 [English](README_en.md) · [功能对照](#引擎与功能) · [快速开始](#快速开始) ·
 [安装与升级](#安装与升级) · [文档](#文档) · [更新记录](CHANGELOG_zh.md)
@@ -23,7 +23,7 @@ cc-remote 把本机 agent 的会话、工具过程、文件和运行控制带到
 - **同时处理多个任务**：会话按目录分组，支持搜索、置顶、重命名和后台运行。
   切换页面不会停止任务；历史按需加载，工具细节展开后再读取。
 - **跟进完整过程**：查看流式回复、引擎公开的思考摘要、计划、工具调用、命令输出、
-  文件改动和审批。Codex 运行中支持引导或排队；Claude 支持打断并发送或排队。
+  文件改动和审批。Claude 与 Codex 运行中均支持引导或排队；引导会补充当前任务，不会打断正在执行的工具。
 - **管理长任务**：通过 `/goal` 设置目标，查看进展并使用各引擎原生的预算与控制。
   Claude、Codex 还支持 `/btw` 临时侧聊，主任务继续运行。
 - **直接查看文件**：聊天里的文件和目录链接连接到 `/open` 与预览面板，支持源码、
@@ -146,7 +146,7 @@ Wrapper 主动出站连接 Relay，设备不需要开放公网入站端口。Rel
 
 至少准备一个可用引擎：
 
-- **Claude**：日常 Claude Code `>= 2.1.258`，默认路径 `~/.local/bin/claude`。
+- **Claude**：日常 Claude Code `>= 2.1.263`，默认路径 `~/.local/bin/claude`。
   Wrapper 使用该 CLI；Python Agent SDK 固定为 `0.2.151`。
 - **Codex**：已登录的官方 CLI。共享控制需要同时支持
   `codex app-server daemon --help` 和 `codex app-server proxy --help`。
@@ -265,6 +265,7 @@ Code 默认权限较宽；Work 的私有目录策略不能替代独立系统用�
 | [远程 Viewer](docs/remote-viewer.md) | 交互式静态页面、Bridge／Isolated 模式 |
 | Codex App 接入：[macOS](docs/codex-desktop-launcher.md)／[Linux](docs/codex-desktop-linux.md) | 可选桌面 App、日常 CLI 与 Wrapper 共用 daemon |
 | [Codex App 工具](docs/codex-app-tools.md) | 可选 App-control MCP |
+| [定时消息 UI](docs/timed-messages.md) | 定时发送入口、消息标签、光圈与下次时间 |
 | [更新记录](CHANGELOG_zh.md) | 版本变化与迁移记录 |
 
 ## 终端工作台（预览）
@@ -286,13 +287,15 @@ relay/wrapper 会话，提供会话标签、Space e 目录树及搜索、Vim 风
 .venv/bin/python -m pip install -r requirements-dev.txt
 .venv/bin/python -m pytest
 npm --prefix web run test:reliability
-npm --prefix web run test:history-browser
-npm --prefix web run test:viewer
 npm --prefix web run lint
 npm --prefix web run build
 ```
 
-完整提交／PR 门禁见 [AGENTS.md](AGENTS.md#commit-and-pr-gate)。
+维护者提交 PR 前执行完整本地检查，见 [AGENTS.md](AGENTS.md#commit-and-pr-gate)。
+其他贡献者可直接提交 PR，并说明已做的验证和未验证部分。PR 和推送到 `master` 会
+自动运行 **Web 编译与 pytest**，发布版本也复用这两项检查。
+Playwright 不进入 CI 或必跑的本地 PR 检查，现有用例仅保留供按需诊断。
+需要验收 PR 时，维护者拉取指定版本、实际运行应用并验证改动行为。
 [真实链路脚本](scripts/live/) 单独运行；真实模型探针可能消耗额度，不属于默认单元测试。
 网页开发服务器使用 `npm --prefix web run dev`，同源联调使用构建后的 Relay 网页。
 

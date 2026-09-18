@@ -1758,7 +1758,7 @@ try {
     activeTurnId: compactToolGapTurn.id,
     onEdit: () => {}, onGetDiff: () => {}, onFork: () => {},
   }));
-  assert.match(compactToolGapMarkup, /turn-process-state running/,
+  assert.match(compactToolGapMarkup, /turn-process-label running status-shimmer is-active/,
     "an exact active task keeps its process disclosure running across a compact tool gap");
   assert.match(compactToolGapMarkup,
     /class="turn-working"[\s\S]*处理中/,
@@ -1781,7 +1781,7 @@ try {
   }));
   assert.doesNotMatch(unrelatedOwnerMarkup, /class="turn-working"/,
     "session activity cannot leak onto a turn which does not own it");
-  assert.match(unrelatedOwnerMarkup, /turn-process-state done/,
+  assert.match(unrelatedOwnerMarkup, /turn-process-label done status-shimmer/,
     "removing the exact owner settles the process exactly once");
   assert.match(unrelatedOwnerMarkup, /class="ubub-meta ai-meta"/,
     "the real terminal reveals completion metadata");

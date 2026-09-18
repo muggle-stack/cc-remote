@@ -586,7 +586,7 @@ All these keys are configurable under `[queue]` and listed in Help.
 The wrapper owns the order and broadcasts changes to Web and other TUIs.
 Reordering compares the displayed queue against the server queue atomically;
 if another client changes it or a message is starting, refresh and retry.
-This requires coordinated protocol v67 Relay/Web/Wrapper/TUI deployment.
+This requires coordinated protocol v71 Relay/Web/Wrapper/TUI deployment.
 
 ### Markdown and image previews
 
@@ -672,4 +672,7 @@ Install `requirements-dev.txt`, which includes the optional TUI dependency.
 `python -m pytest tests/test_tui*.py` runs model-free state, transport and
 headless keyboard/resize regressions, including public-event parity and an
 inventory test for all protocol commands. No live model is needed.
-The repository's complete local gate still applies before a PR.
+Maintainer-authored PRs follow the complete local gate in
+[AGENTS.md](../AGENTS.md#commit-and-pr-gate). Other contributors can submit the
+checks they performed. PR CI automatically builds Web and runs pytest;
+Playwright is not part of CI or the required local PR gate.

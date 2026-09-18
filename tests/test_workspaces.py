@@ -543,6 +543,8 @@ class WorkRegistryTests(unittest.TestCase):
         upload.parent.mkdir()
         upload.write_text("user input", encoding="utf-8")
         (workspace / "report.md").write_text("# result", encoding="utf-8")
+        for name in ("camera.mmd", "navigation.MERMAID"):
+            (workspace / name).write_text("flowchart TD\n  A --> B\n", encoding="utf-8")
         slides = workspace / "output" / "deck.pptx"
         slides.parent.mkdir()
         slides.write_bytes(b"presentation")
@@ -556,11 +558,14 @@ class WorkRegistryTests(unittest.TestCase):
         artifacts = self.store.artifacts("session-1")
 
         self.assertEqual({item["path"] for item in artifacts}, {
-            "report.md", "output/deck.pptx",
+            "report.md", "output/deck.pptx", "camera.mmd", "navigation.MERMAID",
         })
         by_path = {item["path"]: item for item in artifacts}
         self.assertTrue(by_path["report.md"]["previewable"])
         self.assertEqual(by_path["report.md"]["kind"], "document")
+        for name in ("camera.mmd", "navigation.MERMAID"):
+            self.assertTrue(by_path[name]["previewable"])
+            self.assertEqual(by_path[name]["kind"], "document")
         self.assertTrue(by_path["output/deck.pptx"]["previewable"])
         self.assertEqual(by_path["output/deck.pptx"]["kind"], "presentation")
 

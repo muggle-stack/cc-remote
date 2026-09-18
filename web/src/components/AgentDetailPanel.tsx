@@ -1,6 +1,6 @@
 import type { AgentDetailRun } from "../agent-detail";
 import { finalTextBlocks, presentableProcessBlocks } from "../process-blocks";
-import { Icon } from "../icons";
+import { ClaudeWorking, Icon } from "../icons";
 import { MessageBlock } from "./MessageBlock";
 import { ProcessTimeline } from "./ProcessTimeline";
 import { PanelResizer } from "./PanelResizer";
@@ -73,6 +73,10 @@ export function AgentDetailPanel({ run, canGoBack, onBack, onClose, onRetry,
           <MessageBlock key={block.message_id} text={block.text}
             done={block.done} onOpenFile={onOpenFile} />
         ))}
+        {!done && <div className="turn-working agent-detail-working" role="status">
+          <ClaudeWorking size={24} />
+          <span className="turn-working-tx">子代理处理中</span>
+        </div>}
         {!run.loading && !run.error && run.blocks.length === 0 && (
           <div className="agent-detail-empty">这个协作代理暂时没有可展示的过程。</div>
         )}

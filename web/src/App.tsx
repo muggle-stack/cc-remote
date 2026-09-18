@@ -32,6 +32,7 @@ import { TurnFilePageRequests, type LoadTurnFilePage } from "./turn-file-pages";
 import { Icon } from "./icons";
 import { ChatView } from "./components/ChatView";
 import { Composer } from "./components/Composer";
+const BackgroundTaskControl = lazy(() => import("./components/BackgroundTaskControl"));
 import type { QueuedQueryEditor } from "./components/QueuedQueryDialog";
 import { ReconnectBanner } from "./components/ReconnectBanner";
 import { NoticeStack } from "./components/NoticeStack";
@@ -49,7 +50,6 @@ import { WorkDashboardSheet } from "./components/WorkDashboardSheet";
 import type { HookDraft, SkillDraft } from "./components/CapabilitiesSheet";
 import { TerminalControl } from "./components/TerminalControl";
 import { DeviceSheet, type PairingState, type RemoteDevice } from "./components/DeviceSheet";
-import { HeaderMenu } from "./components/HeaderMenu";
 import { EngineSelector } from "./components/EngineSelector";
 import {
   claudeProfileIdForSession,
@@ -113,11 +113,11 @@ import {
   withoutForkFocusPlaceholder,
 } from "./session-worktree";
 import { matchesBtwRequest,
-  normalizeDiffTheme, normalizeEngine, type Snapshot, type QueryImg,
+  normalizeEngine, type Snapshot, type QueryImg,
   type QueryFile, type SessionInfo, type CodexPermissionMode,
   type CodexWebSearchMode, type PermissionProfileInfo,
   type CodexServiceTier, type CollaborationModeName,
-  type DiffTheme, type Engine, type Space,
+  type Engine, type Space,
   type SessionControl, type History,
   sessionControlLocksInput } from "./protocol";
 import type { EngineCapabilities, EngineCapabilityItem, EngineCapabilityKind, WorkArtifactInfo, WorkDashboard } from "./protocol";
@@ -252,8 +252,13 @@ import {
 import type { AgentDetail, FilesListed } from "./protocol";
 import type { AgentDetailSelection } from "./components/AgentDetailController";
 import type { RightPanelView } from "./components/PanelTabs";
+import { useTheme } from "./use-theme";
+import { useBoldText } from "./use-bold-text";
 
-const THEME_KEY = "cc_remote_theme";
+const HeaderMenu = lazy(() => import("./components/HeaderMenu").then(
+  ({ HeaderMenu: Menu }) => ({ default: Menu }),
+));
+
 const ENGINE_KEY = "cc_remote_engine";  // which backend the NEXT new session uses
 const MACHINE_KEY = "cc_remote_machine";
 const GoalPanel = lazy(() => import("./components/GoalPanel").then(
@@ -326,11 +331,11 @@ function catalogForEngineProfile(
 }
 
 export default function App() {
-  const [theme, setTheme] = useState<DiffTheme>(
-    () => normalizeDiffTheme(localStorage.getItem(THEME_KEY)));
   const initialEngineRef = useRef(normalizeEngine(localStorage.getItem(ENGINE_KEY)));
   const initialSpacesRef = useRef(readEngineSpaces(localStorage, initialEngineRef.current));
   const [engine, setEngine] = useState<Engine>(initialEngineRef.current);
+  const { mode: theme, choice: themeChoice, selectTheme } = useTheme(engine);
+  const { boldText, setBoldText } = useBoldText();
   const [space, setSpace] = useState<Space>(initialSpacesRef.current[initialEngineRef.current]);
   const spacesByEngineRef = useRef<Record<Engine, Space>>(initialSpacesRef.current);
   const [authed, setAuthed] = useState(false);
@@ -513,7 +518,7 @@ export default function App() {
     const requestId = transport?.sendGetContextTo(sid, refresh) ?? null;
     if (!requestId) return null;
     contextRequestLaunchesRef.current.set(sid, requestId);
-    dispatch({ type: "begin_context_request", sid, requestId });
+    dispatch({ type: "begin_context_request", sid, requestId, refresh });
     return requestId;
   }, []);
   const resumeListedSession = useCallback((
@@ -1628,16 +1633,12 @@ export default function App() {
   };
 
   useEffect(() => {
-    document.documentElement.setAttribute("data-theme", theme);
-    localStorage.setItem(THEME_KEY, theme);
-  }, [theme]);
-  useEffect(() => {
     try {
       sessionStorage.setItem(
         BTW_PANEL_SCOPES_KEY, JSON.stringify(btwPanelScopes));
     } catch { /* storage is best-effort in private browsing */ }
   }, [btwPanelScopes]);
-  const toggleTheme = () => setTheme((t) => (t === "dark" ? "light" : "dark"));
+  const toggleTheme = () => selectTheme(theme === "dark" ? "light" : "dark");
 
   // `engine` selects the backend (Claude Code / Codex): the whole UI re-skins via
   // data-engine, and the sidebar re-lists that engine's own sessions.
@@ -4290,15 +4291,21 @@ export default function App() {
     const deferred = contextRuntime?.contextRefreshDeferred === true;
     if (!contextRuntime?.contextRequestId
         && (!deferred || focusedEngine === "claude" && contextRuntime?.state === "idle")) {
-      sendContextRequestTo(focusedSid, deferred);
+      // A resumed Claude child has no capacity cache until its first native
+      // summary. The Wrapper selects its safe local read, including while busy.
+      sendContextRequestTo(focusedSid, deferred || focusedEngine === "claude"
+        && (contextRuntime?.contextReport?.max_tokens ?? 0) <= 0);
     }
-    // A long Codex turn can compact before TurnEnd. These visible-session
-    // reads are bounded and never invoke a model or resume an engine.
-    if (focusedEngine !== "codex") return;
+    // Both engines receive usage during a long turn. Poll cached totals; Claude
+    // only needs a native summary again if its generation's capacity is absent.
+    if (focusedEngine !== "codex" && focusedEngine !== "claude") return;
     const timer = window.setInterval(() => {
+      const runtime = stateRef.current.runtimes[focusedSid];
       if (document.visibilityState === "visible"
-          && stateRef.current.runtimes[focusedSid]?.state === "running") {
-        sendContextRequestTo(focusedSid, false);
+          && runtime?.state === "running") {
+        sendContextRequestTo(focusedSid, focusedEngine === "claude"
+          && !runtime.contextRefreshDeferred
+          && (runtime.contextReport?.max_tokens ?? 0) <= 0);
       }
     }, 5000);
     return () => window.clearInterval(timer);
@@ -4631,7 +4638,7 @@ export default function App() {
     prompt: string, images?: QueryImg[], files?: QueryFile[],
   ): boolean => {
     const ws = wsRef.current;
-    if (!ws || !focusedSid || focusedEngine !== "codex") return false;
+    if (!ws || !focusedSid || runtimeIsReadOnly(focusedSid)) return false;
     const runtime = stateRef.current.runtimes[focusedSid];
     if (ws.pendingQueryFor(focusedSid) || runtime?.acceptancePending) {
       return false;
@@ -5052,11 +5059,8 @@ export default function App() {
     const runtime = stateRef.current.runtimes[focusedSid];
     if (runtime?.contextRequestId
         || contextRequestLaunchesRef.current.has(focusedSid)) return;
-    if (focusedEngine === "claude" && runtime
-        && (runtime.state !== "idle" || runtime.queue.length > 0)) {
-      dispatch({ type: "defer_context_request", sid: focusedSid });
-      return;
-    }
+    // The Wrapper knows whether this Claude handle supports a live local
+    // summary. Let it choose, rather than suppress every running read here.
     // Closing and reopening is an explicit retry even if a previous busy
     // response exhausted its automatic finalizer catch-up attempts.
     contextDeferredRetryAttemptsRef.current.delete(focusedSid);
@@ -5199,8 +5203,12 @@ export default function App() {
     if (!focusedSid || focusedEngine !== "claude" || space !== "code"
         || !rt.historyRevision) return;
     closeViewer();
+    const agent = rt.backgroundProcesses.find((block) => block.item_id === runId)
+      ?? rt.turns.flatMap((turn) => turn.blocks).find((block) =>
+        block.kind === "process" && block.item_id === runId);
     setAgentPanel({ sid: focusedSid, revision: rt.historyRevision,
-      runId, title: title || "协作代理" });
+      runId, title: title || "协作代理",
+      status: agent?.kind === "process" ? agent.status : undefined });
   };
   const previewAgentFile = (file: string, line?: number) => {
     if (previewFileForSid(focusedSid, file, line)) setAgentPanel(null);
@@ -5314,7 +5322,9 @@ export default function App() {
     if (!parentSid) return;
     dispatch({ type: "select_btw", parentSid, btwSid: sid });
   };
-  const sendBtw = (prompt: string): boolean => {
+  const sendBtw = (
+    prompt: string, images?: QueryImg[], files?: QueryFile[], steer = false,
+  ): boolean => {
     const sid = activeBtwSid;
     const ws = wsRef.current;
     if (!sid || !ws || runtimeIsReadOnly(sid)) return false;
@@ -5322,10 +5332,11 @@ export default function App() {
     const awaitingAcceptance = !!(
       ws.pendingQueryFor(sid) || runtime?.acceptancePending
     );
-    if (awaitingAcceptance || runtime?.queue.length || runtime?.pendingSend) {
+    if (steer && awaitingAcceptance) return false;
+    const query = { prompt, images, files };
+    if (!steer && (awaitingAcceptance || runtime?.queue.length || runtime?.pendingSend)) {
       const delivery = awaitingAcceptance && activeBtwSendMode !== "queue"
         ? "replace" : "queue";
-      const query = { prompt };
       const currentState = stateRef.current;
       const unconfirmed = collectUnconfirmedQueries(
         currentState.runtimes,
@@ -5340,25 +5351,17 @@ export default function App() {
       return sendDeferredQuery(sid, query, delivery);
     }
     const msg_id = uuid();
-    if (!ws.sendQueryTo(sid, prompt, msg_id)) return false;
+    const accepted = steer
+      ? ws.sendSteerTo(sid, prompt, msg_id, images, files)
+      : ws.sendQueryTo(sid, prompt, msg_id, images, files);
+    if (!accepted) return false;
     dispatch({
-      type: "query_sent", sid, prompt, msg_id, ts: Date.now(),
+      type: steer ? "steer_sent" : "query_sent", sid, ...query, msg_id, ts: Date.now(),
     });
     return true;
   };
-  const steerBtw = (prompt: string): boolean => {
-    const sid = activeBtwSid;
-    const ws = wsRef.current;
-    if (!sid || !ws || activeBtw?.engine !== "codex" || runtimeIsReadOnly(sid)) return false;
-    const runtime = stateRef.current.runtimes[sid];
-    if (ws.pendingQueryFor(sid) || runtime?.acceptancePending) return false;
-    const msg_id = uuid();
-    if (!ws.sendSteerTo(sid, prompt, msg_id)) return false;
-    dispatch({
-      type: "steer_sent", sid, prompt, msg_id, ts: Date.now(),
-    });
-    return true;
-  };
+  const steerBtw = (prompt: string, images?: QueryImg[], files?: QueryFile[]): boolean =>
+    sendBtw(prompt, images, files, true);
   const interruptBtw = (sid: string) => {
     if (runtimeIsReadOnly(sid)) return;
     wsRef.current?.sendInterruptTo(sid);
@@ -5671,9 +5674,11 @@ export default function App() {
             <span>{activeDevice?.label ?? machineId}</span><i />
           </button>
           <EngineSelector engine={engine} onChange={toggleEngine} />
-          <HeaderMenu
+          <Suspense fallback={<span className="iconbtn" aria-hidden="true"><Icon name="dots" /></span>}><HeaderMenu
             engine={engine}
             theme={theme}
+            themeChoice={themeChoice}
+            boldText={boldText} onBoldText={setBoldText}
             notificationMode={notificationMode}
             notificationBinding={pushBinding.state}
             notificationAvailable={typeof Notification !== "undefined"}
@@ -5681,9 +5686,9 @@ export default function App() {
             onOpenUsageActivity={openUsageActivity}
             onOpenViewer={visibleParentSid ? () => openViewer() : undefined}
             onOpenFiles={visibleParentSid && !archivedBrowse && state.wrapperOnline ? () => openFiles() : undefined}
-            onToggleTheme={toggleTheme}
+            onSelectTheme={selectTheme}
             onLogout={() => void logout()}
-          />
+          /></Suspense>
         </header>
 
         <ReconnectBanner banner={state.banner}
@@ -5814,8 +5819,7 @@ export default function App() {
                 turnId: planProgress.turnId,
                 itemId: planProgress.block.item_id,
               } : null}
-              backgroundProcesses={focusedEngine === "claude"
-                ? rt.backgroundProcesses : []}
+              turnUsage={rt.turnUsage}
               activeTurnId={activeTurnId}
               ambiguousActiveTurnIds={ambiguousActiveTurnIds}
               onOpenAgent={focusedEngine === "claude" && space === "code"
@@ -5884,6 +5888,13 @@ export default function App() {
             <Composer
           draftKey={focusedComposerDraftKey}
           draftStore={composerDraftsRef.current}
+          backgroundTasks={focusedEngine === "claude" && rt.backgroundProcesses.length > 0
+            ? <Suspense fallback={null}>
+                <BackgroundTaskControl key={focusedComposerDraftKey}
+                  processes={rt.backgroundProcesses}
+                  onOpenFile={historyView.recovering ? undefined : previewFile}
+                  onOpenAgent={space === "code" ? openAgentDetail : undefined} />
+              </Suspense> : null}
           surface={space}
           state={rt.state}
           catalog={focusedCatalog}
@@ -6054,7 +6065,7 @@ export default function App() {
           return <Suspense fallback={null}>
             <AgentDetailController
               key={`${agentPanel.sid}:${agentPanel.revision}:${agentPanel.runId}`}
-              selection={agentPanel} ws={wsRef.current}
+              selection={{ ...agentPanel, revision: rt.historyRevision || agentPanel.revision }} ws={wsRef.current}
               onListen={setAgentDetailListener}
               onClose={() => setAgentPanel(null)}
               onOpenFile={previewAgentFile} />
@@ -6122,6 +6133,11 @@ export default function App() {
             }}
             onSetEffort={(effort) => {
               if (activeBtwSid) setBtwEffort(activeBtwSid, effort);
+            }}
+            onSetServiceTier={(tier) => {
+              if (!activeBtwSid || activeBtw?.engine !== "codex"
+                  || runtimeIsReadOnly(activeBtwSid)) return false;
+              return wsRef.current?.sendSetServiceTier(tier, activeBtwSid) ?? false;
             }}
             onSetAutoCompact={(selection) => activeBtwSid
               ? setBtwAutoCompact(activeBtwSid, selection) : false}

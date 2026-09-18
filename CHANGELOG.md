@@ -4,6 +4,41 @@
 
 ## Unreleased
 
+- Combine terminal queue controls and session recovery under protocol v71.
+  Upgrade Relay, Wrapper, Web and TUI together. TUI recovery replaces replayed
+  text without duplicating existing output.
+
+- Add an optional independent Claude session service: Wrapper reconnects recover
+  accepted turns and pending questions without resubmitting prompts. Include a
+  separate service installer and preserve account isolation.
+- Support native Claude steering during active work, retaining message, attachment
+  and token ownership. Reserve private BTW identities before launch, refresh live
+  context without overwriting newer readings, and retry busy session-list reads.
+- Replace replayed text prefixes and bound history summaries. Protocol v70
+  requires Wrapper, Relay and Web to be upgraded together.
+
+- Preview `.mmd` and `.mermaid` Work artifacts as diagrams, with a source view.
+
+- Keep Claude's internal recovery prompts hidden after compaction and rebuild
+  stale projections. Show autonomous replies after agent completion in separate
+  live process sections, with their own thinking, tools and working indicator.
+- Stream subagent text without waiting for whole messages. Recover agent-detail
+  read errors and timeouts, refresh active source-backed agents, and show each
+  agent's own running state.
+- Use a subdued text shimmer for active process and tool summaries. Present
+  readable command/search inputs and structured tool output, with raw data
+  available on demand.
+
+- Show native input/output token counts beside the working spark, with exact
+  counts and cache usage on click or tap. Use subdued counters that show
+  the latest readings directly. Keep per-turn ownership and
+  replace-only recovery snapshots across reconnects (protocol v68).
+
+
+- Request readable Claude thinking summaries in SDK sessions and show returned
+  text in the existing thinking timeline. Preserve native thinking mode,
+  token budget and effort across new sessions, resume and private forks.
+
 - Accept provider-native Claude model ids (e.g. `glm-5.2` behind a custom
   `ANTHROPIC_BASE_URL` gateway) as explicit model selections: they are handed
   to Claude Code, persisted in the private session store, and restored across
@@ -17,6 +52,23 @@
   TUI editing, cancellation and ordering controls. Reject stale queue snapshots
   and changes while a message is starting. Deploy Relay, Web, Wrapper and TUI
   together; protocol v66 clients cannot connect to protocol v67 services.
+- Replace Claude's persistent background-task panel with a compact composer
+  indicator. Open details above the trigger on desktop or in a centered mobile
+  dialog; native task completion removes finished items and closes the indicator
+  when no tasks remain, independently of the parent reply's completion.
+- Track Claude compaction through native status and boundary events, preserve
+  valid context readings during refresh failures, and show the applied automatic
+  compaction threshold separately from model capacity. Hide internal command
+  messages and keep completed-turn timestamps stable when rebuilding history.
+  Require Claude Code 2.1.263 or newer for the verified control APIs.
+- Keep account-specific Claude controls attached to the correct session and
+  omit transient Codex thread notifications that have no readable history from
+  the session list.
+- Show explicit timed-message tags, a rounded moving session outline and the
+  next scheduled send time. Tasks use account-scoped native queue receipts
+  independently of Goals (protocol v67). Session menus and task popovers
+  avoid the sidebar footer and the mobile visual viewport.
+
 - Backport shared improvements from the DSH branch without adding a third
   engine (protocol v66): rounded Claude/Codex Goal dialogs with native save
   confirmation and mobile keyboard recovery; directory links open `/open`, and

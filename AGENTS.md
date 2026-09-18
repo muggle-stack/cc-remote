@@ -41,6 +41,13 @@ and keep a decline or pending answer separate from deployment success. App
 attachment and optional App-control MCP tools are separate user choices.
 
 ## Critical constraints / traps
+- **Claude service lifetime**: when `CC_REMOTE_CLAUDE_SERVICE_SOCKET` is set,
+  regular Claude Code/Work SDK processes belong to the separate local service.
+  Wrapper shutdown detaches; explicit stop/reconnect/eviction still has its
+  deliberate native lifecycle. Never resubmit an accepted query during recovery,
+  treat a background Result as the human terminal, or restart the service during
+  an ordinary Wrapper deploy. See `docs/claude-session-service.md` for first
+  migration, remaining in-process tasks, queue drain and version boundaries.
 - **Drain footgun**: after `ClaudeSDKClient.interrupt()`, the SDK does NOT kill
   the session — the current turn's stream still emits a terminal
   `ResultMessage(subtype="error_during_execution")`. You MUST keep consuming
@@ -50,6 +57,12 @@ attachment and optional App-control MCP tools are separate user choices.
   to the terminal ResultMessage; state only returns to `idle` (and the next
   query is only accepted) after that break. Reject-while-busy prevents a second
   query racing the drain.
+- **Claude steering**: send `priority="next"` through streaming input, keeping
+  the one session reader. Rebind the visible turn only on the exact native user
+  UUID echo. A Result before an accepted input is consumed is intermediate;
+  the persistent service journals this distinction and commits the original
+  root turn identity. Explicit Stop uses `interrupt(cancel_queued=true)` when
+  advertised and pending inputs exist, then drains the real Result as above.
 - **cwd must match resume**: a session's jsonl lives at
   `~/.claude/projects/<cwd-with-/-as->/<uuid>.jsonl`. `ClaudeAgentOptions.cwd`
   MUST equal the original session's cwd or `resume` can't find it.
@@ -58,7 +71,7 @@ attachment and optional App-control MCP tools are separate user choices.
   interrupt+drain verification after any upgrade (`SdkHandle.preflight()` guards
   the exact verified patch at startup).
 - **Claude Code is the user's daily CLI, not the SDK bundle**: Claude Code
-  `>=2.1.258` is required and checked before a Claude session starts. The wrapper
+  `>=2.1.263` is required and checked before a Claude session starts. The wrapper
   defaults `CLAUDE_BIN` to `~/.local/bin/claude` and passes that path explicitly
   to the SDK. An empty value keeps this default; only another absolute path may
   override it. Keep that CLI updated and signed in before starting the wrapper.
@@ -93,7 +106,7 @@ attachment and optional App-control MCP tools are separate user choices.
   transport, never the caller's Origin. Uvicorn trusts forwarded transport
   metadata only from loopback Caddy. Never put tokens in URLs or protocol
   message bodies; logging redacts token/password fields.
-- **Protocol version gate**: current wire protocol v67 is declared by
+- **Protocol version gate**: current wire protocol v71 is declared by
   `PROTOCOL_VERSION` in both `protocol.py` and `web/src/protocol.ts`.
   `deserialize` hard-rejects a version mismatch, and
   `_Base` is `extra="forbid"`, so ANY protocol change must be deployed to all
@@ -219,11 +232,15 @@ attachment and optional App-control MCP tools are separate user choices.
   committing, verify the stored message and scope with
   `git log -1 --format=raw --stat`, then recheck
   `git status --short --branch`.
-- Before opening or updating **every** PR, run the complete local gate below;
-  a docs-only or apparently narrow change does not skip it unless the user
-  explicitly accepts that exception. Every command must exit zero. Expected
-  platform-defined test skips are allowed, but failures or missing tools must
-  be reported rather than silently bypassed.
+- Before opening or updating a maintainer-authored PR (including work prepared
+  by an agent for the maintainer), run the complete local gate below. A docs-only
+  or apparently narrow change does not skip it unless the user explicitly
+  accepts that exception. Every command must exit zero. Expected platform-defined
+  test skips are allowed; report failures or missing tools rather than bypassing
+  them. During development, use checks appropriate to the change.
+- Other contributors may open or update a PR without running the complete local
+  gate. Include the checks performed and any known validation gaps in the PR
+  description. Automatic CI still builds Web and runs pytest for every PR.
 - Run the Web gate with Node 24 (see `.nvmrc`), matching CI. Newer Node
   browser-like globals must not mask missing browser-environment guards.
 
@@ -232,8 +249,6 @@ attachment and optional App-control MCP tools are separate user choices.
 uvx --from ruff==0.15.13 ruff check cc_remote tests deploy
 npm --prefix web run build
 npm --prefix web run test:reliability
-npm --prefix web run test:history-browser
-npm --prefix web run test:viewer
 npm --prefix web run lint
 bash -n \
   deploy/install.sh \
@@ -249,9 +264,15 @@ shellcheck -x \
 git diff --check
 ```
 
-- `.github/workflows/ci.yml` repeats this gate for pushes and PRs. A local pass
-  is required before PR publication and does not replace green remote CI before
-  merge. These checks are zero-token; do not substitute a live model probe.
+- `.github/workflows/ci.yml` automatically runs only the Web build and pytest
+  on PRs and pushes to `master`. Release tags reuse the same CI before packaging
+  and publishing. Pytest waits only for the Web build artifact. Lint, front-end
+  reliability tests and shell checks remain part of the local gate above.
+- Playwright is not part of CI or the required local PR gate. Existing browser
+  tests remain available for explicitly requested diagnostics. When the
+  maintainer asks for PR acceptance, check out the requested revision, run the
+  application and verify the changed behavior; report the actual checks and
+  any remaining gaps. The automated checks above do not call a live model.
 
 ## Run / test
 ```bash
@@ -260,7 +281,6 @@ python -m cc_remote.relay        # terminal 1 (set WEB_STATIC_DIR=web/dist to se
 python -m cc_remote.wrapper      # terminal 2 (on each machine running Claude/Codex)
 pytest                           # zero-token unit tests
 npm --prefix web run test:reliability
-npm --prefix web run test:viewer
 npm --prefix web run lint
 npm --prefix web run build
 ```

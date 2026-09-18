@@ -68,8 +68,10 @@ export function conversationNotices(notices: Notice[]): Notice[] {
     if (notice.notice_id.startsWith("compact-")) {
       return {
         ...notice,
-        title: "正在整理上下文",
-        message: "整理完成后可继续使用当前会话。",
+        title: cleanProductText(notice.title),
+        message: notice.title === "上下文压缩完成"
+          ? "可以继续使用当前会话。"
+          : "压缩进度和结果可在处理记录中查看。",
         detail: null,
       };
     }

@@ -4,7 +4,7 @@
 
 Self-hosted · Multiple sessions and devices · Live tool activity · Code / Work · PWA
 
-**Product version: v3.0.0** · Wire protocol v67
+**Product version: v3.0.0** · Wire protocol v71
 
 [中文](README.md) · [Engine comparison](#engines-and-features) · [Quick start](#quick-start) ·
 [Install and upgrade](#install-and-upgrade) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)
@@ -28,8 +28,8 @@ features or wire protocol across different commits.
   a task. History is paged, with tool details loaded when expanded.
 - **Follow the work.** Read streaming replies, engine-provided reasoning
   summaries, plans, tool calls, command output, file changes and approvals.
-  Codex supports steering or queueing while busy; Claude supports
-  interrupt-and-send or queueing.
+  Claude and Codex support steering or queueing while busy. Steering adds
+  instructions to the current task without interrupting running tools.
 - **Manage longer tasks.** `/goal` exposes each engine's native progress, budget
   and controls. Claude and Codex also offer temporary `/btw` side conversations
   while the main task continues.
@@ -167,7 +167,7 @@ development/builds use **Python 3.13 and Node 24**, matching CI and [`.nvmrc`](.
 
 Prepare at least one working engine:
 
-- **Claude:** daily Claude Code `>= 2.1.258`, normally at `~/.local/bin/claude`.
+- **Claude:** daily Claude Code `>= 2.1.263`, normally at `~/.local/bin/claude`.
   Wrapper launches that CLI; the Python Agent SDK is pinned to `0.2.151`.
 - **Codex:** an authenticated official CLI. Shared control requires both
   `codex app-server daemon --help` and `codex app-server proxy --help`.
@@ -304,6 +304,7 @@ policy is not a replacement for separate OS users, containers or virtual machine
 | [Remote Viewer](docs/remote-viewer.md) | Interactive static pages, Bridge/Isolated modes |
 | Codex App: [macOS](docs/codex-desktop-launcher.md) / [Linux](docs/codex-desktop-linux.md) | Optional App, daily CLI and Wrapper on one daemon |
 | [Codex App tools](docs/codex-app-tools.md) | Optional App-control MCP |
+| [Timed messages](docs/timed-messages.md) | Scheduled queue receipts, message tags and countdown UI |
 | [Changelog](CHANGELOG.md) | Version changes and migrations |
 
 ## Terminal workspace (preview)
@@ -327,13 +328,18 @@ Common tests that do not call a live model:
 .venv/bin/python -m pip install -r requirements-dev.txt
 .venv/bin/python -m pytest
 npm --prefix web run test:reliability
-npm --prefix web run test:history-browser
-npm --prefix web run test:viewer
 npm --prefix web run lint
 npm --prefix web run build
 ```
 
-The complete commit/PR gate is in [AGENTS.md](AGENTS.md#commit-and-pr-gate).
+Maintainers run the complete local gate before submitting a PR; see
+[AGENTS.md](AGENTS.md#commit-and-pr-gate). Other contributors may submit a PR
+with a description of the checks performed and any validation gaps. PRs and
+pushes to `master` automatically run the **Web build and pytest**; releases
+reuse these checks. Playwright is not part of CI or the required local PR gate.
+Its tests remain available for diagnostics when requested. For PR acceptance,
+maintainers check out the requested revision and verify the changed behavior
+in the running application.
 [Live probes](scripts/live/) run separately; live model probes may spend tokens
 and are not default unit tests.
 Use `npm --prefix web run dev` for the UI dev server, or the built Relay-served

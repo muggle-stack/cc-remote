@@ -7,6 +7,9 @@ import {
   useState,
 } from "react";
 import { createRoot } from "react-dom/client";
+import { TurnUsageFixture } from "./fixtures/turn-usage";
+import { BackgroundTasksFixture } from "./fixtures/background-tasks";
+import { MermaidArtifactFixture } from "./fixtures/mermaid-artifact";
 
 import "../src/index.css";
 import "../src/App.css";
@@ -31,6 +34,7 @@ import type {
   ThreadGoal,
 } from "../src/protocol";
 import { PROTOCOL_VERSION } from "../src/protocol";
+import { TimedMessageTag } from "../src/components/TimedMessageTag";
 import {
   ChatView,
 } from "../src/components/ChatView";
@@ -57,6 +61,7 @@ import {
 } from "../src/components/QueuedQueryDialog";
 import { DirPicker } from "../src/components/DirPicker";
 import { HeaderMenu } from "../src/components/HeaderMenu";
+import { useBoldText } from "../src/use-bold-text";
 import { UsageActivitySheet } from "../src/components/UsageActivitySheet";
 import { displayHistoryProjection } from "../src/history-recovery";
 import { summaryHistoryTurns } from "../src/history-summary";
@@ -534,6 +539,7 @@ function UsageActivityBrowserFixture({
   engine: "claude" | "codex";
 }) {
   const [activityOpen, setActivityOpen] = useState(false);
+  const { boldText, setBoldText } = useBoldText();
   const report = useMemo(fixtureUsageReport, []);
   useEffect(() => {
     document.documentElement.dataset.engine = engine;
@@ -544,12 +550,14 @@ function UsageActivityBrowserFixture({
       <HeaderMenu
         engine={engine}
         theme="dark"
+        themeChoice="dark"
+        boldText={boldText} onBoldText={setBoldText}
         notificationMode="off"
         notificationBinding="off"
         notificationAvailable
         onNotificationMode={async () => true}
         onOpenUsageActivity={() => setActivityOpen(true)}
-        onToggleTheme={() => {}}
+        onSelectTheme={() => {}}
         onLogout={() => {}}
       />
     </header>
@@ -2087,6 +2095,7 @@ function HistoryConversationBrowserFixture() {
 
 export function HistoryBrowserFixture() {
   const params = new URLSearchParams(window.location.search);
+  if (params.has("background-tasks")) return <BackgroundTasksFixture />;
   const planUi = params.get("plan-ui");
   if (params.has("profile-sidebar")) return <ProfileSidebarFixture />;
   if (planUi) return <PlanUiFixture mode={planUi} />;
@@ -2121,6 +2130,11 @@ function ProfileSidebarFixture() {
   );
   const [newProfileId, setNewProfileId] = useState("none");
   const [activeSessionId, setActiveSessionId] = useState("profile-sidebar-active");
+  const [timedTasks, setTimedTasks] = useState(() => params.has("timed-tasks") ? [{
+    task_id: "timer-test", title: "每分钟向当前会话发送测试",
+    next_message_at: Date.now() / 1000 + 42, interval_seconds: 60,
+    sent_count: 2, total_count: 3, valid_until: Date.now() / 1000 + 90,
+  }] : []);
   useEffect(() => {
     const root = document.documentElement;
     const previousEngine = root.dataset.engine;
@@ -2150,6 +2164,7 @@ function ProfileSidebarFixture() {
     codex_profile_label: "Stack",
   }, {
     session_id: "profile-sidebar-default",
+    timed_tasks: timedTasks,
     summary: "cc-remote 派生",
     cwd: "/repo/cc-remote",
     state: "idle",
@@ -2162,6 +2177,13 @@ function ProfileSidebarFixture() {
   return (
     <>
       <output data-testid="new-work-profile" hidden>{newProfileId}</output>
+      {params.has("timed-tasks") && <div style={{ position: "fixed", left: 400, top: 80 }}>
+        <button data-testid="finish-timed-task" onClick={() => setTimedTasks([])}>结束定时任务</button>
+        <div className="ubub"><TimedMessageTag task={{
+          task_id: "timer-test", title: "每分钟向当前会话发送测试", scheduled_at: Date.now() / 1000,
+        }} />测试</div>
+        <div className="ubub">测试</div>
+      </div>}
       <SessionsSidebar
         open
         engine="codex"
@@ -3022,7 +3044,10 @@ function CodexFileCitationFixture() {
 
 const rootParams = new URLSearchParams(window.location.search);
 createRoot(document.getElementById("root")!).render(
-  rootParams.has("artifact-audio")
+  rootParams.has("turn-usage") ? <TurnUsageFixture />
+    : rootParams.has("artifact-mermaid")
+    ? <MermaidArtifactFixture />
+    : rootParams.has("artifact-audio")
     ? <AudioPreviewFixture />
     : rootParams.has("artifact-html")
     ? <ArtifactPreviewFixture kind="html" />

@@ -39,8 +39,10 @@ from cc_remote.protocol import (
     TurnEnd, TurnResult, UserMsg,
 )
 from cc_remote.wrapper.sanitize import bounded_text, bounded_tool_input
+from cc_remote.wrapper.claude_compaction import compact_metadata
 from cc_remote.wrapper.claude_model_fallback import FALLBACK_TOOL, model_fallback_event
 from cc_remote.wrapper.turn_changes import native_claude_diff
+from cc_remote.wrapper.token_usage import UsageLedger, native_usage
 
 _SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$")
 _SAFE_WIRE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$")
@@ -675,6 +677,7 @@ class StreamTranslator:
         self.item_commands = (
             item_commands if item_commands is not None else {})
         self._message_ids: dict[str, str] = {}
+        self._message_turn_id: str | None = None
         self._started_channels: set[str] = set()
         # Only the emitted prefix LENGTH is needed to deduplicate the assembled
         # AssistantMessage after streaming deltas.  Retaining and repeatedly
@@ -716,6 +719,19 @@ class StreamTranslator:
         # transcript UUID. Keep it separate from the browser's optimistic turn
         # id and from tool-result user envelopes.
         self._last_user_uuid: str | None = None
+        self._compaction_id: str | None = None
+        self._usage = UsageLedger()
+        self._usage_message: tuple[str, str | None] | None = None
+        self._usage_rebound = False
+
+    def rebind_turn(self, turn_id: str) -> None:
+        """Advance at a native input echo while retaining unfinished item owners."""
+        self._usage_rebound = True
+        self.turn_id = turn_id
+        self._ambiguous_final_mid = None
+        self._has_final_text = False
+        self._last_assistant_uuid = None
+        self._last_user_uuid = None
 
     def _remember_turn(self, item_id: str, parent_id: str | None = None) -> str | None:
         turn = (self.item_turns.get(item_id)
@@ -754,8 +770,10 @@ class StreamTranslator:
                         suggested: str | None = None) -> str:
         mid = self._message_id(channel_key, suggested)
         if channel_key not in self._started_channels:
+            if not self._started_channels:
+                self._message_turn_id = self.turn_id
             events.append(AssistantMsgStart(
-                message_id=mid, turn_id=self.turn_id, channel=channel))
+                message_id=mid, turn_id=self._message_turn_id, channel=channel))
             self._started_channels.add(channel_key)
         return mid
 
@@ -768,7 +786,7 @@ class StreamTranslator:
             return
         mid = self._ensure_channel(events, channel_key, channel, suggested)
         events.append(Delta(
-            message_id=mid, turn_id=self.turn_id,
+            message_id=mid, turn_id=self._message_turn_id,
             text=bounded, channel=channel))
         self._emitted[channel_key] += len(bounded)
 
@@ -776,11 +794,11 @@ class StreamTranslator:
         if "thinking" in self._started_channels:
             events.append(AssistantMsgEnd(
                 message_id=self._message_ids["thinking"],
-                turn_id=self.turn_id, channel="thinking"))
+                turn_id=self._message_turn_id, channel="thinking"))
         if "text" in self._started_channels:
             events.append(AssistantMsgEnd(
                 message_id=self._message_ids["text"],
-                turn_id=self.turn_id, channel=text_channel))
+                turn_id=self._message_turn_id, channel=text_channel))
         self._message_ids.clear()
         self._started_channels.clear()
         self._emitted = {"thinking": 0, "text": 0}
@@ -1082,6 +1100,21 @@ class StreamTranslator:
     def _feed_stream_event(self, msg: StreamEvent) -> list:
         events: list = []
         ev = msg.event if isinstance(msg.event, dict) else {}
+        if not msg.parent_tool_use_id:
+            if ev.get("type") == "message_start":
+                message = ev.get("message")
+                if not isinstance(message, dict):
+                    self._usage_message = None
+                    return events
+                mid = message.get("id")
+                self._usage_message = (mid, self.turn_id) if isinstance(mid, str) else None
+                if self._usage_message:
+                    events.extend(self._usage.update(self.turn_id, mid,
+                        native_usage(message.get("usage"), "claude", output=False)))
+            elif ev.get("type") == "message_delta" and self._usage_message:
+                mid, owner = self._usage_message
+                events.extend(self._usage.update(owner, mid,
+                    native_usage(ev.get("usage"), "claude")))
         if ev.get("type") != "content_block_delta":
             return events
         delta = ev.get("delta") if isinstance(ev.get("delta"), dict) else {}
@@ -1097,6 +1130,13 @@ class StreamTranslator:
 
     def _feed_assistant(self, msg: AssistantMessage) -> list:
         events: list = []
+        if not msg.parent_tool_use_id and msg.message_id:
+            owner = (self._usage_message[1] if self._usage_message
+                     and self._usage_message[0] == msg.message_id else self.turn_id)
+            # Assembled blocks repeat the message-start usage, including an
+            # output placeholder. Only message_delta/Result can supply output.
+            events.extend(self._usage.update(owner, msg.message_id,
+                native_usage(msg.usage, "claude", output=False)))
         if (isinstance(msg.uuid, str)
                 and _CLAUDE_MESSAGE_UUID.fullmatch(msg.uuid)):
             self._last_assistant_uuid = msg.uuid
@@ -1436,7 +1476,36 @@ class StreamTranslator:
         if event is None:
             return []
         event.turn_id = self.turn_id
+        if self._compaction_id is not None:
+            # Status UUIDs and persisted boundary UUIDs differ. Bind the live
+            # placeholder to its actual boundary so later history deduplicates.
+            event.input = {"compaction_started_id": self._compaction_id}
+            self._compaction_id = None
         return [event]
+
+    def _feed_compaction_status(self, msg: SystemMessage) -> list[ProcessEvent]:
+        data = msg.data if isinstance(msg.data, dict) else {}
+        if data.get("status") != "compacting":
+            if data.get("compact_error") and self._compaction_id is not None:
+                return self._end_unfinished_compaction("failed")
+            return []
+        if self._compaction_id is not None:
+            return []  # Native heartbeats do not create new animations.
+        self._compaction_id = _wire_id(
+            data.get("uuid") or str(uuid.uuid4()), "compaction")
+        return [ProcessEvent(
+            item_id=self._compaction_id, kind="compaction", phase="start",
+            status="running", title="压缩上下文", turn_id=self.turn_id,
+        )]
+
+    def _end_unfinished_compaction(self, status: str) -> list[ProcessEvent]:
+        if self._compaction_id is None:
+            return []
+        item_id, self._compaction_id = self._compaction_id, None
+        return [ProcessEvent(
+            item_id=item_id, kind="compaction", phase="end", status=status,
+            title="压缩上下文", turn_id=self.turn_id,
+        )]
 
     def _feed_hook(self, msg: HookEventMessage) -> list:
         data = msg.data if isinstance(msg.data, dict) else {}
@@ -1512,9 +1581,17 @@ class StreamTranslator:
                 return self._feed_background_tasks_changed(msg)
             if msg.subtype == "compact_boundary":
                 return self._feed_compaction(msg)
+            if msg.subtype == "status":
+                return self._feed_compaction_status(msg)
             return []
         if isinstance(msg, ResultMessage):
-            events = []
+            # A terminal without a boundary must not leave an eternal spinner
+            # or invent a successful compact (including interrupted commands).
+            events = self._end_unfinished_compaction(
+                "interrupted" if msg.is_error else "failed")
+            if not self._usage_rebound and not msg.is_error:
+                events.extend(self._usage.replace(self.turn_id,
+                    native_usage(msg.usage, "claude")))
             if (not msg.is_error and not self._has_final_text
                     and self._ambiguous_final_mid is not None):
                 events.append(AssistantMsgEnd(
@@ -1728,6 +1805,7 @@ def _compact_visible_user(row: dict[str, Any]) -> bool:
     origin = row.get("origin")
     if (
         row.get("type") != "user"
+        or bool(row.get("isMeta"))
         or origin == "task-notification"
         or (
             isinstance(origin, dict)
@@ -2144,6 +2222,7 @@ def _delayed_retry_tail(
                 if isinstance(row.get("sessionId"), str) else None
             ),
             message=message,
+            is_meta=bool(row.get("isMeta")),
             parent_tool_use_id=(
                 row.get("parentToolUseID")
                 or row.get("parent_tool_use_id")
@@ -2383,6 +2462,7 @@ def _load_compact_chain_messages(
                         uuid=uid,
                         session_id=session_id,
                         message=message,
+                        is_meta=bool(row.get("isMeta")),
                         parent_tool_use_id=(
                             row.get("parentToolUseID")
                             or row.get("parent_tool_use_id")
@@ -2625,12 +2705,10 @@ def _compaction_event_from_row(row: dict[str, Any]) -> ProcessEvent | None:
         and _SAFE_WIRE_ID.fullmatch(uid)
     ):
         return None
-    metadata = row.get("compactMetadata")
-    if not isinstance(metadata, dict):
-        metadata = {}
+    metadata = compact_metadata(row)
     trigger = metadata.get("trigger")
-    pre_tokens = metadata.get("preTokens")
-    post_tokens = metadata.get("postTokens")
+    pre_tokens = metadata.get("pre_tokens")
+    post_tokens = metadata.get("post_tokens")
     summary_bits: list[str] = []
     if trigger == "auto":
         summary_bits.append("自动压缩")
@@ -2641,7 +2719,7 @@ def _compaction_event_from_row(row: dict[str, Any]) -> ProcessEvent | None:
         for value in (pre_tokens, post_tokens)
     ):
         summary_bits.append(f"{pre_tokens:,} → {post_tokens:,} tokens")
-    duration = metadata.get("durationMs")
+    duration = metadata.get("duration_ms")
     duration_ms = (
         duration
         if isinstance(duration, int) and not isinstance(duration, bool)
@@ -2968,6 +3046,12 @@ def translate_history(
         message_uid = _history_id(source_uid, "msg", str(message_index))
 
         if role == "user":
+            if (getattr(m, "is_meta", False)
+                    and source_uid not in (internal_user_events or {})):
+                # Native recovery/continuation prompts are part of the current
+                # human turn. Match the SDK's isMeta filter even when reading
+                # raw compact ancestry, without guessing from prompt text.
+                continue
             if isinstance(content, str):
                 internal_event = (internal_user_events or {}).get(source_uid)
                 if internal_event is not None:
@@ -3003,6 +3087,13 @@ def translate_history(
                     current_turn_id = message_uid
                     background_followup = False
             elif isinstance(content, list):
+                if content and all(
+                    isinstance(block, dict) and block.get("type") == "text"
+                    and isinstance(block.get("text"), str)
+                    and _is_meta_user_text(block["text"])
+                    for block in content
+                ):
+                    continue
                 if _is_interrupted_user_content(content):
                     misplaced_alias = client_message_ids.get(message_uid)
                     pending_interrupted_alias = (
@@ -3108,6 +3199,10 @@ def translate_history(
         elif role == "system":
             internal_event = (internal_user_events or {}).get(source_uid)
             if internal_event is not None:
+                # Manual compaction can finish minutes after an answer. Keep
+                # its process timestamp without retiming the settled response.
+                if settled_answer_seen or ambiguous_final_mid is not None:
+                    advance_terminal_clock = False
                 event = internal_event.model_copy(deep=True)
                 event.turn_id = event.turn_id or current_turn_id
                 timestamp = _ts(source_uid)
@@ -3356,7 +3451,10 @@ def translate_history(
         if (
             mts is not None
             and advance_terminal_clock
-            and not background_followup
+            # A notification alone cannot extend a settled answer. Actual
+            # assistant output after it is a new conversational continuation
+            # and must advance the footer to its real source time.
+            and (not background_followup or role == "assistant")
         ):
             last_ts = mts
     # Claude's transcript does not persist the SDK ResultMessage. EOF normally
@@ -3562,6 +3660,7 @@ def _is_meta_user_text(text: str) -> bool:
         or t.startswith("<command-name>")
         or t.startswith("<command-message>")
         or t.startswith("<command-args>")
+        or t.startswith("<local-command-caveat>")
         or t.startswith("<local-command-stdout>")
         or t.startswith("<local-command-stderr>")
     )

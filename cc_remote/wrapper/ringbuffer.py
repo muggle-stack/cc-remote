@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections import deque
 from typing import Optional
 
-from cc_remote.protocol import Delta, ReplayStart, ReplayEnd, Snapshot, StateEvent
+from cc_remote.protocol import Delta, ReplayStart, ReplayEnd, Snapshot, StateEvent, TurnUsage
 
 
 _CURRENT_TURN_DELTA_CHUNK_CHARS = 64 * 1024
@@ -25,12 +25,18 @@ class RingBuffer:
         self._bytes = 0
         self._logical_tail_seq = 0
         self._dropped_through_seq = 0
+        self._turn_usage: dict[str, TurnUsage] = {}
 
     @staticmethod
     def _size(msg) -> int:
         return len(msg.model_dump_json().encode())  # type: ignore[attr-defined]
 
     def append(self, msg) -> None:
+        if isinstance(msg, TurnUsage):
+            self._turn_usage.pop(msg.turn_id, None)
+            self._turn_usage[msg.turn_id] = msg
+            while len(self._turn_usage) > 8:
+                del self._turn_usage[next(iter(self._turn_usage))]
         size = self._size(msg)
         seq = msg.seq  # type: ignore[attr-defined]
         self._logical_tail_seq = max(self._logical_tail_seq, seq)
@@ -51,6 +57,9 @@ class RingBuffer:
     @property
     def head_seq(self) -> int:
         return self._buf[0][0] if self._buf else 0
+
+    def latest_turn_usage(self) -> list[TurnUsage]:
+        return list(self._turn_usage.values())
 
     @property
     def tail_seq(self) -> int:
@@ -75,7 +84,7 @@ class RingBuffer:
                                         truncated=truncated, rebuild=True,
                                         generation=generation)]
             frames.extend(m for _, m in self._buf)
-            frames.append(ReplayEnd(to_seq=tail, truncated=truncated))
+            frames.append(ReplayEnd(turn_usage=self.latest_turn_usage(), to_seq=tail, truncated=truncated))
             return frames
 
         if last_seq is None:
@@ -83,7 +92,7 @@ class RingBuffer:
             # Authoritative transcript history is fetched separately via GetHistory.
             return [Snapshot(cc_session_id=cc_session_id, state=state,
                              tail_text=tail_text, cwd=cwd,
-                             generation=generation)]
+                             generation=generation, turn_usage=self.latest_turn_usage())]
 
         # Future cursor: the client's last_seq is beyond our buffer's tail. This
         # happens because the seq counter resets to 0 on every wrapper restart,
@@ -102,7 +111,7 @@ class RingBuffer:
                                         truncated=truncated, rebuild=True,
                                         generation=generation)]
             frames.extend(m for _, m in have)
-            frames.append(ReplayEnd(to_seq=to_seq, truncated=truncated))
+            frames.append(ReplayEnd(turn_usage=self.latest_turn_usage(), to_seq=to_seq, truncated=truncated))
             return frames
 
         have = [(s, m) for s, m in self._buf if s > last_seq]
@@ -114,7 +123,7 @@ class RingBuffer:
             to_seq = max(last_seq, self.tail_seq)
             return [ReplayStart(from_seq=last_seq + 1, to_seq=to_seq,
                                 truncated=truncated, generation=generation),
-                    ReplayEnd(to_seq=to_seq, truncated=truncated)]
+                    ReplayEnd(turn_usage=self.latest_turn_usage(), to_seq=to_seq, truncated=truncated)]
 
         from_seq = have[0][0]
         to_seq = self.tail_seq
@@ -122,7 +131,7 @@ class RingBuffer:
                               truncated=truncated, generation=generation)]
         for _, m in have:
             frames.append(m)
-        frames.append(ReplayEnd(to_seq=to_seq, truncated=truncated))
+        frames.append(ReplayEnd(turn_usage=self.latest_turn_usage(), to_seq=to_seq, truncated=truncated))
         return frames
 
     def replay_from_bounded(
@@ -183,6 +192,7 @@ class RingBuffer:
         )]
         frames.extend(selected)
         frames.append(ReplayEnd(
+            turn_usage=self.latest_turn_usage(),
             to_seq=self.tail_seq,
             truncated=truncated,
         ))
@@ -306,6 +316,7 @@ class RingBuffer:
                     ]
                     frames.extend(self._compact_current_turn_suffix(retained))
                     frames.append(ReplayEnd(
+                        turn_usage=self.latest_turn_usage(),
                         to_seq=self.tail_seq,
                         truncated=True,
                     ))
@@ -318,7 +329,7 @@ class RingBuffer:
                 ReplayStart(
                     from_seq=self.head_seq, to_seq=self.tail_seq,
                     truncated=True, generation=generation),
-                ReplayEnd(to_seq=self.tail_seq, truncated=True),
+                ReplayEnd(turn_usage=self.latest_turn_usage(), to_seq=self.tail_seq, truncated=True),
             ]
         have = list(self._buf)[start:]
         if not have:
@@ -329,7 +340,7 @@ class RingBuffer:
             generation=generation,
         )]
         frames.extend(message for _, message in have)
-        frames.append(ReplayEnd(to_seq=self.tail_seq, truncated=truncated))
+        frames.append(ReplayEnd(turn_usage=self.latest_turn_usage(), to_seq=self.tail_seq, truncated=truncated))
         return frames
 
     def latest_state(self):

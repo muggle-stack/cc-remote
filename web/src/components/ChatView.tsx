@@ -17,15 +17,17 @@ import {
   useVirtualizer,
 } from "@tanstack/react-virtual";
 import type {
-  Block, ProcessBlock, TextBlock, Turn,
+  TextBlock, Turn,
 } from "../domain/conversation";
 import type { Space } from "../protocol";
 import type { LoadTurnFilePage } from "../turn-file-pages";
+import { usageForTurn, type TurnUsageReadings } from "../turn-usage";
 import { MessageBlock } from "./MessageBlock";
+import { claudeContinuations, type ClaudeContinuation } from "../claude-continuations";
+import { TimedMessageTag } from "./TimedMessageTag";
 import { Icon, ClaudeMark, ClaudeWorking, ClaudeSpark } from "../icons";
 import { canForkTurn } from "../session-worktree";
 import {
-  BackgroundProcessDock,
   GeneratedImagePreview,
   ProcessTimeline,
 } from "./ProcessTimeline";
@@ -85,6 +87,7 @@ import { mergeDetailWithLiveTail } from "../history-merge";
 import { presentAsyncQuestionReplies } from "../async-question-presentation";
 import type { QueryAcceptanceResult } from "../outbox";
 
+const TurnUsageIndicator = lazy(() => import("./TurnUsageIndicator").then(m => ({ default: m.TurnUsageIndicator })));
 const AsyncQuestionCard = lazy(() => import("./AsyncQuestionCard"));
 const AsyncQuestionHost = lazy(() => import("./AsyncQuestionDialog"));
 const PagePreviewLinks = lazy(() => import("./PagePreviewLinks").then((module) => ({ default: module.PagePreviewLinks })));
@@ -289,48 +292,6 @@ function formatTime(ts: number): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-const BACKGROUND_FOLLOWUP_LABEL_MAX_CHARS = 160;
-
-function backgroundFollowupLabel(process?: ProcessBlock): string {
-  const raw = process?.summary || process?.title || "后台任务完成";
-  return raw.length <= BACKGROUND_FOLLOWUP_LABEL_MAX_CHARS
-    ? raw
-    : `${raw.slice(0, BACKGROUND_FOLLOWUP_LABEL_MAX_CHARS - 1)}…`;
-}
-
-function backgroundFollowupBoundaries(
-  finalBlocks: TextBlock[], timelineBlocks: Block[],
-): Map<string, ProcessBlock | null> {
-  const completions = timelineBlocks.filter(
-    (block): block is ProcessBlock => block.kind === "process"
-      && block.background === true && block.done
-      && (block.processKind === "task" || block.processKind === "agent"),
-  );
-  const used = new Set<string>();
-  const boundaries = new Map<string, ProcessBlock | null>();
-  let emittedFallback = false;
-  for (const block of finalBlocks) {
-    if (block.background !== true) continue;
-    const candidate = block.startedTs == null ? undefined : completions
-      .filter((process) => !used.has(process.item_id)
-        && process.terminalTs != null
-        && process.terminalTs <= block.startedTs!)
-      .sort((left, right) => (right.terminalTs ?? 0) - (left.terminalTs ?? 0))[0];
-    if (candidate) {
-      used.add(candidate.item_id);
-      boundaries.set(block.message_id, candidate);
-      continue;
-    }
-    // Legacy history can lack source clocks. Mark the first detached reply once
-    // without manufacturing a relationship for every text fragment.
-    if (boundaries.size === 0 && !emittedFallback) {
-      boundaries.set(block.message_id, null);
-      emittedFallback = true;
-    }
-  }
-  return boundaries;
-}
-
 function detailTurnFingerprint(turn: Turn): string {
   return [
     turn.detailLoaded ? "1" : "0",
@@ -347,7 +308,7 @@ function detailTurnFingerprint(turn: Turn): string {
   ].join("\u0000");
 }
 
-export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading,
+export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claude", loading,
   hasMore: incomingHasMore,
   historyPagingReady = true,
   historyRevision = null, historyViewRevision = historyRevision,
@@ -363,11 +324,11 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
   historyImageAssets, onLoadHistoryImage,
   onTextSelectionGuardChange,
   externalPlanProgress,
-  backgroundProcesses = [],
   onOpenAgent,
   activeTurnId = null,
   ambiguousActiveTurnIds = [],
   surface = "code" }: {
+  turnUsage?: TurnUsageReadings;
   sid: string | null;
   turns: Turn[];
   surface?: Space;
@@ -424,7 +385,6 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
     turnId: string;
     itemId: string;
   } | null;
-  backgroundProcesses?: ProcessBlock[];
   /** Exact displayed row owned by the still-running native task. Runtime-only:
    * never infer this from array position, final text, or historical activity. */
   activeTurnId?: string | null;
@@ -2596,8 +2556,6 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
             <div className="spinner" aria-label="加载中" />
             <p className="loading-tx">加载会话历史…</p>
           </div>
-          <BackgroundProcessDock processes={backgroundProcesses}
-            onOpenFile={onOpenFile} onOpenAgent={onOpenAgent} />
         </div>
       );
     }
@@ -2611,8 +2569,6 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
             ? "添加资料并描述成果，我会把生成的文档和文件留在这项工作的私有目录。"
             : <>发一条消息开始，或用 <code>/</code> 唤起命令面板（Plan mode、review、技能…）。</>}</p>
         </div>
-        <BackgroundProcessDock processes={backgroundProcesses}
-          onOpenFile={onOpenFile} onOpenAgent={onOpenAgent} />
       </div>
     );
   }
@@ -2694,7 +2650,8 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
               timelineBlocks, engine);
             const foregroundProcessItems = t.done
               ? processItems.filter((block) => !(
-                  block.kind === "process" && block.background === true
+                  block.background === true
+                    && (engine === "claude" || block.kind === "process")
                 ))
               : processItems;
             const activeProcess = hasActiveProcess(foregroundProcessItems);
@@ -2705,8 +2662,13 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                 || supplemental.questionOwners.get(block.message_id) === t.id);
             const generatedImages = generatedOutputImages(timelineBlocks);
             const modelNotices = modelFallbackNotices(timelineBlocks);
-            const followupBoundaries = backgroundFollowupBoundaries(
-              finalBlocks, timelineBlocks);
+            const narrative = engine === "claude"
+              ? claudeContinuations(timelineBlocks, finalBlocks)
+              : { original: timelineBlocks, answers: finalBlocks,
+                  continuations: [] as ClaudeContinuation[] };
+            const lastContinuation = narrative.continuations.at(-1);
+            const originalProcessItems = presentableProcessBlocks(
+              narrative.original, engine);
             const enclosingTaskActive = activeTurnId === t.id;
             const processDetailState = processItems.length > 0
               ? "present"
@@ -2736,13 +2698,16 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
               || processDetailState === "present";
             const activePhase = !working
               ? "complete"
-              : hasProcessTimeline
+              : lastContinuation
+                ? lastContinuation.answers.length > 0 ? "answering" : "process"
+                : hasProcessTimeline
                   && (activeTimeline
                     || (enclosingTaskActive
                       && (finalBlocks.length === 0 || t.done)))
                 ? "process"
                 : finalBlocks.length > 0 ? "answering" : "waiting";
-            const showProcessTimeline = hasProcessTimeline;
+            const showProcessTimeline = originalProcessItems.length > 0
+              || processDetailState === "present";
             // Unknown native summaries don't prove that there is anything to
             // expand. Keep that uncertainty in the projection, not as a button
             // which disappears after an empty read. Real deferred content,
@@ -2806,6 +2771,98 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                 ? Math.max(1, t.detailEventCount ?? 0)
                 : t.detailEventCount ?? 0
               : 0;
+            const renderProcess = (segment?: ClaudeContinuation) => {
+              const continuing = !!segment && segment === lastContinuation
+                && enclosingTaskActive && !terminalProblem;
+              const disclosureKey = segment
+                ? `${processOpenKey}\u0000continuation:${segment.id}` : processOpenKey;
+              return (
+              <ProcessTimeline blocks={segment?.blocks ?? narrative.original}
+                done={segment ? !continuing : t.done || !!lastContinuation}
+                active={activePhase === "process" && (segment ? continuing : !lastContinuation)} engine={engine}
+                outcome={t.error ? "failed" : t.interrupted ? "interrupted" : undefined}
+                problem={t.error}
+                durationMs={segment || engine === "codex" || (lastContinuation
+                  && t.doneTs != null && lastContinuation.startedTs != null
+                  && t.doneTs > lastContinuation.startedTs) ? undefined : t.durationMs}
+                startTs={segment?.startedTs ?? (engine === "codex" ? t.processStartedTs : t.ts)}
+                doneTs={segment ? segment.doneTs : engine === "codex" ? t.processDoneTs
+                  : lastContinuation && t.doneTs != null
+                    && lastContinuation.startedTs != null
+                    && t.doneTs > lastContinuation.startedTs ? undefined : t.doneTs}
+                deferredCount={segment ? (deferredProcessCount > 0 ? 1 : 0) : deferredProcessCount}
+                detailLoading={t.detailLoading}
+                detailError={processDetailError}
+                externalPlanItemId={externalPlanItemId}
+                onLoadDetail={onLoadDetail
+                  ? () => requestProcessDetail(
+                      t.id, undefined, "initial", false)
+                  : undefined}
+                onRetryDetail={onLoadDetail && detailRetryDirection
+                  ? () => requestProcessDetail(
+                      t.id,
+                      detailRetryBefore,
+                      detailRetryDirection,
+                      false)
+                  : undefined}
+                canLoadEarlier={!segment && canReadOlderDetail}
+                canLoadNewer={!segment && canReadNewerDetail}
+                onLoadEarlier={onLoadDetail && canReadOlderDetail
+                  ? () => requestProcessDetail(
+                      t.id, t.detailOldestCursor, "older")
+                  : undefined}
+                onLoadNewer={onLoadDetail && canReadNewerDetail
+                  ? () => requestProcessDetail(
+                      t.id, t.detailNewerCursor, "newer")
+                  : undefined}
+                onOpenFile={onOpenFile} imageAssets={imageAssets}
+                onLoadImage={onLoadImage}
+                onAuthorizeImage={onAuthorizeImage}
+                historyTurnId={historyTurnId}
+                historyImageAssets={historyImageAssets}
+                onLoadHistoryImage={onLoadHistoryImage}
+                onPreviewHistoryImage={(turnId, imageId) => setZoom({
+                  kind: "history",
+                  turnId,
+                  imageId,
+                  alt: "查看过的图片",
+                })}
+                onOpenAgent={onOpenAgent}
+                onInteractionStart={beginProcessInteraction}
+                onInteractionEnd={endProcessInteraction}
+                openOverride={
+                  processDisclosureOpen[`${disclosureKey}\u0000outer`]
+                  ?? (!segment && t.detailRestoreOpen ? true : undefined)
+                }
+                onOpenChange={(open) => rememberProcessDisclosure(
+                  `${disclosureKey}\u0000outer`, open,
+                )}
+                itemOpen={(key) =>
+                  processDisclosureOpen[`${disclosureKey}\u0000${key}`]}
+                onItemOpenChange={(key, open) => rememberProcessDisclosure(
+                  `${disclosureKey}\u0000${key}`, open,
+                )}
+                onPreviewImage={(src, alt) => setZoom({ kind: "data", src, alt })} />
+              );
+            };
+            const renderAnswer = (block: TextBlock) => (
+              <div key={block.message_id} className="assistant-answer-segment">
+                {block.delivery === "async" && block.questions?.length
+                  ? <Suspense fallback={<span className="async-question-hint">助手询问…</span>}>
+                      <AsyncQuestionCard questions={block.questions}
+                        answered={supplemental.answered.has(block.message_id)}
+                        onOpen={() => {
+                          pauseOutputFollow();
+                          setOpenAsyncQuestion({ scope: asyncQuestionScope, messageId: block.message_id });
+                        }} />
+                    </Suspense>
+                  : <MessageBlock text={block.text}
+                    done={block.done} onOpenFile={onOpenFile}
+                    imageAssets={imageAssets} onLoadImage={onLoadImage}
+                    onAuthorizeImage={onAuthorizeImage}
+                    onPreviewImage={(src, alt) => setZoom({ kind: "data", src, alt })} />}
+              </div>
+            );
             const historyImagesReady = !!t.imageRefs?.length
               && t.imageRefs.every((image) => (
                 historyImageAssets?.[historyImageAssetKey(
@@ -2838,7 +2895,9 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
               }}>
             {(t.prompt || (t.images && t.images.length) || (t.imageRefs && t.imageRefs.length) || (t.files && t.files.length)) && (
               <div className="ubub-wrap">
-                {t.prompt && <div className="ubub">{supplemental.replies.has(t.id)
+                {t.prompt && <div className="ubub">
+                  {t.timedTask && <TimedMessageTag task={t.timedTask} />}
+                  {supplemental.replies.has(t.id)
                   ? <div className="supplemental-answer">
                       <details className="supplemental-answer-context">
                         <summary><Icon name="message" size={13} />查看问题<Icon name="chev" size={12} /></summary>
@@ -2910,68 +2969,7 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                 </div>
               </div>
             )}
-            {showProcessTimeline && (
-              <ProcessTimeline blocks={timelineBlocks} done={t.done}
-                active={activePhase === "process"} engine={engine}
-                outcome={t.error ? "failed" : t.interrupted ? "interrupted" : undefined}
-                problem={t.error}
-                durationMs={engine === "codex" ? undefined : t.durationMs}
-                startTs={engine === "codex" ? t.processStartedTs : t.ts}
-                doneTs={engine === "codex" ? t.processDoneTs : t.doneTs}
-                deferredCount={deferredProcessCount}
-                detailLoading={t.detailLoading}
-                detailError={processDetailError}
-                externalPlanItemId={externalPlanItemId}
-                onLoadDetail={onLoadDetail
-                  ? () => requestProcessDetail(
-                      t.id, undefined, "initial", false)
-                  : undefined}
-                onRetryDetail={onLoadDetail && detailRetryDirection
-                  ? () => requestProcessDetail(
-                      t.id,
-                      detailRetryBefore,
-                      detailRetryDirection,
-                      false)
-                  : undefined}
-                canLoadEarlier={canReadOlderDetail}
-                canLoadNewer={canReadNewerDetail}
-                onLoadEarlier={onLoadDetail && canReadOlderDetail
-                  ? () => requestProcessDetail(
-                      t.id, t.detailOldestCursor, "older")
-                  : undefined}
-                onLoadNewer={onLoadDetail && canReadNewerDetail
-                  ? () => requestProcessDetail(
-                      t.id, t.detailNewerCursor, "newer")
-                  : undefined}
-                onOpenFile={onOpenFile} imageAssets={imageAssets}
-                onLoadImage={onLoadImage}
-                onAuthorizeImage={onAuthorizeImage}
-                historyTurnId={historyTurnId}
-                historyImageAssets={historyImageAssets}
-                onLoadHistoryImage={onLoadHistoryImage}
-                onPreviewHistoryImage={(turnId, imageId) => setZoom({
-                  kind: "history",
-                  turnId,
-                  imageId,
-                  alt: "查看过的图片",
-                })}
-                onOpenAgent={onOpenAgent}
-                onInteractionStart={beginProcessInteraction}
-                onInteractionEnd={endProcessInteraction}
-                openOverride={
-                  processDisclosureOpen[`${processOpenKey}\u0000outer`]
-                  ?? (t.detailRestoreOpen ? true : undefined)
-                }
-                onOpenChange={(open) => rememberProcessDisclosure(
-                  `${processOpenKey}\u0000outer`, open,
-                )}
-                itemOpen={(key) =>
-                  processDisclosureOpen[`${processOpenKey}\u0000${key}`]}
-                onItemOpenChange={(key, open) => rememberProcessDisclosure(
-                  `${processOpenKey}\u0000${key}`, open,
-                )}
-                onPreviewImage={(src, alt) => setZoom({ kind: "data", src, alt })} />
-            )}
+            {showProcessTimeline && renderProcess()}
             {modelNotices.map((notice) => <div className="turn-model-notice" key={notice.item_id} role="note">
               <Icon name="notify" size={15} />
               <span>{notice.summary}</span>
@@ -2989,40 +2987,15 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
             </div>}
             {(t.blocks.length > 0 || t.error) && (
               <>
-                {finalBlocks.map((block) => (
-                  <div key={block.message_id} className="assistant-answer-segment">
-                    {followupBoundaries.has(block.message_id) && (
-                      <div className="background-followup-boundary">
-                        <span className="background-followup-icon">
-                          <Icon name="check" size={13} />
-                        </span>
-                        <span>{backgroundFollowupLabel(
-                          followupBoundaries.get(block.message_id)
-                            ?? undefined,
-                        )} · Claude 随后继续回复</span>
-                        {(followupBoundaries.get(block.message_id)?.terminalTs
-                            || block.startedTs) && (
-                          <time>{formatTime(
-                            followupBoundaries.get(block.message_id)?.terminalTs
-                              ?? block.startedTs!,
-                          )}</time>
-                        )}
-                      </div>
-                    )}
-                    {block.delivery === "async" && block.questions?.length
-                      ? <Suspense fallback={<span className="async-question-hint">助手询问…</span>}>
-                          <AsyncQuestionCard questions={block.questions}
-                            answered={supplemental.answered.has(block.message_id)}
-                            onOpen={() => {
-                              pauseOutputFollow();
-                              setOpenAsyncQuestion({ scope: asyncQuestionScope, messageId: block.message_id });
-                            }} />
-                        </Suspense>
-                      : <MessageBlock text={block.text}
-                      done={block.done} onOpenFile={onOpenFile}
-                      imageAssets={imageAssets} onLoadImage={onLoadImage}
-                      onAuthorizeImage={onAuthorizeImage}
-                      onPreviewImage={(src, alt) => setZoom({ kind: "data", src, alt })} />}
+                {narrative.answers.map(renderAnswer)}
+                {narrative.continuations.map((segment) => (
+                  <div key={segment.id} className="background-followup">
+                    <div className="background-followup-boundary">
+                      <span>Claude 继续处理</span>
+                      {segment.startedTs != null && <time>{formatTime(segment.startedTs)}</time>}
+                    </div>
+                    {renderProcess(segment)}
+                    {segment.answers.map(renderAnswer)}
                   </div>
                 ))}
                 {t.error && <TurnProblem message={t.error} continuing={activeTurnIndex > ti} />}
@@ -3080,6 +3053,9 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
                 <div className="turn-working" role="status" aria-live="polite">
                   <ClaudeWorking size={24} />
                   <span className="turn-working-tx">{workingLabel}</span>
+                  {usageForTurn(t, turnUsage) && <Suspense fallback={null}>
+                    <TurnUsageIndicator key={`${sid}:${t.id}`} usage={usageForTurn(t, turnUsage)} />
+                  </Suspense>}
                   {!showCompletionFooter && <Suspense fallback={null}>
                     <PagePreviewLinks turn={t} sid={sid} />
                   </Suspense>}
@@ -3107,8 +3083,6 @@ export function ChatView({ sid, turns: incomingTurns, engine = "claude", loading
           </div>
         )}
       </div>
-      <BackgroundProcessDock processes={backgroundProcesses}
-        onOpenFile={onOpenFile} onOpenAgent={onOpenAgent} />
       {openAsyncQuestion?.scope === asyncQuestionScope && <Suspense fallback={null}>
         <AsyncQuestionHost key={asyncQuestionScope}
           messageId={openAsyncQuestion.messageId}

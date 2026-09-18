@@ -3574,3 +3574,23 @@ def test_codex_work_schedule_missing_profile_fails_without_retry_or_fallback(
     assert result["last_run_status"] == "failed"
     assert result["last_run_attempt"] == 1
     assert "账号不可用" in result["last_error"]
+
+
+def test_native_start_hint_without_catalog_does_not_publish_empty_session(tmp_path, monkeypatch):
+    async def run():
+        machine, _ = _machine(tmp_path)
+        primary = _context("primary@current", "current", "primary")
+        machine.sessions[primary.key] = primary
+
+        async def no_catalog(_limit, *, codex_home=None):
+            return []
+
+        monkeypatch.setattr(machine_module, "list_codex_sessions", no_catalog)
+        monkeypatch.setattr(machine_module, "codex_exact_catalog_rows", lambda *a, **kw: [])
+        machine._on_codex_thread_started_hint(primary, "unmaterialized-helper")
+        await asyncio.gather(*tuple(machine._codex_catalog_hint_tasks))
+        rows = await machine._read_all_codex_profile_sessions()
+        assert all(row["native_session_id"] != "unmaterialized-helper" for row in rows)
+        assert any(row["native_session_id"] == "current" for row in rows)
+
+    asyncio.run(run())

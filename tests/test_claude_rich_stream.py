@@ -727,8 +727,8 @@ def test_history_marks_task_completion_followup_as_later_background_segment():
     )
     assert notification.ts == 20.0 and notification.background is True
     terminal = next(event for event in events if isinstance(event, TurnEnd))
-    assert terminal.ts == 2.0
-    assert terminal.result.duration_ms == 1_000
+    assert terminal.ts == 21.0
+    assert terminal.result.duration_ms == 20_000
     assert terminal.turn_id == answer_after
 
 

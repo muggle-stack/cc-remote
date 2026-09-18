@@ -31,7 +31,7 @@ try {
     accountQuotaWindows, activeRateLimits, quotaTone, quotaWindowLabel,
     quotaWindowsForLimits, remainingPercent,
   } = await harness.ssrLoadModule("/src/rate-limit-usage.ts");
-  const { statusNotices } = await harness.ssrLoadModule(
+  const { conversationNotices, statusNotices } = await harness.ssrLoadModule(
     "/src/notice-presentation.ts");
   const {
     ReconnectBanner, TRANSIENT_BANNER_TTL_MS,
@@ -43,6 +43,42 @@ try {
     presentTurnOutcome,
   } = await harness.ssrLoadModule("/src/problem-presentation.ts");
   const { mergeInitialHistory, restoreCachedTurnDetails } = await harness.ssrLoadModule("/src/history-merge.ts");
+  const compactNotice = {
+    type: "notice", v: 1, ts: 1, notice_id: "compact-completed", severity: "info",
+    category: "runtime", title: "上下文压缩完成", message: "native compact boundary",
+  } as Notice;
+  assert.equal(conversationNotices([compactNotice])[0].title, "上下文压缩完成");
+  assert.equal(conversationNotices([{ ...compactNotice, title: "上下文压缩已启动" }])[0].title,
+    "上下文压缩已启动", "native Codex submission is not a completion receipt");
+  const { default: ContextPopover } = await harness.ssrLoadModule("/src/components/ContextPopover.tsx");
+  const contextHtml = renderToStaticMarkup(createElement(ContextPopover, {
+    report: { total_tokens: 54_459, max_tokens: 1_000_000, percentage: 5.4,
+      categories: [], model: "claude-fable-5-1[1m]" },
+    autoCompact: { mode: "custom", threshold_tokens: 500_000, applied_mode: "custom",
+      applied_threshold_tokens: 500_000, pending: false },
+  }));
+  assert.ok(contextHtml.includes("1,000,000"));
+  assert.ok(contextHtml.includes("生效压缩阈值") && contextHtml.includes("500,000"));
+  const pendingHtml = renderToStaticMarkup(createElement(ContextPopover, {
+    report: null, autoCompact: { mode: "custom", threshold_tokens: 500_000,
+      applied_mode: "inherit", applied_threshold_tokens: null, pending: true },
+  }));
+  assert.ok(pendingHtml.includes("等待生效") && pendingHtml.includes("Claude 默认值"));
+  const repairedHistory = reduce({
+    ...initialState, focusedSid: "compact-session",
+    runtimes: { "compact-session": { ...createRuntime(),
+      historyRevision: "previous-wrapper", hydratedCacheTurnIds: ["internal-caveat"],
+      turns: [{ id: "internal-caveat", prompt: "<local-command-caveat>internal</local-command-caveat>",
+        blocks: [], done: true, error: "该轮未正常结束" }],
+    } },
+  }, { type: "event", event: {
+    v: 1, ts: 12, type: "history", sid: "compact-session", session_id: "compact-session",
+    events: [], detail: "summary", revision: "repaired-wrapper", has_more: false,
+    in_progress: false, turns: [{ id: "real-user", prompt: "inspect", blocks: [],
+      done: true, doneTs: 5, durationMs: 4_000 }],
+  } });
+  assert.deepEqual(repairedHistory.runtimes["compact-session"].turns.map((turn: { id: string }) => turn.id),
+    ["real-user"], "canonical compact history removes the old cached disclaimer/error turn");
   const sid = "notice-session";
   const event = (body: Record<string, unknown>): ServerEvent => ({
     v: 10, ts: 10, sid, ...body,
@@ -456,7 +492,7 @@ try {
   assert.equal(presentTurnOutcome("interrupted", "Codex updated; private diagnostic"), "已打断");
   assert.equal(presentTurnOutcome("failed", hiddenDiagnostic), "回复未完成");
   assert.equal(presentCommandProblem({ code: "steer_outcome_unknown", message: hiddenDiagnostic }),
-    "引导已发出，Codex 尚未确认是否生效。请先查看后续结果。");
+    "引导已发出，尚未确认是否生效。请先查看后续结果。");
   assert.equal(presentCommandProblem({ code: "not_steerable", message: "当前没有可引导的 Codex 任务" }),
     "当前没有可引导的任务，本次未发送。请在会话空闲后重试。");
   assert.equal(presentCommandProblem({ code: "not_steerable", message: "Codex 任务已结束，本次引导未发送。" }),

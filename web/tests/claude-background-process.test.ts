@@ -23,6 +23,7 @@ try {
     await harness.ssrLoadModule("/src/reducer.ts");
   const { ChatView } = await harness.ssrLoadModule(
     "/src/components/ChatView.tsx");
+  const { claudeContinuations } = await harness.ssrLoadModule("/src/claude-continuations.ts");
   const event = (body: Record<string, unknown>): ServerEvent => ({
     v: PROTOCOL_VERSION,
     ts: 10,
@@ -149,27 +150,6 @@ try {
     "untrusted edge volume cannot grow the detached-task dock past protocol bounds",
   );
 
-  const dockMarkup = renderToStaticMarkup(createElement(ChatView, {
-    sid: "background-dock",
-    turns: [],
-    engine: "claude",
-    backgroundProcesses: [{
-      kind: "process",
-      item_id: "bash-task",
-      processKind: "task",
-      phase: "snapshot",
-      status: "running",
-      title: "Run verification",
-      command: "make verify",
-      background: true,
-      done: false,
-    }],
-  }));
-  assert.match(dockMarkup, /后台任务正在运行/);
-  assert.match(dockMarkup, /Run verification/);
-  assert.match(dockMarkup, /make verify/,
-    "the detached Bash card reuses the expandable command UI");
-
   const followupMarkup = renderToStaticMarkup(createElement(ChatView, {
     sid: "followup-history",
     engine: "claude",
@@ -213,7 +193,7 @@ try {
   }));
   assert.match(
     followupMarkup,
-    /Build is running\.[\s\S]*Build completed[\s\S]*Claude 随后继续回复[\s\S]*Build passed\./,
+    /Build is running\.[\s\S]*Claude 继续处理[\s\S]*Build passed\./,
     "a task-completion follow-up keeps its source-time narrative boundary",
   );
 
@@ -244,9 +224,47 @@ try {
   }));
   assert.match(
     concurrentFollowupMarkup,
-    /Task A completed[\s\S]*A report\.[\s\S]*Task B completed[\s\S]*B report\./,
+    /Claude 继续处理[\s\S]*A report\.[\s\S]*Claude 继续处理[\s\S]*B report\./,
     "each detached completion labels its own later reply segment",
   );
+
+  const blocks: Block[] = [
+    { kind: "text", message_id: "original", channel: "final", text: "Interim", done: true },
+    { kind: "process", item_id: "child", processKind: "agent", phase: "end",
+      title: "Long private report stays in child details", status: "succeeded", done: true, background: true },
+    { kind: "text", message_id: "thinking-a", channel: "thinking", text: "Fixture thought A", done: true, background: true, startedTs: 20_000 },
+    { kind: "tool", message_id: "tool-a-message", tool_use_id: "tool-a", tool: "Bash", input: {}, done: true, background: true },
+    { kind: "text", message_id: "answer-a", channel: "final", text: "Result A", done: true, background: true },
+    { kind: "text", message_id: "thinking-b", channel: "thinking", text: "", done: false, background: true, startedTs: 30_000 },
+  ];
+  const narrative = claudeContinuations(blocks, blocks.filter((block) => block.kind === "text" && block.channel === "final"));
+  assert.equal(narrative.original.length, 2);
+  assert.equal(narrative.continuations.length, 2);
+  assert.equal(narrative.continuations[0].blocks.length, 3);
+  assert.equal(narrative.continuations[0].answers[0].message_id, "answer-a");
+  assert.equal(narrative.continuations[1].id, "thinking-b",
+    "a main continuation is visible from its first empty stream frame");
+
+  let continuationState = {
+    ...initialState, focusedSid: sid,
+    runtimes: { [sid]: { ...createRuntime(), turns: [{ id: "settled-parent", prompt: "run", done: true, blocks: [] }] } },
+  };
+  const send = (body: Record<string, unknown>) => {
+    continuationState = reduce(continuationState, { type: "event", event: event({ sid, ...body }) });
+  };
+  send({ type: "state", state: "running" });
+  send({ type: "process", turn_id: "settled-parent", item_id: "child", kind: "agent",
+    phase: "end", status: "succeeded", title: "Child done", background: true });
+  assert.equal(continuationState.runtimes[sid].liveOwner, null,
+    "a completed child cannot claim the parent's running owner");
+  send({ type: "assistant_msg_start", turn_id: "settled-parent", message_id: "continuation", channel: "thinking", background: true });
+  assert.equal(continuationState.runtimes[sid].liveOwner?.turnId, "settled-parent");
+  assert.equal(continuationState.runtimes[sid].turns[0].done, true,
+    "the prior native completion receipt remains settled");
+  send({ type: "state", state: "idle" });
+  send({ type: "delta", turn_id: "settled-parent", message_id: "continuation", channel: "thinking", text: "Late replay", background: true });
+  assert.equal(continuationState.runtimes[sid].liveOwner, null,
+    "replay into an idle session cannot revive the spark");
 } finally {
   await harness.close();
 }

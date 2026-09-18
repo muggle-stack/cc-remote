@@ -32,7 +32,7 @@ from cc_remote.attachments import (
 from cc_remote.protocol import (
     AssistantMsgStart, Delta, ToolUse, ToolDelta, ToolResult, AssistantMsgEnd,
     AsyncQuestionSpec,
-    ProcessEvent, TurnPlan, TurnDiff, TurnEnd, TurnResult, TurnBinding, UserMsg, Error,
+    ProcessEvent, TurnPlan, TurnDiff, TurnEnd, TurnResult, TurnBinding, TurnUsage, UserMsg, Error,
     StateEvent, ERR_CC_CRASH,
 )
 from cc_remote.wrapper.codex_external import (
@@ -2387,7 +2387,13 @@ class CodexStreamTranslator:
         p = msg.get("params") if isinstance(msg.get("params"), dict) else {}
         out: list = []
 
-        if method == "item/agentMessage/delta":
+        if method == "thread/tokenUsage/updated":
+            owner = _optional_wire_id(p.get("turnId"), "turn")
+            usage = msg.get("_cc_remote_usage")
+            if owner and isinstance(usage, dict) and not self._turn_closed:
+                out.append(TurnUsage(turn_id=owner, usage=usage))
+
+        elif method == "item/agentMessage/delta":
             iid = _live_id(p.get("itemId"), "agent-message")
             if not self._admit_live_item(iid, out):
                 return out
@@ -2925,7 +2931,7 @@ class CodexStreamTranslator:
             self._turn_closed = True
 
         # everything else (raw reasoning, userMessage, mcpServer/startupStatus,
-        # thread/status, account/rateLimits, tokenUsage, remoteControl…) -> skip.
+        # thread/status, account/rateLimits, remoteControl…) -> skip.
         return out
 
     # ---- helpers ----

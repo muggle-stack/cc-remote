@@ -62,7 +62,12 @@ from cc_remote.wrapper.usage_limit import is_usage_limit_failure
 # v37 restores reviewed policy-refusal copy across both branch histories.
 # Rebuild pages which promoted an RPC-accepted steer's presentation clock to
 # process presence before the native user segment existed.
-_SCHEMA_VERSION = 38
+# v39 hides local command caveats and preserves the pre-compact answer clock.
+# v40 gives real Claude background replies their source completion time while
+# retaining the old boundary for task bookkeeping without a reply.
+# v41 keeps native isMeta recovery prompts inside their original human turn.
+# v42 replaces recovered text prefixes and bounds summary answer block counts.
+_SCHEMA_VERSION = 42
 _FINGERPRINT_SAMPLE_BYTES = 64 * 1024
 _DEFAULT_MAX_ENTRIES = 128
 _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
@@ -726,10 +731,13 @@ def materialize_history_turns(
                     if message_id not in texts:
                         texts[message_id] = []
                         text_order.append(message_id)
-                    texts[message_id].append(event["text"])
+                    if event.get("replace"):
+                        texts[message_id] = [event["text"]]
+                    else:
+                        texts[message_id].append(event["text"])
                     block = add_live_text(message_id, channels[message_id])
                     if block is not None:
-                        block["text"] += event["text"]
+                        block["text"] = event["text"] if event.get("replace") else block["text"] + event["text"]
                     stamp = _event_ms(event.get("ts"))
                     if stamp is not None:
                         text_first_ms.setdefault(message_id, stamp)
@@ -1018,10 +1026,14 @@ def materialize_history_turns(
                 and (started_ms is None or started_ms > done_ms)):
             started_ms = max(0, done_ms - (duration_ms or 0))
         blocks = []
-        final_block_count = sum(
-            bool("".join(texts.get(message_id, ())))
-            for message_id in final_ids
-        )
+        # A turn may contain arbitrarily many native answers/questions. The
+        # wire summary is bounded by both characters and block count; full
+        # source events remain available through GetTurnDetail.
+        final_ids = [message_id for message_id in final_ids
+                     if any(texts.get(message_id, ()))]
+        summary_truncated = len(final_ids) > _SUMMARY_BLOCK_MAX
+        final_ids = final_ids[-_SUMMARY_BLOCK_MAX:]
+        final_block_count = len(final_ids)
         notice_limit = max(0, _SUMMARY_BLOCK_MAX - final_block_count)
         notices = list(model_notices.values())[-notice_limit:] if notice_limit else []
         image_limit = max(0, _SUMMARY_BLOCK_MAX - final_block_count - len(notices))
@@ -1107,7 +1119,6 @@ def materialize_history_turns(
         blocks.extend(notices)
         blocks.extend(image_summaries)
         remaining_summary_chars = _SUMMARY_TEXT_MAX_CHARS
-        summary_truncated = False
         for message_id in final_ids:
             text = "".join(texts.get(message_id, ()))
             if text:
@@ -1283,6 +1294,36 @@ class HistoryIndexStore:
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
             current = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if current in range(10, 42):
+                # v42 bounds answer summaries and handles recovered prefixes.
+                # Full source events, images and native graph indexes remain
+                # valid; only materialized pages require a fresh projection.
+                connection.execute(
+                    "DELETE FROM history_pages WHERE engine IN ('claude', 'codex')")
+            if current in range(10, 41):
+                # isMeta changes both turn boundaries and the visible-user
+                # graph without changing native bytes. Rebuild Claude's derived
+                # narrative/index only; retain Codex and source-bound assets.
+                for table in ("history_pages", "history_turn_details"):
+                    connection.execute(f"DELETE FROM {table} WHERE engine='claude'")
+                for table in (
+                    "claude_compact_sources", "claude_compact_records", "claude_compact_queue",
+                ):
+                    connection.execute(f"DROP TABLE IF EXISTS {table}")
+            if current in range(10, 40):
+                # Real background replies had the original answer's timestamp.
+                # Only Claude narrative changes; keep all source-bound assets.
+                for table in ("history_pages", "history_turn_details"):
+                    connection.execute(f"DELETE FROM {table} WHERE engine='claude'")
+            if current in range(10, 39):
+                # Native /compact envelopes are not human turns. Rebuild the
+                # Claude narrative and cached visible-user graph together.
+                for table in ("history_pages", "history_turn_details"):
+                    connection.execute(f"DELETE FROM {table} WHERE engine='claude'")
+                for table in (
+                    "claude_compact_sources", "claude_compact_records", "claude_compact_queue",
+                ):
+                    connection.execute(f"DROP TABLE IF EXISTS {table}")
             if current in range(10, 38):
                 # RPC-accepted steers could cache a phantom process. Invalidate
                 # only derived Codex narrative; retain other engines and assets.
@@ -1407,8 +1448,8 @@ class HistoryIndexStore:
                 for table in ("history_pages", "history_turn_details"):
                     connection.execute(
                         f"DELETE FROM {table} WHERE engine='codex'")
-            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37):
-                # The independent v22-v38 invalidations above suffice.
+            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41):
+                # The independent v22-v42 invalidations above suffice.
                 pass
             elif current not in (0, _SCHEMA_VERSION):
                 # v9 changes the invariant of history_turn_details: those rows
