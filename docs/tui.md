@@ -20,6 +20,11 @@ inside progress prose it closes the outer section. The final answer remains
 outside the fold, and Enter on it toggles its own turn's section. New output
 and completion preserve manually chosen folds. History details load on demand.
 
+Active turn status and tool summaries have a left-to-right text sweep that
+stops on completion, failure or interruption. Only the foreground color
+changes; text, selection and reading position stay intact. Set
+`TEXTUAL_ANIMATIONS=none` or `NO_COLOR=1` to disable it.
+
 The compact bottom status keeps mode, execution state and elapsed time visible;
 long activity/notice text is truncated to the terminal width. Shortcut lists
 live in `Space h` rather than permanently occupying the bottom of the screen.

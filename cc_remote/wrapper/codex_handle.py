@@ -1666,6 +1666,10 @@ class CodexHandle:
         self._goal_baseline_loaded = False
         self._goal_prompt_pending: OrderedDict[str, str] = OrderedDict()
         self._goal_prompt_candidate: Optional[_GoalPromptCandidate] = None
+        self._manual_compact_request: asyncio.Future[bool] | None = None
+        self._manual_compact_candidate: str | None = None
+        self._manual_compact_generation = -1
+        self._explicit_interrupt_turn: tuple[int, str] | None = None
         # Prompt correlation ends as soon as turn/started claims its candidate.
         # Keep retired objectives independently across response -> notification
         # gaps. Authoritative external replacements extend the same fence so
@@ -3952,6 +3956,9 @@ class CodexHandle:
                 fence.suppression_enabled = False
         if not (self.proc and self.thread_id and self.turn_id):
             raise RuntimeError("codex turn is not running")
+        # Spontaneous turns have no managed continuation fence. Stop still owns
+        # their real terminal, including a compaction item arriving after Stop.
+        self._explicit_interrupt_turn = (self._generation, self.turn_id)
         target_thread_id = self.thread_id
         target_turn_id = self._review_execution_turn_id or self.turn_id
         try:
@@ -5441,8 +5448,36 @@ class CodexHandle:
         await self._release_managed_compaction_continuation()
         if self.turn_active:
             raise RuntimeError("codex thread is busy")
-        await self._request(
-            "thread/compact/start", {"threadId": self.thread_id})
+        accepted = asyncio.get_running_loop().create_future()
+        self._manual_compact_request = accepted
+        self._manual_compact_candidate = None
+        self._manual_compact_generation = self._generation
+        try:
+            await self._request("thread/compact/start", {"threadId": self.thread_id})
+        except BaseException:
+            accepted.set_result(False)
+            if self._manual_compact_request is accepted:
+                self._manual_compact_request = None
+            raise
+        else:
+            accepted.set_result(True)
+
+    async def manual_compact_for_turn(self, turn_id: str) -> bool:
+        """Called by the consumer only after native compaction output proves it.
+
+        The stdout reader must never await the RPC response it itself delivers.
+        Keep early notifications queued until the control request is accepted.
+        """
+        request = self._manual_compact_request
+        if (request is None or self._manual_compact_candidate != turn_id
+                or self._manual_compact_generation != self._generation):
+            return False
+        accepted = await asyncio.shield(request)
+        if (self._manual_compact_request is not request
+                or self._manual_compact_generation != self._generation):
+            return False
+        self._manual_compact_request = None
+        return accepted
 
     async def rollback_thread(self, num_turns: int) -> dict[str, Any]:
         assert self.thread_id, "connect() first"
@@ -7174,6 +7209,7 @@ class CodexHandle:
                 and target_turn_id == self._compaction_continuation_turn_id
                 and target_turn_id == self.turn_id
                 and self.turn_active
+                and self._explicit_interrupt_turn != (self._generation, target_turn_id)
             )
             if compact_continuation_boundary:
                 self._compaction_continuation_turn_id = None
@@ -7222,6 +7258,11 @@ class CodexHandle:
             was_active = self.turn_active
             turn = (m.get("params") or {}).get("turn") or {}
             turn_id = turn.get("id")
+            if (not was_active and not review_execution_frame
+                    and isinstance(turn_id, str) and turn_id
+                    and self._manual_compact_request is not None
+                    and self._manual_compact_candidate is None):
+                self._manual_compact_candidate = turn_id
             if (isinstance(turn_id, str) and turn_id
                     and not review_execution_frame):
                 if self._compaction_continuation_turn_id not in {

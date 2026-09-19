@@ -682,7 +682,9 @@ def test_profile_rollouts_and_watches_remain_in_their_own_home(
     )
     for path in (primary_rollout, stack_rollout):
         path.parent.mkdir(parents=True)
-        path.write_text("", encoding="utf-8")
+        path.write_text(json.dumps({
+            "type": "session_meta", "payload": {"id": "same-native-id"},
+        }) + "\n", encoding="utf-8")
 
     machine._watch_session("primary@same-native-id")
     machine._watch_session("stack@same-native-id")

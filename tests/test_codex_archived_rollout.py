@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 
+import pytest
+
 from cc_remote.wrapper import codex_sessions
 
 
@@ -67,6 +69,35 @@ def test_active_rollout_wins_if_both_stores_contain_same_id(tmp_path, monkeypatc
 
     assert codex_sessions.codex_rollout_path(session_id) == str(active_rollout)
     assert codex_sessions.codex_session_cwd(session_id) == "/repo/active"
+
+
+@pytest.mark.parametrize("archived", [False, True])
+@pytest.mark.parametrize("exact_first", [False, True])
+def test_rollout_lookup_requires_exact_thread_identity_regardless_of_order(
+    tmp_path, monkeypatch, archived, exact_first,
+):
+    exact = _write_catalog_rollout(tmp_path, "child", archived=archived)
+    _write_catalog_rollout(tmp_path, "grandchild")
+    # A copied session_id is not the native thread id of a fork.
+    _write_catalog_rollout(tmp_path, "child-copy", session_id="child")
+    (tmp_path / "sessions/rollout-empty-child.jsonl").write_text("")
+    (tmp_path / "sessions/rollout-broken-child.jsonl").write_text("{invalid}\n")
+    iglob = codex_sessions.glob.iglob
+
+    def ordered_matches(pattern, *, recursive):
+        # Directory order differs between filesystems. Exercise both orders
+        # without relying on this machine's native directory enumeration.
+        return iter(sorted(
+            iglob(pattern, recursive=recursive),
+            key=lambda path: path == str(exact),
+            reverse=exact_first,
+        ))
+
+    monkeypatch.setattr(codex_sessions.glob, "iglob", ordered_matches)
+
+    assert codex_sessions.codex_rollout_path("child", codex_home=tmp_path) == str(exact)
+    exact.unlink()
+    assert codex_sessions.codex_rollout_path("child", codex_home=tmp_path) is None
 
 
 def test_codex_session_presence_uses_exact_state_db_and_preserves_uncertainty(

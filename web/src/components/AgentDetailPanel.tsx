@@ -1,6 +1,7 @@
 import type { AgentDetailRun } from "../agent-detail";
+import type { Engine } from "../protocol";
 import { finalTextBlocks, presentableProcessBlocks } from "../process-blocks";
-import { ClaudeWorking, Icon } from "../icons";
+import { ClaudeWorking, EngineIcon, Icon } from "../icons";
 import { MessageBlock } from "./MessageBlock";
 import { ProcessTimeline } from "./ProcessTimeline";
 import { PanelResizer } from "./PanelResizer";
@@ -13,9 +14,10 @@ function statusLabel(run: AgentDetailRun): string {
   return "状态未知";
 }
 
-export function AgentDetailPanel({ run, canGoBack, onBack, onClose, onRetry,
+export function AgentDetailPanel({ run, engine = "claude", canGoBack, onBack, onClose, onRetry,
   onLoadEarlier, onOpenAgent, onOpenFile }: {
   run: AgentDetailRun;
+  engine?: Engine;
   canGoBack: boolean;
   onBack: () => void;
   onClose: () => void;
@@ -24,7 +26,7 @@ export function AgentDetailPanel({ run, canGoBack, onBack, onClose, onRetry,
   onOpenAgent: (runId: string, title?: string) => void;
   onOpenFile?: (path: string, line?: number) => void;
 }) {
-  const process = presentableProcessBlocks(run.blocks, "claude");
+  const process = presentableProcessBlocks(run.blocks, engine);
   const final = finalTextBlocks(run.blocks);
   const done = !["running", "pending"].includes(run.status);
   return (
@@ -66,7 +68,7 @@ export function AgentDetailPanel({ run, canGoBack, onBack, onClose, onRetry,
         )}
         {process.length > 0 && (
           <ProcessTimeline blocks={run.blocks} done={done}
-            active={!done} engine="claude" openOverride
+            active={!done} engine={engine} openOverride
             onOpenAgent={onOpenAgent} onOpenFile={onOpenFile} />
         )}
         {final.map((block) => (
@@ -74,7 +76,7 @@ export function AgentDetailPanel({ run, canGoBack, onBack, onClose, onRetry,
             done={block.done} onOpenFile={onOpenFile} />
         ))}
         {!done && <div className="turn-working agent-detail-working" role="status">
-          <ClaudeWorking size={24} />
+          {engine === "claude" ? <ClaudeWorking size={24} /> : <EngineIcon engine={engine} size={24} />}
           <span className="turn-working-tx">子代理处理中</span>
         </div>}
         {!run.loading && !run.error && run.blocks.length === 0 && (

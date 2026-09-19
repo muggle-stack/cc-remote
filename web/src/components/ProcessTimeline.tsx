@@ -71,6 +71,53 @@ function statusIcon(status: ProcessBlock["status"], done: boolean) {
   return <Icon name="verify" size={14} />;
 }
 
+function useProcessInteraction(
+  onStart?: () => number,
+  onEnd?: (token: number, followOutput?: boolean) => void,
+) {
+  const active = useRef(new Map<number, number>());
+  const pending = useRef(new Map<number, number>());
+  const frame = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (frame.current !== null) window.cancelAnimationFrame(frame.current);
+    frame.current = null;
+    for (const token of active.current.values()) onEnd?.(token, false);
+    for (const token of pending.current.values()) onEnd?.(token, false);
+    active.current.clear();
+    pending.current.clear();
+  }, [onEnd]);
+  const cancel = (pointerId: number) => {
+    const token = active.current.get(pointerId) ?? pending.current.get(pointerId);
+    if (token == null) return;
+    active.current.delete(pointerId);
+    pending.current.delete(pointerId);
+    onEnd?.(token, false);
+  };
+  return {
+    cancel,
+    begin(pointerId: number) {
+      cancel(pointerId);
+      const token = onStart?.();
+      if (token != null) active.current.set(pointerId, token);
+    },
+    release(pointerId: number) {
+      const token = active.current.get(pointerId);
+      if (token == null) return;
+      active.current.delete(pointerId);
+      pending.current.set(pointerId, token);
+      if (frame.current !== null) window.cancelAnimationFrame(frame.current);
+      // Keep the viewport frozen through native click and ResizeObserver.
+      frame.current = window.requestAnimationFrame(() => {
+        frame.current = window.requestAnimationFrame(() => {
+          frame.current = null;
+          for (const token of pending.current.values()) onEnd?.(token);
+          pending.current.clear();
+        });
+      });
+    },
+  };
+}
+
 function ProcessDisclosure({ className, summary, children, openOverride,
   onOpenChange, onInteractionStart, onInteractionEnd }: {
   className: string;
@@ -84,51 +131,10 @@ function ProcessDisclosure({ className, summary, children, openOverride,
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
   const open = openOverride ?? uncontrolledOpen;
   const tapGuard = useRef(new PointerTapGuard());
-  const interactionTokens = useRef(new Map<number, number>());
-  const pendingInteractionTokens = useRef(new Map<number, number>());
-  const releaseInteractionFrame = useRef<number | null>(null);
-  useEffect(() => () => {
-    if (releaseInteractionFrame.current !== null) {
-      window.cancelAnimationFrame(releaseInteractionFrame.current);
-    }
-    for (const token of interactionTokens.current.values()) {
-      onInteractionEnd?.(token, false);
-    }
-    for (const token of pendingInteractionTokens.current.values()) {
-      onInteractionEnd?.(token, false);
-    }
-    interactionTokens.current.clear();
-    pendingInteractionTokens.current.clear();
-  }, [onInteractionEnd]);
+  const interaction = useProcessInteraction(onInteractionStart, onInteractionEnd);
   const setOpen = (next: boolean) => {
     setUncontrolledOpen(next);
     onOpenChange?.(next);
-  };
-  const releaseInteraction = (pointerId: number) => {
-    const token = interactionTokens.current.get(pointerId);
-    if (token == null) return;
-    interactionTokens.current.delete(pointerId);
-    pendingInteractionTokens.current.set(pointerId, token);
-    if (releaseInteractionFrame.current !== null) {
-      window.cancelAnimationFrame(releaseInteractionFrame.current);
-    }
-    releaseInteractionFrame.current = window.requestAnimationFrame(() => {
-      releaseInteractionFrame.current = window.requestAnimationFrame(() => {
-        releaseInteractionFrame.current = null;
-        for (const token of pendingInteractionTokens.current.values()) {
-          onInteractionEnd?.(token);
-        }
-        pendingInteractionTokens.current.clear();
-      });
-    });
-  };
-  const cancelInteraction = (pointerId: number) => {
-    const token = interactionTokens.current.get(pointerId)
-      ?? pendingInteractionTokens.current.get(pointerId);
-    if (token == null) return;
-    interactionTokens.current.delete(pointerId);
-    pendingInteractionTokens.current.delete(pointerId);
-    onInteractionEnd?.(token, false);
   };
   return (
     <details className={className} open={open}>
@@ -145,25 +151,23 @@ function ProcessDisclosure({ className, summary, children, openOverride,
             event.pointerId, event.clientX, event.clientY,
           );
           event.currentTarget.setPointerCapture?.(event.pointerId);
-          cancelInteraction(event.pointerId);
-          const token = onInteractionStart?.();
-          if (token != null) interactionTokens.current.set(event.pointerId, token);
+          interaction.begin(event.pointerId);
         }}
         onPointerMove={(event) => {
           if (tapGuard.current.pointerMove(
             event.pointerId, event.clientX, event.clientY,
           )) {
-            cancelInteraction(event.pointerId);
+            interaction.cancel(event.pointerId);
             releaseDraggedPointer(
               event.currentTarget, event.pointerId, event.pointerType);
           }
         }}
         onPointerUp={(event) => {
           tapGuard.current.pointerUp(event.pointerId);
-          releaseInteraction(event.pointerId);
+          interaction.release(event.pointerId);
         }}
         onPointerCancel={(event) => {
-          cancelInteraction(event.pointerId);
+          interaction.cancel(event.pointerId);
           cancelDraggedPointer(
             tapGuard.current,
             event.currentTarget, event.pointerId, event.pointerType);
@@ -415,11 +419,13 @@ export function ProcessActivity({ block, onOpenFile, imageAssets, onLoadImage,
       </div>
     );
   }
-  if (block.processKind === "agent" && onOpenAgent) {
+  const inlineAgent = block.processKind === "agent" && block.input?.agent_run_id === null;
+  if (block.processKind === "agent" && !inlineAgent && onOpenAgent) {
     return (
       <button type="button"
         className={`process-activity process-agent-card process-${block.status}`}
-        onClick={() => onOpenAgent(block.item_id, block.title)}>
+        onClick={() => onOpenAgent(typeof block.input?.agent_run_id === "string"
+          ? block.input.agent_run_id : block.item_id, block.title)}>
         <span className="process-item-ic"><Icon name="spark" size={15} /></span>
         <span className="process-agent-copy">
           <span className="process-item-title">{block.title}</span>
@@ -434,6 +440,8 @@ export function ProcessActivity({ block, onOpenFile, imageAssets, onLoadImage,
       </button>
     );
   }
+  const displayInput = { ...block.input };
+  if (block.processKind === "agent") delete displayInput.agent_run_id;
   const imageView = block.tool?.toLowerCase().replaceAll("_", "") === "viewimage";
   const imagePath = imageView
     ? filePathsFromInput(block.input)[0] ?? ""
@@ -459,7 +467,7 @@ export function ProcessActivity({ block, onOpenFile, imageAssets, onLoadImage,
   const hasBody = !!(block.summary || block.detail || block.output || block.diff
     || block.progress || block.explanation || block.command || block.cwd
     || block.plan?.length || block.exit_code != null || block.duration_ms != null
-    || (block.input && Object.keys(block.input).length));
+    || Object.keys(displayInput).length);
   const body = (
     <>
       {block.progress && <div className="process-progress">{block.progress}</div>}
@@ -478,7 +486,7 @@ export function ProcessActivity({ block, onOpenFile, imageAssets, onLoadImage,
       {block.cwd && <div className="process-meta">{block.cwd}</div>}
       {block.summary && !imageView
         && <div className="process-copy">{block.summary}</div>}
-      {block.detail && <ToolOutput output={block.detail} label="详情" />}
+      {block.detail && <ToolOutput output={block.detail} label={inlineAgent ? "消息" : "详情"} />}
       {onOpenFile && filePaths.map((filePath) => (
         <button key={filePath} type="button" className="process-file-link"
           onClick={() => onOpenFile(filePath)}>
@@ -495,9 +503,9 @@ export function ProcessActivity({ block, onOpenFile, imageAssets, onLoadImage,
           onPreviewImage={onPreviewImage}
           onPreviewHistoryImage={onPreviewHistoryImage} />
       )}
-      {block.input && Object.keys(block.input).length > 0
+      {Object.keys(displayInput).length > 0
         && filePaths.length === 0 && !imageView && (
-        <ToolInput input={block.input} omit={[
+        <ToolInput input={displayInput} omit={[
           ...(block.command ? ["command", "cmd"] : []),
           ...(block.cwd ? ["cwd", "workdir"] : []),
         ]} />
@@ -594,7 +602,8 @@ function TimelineItem({ block, onOpenFile, imageAssets, onLoadImage,
         onOpenChange={(open) => onItemOpenChange?.(key, open)}
         onInteractionStart={onInteractionStart}
         onInteractionEnd={onInteractionEnd}
-        summary={<><Icon name="spark" size={14} /><span>思考</span>
+        summary={<><Icon name="spark" size={14} />
+          <span className="process-item-title">思考</span>
           <Icon name="chev" size={13} /></>}>
         <div className="process-reasoning-body"><MessageBlock text={text.text}
           done={text.done} onOpenFile={onOpenFile} imageAssets={imageAssets}
@@ -789,9 +798,7 @@ export function ProcessTimeline({ blocks, done, active, outcome, problem, durati
   const [now, setNow] = useState(Date.now());
   const manuallyToggled = useRef(false);
   const tapGuard = useRef(new PointerTapGuard());
-  const interactionTokens = useRef(new Map<number, number>());
-  const pendingInteractionTokens = useRef(new Map<number, number>());
-  const releaseInteractionFrame = useRef<number | null>(null);
+  const interaction = useProcessInteraction(onInteractionStart, onInteractionEnd);
 
   useEffect(() => {
     // A steer or a history refresh may settle a visible segment before its
@@ -812,20 +819,6 @@ export function ProcessTimeline({ blocks, done, active, outcome, problem, durati
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [processActive]);
-  useEffect(() => () => {
-    if (releaseInteractionFrame.current !== null) {
-      window.cancelAnimationFrame(releaseInteractionFrame.current);
-      releaseInteractionFrame.current = null;
-    }
-    for (const token of interactionTokens.current.values()) {
-      onInteractionEnd?.(token, false);
-    }
-    for (const token of pendingInteractionTokens.current.values()) {
-      onInteractionEnd?.(token, false);
-    }
-    interactionTokens.current.clear();
-    pendingInteractionTokens.current.clear();
-  }, [onInteractionEnd]);
 
   const hasDeferredOnly = timelineItems.length === 0 && needsAuthoritativeDetail;
   const waitingForContent = timelineItems.length === 0
@@ -885,57 +878,26 @@ export function ProcessTimeline({ blocks, done, active, outcome, problem, durati
   const pointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
     tapGuard.current.pointerDown(event.pointerId, event.clientX, event.clientY);
     event.currentTarget.setPointerCapture?.(event.pointerId);
-    releaseCancelledInteraction(event.pointerId);
-    const token = onInteractionStart?.();
-    if (token != null) interactionTokens.current.set(event.pointerId, token);
+    interaction.begin(event.pointerId);
   };
   const pointerMove = (event: ReactPointerEvent<HTMLButtonElement>) => {
     if (tapGuard.current.pointerMove(
       event.pointerId, event.clientX, event.clientY,
     )) {
-      releaseCancelledInteraction(event.pointerId);
+      interaction.cancel(event.pointerId);
       releaseDraggedPointer(
         event.currentTarget, event.pointerId, event.pointerType);
     }
   };
   const pointerUp = (event: ReactPointerEvent<HTMLButtonElement>) => {
     tapGuard.current.pointerUp(event.pointerId);
-    releaseInteraction(event.pointerId);
+    interaction.release(event.pointerId);
   };
   const pointerCancel = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    releaseCancelledInteraction(event.pointerId);
+    interaction.cancel(event.pointerId);
     cancelDraggedPointer(
       tapGuard.current,
       event.currentTarget, event.pointerId, event.pointerType);
-  };
-  const releaseCancelledInteraction = (pointerId: number) => {
-    const token = interactionTokens.current.get(pointerId)
-      ?? pendingInteractionTokens.current.get(pointerId);
-    if (token == null) return;
-    interactionTokens.current.delete(pointerId);
-    pendingInteractionTokens.current.delete(pointerId);
-    onInteractionEnd?.(token, false);
-  };
-  const releaseInteraction = (pointerId: number) => {
-    const token = interactionTokens.current.get(pointerId);
-    if (token == null) return;
-    interactionTokens.current.delete(pointerId);
-    pendingInteractionTokens.current.set(pointerId, token);
-    if (releaseInteractionFrame.current !== null) {
-      window.cancelAnimationFrame(releaseInteractionFrame.current);
-    }
-    // Native click is dispatched after pointerup in the same task. Keep the
-    // viewport frozen through the following ResizeObserver frame as well, so
-    // the clicked disclosure can settle before output following resumes.
-    releaseInteractionFrame.current = window.requestAnimationFrame(() => {
-      releaseInteractionFrame.current = window.requestAnimationFrame(() => {
-        releaseInteractionFrame.current = null;
-        for (const token of pendingInteractionTokens.current.values()) {
-          onInteractionEnd?.(token);
-        }
-        pendingInteractionTokens.current.clear();
-      });
-    });
   };
   return (
     <section data-process-detail-root

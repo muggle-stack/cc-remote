@@ -67,7 +67,8 @@ from cc_remote.wrapper.usage_limit import is_usage_limit_failure
 # retaining the old boundary for task bookkeeping without a reply.
 # v41 keeps native isMeta recovery prompts inside their original human turn.
 # v42 replaces recovered text prefixes and bounds summary answer block counts.
-_SCHEMA_VERSION = 42
+# v43 makes manual /compact a visible turn owning its native boundary.
+_SCHEMA_VERSION = 43
 _FINGERPRINT_SAMPLE_BYTES = 64 * 1024
 _DEFAULT_MAX_ENTRIES = 128
 _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
@@ -1294,6 +1295,13 @@ class HistoryIndexStore:
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
             current = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if current in range(10, 43):
+                # /compact is now a visible native command. Its graph boundary
+                # and the derived pages must agree; retain source-bound assets.
+                for table in ("history_pages", "history_turn_details"):
+                    connection.execute(f"DELETE FROM {table} WHERE engine='claude'")
+                for table in ("claude_compact_sources", "claude_compact_records", "claude_compact_queue"):
+                    connection.execute(f"DROP TABLE IF EXISTS {table}")
             if current in range(10, 42):
                 # v42 bounds answer summaries and handles recovered prefixes.
                 # Full source events, images and native graph indexes remain
@@ -1448,8 +1456,8 @@ class HistoryIndexStore:
                 for table in ("history_pages", "history_turn_details"):
                     connection.execute(
                         f"DELETE FROM {table} WHERE engine='codex'")
-            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41):
-                # The independent v22-v42 invalidations above suffice.
+            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42):
+                # The independent v22-v43 invalidations above suffice.
                 pass
             elif current not in (0, _SCHEMA_VERSION):
                 # v9 changes the invariant of history_turn_details: those rows

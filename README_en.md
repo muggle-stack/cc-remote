@@ -1,13 +1,13 @@
 # cc-remote
 
-**Use Claude Code and Codex on your machine from your phone or browser.**
+**Use Claude Code and Codex on your machine from your phone, browser or terminal.**
 
-Self-hosted · Multiple sessions and devices · Live tool activity · Code / Work · PWA
+Self-hosted · Multiple sessions and devices · Live tool activity · Code / Work · Web / PWA / TUI
 
 **Product version: v3.0.0** · Wire protocol v71
 
 [中文](README.md) · [Engine comparison](#engines-and-features) · [Quick start](#quick-start) ·
-[Install and upgrade](#install-and-upgrade) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)
+[Terminal workspace](#terminal-workspace) · [Install and upgrade](#install-and-upgrade) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)
 
 cc-remote brings your local agent's sessions, tool activity, files and controls to
 remote clients. Start a task on your computer, check progress from your phone,
@@ -41,6 +41,9 @@ features or wire protocol across different commits.
 - **Work from a phone.** Compact engine menus, light/dark themes, image zoom, PWA
   installation and optional background notifications. Notifications default to
   generic status; showing a session name requires an explicit opt-in.
+- **Continue in a terminal.** The full-screen TUI supports Claude/Codex Code and
+  Work, sharing Web sessions, running state and queues. Use Vim-style controls,
+  a searchable session tree, tabs and tool details. [Install and run](#terminal-workspace).
 
 ### Code and Work
 
@@ -62,6 +65,7 @@ and extensions still depend on the native installation on the selected device.
 |---|---|---|
 | Connection | Daily Claude CLI + Agent SDK | Official app-server, shared daemon |
 | Code / Work | Both | Both |
+| Full-screen terminal TUI | Supported | Supported |
 | Models and reasoning | Native models and supported levels | Native models, reasoning effort, service tier |
 | Plan | Native Plan mode | Native Plan collaboration mode |
 | Goal | Completion condition, check count, latest feedback, token usage and elapsed time | Objective, optional token budget, pause/resume, complete and clear |
@@ -147,6 +151,7 @@ preview domain; it does not proxy arbitrary private-network services.
 ```mermaid
 flowchart LR
   browser["Phone / browser"] <-->|HTTPS / WSS| relay["Relay + static Web client"]
+  terminal["Terminal TUI"] <-->|WSS| relay
   subgraph device["Your machine"]
     wrapper["Wrapper"] <--> engine["Claude SDK / Codex app-server"]
   end
@@ -305,19 +310,49 @@ policy is not a replacement for separate OS users, containers or virtual machine
 | Codex App: [macOS](docs/codex-desktop-launcher.md) / [Linux](docs/codex-desktop-linux.md) | Optional App, daily CLI and Wrapper on one daemon |
 | [Codex App tools](docs/codex-app-tools.md) | Optional App-control MCP |
 | [Timed messages](docs/timed-messages.md) | Scheduled queue receipts, message tags and countdown UI |
+| [Terminal workspace](docs/tui.md) | TUI setup, connections, Vim controls, session tree, previews and terminal limits |
 | [Changelog](CHANGELOG.md) | Version changes and migrations |
+
+<a id="terminal-workspace"></a>
 
 ## Terminal workspace (preview)
 
-The built-in Python/Textual TUI shares relay/wrapper sessions with Web. It
-provides session tabs, a Space e directory tree with search, Vim-style reading
-and input modes, message jumps, and copy/quote actions that retain the reading
-position. Thinking/tool/process
-details, elapsed time, Goal/Plan, usage, queue editing and shared session
-controls are available. Markdown and compatible-terminal image previews are
-built in; other graphical content has an explicit Web handoff.
-See the [terminal workspace guide](docs/tui.md) for installation, keys and
-terminal boundaries. Use `--line-mode` for the original line-oriented client.
+The built-in Python/Textual full-screen TUI supports **Claude/Codex Code and
+Work** through the same Relay and Wrapper as Web. Sessions, running state and
+queues share the control link. Closing the TUI leaves running tasks and accepted
+queued messages intact; native clients' session ownership rules still apply.
+
+After installing the source dependencies above, add the optional terminal packages:
+
+```bash
+.venv/bin/python -m pip install -r requirements-tui.txt
+# Offline preview; no server connection or model calls.
+./scripts/cc-remote-tui --demo
+# Connect to your Relay; replace the example domain and enter the password when prompted.
+./scripts/cc-remote-tui --engine codex --url wss://cc.example.com/ws
+```
+
+Use `--engine claude` for Claude or `--space work` for Work. Append a session ID
+to open it directly, or use `--machine <id>` to select an authorized device.
+The TUI, Relay and Wrapper must use the same source/protocol version. See the
+[terminal workspace guide](docs/tui.md) for authentication, local automatic
+login and a launcher that works from any directory.
+
+| Action | Default keys |
+|---|---|
+| Session directory tree and search | `Space e` in Normal mode, then `/` to search |
+| Switch open sessions | `H` / `L` in Normal mode; `Space ,` searches tabs |
+| Focus transcript / draft | `Ctrl+k` / `Ctrl+j` |
+| Type and send | `i` enters Insert; `Esc` returns to Normal; Normal `Enter` sends |
+| Queue / stop the current turn | `Ctrl+e` / `Ctrl+x` |
+| Current shortcut help | `Space h` |
+
+Vim selection, copy and quote, on-demand thinking/tool/process details, elapsed
+time, Goal / Plan, usage and queue editing are available. Active status text
+sweeps from left to right and stops on completion or interruption; set
+`TEXTUAL_ANIMATIONS=none` to disable animation. Markdown previews work in the
+terminal; images depend on its graphics protocol, and other content offers a
+Web handoff. Use `--line-mode` for the original line-oriented client.
 
 ## Development
 

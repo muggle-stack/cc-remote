@@ -2630,7 +2630,7 @@ class TurnDetail(_Base):
 
 
 class GetAgentDetail(_Command):
-    """client -> wrapper: fetch one Claude subagent's public process projection."""
+    """client -> wrapper: fetch one subagent's public process projection."""
     type: Literal["get_agent_detail"] = "get_agent_detail"
     session_id: WireId
     run_id: WireId
@@ -2643,12 +2643,13 @@ class GetAgentDetail(_Command):
 
 
 class AgentDetail(_Base):
-    """wrapper -> browser: one read-only page from a Claude subagent run.
+    """wrapper -> browser: one read-only page from a subagent run.
 
-    ``run_id`` is a stable public hash of the spawning Agent tool call. Raw
+    For Claude, ``run_id`` is a stable public hash of the spawning Agent tool call. Raw
     Claude agent ids, delegated prompts and output-file paths never cross this
     boundary. Live batches are unbuffered hints; a normal response is always a
-    source-backed or resident authoritative snapshot.
+    source-backed or resident authoritative snapshot. Codex cards resolve a
+    native child only after verifying account-local ancestry to this session.
     """
     type: Literal["agent_detail"] = "agent_detail"
     session_id: WireId

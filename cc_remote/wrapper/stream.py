@@ -39,7 +39,9 @@ from cc_remote.protocol import (
     TurnEnd, TurnResult, UserMsg,
 )
 from cc_remote.wrapper.sanitize import bounded_text, bounded_tool_input
-from cc_remote.wrapper.claude_compaction import compact_metadata
+from cc_remote.wrapper.claude_compaction import (
+    compact_completion_events, compact_metadata, manual_compact_prompt,
+)
 from cc_remote.wrapper.claude_model_fallback import FALLBACK_TOOL, model_fallback_event
 from cc_remote.wrapper.turn_changes import native_claude_diff
 from cc_remote.wrapper.token_usage import UsageLedger, native_usage
@@ -282,6 +284,10 @@ def replayed_user_message_id(message: Any) -> str | None:
         # UserMessage channel as a real browser prompt.  A replacement query
         # can start before that late marker reaches the SDK reader; binding it
         # would give the next optimistic row the preceding turn's UUID.
+        return None
+    raw_text = message.content if isinstance(message.content, str) else "".join(
+        block.text for block in message.content if isinstance(block, TextBlock))
+    if raw_text and _is_meta_user_text(raw_text):
         return None
     content = message.content if isinstance(message.content, list) else []
     if any(isinstance(block, (ToolResultBlock, ServerToolResultBlock))
@@ -664,8 +670,11 @@ class StreamTranslator:
                  item_turns: dict[str, str] | None = None,
                  item_titles: dict[str, str] | None = None,
                  item_meta: dict[str, tuple[str, str | None]] | None = None,
-                 item_commands: dict[str, str] | None = None):
+                 item_commands: dict[str, str] | None = None,
+                 manual_compact: bool = False):
         self.tool_result_max = tool_result_max
+        self.manual_compact = manual_compact
+        self.compact_boundary_id: str | None = None
         self.turn_id = _wire_id(turn_id, "turn") if turn_id else None
         # These maps are optionally shared by every translator for one resident
         # session. Claude's queue is continuous across ResultMessage boundaries;
@@ -1475,6 +1484,7 @@ class StreamTranslator:
             msg.data if isinstance(msg.data, dict) else {})
         if event is None:
             return []
+        self.compact_boundary_id = event.item_id
         event.turn_id = self.turn_id
         if self._compaction_id is not None:
             # Status UUIDs and persisted boundary UUIDs differ. Bind the live
@@ -1599,10 +1609,13 @@ class StreamTranslator:
                     turn_id=self.turn_id, channel="final"))
             for tool_id in sorted({key[0] for key in self._tool_pending}):
                 events.extend(self._flush_tool_deltas(tool_id))
+            missing_boundary = self.manual_compact and self.compact_boundary_id is None
+            if self.manual_compact and self.compact_boundary_id and not msg.is_error:
+                events.extend(compact_completion_events(self.compact_boundary_id, self.turn_id))
             terminal = TurnEnd(result=TurnResult(
-                subtype=msg.subtype,
+                subtype="error" if missing_boundary and not msg.is_error else msg.subtype,
                 duration_ms=msg.duration_ms,
-                is_error=msg.is_error,
+                is_error=msg.is_error or missing_boundary,
                 total_cost_usd=msg.total_cost_usd,
                 num_turns=msg.num_turns,
             ), turn_id=self._last_assistant_uuid,
@@ -1990,6 +2003,31 @@ def _compact_chain_index(
         for uid in chain_ids
     ):
         return None
+    # Claude persists the completed boundary before replaying the command that
+    # caused it. Put that exact /compact row before its boundary for pagination
+    # and narrative ownership; ordinary post-compaction prompts stay in place.
+    commands: dict[str, str] = {}
+    boundary = None
+    try:
+        with open(source_path, "rb") as source:
+            for uid in chain_ids:
+                if rows[uid][:2] == ("system", "compact_boundary"):
+                    boundary = uid
+                elif boundary is not None and rows[uid][6]:
+                    row = _indexed_transcript_row(source, uid, rows[uid],
+                                                 max_record_bytes=max_record_bytes)
+                    compact = _indexed_transcript_row(source, boundary, rows[boundary],
+                                                     max_record_bytes=max_record_bytes)
+                    if (row and compact and compact_metadata(compact).get("trigger") != "auto"
+                            and manual_compact_prompt((row.get("message") or {}).get("content"))):
+                        commands[boundary] = uid
+                    boundary = None
+    except OSError:
+        return None
+    if commands:
+        moved = set(commands.values())
+        chain_ids = [part for uid in chain_ids if uid not in moved
+                     for part in ([commands[uid], uid] if uid in commands else [uid])]
     return chain_ids, rows, queued
 
 
@@ -2482,6 +2520,7 @@ def _load_compact_chain_messages(
                             "role": "system",
                             "content": "",
                         },
+                        internal_event=internal,
                         parent_tool_use_id=None,
                     ))
                 timestamp = row.get("timestamp")
@@ -2860,7 +2899,7 @@ def translate_history(
     but cannot move an already-settled answer's terminal clock. Rich
     assistant blocks retain the same thinking/commentary/final and semantic tool
     structure as the live stream. Non-conversational user turns (compact summaries,
-    slash-command envelopes, local-command stdout) remain hidden.
+    slash-command envelopes other than /compact, local-command stdout) remain hidden.
     """
     events: list = []
     turn_open = False
@@ -2877,6 +2916,7 @@ def translate_history(
     settled_answer_seen = False
     background_followup = False
     turn_failed = False
+    compact_requested = False
     # Older wrappers could bind a replacement query's browser id to Claude's
     # late ``[Request interrupted by user]`` record.  The marker terminates the
     # preceding turn; transfer that proven-but-misplaced alias only when the
@@ -2983,6 +3023,7 @@ def translate_history(
         nonlocal ambiguous_final_mid, ambiguous_final_start
         nonlocal turn_start_ts, settled_answer_seen, turn_failed
         nonlocal background_followup
+        nonlocal compact_requested
         if turn_open:
             # SessionMessage rows can omit stop_reason. Live must conservatively
             # treat such text as commentary, but history has the next user/EOF as
@@ -3029,6 +3070,7 @@ def translate_history(
             settled_answer_seen = False
             background_followup = False
             turn_failed = False
+            compact_requested = False
 
     for message_index, m in enumerate(messages):
         advance_terminal_clock = True
@@ -3052,6 +3094,9 @@ def translate_history(
                 # human turn. Match the SDK's isMeta filter even when reading
                 # raw compact ancestry, without guessing from prompt text.
                 continue
+            compact_prompt = manual_compact_prompt(content)
+            if compact_prompt is not None:
+                content = compact_prompt
             if isinstance(content, str):
                 internal_event = (internal_user_events or {}).get(source_uid)
                 if internal_event is not None:
@@ -3086,6 +3131,9 @@ def translate_history(
                     turn_open = True
                     current_turn_id = message_uid
                     background_followup = False
+                    compact_requested = compact_prompt is not None
+                    # A command row alone does not prove successful compaction.
+                    turn_failed = compact_requested
             elif isinstance(content, list):
                 if content and all(
                     isinstance(block, dict) and block.get("type") == "text"
@@ -3197,7 +3245,8 @@ def translate_history(
                     current_turn_id = message_uid
                     background_followup = False
         elif role == "system":
-            internal_event = (internal_user_events or {}).get(source_uid)
+            internal_event = ((internal_user_events or {}).get(source_uid)
+                              or getattr(m, "internal_event", None))
             if internal_event is not None:
                 # Manual compaction can finish minutes after an answer. Keep
                 # its process timestamp without retiming the settled response.
@@ -3210,6 +3259,12 @@ def translate_history(
                     event.ts = timestamp
                 events.append(event)
                 turn_open = True
+                if compact_requested and event.kind == "compaction" and event.status == "succeeded":
+                    receipt = compact_completion_events(event.item_id, current_turn_id)
+                    for item in receipt:
+                        item.ts = event.ts
+                    events.extend(receipt)
+                    turn_failed = False
         elif role == "assistant":
             if not isinstance(content, list):
                 continue
@@ -3655,6 +3710,8 @@ def _is_meta_user_text(text: str) -> bool:
     """Skip non-conversational user turns that would just clutter the history:
     compact summaries, slash-command envelopes, and local-command stdout/stderr."""
     t = text.lstrip()
+    if manual_compact_prompt(t) is not None:
+        return False
     return (
         t.startswith("This session is being continued from a previous conversation")
         or t.startswith("<command-name>")

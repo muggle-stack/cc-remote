@@ -226,6 +226,8 @@ class SdkHandle:
         self.service_defer_events = False
         self._steers = PendingSteers()
         self._turn_root_id: str | None = None
+        self._autonomous_steer_root: dict | None = None
+        self.steer_adoption_callback: Callable[[dict], None] | None = None
         self._context_revision = 0
         # reasoning effort is a spawn-time flag (--effort), not a runtime setter.
         # `effort` is the desired level; `applied_effort` is what the live client
@@ -704,12 +706,18 @@ class SdkHandle:
             launch_auto_compact[1])
         self._start_message_pump()
         if self.service_recovery is not None:
-            self._turn_active = True
             self._turn_root_id = self.service_recovery["id"]
-            self._turn_origin_id = self.service_recovery["id"]
-            self._message_route_owner = "managed"
+            if self.service_recovery.get("background_steer"):
+                self._autonomous_steer_root = self.service_recovery
+                self._turn_origin_id = self.service_recovery.get("previous_origin_id")
+            else:
+                self._turn_active = True
+                self._turn_origin_id = self.service_recovery["id"]
+                self._message_route_owner = "managed"
         elif hasattr(self.client, "description"):
             self._turn_origin_id = self.client.description.get("origin_id")
+        if hasattr(self.client, "description"):
+            self._steers.pending = dict(self.client.description.get("pending_steers") or {})
         if not self.service_defer_events:
             self.start_service_events()
         log.info("sdk connected", resume=bool(resume_id), fork=fork, cwd=opts.cwd,
@@ -988,7 +996,7 @@ class SdkHandle:
             if self._message_pump_task is not None:
                 if self._message_pump_task.done():
                     raise RuntimeError("Claude SDK message pump is not running") from self._message_pump_error
-                if self._turn_active or self._turn_consumer_active:
+                if self._turn_active or self._turn_consumer_active or self._autonomous_steer_root:
                     raise RuntimeError("Claude SDK already has an active response")
                 # Do not let a Query overtake a task notification that the sole
                 # reader already routed but whose machine callback has not yet
@@ -1052,30 +1060,47 @@ class SdkHandle:
             # going through connect(). Real SDK connections always use the sole pump.
             await client.query(prompt)
 
+    @property
+    def autonomous_steer_pending(self) -> bool:
+        return bool(self._autonomous_steer_root and not self._autonomous_steer_root.get("adopted"))
+
     async def steer(self, prompt, *, native_id: str, metadata: dict) -> None:
         """Write `priority=next` without interrupting or creating another reader."""
         async with self._control_request_lock:
             async with self._message_route_lock:
                 self.check_service_delivery()
                 client = self.client
+                background_id = self._steers.background_id if not (
+                    self._turn_active or self._autonomous_steer_root or self._turn_consumer_active) else None
                 if (client is None or self.control_plane_failed
-                        or self.message_pump_failed or not self._turn_active
+                        or self.message_pump_failed
+                        or not (self._turn_active or self.autonomous_steer_pending or background_id)
                         or self._message_pump_task is None):
                     raise ClaudeSteerRejected("Claude has no active response")
-                if hasattr(client, "steer"):
-                    # The persistent owner checks its live boundary too; its
-                    # terminal may already be ahead of this controller's poll.
-                    await client.steer(prompt, native_id=native_id,
-                                       metadata=metadata, turn_id=self._turn_root_id)
-                else:
+                if not hasattr(client, "steer") or native_id not in self._steers.pending:
                     self._steers.add(native_id, metadata)
+                if background_id:
+                    self._autonomous_steer_root = {**metadata, "background_id": background_id,
+                                                   "background_origin": self._steers.background_origin_data,
+                                                   "previous_origin_id": self._turn_origin_id}
+                    self._turn_root_id = metadata["id"]
+                try:
+                    if hasattr(client, "steer"):
+                        await client.steer(prompt, native_id=native_id,
+                                           metadata=metadata, turn_id=self._turn_root_id,
+                                           **({"background_id": background_id} if background_id else {}))
+                    else:
 
-                    async def stream():
-                        yield steer_message(prompt, native_id)
+                        async def stream():
+                            yield steer_message(prompt, native_id)
 
-                    # Keep registration on uncertain writes: a late exact echo
-                    # can still confirm acceptance. Never retry this as Query.
-                    await client.query(stream())
+                        # Retain ownership on an uncertain write; never retry.
+                        await client.query(stream())
+                except ClaudeSteerRejected:
+                    self._steers.pending.pop(native_id, None)
+                    if background_id:
+                        self._autonomous_steer_root = None
+                    raise
 
     async def interrupt(self) -> None:
         assert self.client is not None
@@ -1468,6 +1493,7 @@ class SdkHandle:
         self._turn_consumer_active = False
         self._steers = PendingSteers()
         self._turn_root_id = None
+        self._autonomous_steer_root = None
         self._message_route_owner = None
         self._message_pump_error = None
         self._service_delivery_error = None
@@ -1538,6 +1564,22 @@ class SdkHandle:
                         and not bool(getattr(message, "is_error", False))):
                     self.context_probe_suppressed = False
                 async with self._message_route_lock:
+                    if steer is not None and self.autonomous_steer_pending:
+                        # Drain only earlier autonomous frames before activating
+                        # the new human route. Tools and Results before the exact
+                        # echo must never acquire this user's identity.
+                        await self._background_callbacks_drained.wait()
+                        self._turn_active = True
+                        self._autonomous_steer_root["adopted"] = True
+                        self._pending_turn_background_release = asyncio.Event()
+                        self._pending_turn_origin_id = steer["id"]
+                        self._steers.handoff_background(self._autonomous_steer_root.get("background_id"))
+                        if self.steer_adoption_callback:
+                            self.steer_adoption_callback({**steer, "background_origin":
+                                                          self._autonomous_steer_root.get("background_origin")})
+                    if (getattr(message, "_cc_steer_cancelled", None)
+                            and not self._steers.pending and not self._turn_active):
+                        self._autonomous_steer_root = None
                     origin_kind = _message_origin_kind(message)
                     top_level_user = bool(
                         isinstance(message, UserMessage)
@@ -1636,8 +1678,17 @@ class SdkHandle:
                     self._background_callbacks_pending += 1
                     self._background_callbacks_drained.clear()
                     try:
+                        background_owner = service_origin if service_seed else self._turn_origin_id
+                        if not service_seed and self._autonomous_steer_root:
+                            from cc_remote.claude_steering import _origin_key
+
+                            old_origin = self._autonomous_steer_root.get("background_origin")
+                            origin = getattr(message, "origin", None)
+                            if (isinstance(origin, dict) and isinstance(old_origin, dict)
+                                    and _origin_key(origin) == _origin_key(old_origin)):
+                                background_owner = self._autonomous_steer_root.get("previous_origin_id")
                         await self._background_messages.put(
-                            (message, release, service_origin if service_seed else self._turn_origin_id))
+                            (message, release, background_owner))
                     except BaseException:
                         self._background_callback_completed()
                         raise
@@ -1738,6 +1789,7 @@ class SdkHandle:
                     raise message.error
                 yield message
                 if isinstance(message, ResultMessage):
+                    self._autonomous_steer_root = None
                     return
         finally:
             self._turn_consumer_active = False
@@ -1839,6 +1891,7 @@ class SdkHandle:
         self._turn_active = False
         self._turn_consumer_active = False
         self._message_route_owner = None
+        self._autonomous_steer_root = None
         self._turn_background_release = None
         self._pending_turn_background_release = None
         self._pending_turn_origin_id = None

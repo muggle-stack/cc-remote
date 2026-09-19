@@ -65,6 +65,7 @@ from cc_remote.tui_actions import ACTIONS
 from cc_remote.tui_attachments import read_attachment
 from cc_remote.tui_clipboard import read_clipboard_image
 from cc_remote.tui_chrome import (
+    activity_sweep,
     settings_text,
     status_text as styled_status,
 )
@@ -1126,7 +1127,18 @@ def offset(text: str, point: tuple[int, int]) -> int:
 class Transcript(VimArea):
     """Read-only document with a logical cursor independent of the composer."""
 
+    COMPONENT_CLASSES = VimArea.COMPONENT_CLASSES | {
+        "transcript--activity", "transcript--activity-highlight",
+        "transcript--activity-on-user",
+    }
+    DEFAULT_CSS = """
+    Transcript > .transcript--activity { color: $text-muted; }
+    Transcript > .transcript--activity-highlight { color: #f5f5f5; }
+    Transcript > .transcript--activity-on-user { color: #a4afba; }
+    """
     line_styles: dict[int, str] = {}
+    activity_ranges: dict[int, tuple[int, int, bool]] = {}
+    activity_frame: int | None = None
     resize_bookmark = None
     follow_scroll_sid = None
     follow_revision = 0
@@ -1261,12 +1273,44 @@ class Transcript(VimArea):
                 and rich_lines[line_index].plain == line.plain):
             line = rich_lines[line_index].copy()
         line.stylize(self.line_styles.get(line_index, ""))
+        if self.activity_frame is not None and line_index in self.activity_ranges:
+            start, end, on_user = self.activity_ranges[line_index]
+            activity_sweep(
+                line, start, end, self.activity_frame / 23,
+                self.get_component_rich_style(
+                    "transcript--activity-on-user" if on_user
+                    else "transcript--activity"
+                ),
+                self.get_component_rich_style("transcript--activity-highlight"),
+            )
         return line
 
-    def style_messages(self, text: str, starts: list) -> None:
+    def refresh_activity(self) -> None:
+        if not self.activity_ranges:
+            self.activity_frame = None
+            return
+        enabled = self.app.animation_level != "none" and not self.app.no_color
+        frame = int(time.monotonic() * 10) % 24 if enabled else None
+        if frame == self.activity_frame:
+            return
+        self.activity_frame = frame
+        first = int(self.scroll_y)
+        rows = self.wrapped_document._offset_to_line_info[
+            first:first + self.scrollable_content_region.height
+        ]
+        visible = [first + y for y, (row, _) in enumerate(rows)
+                   if row in self.activity_ranges]
+        if visible:
+            self._line_cache.clear()
+            for y in visible:
+                self.refresh_lines(y)
+
+    def style_messages(self, text: str, starts: list, view) -> None:
         # Inline styles can change while the rendered characters stay equal.
         self.notify_style_update()
         self.line_styles = {}
+        self.activity_ranges = {}
+        seen_turns = set()
         row = 0
         for index, (start, block) in enumerate(starts):
             end = starts[index + 1][0] if index + 1 < len(starts) else len(text)
@@ -1298,6 +1342,20 @@ class Transcript(VimArea):
                 if muted
                 else "bold green"
             )
+            turn = view.presentation.turns.get(block.turn)
+            if turn and turn.status == "running":
+                header = text[start:end].split("\n", 1)[0]
+                if block.role == "detail" or (
+                    block.role == "tool_group"
+                    and block.data.get("status") == "running"
+                ):
+                    self.activity_ranges[row] = (0, len(header), False)
+                elif block.turn not in seen_turns and "  [" in header:
+                    # The first block owns the turn's clock/status suffix.
+                    self.activity_ranges[row] = (
+                        header.index("  [") + 2, len(header), block.role == "user",
+                    )
+            seen_turns.add(block.turn)
             if block.role == "detail" and block.expanded:
                 sections = block.data.get("sections", [])
                 projection = self.parent.projection
@@ -1759,6 +1817,7 @@ class WorkspaceApp(App, inherit_bindings=False):
             else:
                 editor.load_text("")
                 reader.load_text("")
+                reader.activity_ranges = {}
                 reader.parent.reset(None)
             reader.focus()
         elif sid:
@@ -1858,7 +1917,7 @@ class WorkspaceApp(App, inherit_bindings=False):
             text, starts = reader.parent.project(
                 text, starts, projection_identity
             )
-            reader.style_messages(text, starts)
+            reader.style_messages(text, starts, view)
             reader.follow_layout_pending = True
             with reader.presentation_update():
                 if text != reader.text:
@@ -1904,6 +1963,7 @@ class WorkspaceApp(App, inherit_bindings=False):
                 self.jump(role, direction=direction)
         if view:
             self.refresh_turn_clocks(view, reader)
+            reader.refresh_activity()
             if self.app_focus and not view.loading and self.starts:
                 view.read_tab()
         reader.parent.sync()
@@ -2006,6 +2066,9 @@ class WorkspaceApp(App, inherit_bindings=False):
                 block, show_turn=True, now=now,
                 detail_key=self.client.keys.layer_label("reader", "details"),
             )
+            if row in reader.activity_ranges:
+                begin, _, on_user = reader.activity_ranges[row]
+                reader.activity_ranges[row] = (begin, len(new), on_user)
             # Clock updates only replace a single header line. Never touch
             # multi-line activity text or replace content from another block.
             if old != new and "\n" not in new:

@@ -5,7 +5,7 @@ import {
   emptyAgentRun,
   type AgentDetailPanelState,
 } from "../agent-detail";
-import type { AgentDetail, ProcessStatus } from "../protocol";
+import type { AgentDetail, Engine, ProcessStatus } from "../protocol";
 import type { RelayWs } from "../ws";
 import { uuid } from "../util";
 import { AgentDetailPanel } from "./AgentDetailPanel";
@@ -17,6 +17,7 @@ export interface AgentDetailSelection {
   runId: string;
   title: string;
   status?: ProcessStatus;
+  engine?: Engine;
 }
 
 export function AgentDetailController({ selection, ws, onListen, onClose,
@@ -134,7 +135,7 @@ export function AgentDetailController({ selection, ws, onListen, onClose,
     return () => clearTimeout(timer);
   }, [request, run]);
   if (!run) return null;
-  return <AgentDetailPanel run={run} canGoBack={panel.stack.length > 1}
+  return <AgentDetailPanel run={run} engine={selection.engine} canGoBack={panel.stack.length > 1}
     onBack={() => setPanel((value) => ({
       ...value, stack: value.stack.slice(0, -1),
     }))}

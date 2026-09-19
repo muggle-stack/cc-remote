@@ -1112,7 +1112,11 @@ def _rollout_path(
                 scanned += 1
                 resolved = os.path.realpath(match)
                 if os.path.commonpath((root, resolved)) == root:
-                    return match
+                    # Filename substrings can match other threads (child vs
+                    # grandchild), in filesystem-dependent directory order.
+                    meta = _read_meta(match)
+                    if meta and meta.get("id") == session_id:
+                        return match
         return None
     except Exception:
         return None

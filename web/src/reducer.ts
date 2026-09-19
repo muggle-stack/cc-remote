@@ -5248,8 +5248,9 @@ function reduceEvent(
     case "state": {
       const next = patch(state, e.sid, (rt) => {
         rt.state = e.state;
-        if (typeof e.seq === "number") {
-          rt.lastLifecycleSeq = Math.max(rt.lastLifecycleSeq, e.seq);
+        const seq = e.seq;
+        if (typeof seq === "number") {
+          rt.lastLifecycleSeq = Math.max(rt.lastLifecycleSeq, seq);
         }
         // A direct lifecycle frame belongs to this wrapper's resident turn and
         // supersedes any older rollout-only activity projection.
@@ -5257,7 +5258,15 @@ function reduceEvent(
         const turns = cloneTurns(rt.turns);
         const turn = e.msg_id
           ? turns.find((candidate) => candidate.id === e.msg_id)
-          : turns[turns.length - 1];
+          : turns.at(-1);
+        // Native commands can start without a browser optimistic query or a
+        // user UUID echo. A sequenced, explicitly named owner gives
+        // their existing working indicator the same exact identity contract.
+        // The idle boundary below clears it in this same state transition.
+        if (boundCompletedTurns && e.msg_id
+            && !turn?.done && seq === rt.lastLiveSeq) {
+          rt.liveOwner = { turnId: e.msg_id, seq };
+        }
         if (e.detail && turn && !turn.done) turn.progress = e.detail;
         else if (turn && (Object.hasOwn(e, "detail") || e.state !== "running")) {
           turn.progress = undefined;

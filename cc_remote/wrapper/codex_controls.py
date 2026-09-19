@@ -33,6 +33,7 @@ class CodexControls:
     context_max_tokens: int | None = None
     context_window_tokens: int | None = None
     context_settings_set: bool = False
+    manual_compactions: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         result = {}
@@ -49,6 +50,8 @@ class CodexControls:
             result["context_window_tokens"] = self.context_window_tokens
         if self.context_settings_set:
             result["context_settings_set"] = True
+        if self.manual_compactions:
+            result["manual_compactions"] = list(self.manual_compactions)
         return result
 
 
@@ -96,6 +99,10 @@ def _controls(values: object) -> CodexControls:
                                        else raw.get("context_threshold_tokens")),
         context_window_tokens=_token_count(raw.get("context_window_tokens")),
         context_settings_set=raw.get("context_settings_set") is True,
+        manual_compactions=tuple(
+            value for value in (raw.get("manual_compactions") or [])[-64:]
+            if isinstance(value, str) and _SESSION_ID.fullmatch(value)
+        ) if isinstance(raw.get("manual_compactions"), list) else (),
     )
 
 
@@ -250,6 +257,7 @@ class CodexControlStore:
                 context_max_tokens=existing.context_max_tokens,
                 context_window_tokens=existing.context_window_tokens,
                 context_settings_set=existing.context_settings_set,
+                manual_compactions=existing.manual_compactions,
             )
             payload = controls.as_dict()
             updated = dict(self._sessions)
@@ -326,6 +334,20 @@ class CodexControlStore:
             self._persist(updated)
             self._sessions = updated
 
+    def remember_compaction(self, session_id: str, turn_id: str) -> None:
+        """Keep the explicit command only for its proven native compaction turn."""
+        session_id, turn_id = _session_id(session_id), _session_id(turn_id)
+        with self._lock:
+            existing = _controls(self._sessions.get(session_id))
+            turns = tuple(value for value in existing.manual_compactions if value != turn_id)
+            controls = replace(existing, manual_compactions=(*turns, turn_id)[-64:])
+            updated = dict(self._sessions)
+            updated[session_id] = controls.as_dict()
+            while len(updated) > _MAX_ENTRIES:
+                updated.pop(next(iter(updated)))
+            self._persist(updated)
+            self._sessions = updated
+
     def set_cwd_override(
         self, session_id: str, cwd_override: str | None,
     ) -> CodexControls:
@@ -343,6 +365,7 @@ class CodexControlStore:
                 context_max_tokens=existing.context_max_tokens,
                 context_window_tokens=existing.context_window_tokens,
                 context_settings_set=existing.context_settings_set,
+                manual_compactions=existing.manual_compactions,
             )
             payload = controls.as_dict()
             updated = dict(self._sessions)
@@ -374,6 +397,7 @@ class CodexControlStore:
                 context_max_tokens=existing.context_max_tokens,
                 context_window_tokens=existing.context_window_tokens,
                 context_settings_set=existing.context_settings_set,
+                manual_compactions=existing.manual_compactions,
             )
             payload = controls.as_dict()
             updated = dict(self._sessions)
@@ -415,6 +439,7 @@ class CodexControlStore:
                 context_max_tokens=existing.context_max_tokens,
                 context_window_tokens=existing.context_window_tokens,
                 context_settings_set=existing.context_settings_set,
+                manual_compactions=existing.manual_compactions,
             )
             payload = controls.as_dict()
             updated = dict(durable)

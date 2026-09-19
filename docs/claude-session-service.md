@@ -47,6 +47,15 @@ releases them. The service also retains attachment ownership across controller
 replacement, so closing before replaying a steering echo still removes its
 files. An unconfirmed close does not authorize deleting live-task attachments.
 
+Steering during an autonomous background continuation requires the owner's
+`background_steering` capability. The input still uses native `priority=next`;
+only its exact human UUID echo transfers the continuation to a managed turn.
+An earlier background Result cannot complete that input. Pending inputs and
+their original commit identity survive controller replacement, including when
+the first queued input is cancelled. Older service owners reject this operation
+before writing to the native stream. Upgrade them using the drain procedure
+below; a Wrapper-only upgrade does not add this capability to an existing owner.
+
 This is a cc-remote SDK service, not Claude Code's terminal background mode or
 the experimental PTY broker. The daily native Claude TUI keeps its existing
 external-ownership rules; this service does not give it shared input ownership.

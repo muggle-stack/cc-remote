@@ -3928,6 +3928,9 @@ def _collab_event(item: dict, turn_id: str | None, completed: bool):
         "receivers": item.get("receiverThreadIds"),
         "agents": safe_states,
     }, 64 * 1024)
+    receivers = item.get("receiverThreadIds")
+    if isinstance(receivers, list) and len(receivers) == 1 and isinstance(receivers[0], str):
+        input_value["agent_run_id"] = f"codex-agent:{receivers[0]}"
     return ProcessEvent(
         item_id=_live_id(item.get("id"), "collab-agent"),
         kind="agent",
@@ -3959,9 +3962,12 @@ def _subagent_event(item: dict, turn_id: str | None, completed: bool):
         title={
             "started": "协作代理已启动",
             "interacted": "协作代理有新进展",
+            "completed": "协作代理已完成",
             "interrupted": "协作代理已中断",
         }.get(kind, "协作代理"),
         summary=path or None,
+        input={"agent_run_id": f"codex-agent:{item['agentThreadId']}"}
+        if isinstance(item.get("agentThreadId"), str) else None,
     )
 
 
@@ -4968,7 +4974,25 @@ def codex_translate_history(
                     upsert_tool_result(result)
             elif t == "event_msg" and payload_type == "item_completed":
                 item = p.get("item") if isinstance(p.get("item"), dict) else {}
-                if str(item.get("type") or "").lower() == "plan":
+                item_type = str(item.get("type") or "").replace("_", "").lower()
+                if item_type == "subagentactivity":
+                    open_assistant_only_turn()
+                    events.append(_subagent_event({
+                        **item, "agentThreadId": item.get("agentThreadId") or item.get("agent_thread_id"),
+                        "agentPath": item.get("agentPath") or item.get("agent_path"),
+                    }, _history_optional_turn_id(p.get("turn_id") or active_turn_id or pending_turn_id), True))
+                    turn_visible = True
+                elif item_type == "collabagenttoolcall":
+                    open_assistant_only_turn()
+                    events.append(_collab_event({
+                        **item,
+                        "receiverThreadIds": item.get("receiverThreadIds") or item.get("receiver_thread_ids"),
+                        "senderThreadId": item.get("senderThreadId") or item.get("sender_thread_id"),
+                        "agentsStates": item.get("agentsStates") or item.get("agents_states"),
+                        "reasoningEffort": item.get("reasoningEffort") or item.get("reasoning_effort"),
+                    }, _history_optional_turn_id(p.get("turn_id") or active_turn_id or pending_turn_id), True))
+                    turn_visible = True
+                elif item_type == "plan":
                     open_assistant_only_turn()
                     item_id = _history_id(
                         item.get("id"), "plan-detail", line_no, raw_ts)

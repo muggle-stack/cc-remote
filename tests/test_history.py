@@ -5893,13 +5893,14 @@ def test_compacted_claude_main_chain_recovers_precompact_history(
     assert recovered is not None
     messages, timestamps = recovered
     assert [message.uuid for message in messages] == [
-        "user-before", "assistant-before", "compact-boundary", "compact-summary",
-        "compact-command", "user-after", "assistant-after",
+        "user-before", "assistant-before", "compact-command", "compact-boundary",
+        "compact-summary", "user-after", "assistant-after",
     ]
     events = translate_history(messages, 10_000, timestamps=timestamps)
     assert [event.prompt for event in events if isinstance(event, UserMsg)] == [
-        "before compact", "after compact",
+        "before compact", "/compact", "after compact",
     ]
+    assert not any(event.result.is_error for event in events if isinstance(event, TurnEnd))
     assert timestamps["user-before"] < timestamps["user-after"]
 
 
@@ -6237,12 +6238,20 @@ def test_compacted_claude_page_loads_only_requested_main_chain_turns(
         "claude-compact", path=str(transcript), before="user-4", limit=2)
     assert older is not None
     assert [message.uuid for message in older.messages] == [
-        "user-2", "answer-2", "compact-boundary",
-        "compact-summary", "compact-command",
+        "compact-command", "compact-boundary", "compact-summary",
         "user-3", "answer-3",
     ]
     assert older.has_more is True
-    assert older.oldest_cursor == "user-2"
+    assert older.oldest_cursor == "compact-command"
+
+    earliest = transcript_compact_history_page(
+        "claude-compact", path=str(transcript), before="compact-command", limit=2)
+    assert earliest is not None
+    assert [message.uuid for message in earliest.messages] == [
+        "user-1", "answer-1", "user-2", "answer-2",
+    ]
+    assert earliest.has_more is False
+    assert earliest.oldest_cursor == "user-1"
 
 
 def test_compacted_claude_page_uses_only_visible_human_boundaries(tmp_path):

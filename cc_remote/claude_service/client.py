@@ -214,12 +214,15 @@ class RemoteClient:
             if result["failure"] and not result["events"]:
                 raise RuntimeError("Claude SDK stream ended: " + result["failure"])
 
-    async def steer(self, prompt, *, native_id, metadata, turn_id):
+    async def steer(self, prompt, *, native_id, metadata, turn_id, background_id=None):
         if not self.description.get("native_steering"):
             raise ClaudeSteerRejected("Claude service requires a steering upgrade")
+        if background_id is not None and not self.description.get("background_steering"):
+            raise ClaudeSteerRejected("Claude service requires a background steering upgrade")
         accepted = await self.call("steer", {
             "prompt": prompt, "native_id": native_id,
             "metadata": metadata, "turn_id": turn_id,
+            **({"background_id": background_id} if background_id is not None else {}),
         }, request_id="steer-" + native_id)
         if not accepted:
             raise ClaudeSteerRejected("Claude response has already ended")

@@ -5200,14 +5200,14 @@ export default function App() {
     previewFileForSid(activeBtwSid, file, line);
 
   const openAgentDetail = (runId: string, title?: string) => {
-    if (!focusedSid || focusedEngine !== "claude" || space !== "code"
+    if (!focusedSid || space !== "code"
         || !rt.historyRevision) return;
     closeViewer();
     const agent = rt.backgroundProcesses.find((block) => block.item_id === runId)
       ?? rt.turns.flatMap((turn) => turn.blocks).find((block) =>
         block.kind === "process" && block.item_id === runId);
     setAgentPanel({ sid: focusedSid, revision: rt.historyRevision,
-      runId, title: title || "协作代理",
+      runId, title: title || "协作代理", engine: focusedEngine,
       status: agent?.kind === "process" ? agent.status : undefined });
   };
   const previewAgentFile = (file: string, line?: number) => {
@@ -5822,7 +5822,7 @@ export default function App() {
               turnUsage={rt.turnUsage}
               activeTurnId={activeTurnId}
               ambiguousActiveTurnIds={ambiguousActiveTurnIds}
-              onOpenAgent={focusedEngine === "claude" && space === "code"
+              onOpenAgent={space === "code"
                 ? openAgentDetail : undefined}
               onFork={!historyView.recovering && !archivedBrowse
                   && space === "code"
