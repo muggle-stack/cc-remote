@@ -336,3 +336,71 @@ def test_deferred_commit_does_not_deadlock_on_the_managed_result_barrier():
                 await handle.detach_for_shutdown()
 
     asyncio.run(go())
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_mid_turn_background_burst_preserves_service_commit_boundary(fails):
+    async def go():
+        async with environment() as (service, attach):
+            client = await attach()
+            worker = service.sessions[client.id]
+            projected = []
+
+            async def project(message, turn_id):
+                assert turn_id == "human"
+                projected.append(message._cc_service_seq)
+                if fails and message._cc_service_seq == 4:
+                    raise ValueError("temporary projection failure")
+
+            handle = start_handle(client, project)
+            response = None
+            try:
+                handle.next_turn_id = "human"
+                await handle.query("hello")
+
+                async def consume():
+                    return [message async for message in handle.receive_response()]
+
+                response = asyncio.create_task(consume())
+                rows = [
+                    {"type": "user", "message": {"role": "user", "content": "hello"},
+                     "uuid": "human", "origin": {"kind": "human"}},
+                    {"type": "user", "message": {"role": "user", "content": "task done"},
+                     "uuid": "background", "origin": {"kind": "task-notification"}},
+                    *[{"type": "assistant", "message": {"id": f"background-{number}",
+                       "model": "test", "content": [{"type": "text", "text": "progress"}]}}
+                      for number in range(12)],
+                    {**result(), "origin": {"kind": "task-notification"}},
+                    result(),
+                ]
+                for row in rows:
+                    await worker.client.queue.put(row)
+                messages = await asyncio.wait_for(response, 2)
+                await asyncio.wait_for(handle._background_callbacks_drained.wait(), 2)
+                assert len(messages) == 2
+                assert isinstance(messages[-1], ResultMessage)
+                assert messages[-1].origin == {"kind": "human"}
+                if fails:
+                    with pytest.raises(ClaudeServiceReplayRequired):
+                        await handle.ack_service_message(messages[-1], turn_id="human")
+                    assert projected == [2, 3, 4]
+                    assert worker.ack == 3
+                    assert worker.turn["id"] == "human"
+                    assert [row["seq"] for row in worker.journal.after(0)] == list(range(1, len(rows) + 1))
+                else:
+                    await handle.ack_service_message(messages[-1], turn_id="human")
+                    assert projected == list(range(2, len(rows)))
+                    assert worker.turn is None
+                    assert worker.background_turns == []
+                    assert worker.ack == len(rows)
+                    assert worker.journal.after(0) == []
+                assert worker.client.prompts == ["hello"]
+                assert worker.client.interrupts == 0
+                assert not worker.client.closed
+            finally:
+                if response is not None:
+                    response.cancel()
+                    await asyncio.gather(response, return_exceptions=True)
+                await handle.detach_for_shutdown()
+
+    asyncio.run(go())

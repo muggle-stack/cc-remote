@@ -1672,7 +1672,11 @@ class SdkHandle:
                             self._message_route_owner = None
                         continue
                     release = self._turn_background_release
-                    if release is None:
+                    # In-turn injections must drain before the pending human
+                    # Result: waiting on its barrier fills the bounded queue
+                    # and blocks the sole reader from ever reaching that Result.
+                    # Only post-Result callbacks wait for managed projection.
+                    if release is None or self._turn_active:
                         release = asyncio.Event()
                         release.set()
                     self._background_callbacks_pending += 1
