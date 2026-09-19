@@ -26,6 +26,18 @@ def _origin_key(origin: dict) -> str:
     return json.dumps(origin, sort_keys=True)
 
 
+def _main_activity(value: dict) -> bool:
+    if value.get("parent_tool_use_id") or value.get("parentToolUseID"):
+        return False
+    kind = value.get("type")
+    if kind == "assistant":
+        return True
+    if kind == "stream_event":
+        return value.get("event", {}).get("type") == "message_start"
+    return (kind == "system" and value.get("subtype") == "status"
+            and value.get("status") in {"requesting", "compacting"})
+
+
 class PendingSteers:
     """Fence accepted inputs against their exact replayed human UUIDs.
 
@@ -52,23 +64,46 @@ class PendingSteers:
             raise ClaudeSteerRejected("Claude steering capacity reached")
         self.pending[native_id] = metadata
 
-    def annotate(self, value: dict) -> dict:
+    def annotate(self, value: dict, *, managed_active: bool = False) -> dict:
         origin = value.get("origin")
         kind = origin.get("kind") if isinstance(origin, dict) else None
-        if not value.get("parent_tool_use_id") and kind not in (None, "human"):
+        child = value.get("parent_tool_use_id") or value.get("parentToolUseID")
+        if not child:
             message = value.get("message")
             content = message.get("content") if isinstance(message, dict) else None
             tool_result = isinstance(content, list) and any(
                 isinstance(part, dict) and part.get("type") == "tool_result" for part in content)
-            if value.get("type") == "user" and not tool_result:
-                self.background_origin = _origin_key(origin)
-                self.background_origin_data = origin
-                self.background_id = "background-" + hashlib.sha256(json.dumps(
-                    [value.get("uuid"), self.background_origin], sort_keys=True).encode()).hexdigest()[:32]
-            elif value.get("type") == "result" and _origin_key(origin) == self.background_origin:
-                self.background_id = None
-                self.background_origin = None
-                self.background_origin_data = None
+            injected = (value.get("type") == "user" and not tool_result
+                        and kind not in (None, "human"))
+            start = value.get("__cc_background_start")
+            # Code can omit replay of an internal task-notification user row.
+            # An unsolicited top-level request/output still proves a main turn;
+            # task edges and forwarded child output do not.
+            if start or injected or (not managed_active and not self.background_id
+                                     and _main_activity(value)):
+                if start:
+                    identity = start["id"]
+                    origin_key, origin_data = start.get("origin_key"), start.get("origin")
+                else:
+                    origin_key = _origin_key(origin) if injected else None
+                    origin_data = origin if injected else None
+                    identity = self.background_id if injected and self.background_origin is None else None
+                    identity = identity or "background-" + hashlib.sha256(json.dumps(
+                        [value.get("uuid"), origin_key], sort_keys=True).encode()).hexdigest()[:32]
+                self.background_id = identity
+                self.background_origin = origin_key
+                self.background_origin_data = origin_data
+                value = {**value, "__cc_background_start": {
+                    "id": identity, "origin_key": self.background_origin,
+                    "origin": self.background_origin_data,
+                }}
+            elif (value.get("type") == "result" and self.background_id
+                  and kind != "human"
+                  and (kind not in (None, "human") or not managed_active)
+                  and (self.background_origin is None
+                       or isinstance(origin, dict) and _origin_key(origin) == self.background_origin)):
+                value = {**value, "__cc_background_end": self.background_id}
+                self.handoff_background(self.background_id)
         cancelled = value.get("__cc_steer_cancelled")
         if cancelled:
             self.pending = {uid: data for uid, data in self.pending.items()
@@ -80,7 +115,7 @@ class PendingSteers:
             if metadata is not None:
                 return {**value, "type": "system", "subtype": "cc_remote_steer_cancelled",
                         "__cc_steer_cancelled": metadata}
-        if kind not in (None, "human") or value.get("parent_tool_use_id"):
+        if kind not in (None, "human") or child:
             return value
         if value.get("type") == "user":
             metadata = self.pending.pop(value.get("uuid"), None)

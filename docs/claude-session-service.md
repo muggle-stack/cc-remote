@@ -56,6 +56,14 @@ the first queued input is cancelled. Older service owners reject this operation
 before writing to the native stream. Upgrade them using the drain procedure
 below; a Wrapper-only upgrade does not add this capability to an existing owner.
 
+Claude Code can omit replay of internal task-notification prompts. Owners with
+`background_activity_steering` also recognize unsolicited top-level request or
+assistant events, retain that continuation from its first event, and permit
+native steering until its Result or exact input handoff. Task notifications and
+child-agent output alone never claim the main session's running state. Deploy
+this service change using the same drain procedure; existing owners keep their
+original implementation until their native work has safely finished.
+
 This is a cc-remote SDK service, not Claude Code's terminal background mode or
 the experimental PTY broker. The daily native Claude TUI keeps its existing
 external-ownership rules; this service does not give it shared input ownership.

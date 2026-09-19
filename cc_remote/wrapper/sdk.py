@@ -1541,7 +1541,7 @@ class SdkHandle:
                     if parse_raw and isinstance(data, dict) else None
                 )
                 if parse_raw and isinstance(data, dict):
-                    data = self._steers.annotate(data)
+                    data = self._steers.annotate(data, managed_active=self._turn_active)
                 steer = data.get("__cc_steer") if parse_raw else None
                 intermediate = bool(parse_raw and data.get("__cc_steer_intermediate"))
                 message = self._parse_compat_message(data) if parse_raw else data
@@ -1557,6 +1557,9 @@ class SdkHandle:
                     message._cc_steer = steer
                 if parse_raw and data.get("__cc_steer_cancelled"):
                     message._cc_steer_cancelled = data["__cc_steer_cancelled"]
+                if parse_raw:
+                    message._cc_background_start = data.get("__cc_background_start")
+                    message._cc_background_end = data.get("__cc_background_end")
                 self._observe_recent_context_usage(message)
                 self._observe_context_boundary(message)
                 self._observe_model_fallback(message)
@@ -1576,7 +1579,8 @@ class SdkHandle:
                         self._steers.handoff_background(self._autonomous_steer_root.get("background_id"))
                         if self.steer_adoption_callback:
                             self.steer_adoption_callback({**steer, "background_origin":
-                                                          self._autonomous_steer_root.get("background_origin")})
+                                                          self._autonomous_steer_root.get("background_origin"),
+                                                          "background_id": self._autonomous_steer_root.get("background_id")})
                     if (getattr(message, "_cc_steer_cancelled", None)
                             and not self._steers.pending and not self._turn_active):
                         self._autonomous_steer_root = None

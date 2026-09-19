@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-from cc_remote.claude_steering import PendingSteers, steer_message, _origin_key
+from cc_remote.claude_steering import PendingSteers, steer_message
 
 from .wire import (
     ControllerLeaseConflict, decode_sdk, encode_sdk, private_directory,
@@ -198,7 +198,9 @@ class Session:
             async for value in self.client._query.receive_messages():
                 if self.closed:
                     return
-                value = self.steers.annotate(value)
+                value = self.steers.annotate(value, managed_active=bool(
+                    self.turn and self.terminal_seq is None
+                    and not self.turn.get("awaiting_steer")))
                 if "__cc_steer" in value:
                     self.origin_id = value["__cc_steer"]["id"]
                     if self.turn is not None:
@@ -219,15 +221,13 @@ class Session:
                 # stop the sole native reader at a per-turn byte cap: an offline
                 # long turn could then never deliver the Result that frees it.
                 seq = self.journal.append(value)
-                origin = value.get("origin")
-                kind = origin.get("kind") if isinstance(origin, dict) else None
-                if value.get("type") == "user" and kind not in (None, "human"):
+                background = value.get("__cc_background_start")
+                if background and not any(t["identity"] == background["id"] for t in self.background_turns):
                     self.background_turns.append({"start_seq": seq - 1, "terminal_seq": None,
-                                                  "origin": _origin_key(origin),
-                                                  "identity": self.steers.background_id})
-                if value.get("type") == "result" and kind not in (None, "human"):
+                                                  "identity": background["id"]})
+                if value.get("__cc_background_end"):
                     for turn in reversed(self.background_turns):
-                        if turn["terminal_seq"] is None and turn.get("origin") == _origin_key(origin):
+                        if turn["terminal_seq"] is None and turn["identity"] == value["__cc_background_end"]:
                             turn["terminal_seq"] = seq
                             break
                 if value.get("type") == "system":
@@ -266,6 +266,7 @@ class Session:
             "task_seeds": list(self.task_seeds.values()),
             "native_steering": True,
             "background_steering": True,
+            "background_activity_steering": True,
             "pending_steers": {uid: {"id": data["id"]} for uid, data in self.steers.pending.items()},
         }
 

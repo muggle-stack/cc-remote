@@ -1359,54 +1359,62 @@ test("active process text shimmers and readable tool output settles without repl
 
 test("Claude resumes a separate live process after an idle background task", async ({ page }, info) => {
   const relay = await mockRightPanelRelay(page, { engine: "claude", historyReply: () => null });
+  let seq = 0;
+  const emit = (message: PanelRelayEvent) => relay.emit({ ...message, seq: ++seq });
   await page.goto("/");
   await expect.poll(() => relay.commands.some((c) => c.type === "get_history")).toBe(true);
   const sid = "layout-parent";
   const turnId = "background-parent";
-  relay.emit({ type: "user_msg", sid, msg_id: turnId, prompt: "检查两个任务" });
-  relay.emit({ type: "turn_binding", sid, msg_id: turnId, turn_id: turnId });
-  relay.emit({ type: "state", sid, state: "running" });
-  relay.emit({ type: "process", sid, turn_id: turnId, item_id: "agent-a", kind: "agent",
+  emit({ type: "user_msg", sid, msg_id: turnId, prompt: "检查两个任务" });
+  emit({ type: "turn_binding", sid, msg_id: turnId, turn_id: turnId });
+  emit({ type: "state", sid, state: "running" });
+  emit({ type: "process", sid, turn_id: turnId, item_id: "agent-a", kind: "agent",
     phase: "start", status: "running", title: "检查结构", background: true });
-  relay.emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "interim", channel: "final" });
-  relay.emit({ type: "delta", sid, turn_id: turnId, message_id: "interim", channel: "final", text: "中间结果先给你，两路探索还在跑。" });
-  relay.emit({ type: "assistant_msg_end", sid, turn_id: turnId, message_id: "interim", channel: "final" });
-  relay.emit({ type: "turn_end", sid, turn_id: turnId, result: { subtype: "success", duration_ms: 3000, is_error: false } });
-  relay.emit({ type: "state", sid, state: "idle" });
+  emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "interim", channel: "final" });
+  emit({ type: "delta", sid, turn_id: turnId, message_id: "interim", channel: "final", text: "中间结果先给你，两路探索还在跑。" });
+  emit({ type: "assistant_msg_end", sid, turn_id: turnId, message_id: "interim", channel: "final" });
+  emit({ type: "turn_end", sid, turn_id: turnId, result: { subtype: "success", duration_ms: 3000, is_error: false } });
+  emit({ type: "state", sid, state: "idle" });
   const turn = page.locator(`.turn[data-turn-id="${turnId}"]`);
   await expect(turn.locator(".turn-working")).toHaveCount(0);
   await expect(turn.locator(".turn-process-head").first()).toHaveAttribute("aria-expanded", "false");
-  relay.emit({ type: "process", sid, turn_id: turnId, item_id: "agent-a", kind: "agent",
+  emit({ type: "process", sid, turn_id: turnId, item_id: "agent-a", kind: "agent",
     phase: "end", status: "succeeded", title: "检查结构", summary: "Raw agent report must stay in details", background: true });
   await expect(turn.locator(".turn-working")).toHaveCount(0);
   await expect(turn.locator(".background-followup")).toHaveCount(0);
 
-  relay.emit({ type: "state", sid, state: "running" });
-  relay.emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "follow-thinking", channel: "thinking", background: true });
-  relay.emit({ type: "delta", sid, turn_id: turnId, message_id: "follow-thinking", channel: "thinking", text: "Fixture continuation reasoning", background: true });
+  emit({ type: "state", sid, state: "running", msg_id: turnId, continuation: true });
+  await expect(turn.locator(".turn-working")).toBeVisible();
+  emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "follow-thinking", channel: "thinking", background: true });
+  emit({ type: "delta", sid, turn_id: turnId, message_id: "follow-thinking", channel: "thinking", text: "Fixture continuation reasoning", background: true });
   const continuation = turn.locator(".background-followup").first();
   await expect(turn.locator(".turn-working")).toBeVisible();
   await expect(continuation.locator(".turn-process-head")).toHaveAttribute("aria-expanded", "true");
   await expect(continuation.locator(".turn-process-label")).toHaveClass(/is-active/);
+  await expect(continuation.locator(".turn-process-label")).toContainText("正在处理");
+  const workingAnimation = turn.locator(".turn-working").locator("svg");
+  const initialFrame = await workingAnimation.innerHTML();
+  await expect.poll(() => workingAnimation.innerHTML()).not.toBe(initialFrame);
   await expect(continuation.locator(".process-reasoning")).toBeVisible();
   await expect(turn.locator(".turn-process-head").first()).toHaveAttribute("aria-expanded", "false");
   await expect(continuation).not.toContainText("Raw agent report");
-  relay.emit({ type: "assistant_msg_end", sid, turn_id: turnId, message_id: "follow-thinking", channel: "thinking", background: true });
-  relay.emit({ type: "tool_use", sid, turn_id: turnId, message_id: "follow-tool", tool_use_id: "verify", tool: "Bash", category: "command", input: { command: "verify camera" }, background: true });
+  emit({ type: "assistant_msg_end", sid, turn_id: turnId, message_id: "follow-thinking", channel: "thinking", background: true });
+  emit({ type: "tool_use", sid, turn_id: turnId, message_id: "follow-tool", tool_use_id: "verify", tool: "Bash", category: "command", input: { command: "verify camera" }, background: true });
   await expect(continuation.locator(".tool-group-label")).toContainText("正在调用 1 个工具");
   await page.screenshot({ path: info.outputPath("claude-live-continuation.png") });
-  relay.emit({ type: "tool_result", sid, turn_id: turnId, tool_use_id: "verify", content: "Verified", is_error: false, background: true });
-  relay.emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "follow-answer", channel: "final", background: true });
-  relay.emit({ type: "delta", sid, turn_id: turnId, message_id: "follow-answer", channel: "final", text: "第一路检查完成。", background: true });
-  relay.emit({ type: "assistant_msg_end", sid, turn_id: turnId, message_id: "follow-answer", channel: "final", background: true });
-  relay.emit({ type: "state", sid, state: "idle" });
+  emit({ type: "tool_result", sid, turn_id: turnId, tool_use_id: "verify", content: "Verified", is_error: false, background: true });
+  await expect(continuation.locator(".turn-process-label")).toContainText("正在处理");
+  emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "follow-answer", channel: "final", background: true });
+  emit({ type: "delta", sid, turn_id: turnId, message_id: "follow-answer", channel: "final", text: "第一路检查完成。", background: true });
+  emit({ type: "assistant_msg_end", sid, turn_id: turnId, message_id: "follow-answer", channel: "final", background: true });
+  emit({ type: "state", sid, state: "idle" });
   await expect(turn.locator(".turn-working")).toHaveCount(0);
   await expect(continuation.locator(".turn-process-head")).toHaveAttribute("aria-expanded", "false");
   await expect(continuation).toContainText("第一路检查完成。");
 
-  relay.emit({ type: "state", sid, state: "running" });
-  relay.emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "second-thinking", channel: "thinking", background: true });
-  relay.emit({ type: "delta", sid, turn_id: turnId, message_id: "second-thinking", channel: "thinking", text: "Fixture second continuation", background: true });
+  emit({ type: "state", sid, state: "running", msg_id: turnId, continuation: true });
+  emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "second-thinking", channel: "thinking", background: true });
+  emit({ type: "delta", sid, turn_id: turnId, message_id: "second-thinking", channel: "thinking", text: "Fixture second continuation", background: true });
   await expect(turn.locator(".background-followup")).toHaveCount(2);
   await expect(turn.locator(".background-followup").last().locator(".turn-process-head")).toHaveAttribute("aria-expanded", "true");
   await expect(continuation.locator(".turn-process-head")).toHaveAttribute("aria-expanded", "false");

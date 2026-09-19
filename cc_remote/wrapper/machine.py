@@ -6485,6 +6485,9 @@ class WrapperMachine:
         cls, ctx: SessionContext, message: ResultMessage,
     ) -> bool:
         """Retire only the autonomous turn closed by this exact Result."""
+        identity = getattr(message, "_cc_background_end", None)
+        if identity is not None:
+            return ctx.claude_background_followups.pop(identity, None) is not None
         origin = getattr(message, "origin", None)
         origin_kind = origin.get("kind") if isinstance(origin, dict) else None
         if origin_kind == "human":
@@ -6558,6 +6561,13 @@ class WrapperMachine:
                 ctx.claude_task_tracking_overflow = False
             return
 
+        boundary = getattr(message, "_cc_background_start", None)
+        if background and boundary:
+            overflowed = self._store_claude_followup(ctx, boundary["id"], "active")
+            if overflowed:
+                self._schedule_claude_followup_overflow_recovery(ctx)
+            return
+
         if isinstance(message, ResultMessage):
             # Only the background callback knows that this Result closes an
             # injected turn. A managed human Result may overlap a notification
@@ -6566,10 +6576,8 @@ class WrapperMachine:
 
         if isinstance(message, UserMessage):
             if background and self._claude_injected_user_boundary(message):
-                # The pinned SDK marks every injected turn at its replayed
-                # top-level user boundary. This is stronger than inferring a
-                # continuation only from the last active task: channel/peer
-                # turns and each completion in a multi-task run are covered too.
+                # Preserve explicit boundaries for custom/legacy clients that
+                # do not pass through the raw stream ownership annotations.
                 overflowed = self._activate_claude_followup(ctx, message)
                 if overflowed:
                     self._schedule_claude_followup_overflow_recovery(ctx)
@@ -6599,19 +6607,6 @@ class WrapperMachine:
                 # injected turn: that owner still requires its exact Result.
                 if ctx.claude_background_followups.get(key) == "notified":
                     ctx.claude_background_followups.pop(key, None)
-            elif (background and isinstance(message, TaskNotificationMessage)
-                  and not getattr(message, "_cc_service_seed", False)):
-                # A task_updated terminal is a task status, not evidence of a
-                # new model response. In particular killed tasks often emit no
-                # notification and no Result at all. Only a real notification
-                # can reserve the subsequent injected User/Result boundary.
-                # Reattach seeds describe already-consumed task state, not a
-                # fresh notification. Any unacknowledged continuation follows
-                # separately in the service's ordered User/Result replay.
-                overflowed = self._claim_claude_followup_notification(
-                    ctx, task_id)
-                if overflowed:
-                    self._schedule_claude_followup_overflow_recovery(ctx)
             return
 
         track = isinstance(message, (TaskStartedMessage, TaskProgressMessage))
@@ -11274,10 +11269,13 @@ class WrapperMachine:
             await asyncio.gather(task, return_exceptions=True)
         ctx.queued_query_drain_task = None
 
-    async def _set_state(self, ctx: SessionContext, state: State) -> None:
+    async def _set_state(
+        self, ctx: SessionContext, state: State, *, msg_id: str | None = None,
+        continuation: bool = False,
+    ) -> None:
         ctx.state = state
         ctx.queued_query_wakeup.set()
-        await self._emit(ctx, StateEvent(state=state))
+        await self._emit(ctx, StateEvent(state=state, msg_id=msg_id, continuation=continuation))
         log.info("state transition", sid=ctx.session_id, state=state)
         settings = getattr(ctx.sdk, "context_settings", None)
         if state == "idle" and ctx.engine == "codex" and settings is not None and settings.needs_apply:
@@ -12319,11 +12317,12 @@ class WrapperMachine:
         )
 
     def _own_write(self, sid: str) -> bool:
-        """True only after this wrapper has launched the current Claude query."""
+        """Whether the managed Claude connection currently owns native work."""
         ctx = self._ctx_by_sid(sid)
         if ctx is None:
             return False                       # not resident => we cannot have written it
-        return bool(ctx.engine == "claude" and ctx.claude_write_active)
+        return bool(ctx.engine == "claude" and (
+            ctx.claude_write_active or self._claude_autonomous_followup_pending(ctx)))
 
     async def _terminate_external_claude_holders(
         self,
@@ -21651,11 +21650,12 @@ class WrapperMachine:
                         # state. A child's background command has its own
                         # notification/Result consumer inside that Agent.
                         if ctx.state == "idle":
-                            await self._set_state(ctx, "running")
+                            await self._set_state(ctx, "running", msg_id=turn_id, continuation=True)
                         elif ctx.state in {"interrupting", "draining"}:
                             self._schedule_claude_autonomous_interrupt_watchdog(ctx)
                     translator = ctx.claude_background_translator
-                    if translator is None or self._claude_injected_user_boundary(message):
+                    if (translator is None or self._claude_injected_user_boundary(message)
+                            or getattr(message, "_cc_background_start", None)):
                         # Idle system updates can create a translator before
                         # any user turn exists. Rebind at the native injected
                         # boundary so the answer extends its actual owner,
@@ -21716,6 +21716,8 @@ class WrapperMachine:
                             managed is not None and not managed.done()
                         )
                         if not managed_active:
+                            if ctx.session_id:
+                                self._resync_watch(self._ctx_wire_sid(ctx))
                             await self._settle_claude_lifecycle_if_quiescent(ctx)
                 finally:
                     # A task/hook notification can itself trigger Claude's

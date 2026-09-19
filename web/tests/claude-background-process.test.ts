@@ -265,6 +265,12 @@ try {
   send({ type: "delta", turn_id: "settled-parent", message_id: "continuation", channel: "thinking", text: "Late replay", background: true });
   assert.equal(continuationState.runtimes[sid].liveOwner, null,
     "replay into an idle session cannot revive the spark");
+  send({ type: "state", state: "running", msg_id: "settled-parent", continuation: true, seq: 20 });
+  assert.equal(continuationState.runtimes[sid].liveOwner?.turnId, "settled-parent",
+    "the native continuation owns its spark before any text or tool output");
+  assert.equal(continuationState.runtimes[sid].turns[0].done, true);
+  send({ type: "state", state: "idle", seq: 21 });
+  assert.equal(continuationState.runtimes[sid].liveOwner, null);
 } finally {
   await harness.close();
 }

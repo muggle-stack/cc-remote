@@ -1425,11 +1425,15 @@ def test_work_background_bash_defers_reconnect_through_autonomous_result():
             "origin-turn",
         )
         assert ctx.claude_active_tasks == set()
+        assert ctx.claude_background_followup_pending is False
+        await machine._on_claude_background_message(
+            ctx, UserMessage(content="background result", origin={"kind": "task-notification"}),
+            "origin-turn")
         assert ctx.claude_background_followup_pending is True
         assert sdk.reconnects == []
 
         # Even an explicit idle control change cannot cut off the autonomous
-        # response started by the task notification.
+        # response after its actual native start.
         held = await machine._handle_set_auto_compact(SetAutoCompact(
             sid=SESSION_ID,
             mode="custom",
@@ -1989,6 +1993,11 @@ def test_background_followup_owns_running_state_until_its_result():
             "origin-turn",
         )
 
+        assert ctx.claude_background_followup_pending is False
+        assert ctx.state == "idle"
+        await machine._on_claude_background_message(
+            ctx, UserMessage(content="background result", origin={"kind": "task-notification"}),
+            "origin-turn")
         assert ctx.claude_background_followup_pending is True
         assert ctx.state == "running"
 
@@ -2011,7 +2020,7 @@ def test_background_followup_owns_running_state_until_its_result():
     asyncio.run(run())
 
 
-def test_each_completed_background_task_claims_its_own_followup():
+def test_batched_task_notifications_do_not_invent_extra_native_turns():
     async def run():
         machine, _transport, ctx = _machine_with_sdk(_AutoCompactSdk())
         ctx.claude_active_tasks.update({"task-1", "task-2"})
@@ -2029,7 +2038,7 @@ def test_each_completed_background_task_claims_its_own_followup():
                 tool_use_id=f"{task_id}-tool",
             )
 
-        def result(task_id: str) -> ResultMessage:
+        def result() -> ResultMessage:
             return ResultMessage(
                 subtype="success",
                 duration_ms=1,
@@ -2037,29 +2046,29 @@ def test_each_completed_background_task_claims_its_own_followup():
                 is_error=False,
                 num_turns=1,
                 session_id=SESSION_ID,
-                origin={"kind": "task-notification", "taskId": task_id},
+                origin={"kind": "task-notification"},
             )
 
         await machine._on_claude_background_message(
             ctx, notification("task-1"), "origin-turn")
         assert ctx.claude_active_tasks == {"task-2"}
-        assert ctx.claude_background_followup_pending is True
-        assert ctx.state == "running"
+        assert ctx.claude_background_followup_pending is False
+        assert ctx.state == "idle"
 
-        # Both completions may be delivered before the first autonomous turn
-        # reaches its Result. The first terminal must retire only task-1.
+        # Multiple task completions can be consumed by a single native turn.
         await machine._on_claude_background_message(
             ctx, notification("task-2"), "origin-turn")
         assert ctx.claude_active_tasks == set()
-        assert len(ctx.claude_background_followups) == 2
+        assert ctx.claude_background_followups == {}
 
         await machine._on_claude_background_message(
-            ctx, result("task-1"), "task-1-followup")
+            ctx, UserMessage(content="both results", origin={"kind": "task-notification"}),
+            "origin-turn")
         assert ctx.claude_background_followup_pending is True
         assert ctx.state == "running"
 
         await machine._on_claude_background_message(
-            ctx, result("task-2"), "task-2-followup")
+            ctx, result(), "origin-turn")
         assert ctx.claude_background_followup_pending is False
         assert ctx.state == "idle"
 
@@ -2438,15 +2447,11 @@ def test_followup_ledger_overflow_forces_one_controlled_reconnect(monkeypatch):
         monkeypatch.setattr(type(machine), "CLAUDE_ACTIVE_TASK_CAP", 1)
         ctx.state = "running"
 
-        machine._observe_claude_task_lifecycle(ctx, TaskNotificationMessage(
-            subtype="task_notification", data={}, task_id="task-1",
-            status="completed", output_file="", summary="one",
-            uuid="u1", session_id=SESSION_ID, tool_use_id=None,
+        machine._observe_claude_task_lifecycle(ctx, UserMessage(
+            content="one", uuid="u1", origin={"kind": "task-notification", "taskId": "task-1"},
         ), background=True)
-        machine._observe_claude_task_lifecycle(ctx, TaskNotificationMessage(
-            subtype="task_notification", data={}, task_id="task-2",
-            status="completed", output_file="", summary="two",
-            uuid="u2", session_id=SESSION_ID, tool_use_id=None,
+        machine._observe_claude_task_lifecycle(ctx, UserMessage(
+            content="two", uuid="u2", origin={"kind": "task-notification", "taskId": "task-2"},
         ), background=True)
 
         recovery = ctx.claude_followup_recovery_task

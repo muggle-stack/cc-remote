@@ -4,6 +4,7 @@
 
 ## Unreleased
 
+- Track native Claude continuations and their live processing state under protocol v72.
 - Combine terminal queue controls and session recovery under protocol v71.
   Upgrade Relay, Wrapper, Web and TUI together. TUI recovery replaces replayed
   text without duplicating existing output.
