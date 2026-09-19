@@ -47,9 +47,25 @@ try {
     type: "notice", v: 1, ts: 1, notice_id: "compact-completed", severity: "info",
     category: "runtime", title: "上下文压缩完成", message: "native compact boundary",
   } as Notice;
-  assert.equal(conversationNotices([compactNotice])[0].title, "上下文压缩完成");
-  assert.equal(conversationNotices([{ ...compactNotice, title: "上下文压缩已启动" }])[0].title,
-    "上下文压缩已启动", "native Codex submission is not a completion receipt");
+  for (const title of ["上下文压缩已启动", "上下文压缩完成"]) {
+    const notices = [{ ...compactNotice, title }];
+    assert.deepEqual(conversationNotices(notices), [],
+      "routine compaction receipts must not duplicate inline progress");
+    assert.equal(renderToStaticMarkup(createElement(NoticeStack, {
+      notices, onDismiss: () => {},
+    })), "", "hidden compaction receipts must not leave an empty banner");
+  }
+  const compactWarning = { ...compactNotice, notice_id: "compact-failed",
+    severity: "warning", title: "上下文压缩失败", message: "请稍后重试。" } as Notice;
+  const compactWarnings = conversationNotices([compactNotice, compactWarning]);
+  assert.equal(compactWarnings.length, 1);
+  assert.equal(compactWarnings[0].notice_id, compactWarning.notice_id);
+  assert.equal(compactWarnings[0].message, compactWarning.message);
+  const compactWarningHtml = renderToStaticMarkup(createElement(NoticeStack, {
+    notices: [compactNotice, compactWarning], onDismiss: () => {},
+  }));
+  assert.match(compactWarningHtml, /上下文压缩失败/);
+  assert.doesNotMatch(compactWarningHtml, /上下文压缩完成|压缩进度和结果/);
   const { default: ContextPopover } = await harness.ssrLoadModule("/src/components/ContextPopover.tsx");
   const contextHtml = renderToStaticMarkup(createElement(ContextPopover, {
     report: { total_tokens: 54_459, max_tokens: 1_000_000, percentage: 5.4,

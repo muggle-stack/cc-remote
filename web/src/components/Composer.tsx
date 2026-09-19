@@ -574,7 +574,6 @@ export function Composer(p: Props) {
       case "compact":
         if (args.trim()) { flash("/compact 不接受参数"); return; }
         p.onCompact?.();
-        flash("正在启动原生上下文压缩…");
         break;
       case "rollback": flash("Codex Rollback 暂未开放"); break;
       // /btw: open an ephemeral side-fork panel (both engines).

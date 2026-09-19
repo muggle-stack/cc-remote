@@ -2299,7 +2299,7 @@ test(`Claude native compaction animates once and settles at the persisted bounda
 }
 
 for (const engine of ["claude", "codex"] as const) {
-test(`manual compact keeps the existing spark and accepts the next message (${engine})`, async ({ page }) => {
+test(`manual compact stays inline, keeps the existing spark and accepts the next message (${engine})`, async ({ page }, testInfo) => {
   const relay = await mockRightPanelRelay(page, {
     engine, retained: false, historyReply: () => null,
   });
@@ -2310,10 +2310,13 @@ test(`manual compact keeps the existing spark and accepts the next message (${en
   await page.locator(".composer").getByRole("button", { name: "发送", exact: true }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "compact_session").length).toBe(1);
   expect(relay.commands.some(c => c.type === "query")).toBe(false);
+  await expect(page.getByText("正在启动原生上下文压缩…", { exact: true })).toHaveCount(0);
   const sid = "layout-parent";
   const turnId = "manual-compact";
   let seq = 0;
   const emit = (event: PanelRelayEvent) => relay.emit({ ...event, seq: ++seq });
+  emit({ type: "notice", sid, notice_id: "compact-started", severity: "info",
+    category: "runtime", title: "上下文压缩已启动", message: `${engine} 正在压缩当前会话的上下文。` });
   emit({ type: "state", sid, state: "running", phase: "waiting", detail: "压缩中", msg_id: turnId });
   emit({ type: "user_msg", sid, msg_id: turnId, prompt: "/compact" });
   emit({ type: "process", sid, turn_id: turnId, item_id: "compact-start",
@@ -2323,11 +2326,15 @@ test(`manual compact keeps the existing spark and accepts the next message (${en
   await expect(turn.locator(".turn-working")).toBeVisible();
   await expect(turn.locator(".turn-working svg")).toHaveAttribute("width", "24");
   await expect(turn.locator(".process-compaction-running")).toBeVisible();
+  await expect(page.locator(".notice-stack")).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath(`${engine}-compact-inline-running.png`) });
   emit({ type: "process", sid, turn_id: turnId, item_id: "compact-boundary",
     kind: "compaction", phase: "end", status: "succeeded", title: "压缩上下文",
     input: { compaction_started_id: "compact-start" } });
   // A completed process item is not the native turn's terminal boundary.
   await expect(turn.locator(".turn-working")).toBeVisible();
+  emit({ type: "notice", sid, notice_id: "compact-completed", severity: "info",
+    category: "runtime", title: "上下文压缩完成", message: "可以继续使用当前会话。" });
   emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "compact-result", channel: "final" });
   emit({ type: "delta", sid, turn_id: turnId, message_id: "compact-result", channel: "final",
     text: "上下文已压缩，可以继续当前会话。" });
@@ -2339,7 +2346,9 @@ test(`manual compact keeps the existing spark and accepts the next message (${en
   await expect(turn).not.toContainText("该轮未正常结束");
   await expect(turn.locator(".turn-working")).toHaveCount(0);
   await expect(turn.locator(".turn-done-mark .spark-btn")).toBeVisible();
+  await expect(page.locator(".notice-stack")).toHaveCount(0);
   await expect(input).toBeEnabled();
+  await page.screenshot({ path: testInfo.outputPath(`${engine}-compact-inline-completed.png`) });
   await input.fill("继续刚才的问题");
   await page.locator(".composer").getByRole("button", { name: "发送", exact: true }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
