@@ -1101,6 +1101,7 @@ function HistoryConversationBrowserFixture() {
   const streamingMath = params.has("streaming-math");
   const composerAttachment = params.has("composer-attachment");
   const composerResize = params.has("composer-resize");
+  const mobileScroll = params.has("mobile-scroll");
   const quotaComposer = params.has("quota-composer");
   const queuedQueryFixture = params.has("queued-query-editor");
   const migrationPickerFixture = params.has("migration-picker")
@@ -1733,7 +1734,10 @@ function HistoryConversationBrowserFixture() {
   };
 
   return (
-    <main style={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
+    <main className={mobileScroll ? "shell" : undefined} style={{
+      height: mobileScroll ? "var(--app-height)" : "100dvh",
+      display: "flex", flexDirection: "column",
+    }}>
       <div style={{ flex: "none", minHeight: 24 }}>
         <output data-testid="load-count">{loads}</output>
         <output data-testid="newer-load-count">{newerLoads}</output>
@@ -2114,7 +2118,7 @@ export function HistoryBrowserFixture() {
       engine={params.get("engine") === "claude" ? "claude" : "codex"}
     />;
   }
-  if (params.has("newchat-controls")) {
+  if (params.has("newchat-controls") || params.has("mobile-scroll")) {
     return <MobileViewportHistoryConversationBrowserFixture />;
   }
   return <HistoryConversationBrowserFixture />;

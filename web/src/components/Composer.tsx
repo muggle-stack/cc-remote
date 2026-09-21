@@ -31,6 +31,8 @@ import {
 const CommandSheet = lazy(() => import("./CommandSheet").then(m => ({ default: m.CommandSheet })));
 import { attachmentBytes, snapshotAttachmentFiles } from "../img";
 import { useAttachmentDrop } from "../use-attachment-drop";
+import { useClipboardPasteGuard } from "../use-clipboard-paste-guard";
+import type { PasteReceipt } from "../clipboard-paste-guard";
 import {
   readClipboardImport, resolveClipboardImport, insertClipboardText,
   type ClipboardImport,
@@ -201,6 +203,7 @@ export function Composer(p: Props) {
   const [importing, setImporting] = useState(false);
   const importingRef = useRef(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const pasteGuard = useClipboardPasteGuard(taRef, p.draftKey);
   const imeSubmitRef = useRef(new ImeSubmitGuard());
   const buttonSendTimerRef = useRef<number | null>(null);
   const requestedSkillScopeRef = useRef<string | null>(null);
@@ -376,7 +379,7 @@ export function Composer(p: Props) {
   ]);
 
   const onPickFiles = async (
-    fl: FileList | File[] | null, clipboard?: ClipboardImport,
+    fl: FileList | File[] | null, clipboard?: ClipboardImport, paste?: PasteReceipt,
   ) => {
     if (locked) return;
     if (importingRef.current) { flash("附件正在导入，请稍候"); return; }
@@ -391,6 +394,7 @@ export function Composer(p: Props) {
       ]);
       const batch = await pickFiles(
         imported.files, images.length + files.length, attachmentBytes(images, files));
+      if (paste && !imported.errors.length && !pasteGuard.acceptAttachments(paste, batch)) return;
       if (draftKeyRef.current === targetDraftKey) {
         if (batch.images.length) {
           setImages((previous) => [...previous, ...batch.images]);
@@ -421,19 +425,24 @@ export function Composer(p: Props) {
   // retained privately by the draft and represented only by an editable card.
   const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
     const clipboard = readClipboardImport(e.clipboardData, images.length + files.length);
+    const paste = pasteGuard.capture(e.currentTarget, clipboard);
     const { text } = clipboard;
     const attachments = clipboard.files.length || clipboard.images.length
       || clipboard.errors.length;
+    if (!paste.acceptText) {
+      e.preventDefault();
+      if (!attachments) return;
+    }
     if (!attachments && text.length <= LONG_PASTE_THRESHOLD) return;
     e.preventDefault();
     const textarea = e.currentTarget;
-    if (text.length > LONG_PASTE_THRESHOLD) {
+    if (paste.acceptText && text.length > LONG_PASTE_THRESHOLD) {
       const id = uuid();
       updateDraft((current) => ({
         ...current, pastes: [...current.pastes, makeComposerPaste(text, id)],
       }));
-    } else if (text) insertClipboardText(textarea, text, setInput);
-    if (attachments) void onPickFiles(null, clipboard);
+    } else if (paste.acceptText && text) insertClipboardText(textarea, text, setInput);
+    if (attachments) void onPickFiles(null, clipboard, paste);
   };
 
   // Send prompt text to cc, honoring busy/queue/interrupt rules.
