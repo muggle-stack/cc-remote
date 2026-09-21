@@ -2772,6 +2772,12 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
                 : t.detailEventCount ?? 0
               : 0;
             const renderProcess = (segment?: ClaudeContinuation) => {
+              // Deferred counts describe the whole native turn. A continuation
+              // containing only an answer has no process disclosure of its own;
+              // borrowing the parent's count creates an empty "1 item" row.
+              if (segment && presentableProcessBlocks(segment.blocks, engine).length === 0) {
+                return null;
+              }
               const continuing = !!segment && segment === lastContinuation
                 && enclosingTaskActive && !terminalProblem;
               const disclosureKey = segment
@@ -2790,7 +2796,7 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
                   : lastContinuation && t.doneTs != null
                     && lastContinuation.startedTs != null
                     && t.doneTs > lastContinuation.startedTs ? undefined : t.doneTs}
-                deferredCount={segment ? (deferredProcessCount > 0 ? 1 : 0) : deferredProcessCount}
+                deferredCount={segment ? 0 : deferredProcessCount}
                 detailLoading={t.detailLoading}
                 detailError={processDetailError}
                 externalPlanItemId={externalPlanItemId}

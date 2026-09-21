@@ -38,6 +38,12 @@ def _main_activity(value: dict) -> bool:
             and value.get("status") in {"requesting", "compacting"})
 
 
+def background_end_ids(value: dict) -> tuple[str, ...]:
+    """Exact native continuations settled by this journaled boundary."""
+    return tuple(value.get("__cc_background_ends") or (
+        [value["__cc_background_end"]] if value.get("__cc_background_end") else []))
+
+
 class PendingSteers:
     """Fence accepted inputs against their exact replayed human UUIDs.
 
@@ -52,12 +58,14 @@ class PendingSteers:
         self.background_id: str | None = None
         self.background_origin: str | None = None
         self.background_origin_data: dict | None = None
+        self._backgrounds: dict[str, dict] = {}
 
     def handoff_background(self, identity: str | None) -> None:
-        if identity and identity == self.background_id:
-            self.background_id = None
-            self.background_origin = None
-            self.background_origin_data = None
+        self._backgrounds.pop(identity, None)
+        self.background_id = next(reversed(self._backgrounds), None)
+        current = self._backgrounds.get(self.background_id, {})
+        self.background_origin = current.get("origin_key")
+        self.background_origin_data = current.get("origin")
 
     def add(self, native_id: str, metadata: dict) -> None:
         if len(self.pending) >= 32 or native_id in self.pending:
@@ -84,26 +92,51 @@ class PendingSteers:
                 if start:
                     identity = start["id"]
                     origin_key, origin_data = start.get("origin_key"), start.get("origin")
+                    managed = start.get("managed", managed_active)
                 else:
                     origin_key = _origin_key(origin) if injected else None
                     origin_data = origin if injected else None
-                    identity = self.background_id if injected and self.background_origin is None else None
+                    managed = managed_active
+                    # Several task inputs may feed one physical response. A
+                    # repeated origin refines its existing claim, not a second
+                    # response for which the CLI may never send a Result.
+                    identity = next((key for key, entry in self._backgrounds.items()
+                                     if entry["managed"] == managed
+                                     and entry["origin_key"] in (None, origin_key)), None)
                     identity = identity or "background-" + hashlib.sha256(json.dumps(
                         [value.get("uuid"), origin_key], sort_keys=True).encode()).hexdigest()[:32]
+                self._backgrounds[identity] = {
+                    "origin_key": origin_key, "origin": origin_data, "managed": managed,
+                }
                 self.background_id = identity
                 self.background_origin = origin_key
                 self.background_origin_data = origin_data
                 value = {**value, "__cc_background_start": {
                     "id": identity, "origin_key": self.background_origin,
-                    "origin": self.background_origin_data,
+                    "origin": self.background_origin_data, "managed": managed,
                 }}
-            elif (value.get("type") == "result" and self.background_id
-                  and kind != "human"
-                  and (kind not in (None, "human") or not managed_active)
-                  and (self.background_origin is None
-                       or isinstance(origin, dict) and _origin_key(origin) == self.background_origin)):
-                value = {**value, "__cc_background_end": self.background_id}
-                self.handoff_background(self.background_id)
+            elif value.get("type") == "result":
+                ended = background_end_ids(value)
+                if not ended:
+                    if kind in (None, "human"):
+                        # An unattributed Result closes the physical response,
+                        # including its in-turn task inputs. An older autonomous
+                        # response must not be consumed by a new human terminal.
+                        if managed_active:
+                            ended = tuple(key for key, entry in self._backgrounds.items()
+                                          if entry["managed"])
+                        elif kind is None:
+                            ended = tuple(self._backgrounds)
+                    else:
+                        # A precise unrelated origin remains authoritative.
+                        ended = tuple(key for key, entry in self._backgrounds.items()
+                                      if entry["origin_key"] in (None, _origin_key(origin)))
+                if ended:
+                    value = {**value, "__cc_background_ends": list(ended)}
+                    if len(ended) == 1:
+                        value["__cc_background_end"] = ended[0]
+                    for identity in ended:
+                        self.handoff_background(identity)
         cancelled = value.get("__cc_steer_cancelled")
         if cancelled:
             self.pending = {uid: data for uid, data in self.pending.items()

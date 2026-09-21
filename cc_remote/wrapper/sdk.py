@@ -26,13 +26,17 @@ from claude_agent_sdk._internal.message_parser import parse_message as _parse_sd
 from claude_agent_sdk.types import (
     AssistantMessage,
     ResultMessage,
+    ServerToolResultBlock,
     SystemMessage,
+    ToolResultBlock,
     UserMessage,
 )
 from mcp.server import Server
 
 from cc_remote.config import WrapperConfig
-from cc_remote.claude_steering import ClaudeSteerRejected, PendingSteers, steer_message
+from cc_remote.claude_steering import (
+    ClaudeSteerRejected, PendingSteers, background_end_ids, steer_message,
+)
 from cc_remote.log import logger
 from cc_remote.protocol import MAX_SAFE_WIRE_INTEGER
 from cc_remote.wrapper.child_env import claude_profile_child_env
@@ -134,6 +138,14 @@ CLAUDE_WORK_TOOLS = [
 class _MessagePumpFailure:
     def __init__(self, error: BaseException):
         self.error = error
+
+
+class ClaudeBackgroundBoundary:
+    """Retire in-turn injections in callback order without duplicating Result."""
+
+    def __init__(self, identities: tuple[str, ...], *, durable: bool = False):
+        self.identities = identities
+        self.durable = durable
 
 
 _MESSAGE_PUMP_END = object()
@@ -338,6 +350,7 @@ class SdkHandle:
         # their UserMessage/ResultMessage ``origin`` instead of assigning every
         # frame to whichever browser query happened to write most recently.
         self._turn_active = False
+        self._managed_input_seen = False
         self._turn_consumer_active = False
         self._message_route_owner: str | None = None
         self._turn_background_release: asyncio.Event | None = None
@@ -967,6 +980,7 @@ class SdkHandle:
 
     def _activate_pending_turn_route(self) -> None:
         """Bind post-Result background frames to the submitted browser turn."""
+        self._managed_input_seen = True
         release = self._pending_turn_background_release
         if release is None:
             return
@@ -1049,6 +1063,7 @@ class SdkHandle:
                     )
                     self.next_turn_id = None
                     self._turn_active = True
+                    self._managed_input_seen = False
                     try:
                         await client.query(prompt)
                     except BaseException:
@@ -1490,6 +1505,7 @@ class SdkHandle:
         self._turn_messages = asyncio.Queue(maxsize=cap)
         self._background_messages = asyncio.Queue(maxsize=cap)
         self._turn_active = False
+        self._managed_input_seen = False
         self._turn_consumer_active = False
         self._steers = PendingSteers()
         self._turn_root_id = None
@@ -1560,6 +1576,7 @@ class SdkHandle:
                 if parse_raw:
                     message._cc_background_start = data.get("__cc_background_start")
                     message._cc_background_end = data.get("__cc_background_end")
+                    message._cc_background_ends = background_end_ids(data)
                 self._observe_recent_context_usage(message)
                 self._observe_context_boundary(message)
                 self._observe_model_fallback(message)
@@ -1588,6 +1605,8 @@ class SdkHandle:
                     top_level_user = bool(
                         isinstance(message, UserMessage)
                         and not message.parent_tool_use_id
+                        and not any(isinstance(block, (ToolResultBlock, ServerToolResultBlock))
+                                    for block in (message.content if isinstance(message.content, list) else []))
                     )
                     if service_seed:
                         owner = "background"
@@ -1597,7 +1616,20 @@ class SdkHandle:
                         self._message_route_owner = owner
                     elif top_level_user:
                         if origin_kind is not None and origin_kind != "human":
-                            owner = "background"
+                            # Code projects an absorbed queued_command attachment
+                            # as a replayed UserMessage (uuid = source_uuid). Its
+                            # source is non-human, but it does not start another
+                            # response. Keep the current translator, message order
+                            # and final-message identity through the real Result.
+                            # Before the human echo, the same frame can belong to
+                            # an older autonomous response already in the queue.
+                            absorbed = bool(
+                                origin_kind == "task-notification"
+                                and parse_raw and data.get("isReplay") is True
+                                and self._turn_active and self._managed_input_seen
+                                and self._message_route_owner != "background"
+                            )
+                            owner = "managed" if absorbed else "background"
                         elif self._turn_active:
                             owner = "managed"
                             self._activate_pending_turn_route()
@@ -1662,16 +1694,31 @@ class SdkHandle:
                             )
 
                     if owner == "managed":
+                        if isinstance(message, ResultMessage) and getattr(message, "_cc_background_ends", ()):
+                            # The human Result may also settle task inputs that
+                            # arrived during this response. Queue only their
+                            # lifecycle boundary behind those callbacks; waiting
+                            # here or projecting the Result twice breaks drain.
+                            release = asyncio.Event()
+                            release.set()
+                            await self._queue_background_message(
+                                ClaudeBackgroundBoundary(message._cc_background_ends,
+                                                         durable=service_seq is not None),
+                                release, self._turn_origin_id)
                         if isinstance(message, ResultMessage) and (
                                 intermediate or self._steers.pending):
                             # The original response ended just before an accepted
-                            # input was consumed. Keep the same sole consumer.
+                            # input was consumed. Keep the same sole consumer,
+                            # but another task replay is not absorbed by that
+                            # ended response while the next human echo is pending.
+                            self._managed_input_seen = False
                             continue
                         if steer is not None:
                             self._turn_origin_id = steer["id"]
                         await self._turn_messages.put(message)
                         if isinstance(message, ResultMessage):
                             self._turn_active = False
+                            self._managed_input_seen = False
                             self._pending_compact = False
                             self._message_route_owner = None
                         continue
@@ -1683,23 +1730,16 @@ class SdkHandle:
                     if release is None or self._turn_active:
                         release = asyncio.Event()
                         release.set()
-                    self._background_callbacks_pending += 1
-                    self._background_callbacks_drained.clear()
-                    try:
-                        background_owner = service_origin if service_seed else self._turn_origin_id
-                        if not service_seed and self._autonomous_steer_root:
-                            from cc_remote.claude_steering import _origin_key
+                    background_owner = service_origin if service_seed else self._turn_origin_id
+                    if not service_seed and self._autonomous_steer_root:
+                        from cc_remote.claude_steering import _origin_key
 
-                            old_origin = self._autonomous_steer_root.get("background_origin")
-                            origin = getattr(message, "origin", None)
-                            if (isinstance(origin, dict) and isinstance(old_origin, dict)
-                                    and _origin_key(origin) == _origin_key(old_origin)):
-                                background_owner = self._autonomous_steer_root.get("previous_origin_id")
-                        await self._background_messages.put(
-                            (message, release, background_owner))
-                    except BaseException:
-                        self._background_callback_completed()
-                        raise
+                        old_origin = self._autonomous_steer_root.get("background_origin")
+                        origin = getattr(message, "origin", None)
+                        if (isinstance(origin, dict) and isinstance(old_origin, dict)
+                                and _origin_key(origin) == _origin_key(old_origin)):
+                            background_owner = self._autonomous_steer_root.get("previous_origin_id")
+                    await self._queue_background_message(message, release, background_owner)
                     if isinstance(message, ResultMessage):
                         self._message_route_owner = None
         except asyncio.CancelledError:
@@ -1744,6 +1784,15 @@ class SdkHandle:
                 error_type=type(exc).__name__,
             )
 
+    async def _queue_background_message(self, message, release, turn_id) -> None:
+        self._background_callbacks_pending += 1
+        self._background_callbacks_drained.clear()
+        try:
+            await self._background_messages.put((message, release, turn_id))
+        except BaseException:
+            self._background_callback_completed()
+            raise
+
     def _background_callback_completed(self) -> None:
         if self._background_callbacks_pending > 0:
             self._background_callbacks_pending -= 1
@@ -1772,7 +1821,8 @@ class SdkHandle:
                     "Claude background message callback failed",
                     error_type=type(exc).__name__)
                 if (getattr(message, "_cc_service_seq", None) is not None
-                        or getattr(message, "_cc_service_seed", False)):
+                        or getattr(message, "_cc_service_seed", False)
+                        or isinstance(message, ClaudeBackgroundBoundary) and message.durable):
                     # ACK is cumulative. Keep reading (the native task is
                     # healthy), but do not project/ack past this hole. A fresh
                     # controller reconstructs state from the retained journal.
@@ -1897,6 +1947,7 @@ class SdkHandle:
         self._turn_messages = None
         self._background_messages = None
         self._turn_active = False
+        self._managed_input_seen = False
         self._turn_consumer_active = False
         self._message_route_owner = None
         self._autonomous_steer_root = None

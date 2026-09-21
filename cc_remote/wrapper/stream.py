@@ -1814,7 +1814,41 @@ class CompactTranscriptPage:
     oldest_cursor: str | None
 
 
+def _queued_prompt_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Project an accepted native human attachment using its SDK echo identity.
+
+    Mid-response inputs are persisted as queued_command attachments, while the
+    SDK's catalog drops attachments entirely. Queue-operation records alone do
+    not prove consumption, and task notifications must never become humans.
+    Keep the attachment UUID in the ancestry graph; source_uuid owns the public
+    prompt, its live alias and its pagination cursor.
+    """
+    attachment = row.get("attachment")
+    if (row.get("type") != "attachment" or row.get("isSidechain") is True
+            or row.get("isMeta") or not isinstance(attachment, dict)
+            or attachment.get("type") != "queued_command"
+            or attachment.get("commandMode") != "prompt"):
+        return None
+    origin = attachment.get("origin")
+    if origin is not None and not (
+        isinstance(origin, dict) and origin.get("kind") == "human"
+    ):
+        return None
+    uid = attachment.get("source_uuid")
+    prompt = attachment.get("prompt")
+    if (not isinstance(uid, str) or not _SAFE_WIRE_ID.fullmatch(uid)
+            or not isinstance(prompt, (str, list))):
+        return None
+    return {**row, "type": "user", "uuid": uid,
+            "message": {"role": "user", "content": prompt}}
+
+
 def _compact_visible_user(row: dict[str, Any]) -> bool:
+    if row.get("type") == "attachment":
+        projected = _queued_prompt_row(row)
+        if projected is None:
+            return False
+        row = projected
     origin = row.get("origin")
     if (
         row.get("type") != "user"
@@ -1851,6 +1885,14 @@ def _compact_visible_user(row: dict[str, Any]) -> bool:
     )
 
 
+def _compact_user_cursor(row: dict[str, Any]) -> str | None:
+    if not _compact_visible_user(row):
+        return None
+    if row.get("type") == "attachment":
+        return row["attachment"]["source_uuid"]
+    return row.get("uuid")
+
+
 def _transcript_graph_index(
     source_path: str,
     *,
@@ -1874,7 +1916,7 @@ def _transcript_graph_index(
                 snapshot_size=snapshot_size,
                 max_record_bytes=max_record_bytes,
                 max_entries=_MAX_TRANSCRIPT_CHAIN_ENTRIES,
-                visible_user=_compact_visible_user,
+                visible_user=_compact_user_cursor,
             )
         except Exception:
             indexed = None
@@ -1930,6 +1972,7 @@ def _transcript_graph_index(
                     if len(rows) >= _MAX_TRANSCRIPT_CHAIN_ENTRIES \
                             and uid not in rows:
                         return None
+                    public_uid = _compact_user_cursor(row)
                     rows[uid] = (
                         row.get("type"),
                         row.get("subtype"),
@@ -1937,8 +1980,9 @@ def _transcript_graph_index(
                         row.get("logicalParentUuid"),
                         row.get("isSidechain"),
                         offset,
-                        _compact_visible_user(row),
+                        bool(public_uid),
                         len(line),
+                        public_uid,
                     )
                     if row.get("isSidechain") is not True:
                         leaf = uid
@@ -2385,8 +2429,9 @@ def recover_claude_native_metadata(
     index_store=None,
     snapshot_size: int | None = None,
     max_record_bytes: int = _MAX_TRANSCRIPT_RECORD_CHARS,
+    include_queued_prompts: bool = True,
 ) -> list:
-    """Restore model notes and native tool results on the active ancestry only.
+    """Restore queued human inputs, model notes and results on active ancestry.
 
     The SDK catalog omits these rows. These positional shells are solely a UI
     projection, never a prompt sent back to Claude. Exact native tool results
@@ -2407,12 +2452,35 @@ def recover_claude_native_metadata(
     visible = {getattr(message, "uuid", None) for message in messages}
     by_id = {getattr(message, "uuid", None): message for message in messages}
     insertions: dict[str, list[SimpleNamespace]] = {}
+    restored_prompts: set[str] = set()
     anchor = None
     restored = 0
     try:
         with open(path, "rb") as source:
             for uid in chain:
                 metadata = rows[uid]
+                if metadata[0] == "attachment" and metadata[6]:
+                    public_uid = metadata[8]
+                    if public_uid in visible:
+                        anchor = public_uid
+                    elif (include_queued_prompts and anchor is not None
+                          and public_uid not in restored_prompts):
+                        row = _indexed_transcript_row(
+                            source, uid, metadata, max_record_bytes=max_record_bytes)
+                        projected = _queued_prompt_row(row) if row else None
+                        if projected is not None:
+                            insertions.setdefault(anchor, []).append(SimpleNamespace(
+                                type="user", uuid=public_uid, session_id=session_id,
+                                message=projected["message"], is_queued_prompt=True,
+                                parent_tool_use_id=None,
+                            ))
+                            restored_prompts.add(public_uid)
+                            stamp = _transcript_epoch(projected)
+                            if stamp is not None:
+                                timestamps[public_uid] = stamp
+                    else:
+                        # A human outside this selected page also bounds notes.
+                        anchor = None
                 if metadata[0] in {"user", "assistant"} and uid not in visible:
                     anchor = None
                 if uid in visible:
@@ -2484,6 +2552,10 @@ def _load_compact_chain_messages(
                     return None
                 if row.get("uuid") != uid:
                     return None
+                projected = _queued_prompt_row(row)
+                if projected is not None:
+                    row = projected
+                    uid = projected["uuid"]
                 internal = _internal_user_event_from_row(row, queued)
                 if internal is None:
                     internal = _compaction_event_from_row(row)
@@ -2501,6 +2573,7 @@ def _load_compact_chain_messages(
                         session_id=session_id,
                         message=message,
                         is_meta=bool(row.get("isMeta")),
+                        is_queued_prompt=projected is not None,
                         parent_tool_use_id=(
                             row.get("parentToolUseID")
                             or row.get("parent_tool_use_id")
@@ -2673,7 +2746,7 @@ def transcript_compact_history_page(
         return None
     ordered_ids, rows, queued = indexed
     visible = [
-        (index, uid)
+        (index, rows[uid][8])
         for index, uid in enumerate(ordered_ids)
         if bool(rows[uid][6])
     ]
@@ -2696,7 +2769,8 @@ def transcript_compact_history_page(
     for uid in ordered_ids:
         metadata = rows[uid]
         payload_prefix.append(payload_prefix[-1] + (
-            int(metadata[7]) if metadata[0] in {"user", "assistant"} else 0
+            int(metadata[7])
+            if metadata[0] in {"user", "assistant"} or metadata[6] else 0
         ))
     while True:
         chain_start = 0 if start == 0 else visible[start][0]
@@ -3029,7 +3103,7 @@ def translate_history(
             # treat such text as commentary, but history has the next user/EOF as
             # an authoritative turn boundary. Promote only the final top-level
             # ambiguous text row that was not followed by any tool activity.
-            if (ambiguous_final_mid is not None
+            if (subtype != "steered" and ambiguous_final_mid is not None
                     and ambiguous_final_start is not None):
                 for event_index in range(ambiguous_final_start, len(events)):
                     event = events[event_index]
@@ -3094,6 +3168,17 @@ def translate_history(
                 # human turn. Match the SDK's isMeta filter even when reading
                 # raw compact ancestry, without guessing from prompt text.
                 continue
+            if getattr(m, "is_queued_prompt", False) and _compact_visible_user({
+                "type": "user", "message": msg,
+            }):
+                # A consumed human input starts a new visible segment, exactly
+                # like the live TurnSteered echo. It is not proof that the
+                # preceding physical response finished or its text was final.
+                if not settled_answer_seen:
+                    stamp = _ts(source_uid)
+                    if stamp is not None:
+                        last_ts = max(last_ts or stamp, stamp)
+                    close_turn("steered", False)
             compact_prompt = manual_compact_prompt(content)
             if compact_prompt is not None:
                 content = compact_prompt
@@ -3162,6 +3247,13 @@ def translate_history(
                         if img:
                             imgs.append(img)
                 made = False
+                text_made = False
+                prompt_text = "\n".join(
+                    b["text"] for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                    and isinstance(b.get("text"), str) and b["text"]
+                    and not _is_meta_user_text(b["text"])
+                )
                 for block_index, b in enumerate(content):
                     if not isinstance(b, dict):
                         continue
@@ -3224,10 +3316,11 @@ def translate_history(
                             ))
                     elif bt == "text":
                         txt = b.get("text", "")
-                        if txt and not _is_meta_user_text(txt):
+                        if txt and not _is_meta_user_text(txt) and not text_made:
                             close_turn()
                             turn_start_ts = _ts(source_uid)
-                            um = _um(message_uid, txt)
+                            um = _um(message_uid, prompt_text)
+                            text_made = True
                             if imgs and not made:
                                 um.images = imgs
                                 made = True

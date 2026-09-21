@@ -226,6 +226,7 @@ from cc_remote.wrapper.sdk import (
     CLAUDE_DEFAULT_EFFORT,
     CLAUDE_DEFAULT_MODEL,
     ClaudeAutonomousFollowupPending,
+    ClaudeBackgroundBoundary,
     ClaudeServiceReplayRequired,
     SdkHandle,
     normalize_claude_model_selection,
@@ -2994,12 +2995,16 @@ class WrapperMachine:
     ):
         if self._claude_config_root(profile) is None:
             if directory is None:
-                return list_sessions(limit=limit)
-            return list_sessions(
-                limit=limit,
-                directory=directory,
-                include_worktrees=include_worktrees,
-            )
+                sessions = list_sessions(limit=limit)
+            else:
+                sessions = list_sessions(
+                    limit=limit,
+                    directory=directory,
+                    include_worktrees=include_worktrees,
+                )
+            return [claude_catalog.recover_session_cwd(
+                info, transcript_path(info.session_id)) if not info.cwd else info
+                for info in sessions]
         return claude_catalog.list_sessions(
             self._claude_catalog_root(profile),
             limit=limit,
@@ -3016,8 +3021,11 @@ class WrapperMachine:
     ):
         if self._claude_config_root(profile) is None:
             if directory is None:
-                return get_session_info(session_id)
-            return get_session_info(session_id, directory=directory)
+                info = get_session_info(session_id)
+            else:
+                info = get_session_info(session_id, directory=directory)
+            return claude_catalog.recover_session_cwd(
+                info, transcript_path(session_id) if info is not None and not info.cwd else None)
         return claude_catalog.get_session_info(
             self._claude_catalog_root(profile),
             session_id,
@@ -6485,6 +6493,12 @@ class WrapperMachine:
         cls, ctx: SessionContext, message: ResultMessage,
     ) -> bool:
         """Retire only the autonomous turn closed by this exact Result."""
+        identities = getattr(message, "_cc_background_ends", ())
+        if identities:
+            retired = False
+            for identity in identities:
+                retired = ctx.claude_background_followups.pop(identity, None) is not None or retired
+            return retired
         identity = getattr(message, "_cc_background_end", None)
         if identity is not None:
             return ctx.claude_background_followups.pop(identity, None) is not None
@@ -14571,6 +14585,7 @@ class WrapperMachine:
                 def _read():
                     if claude_profile is None or claude_native_sid is None:
                         raise ValueError("invalid Claude session route")
+                    compact_snapshot = None
                     if oversized_compact_page is not None:
                         messages = oversized_compact_page.messages
                         timestamps = oversized_compact_page.timestamps
@@ -14646,6 +14661,8 @@ class WrapperMachine:
                             claude_native_sid or sid, messages,
                             path=source_path, timestamps=timestamps,
                             internal_events=internal_events,
+                            include_queued_prompts=(
+                                oversized_compact_page is None and compact_snapshot is None),
                             index_store=self._history_index,
                             snapshot_size=(source_fingerprint.size
                                            if source_fingerprint else None),
@@ -21614,6 +21631,14 @@ class WrapperMachine:
         the autonomous work extends its origin turn rather than creating a new
         visible human turn.
         """
+        if isinstance(message, ClaudeBackgroundBoundary):
+            for identity in message.identities:
+                ctx.claude_background_followups.pop(identity, None)
+            ctx.claude_background_translator = None
+            await self._settle_claude_lifecycle_if_quiescent(ctx)
+            self._schedule_pending_claude_auto_compact(ctx)
+            self._schedule_query_queue_drain(ctx)
+            return
         if getattr(message, "_cc_steer_cancelled", None):
             from cc_remote.wrapper import claude_steer
 
@@ -27122,12 +27147,11 @@ class WrapperMachine:
                         if c.engine == "claude"
                         and c.session_id == native_sid), None)
         if ctx is None and engine == "claude" and actual_space == "code":
-            # Claude's catalog accepts metadata-only JSONL files (for example,
-            # an ai-title row) even though the native CLI cannot resume them:
-            # there is no message cwd or conversation chain to restore.  Catch
-            # that exact on-disk state before _spawn so one click produces one
-            # session-scoped error instead of both _spawn's focused error and
-            # this handler's fallback error.
+            # Refuse an unproven cwd before _spawn falls back to the default.
+            # A lite catalog miss can be an oversized image rather than lost
+            # history; the catalog first tries bounded native-record recovery.
+            # If still unknown, preserve the transcript and emit one scoped
+            # error without claiming the user's conversation is corrupt.
             assert claude_profile is not None
             info = await asyncio.to_thread(
                 self._claude_catalog_session_info,
@@ -27140,8 +27164,8 @@ class WrapperMachine:
                 error = Error(
                     code=ERR_NOT_RUNNING,
                     message=(
-                        "Claude 会话历史不完整，无法恢复；"
-                        "可从会话菜单删除该条目。"
+                        "无法确认此 Claude 会话的工作目录，暂时无法恢复。"
+                        "历史记录已保留。"
                     ),
                     request_id=getattr(cmd, "cmd_id", None),
                     sid=sid,
@@ -36674,6 +36698,7 @@ class WrapperMachine:
             msgs = await asyncio.to_thread(
                 recover_claude_native_metadata, session_id, msgs,
                 path=path, timestamps=timestamps, internal_events=internal_events,
+                include_queued_prompts=compact_snapshot is None,
                 index_store=self._history_index,
                 snapshot_size=(os.path.getsize(path) if path else None),
             )

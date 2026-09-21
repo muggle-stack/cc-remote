@@ -9,6 +9,7 @@ every filesystem operation.
 from __future__ import annotations
 
 import errno
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -43,6 +44,8 @@ from claude_agent_sdk.types import SDKSessionInfo, SessionMessage
 
 
 _MAX_PROJECT_DIRS = 16_384
+_CWD_SCAN_BYTES = 16 * 1024 * 1024
+_CWD_RECORD_BYTES = 4 * 1024 * 1024
 
 
 def projects_dir(config_dir: str | os.PathLike[str]) -> Path:
@@ -178,6 +181,57 @@ def transcript_presence(
         entries.close()
 
 
+def recover_session_cwd(
+    info: SDKSessionInfo | None,
+    path: str | os.PathLike[str] | None,
+) -> SDKSessionInfo | None:
+    """Fill a lite-read miss from complete native records, never a prompt.
+
+    An initial queued image can occupy the SDK's entire 64 KiB head window.
+    Missing cwd then says nothing about whether the conversation is resumable.
+    Read a bounded prefix and require the original transcript's project bucket;
+    later messages may record a different cwd after a shell directory change.
+    """
+    if info is None or info.cwd or path is None:
+        return info
+    source = Path(path)
+    remaining = _CWD_SCAN_BYTES
+    discard = False
+    try:
+        with source.open("rb") as stream:
+            while remaining > 0:
+                limit = min(_CWD_RECORD_BYTES, remaining)
+                line = stream.readline(limit)
+                if not line:
+                    break
+                remaining -= len(line)
+                complete = line.endswith(b"\n") or len(line) < limit
+                if discard:
+                    discard = not complete
+                    continue
+                if not complete:
+                    discard = True
+                    continue
+                try:
+                    row = json.loads(line)
+                except (ValueError, UnicodeError):
+                    continue
+                if (not isinstance(row, dict)
+                        or row.get("type") not in {"user", "assistant"}
+                        or row.get("isSidechain") is True
+                        or row.get("sessionId") != info.session_id
+                        or not isinstance(row.get("message"), dict)):
+                    continue
+                cwd = row.get("cwd")
+                if (isinstance(cwd, str) and os.path.isabs(cwd)
+                        and "\x00" not in cwd
+                        and _sanitize_path(cwd) == source.parent.name):
+                    return replace(info, cwd=cwd)
+    except OSError:
+        pass
+    return info
+
+
 def list_sessions(
     config_dir: str | os.PathLike[str],
     *,
@@ -207,6 +261,7 @@ def list_sessions(
                 continue
             info = _parse_session_info_from_lite(
                 session_id, lite, project_path)
+            info = recover_session_cwd(info, entry)
             if info is None:
                 continue
             previous = by_id.get(session_id)
@@ -228,7 +283,8 @@ def get_session_info(
     if lite is None:
         return None
     project_path = _canonicalize_path(directory) if directory else None
-    return _parse_session_info_from_lite(session_id, lite, project_path)
+    return recover_session_cwd(
+        _parse_session_info_from_lite(session_id, lite, project_path), path)
 
 
 def get_session_messages(

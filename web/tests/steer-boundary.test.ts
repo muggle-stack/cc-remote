@@ -41,6 +41,32 @@ assert.deepEqual(repaired.map((turn) => turn.blocks.map((block) =>
   block.kind === "text" ? block.message_id : null)),
 [["answer-old"], ["answer-guided"]]);
 
+// Claude stores an in-flight human prompt as a queued_command attachment.
+// Older cold history omitted it and assigned its final answer to the root.
+// A corrected authoritative page must retain both prompts and move that exact
+// answer back to the consumed input, including across an IndexedDB refresh.
+const claudeRoot: Turn = {
+  id: "claude-root", prompt: "original question", done: true,
+  blocks: [], processDetailState: "present", detailEventCount: 2,
+};
+const claudeSteer: Turn = {
+  id: "claude-native-steer", clientMsgId: "claude-browser-steer",
+  forkPointId: "claude-final", prompt: "additional direction", done: true,
+  blocks: [{ kind: "text", message_id: "claude-final", channel: "final",
+    text: "final answer", done: true }],
+};
+let collapsed: Turn[] = [{ ...claudeRoot, forkPointId: "claude-final",
+  blocks: [...claudeSteer.blocks] }];
+for (let refresh = 0; refresh < 2; refresh += 1) {
+  collapsed = mergeInitialHistory([claudeRoot, claudeSteer], collapsed,
+    { reconcileReplayOrphans: true }, true);
+  assert.deepEqual(collapsed.map(turn => turn.prompt),
+    ["original question", "additional direction"]);
+  assert.equal(collapsed[0].blocks.filter(block => block.kind === "text").length, 0);
+  assert.deepEqual(collapsed[1].blocks.map(block =>
+    block.kind === "text" ? block.message_id : null), ["claude-final"]);
+}
+
 // Two steers can materialize consecutively after compaction. The first is a
 // real user row with no process of its own. Older clients cached the previous
 // segment's items and clock under it, then reported an endless detail failure.
