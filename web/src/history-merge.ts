@@ -593,6 +593,26 @@ function compactionTurnAliases(turn: Turn): Set<string> {
       : []));
 }
 
+function manualCompactionKeys(turn: Turn): Set<string> {
+  if (!/^\/compact(?:\s|$)/.test(turn.prompt)) return new Set();
+  return new Set(turn.blocks.flatMap((block) => {
+    // The receipt survives summary pagination, which defers the process block.
+    // Its id is derived from the native boundary UUID on both live/history.
+    if (block.kind === "text"
+        && /^compact-result-[a-f0-9]{24}$/.test(block.message_id)) {
+      return [`receipt:${block.message_id}`];
+    }
+    return block.kind === "process" && block.processKind === "compaction"
+      && block.status === "succeeded" && block.phase === "end"
+      ? [`boundary:${block.item_id}`] : [];
+  }));
+}
+
+function sharesManualCompaction(history: Turn, live: Turn): boolean {
+  const keys = manualCompactionKeys(history);
+  return keys.size > 0 && [...manualCompactionKeys(live)].some(key => keys.has(key));
+}
+
 function sharesCompactionTurnAlias(history: Turn, live: Turn): boolean {
   // Official Codex history keeps the visible user-message id as the row id and
   // exposes the enclosing native task as forkPointId. A live compaction marker
@@ -621,6 +641,9 @@ function sharesCompactionTurnAlias(history: Turn, live: Turn): boolean {
 
 function sameTurnIdentity(history: Turn, live: Turn): boolean {
   if (sharesExactTurnAlias(history, live)) return true;
+  // Claude may not echo the manual command's native user UUID live. A proven
+  // completed boundary still identifies that exact execution, never its prose.
+  if (sharesManualCompaction(history, live)) return true;
   // Codex may emit contextCompaction before the clean user/message binding.
   // The process event then carries the only native identity available to the
   // optimistic row. Treat that one authoritative marker as a turn alias, but
@@ -1423,6 +1446,7 @@ export function mergeInitialHistory(
   // compaction fallback can consume a row belonging to another live segment.
   reserveMatches((historyTurn, liveTurn) => historyTurn.id === liveTurn.id);
   reserveMatches(sharesExactTurnAlias);
+  reserveMatches(sharesManualCompaction);
 
   const itemOwners = indexedBlockOwners(history);
   // A steer and its predecessor share a native task. Reserve exact item
@@ -1768,9 +1792,19 @@ export function mergeInitialHistory(
   const result: Turn[] = [];
   for (const { turn } of rows) {
     const duplicate = result.findIndex((row) =>
-      sharesExactTurnAlias(row, turn));
+      sharesExactTurnAlias(row, turn) || sharesManualCompaction(row, turn));
     if (duplicate < 0) {
       result.push(turn);
+      continue;
+    }
+    if (sharesManualCompaction(result[duplicate], turn)) {
+      // Also heal a duplicate already saved by an older browser. Keep the
+      // canonical detail identity and first rendered row while retaining any
+      // loaded process detail from either copy.
+      const first = result[duplicate];
+      const canonical = first.historyTurnId ? first : turn;
+      const other = canonical === first ? turn : first;
+      result[duplicate] = { ...mergeTurn(canonical, other), id: first.id };
       continue;
     }
     // The old one-to-one matcher could leave both local ids until this final

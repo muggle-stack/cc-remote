@@ -68,7 +68,8 @@ from cc_remote.wrapper.usage_limit import is_usage_limit_failure
 # v41 keeps native isMeta recovery prompts inside their original human turn.
 # v42 replaces recovered text prefixes and bounds summary answer block counts.
 # v43 makes manual /compact a visible turn owning its native boundary.
-_SCHEMA_VERSION = 43
+# v44 restores consumed human queued_command attachments as visible inputs.
+_SCHEMA_VERSION = 44
 _FINGERPRINT_SAMPLE_BYTES = 64 * 1024
 _DEFAULT_MAX_ENTRIES = 128
 _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
@@ -1295,6 +1296,14 @@ class HistoryIndexStore:
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
             current = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if current in range(10, 44):
+                # Accepted human attachments change Claude turn ownership and
+                # cursors without changing transcript bytes. Rebuild only its
+                # derived narrative/graph; preserve other engines and assets.
+                for table in ("history_pages", "history_turn_details"):
+                    connection.execute(f"DELETE FROM {table} WHERE engine='claude'")
+                for table in ("claude_compact_sources", "claude_compact_records", "claude_compact_queue"):
+                    connection.execute(f"DROP TABLE IF EXISTS {table}")
             if current in range(10, 43):
                 # /compact is now a visible native command. Its graph boundary
                 # and the derived pages must agree; retain source-bound assets.
@@ -1456,8 +1465,8 @@ class HistoryIndexStore:
                 for table in ("history_pages", "history_turn_details"):
                     connection.execute(
                         f"DELETE FROM {table} WHERE engine='codex'")
-            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42):
-                # The independent v22-v43 invalidations above suffice.
+            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43):
+                # The independent v22-v44 invalidations above suffice.
                 pass
             elif current not in (0, _SCHEMA_VERSION):
                 # v9 changes the invariant of history_turn_details: those rows
@@ -1614,6 +1623,7 @@ class HistoryIndexStore:
                     source_offset INTEGER NOT NULL,
                     record_bytes INTEGER NOT NULL,
                     visible_user INTEGER NOT NULL,
+                    public_user_id TEXT,
                     PRIMARY KEY (source_path, source_device, source_inode, uuid)
                 )
                 """
@@ -1656,7 +1666,7 @@ class HistoryIndexStore:
         snapshot_size: int | None,
         max_record_bytes: int,
         max_entries: int,
-        visible_user: Callable[[dict[str, Any]], bool],
+        visible_user: Callable[[dict[str, Any]], bool | str | None],
     ) -> ClaudeCompactChainIndex | None:
         """Incrementally index compact ancestry without retaining row payloads.
 
@@ -1770,6 +1780,12 @@ class HistoryIndexStore:
                         def text_field(name: str) -> str | None:
                             value = row.get(name)
                             return value if isinstance(value, str) else None
+                        visible = visible_user(row)
+                        # Accepted attachment edges use a different UUID from
+                        # the native user echo. Index that public cursor without
+                        # retaining/re-reading potentially large prompt bodies.
+                        public_uid = (visible if isinstance(visible, str)
+                                      else uid if visible else None)
                         new_records.append((
                             resolved, device, inode, uid,
                             text_field("type"), text_field("subtype"),
@@ -1777,7 +1793,7 @@ class HistoryIndexStore:
                             text_field("logicalParentUuid"),
                             (1 if row.get("isSidechain") is True else 0
                              if row.get("isSidechain") is False else None),
-                            offset, len(line), int(bool(visible_user(row))),
+                            offset, len(line), int(bool(visible)), public_uid,
                         ))
                     scan_complete = scan_offset >= target_size
                     if new_records:
@@ -1787,8 +1803,8 @@ class HistoryIndexStore:
                                 source_path, source_device, source_inode, uuid,
                                 row_type, subtype, parent_uuid,
                                 logical_parent_uuid, is_sidechain,
-                                source_offset, record_bytes, visible_user
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                source_offset, record_bytes, visible_user, public_user_id
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             ON CONFLICT (
                                 source_path, source_device, source_inode, uuid
                             ) DO UPDATE SET
@@ -1799,7 +1815,8 @@ class HistoryIndexStore:
                                 is_sidechain=excluded.is_sidechain,
                                 source_offset=excluded.source_offset,
                                 record_bytes=excluded.record_bytes,
-                                visible_user=excluded.visible_user
+                                visible_user=excluded.visible_user,
+                                public_user_id=excluded.public_user_id
                             """,
                             new_records,
                         )
@@ -1895,6 +1912,7 @@ class HistoryIndexStore:
                          if row["is_sidechain"] == 0 else None),
                         int(row["source_offset"]), bool(row["visible_user"]),
                         int(row["record_bytes"]),
+                        row["public_user_id"],
                     )
                     for row in rows
                 }

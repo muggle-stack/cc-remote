@@ -13,6 +13,48 @@ import {
 import { clientSlashesFor } from "../src/data.ts";
 import { PROTOCOL_VERSION, type ServerEvent } from "../src/protocol.ts";
 import { RelayWs } from "../src/ws.ts";
+import { historyContainsTurn, mergeInitialHistory } from "../src/history-merge.ts";
+import type { Turn } from "../src/domain/conversation.ts";
+
+// Claude writes the native /compact user UUID after the boundary, while the
+// live command can finish without echoing that UUID. Both projections still
+// share the exact boundary-derived receipt; identical prose is not identity.
+const compactReceipt = "compact-result-0123456789abcdef01234567";
+const manualLive: Turn = {
+  id: "compact-live", prompt: "/compact", done: true, ts: 1000, doneTs: 126960,
+  blocks: [{ kind: "process", processKind: "compaction", item_id: "native-boundary",
+    turn_id: "compact-live", phase: "end", status: "succeeded", done: true, title: "压缩上下文" },
+  { kind: "text", message_id: compactReceipt, channel: "final", done: true,
+    text: "上下文已压缩，可以继续当前会话。" }],
+};
+const manualHistory: Turn = {
+  ...manualLive, id: "native-command", blocks: manualLive.blocks.slice(1),
+  historyTurnId: "native-command", detailEventCount: 1,
+};
+assert.equal(historyContainsTurn([manualHistory], manualLive), true,
+  "the native compact receipt binds a live command even without a user UUID echo");
+const compactMerged = mergeInitialHistory([manualHistory], [manualLive]);
+assert.equal(compactMerged.length, 1);
+assert.equal(compactMerged[0].id, "compact-live");
+assert.equal(compactMerged[0].historyTurnId, "native-command");
+assert.equal(compactMerged[0].blocks.filter(b => b.kind === "text").length, 1);
+assert.equal(mergeInitialHistory([manualHistory], [manualHistory, manualLive]).length, 1,
+  "already cached canonical + live duplicates heal on the next history merge");
+assert.equal(mergeInitialHistory([], [manualHistory, manualLive]).length, 1,
+  "restoring a cached duplicate also uses exact receipt identity");
+const secondCompact: Turn = { ...manualLive, id: "compact-second", blocks: [
+  { kind: "text", message_id: "compact-result-fedcba9876543210fedcba98",
+    channel: "final", done: true, text: "上下文已压缩，可以继续当前会话。" },
+] };
+assert.equal(mergeInitialHistory([manualHistory], [manualLive, secondCompact]).length, 2,
+  "two real compactions remain distinct even with equal prompts, text and clocks");
+assert.equal(mergeInitialHistory([manualHistory], [{ ...manualLive, prompt: "explain compact" }]).length, 2,
+  "only a manual command can use the manual receipt alias");
+assert.equal(mergeInitialHistory([manualHistory], [{ ...manualLive, blocks: [] }]).length, 2,
+  "an unproven pending command cannot be guessed from its prompt or timestamp");
+assert.equal(mergeInitialHistory([{ ...manualHistory, blocks: manualLive.blocks.slice(0, 1) }],
+  [{ ...manualLive, blocks: manualLive.blocks.slice(0, 1) }]).length, 1,
+  "full history can prove identity from the native completed boundary alone");
 
 
 assert.equal(clientSlashesFor("claude").has("autocompact"), true);

@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-from cc_remote.claude_steering import PendingSteers, steer_message, _origin_key
+from cc_remote.claude_steering import PendingSteers, background_end_ids, steer_message
 
 from .wire import (
     ControllerLeaseConflict, decode_sdk, encode_sdk, private_directory,
@@ -198,7 +198,9 @@ class Session:
             async for value in self.client._query.receive_messages():
                 if self.closed:
                     return
-                value = self.steers.annotate(value)
+                value = self.steers.annotate(value, managed_active=bool(
+                    self.turn and self.terminal_seq is None
+                    and not self.turn.get("awaiting_steer")))
                 if "__cc_steer" in value:
                     self.origin_id = value["__cc_steer"]["id"]
                     if self.turn is not None:
@@ -219,17 +221,15 @@ class Session:
                 # stop the sole native reader at a per-turn byte cap: an offline
                 # long turn could then never deliver the Result that frees it.
                 seq = self.journal.append(value)
-                origin = value.get("origin")
-                kind = origin.get("kind") if isinstance(origin, dict) else None
-                if value.get("type") == "user" and kind not in (None, "human"):
+                background = value.get("__cc_background_start")
+                if background and not any(t["identity"] == background["id"] for t in self.background_turns):
                     self.background_turns.append({"start_seq": seq - 1, "terminal_seq": None,
-                                                  "origin": _origin_key(origin),
-                                                  "identity": self.steers.background_id})
-                if value.get("type") == "result" and kind not in (None, "human"):
-                    for turn in reversed(self.background_turns):
-                        if turn["terminal_seq"] is None and turn.get("origin") == _origin_key(origin):
+                                                  "identity": background["id"]})
+                ended = background_end_ids(value)
+                if ended:
+                    for turn in self.background_turns:
+                        if turn["terminal_seq"] is None and turn["identity"] in ended:
                             turn["terminal_seq"] = seq
-                            break
                 if value.get("type") == "system":
                     subtype = value.get("subtype")
                     task_id = value.get("task_id")
@@ -266,6 +266,7 @@ class Session:
             "task_seeds": list(self.task_seeds.values()),
             "native_steering": True,
             "background_steering": True,
+            "background_activity_steering": True,
             "pending_steers": {uid: {"id": data["id"]} for uid, data in self.steers.pending.items()},
         }
 
@@ -404,6 +405,7 @@ class Session:
                     if self.terminal_seq is None or params["seq"] != self.terminal_seq:
                         raise ValueError("Claude terminal was not acknowledged exactly")
                     self.ack = max(self.ack, self.terminal_seq)
+                    self._retire_backgrounds(self.terminal_seq)
                     self.turn = None
                     self._cleanup_steer_attachments()
                     self.journal.prune(
@@ -416,16 +418,7 @@ class Session:
                 if not 0 <= seq <= self.journal.seq:
                     raise ValueError("invalid Claude journal acknowledgement")
                 self.ack = max(self.ack, seq)
-                retired = [turn["terminal_seq"] for turn in self.background_turns
-                           if turn["terminal_seq"] is not None and seq >= turn["terminal_seq"]]
-                if retired:
-                    self.background_turns = [turn for turn in self.background_turns
-                                             if turn["terminal_seq"] not in retired]
-                    self.task_seeds = {
-                        key: seed for key, seed in self.task_seeds.items()
-                        if seed["data"].get("subtype") != "task_notification"
-                        or seed["seq"] > max(retired)
-                    }
+                self._retire_backgrounds(seq)
                 boundary = min(self.ack, self.turn["start_seq"]) if self.turn else self.ack
                 if self.background_start is not None:
                     boundary = min(boundary, self.background_start)
@@ -436,6 +429,18 @@ class Session:
                 self.metadata.update(params["value"])
                 return None
         raise ValueError("unknown Claude service operation")
+
+    def _retire_backgrounds(self, seq: int) -> None:
+        retired = [turn["terminal_seq"] for turn in self.background_turns
+                   if turn["terminal_seq"] is not None and seq >= turn["terminal_seq"]]
+        if retired:
+            self.background_turns = [turn for turn in self.background_turns
+                                     if turn["terminal_seq"] not in retired]
+            self.task_seeds = {
+                key: seed for key, seed in self.task_seeds.items()
+                if seed["data"].get("subtype") != "task_notification"
+                or seed["seq"] > max(retired)
+            }
 
     def _cleanup_steer_attachments(self) -> None:
         for directory in self.steer_attachment_dirs:

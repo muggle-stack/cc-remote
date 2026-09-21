@@ -165,7 +165,8 @@ def classify_claude_growth(
             external_evidence = True
             continue
         if (isinstance(prompt_source, str) and prompt_source
-                and prompt_source not in _SDK_PROMPT_SOURCES):
+                and prompt_source not in _SDK_PROMPT_SOURCES
+                and not (entrypoint in _SDK_ENTRYPOINTS and prompt_source == "system")):
             external_evidence = True
             continue
         if entrypoint in _SDK_ENTRYPOINTS or prompt_source in _SDK_PROMPT_SOURCES:

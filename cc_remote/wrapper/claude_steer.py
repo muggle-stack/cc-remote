@@ -12,7 +12,10 @@ from uuid import NAMESPACE_URL, uuid5
 
 from cc_remote.attachments import validate_attachments
 from cc_remote.claude_steering import ClaudeSteerRejected
+from cc_remote.log import logger
 from cc_remote.protocol import ERR_NOT_STEERABLE, ERR_STEER_UNKNOWN, Error, TurnSteered
+
+log = logger("cc_remote.wrapper.claude_steer")
 
 
 async def handle(machine, ctx, cmd, reject):
@@ -53,8 +56,10 @@ async def handle(machine, ctx, cmd, reject):
             await ctx.sdk.steer(prompt, native_id=native_id, metadata=metadata)
         # The command ACK transfers ownership. The replayed native UserMessage
         # publishes TurnSteered later, after the preceding tool/text finishes.
-    except ClaudeSteerRejected:
+    except ClaudeSteerRejected as exc:
         attempted = False
+        log.info("Claude native input rejected", session_id=ctx.session_id,
+                 reason=str(exc))
         return await reject(ERR_NOT_STEERABLE,
                             "Claude 当前无法接收引导，本次未发送；请稍后重试或排队。")
     except Exception:
@@ -97,6 +102,7 @@ def adopt(machine, ctx, metadata):
         if previous is not None and not previous.done():
             await asyncio.shield(previous)
         ctx.turn_task = asyncio.current_task()
+        ctx.claude_background_followups.pop(metadata.get("background_id"), None)
         origin_key = machine._claude_followup_origin_key(metadata.get("background_origin"))
         if origin_key is not None:
             ctx.claude_background_followups.pop(origin_key, None)

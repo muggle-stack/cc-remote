@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from claude_agent_sdk.types import ResultMessage, SystemMessage
 
 from cc_remote.wrapper import claude_external as claude_external_module
@@ -1236,6 +1237,15 @@ def test_claude_growth_classifier_rejects_partial_jsonl():
     assert classify_claude_growth(
         b'{"type":"assistant","entrypoint":"sdk-py"'
     ) == ("unknown", ())
+
+
+@pytest.mark.parametrize("entrypoint, expected", [("sdk-py", "sdk"), ("cli", "external"), (None, "external")])
+def test_injected_system_prompt_keeps_its_native_process_provenance(entrypoint, expected):
+    row = {"type": "user", "uuid": "injected", "entrypoint": entrypoint,
+           "promptSource": "system", "origin": {"kind": "task-notification"}}
+    origin, owned = classify_claude_growth((json.dumps(row) + "\n").encode())
+    assert origin == expected
+    assert owned == (("injected",) if expected == "sdk" else ())
 
 
 def test_claude_growth_classifier_treats_atis_latch_as_neutral_metadata():

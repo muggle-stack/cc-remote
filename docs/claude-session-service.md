@@ -56,6 +56,34 @@ the first queued input is cancelled. Older service owners reject this operation
 before writing to the native stream. Upgrade them using the drain procedure
 below; a Wrapper-only upgrade does not add this capability to an existing owner.
 
+Claude Code can omit replay of internal task-notification prompts. Owners with
+`background_activity_steering` also recognize unsolicited top-level request or
+assistant events, retain that continuation from its first event, and permit
+native steering until its Result or exact input handoff. Task notifications and
+child-agent output alone never claim the main session's running state. Deploy
+this service change using the same drain procedure; existing owners keep their
+original implementation until their native work has safely finished.
+
+Several injected task inputs can share one native response and one unattributed
+Result. The service journals which continuations that physical terminal closes;
+the controller retires them in callback order, including inputs consumed during
+a human response. A delayed callback must not revive a completed response, and
+replay of its terminal must not close a later continuation. Running child tasks
+retain their independent lifetime: after the main response ends, normal prompts
+are accepted while those children continue, and later native activity can start
+another main continuation.
+
+Native Code can also absorb a queued task notification between tool batches in
+an already-running human response. Its JSONL entry is a `queued_command`
+attachment; the SDK projects it as a replayed `UserMessage` with non-human origin
+and the attachment's `source_uuid`. After the human input has been consumed,
+these task inputs stay on the same managed reader and translator until the real
+Result. They do not move the final answer into a separate background segment or
+change its native checkpoint/fork identity. Buffered notifications and tool
+results before that human echo retain their earlier route. A display segment
+with only a final answer has no process disclosure; whole-turn deferred counts
+cannot invent a process item for it.
+
 This is a cc-remote SDK service, not Claude Code's terminal background mode or
 the experimental PTY broker. The daily native Claude TUI keeps its existing
 external-ownership rules; this service does not give it shared input ownership.
