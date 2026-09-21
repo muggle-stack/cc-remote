@@ -1,6 +1,7 @@
 """Large leading image rows must not make valid native sessions look orphaned."""
 
 import asyncio
+import base64
 import json
 
 import pytest
@@ -8,22 +9,37 @@ from claude_agent_sdk import get_session_info
 from claude_agent_sdk._internal.sessions import _sanitize_path
 from claude_agent_sdk.types import SDKSessionInfo
 
+from cc_remote.attachments import (
+    MAX_ATTACHMENT_COUNT,
+    MAX_SINGLE_ATTACHMENT_BYTES,
+    MAX_TOTAL_ATTACHMENT_BYTES,
+    validate_attachments,
+)
 from cc_remote.protocol import SwitchSession
 from cc_remote.wrapper import claude_catalog
+from tests.test_attachments import _complete_png
 from tests.test_multisession import _mk_machine
 
 
 SID = "11111111-1111-4111-8111-111111111111"
 
 
-def write_image_transcript(root, cwd="/original-project", *, image_bytes=100_000):
+def write_image_transcript(root, cwd="/original-project", *, image_sizes=(100_000,)):
     path = root / "projects" / _sanitize_path(cwd) / f"{SID}.jsonl"
     path.parent.mkdir(parents=True)
-    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A" * image_bytes}}
+    metadata = b"Comment\x00"
+    overhead = len(base64.b64decode(_complete_png((b"tEXt", metadata))))
+    images = [{
+        "media_type": "image/png",
+        "data": _complete_png((b"tEXt", metadata + b"A" * (size - overhead))),
+    } for size in image_sizes]
+    assert [len(base64.b64decode(image["data"])) for image in images] == list(image_sizes)
+    assert validate_attachments(images, None) is None
+    content = [{"type": "image", "source": {"type": "base64", **image}} for image in images]
     records = [
-        {"type": "queue-operation", "operation": "enqueue", "content": [image]},
+        {"type": "queue-operation", "operation": "enqueue", "content": content},
         {"type": "user", "uuid": "human", "parentUuid": None, "sessionId": SID,
-         "cwd": cwd, "message": {"role": "user", "content": [image, {"type": "text", "text": "inspect image"}]}},
+         "cwd": cwd, "message": {"role": "user", "content": [*content, {"type": "text", "text": "inspect image"}]}},
         {"type": "assistant", "uuid": "answer", "parentUuid": "human", "sessionId": SID,
          "cwd": cwd + "/later-shell-directory", "message": {"role": "assistant", "content": "done"}},
         {"type": "custom-title", "sessionId": SID, "customTitle": "Image review"},
@@ -33,9 +49,16 @@ def write_image_transcript(root, cwd="/original-project", *, image_bytes=100_000
 
 
 @pytest.mark.parametrize("explicit", [False, True])
-def test_large_image_session_recovers_original_cwd_and_can_be_selected(tmp_path, monkeypatch, explicit):
+@pytest.mark.parametrize("image_sizes", [
+    (100_000,),
+    (3 * 1024 * 1024,),
+    (MAX_SINGLE_ATTACHMENT_BYTES,),
+    (MAX_TOTAL_ATTACHMENT_BYTES // 2,) * 2,
+    (MAX_TOTAL_ATTACHMENT_BYTES // MAX_ATTACHMENT_COUNT,) * MAX_ATTACHMENT_COUNT,
+], ids=["sdk-window", "base64-record-boundary", "single-limit", "total-limit", "count-and-total-limit"])
+def test_large_image_session_recovers_original_cwd_and_can_be_selected(tmp_path, monkeypatch, explicit, image_sizes):
     root = tmp_path / "selected-profile"
-    path = write_image_transcript(root)
+    path = write_image_transcript(root, image_sizes=image_sizes)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
     raw = get_session_info(SID)
     assert raw is not None and raw.cwd is None  # The pinned SDK reproducer.

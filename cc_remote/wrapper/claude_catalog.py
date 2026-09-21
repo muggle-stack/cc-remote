@@ -42,10 +42,16 @@ from claude_agent_sdk._internal.sessions import (
 )
 from claude_agent_sdk.types import SDKSessionInfo, SessionMessage
 
+from cc_remote.attachments import MAX_TOTAL_ATTACHMENT_BYTES
+
 
 _MAX_PROJECT_DIRS = 16_384
-_CWD_SCAN_BYTES = 16 * 1024 * 1024
-_CWD_RECORD_BYTES = 4 * 1024 * 1024
+# A native user row can carry the full attachment set as base64. Reserve room
+# for the prompt and native metadata as well as the expanded image bytes.
+_CWD_RECORD_BYTES = 2 * MAX_TOTAL_ATTACHMENT_BYTES
+# Native queue records can repeat those images before the actual user row.
+# Bound the scan independently while allowing both copies and leading metadata.
+_CWD_SCAN_BYTES = 3 * _CWD_RECORD_BYTES
 
 
 def projects_dir(config_dir: str | os.PathLike[str]) -> Path:
