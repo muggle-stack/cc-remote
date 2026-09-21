@@ -44,6 +44,30 @@ def background_end_ids(value: dict) -> tuple[str, ...]:
         [value["__cc_background_end"]] if value.get("__cc_background_end") else []))
 
 
+def is_managed_input(value: dict, *, pending_compact: bool = False) -> bool:
+    """Native consumption evidence, excluding child output and tool results.
+
+    Manual /compact may report its boundary before replaying its user input.
+    Only a controller with that exact command pending may claim those frames.
+    """
+    origin = value.get("origin")
+    if (value.get("parent_tool_use_id") or value.get("parentToolUseID")
+            or (isinstance(origin, dict) and origin.get("kind") not in (None, "human"))):
+        return False
+    if value.get("type") == "user":
+        content = value.get("message", {}).get("content")
+        return not (isinstance(content, list) and any(
+            isinstance(part, dict) and part.get("type") in {"tool_result", "server_tool_result"}
+            for part in content))
+    if pending_compact and value.get("type") == "system":
+        if value.get("subtype") == "status":
+            return value.get("status") == "compacting"
+        if value.get("subtype") == "compact_boundary":
+            metadata = value.get("compact_metadata", value.get("compactMetadata"))
+            return isinstance(metadata, dict) and metadata.get("trigger") == "manual"
+    return False
+
+
 class PendingSteers:
     """Fence accepted inputs against their exact replayed human UUIDs.
 

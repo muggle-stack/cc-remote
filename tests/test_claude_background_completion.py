@@ -149,18 +149,19 @@ async def test_shared_terminal_replays_without_resubmission_or_retiring_later_ac
         if managed:
             first.next_turn = {"id": "human", "prompt": "inspect"}
             await first.query("inspect")
+            await native.queue.put(user("human-echo", "inspect"))
         for index in range(2):
             await native.queue.put(task_input(f"notification-{index}", {
                 "kind": "task-notification", "taskId": f"task-{index}",
             }))
-        await until(lambda: worker.journal.seq == 2)
+        await until(lambda: worker.journal.seq == 2 + int(managed))
         await first.detach()
         await released(worker)
         await native.queue.put(result())
         if later_continuation:
             await native.queue.put(task_input("later-input", {"kind": "task-notification", "taskId": "later"}))
             await native.queue.put(assistant("later-output", [{"type": "text", "text": "later report"}]))
-        await until(lambda: worker.journal.seq == (5 if later_continuation else 3))
+        await until(lambda: worker.journal.seq == (5 if later_continuation else 3) + int(managed))
 
         sdk = SdkHandle(WrapperConfig(claude_service_socket=first.connection.socket_path))
         sdk.service_defer_events = True

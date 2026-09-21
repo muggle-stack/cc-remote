@@ -35,7 +35,7 @@ from mcp.server import Server
 
 from cc_remote.config import WrapperConfig
 from cc_remote.claude_steering import (
-    ClaudeSteerRejected, PendingSteers, background_end_ids, steer_message,
+    ClaudeSteerRejected, PendingSteers, background_end_ids, is_managed_input, steer_message,
 )
 from cc_remote.log import logger
 from cc_remote.protocol import MAX_SAFE_WIRE_INTEGER
@@ -725,8 +725,15 @@ class SdkHandle:
                 self._turn_origin_id = self.service_recovery.get("previous_origin_id")
             else:
                 self._turn_active = True
-                self._turn_origin_id = self.service_recovery["id"]
-                self._message_route_owner = "managed"
+                if "previous_origin_id" in self.service_recovery:
+                    # Replay from the accepted write, which can still precede
+                    # buffered autonomous activity and the actual human echo.
+                    self._turn_origin_id = self.service_recovery["previous_origin_id"]
+                    self._pending_turn_origin_id = self.service_recovery["id"]
+                    self._pending_turn_background_release = asyncio.Event()
+                else:
+                    self._turn_origin_id = self.service_recovery["id"]
+                    self._message_route_owner = "managed"
         elif hasattr(self.client, "description"):
             self._turn_origin_id = self.client.description.get("origin_id")
         if hasattr(self.client, "description"):
@@ -1557,7 +1564,11 @@ class SdkHandle:
                     if parse_raw and isinstance(data, dict) else None
                 )
                 if parse_raw and isinstance(data, dict):
-                    data = self._steers.annotate(data, managed_active=self._turn_active)
+                    managed_active = self._turn_active and (
+                        self._managed_input_seen
+                        or (self._pending_compact and self._message_route_owner != "background"
+                            and is_managed_input(data, pending_compact=True)))
+                    data = self._steers.annotate(data, managed_active=managed_active)
                 steer = data.get("__cc_steer") if parse_raw else None
                 intermediate = bool(parse_raw and data.get("__cc_steer_intermediate"))
                 message = self._parse_compat_message(data) if parse_raw else data
@@ -1610,6 +1621,10 @@ class SdkHandle:
                     )
                     if service_seed:
                         owner = "background"
+                    elif (getattr(message, "_cc_background_start", None)
+                          and not message._cc_background_start["managed"]):
+                        owner = "background"
+                        self._message_route_owner = owner
                     elif getattr(message, "_cc_steer_cancelled", None) and self._turn_active:
                         owner = "managed"
                         self._activate_pending_turn_route()
@@ -1665,6 +1680,12 @@ class SdkHandle:
                         # turn; the browser query remains pending for its later
                         # human/legacy-unattributed result on the same stream.
                         if origin_kind is not None and origin_kind != "human":
+                            owner = "background"
+                        elif (getattr(message, "_cc_background_ends", ())
+                              and not self._managed_input_seen):
+                            # An unannounced response started before this query's
+                            # human echo. Its unattributed terminal cannot consume
+                            # the newly accepted browser input.
                             owner = "background"
                         elif self._turn_active:
                             owner = "managed"
@@ -1874,6 +1895,14 @@ class SdkHandle:
 
     def start_service_events(self) -> None:
         """Release native replay only after the machine installed its routing."""
+        recovery = self.service_recovery
+        if self._turn_active and recovery is not None:
+            prompt = recovery.get("prompt")
+            # Older internal compactions retained the preceding prompt. Their
+            # reserved turn identity remains the command's recovery authority.
+            self._pending_compact = bool(
+                recovery["id"].startswith("compact-")
+                or (isinstance(prompt, str) and prompt.split(maxsplit=1)[:1] == ["/compact"]))
         ready = getattr(self.client, "ready", None)
         if ready is not None:
             ready.set()

@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-from cc_remote.claude_steering import PendingSteers, background_end_ids, steer_message
+from cc_remote.claude_steering import PendingSteers, background_end_ids, is_managed_input, steer_message
 
 from .wire import (
     ControllerLeaseConflict, decode_sdk, encode_sdk, private_directory,
@@ -99,6 +99,8 @@ class Session:
         self.callback_answers: dict[str, object] = {}
         self.initializers: dict[str, dict] = {}
         self.turn: dict | None = None
+        self.managed_input_seen = False
+        self.pending_compact = False
         self.steers = PendingSteers()
         # Controller replacement may happen before an attachment's native echo.
         # Keep ownership here until exact terminal commit or explicit close.
@@ -198,10 +200,17 @@ class Session:
             async for value in self.client._query.receive_messages():
                 if self.closed:
                     return
-                value = self.steers.annotate(value, managed_active=bool(
-                    self.turn and self.terminal_seq is None
-                    and not self.turn.get("awaiting_steer")))
+                managed_pending = bool(self.turn and self.terminal_seq is None
+                                       and not self.turn.get("awaiting_steer"))
+                if managed_pending and is_managed_input(
+                    value, pending_compact=self.pending_compact and not self.steers.background_id,
+                ):
+                    self.managed_input_seen = True
+                    self.origin_id = self.turn["id"]
+                value = self.steers.annotate(
+                    value, managed_active=managed_pending and self.managed_input_seen)
                 if "__cc_steer" in value:
+                    self.managed_input_seen = True
                     self.origin_id = value["__cc_steer"]["id"]
                     if self.turn is not None:
                         if self.turn.get("awaiting_steer"):
@@ -242,8 +251,14 @@ class Session:
                     self.metadata["session_id"] = sid
                 if (self.turn is not None and _human_result(value)
                         and not self.turn.get("awaiting_steer")
-                        and not value.get("__cc_steer_intermediate")):
+                        and not value.get("__cc_steer_intermediate")
+                        and (self.managed_input_seen or not ended)):
                     self.terminal_seq = seq
+                    if not self.managed_input_seen:
+                        # Commands/errors can terminate without a user replay.
+                        self.origin_id = self.turn["id"]
+                if _human_result(value):
+                    self.managed_input_seen = False
                 await self.notify()
         except asyncio.CancelledError:
             raise
@@ -363,6 +378,8 @@ class Session:
                                  "previous_origin_id": self.origin_id,
                                  "start_seq": self.journal.seq, "started_at": time.time()}
                     self.terminal_seq = None
+                    self.managed_input_seen = False
+                    self.pending_compact = False
                 directory = params["metadata"].get("attachment_dir")
                 if directory:
                     self.steer_attachment_dirs.add(directory)
@@ -387,8 +404,11 @@ class Session:
                     prompt = _prompt_messages(prompt)
                 elif not isinstance(prompt, str):
                     raise ValueError("Claude prompt must be text or message objects")
-                self.turn = {**params["turn"], "start_seq": self.journal.seq, "started_at": time.time()}
-                self.origin_id = self.turn["id"]
+                self.turn = {**params["turn"], "start_seq": self.journal.seq, "started_at": time.time(),
+                             "previous_origin_id": self.origin_id}
+                self.managed_input_seen = False
+                self.pending_compact = (isinstance(prompt, str)
+                                        and prompt.split(maxsplit=1)[:1] == ["/compact"])
                 self.terminal_seq = None
                 self.submitted_turns.add(self.turn["id"])
                 self.callback_answers.clear()

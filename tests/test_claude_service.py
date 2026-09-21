@@ -201,6 +201,8 @@ def test_attached_summary_opt_in_keeps_running_turn_and_native_child(
             worker = service.sessions[first.id]
             native = worker.client
             original_controls = worker.controls.copy()
+            await native.queue.put({"type": "user", "uuid": "human-echo",
+                                   "message": {"role": "user", "content": "hello"}})
             await first.detach()
             await released(worker)
 
@@ -263,8 +265,11 @@ def test_running_query_and_offline_terminal_survive_wrapper_disconnect():
             await first.query("hello")
             worker = service.sessions[first.id]
             native = worker.client
+            await native.queue.put({"type": "user", "uuid": "human-echo",
+                                   "message": {"role": "user", "content": "hello"}})
             await native.queue.put({"type": "assistant", "message": {"content": "part one"}})
             stream = first.receive_messages()
+            assert (await anext(stream))["uuid"] == "human-echo"
             assert (await anext(stream))["message"]["content"] == "part one"
             await first.detach()
             await released(worker)
@@ -276,6 +281,7 @@ def test_running_query_and_offline_terminal_survive_wrapper_disconnect():
             assert second.id == first.id
             assert second.recovery["id"] == "browser-msg"
             replay = second.receive_messages()
+            assert (await anext(replay))["uuid"] == "human-echo"
             assert (await anext(replay))["message"]["content"] == "part one"
             assert (await anext(replay))["message"]["content"] == "part two"
             terminal = await anext(replay)
@@ -456,6 +462,8 @@ def test_machine_reconstructs_offline_completion_without_resubmitting_or_duplica
             await released(worker)
             native = worker.client
             rows = [
+                {"type": "user", "uuid": "human-echo",
+                 "message": {"role": "user", "content": "hello"}},
                 {"type": "stream_event", "uuid": "e1", "session_id": SESSION_ID, "event": {
                     "type": "message_start", "message": {"id": "native-assistant"},
                 }},
@@ -482,6 +490,7 @@ def test_machine_reconstructs_offline_completion_without_resubmitting_or_duplica
             handle.service_defer_events = True
             await handle.connect(resume_id=SESSION_ID, cwd="/tmp")
             machine, transport, ctx = _machine_with_sdk(handle)
+            machine._configure_claude_sdk_callbacks(ctx, handle)
             ctx.active_msg_id = "browser-msg"
             ctx.state = "running"
             try:
@@ -495,6 +504,10 @@ def test_machine_reconstructs_offline_completion_without_resubmitting_or_duplica
                 assert len([item for item in transport.sent if isinstance(item, TurnEnd)]) == 1
                 assert native.prompts == ["hello"]
                 assert ctx.state == "idle"
+                # Replay completion is delivered behind the recovered turn's
+                # projection barrier; its deferred commit may still be in flight.
+                async with worker.changed:
+                    await asyncio.wait_for(worker.changed.wait_for(lambda: worker.turn is None), 2)
                 assert worker.turn is None
             finally:
                 await handle.detach_for_shutdown()
