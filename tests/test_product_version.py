@@ -12,8 +12,8 @@ from cc_remote.wrapper.codex_handle import _initialize_params
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_v3_product_version_is_consistent_across_runtime_and_web_metadata():
-    assert __version__ == "3.0.0"
+def test_product_version_is_consistent_across_runtime_and_web_metadata():
+    assert __version__ == "4.0.0"
     assert re.fullmatch(r"[1-9]\d*\.\d+\.\d+", __version__)
 
     package = json.loads((ROOT / "web/package.json").read_text())
@@ -42,7 +42,7 @@ def test_release_docs_distinguish_product_and_wire_protocol_versions():
     assert f"产品版本：v{__version__}" in readme
     assert f"Product version: v{__version__}" in readme_en
     for document in (readme, readme_en, changelog):
-        assert "v3.0.0" in document
+        assert f"v{__version__}" in document
         assert f"protocol v{PROTOCOL_VERSION}" in document.lower()
 
 

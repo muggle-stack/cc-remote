@@ -211,6 +211,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
+          notes_file="docs/releases/$RELEASE_TAG.md"
+          notes_args=(--generate-notes)
+          if [ -f "$notes_file" ]; then
+            notes_args=(--notes-file "$notes_file")
+          fi
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             is_draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)"
             test "$is_draft" = true || {
@@ -222,7 +227,7 @@ jobs:
               --verify-tag \
               --draft \
               --title "cc-remote $RELEASE_TAG" \
-              --generate-notes
+              "${notes_args[@]}"
           fi
           gh release upload "$RELEASE_TAG" dist/* --clobber
           gh release edit "$RELEASE_TAG" --draft=false --latest
