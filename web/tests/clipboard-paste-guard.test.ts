@@ -63,9 +63,31 @@ try {
 
   guard.clear();
   const failed = guard.capture(empty, imageClipboard());
-  assert.equal(guard.acceptAttachments(failed, { ...batch, errors: ["retry"] }), true);
+  const failedBatch = { images: [], files: [], errors: ["retry"] };
+  assert.equal(guard.acceptAttachments(failed, failedBatch), true);
   assert.equal(guard.acceptAttachments(guard.capture(empty, imageClipboard()), batch), true,
-    "a failed import must not block retrying its attachments");
+    "an entirely failed import must not block retrying its attachments");
+
+  for (const successful of [batch, { ...batch, images: [] }, { ...batch, files: [] }]) {
+    guard.clear();
+    const partial = { ...successful, errors: ["broken.png 图片格式无法识别", "large.txt 超过 6 MiB"] };
+    const first = guard.capture(empty, imageClipboard());
+    now += 10; // Complete the first asynchronous import before its native replay.
+    assert.equal(guard.acceptAttachments(first, partial), true);
+    now += 5;
+    assert.equal(guard.acceptAttachments(guard.capture(empty, imageClipboard()), structuredClone(partial)),
+      false, "successful attachments in a partial import must not be appended twice");
+    assert.equal(guard.acceptAttachments(guard.capture(empty, imageClipboard()), successful),
+      false, "replay deduplication compares successful bytes independently of import errors");
+    assert.equal(guard.acceptAttachments(guard.capture(empty, imageClipboard()), failedBatch), true);
+    assert.equal(guard.acceptAttachments(guard.capture(empty, imageClipboard()), partial),
+      false, "an entirely failed replay must not erase the last successful receipt");
+    guard.clear(); // A later explicit paste may deliberately repeat the same attachments.
+    assert.equal(guard.acceptAttachments(guard.capture(empty, imageClipboard()), partial), true);
+    now += PASTE_REPLAY_MS + 1;
+    assert.equal(guard.acceptAttachments(guard.capture(empty, imageClipboard()), partial), true,
+      "partial imports remain repeatable outside the native replay window");
+  }
 
   guard.clear();
   const pending = guard.capture(empty, imageClipboard());

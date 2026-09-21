@@ -98,7 +98,9 @@ export class ClipboardPasteGuard {
   }
 
   acceptAttachments(receipt: PasteReceipt, batch: Batch): boolean {
-    if (!this.recent(receipt) || batch.errors.length
+    // Partial imports still append their successful attachments. Compare those
+    // bytes even when other items failed; an explicit retry clears the receipt.
+    if (!this.recent(receipt)
         || (!batch.images.length && !batch.files.length)) return true;
     const prior = this.attachments;
     if (prior && this.recent(prior.receipt, receipt.at)

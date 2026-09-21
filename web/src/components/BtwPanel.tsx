@@ -258,7 +258,7 @@ export function BtwPanel(p: Props) {
       ]);
       const batch = await pickFiles(
         imported.files, images.length + files.length, attachmentBytes(images, files));
-      if (paste && !imported.errors.length && !pasteGuard.acceptAttachments(paste, batch)) return;
+      if (paste && !pasteGuard.acceptAttachments(paste, batch)) return;
       const append = (current: ComposerDraft): ComposerDraft => ({
         ...current,
         images: [...current.images, ...batch.images],
