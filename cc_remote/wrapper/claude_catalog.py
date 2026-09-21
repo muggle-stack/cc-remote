@@ -58,6 +58,41 @@ def projects_dir(config_dir: str | os.PathLike[str]) -> Path:
     return Path(config_dir) / "projects"
 
 
+def _project_bucket_names(directory: str) -> tuple[str, ...]:
+    sdk_name = _sanitize_path(directory)
+    if not any(ord(char) > 0xFFFF for char in directory):
+        return (sdk_name,)
+    # The native JS sanitizer and hash operate on UTF-16 code units. The
+    # Python SDK iterates code points, producing different keys for emoji.
+    encoded = directory.encode("utf-16-le", errors="surrogatepass")
+    native_units = "".join(
+        chr(encoded[index] | encoded[index + 1] << 8)
+        for index in range(0, len(encoded), 2)
+    )
+    native_name = _sanitize_path(native_units)
+    return (sdk_name,) if native_name == sdk_name else (sdk_name, native_name)
+
+
+def _matches_project_bucket(
+    names: tuple[str, ...], bucket: str, *, allow_legacy_hash: bool = False,
+) -> bool:
+    if bucket in names:
+        return True
+    if not allow_legacy_hash:
+        return False
+    # Older native builds used a different hash. Match the same bounded
+    # prefix as the SDK catalog, requiring a nonempty lowercase hash suffix.
+    suffix = bucket[MAX_SANITIZED_LENGTH + 1:]
+    return (
+        suffix.isascii() and suffix.isalnum() and suffix == suffix.lower()
+        and any(
+            len(name) > MAX_SANITIZED_LENGTH
+            and bucket.startswith(name[:MAX_SANITIZED_LENGTH] + "-")
+            for name in names
+        )
+    )
+
+
 def _project_entries(config_dir: str | os.PathLike[str]) -> list[Path]:
     root = projects_dir(config_dir)
     try:
@@ -98,17 +133,18 @@ def _directory_candidates(
     result: list[tuple[Path, str]] = []
     seen: set[Path] = set()
     for project_path in roots:
-        sanitized = _sanitize_path(project_path)
-        exact = by_name.get(sanitized)
+        names = _project_bucket_names(project_path)
+        exact = next((by_name[name] for name in names if name in by_name), None)
         if exact is not None and exact not in seen:
             seen.add(exact)
             result.append((exact, project_path))
             continue
-        if len(sanitized) <= MAX_SANITIZED_LENGTH:
+        if all(len(name) <= MAX_SANITIZED_LENGTH for name in names):
             continue
-        prefix = sanitized[:MAX_SANITIZED_LENGTH] + "-"
         for entry in available:
-            if entry not in seen and entry.name.startswith(prefix):
+            if entry not in seen and _matches_project_bucket(
+                names, entry.name, allow_legacy_hash=True,
+            ):
                 seen.add(entry)
                 result.append((entry, project_path))
     return result
@@ -231,7 +267,17 @@ def recover_session_cwd(
                 cwd = row.get("cwd")
                 if (isinstance(cwd, str) and os.path.isabs(cwd)
                         and "\x00" not in cwd
-                        and _sanitize_path(cwd) == source.parent.name):
+                        and _matches_project_bucket(
+                            _project_bucket_names(cwd), source.parent.name,
+                            # Only the explicit native root identifies the
+                            # original cwd when an old hash cannot be checked.
+                            # Later messages can share the same long prefix.
+                            allow_legacy_hash=(
+                                row.get("type") == "user"
+                                and "parentUuid" in row
+                                and row["parentUuid"] is None
+                            ),
+                        )):
                     return replace(info, cwd=cwd)
     except OSError:
         pass

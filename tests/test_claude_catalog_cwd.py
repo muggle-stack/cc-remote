@@ -22,10 +22,13 @@ from tests.test_multisession import _mk_machine
 
 
 SID = "11111111-1111-4111-8111-111111111111"
+LONG_CWD = "/workspace/" + "/".join(["long-project-component"] * 12)
+LONG_PREFIX = ("-workspace-" + "long-project-component-" * 12)[:200]
+EMOJI_PREFIX = ("----workspace-" + "long-project-component-" * 12)[:200]
 
 
-def write_image_transcript(root, cwd="/original-project", *, image_sizes=(100_000,)):
-    path = root / "projects" / _sanitize_path(cwd) / f"{SID}.jsonl"
+def write_image_transcript(root, cwd="/original-project", *, image_sizes=(100_000,), bucket=None, parent_uuid=None):
+    path = root / "projects" / (bucket or _sanitize_path(cwd)) / f"{SID}.jsonl"
     path.parent.mkdir(parents=True)
     metadata = b"Comment\x00"
     overhead = len(base64.b64decode(_complete_png((b"tEXt", metadata))))
@@ -38,7 +41,7 @@ def write_image_transcript(root, cwd="/original-project", *, image_sizes=(100_00
     content = [{"type": "image", "source": {"type": "base64", **image}} for image in images]
     records = [
         {"type": "queue-operation", "operation": "enqueue", "content": content},
-        {"type": "user", "uuid": "human", "parentUuid": None, "sessionId": SID,
+        {"type": "user", "uuid": "human", "parentUuid": parent_uuid, "sessionId": SID,
          "cwd": cwd, "message": {"role": "user", "content": [*content, {"type": "text", "text": "inspect image"}]}},
         {"type": "assistant", "uuid": "answer", "parentUuid": "human", "sessionId": SID,
          "cwd": cwd + "/later-shell-directory", "message": {"role": "assistant", "content": "done"}},
@@ -95,6 +98,54 @@ def test_large_image_session_recovers_original_cwd_and_can_be_selected(tmp_path,
 
     asyncio.run(run())
     assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("cwd,bucket,parent_uuid", [
+    (LONG_CWD, LONG_PREFIX + "-qyxukm", "earlier-turn"),
+    (LONG_CWD + "/🧪", LONG_PREFIX + "-ljv3l7", "earlier-turn"),
+    ("/🧪" + LONG_CWD, EMOJI_PREFIX + "-q5e8nz", "earlier-turn"),
+    (LONG_CWD, LONG_PREFIX + "-1legacyhash", None),
+], ids=["native-ascii", "native-emoji-hash", "native-emoji-prefix", "legacy-hash"])
+def test_image_session_recovers_full_cwd_from_hashed_project_bucket(tmp_path, cwd, bucket, parent_uuid):
+    # Native keys above were evaluated from Claude 2.1.276's JS sanitizer.
+    # Non-root rows must match the native key exactly, never just its prefix.
+    root = tmp_path / "profile"
+    path = write_image_transcript(root, cwd, bucket=bucket, parent_uuid=parent_uuid)
+    original = path.read_bytes()
+
+    info = claude_catalog.get_session_info(root, SID)
+    assert info is not None and info.cwd == cwd
+    listed = claude_catalog.list_sessions(root)
+    assert [item.cwd for item in listed if item.session_id == SID] == [cwd]
+    assert claude_catalog.find_session_file(root, SID, directory=cwd) == path
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("bucket,cwd,parent_uuid", [
+    (LONG_PREFIX + "-", LONG_CWD, None),
+    (LONG_PREFIX + "-invalid-hash", LONG_CWD, None),
+    (LONG_PREFIX + "-INVALID", LONG_CWD, None),
+    ("-another-project-" + LONG_PREFIX[17:] + "-1legacyhash", LONG_CWD, None),
+    ("-short-project-1legacyhash", "/short-project", None),
+    (LONG_PREFIX + "-qyxukm", LONG_CWD + "/later-shell-directory", "earlier-turn"),
+])
+def test_cwd_recovery_rejects_invalid_buckets_and_later_prefix_collisions(tmp_path, bucket, cwd, parent_uuid):
+    path = tmp_path / bucket / f"{SID}.jsonl"
+    path.parent.mkdir()
+    row = {"type": "user", "uuid": "human", "parentUuid": parent_uuid,
+           "sessionId": SID, "cwd": cwd, "message": {"role": "user", "content": "fixture"}}
+    path.write_text(json.dumps(row) + "\n")
+    info = SDKSessionInfo(session_id=SID, summary="fixture", last_modified=0)
+    assert claude_catalog.recover_session_cwd(info, path).cwd is None
+
+
+def test_long_cwd_legacy_hash_requires_explicit_native_root(tmp_path):
+    path = write_image_transcript(tmp_path, LONG_CWD, bucket=LONG_PREFIX + "-1legacyhash")
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    del rows[1]["parentUuid"]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    info = SDKSessionInfo(session_id=SID, summary="fixture", last_modified=0)
+    assert claude_catalog.recover_session_cwd(info, path).cwd is None
 
 
 def test_cwd_recovery_skips_oversized_rows_without_unbounded_allocation(tmp_path):
