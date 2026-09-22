@@ -1146,6 +1146,63 @@ function mergeTurn(
   };
 }
 
+/** Reconcile overlapping browse/cache pages by native user identity. Keep the
+ * last copy's position, display id and lifecycle; older copies can supply the
+ * native lookup id and already-expanded detail. Null slots let browse keep its
+ * page/cursor ownership without regrouping rows or changing live runtime state.
+ *
+ * A client alias is usable only when it names one native row across the whole
+ * window. Task/fork ids, matching prose and timestamps are never row identity:
+ * multiple steered prompts may legitimately share all three. */
+export function mergeHistoryPageCopies(turns: readonly Turn[]): (Turn | null)[] {
+  const canonicalId = (turn: Turn) => turn.historyTurnId || turn.id;
+  const aliases = new Map<string, Set<string>>();
+  const nativeIds = new Set<string>();
+  for (const turn of turns) {
+    const nativeId = canonicalId(turn);
+    if (turn.historyTurnId || (turn.clientMsgId && turn.clientMsgId !== turn.id)) {
+      nativeIds.add(nativeId);
+    }
+    for (const alias of [turn.clientMsgId, turn.historyTurnId ? turn.id : undefined]) {
+      if (!alias || alias === nativeId) continue;
+      const targets = aliases.get(alias) ?? new Set<string>();
+      targets.add(nativeId);
+      aliases.set(alias, targets);
+    }
+  }
+
+  const result: (Turn | null)[] = [...turns];
+  const indexes = new Map<string, number>();
+  turns.forEach((turn, index) => {
+    let key = canonicalId(turn);
+    if (!turn.historyTurnId && !nativeIds.has(key)) {
+      const targets = aliases.get(key);
+      if (targets?.size === 1) key = targets.values().next().value!;
+    }
+    const previousIndex = indexes.get(key);
+    indexes.set(key, index);
+    if (previousIndex == null) return;
+    const previous = result[previousIndex]!;
+    const merged = mergeTurn(previous, turn, !turn.done, "second");
+    result[previousIndex] = null;
+    result[index] = {
+      ...merged,
+      historyTurnId: key !== turn.id ? key : turn.historyTurnId,
+      detailEventCount: Math.max(
+        previous.detailEventCount ?? 0, turn.detailEventCount ?? 0),
+      // These are display-only copies. An older completed page cannot settle
+      // a newer open row, nor reopen a newer terminal or restore its old error.
+      done: turn.done,
+      interrupted: turn.interrupted,
+      error: turn.error,
+      progress: turn.progress,
+      terminalSource: turn.terminalSource,
+      doneTs: turn.done ? merged.doneTs : turn.doneTs,
+    };
+  });
+  return result;
+}
+
 function restoreAuthoritativeLifecycle(merged: Turn, history: Turn, live: Turn): Turn {
   const restored = {
     ...merged,

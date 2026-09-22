@@ -288,6 +288,49 @@ assert.deepEqual(mergedPage?.turns.map((item) => item.id), [
   "1", "native-2", "3",
 ]);
 
+// A live-only Claude row can be evicted before its native summary arrives.
+// Both write orders must converge without relying on prompt text or a prior
+// historyTurnId binding, and old cached duplicates must heal on read as well.
+const nativeClaudeRow = turn("claude-native", {
+  clientMsgId: "claude-browser", prompt: "same question", ts: 2,
+  detailEventCount: 16, processDetailState: "present",
+});
+const liveClaudeRow = turn("claude-browser", {
+  prompt: "same question", ts: 2,
+});
+for (const [index, copies] of [
+  [liveClaudeRow, nativeClaudeRow],
+  [nativeClaudeRow, liveClaudeRow],
+].entries()) {
+  const pageKey = `claude-alias-${index}`;
+  for (const copy of copies) {
+    assert.equal((await cache.putPage(scope, {
+      pageKey, turns: [copy], hasOlder: false,
+    })).ok, true);
+  }
+  const page = await cache.getPage(scope, pageKey);
+  assert.equal(page?.turns.length, 1);
+  assert.equal(page?.turns[0].historyTurnId ?? page?.turns[0].id, "claude-native");
+  assert.equal(page?.turns[0].clientMsgId, "claude-browser");
+  assert.equal(page?.turns[0].detailEventCount, 16);
+  const stored = storage.records.get(cache.pageKey(scope, pageKey)) as HistoryPageCacheStoredRecord;
+  stored.page.turns = [nativeClaudeRow, liveClaudeRow];
+  assert.equal((await cache.getPage(scope, pageKey))?.turns.length, 1,
+    "existing cache pollution is repaired without discarding history pages");
+}
+
+const repeatedClaudePage = sanitizeHistoryPageForCache({
+  pageKey: "repeated-claude-prompts",
+  turns: [
+    nativeClaudeRow,
+    { ...nativeClaudeRow, id: "claude-native-other", clientMsgId: "claude-browser-other" },
+    turn("display-collision", { historyTurnId: "native-first" }),
+    turn("display-collision", { historyTurnId: "native-second" }),
+  ],
+});
+assert.equal(repeatedClaudePage.turns.length, 4,
+  "identical questions and display-id collisions keep separate native rows");
+
 // Concurrent partial writes to one logical page must serialize their
 // read/merge/write cycle. Otherwise both reads can observe an empty page and
 // the last writer silently drops the other turn.

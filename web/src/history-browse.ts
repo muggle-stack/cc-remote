@@ -1,6 +1,7 @@
 import {
   installAuthoritativeTurnDetailPage,
   mergeAuthoritativeTurnDetail,
+  mergeHistoryPageCopies,
   reconcileProvenCompactionOrphans,
 } from "./history-merge.ts";
 import {
@@ -186,24 +187,14 @@ function segmentToPage(segment: HistoryBrowseSegment): HistoryBrowsePage {
 /** Newer segments win canonical overlap so an optimistic live id stays mounted
  * after its native history row materializes. */
 function dedupeSegments(segments: readonly HistoryBrowseSegment[]): HistoryBrowseSegment[] {
-  const next = segments.map((segment) => ({
-    ...segment,
-    turns: [...segment.turns],
-  }));
-  const seen = new Set<string>();
-  for (let segmentIndex = next.length - 1; segmentIndex >= 0; segmentIndex -= 1) {
-    const segment = next[segmentIndex];
-    const retained: Turn[] = [];
-    for (let turnIndex = segment.turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
-      const turn = segment.turns[turnIndex];
-      const key = canonicalTurnId(turn);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      retained.unshift(turn);
-    }
-    segment.turns = retained;
-  }
-  return next;
+  const copies = mergeHistoryPageCopies(flattenSegments(segments));
+  let offset = 0;
+  return segments.map((segment) => {
+    const turns = copies.slice(offset, offset + segment.turns.length)
+      .filter((turn): turn is Turn => turn != null);
+    offset += segment.turns.length;
+    return { ...segment, turns };
+  });
 }
 
 function flattenSegments(segments: readonly HistoryBrowseSegment[]): Turn[] {

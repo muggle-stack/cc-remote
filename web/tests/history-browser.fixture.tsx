@@ -608,7 +608,19 @@ function reducerHistoryEvent(
   };
 }
 
-function reducerHistoryInitialState(cachedPagingRace = false): AppState {
+const CLAUDE_ALIAS_HISTORY: Turn[] = Array.from({ length: 10 }, (_, index) => ({
+  id: `claude-native-${index + 1}`,
+  clientMsgId: `claude-browser-${index + 1}`,
+  prompt: index === 0 ? "hi claude" : `Claude question ${index + 1}`,
+  ts: 1_790_000_000_000 + index * 60_000,
+  done: true,
+  blocks: [{
+    kind: "text", message_id: `claude-answer-${index + 1}`,
+    channel: "final", text: `Claude answer ${index + 1}`, done: true,
+  }],
+}));
+
+function reducerHistoryInitialState(cachedPagingRace = false, claudeAliases = false): AppState {
   let state: AppState = {
     ...initialState,
     focusedSid: REDUCER_SESSION_A,
@@ -617,6 +629,20 @@ function reducerHistoryInitialState(cachedPagingRace = false): AppState {
       [REDUCER_SESSION_B]: createRuntime(),
     },
   };
+  if (claudeAliases) {
+    state.runtimes[REDUCER_SESSION_A] = {
+      ...createRuntime(),
+      historyRevision: REDUCER_HISTORY_REVISION,
+      historyGeneration: REDUCER_HISTORY_GENERATION,
+      turns: CLAUDE_ALIAS_HISTORY.map((turn, index) => index === 0 ? turn : {
+        ...turn, id: turn.clientMsgId!, clientMsgId: undefined,
+      }),
+    };
+    return reduce(state, { type: "event", event: reducerHistoryEvent(
+      REDUCER_SESSION_A, CLAUDE_ALIAS_HISTORY.slice(6),
+      { buildSeq: 1, hasMore: true },
+    ) });
+  }
   if (cachedPagingRace) {
     return reduce(state, {
       type: "hydrate_cache",
@@ -658,6 +684,9 @@ function reducerHistoryInitialState(cachedPagingRace = false): AppState {
 }
 
 function ReducerHistoryBrowserFixture() {
+  const claudeAliases = useMemo(
+    () => new URLSearchParams(window.location.search).has("claude-aliases"), [],
+  );
   const cachedPagingRace = useMemo(
     () => new URLSearchParams(window.location.search).has("cached-paging"),
     [],
@@ -665,7 +694,7 @@ function ReducerHistoryBrowserFixture() {
   const [state, dispatch] = useReducer(
     reduce,
     cachedPagingRace,
-    reducerHistoryInitialState,
+    (cached) => reducerHistoryInitialState(cached, claudeAliases),
   );
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -740,7 +769,8 @@ function ReducerHistoryBrowserFixture() {
         before: browse.olderCursor!,
         page: {
           pageKey: "reducer-older-page",
-          turns: Array.from({ length: 20 }, (_, index) =>
+          turns: claudeAliases ? CLAUDE_ALIAS_HISTORY.slice(0, 6)
+            : Array.from({ length: 20 }, (_, index) =>
             finalTurn(`reducer-m${index + 1}`, index === 14 ? 4 : 3)),
           hasOlder: false,
           olderCursor: null,
@@ -749,7 +779,7 @@ function ReducerHistoryBrowserFixture() {
       });
     }, 25);
     return { accepted: true, viewId };
-  }, []);
+  }, [claudeAliases]);
 
   const refreshLiveRuntime = useCallback(() => {
     const current = stateRef.current;
@@ -759,19 +789,20 @@ function ReducerHistoryBrowserFixture() {
       type: "event",
       event: reducerHistoryEvent(
         REDUCER_SESSION_A,
-        Array.from({ length: 16 }, (_, index) =>
+        claudeAliases ? CLAUDE_ALIAS_HISTORY.slice(6)
+          : Array.from({ length: 16 }, (_, index) =>
           finalTurn(`reducer-m${index + 25}`, index === 15 ? 5 : 3)),
         {
           buildSeq: nextBuildSeq,
           hasMore: true,
-          oldestId: "reducer-m25",
-          newestId: "reducer-m40",
+          oldestId: claudeAliases ? CLAUDE_ALIAS_HISTORY[6].id : "reducer-m25",
+          newestId: claudeAliases ? CLAUDE_ALIAS_HISTORY[9].id : "reducer-m40",
           liveSeq: target?.lastLiveSeq ?? 0,
         },
       ),
     });
     setRefreshes((value) => value + 1);
-  }, []);
+  }, [claudeAliases]);
 
   const switchSession = useCallback(() => {
     const target = stateRef.current.focusedSid === REDUCER_SESSION_A
@@ -803,7 +834,7 @@ function ReducerHistoryBrowserFixture() {
       <ChatView
         sid={sid}
         turns={historyView.turns}
-        engine="codex"
+        engine={claudeAliases ? "claude" : "codex"}
         hasMore={historyView.hasMore}
         historyRevision={runtime.historyRevision}
         historyViewRevision={historyView.viewRevision}
