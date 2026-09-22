@@ -200,6 +200,7 @@ rollback_snapshot=""
 snapshot_created=0
 service_stopped=0
 service_was_running=0
+activation_committed=0
 
 mkdir -p "$releases" "$runtimes" "$rollback_root"
 if [ "$system" = darwin ]; then
@@ -269,7 +270,7 @@ wrapper_service_active() {
 cleanup() {
   status=$?
   trap - EXIT HUP INT TERM
-  if [ "$status" -ne 0 ]; then
+  if [ "$status" -ne 0 ] && [ "$activation_committed" -eq 0 ]; then
     rollback_ready=1
     if [ "$snapshot_created" -eq 1 ]; then
       # Never start old code against data migrated by the failed new release.
@@ -325,6 +326,8 @@ cleanup() {
     else
       echo "ERROR: wrapper activation failed; manual data recovery is required" >&2
     fi
+  elif [ "$status" -ne 0 ]; then
+    echo "WARNING: Wrapper activation was committed; inspect it before retrying." >&2
   fi
   [ -z "$stage" ] || rm -rf -- "$stage"
   [ -z "$service_backup" ] || rm -f -- "$service_backup"
@@ -594,9 +597,6 @@ if [ "$migration_ready" -ne 1 ]; then
   die "Claude/Codex Work profile migrations did not become ready"
 fi
 
-"$target/.venv/bin/python" "$target/deploy/install_cli.py" \
-  --root "$appdir" --destination "$cli_path" --role wrapper --user "$target_user"
-
 # The real Wrapper prepares and probes each account as the service user. Read
 # its fresh result here; never run a user's Codex binary as the Linux installer.
 codex_check_args=(--home "$target_home" --release "$target" --after "$activation_started")
@@ -610,6 +610,12 @@ if ! "$target/.venv/bin/python" "$target/deploy/check_codex_readiness.py" \
     "${codex_check_args[@]}"; then
   echo "WARNING: Wrapper is installed; Codex sharing still needs attention."
 fi
+
+# Keep registration after the interruptible readiness check. Once it succeeds,
+# post-install output failures must not roll back a registered installation.
+"$target/.venv/bin/python" "$target/deploy/install_cli.py" \
+  --root "$appdir" --destination "$cli_path" --role wrapper --user "$target_user"
+activation_committed=1
 
 echo
 echo "Wrapper v$version installed from $git_sha."
