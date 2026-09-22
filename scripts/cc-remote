@@ -15,7 +15,39 @@ fi
 
 case "$(uname -s)" in
   Darwin) roots=("$HOME/Library/Application Support/cc-remote/current") ;;
-  Linux) roots=(/opt/cc-remote-wrapper/current /opt/cc-remote/current) ;;
+  Linux)
+    selected_role=""
+    role_requested=0
+    role_value_next=0
+    if [ "${1:-}" = update ]; then
+      for argument in "${@:2}"; do
+        if [ "$role_value_next" -eq 1 ]; then
+          selected_role="$argument"
+          role_value_next=0
+          continue
+        fi
+        case "$argument" in
+          --) break ;;
+          # Match argparse's accepted abbreviations and last-option-wins rule.
+          --r|--ro|--rol|--role) role_requested=1; role_value_next=1 ;;
+          --r=*|--ro=*|--rol=*|--role=*)
+            role_requested=1; selected_role="${argument#*=}" ;;
+        esac
+      done
+    fi
+    if [ "$role_requested" -eq 1 ]; then
+      [ "$role_value_next" -eq 0 ] || {
+        echo "--role requires relay or wrapper." >&2; exit 2;
+      }
+      case "$selected_role" in
+        relay) roots=("/opt/cc-remote/current") ;;
+        wrapper) roots=("/opt/cc-remote-wrapper/current") ;;
+        *) echo "--role requires relay or wrapper." >&2; exit 2 ;;
+      esac
+    else
+      roots=("/opt/cc-remote-wrapper/current" "/opt/cc-remote/current")
+    fi
+    ;;
   *) echo "cc-remote supports macOS and Linux." >&2; exit 1 ;;
 esac
 

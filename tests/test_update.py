@@ -312,6 +312,76 @@ def test_selected_managed_root_cannot_impersonate_another_role(tmp_path, monkeyp
         updater.select_installation("relay", "linux", "arm64")
 
 
+@pytest.fixture
+def linux_launcher(tmp_path):
+    managed = tmp_path / "managed roots"
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    (stubs / "uname").write_text("#!/bin/sh\necho Linux\n")
+    (stubs / "id").write_text("#!/bin/sh\necho 0\n")
+    for stub in stubs.iterdir():
+        stub.chmod(0o755)
+    releases = {}
+    for role, directory in (("relay", "cc-remote"), ("wrapper", "cc-remote-wrapper")):
+        release = managed / directory / "release"
+        (release / ".venv/bin").mkdir(parents=True)
+        runtime = release / ".venv/bin/python"
+        runtime.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n")
+        runtime.chmod(0o755)
+        package = release / "cc_remote"
+        package.mkdir()
+        (package / "__init__.py").touch()
+        (package / "__main__.py").write_text(
+            f"import json, sys\nprint(json.dumps({{'role': {role!r}, 'argv': sys.argv[1:]}}))\n")
+        (release.parent / "current").symlink_to(release)
+        releases[role] = release
+    script = tmp_path / "cc-remote"
+    script.write_text((ROOT / "scripts/cc-remote").read_text().replace(
+        "/opt/cc-remote", str(managed / "cc-remote")))
+    env = {**os.environ, "PATH": f'{stubs}:{os.environ["PATH"]}'}
+    return ["bash", str(script)], env, releases
+
+
+@pytest.mark.parametrize("role", ["relay", "wrapper"])
+@pytest.mark.parametrize("option", ["--role", "--role=", "--ro", "--ro="])
+def test_launcher_selects_requested_runtime_before_loading_python(linux_launcher, role, option):
+    command, env, releases = linux_launcher
+    other = "wrapper" if role == "relay" else "relay"
+    (releases[other] / "cc_remote/__main__.py").write_text("raise ImportError('broken unrelated runtime')\n")
+    selection = [f"{option}{role}"] if option.endswith("=") else [option, role]
+    arguments = ["update", "--check", *selection]
+    result = subprocess.run(command + arguments, env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"role": role, "argv": arguments}
+
+
+@pytest.mark.parametrize("role", ["relay", "wrapper"])
+def test_launcher_does_not_fall_back_when_requested_runtime_is_missing(linux_launcher, role):
+    command, env, releases = linux_launcher
+    (releases[role] / ".venv/bin/python").unlink()
+    result = subprocess.run(command + ["update", "--role", role], env=env,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 1
+    assert "No managed cc-remote release found" in result.stderr
+
+
+def test_launcher_uses_last_explicit_role_without_consuming_arguments(linux_launcher):
+    command, env, _releases = linux_launcher
+    arguments = ["update", "--role", "wrapper", "--role=relay", "--check"]
+    result = subprocess.run(command + arguments, env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"role": "relay", "argv": arguments}
+
+
+@pytest.mark.parametrize("selection", [["--role"], ["--role="], ["--role", "invalid"]])
+def test_launcher_rejects_missing_or_invalid_role(linux_launcher, selection):
+    command, env, _releases = linux_launcher
+    result = subprocess.run(command + ["update", *selection], env=env,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 2
+    assert "--role requires relay or wrapper" in result.stderr
+
+
 def test_custom_installation_is_not_adopted(tmp_path, monkeypatch):
     installation = _installation(tmp_path, monkeypatch)
     (installation.root / "installation.json").unlink()
