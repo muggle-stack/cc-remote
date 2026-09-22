@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # First-install/update entrypoint for a role-scoped wrapper release bundle.
 set -euo pipefail
+installer_args=("$@")
 
 die() {
   echo "ERROR: $*" >&2
@@ -160,6 +161,17 @@ else
   log_dir=""
   cli_path=/usr/local/bin/cc-remote
 fi
+
+# Lock before reading rollback state, staging releases or changing credentials.
+# Managed updates pass their open lock; direct installs acquire it and re-enter.
+if [ -z "${CC_REMOTE_INSTALL_LOCK_FD:-}" ]; then
+  exec "$bundle/bin/uv" run --no-project --no-env-file --managed-python \
+    --python "$python_runtime" python "$bundle/deploy/install_lock.py" \
+    "$appdir" bash "$bundle/deploy/install-wrapper.sh" "${installer_args[@]}"
+fi
+"$bundle/bin/uv" run --no-project --no-env-file --managed-python \
+  --python "$python_runtime" python "$bundle/deploy/install_lock.py" \
+  --verify-fd "$CC_REMOTE_INSTALL_LOCK_FD" "$appdir"
 
 "$bundle/bin/uv" run --no-project --no-env-file --managed-python \
   --python "$python_runtime" python "$bundle/deploy/install_cli.py" \

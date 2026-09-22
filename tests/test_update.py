@@ -20,6 +20,7 @@ from cc_remote import update as updater
 from cc_remote.__main__ import main
 from deploy.install_cli import check_destination, install_cli
 from deploy import install_cli as cli_installer
+from deploy.install_lock import acquire_install_lock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +52,13 @@ def _installation(tmp_path, monkeypatch, *, role="wrapper", system="darwin"):
     monkeypatch.setattr(updater, "installation_roots", lambda _: [root])
     monkeypatch.setattr(updater, "host_platform", lambda: (system, "arm64"))
     monkeypatch.setattr(updater.os, "geteuid", lambda: 0 if system == "linux" else 501)
+    # The fixture models activation privileges; its real files still belong to
+    # this test process. Exercise native locking with that actual OS identity.
+    def native_lock(path):
+        with monkeypatch.context() as native_identity:
+            native_identity.setattr(updater.os, "geteuid", os.getuid)
+            return acquire_install_lock(path)
+    monkeypatch.setattr(updater, "acquire_install_lock", native_lock)
     monkeypatch.setattr(updater, "require_independent_terminal", lambda: None)
     return updater.read_installation(root, system, "arm64")
 

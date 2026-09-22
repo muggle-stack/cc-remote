@@ -169,6 +169,7 @@ def test_release_bundles_are_deterministic_and_role_scoped(
         assert f"{prefix}/web/dist/cc-remote-viewer-runner.js" in members
         assert f"{prefix}/requirements-relay.lock" in members
         assert f"{prefix}/deploy/install-relay.sh" in members
+        assert f"{prefix}/deploy/install_lock.py" in members
         assert f"{prefix}/deploy/setup-vps.sh" in members
         assert f"{prefix}/deploy/Caddyfile.insecure" in members
         assert f"{prefix}/deploy/install-wrapper.sh" not in members
@@ -177,6 +178,7 @@ def test_release_bundles_are_deterministic_and_role_scoped(
         assert not any("/web/" in name for name in members)
         assert f"{prefix}/requirements-wrapper.lock" in members
         assert f"{prefix}/deploy/install-wrapper.sh" in members
+        assert f"{prefix}/deploy/install_lock.py" in members
         assert f"{prefix}/deploy/install_claude_service.py" in members
         assert f"{prefix}/deploy/check_codex_readiness.py" in members
         assert f"{prefix}/cc_remote/wrapper/codex_readiness.py" in members

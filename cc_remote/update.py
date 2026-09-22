@@ -8,14 +8,12 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 import ast
-import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
 import platform
 import re
-import stat
 import subprocess
 import sys
 import tarfile
@@ -25,6 +23,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from deploy.release_manifest import ReleaseManifestError, load_manifest
+from deploy.install_lock import LOCK_FD_ENV, InstallLockError, acquire_install_lock
 
 
 class UpdateError(ValueError):
@@ -257,14 +256,11 @@ def _claude_contract(release: Path) -> tuple[str, int]:
 
 @contextmanager
 def update_lock(root: Path):
-    descriptor = os.open(root / ".update.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise UpdateError("update lock is not a regular file")
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise UpdateError("another update is already running; inspect it before retrying") from exc
+        descriptor = acquire_install_lock(root)
+    except InstallLockError as exc:
+        raise UpdateError(str(exc)) from exc
+    try:
         # The installer inherits this descriptor so loss of its controller does
         # not let a second update enter an activation whose result is unknown.
         yield descriptor
@@ -303,7 +299,10 @@ def require_independent_terminal() -> None:
 def run_installer(command: list[str], lock_descriptor: int) -> int:
     # subprocess.run kills its child on KeyboardInterrupt. A role installer may
     # already be rolling back in its INT trap, so leave it alive until it exits.
-    process = subprocess.Popen(command, pass_fds=(lock_descriptor,))
+    process = subprocess.Popen(
+        command, pass_fds=(lock_descriptor,),
+        env={**os.environ, LOCK_FD_ENV: str(lock_descriptor)},
+    )
     while True:
         try:
             return process.wait()

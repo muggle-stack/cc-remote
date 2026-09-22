@@ -96,6 +96,9 @@ deployment.
   The command must run outside the managed Wrapper/Relay process tree. It does
   not update remote machines, restart the independent Claude service, adopt
   source/Docker/custom layouts, prune releases, or automate downgrade rollback.
+  Direct role installers use the same per-installation `.update.lock` before
+  reading rollback state or changing services. They validate the inherited file
+  descriptor from a managed update; an environment marker cannot bypass the lock.
 - `build_release.py` / `release_manifest.py` — reproducible role-bundle builder
   and fail-closed manifest validator. Relay artifacts contain `web/dist` and
   `requirements-relay.lock`; Wrapper artifacts contain no Web tree and use
