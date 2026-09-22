@@ -14,6 +14,7 @@ import {
 } from "react";
 import {
   defaultRangeExtractor,
+  elementScroll,
   useVirtualizer,
 } from "@tanstack/react-virtual";
 import type {
@@ -397,6 +398,7 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
   const controllerRef = useRef<ScrollFollowController | null>(null);
   if (!controllerRef.current) controllerRef.current = new ScrollFollowController();
   const scrollCoordinatorRef = useRef(new ScrollCoordinator());
+  const applyingScrollCommandRef = useRef(false);
   const [scrollPolicyEpoch, setScrollPolicyEpoch] = useState(0);
   const [scrollState, setScrollState] = useState<ScrollFollowSnapshot>(() =>
     controllerRef.current!.snapshot());
@@ -727,6 +729,18 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
   const virtualAnchorTo = keyedPrependActive
       && activeHistoryAnchor?.direction === "newer"
     ? "end" : "start";
+  const canFollowLiveTail = useCallback(() =>
+    activeScrollScopeRef.current === scrollScope
+      && renderedScrollScopeRef.current === scrollScope
+      && !browseMode
+      && !!controllerRef.current?.isFollowing()
+      && !userScrollIntentRef.current
+      && touchYRef.current === null
+      && !wheelGestureActiveRef.current
+      && textSelectionRef.current === null
+      && historyAnchorRef.current.current() === null
+      && !scrollCoordinatorRef.current.isInteractionLocked(),
+  [browseMode, scrollScope]);
   const virtualizer = useVirtualizer({
     count: turns.length,
     getScrollElement: () => scrollRef.current,
@@ -738,6 +752,16 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
     // remains owned by ChatView's measured-tail observer below.
     anchorTo: virtualAnchorTo,
     followOnAppend: virtualScrollPolicy.followOnAppend,
+    scrollToFn: (offset, options, instance) => {
+      // scrollToEnd keeps reconciling its target as streamed rows or the IME
+      // resize. Changing followOnAppend does not cancel that pending operation.
+      // Check ownership at the actual DOM write, including delayed corrections;
+      // otherwise they can fight the reader's anchor or impersonate momentum.
+      // Explicit history/detail offsets and scope resets own their synchronous
+      // write even when output following is paused.
+      if (!applyingScrollCommandRef.current && !canFollowLiveTail()) return;
+      elementScroll(offset, options, instance);
+    },
     scrollEndThreshold: 80,
     overscan: HISTORY_VIRTUAL_OVERSCAN,
     rangeExtractor: (range) => {
@@ -904,10 +928,15 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
     const el = scrollRef.current;
     const controller = controllerRef.current;
     if (!el || !controller) return;
-    if (command.kind === "bottom") {
-      virtualizer.scrollToEnd({ behavior: command.behavior });
-    } else {
-      virtualizer.scrollToOffset(command.offset, { behavior: "auto" });
+    applyingScrollCommandRef.current = true;
+    try {
+      if (command.kind === "bottom") {
+        virtualizer.scrollToEnd({ behavior: command.behavior });
+      } else {
+        virtualizer.scrollToOffset(command.offset, { behavior: "auto" });
+      }
+    } finally {
+      applyingScrollCommandRef.current = false;
     }
     lastScrollTopRef.current = el.scrollTop;
     syncScrollState(controller.recordProgrammaticScroll(readScrollMetrics(el)));
@@ -915,23 +944,12 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
 
   const maintainFollowedLiveTail = useCallback(() => {
     const el = scrollRef.current;
-    const controller = controllerRef.current;
-    if (!el || !controller
-        || activeScrollScopeRef.current !== scrollScope
-        || renderedScrollScopeRef.current !== scrollScope
-        || browseMode
-        || !controller.isFollowing()
-        || userScrollIntentRef.current
-        || touchYRef.current !== null
-        || wheelGestureActiveRef.current
-        || textSelectionRef.current !== null
-        || historyAnchorRef.current.current() !== null
-        || scrollCoordinatorRef.current.isInteractionLocked()) return;
+    if (!el || !canFollowLiveTail()) return;
     if (measureBottom(readScrollMetrics(el)).distance <= 0.5) return;
     applyScrollCommand(
       scrollCoordinatorRef.current.requestBottom("auto"),
     );
-  }, [applyScrollCommand, browseMode, scrollScope]);
+  }, [applyScrollCommand, canFollowLiveTail]);
 
   useLayoutEffect(() => {
     const el = scrollRef.current;
@@ -1746,7 +1764,8 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
   useEffect(() => setZoom(null), [sid]);
 
   const settleUserScrollIntent = () => {
-    if (touchYRef.current !== null || wheelGestureActiveRef.current) {
+    if (touchYRef.current !== null || wheelGestureActiveRef.current
+        || scrollbarDragIntentRef.current?.scope === scrollScope) {
       if (userScrollIntentTimerRef.current !== null) {
         window.clearTimeout(userScrollIntentTimerRef.current);
       }
@@ -1776,6 +1795,10 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
       return;
     }
     const controller = controllerRef.current;
+    // A tap or a pull beyond the latest edge can leave follow enabled while
+    // suppressing a queued resize correction. Catch up only after the native
+    // gesture has settled; a history reader keeps their paused state.
+    if (controller?.isFollowing()) maintainFollowedLiveTail();
     const point = captureHistoryBoundary();
     const request = historyRequestRef.current;
     if (point && (!controller?.isFollowing()
@@ -2250,9 +2273,11 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
     );
     setScrollPolicyEpoch((value) => value + 1);
     if (command) {
-      window.requestAnimationFrame(() => applyScrollCommand(command));
+      window.requestAnimationFrame(() => {
+        if (canFollowLiveTail()) applyScrollCommand(command);
+      });
     }
-  }, [applyScrollCommand]);
+  }, [applyScrollCommand, canFollowLiveTail]);
 
   const disposeDetailResources = useCallback((
     transaction: DetailAnchorTransaction,
@@ -2772,6 +2797,12 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
                 : t.detailEventCount ?? 0
               : 0;
             const renderProcess = (segment?: ClaudeContinuation) => {
+              // Deferred counts describe the whole native turn. A continuation
+              // containing only an answer has no process disclosure of its own;
+              // borrowing the parent's count creates an empty "1 item" row.
+              if (segment && presentableProcessBlocks(segment.blocks, engine).length === 0) {
+                return null;
+              }
               const continuing = !!segment && segment === lastContinuation
                 && enclosingTaskActive && !terminalProblem;
               const disclosureKey = segment
@@ -2790,7 +2821,7 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
                   : lastContinuation && t.doneTs != null
                     && lastContinuation.startedTs != null
                     && t.doneTs > lastContinuation.startedTs ? undefined : t.doneTs}
-                deferredCount={segment ? (deferredProcessCount > 0 ? 1 : 0) : deferredProcessCount}
+                deferredCount={segment ? 0 : deferredProcessCount}
                 detailLoading={t.detailLoading}
                 detailError={processDetailError}
                 externalPlanItemId={externalPlanItemId}

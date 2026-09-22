@@ -30,12 +30,13 @@ repository, install Node, or paste tokens into service definitions.
 ### 1) Download and verify the bootstrap
 
 Confirm the version and release attestation on GitHub, then download
-`install.sh` and `SHA256SUMS` from that same release. The example uses `3.0.0`;
-replace it with the published tag you selected (without the leading `v`). This
+`install.sh` and `SHA256SUMS` from that same release. The example uses `4.0.0`;
+first confirm that it is published, or replace it with the published tag you
+selected (without the leading `v`). This
 does not select an unpublished development-branch build:
 
 ```bash
-export CC_REMOTE_VERSION=3.0.0
+export CC_REMOTE_VERSION=4.0.0
 release_base="https://github.com/muggle-stack/cc-remote/releases/download/v${CC_REMOTE_VERSION}"
 curl -fLO "$release_base/install.sh"
 curl -fLO "$release_base/SHA256SUMS"
@@ -188,7 +189,7 @@ as described in the deployment contract. No browser secret is needed for a build
 
 **Stage every target before changing live services.** The commands below describe
 the Relay and Wrapper separately; do not activate Relay until every Wrapper stage
-has passed validation. Protocol v71 cannot be mixed with older clients. Stop old
+has passed validation. Protocol v72 cannot be mixed with older clients. Stop old
 incompatible Wrappers, activate Relay + Web, then activate Wrappers and hard-refresh
 browser tabs. Wrapper activation must snapshot Work SQLite and private profile
 control state with `deploy/work_registry_snapshot.py`; this is not limited to
@@ -250,7 +251,7 @@ The script installs `python3-venv` + Caddy, creates the `ccremote` service user,
 builds an immutable release and its venv, merges Caddy configuration, atomically
 switches `current`, and restarts the relay. If restart/readiness fails, `current`,
 the Caddyfile, and the systemd unit roll back as one transaction and the previous
-release's `/healthz` is verified. Start the v71 wrapper after success.
+release's `/healthz` is verified. Start the v72 wrapper after success.
 
 Verify:
 

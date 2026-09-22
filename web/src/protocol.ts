@@ -133,6 +133,7 @@ export interface StateEvent extends Base {
   phase?: "retrying" | "waiting" | null;
   detail?: string | null;
   msg_id?: string | null;
+  continuation?: boolean;
 }
 export interface Model extends Base { type: "model"; model: string }
 export interface Effort extends Base { type: "effort"; effort: string }
@@ -719,7 +720,7 @@ export type ServerEvent = FilesListed | CodexContext
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnUsage | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 71;
+export const PROTOCOL_VERSION = 72;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

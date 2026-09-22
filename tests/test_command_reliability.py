@@ -1064,7 +1064,9 @@ def test_metadata_only_claude_session_switch_fails_once_without_spawn(
 
         assert isinstance(result, Error)
         assert result.code == "not_running"
-        assert "历史不完整" in result.message
+        assert "无法确认" in result.message and "工作目录" in result.message
+        assert "历史记录已保留" in result.message
+        assert "删除" not in result.message
         assert result.sid == session_id
         assert result.to == "client-1"
         assert result.request_id == "switch-metadata-only"

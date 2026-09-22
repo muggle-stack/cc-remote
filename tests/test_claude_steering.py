@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from claude_agent_sdk.types import ResultMessage
 
-from cc_remote.claude_steering import ClaudeSteerRejected
+from cc_remote.claude_steering import ClaudeSteerRejected, PendingSteers
 from cc_remote.protocol import Steer
 from cc_remote.wrapper.sdk import SdkHandle
 from cc_remote.wrapper.stream import StreamTranslator, replayed_user_message_id
@@ -68,10 +68,110 @@ async def until(predicate):
             await asyncio.sleep(0.001)
 
 
+def requesting(uid="request"):
+    return {"type": "system", "subtype": "status", "status": "requesting", "uuid": uid}
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("persistent", [False, True])
+@pytest.mark.parametrize("finish", ["result", "steer", "stop"])
+@pytest.mark.parametrize("start", [
+    requesting(),
+    assistant("unannounced", [{"type": "text", "text": "continue"}]),
+    {"type": "stream_event", "uuid": "unannounced", "session_id": "native-session",
+     "event": {"type": "message_start", "message": {"id": "continuation", "content": []}}},
+], ids=["request", "assistant", "stream"])
+async def test_native_continuation_without_replayed_user_is_visible_and_interactive(persistent, finish, start):
+    async with environment() as (service, attach):
+        client = await attach() if persistent else NativeClient()
+        worker = service.sessions[client.id] if persistent else None
+        native = worker.client if worker else client
+
+        async def interrupt():
+            native.interrupts += 1
+
+        native.interrupt = interrupt
+        sdk = SdkHandle(WrapperConfig())
+        sdk.applied_auto_compact_mode = sdk.auto_compact_mode
+        sdk.applied_auto_compact_threshold_tokens = sdk.auto_compact_threshold_tokens
+        machine, transport, ctx = _machine_with_sdk(sdk)
+        machine._configure_claude_sdk_callbacks(ctx, sdk)
+        sdk.refresh_goal = AsyncMock(return_value=None)
+        sdk.client = client
+        sdk._start_message_pump()
+        try:
+            sdk.next_turn_id = "parent"
+            await sdk.query("start background work")
+            await native.queue.put(user("human", "start background work"))
+            await native.queue.put(result())
+            messages = [m async for m in sdk.receive_response()]
+            await sdk.ack_service_message(messages[-1], turn_id="parent")
+            sdk.release_background_messages()
+
+            for task in ("task-a", "task-b"):
+                await native.queue.put({"type": "system", "subtype": "task_notification",
+                                        "task_id": task, "status": "completed", "output_file": "",
+                                        "summary": "finished", "uuid": task, "session_id": ctx.session_id})
+            await until(lambda: native.queue.empty() and sdk._background_callbacks_pending == 0)
+            assert ctx.state == "idle" and not ctx.claude_background_followups
+
+            # Claude Code 2.1.276 does not replay ordinary internal task prompts.
+            # Its next request and output arrive without any UserMessage first.
+            await native.queue.put(start.copy())
+            await until(lambda: ctx.state == "running")
+            running = [e for e in transport.sent if e.type == "state" and e.state == "running"]
+            assert running[-1].msg_id == "parent" and running[-1].continuation
+            assert machine._own_write(ctx.key)
+            await native.queue.put(assistant("background-tool", [{"type": "tool_use", "id": "read",
+                                                                 "name": "Read", "input": {"file_path": "README.md"}}]))
+            await until(lambda: any(e.type == "tool_use" for e in transport.sent))
+            tools = [e for e in transport.sent if e.type == "tool_use"]
+            assert tools[-1].turn_id == "parent" and tools[-1].background
+            if worker:
+                assert worker.background_start is not None
+                assert worker.journal.after(0)[0]["data"]["uuid"] == start["uuid"]
+
+            if finish == "steer":
+                reply = await machine._handle_steer(Steer(sid=ctx.key, cmd_id="guide", client_id="browser",
+                                                        msg_id="guide-ui", prompt="continue here"))
+                assert reply is None
+                inputs = native.prompts if persistent else native.inputs
+                written = [item async for item in inputs[-1]] if persistent else inputs[-1]
+                uid = written[0]["uuid"]
+                await native.queue.put(user(uid, "continue here"))
+                await native.queue.put(assistant("guided", [{"type": "text", "text": "guided answer"}]))
+                await native.queue.put(result())
+                await until(lambda: ctx.turn_task is None and ctx.state == "idle")
+                assert len(inputs) == 2
+                assert sum(e.type == "turn_steered" for e in transport.sent) == 1
+                assert sum(e.type == "turn_end" for e in transport.sent) == 1
+            else:
+                if finish == "stop":
+                    await machine._handle_interrupt(SimpleNamespace(sid=ctx.key))
+                    assert native.interrupts == 1
+                await native.queue.put({**result(), "origin": {"kind": "task-notification"}})
+                await until(lambda: ctx.state == "idle")
+                assert not any(e.type == "turn_end" for e in transport.sent)
+            await until(lambda: sdk._background_callbacks_pending == 0)
+            assert not ctx.claude_background_followups and not sdk._steers.background_id
+            if worker:
+                await until(lambda: worker.turn is None and worker.background_start is None)
+                assert not native.closed
+        finally:
+            for task in (ctx.turn_task, ctx.claude_autonomous_interrupt_task):
+                if task:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+            await sdk._stop_message_pump()
+            if persistent:
+                await client.detach()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("origin", [{"kind": "task-notification"}, ORIGIN])
 @pytest.mark.parametrize("uncertain", [False, True])
 @pytest.mark.parametrize("background_result", ["before", "after", "none"])
-async def test_autonomous_steer_waits_for_exact_echo_then_uses_normal_turn(uncertain, background_result):
+async def test_autonomous_steer_waits_for_exact_echo_then_uses_normal_turn(uncertain, background_result, origin):
     sdk = SdkHandle(WrapperConfig())
     machine, transport, ctx = _machine_with_sdk(sdk)
     machine._configure_claude_sdk_callbacks(ctx, sdk)
@@ -79,7 +179,7 @@ async def test_autonomous_steer_waits_for_exact_echo_then_uses_normal_turn(uncer
     sdk.client = native = NativeClient()
     sdk._start_message_pump()
     try:
-        await native.queue.put({**user("injected", "background task finished"), "origin": ORIGIN})
+        await native.queue.put({**user("injected", "background task finished"), "origin": origin})
         await until(lambda: ctx.state == "running")
         assert ctx.active_msg_id is None and ctx.translator is None
         native.fail_write = uncertain
@@ -90,7 +190,7 @@ async def test_autonomous_steer_waits_for_exact_echo_then_uses_normal_turn(uncer
         uid = native.inputs[0][0]["uuid"]
         await native.queue.put(user("old-tool", [{"type": "tool_result", "tool_use_id": "old", "content": "done"}]))
         if background_result == "before":
-            await native.queue.put({**result(), "origin": ORIGIN})
+            await native.queue.put({**result(), "origin": origin})
             await until(lambda: sdk._background_callbacks_pending == 0 and not sdk._steers.background_id)
         assert ctx.state == "running" and ctx.turn_task is None
         assert not any(e.type in {"turn_end", "turn_steered"} for e in transport.sent)
@@ -98,7 +198,7 @@ async def test_autonomous_steer_waits_for_exact_echo_then_uses_normal_turn(uncer
             await sdk.query("must not overtake accepted guidance")
         await native.queue.put(user(uid))
         if background_result == "after":
-            await native.queue.put({**result(), "origin": ORIGIN})
+            await native.queue.put({**result(), "origin": origin})
         await native.queue.put(assistant("guided-reply", [{"type": "text", "text": "guided answer"}]))
         await native.queue.put(result())
         await until(lambda: any(e.type == "turn_end" for e in transport.sent))
@@ -191,7 +291,6 @@ async def test_service_multiple_background_inputs_cancel_one_and_keep_root_commi
 
 
 def test_background_target_matches_exact_origin_across_native_field_spellings():
-    from cc_remote.claude_steering import PendingSteers
     pending = PendingSteers()
     pending.annotate({**user("injected"), "origin": ORIGIN})
     identity = pending.background_id
@@ -201,17 +300,40 @@ def test_background_target_matches_exact_origin_across_native_field_spellings():
     assert pending.background_id is None
 
 
+def test_only_main_activity_starts_an_implicit_continuation():
+    pending = PendingSteers()
+    frames = [requesting(), assistant("output", [])]
+    for frame in frames:
+        assert "__cc_background_start" not in pending.annotate(frame, managed_active=True)
+        for field in ("parent_tool_use_id", "parentToolUseID"):
+            assert "__cc_background_start" not in pending.annotate({**frame, field: "child"})
+    for subtype in ("task_started", "task_progress", "task_notification", "task_updated"):
+        pending.annotate({"type": "system", "subtype": subtype, "task_id": "child", "status": "completed"})
+    assert pending.background_id is None
+
+    started = pending.annotate(requesting())
+    identity = started["__cc_background_start"]["id"]
+    assert "__cc_background_start" not in pending.annotate(assistant("next", []))
+    pending.annotate({**result(), "origin": {"kind": "human"}})
+    assert pending.background_id == identity
+    enriched = pending.annotate({**user("injected"), "origin": ORIGIN})
+    assert enriched["__cc_background_start"]["id"] == identity
+    ended = pending.annotate({**result(), "origin": ORIGIN})
+    assert ended["__cc_background_end"] == identity and pending.background_id is None
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("replayed_user", [False, True])
 @pytest.mark.parametrize("echo_before_detach", [False, True])
 @pytest.mark.parametrize("background_result", [False, True])
-async def test_service_background_steer_recovery_does_not_resubmit(echo_before_detach, background_result):
+async def test_service_background_steer_recovery_does_not_resubmit(echo_before_detach, background_result, replayed_user):
     guide_id = "22222222-2222-4222-8222-222222222222"
     metadata = {"id": "guide-ui", "prompt": "guide", "fingerprint": "a" * 64}
     async with environment() as (service, attach):
         first = await attach()
         worker = service.sessions[first.id]
         native = worker.client
-        await native.queue.put({**user("injected"), "origin": ORIGIN})
+        await native.queue.put({**user("injected"), "origin": ORIGIN} if replayed_user else requesting())
         await until(lambda: worker.steers.background_id)
         target = worker.steers.background_id
         await first.steer("guide", native_id=guide_id, metadata=metadata,

@@ -16,6 +16,8 @@ import {
 } from "../clipboard-import";
 import type { ClaudeProfileInfo, CodexPermissionMode, CodexProfileInfo, CodexServiceTier, CodexWebSearchMode, CollaborationModeName, PermissionProfileInfo, QueryImg, QueryFile, Space, WorkDashboard } from "../protocol";
 import { ImeSubmitGuard } from "../ime-submit";
+import { useClipboardPasteGuard } from "../use-clipboard-paste-guard";
+import type { PasteReceipt } from "../clipboard-paste-guard";
 import { PendingImageAttachments } from "./PendingImageAttachments";
 import { CommandSheet } from "./CommandSheet";
 import { CenteredSheet } from "./CenteredSheet";
@@ -184,6 +186,7 @@ export function NewChatView({ cwd, controlScopeKey,
       () => defaultExecutionControls(controlScopeKey));
   const [permissionsOpen, setPermissionsOpen] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const pasteGuard = useClipboardPasteGuard(taRef, `${controlScopeKey}:${cwd}:${engine}`);
   const imeSubmitRef = useRef(new ImeSubmitGuard());
   const buttonSendTimerRef = useRef<number | null>(null);
 
@@ -299,7 +302,7 @@ export function NewChatView({ cwd, controlScopeKey,
     icon: candidate.ic,
   }))];
 
-  const onPick = async (fl: FileList | File[] | null, clipboard?: ClipboardImport) => {
+  const onPick = async (fl: FileList | File[] | null, clipboard?: ClipboardImport, paste?: PasteReceipt) => {
     if (importingRef.current) return;
     importingRef.current = true;
     setImporting(true);
@@ -311,6 +314,7 @@ export function NewChatView({ cwd, controlScopeKey,
       ]);
       const batch = await pickFiles(
         imported.files, images.length + files.length, attachmentBytes(images, files));
+      if (paste && !pasteGuard.acceptAttachments(paste, batch)) return;
       if (batch.images.length) setImages((previous) => [...previous, ...batch.images]);
       if (batch.files.length) setFiles((previous) => [...previous, ...batch.files]);
       const errors = [...imported.errors, ...batch.errors];
@@ -325,15 +329,20 @@ export function NewChatView({ cwd, controlScopeKey,
 
   const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
     const clipboard = readClipboardImport(e.clipboardData, images.length + files.length);
+    const paste = pasteGuard.capture(e.currentTarget, clipboard);
     const pastedText = clipboard.text;
     const attachments = clipboard.files.length || clipboard.images.length
       || clipboard.errors.length;
+    if (!paste.acceptText) {
+      e.preventDefault();
+      if (!attachments) return;
+    }
     if (!attachments && pastedText.length <= LONG_PASTE_THRESHOLD) return;
     e.preventDefault();
-    if (pastedText.length > LONG_PASTE_THRESHOLD) {
+    if (paste.acceptText && pastedText.length > LONG_PASTE_THRESHOLD) {
       setPastes((current) => [...current, makeComposerPaste(pastedText, uuid())]);
-    } else if (pastedText) insertClipboardText(e.currentTarget, pastedText, setText);
-    if (attachments) void onPick(null, clipboard);
+    } else if (paste.acceptText && pastedText) insertClipboardText(e.currentTarget, pastedText, setText);
+    if (attachments) void onPick(null, clipboard, paste);
   };
 
   const send = (value = taRef.current?.value ?? text) => {

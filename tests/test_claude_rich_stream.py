@@ -5,6 +5,8 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from claude_agent_sdk.types import (
     AssistantMessage,
     HookEventMessage,
@@ -1128,6 +1130,116 @@ def test_sdk_single_pump_forwards_post_result_background_events_immediately():
 
     async def _collect(source):
         return [message async for message in source]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("queue_cap", [1, 4])
+@pytest.mark.parametrize("origin_kind", ["task-notification", "channel"])
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_sdk_pump_drains_injected_turn_before_the_managed_result(
+    queue_cap, origin_kind, interrupted,
+):
+    async def run():
+        queue = asyncio.Queue()
+        post_result_read = asyncio.Event()
+        consumers = 0
+
+        async def receive_messages():
+            nonlocal consumers
+            consumers += 1
+            while True:
+                row = await queue.get()
+                if row.get("uuid") == "post-result":
+                    post_result_read.set()
+                yield row
+
+        async def query(_prompt):
+            pass
+
+        def result(origin):
+            return {
+                "type": "result", "subtype": "success",
+                "duration_ms": 1, "duration_api_ms": 1,
+                "is_error": False, "num_turns": 1,
+                "session_id": "session-1", "origin": {"kind": origin},
+            }
+
+        handle = SdkHandle(SimpleNamespace(turn_reader_queue_cap=queue_cap))
+        handle.client = SimpleNamespace(
+            _query=SimpleNamespace(receive_messages=receive_messages), query=query)
+        background = []
+        background_terminal = asyncio.Event()
+        post_result_delivered = asyncio.Event()
+
+        async def project(message, turn_id):
+            background.append((message, turn_id))
+            if isinstance(message, ResultMessage):
+                background_terminal.set()
+            if getattr(message, "uuid", None) == "post-result":
+                post_result_delivered.set()
+
+        async def collect():
+            return [message async for message in handle.receive_response()]
+
+        handle.background_message_callback = project
+        handle._start_message_pump()
+        response = None
+        try:
+            handle.next_turn_id = "human-turn"
+            await handle.query("work")
+            response = asyncio.create_task(collect())
+            await queue.put({
+                "type": "user", "uuid": "human-user",
+                "message": {"role": "user", "content": "work"},
+                "origin": {"kind": "human"},
+            })
+            await queue.put({
+                "type": "user", "uuid": "injected-user",
+                "message": {"role": "user", "content": "task completed"},
+                "origin": {"kind": origin_kind},
+            })
+            frame_count = queue_cap * 3 + 1
+            for index in range(frame_count):
+                await queue.put({
+                    "type": "stream_event", "uuid": f"delta-{index}",
+                    "session_id": "session-1", "parent_tool_use_id": None,
+                    "event": {"type": "content_block_delta", "index": 0,
+                              "delta": {"type": "text_delta", "text": str(index)}},
+                })
+            await queue.put(result(origin_kind))
+            await asyncio.wait_for(background_terminal.wait(), 2)
+            assert not response.done()
+            assert [turn_id for _, turn_id in background] == ["human-turn"] * (frame_count + 2)
+            assert [message.event["delta"]["text"] for message, _ in background
+                    if isinstance(message, StreamEvent)] == [str(index) for index in range(frame_count)]
+
+            terminal = result("human")
+            if interrupted:
+                terminal.update(subtype="error_during_execution", is_error=True)
+            await queue.put(terminal)
+            messages = await asyncio.wait_for(response, 2)
+            assert len(messages) == 2
+            assert isinstance(messages[0], UserMessage)
+            assert isinstance(messages[-1], ResultMessage)
+            assert messages[-1].is_error is interrupted
+
+            await queue.put({
+                "type": "system", "subtype": "task_progress",
+                "uuid": "post-result", "session_id": "session-1",
+                "task_id": "task-1", "description": "Follow-up",
+                "usage": {"total_tokens": 1},
+            })
+            await asyncio.wait_for(post_result_read.wait(), 2)
+            assert not post_result_delivered.is_set()
+            handle.release_background_messages()
+            await asyncio.wait_for(post_result_delivered.wait(), 2)
+            assert consumers == 1
+        finally:
+            if response is not None:
+                response.cancel()
+                await asyncio.gather(response, return_exceptions=True)
+            await handle._stop_message_pump()
 
     asyncio.run(run())
 

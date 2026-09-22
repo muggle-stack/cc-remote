@@ -4,6 +4,31 @@
 
 ## Unreleased
 
+## v4.0.0
+
+cc-remote v4 brings persistent Claude sessions, native steering, durable history
+and per-turn diffs, richer side chats and previews, and a terminal workspace
+preview to the Claude/Codex control plane. See the bilingual
+[release notes](docs/releases/v4.0.0.md) for highlights and upgrade requirements.
+
+### Final stability fixes
+
+- Drain injected Claude background responses without blocking the human Result
+  or the next prompt. Track actual native continuations independently of child
+  task status, including when the CLI omits an internal user echo.
+- Keep task results absorbed during an active response on that response's
+  original timeline. Restore consumed queued human prompts from native JSONL
+  and remove empty continuation process disclosures.
+- Recover the original working directory from bounded native transcript reads
+  when a large leading image hides it from the SDK catalog.
+- Deduplicate manual compaction using the exact native boundary receipt.
+- Yield live-output scroll corrections to touch/scrollbar gestures and keyboard
+  viewport changes; suppress duplicate iOS keyboard paste deliveries while
+  preserving deliberate repeated pastes.
+
+### Changes since v3.0.0
+
+- Track native Claude continuations and their live processing state under protocol v72.
 - Combine terminal queue controls and session recovery under protocol v71.
   Upgrade Relay, Wrapper, Web and TUI together. TUI recovery replaces replayed
   text without duplicating existing output.

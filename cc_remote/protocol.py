@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 71
+PROTOCOL_VERSION = 72
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -734,6 +734,9 @@ class StateEvent(_Base):
     phase: Optional[Literal["retrying", "waiting"]] = None
     detail: Optional[str] = Field(default=None, max_length=4096)
     msg_id: Optional[WireId] = None
+    # A native main-agent continuation may extend an already-completed human
+    # row. Ordinary late progress must never revive that row's activity.
+    continuation: bool = False
 
 
 class Model(_Base):

@@ -5257,15 +5257,18 @@ function reduceEvent(
         rt.mirroredRunning = false;
         const turns = cloneTurns(rt.turns);
         const turn = e.msg_id
-          ? turns.find((candidate) => candidate.id === e.msg_id)
+          ? turns.find((candidate) => turnHasIdentityAlias(candidate, e.msg_id))
           : turns.at(-1);
         // Native commands can start without a browser optimistic query or a
         // user UUID echo. A sequenced, explicitly named owner gives
         // their existing working indicator the same exact identity contract.
         // The idle boundary below clears it in this same state transition.
-        if (boundCompletedTurns && e.msg_id
-            && !turn?.done && seq === rt.lastLiveSeq) {
-          rt.liveOwner = { turnId: e.msg_id, seq };
+        // A completed human row can own a new autonomous Claude continuation.
+        // Its completion receipt stays intact; the explicit native owner alone
+        // drives current activity until the next idle boundary.
+        if (boundCompletedTurns && e.msg_id && seq === rt.lastLiveSeq
+            && (!turn?.done || e.continuation === true)) {
+          rt.liveOwner = { turnId: turn?.id ?? e.msg_id, seq };
         }
         if (e.detail && turn && !turn.done) turn.progress = e.detail;
         else if (turn && (Object.hasOwn(e, "detail") || e.state !== "running")) {

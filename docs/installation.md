@@ -28,11 +28,11 @@ Web，Wrapper 包只含本机控制端；两者都自带 `uv`，安装时创建�
 ### 1）下载并校验引导脚本
 
 在 GitHub Release 页面确认版本与 release attestation，再在待安装机器下载同一版本的
-`install.sh` 和 `SHA256SUMS`。下例使用 `3.0.0`；请替换为已选定的已发布 tag
+`install.sh` 和 `SHA256SUMS`。下例使用 `4.0.0`；请先确认对应版本已发布，或替换为已选定的已发布 tag
 （变量中不带开头的 `v`）。该路径不会自动安装尚未发布的开发分支：
 
 ```bash
-export CC_REMOTE_VERSION=3.0.0
+export CC_REMOTE_VERSION=4.0.0
 release_base="https://github.com/muggle-stack/cc-remote/releases/download/v${CC_REMOTE_VERSION}"
 curl -fLO "$release_base/install.sh"
 curl -fLO "$release_base/SHA256SUMS"
@@ -166,7 +166,7 @@ npm --prefix web run build   # 产出 web/dist/
 网页构建不需要任何登录密钥。
 
 **所有目标先 staging，再改动线上服务。** 下文分别描述 Relay 和 Wrapper，
-不能在 Wrapper staging 未验证时先激活 Relay。协议 v71 不允许混用旧客户端：
+不能在 Wrapper staging 未验证时先激活 Relay。协议 v72 不允许混用旧客户端：
 停止不兼容的旧 Wrapper，激活 Relay + Web，再激活 Wrapper 并硬刷新网页。
 Wrapper 激活须通过 `deploy/work_registry_snapshot.py` 保存 Work SQLite 与私有账号
 控制状态，不再按“是否来自某个旧协议”决定是否保护。回滚先恢复匹配状态，再启动
@@ -224,7 +224,7 @@ sudo bash ~/cc-remote-upload/deploy/setup-vps.sh \
 脚本会：装 `python3-venv` + Caddy、建 `ccremote` 系统用户、创建不可变 release
 和 release-local venv、合并 Caddy 配置、原子切换 `current`，再重启 relay。若新
 relay 重启或健康检查失败，`current`、Caddyfile、systemd unit 会作为一个事务全部
-恢复，并验证旧 release 的 `/healthz`。成功后再启动 v71 wrapper。
+恢复，并验证旧 release 的 `/healthz`。成功后再启动 v72 wrapper。
 
 验证：
 

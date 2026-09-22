@@ -62,14 +62,23 @@ export async function resolveClipboardImport(snapshot: ClipboardImport) {
 export function insertClipboardText(
   textarea: HTMLTextAreaElement, text: string, setText: (value: string) => void,
 ): void {
+  const previous = textarea.value;
+  const start = textarea.selectionStart;
+  const end = textarea.selectionEnd;
   // Preserve native textarea undo where supported. Controlled-state fallback
   // also covers synthetic paste events and browser environments without it.
   if (document.activeElement === textarea
-      && typeof document.execCommand === "function"
-      && document.execCommand("insertText", false, text)) return;
-  const start = textarea.selectionStart;
-  const end = textarea.selectionEnd;
-  setText(textarea.value.slice(0, start) + text + textarea.value.slice(end));
+      && typeof document.execCommand === "function") {
+    const inserted = document.execCommand("insertText", false, text);
+    // The DOM is the authority on whether the command already inserted text.
+    // A false result after a mutation must not insert again at the new caret.
+    if (textarea.value !== previous) {
+      setText(textarea.value);
+      return;
+    }
+    if (inserted) return;
+  }
+  setText(previous.slice(0, start) + text + previous.slice(end));
   requestAnimationFrame(() => {
     if (document.activeElement === textarea) {
       textarea.setSelectionRange(start + text.length, start + text.length);

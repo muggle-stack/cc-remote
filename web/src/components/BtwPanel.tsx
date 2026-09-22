@@ -63,6 +63,8 @@ import {
   type ClipboardImport,
 } from "../clipboard-import";
 import { useAttachmentDrop } from "../use-attachment-drop";
+import { useClipboardPasteGuard } from "../use-clipboard-paste-guard";
+import type { PasteReceipt } from "../clipboard-paste-guard";
 import "./BtwPanel.css";
 
 interface Props {
@@ -135,6 +137,7 @@ export function BtwPanel(p: Props) {
   const importingRef = useRef(false);
   const noticeTimerRef = useRef<number | null>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const pasteGuard = useClipboardPasteGuard(taRef, p.draftKey);
   const imeSubmitRef = useRef(new ImeSubmitGuard());
   const buttonSendTimerRef = useRef<number | null>(null);
   const input = draft.input;
@@ -239,7 +242,7 @@ export function BtwPanel(p: Props) {
     }, duration);
   };
   const onPickFiles = async (
-    selected: FileList | File[] | null, clipboard?: ClipboardImport,
+    selected: FileList | File[] | null, clipboard?: ClipboardImport, paste?: PasteReceipt,
   ) => {
     if (attachmentsLocked) return;
     if (importingRef.current) { flash("附件正在导入，请稍候"); return; }
@@ -255,6 +258,7 @@ export function BtwPanel(p: Props) {
       ]);
       const batch = await pickFiles(
         imported.files, images.length + files.length, attachmentBytes(images, files));
+      if (paste && !pasteGuard.acceptAttachments(paste, batch)) return;
       const append = (current: ComposerDraft): ComposerDraft => ({
         ...current,
         images: [...current.images, ...batch.images],
@@ -277,15 +281,20 @@ export function BtwPanel(p: Props) {
   const onPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     if (attachmentsLocked) return;
     const clipboard = readClipboardImport(event.clipboardData, images.length + files.length);
+    const paste = pasteGuard.capture(event.currentTarget, clipboard);
     const { text } = clipboard;
     const attachments = clipboard.files.length || clipboard.images.length || clipboard.errors.length;
+    if (!paste.acceptText) {
+      event.preventDefault();
+      if (!attachments) return;
+    }
     if (!attachments && text.length <= LONG_PASTE_THRESHOLD) return;
     event.preventDefault();
-    if (text.length > LONG_PASTE_THRESHOLD) {
+    if (paste.acceptText && text.length > LONG_PASTE_THRESHOLD) {
       const paste = makeComposerPaste(text, uuid());
       updateDraft((current) => ({ ...current, pastes: [...current.pastes, paste] }));
-    } else if (text) insertClipboardText(event.currentTarget, text, setInput);
-    if (attachments) void onPickFiles(null, clipboard);
+    } else if (paste.acceptText && text) insertClipboardText(event.currentTarget, text, setInput);
+    if (attachments) void onPickFiles(null, clipboard, paste);
   };
   const resetTaHeight = () => {
     if (taRef.current) taRef.current.style.height = "auto";

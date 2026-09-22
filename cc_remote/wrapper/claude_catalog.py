@@ -9,6 +9,7 @@ every filesystem operation.
 from __future__ import annotations
 
 import errno
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -41,12 +42,55 @@ from claude_agent_sdk._internal.sessions import (
 )
 from claude_agent_sdk.types import SDKSessionInfo, SessionMessage
 
+from cc_remote.attachments import MAX_TOTAL_ATTACHMENT_BYTES
+
 
 _MAX_PROJECT_DIRS = 16_384
+# A native user row can carry the full attachment set as base64. Reserve room
+# for the prompt and native metadata as well as the expanded image bytes.
+_CWD_RECORD_BYTES = 2 * MAX_TOTAL_ATTACHMENT_BYTES
+# Native queue records can repeat those images before the actual user row.
+# Bound the scan independently while allowing both copies and leading metadata.
+_CWD_SCAN_BYTES = 3 * _CWD_RECORD_BYTES
 
 
 def projects_dir(config_dir: str | os.PathLike[str]) -> Path:
     return Path(config_dir) / "projects"
+
+
+def _project_bucket_names(directory: str) -> tuple[str, ...]:
+    sdk_name = _sanitize_path(directory)
+    if not any(ord(char) > 0xFFFF for char in directory):
+        return (sdk_name,)
+    # The native JS sanitizer and hash operate on UTF-16 code units. The
+    # Python SDK iterates code points, producing different keys for emoji.
+    encoded = directory.encode("utf-16-le", errors="surrogatepass")
+    native_units = "".join(
+        chr(encoded[index] | encoded[index + 1] << 8)
+        for index in range(0, len(encoded), 2)
+    )
+    native_name = _sanitize_path(native_units)
+    return (sdk_name,) if native_name == sdk_name else (sdk_name, native_name)
+
+
+def _matches_project_bucket(
+    names: tuple[str, ...], bucket: str, *, allow_legacy_hash: bool = False,
+) -> bool:
+    if bucket in names:
+        return True
+    if not allow_legacy_hash:
+        return False
+    # Older native builds used a different hash. Match the same bounded
+    # prefix as the SDK catalog, requiring a nonempty lowercase hash suffix.
+    suffix = bucket[MAX_SANITIZED_LENGTH + 1:]
+    return (
+        suffix.isascii() and suffix.isalnum() and suffix == suffix.lower()
+        and any(
+            len(name) > MAX_SANITIZED_LENGTH
+            and bucket.startswith(name[:MAX_SANITIZED_LENGTH] + "-")
+            for name in names
+        )
+    )
 
 
 def _project_entries(config_dir: str | os.PathLike[str]) -> list[Path]:
@@ -89,17 +133,18 @@ def _directory_candidates(
     result: list[tuple[Path, str]] = []
     seen: set[Path] = set()
     for project_path in roots:
-        sanitized = _sanitize_path(project_path)
-        exact = by_name.get(sanitized)
+        names = _project_bucket_names(project_path)
+        exact = next((by_name[name] for name in names if name in by_name), None)
         if exact is not None and exact not in seen:
             seen.add(exact)
             result.append((exact, project_path))
             continue
-        if len(sanitized) <= MAX_SANITIZED_LENGTH:
+        if all(len(name) <= MAX_SANITIZED_LENGTH for name in names):
             continue
-        prefix = sanitized[:MAX_SANITIZED_LENGTH] + "-"
         for entry in available:
-            if entry not in seen and entry.name.startswith(prefix):
+            if entry not in seen and _matches_project_bucket(
+                names, entry.name, allow_legacy_hash=True,
+            ):
                 seen.add(entry)
                 result.append((entry, project_path))
     return result
@@ -178,6 +223,67 @@ def transcript_presence(
         entries.close()
 
 
+def recover_session_cwd(
+    info: SDKSessionInfo | None,
+    path: str | os.PathLike[str] | None,
+) -> SDKSessionInfo | None:
+    """Fill a lite-read miss from complete native records, never a prompt.
+
+    An initial queued image can occupy the SDK's entire 64 KiB head window.
+    Missing cwd then says nothing about whether the conversation is resumable.
+    Read a bounded prefix and require the original transcript's project bucket;
+    later messages may record a different cwd after a shell directory change.
+    """
+    if info is None or info.cwd or path is None:
+        return info
+    source = Path(path)
+    remaining = _CWD_SCAN_BYTES
+    discard = False
+    try:
+        with source.open("rb") as stream:
+            while remaining > 0:
+                limit = min(_CWD_RECORD_BYTES, remaining)
+                line = stream.readline(limit)
+                if not line:
+                    break
+                remaining -= len(line)
+                complete = line.endswith(b"\n") or len(line) < limit
+                if discard:
+                    discard = not complete
+                    continue
+                if not complete:
+                    discard = True
+                    continue
+                try:
+                    row = json.loads(line)
+                except (ValueError, UnicodeError):
+                    continue
+                if (not isinstance(row, dict)
+                        or row.get("type") not in {"user", "assistant"}
+                        or row.get("isSidechain") is True
+                        or row.get("sessionId") != info.session_id
+                        or not isinstance(row.get("message"), dict)):
+                    continue
+                cwd = row.get("cwd")
+                if (isinstance(cwd, str) and os.path.isabs(cwd)
+                        and "\x00" not in cwd
+                        and _matches_project_bucket(
+                            _project_bucket_names(cwd), source.parent.name,
+                            # Only the explicit native root identifies the
+                            # original cwd when an old hash cannot be checked.
+                            # Later messages can share the same long prefix.
+                            allow_legacy_hash=(
+                                row.get("type") == "user"
+                                and "parentUuid" in row
+                                and row["parentUuid"] is None
+                            ),
+                        )):
+                    return replace(info, cwd=cwd)
+    except OSError:
+        pass
+    return info
+
+
 def list_sessions(
     config_dir: str | os.PathLike[str],
     *,
@@ -207,6 +313,7 @@ def list_sessions(
                 continue
             info = _parse_session_info_from_lite(
                 session_id, lite, project_path)
+            info = recover_session_cwd(info, entry)
             if info is None:
                 continue
             previous = by_id.get(session_id)
@@ -228,7 +335,8 @@ def get_session_info(
     if lite is None:
         return None
     project_path = _canonicalize_path(directory) if directory else None
-    return _parse_session_info_from_lite(session_id, lite, project_path)
+    return recover_session_cwd(
+        _parse_session_info_from_lite(session_id, lite, project_path), path)
 
 
 def get_session_messages(

@@ -2,7 +2,7 @@
 # Download, verify, and run a role-specific cc-remote release installer.
 set -euo pipefail
 
-VERSION="${CC_REMOTE_VERSION:-3.0.0}"
+VERSION="${CC_REMOTE_VERSION:-4.0.0}"
 REPOSITORY="${CC_REMOTE_GITHUB_REPOSITORY:-muggle-stack/cc-remote}"
 BASE_URL="${CC_REMOTE_RELEASE_BASE_URL:-https://github.com/$REPOSITORY/releases/download/v$VERSION}"
 
@@ -12,7 +12,7 @@ die() {
 }
 
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || \
-  die "CC_REMOTE_VERSION must be an exact semantic version such as 3.0.0"
+  die "CC_REMOTE_VERSION must be an exact semantic version such as 4.0.0"
 
 usage() {
   cat >&2 <<'EOF'

@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
 
 import type { Block } from "../src/domain/conversation.ts";
+import { isComposerBusy } from "../src/composer-submit.ts";
 import {
   MAX_BACKGROUND_PROCESS_ITEMS,
   PROTOCOL_VERSION,
@@ -197,6 +198,53 @@ try {
     "a task-completion follow-up keeps its source-time narrative boundary",
   );
 
+  for (const detailState of [
+    { detailLoaded: false },
+    { detailLoaded: false, detailLoading: true },
+    { detailLoaded: false, detailError: "detail unavailable" },
+    { detailLoaded: true, detailHasMore: true, detailOldestCursor: "older" },
+  ]) {
+    const finalOnlyMarkup = renderToStaticMarkup(createElement(ChatView, {
+      sid: "final-only-continuation", engine: "claude",
+      turns: [{
+        id: "native-turn", prompt: "run", done: true,
+        ts: 1_000, doneTs: 21_000, processDetailState: "present",
+        detailEventCount: 28, ...detailState,
+        blocks: [
+          { kind: "text", message_id: "original", channel: "final",
+            text: "Original response.", done: true, startedTs: 2_000 },
+          { kind: "text", message_id: "continued-final", channel: "final",
+            text: "Completed follow-up.", done: true, background: true,
+            startedTs: 20_000, doneTs: 21_000 },
+        ],
+      }],
+    }));
+    const continuation = finalOnlyMarkup.slice(finalOnlyMarkup.indexOf("Claude 继续处理"));
+    assert.match(continuation, /Completed follow-up\./);
+    assert.doesNotMatch(continuation, /已处理|正在处理|process-timeline/,
+      "parent detail counts/loading/errors must not create an empty continuation disclosure");
+    assert.equal(finalOnlyMarkup.split("Completed follow-up.").length - 1, 1,
+      "the real answer remains visible exactly once");
+  }
+
+  const processFollowupMarkup = renderToStaticMarkup(createElement(ChatView, {
+    sid: "followup-with-process", engine: "claude",
+    turns: [{ id: "native-turn", prompt: "run", done: true,
+      processDetailState: "present", detailEventCount: 28,
+      blocks: [
+        { kind: "text", message_id: "original", channel: "final",
+          text: "Original response.", done: true },
+        { kind: "text", message_id: "continued-thought", channel: "thinking",
+          text: "Reviewing the background result.", done: true, background: true },
+        { kind: "text", message_id: "continued-final", channel: "final",
+          text: "Completed follow-up.", done: true, background: true },
+      ],
+    }],
+  }));
+  assert.match(processFollowupMarkup,
+    /Claude 继续处理[\s\S]*已处理[\s\S]*1 项[\s\S]*Completed follow-up\./,
+    "a continuation with an actual process item retains its own disclosure");
+
   const concurrentFollowupMarkup = renderToStaticMarkup(createElement(ChatView, {
     sid: "concurrent-followup-history",
     engine: "claude",
@@ -247,11 +295,18 @@ try {
 
   let continuationState = {
     ...initialState, focusedSid: sid,
-    runtimes: { [sid]: { ...createRuntime(), turns: [{ id: "settled-parent", prompt: "run", done: true, blocks: [] }] } },
+    runtimes: { [sid]: { ...createRuntime(), controlGeneration: "generation-1",
+      turns: [{ id: "settled-parent", prompt: "run", done: true, blocks: [] }] } },
   };
   const send = (body: Record<string, unknown>) => {
     continuationState = reduce(continuationState, { type: "event", event: event({ sid, ...body }) });
   };
+  send({ type: "background_process_sync", generation: "generation-1", items: [{
+    item_id: "other-child", kind: "task", status: "running", title: "Background check",
+    started_at: 12, updated_at: 13,
+  }] });
+  assert.equal(isComposerBusy(continuationState.runtimes[sid].state), false,
+    "a background child alone must leave the composer available for a normal query");
   send({ type: "state", state: "running" });
   send({ type: "process", turn_id: "settled-parent", item_id: "child", kind: "agent",
     phase: "end", status: "succeeded", title: "Child done", background: true });
@@ -262,9 +317,22 @@ try {
   assert.equal(continuationState.runtimes[sid].turns[0].done, true,
     "the prior native completion receipt remains settled");
   send({ type: "state", state: "idle" });
+  assert.equal(isComposerBusy(continuationState.runtimes[sid].state), false,
+    "the real main terminal restores normal submission without a hard refresh");
+  assert.equal(continuationState.runtimes[sid].backgroundProcesses[0]?.status, "running",
+    "settling the main response keeps the still-running child visible");
   send({ type: "delta", turn_id: "settled-parent", message_id: "continuation", channel: "thinking", text: "Late replay", background: true });
   assert.equal(continuationState.runtimes[sid].liveOwner, null,
     "replay into an idle session cannot revive the spark");
+  send({ type: "state", state: "running", msg_id: "settled-parent", continuation: true, seq: 20 });
+  assert.equal(isComposerBusy(continuationState.runtimes[sid].state), true,
+    "a later native continuation, rather than the child job, owns steering mode");
+  assert.equal(continuationState.runtimes[sid].liveOwner?.turnId, "settled-parent",
+    "the native continuation owns its spark before any text or tool output");
+  assert.equal(continuationState.runtimes[sid].turns[0].done, true);
+  send({ type: "state", state: "idle", seq: 21 });
+  assert.equal(continuationState.runtimes[sid].liveOwner, null);
+  assert.equal(isComposerBusy(continuationState.runtimes[sid].state), false);
 } finally {
   await harness.close();
 }

@@ -1359,54 +1359,62 @@ test("active process text shimmers and readable tool output settles without repl
 
 test("Claude resumes a separate live process after an idle background task", async ({ page }, info) => {
   const relay = await mockRightPanelRelay(page, { engine: "claude", historyReply: () => null });
+  let seq = 0;
+  const emit = (message: PanelRelayEvent) => relay.emit({ ...message, seq: ++seq });
   await page.goto("/");
   await expect.poll(() => relay.commands.some((c) => c.type === "get_history")).toBe(true);
   const sid = "layout-parent";
   const turnId = "background-parent";
-  relay.emit({ type: "user_msg", sid, msg_id: turnId, prompt: "检查两个任务" });
-  relay.emit({ type: "turn_binding", sid, msg_id: turnId, turn_id: turnId });
-  relay.emit({ type: "state", sid, state: "running" });
-  relay.emit({ type: "process", sid, turn_id: turnId, item_id: "agent-a", kind: "agent",
+  emit({ type: "user_msg", sid, msg_id: turnId, prompt: "检查两个任务" });
+  emit({ type: "turn_binding", sid, msg_id: turnId, turn_id: turnId });
+  emit({ type: "state", sid, state: "running" });
+  emit({ type: "process", sid, turn_id: turnId, item_id: "agent-a", kind: "agent",
     phase: "start", status: "running", title: "检查结构", background: true });
-  relay.emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "interim", channel: "final" });
-  relay.emit({ type: "delta", sid, turn_id: turnId, message_id: "interim", channel: "final", text: "中间结果先给你，两路探索还在跑。" });
-  relay.emit({ type: "assistant_msg_end", sid, turn_id: turnId, message_id: "interim", channel: "final" });
-  relay.emit({ type: "turn_end", sid, turn_id: turnId, result: { subtype: "success", duration_ms: 3000, is_error: false } });
-  relay.emit({ type: "state", sid, state: "idle" });
+  emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "interim", channel: "final" });
+  emit({ type: "delta", sid, turn_id: turnId, message_id: "interim", channel: "final", text: "中间结果先给你，两路探索还在跑。" });
+  emit({ type: "assistant_msg_end", sid, turn_id: turnId, message_id: "interim", channel: "final" });
+  emit({ type: "turn_end", sid, turn_id: turnId, result: { subtype: "success", duration_ms: 3000, is_error: false } });
+  emit({ type: "state", sid, state: "idle" });
   const turn = page.locator(`.turn[data-turn-id="${turnId}"]`);
   await expect(turn.locator(".turn-working")).toHaveCount(0);
   await expect(turn.locator(".turn-process-head").first()).toHaveAttribute("aria-expanded", "false");
-  relay.emit({ type: "process", sid, turn_id: turnId, item_id: "agent-a", kind: "agent",
+  emit({ type: "process", sid, turn_id: turnId, item_id: "agent-a", kind: "agent",
     phase: "end", status: "succeeded", title: "检查结构", summary: "Raw agent report must stay in details", background: true });
   await expect(turn.locator(".turn-working")).toHaveCount(0);
   await expect(turn.locator(".background-followup")).toHaveCount(0);
 
-  relay.emit({ type: "state", sid, state: "running" });
-  relay.emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "follow-thinking", channel: "thinking", background: true });
-  relay.emit({ type: "delta", sid, turn_id: turnId, message_id: "follow-thinking", channel: "thinking", text: "Fixture continuation reasoning", background: true });
+  emit({ type: "state", sid, state: "running", msg_id: turnId, continuation: true });
+  await expect(turn.locator(".turn-working")).toBeVisible();
+  emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "follow-thinking", channel: "thinking", background: true });
+  emit({ type: "delta", sid, turn_id: turnId, message_id: "follow-thinking", channel: "thinking", text: "Fixture continuation reasoning", background: true });
   const continuation = turn.locator(".background-followup").first();
   await expect(turn.locator(".turn-working")).toBeVisible();
   await expect(continuation.locator(".turn-process-head")).toHaveAttribute("aria-expanded", "true");
   await expect(continuation.locator(".turn-process-label")).toHaveClass(/is-active/);
+  await expect(continuation.locator(".turn-process-label")).toContainText("正在处理");
+  const workingAnimation = turn.locator(".turn-working").locator("svg");
+  const initialFrame = await workingAnimation.innerHTML();
+  await expect.poll(() => workingAnimation.innerHTML()).not.toBe(initialFrame);
   await expect(continuation.locator(".process-reasoning")).toBeVisible();
   await expect(turn.locator(".turn-process-head").first()).toHaveAttribute("aria-expanded", "false");
   await expect(continuation).not.toContainText("Raw agent report");
-  relay.emit({ type: "assistant_msg_end", sid, turn_id: turnId, message_id: "follow-thinking", channel: "thinking", background: true });
-  relay.emit({ type: "tool_use", sid, turn_id: turnId, message_id: "follow-tool", tool_use_id: "verify", tool: "Bash", category: "command", input: { command: "verify camera" }, background: true });
+  emit({ type: "assistant_msg_end", sid, turn_id: turnId, message_id: "follow-thinking", channel: "thinking", background: true });
+  emit({ type: "tool_use", sid, turn_id: turnId, message_id: "follow-tool", tool_use_id: "verify", tool: "Bash", category: "command", input: { command: "verify camera" }, background: true });
   await expect(continuation.locator(".tool-group-label")).toContainText("正在调用 1 个工具");
   await page.screenshot({ path: info.outputPath("claude-live-continuation.png") });
-  relay.emit({ type: "tool_result", sid, turn_id: turnId, tool_use_id: "verify", content: "Verified", is_error: false, background: true });
-  relay.emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "follow-answer", channel: "final", background: true });
-  relay.emit({ type: "delta", sid, turn_id: turnId, message_id: "follow-answer", channel: "final", text: "第一路检查完成。", background: true });
-  relay.emit({ type: "assistant_msg_end", sid, turn_id: turnId, message_id: "follow-answer", channel: "final", background: true });
-  relay.emit({ type: "state", sid, state: "idle" });
+  emit({ type: "tool_result", sid, turn_id: turnId, tool_use_id: "verify", content: "Verified", is_error: false, background: true });
+  await expect(continuation.locator(".turn-process-label")).toContainText("正在处理");
+  emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "follow-answer", channel: "final", background: true });
+  emit({ type: "delta", sid, turn_id: turnId, message_id: "follow-answer", channel: "final", text: "第一路检查完成。", background: true });
+  emit({ type: "assistant_msg_end", sid, turn_id: turnId, message_id: "follow-answer", channel: "final", background: true });
+  emit({ type: "state", sid, state: "idle" });
   await expect(turn.locator(".turn-working")).toHaveCount(0);
   await expect(continuation.locator(".turn-process-head")).toHaveAttribute("aria-expanded", "false");
   await expect(continuation).toContainText("第一路检查完成。");
 
-  relay.emit({ type: "state", sid, state: "running" });
-  relay.emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "second-thinking", channel: "thinking", background: true });
-  relay.emit({ type: "delta", sid, turn_id: turnId, message_id: "second-thinking", channel: "thinking", text: "Fixture second continuation", background: true });
+  emit({ type: "state", sid, state: "running", msg_id: turnId, continuation: true });
+  emit({ type: "assistant_msg_start", sid, turn_id: turnId, message_id: "second-thinking", channel: "thinking", background: true });
+  emit({ type: "delta", sid, turn_id: turnId, message_id: "second-thinking", channel: "thinking", text: "Fixture second continuation", background: true });
   await expect(turn.locator(".background-followup")).toHaveCount(2);
   await expect(turn.locator(".background-followup").last().locator(".turn-process-head")).toHaveAttribute("aria-expanded", "true");
   await expect(continuation.locator(".turn-process-head")).toHaveAttribute("aria-expanded", "false");
@@ -8611,6 +8619,169 @@ test("iOS pointercancel releases process interactions and output following", asy
   )).toBeLessThan(2);
 });
 
+// WebKit desktop cannot summon the iOS keyboard or drive native momentum.
+// Exercise the same viewport events and touch ownership, and record every DOM
+// scroll write: a later anchor repair can hide the fault from endpoint checks.
+for (const [keyboardOpen, pullAtBottom] of [[false, false], [true, false], [true, true]]) {
+  test(`live append follows yield to a Claude touch drag${keyboardOpen ? " with the keyboard open" : ""}${pullAtBottom ? " at the bottom edge" : ""}`, async ({ page }) => {
+    await page.goto("/tests/history-browser.html?interactive-timeline=1&engine=claude"
+      + (keyboardOpen ? "&mobile-scroll=1&quota-composer=1" : ""));
+    await expect(page.locator('[data-turn-id="streaming"] .turn-working')).toBeVisible();
+    for (let index = 0; index < 8; index += 1) {
+      await page.getByTestId("grow-stream").evaluate((node) => node.click());
+      await page.waitForTimeout(30);
+    }
+    await waitForScrollIdle(page);
+    if (keyboardOpen) {
+      await page.evaluate(() => {
+        document.querySelector<HTMLTextAreaElement>("textarea")!.focus();
+        Object.defineProperties(window.visualViewport!, {
+          height: { configurable: true, value: 420 },
+          offsetTop: { configurable: true, value: 0 },
+        });
+        window.visualViewport!.dispatchEvent(new Event("resize"));
+      });
+      await expect(page.locator("html")).toHaveAttribute("data-short-viewport", "ime");
+      await waitForScrollIdle(page);
+    }
+    const result = await page.evaluate(async ({ keyboardOpen, pullAtBottom }) => {
+      const thread = document.querySelector<HTMLElement>(".thread")!;
+      const grow = document.querySelector<HTMLButtonElement>('[data-testid="grow-stream"]')!;
+      const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+      const touch = (type: string, clientY: number) => {
+        const point = { identifier: 1, target: thread, clientX: 120, clientY };
+        const event = new Event(type, { bubbles: true, cancelable: true });
+        Object.defineProperties(event, {
+          touches: { value: type === "touchend" ? [] : [point] },
+          targetTouches: { value: type === "touchend" ? [] : [point] },
+          changedTouches: { value: [point] },
+        });
+        thread.dispatchEvent(event);
+      };
+      const writes: { from: number; to: number; kind: string }[] = [];
+      let readerOwnsScroll = false;
+      let simulateDrag = false;
+      let intended = 0;
+      let interrupt: (() => void) | null = null;
+      const nativeScroll = thread.scrollTo;
+      const scrollTop = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop")!;
+      Object.defineProperty(thread, "scrollTop", {
+        configurable: true,
+        get() { return scrollTop.get!.call(this); },
+        set(value: number) {
+          const from = scrollTop.get!.call(this) as number;
+          scrollTop.set!.call(this, value);
+          if (readerOwnsScroll && !simulateDrag && Math.abs(value - from) > 1) {
+            writes.push({ from, to: value, kind: "scrollTop" });
+          }
+        },
+      });
+      thread.scrollTo = function (...args: Parameters<HTMLElement["scrollTo"]>) {
+        const from = thread.scrollTop;
+        nativeScroll.apply(this, args);
+        if (readerOwnsScroll && Math.abs(thread.scrollTop - from) > 1) {
+          writes.push({ from, to: thread.scrollTop, kind: "scrollTo" });
+        }
+        if (interrupt) {
+          const callback = interrupt;
+          interrupt = null;
+          // Interrupt an actual pending virtualizer bottom operation before
+          // its next reconciliation frame, as a finger can do on iOS.
+          queueMicrotask(callback);
+        }
+      };
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error("no followed-tail write")), 2_000);
+          interrupt = () => {
+            readerOwnsScroll = true;
+            touch("touchstart", 120);
+            touch("touchmove", pullAtBottom ? 60 : 300);
+            if (!pullAtBottom) {
+              simulateDrag = true;
+              thread.scrollTop -= 180;
+              simulateDrag = false;
+            }
+            intended = thread.scrollTop;
+            clearTimeout(timeout);
+            resolve();
+          };
+          if (keyboardOpen) {
+            Object.defineProperty(window.visualViewport!, "height", {
+              configurable: true, value: 400,
+            });
+            window.visualViewport!.dispatchEvent(new Event("resize"));
+          } else grow.click();
+        });
+        await sleep(60);
+        if (!pullAtBottom) touch("touchend", 300);
+        for (let index = 0; index < 8; index += 1) {
+          await sleep(80);
+          grow.click();
+          if (keyboardOpen) {
+            Object.defineProperty(window.visualViewport!, "height", {
+              configurable: true, value: index % 2 ? 400 : 410,
+            });
+            window.visualViewport!.dispatchEvent(new Event("resize"));
+          }
+        }
+        await sleep(350);
+        if (pullAtBottom) {
+          readerOwnsScroll = false;
+          touch("touchend", 60);
+        }
+        return {
+          writes, intended, finalTop: thread.scrollTop,
+          editorFocused: document.activeElement?.tagName === "TEXTAREA",
+          paused: !!document.querySelector(".scroll-bottom-btn"),
+        };
+      } finally {
+        thread.scrollTo = nativeScroll;
+        Reflect.deleteProperty(thread, "scrollTop");
+      }
+    }, { keyboardOpen, pullAtBottom });
+    expect(result.writes, JSON.stringify(result.writes)).toEqual([]);
+    if (!pullAtBottom) {
+      expect(result.paused, JSON.stringify(result)).toBe(true);
+      expect(Math.abs(result.finalTop - result.intended)).toBeLessThanOrEqual(1);
+      await page.locator(".scroll-bottom-btn").click();
+    }
+    if (keyboardOpen) expect(result.editorFocused).toBe(true);
+    await expect.poll(() => page.locator(".thread").evaluate((node) =>
+      Math.abs(node.scrollHeight - node.scrollTop - node.clientHeight),
+    )).toBeLessThanOrEqual(2);
+  });
+}
+
+test("live append follows yield to a held desktop scrollbar", async ({ page, isMobile }) => {
+  test.skip(isMobile, "desktop scrollbar ownership");
+  await page.goto("/tests/history-browser.html?interactive-timeline=1&engine=claude");
+  for (let index = 0; index < 8; index += 1) {
+    await page.getByTestId("grow-stream").evaluate((node) => node.click());
+    await page.waitForTimeout(30);
+  }
+  await waitForScrollIdle(page);
+  const result = await page.locator(".thread").evaluate(async (node) => {
+    const rect = node.getBoundingClientRect();
+    node.dispatchEvent(new PointerEvent("pointerdown", {
+      bubbles: true, pointerId: 41, pointerType: "mouse", isPrimary: true,
+      button: 0, clientX: rect.right - 2, clientY: rect.bottom - 30,
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    node.scrollTop -= 180;
+    const intended = node.scrollTop;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    document.querySelector<HTMLButtonElement>('[data-testid="grow-stream"]')!.click();
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    document.dispatchEvent(new PointerEvent("pointerup", {
+      bubbles: true, pointerId: 41, pointerType: "mouse", isPrimary: true,
+    }));
+    return { intended, actual: node.scrollTop };
+  });
+  expect(Math.abs(result.actual - result.intended)).toBeLessThanOrEqual(1);
+  await expect(page.locator(".scroll-bottom-btn")).toBeVisible();
+});
+
 test("live append follows at the bottom but not while reading history", async ({
   page,
 }, testInfo) => {
@@ -9009,8 +9180,113 @@ for (const [target, source] of [
   });
 }
 
+for (const target of ["long paste", "new-chat controls", "side chat scope"]) {
+  for (const replay of ["paste", "insertFromPaste", "insertText"]) {
+    test(`${target} iOS keyboard paste ignores an immediate ${replay} replay`, async ({ page }) => {
+      await page.addInitScript(() => Object.defineProperty(navigator, "userAgent", {
+        configurable: true, value: "Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X)",
+      }));
+      if (target === "side chat scope") {
+        await mockRightPanelRelay(page, { visible: true });
+        await page.goto("/");
+      } else await page.goto(target === "new-chat controls"
+        ? "/tests/history-browser.html?newchat-controls=1"
+        : "/tests/history-browser.html?codex-live-burst=1&composer-live=1&composer-paste=1");
+      const input = target === "side chat scope"
+        ? page.locator(".btw-panel textarea") : page.locator("textarea").first();
+      await input.fill("before REPLACE after");
+      const result = await input.evaluate((node, replay) => {
+        const ta = node as HTMLTextAreaElement;
+        ta.focus(); ta.setSelectionRange(7, 14);
+        const pasted = "一份测试文字";
+        const deliver = () => {
+          const data = new DataTransfer();
+          data.setData("text/plain", pasted);
+          const accepted = ta.dispatchEvent(new ClipboardEvent("paste", {
+            bubbles: true, cancelable: true, clipboardData: data,
+          }));
+          // Synthetic paste has no default action. Use the real editor to
+          // simulate that default, including its input event and undo entry.
+          if (accepted) document.execCommand("insertText", false, pasted);
+          return accepted;
+        };
+        const first = deliver();
+        const second = replay === "paste" ? deliver() : ta.dispatchEvent(new InputEvent("beforeinput", {
+          bubbles: true, cancelable: true, inputType: replay, data: pasted,
+        }));
+        if (replay !== "paste" && second) document.execCommand("insertText", false, pasted);
+        const once = ta.value;
+        // A deliberate second action must work even before the window expires.
+        ta.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "v", metaKey: true }));
+        const third = deliver();
+        return { first, second, third, once, twice: ta.value };
+      }, replay);
+      expect(result).toEqual({ first: true, second: false, third: true,
+        once: "before 一份测试文字 after", twice: "before 一份测试文字一份测试文字 after" });
+      await expect(input).toHaveValue(result.twice);
+    });
+  }
+
+  test(`${target} iOS keyboard paste imports duplicate image deliveries once`, async ({ page }) => {
+    await page.addInitScript(() => Object.defineProperty(navigator, "userAgent", {
+      configurable: true, value: "Mozilla/5.0 (iPhone; CPU iPhone OS 27_0 like Mac OS X)",
+    }));
+    if (target === "side chat scope") {
+      await mockRightPanelRelay(page, { visible: true });
+      await page.goto("/");
+    } else await page.goto(target === "new-chat controls"
+      ? "/tests/history-browser.html?newchat-controls=1"
+      : "/tests/history-browser.html?codex-live-burst=1&composer-live=1&composer-paste=1");
+    const input = target === "side chat scope"
+      ? page.locator(".btw-panel textarea") : page.locator("textarea").first();
+    await input.focus();
+    const result = await input.evaluate(async (node, encoded) => {
+      // Warm only the importer: a native second delivery follows a completed
+      // import, rather than being rejected by the ordinary import-in-flight lock.
+      const importer = "/src/attachment-import.ts";
+      const resolver = "/src/clipboard-files.ts";
+      await Promise.all([import(/* @vite-ignore */ importer), import(/* @vite-ignore */ resolver)]);
+      const ta = node as HTMLTextAreaElement;
+      const root = ta.closest(".btw-panel") ?? document;
+      const frames = () => new Promise<void>(resolve => requestAnimationFrame(() =>
+        requestAnimationFrame(() => resolve())));
+      const deliver = () => {
+        const data = new DataTransfer();
+        data.setData("text/plain", "配图文字");
+        data.items.add(new File([Uint8Array.from(atob(encoded), c => c.charCodeAt(0))],
+          "image.png", { type: "image/png" }));
+        ta.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data }));
+        data.items.clear();
+      };
+      const start = performance.now();
+      const appeared = new Promise<void>(resolve => {
+        const observer = new MutationObserver(() => {
+          if (root.querySelectorAll(".attach-image-preview").length !== 1) return;
+          observer.disconnect(); resolve();
+        });
+        observer.observe(root, { childList: true, subtree: true });
+      });
+      deliver();
+      await appeared;
+      const repeatAt = performance.now() - start;
+      deliver();
+      await frames();
+      const once = { text: ta.value, images: root.querySelectorAll(".attach-image-preview").length };
+      ta.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+      deliver();
+      await frames();
+      return { repeatAt, once, twice: { text: ta.value,
+        images: root.querySelectorAll(".attach-image-preview").length } };
+    }, staticPng().toString("base64"));
+    expect(result.repeatAt, "probe must replay inside the native duplicate window").toBeLessThan(120);
+    expect(result.once).toEqual({ text: "配图文字", images: 1 });
+    expect(result.twice).toEqual({ text: "配图文字配图文字", images: 2 });
+  });
+}
+
 for (const target of ["composer", "new-chat controls"]) {
-  test(`${target === "composer" ? "long paste" : target} mixed clipboard keeps text and deduplicates supplied images`, async ({ page }) => {
+for (const misreportedInsert of [false, true]) {
+  test(`${target === "composer" ? "long paste" : target} mixed clipboard keeps text and deduplicates supplied images${misreportedInsert ? " after a misreported native insert" : ""}`, async ({ page }) => {
     const alerts: string[] = [];
     page.on("dialog", async (dialog) => {
       alerts.push(dialog.message());
@@ -9029,7 +9305,7 @@ for (const target of ["composer", "new-chat controls"]) {
       })),
     );
     await expect(page.locator(".attach-file")).toHaveCount(7);
-    await input.evaluate((node) => {
+    await input.evaluate((node, misreportedInsert) => {
       const ta = node as HTMLTextAreaElement;
       ta.focus(); ta.setSelectionRange(7, 14);
       const canvas = document.createElement("canvas");
@@ -9041,10 +9317,27 @@ for (const target of ["composer", "new-chat controls"]) {
       data.setData("text/plain", "pasted text");
       data.setData("text/html", `<div>pasted text<img src="${source}"></div>`);
       data.items.add(new File([bytes], "clipboard.png", { type: "image/png" }));
-      ta.dispatchEvent(new ClipboardEvent("paste", {
-        bubbles: true, cancelable: true, clipboardData: data,
-      }));
-    });
+      const nativeInsert = document.execCommand;
+      if (misreportedInsert) {
+        document.execCommand = function (command, ui, value) {
+          const result = nativeInsert.call(this, command, ui, value);
+          if (command === "insertText") {
+            if (ta.value !== "before pasted text after") {
+              throw new Error("the compatibility probe must actually insert text");
+            }
+            return false;
+          }
+          return result;
+        };
+      }
+      try {
+        ta.dispatchEvent(new ClipboardEvent("paste", {
+          bubbles: true, cancelable: true, clipboardData: data,
+        }));
+      } finally {
+        document.execCommand = nativeInsert;
+      }
+    }, misreportedInsert);
     await expect(input).toHaveValue("before pasted text after");
     await expect(page.locator(".attach-image-preview")).toHaveCount(1);
     await expect(page.locator(".attach-file")).toHaveCount(7);
@@ -9058,6 +9351,7 @@ for (const target of ["composer", "new-chat controls"]) {
       await expect(page.getByTestId("composer-image-count")).toHaveText("1");
     }
   });
+}
 }
 
 test("long paste static PNG pixels and metadata survive preview and send", async ({ page }) => {
