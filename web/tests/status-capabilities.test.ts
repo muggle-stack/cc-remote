@@ -44,4 +44,13 @@ assert.equal(accountStatsNote({
 }), null);
 assert.equal(accountStatsNote(null), null);
 
+const { deviceVersionNotice } = await import("../src/device-version.ts");
+const sameVersion = { wrapper_version: "4.0.1", relay_version: "4.0.1", wrapper_protocol: 72, relay_protocol: 72 };
+assert.equal(deviceVersionNotice(sameVersion), null);
+assert.equal(deviceVersionNotice(undefined), null);
+assert.match(deviceVersionNotice({ ...sameVersion, wrapper_protocol: 71 })!, /这台设备执行 cc-remote update/);
+assert.match(deviceVersionNotice({ ...sameVersion, wrapper_protocol: 73 })!, /VPS 服务端执行 cc-remote update/);
+assert.match(deviceVersionNotice({ ...sameVersion, wrapper_version: "4.0.0" })!, /当前仍可连接/);
+assert.equal(deviceVersionNotice({ ...sameVersion, wrapper_version: null }), null);
+
 console.log("status capability tests passed");

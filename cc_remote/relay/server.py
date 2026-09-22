@@ -864,12 +864,13 @@ def create_app(
                 "last_seen": record.last_seen,
                 "online": record.machine_id in connected,
                 "managed": True,
+                **hub.device_version(record.machine_id),
             }
             for record in records
         ]
         known = {record.machine_id for record in records}
         visible_legacy = {
-            machine_id for machine_id in connected
+            machine_id for machine_id in connected | set(hub.versioned_machine_ids)
             if claims.allows_machine(machine_id)
         }
         if "*" not in claims.machines:
@@ -884,6 +885,7 @@ def create_app(
                 "last_seen": None,
                 "online": machine_id in connected,
                 "managed": False,
+                **hub.device_version(machine_id),
             })
         pairing_expires_at = await devices.pairing_expires_at(subject)
         return JSONResponse(
@@ -1007,6 +1009,7 @@ def create_app(
         if not revoked:
             return JSONResponse({"error": "not_found"}, status_code=404)
         await hub.disconnect_wrapper(machine_id, reason="device revoked")
+        hub.forget_wrapper_version(machine_id)
         await viewers.disconnect_machine(machine_id)
         return JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
 
@@ -1162,10 +1165,13 @@ def create_app(
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
+        from cc_remote import __version__
+
         return JSONResponse(
             {
                 "ok": True,
                 "protocol": PROTOCOL_VERSION,
+                "version": __version__,
                 "wrapper_connected": hub.wrapper_connected,
                 "machines": hub.machine_ids,
                 "clients": hub.client_count,

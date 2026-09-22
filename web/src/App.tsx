@@ -50,6 +50,7 @@ import { WorkDashboardSheet } from "./components/WorkDashboardSheet";
 import type { HookDraft, SkillDraft } from "./components/CapabilitiesSheet";
 import { TerminalControl } from "./components/TerminalControl";
 import { DeviceSheet, type PairingState, type RemoteDevice } from "./components/DeviceSheet";
+import { deviceVersionNotice } from "./device-version";
 import { EngineSelector } from "./components/EngineSelector";
 import {
   claudeProfileIdForSession,
@@ -1551,7 +1552,7 @@ export default function App() {
     }
     setDevicesLoadState("loading");
     let cancelled = false;
-    void fetch("/api/devices", {
+    const refreshDevices = () => void fetch("/api/devices", {
       credentials: "same-origin", cache: "no-store",
     }).then(async (response) => response.ok ? response.json() : null)
       .then((payload) => {
@@ -1577,8 +1578,10 @@ export default function App() {
       }).catch(() => {
         if (!cancelled) setDevicesLoadState("error");
       });
-    return () => { cancelled = true; };
-  }, [authed, machineId]);
+    refreshDevices();
+    const timer = window.setInterval(refreshDevices, 15000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [authed, machineId, state.connState, state.wrapperOnline]);
 
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;
@@ -5498,6 +5501,7 @@ export default function App() {
   };
   const activeDevice = remoteDevices.find(
     (device) => device.machine_id === machineId);
+  const versionNotice = deviceVersionNotice(activeDevice?.compatibility);
   const activeDeviceOnline = state.connState === "connected" && state.wrapperOnline;
   // A native client can advance the transcript without a wrapper-owned turn.
   // Present that mirrored activity as running in every status surface while
@@ -5691,6 +5695,7 @@ export default function App() {
           /></Suspense>
         </header>
 
+        {versionNotice && <div className="notice-bar attention" role="status">{versionNotice}</div>}
         <ReconnectBanner banner={state.banner}
           replaying={rt.replaying || historyView.recovering}
           truncated={rt.truncated}
