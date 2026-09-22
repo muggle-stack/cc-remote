@@ -28,11 +28,11 @@ Web，Wrapper 包只含本机控制端；两者都自带 `uv`，安装时创建�
 ### 1）下载并校验引导脚本
 
 在 GitHub Release 页面确认版本与 release attestation，再在待安装机器下载同一版本的
-`install.sh` 和 `SHA256SUMS`。下例使用 `4.0.0`；请先确认对应版本已发布，或替换为已选定的已发布 tag
+`install.sh` 和 `SHA256SUMS`。下例使用 `4.0.1`；请先确认对应版本已发布，或替换为已选定的已发布 tag
 （变量中不带开头的 `v`）。该路径不会自动安装尚未发布的开发分支：
 
 ```bash
-export CC_REMOTE_VERSION=4.0.0
+export CC_REMOTE_VERSION=4.0.1
 release_base="https://github.com/muggle-stack/cc-remote/releases/download/v${CC_REMOTE_VERSION}"
 curl -fLO "$release_base/install.sh"
 curl -fLO "$release_base/SHA256SUMS"

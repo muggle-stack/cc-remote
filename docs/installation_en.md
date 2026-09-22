@@ -30,13 +30,13 @@ repository, install Node, or paste tokens into service definitions.
 ### 1) Download and verify the bootstrap
 
 Confirm the version and release attestation on GitHub, then download
-`install.sh` and `SHA256SUMS` from that same release. The example uses `4.0.0`;
+`install.sh` and `SHA256SUMS` from that same release. The example uses `4.0.1`;
 first confirm that it is published, or replace it with the published tag you
 selected (without the leading `v`). This
 does not select an unpublished development-branch build:
 
 ```bash
-export CC_REMOTE_VERSION=4.0.0
+export CC_REMOTE_VERSION=4.0.1
 release_base="https://github.com/muggle-stack/cc-remote/releases/download/v${CC_REMOTE_VERSION}"
 curl -fLO "$release_base/install.sh"
 curl -fLO "$release_base/SHA256SUMS"

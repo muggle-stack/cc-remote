@@ -2,7 +2,11 @@
 
 [中文](CHANGELOG_zh.md)
 
-## Unreleased
+## v4.0.1
+
+Add managed release updates and verify Codex shared connections after activation.
+The wire protocol remains v72. See the bilingual [release notes](docs/releases/v4.0.1.md)
+for the one-time upgrade from v4.0.0.
 
 - Add `cc-remote update` for installer-managed local Relay/Wrapper releases,
   with stable-version discovery, check-only and pinned-version modes, verified
@@ -10,6 +14,10 @@
   guards. Reuse immutable installation and rollback; leave independent Claude
   services and custom deployments under their existing lifecycle.
 - Preserve operator-provided macOS Wrapper environment settings during upgrades.
+- Prepare account-scoped Codex daemons without restarting active native clients,
+  check CLI and Wrapper transport readiness, and print the result after activation.
+  Report unavailable shared connections instead of silently falling back to a
+  private server; preserve explicit opt-outs and existing terminal tasks.
 
 ## v4.0.0
 
