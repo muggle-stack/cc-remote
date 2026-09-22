@@ -1,6 +1,7 @@
 """Coordinate a device update with its configured Relay's managed installer."""
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import pwd
 import re
 import shlex
 import subprocess
+import sys
 import time
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -18,6 +20,7 @@ from dotenv import dotenv_values
 
 from cc_remote.update import Installation, UpdateError, version_tuple
 from deploy.install_cli import _atomic_file
+from deploy.release_manifest import load_manifest
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -104,7 +107,7 @@ class RelayUpdate:
                     raise ValueError("invalid settings")
             except (OSError, ValueError) as exc:
                 raise UpdateError("invalid update.json; inspect the saved Relay update configuration") from exc
-        target = ssh_target or stored.get("relay_ssh")
+        target = ssh_target or os.environ.get("CC_REMOTE_RELAY_SSH") or stored.get("relay_ssh")
         self.target = _ssh_target(target) if target else None
 
     def inspect(self) -> dict:
@@ -119,7 +122,8 @@ class RelayUpdate:
     def _ssh(self, command: list[str], *, timeout: int = 30) -> str:
         if not self.target:
             raise UpdateError(
-                "Relay also needs updating. Repeat with --relay-ssh user@host once; "
+                "Relay also needs updating. Set CC_REMOTE_RELAY_SSH=user@host, "
+                "or use --relay-ssh user@host with the new updater/installer; "
                 "its SSH account must be allowed to run the managed installer with sudo"
             )
         args = ["/usr/bin/ssh", "-oBatchMode=yes", "-oConnectTimeout=10",
@@ -211,6 +215,11 @@ class RelayUpdate:
             return
         if info["protocol"] != protocol and not allow_protocol_change:
             raise UpdateError("Relay protocol changes; arrange the device upgrades and repeat with --allow-protocol-change")
+        if not self.target and sys.stdin.isatty():
+            try:
+                self.target = _ssh_target(input("Relay needs updating. Existing SSH admin host (user@host or alias): ").strip())
+            except (EOFError, KeyboardInterrupt) as exc:
+                raise UpdateError("Relay update cancelled; no local service was changed") from exc
         self._verify_host()
         self.save_settings()
         unit = f"cc-remote-update-{uuid.uuid4().hex}"
@@ -225,3 +234,49 @@ class RelayUpdate:
         print(f"Updating Relay first; independent server transaction: {unit}", flush=True)
         self._ssh(command)
         self._finish(transaction)
+
+
+def installer_main(argv: list[str] | None = None) -> int:
+    """New-bundle preflight, including callers running the old v4.0.1 updater.
+
+    The role installer already holds the installation lock and has built and
+    validated this bundle. This check runs before stopping the local Wrapper.
+    Older Release installs may not yet have installation.json, so use the
+    service identity validated by the installer instead of registering early.
+    """
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", required=True, type=Path)
+    parser.add_argument("--bundle", required=True, type=Path)
+    parser.add_argument("--user", required=True)
+    parser.add_argument("--service-label")
+    parser.add_argument("--relay-ssh")
+    parser.add_argument("--allow-protocol-change", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        current = args.root / "current"
+        previous = current.resolve(strict=True)
+        if not current.is_symlink() or previous.parent != (args.root / "releases").resolve():
+            raise UpdateError("current must identify an existing immutable Wrapper release")
+        old = load_manifest(previous / "release-manifest.json")
+        target = load_manifest(args.bundle / "release-manifest.json")
+        if (old["role"] != "wrapper" or target["role"] != "wrapper"
+                or any(old[key] != target[key] for key in ("os", "arch"))):
+            raise UpdateError("upstream preflight requires matching Wrapper installations")
+        if old["protocol_version"] != target["protocol_version"] and not args.allow_protocol_change:
+            raise UpdateError("protocol changes; coordinate all devices and use --allow-protocol-change")
+        metadata = {"schema": 1, "role": "wrapper", "user": args.user}
+        if args.service_label:
+            metadata["service_label"] = args.service_label
+        installation = Installation(args.root, previous, old, metadata)
+        RelayUpdate(installation, args.relay_ssh).ensure(
+            target["product_version"], target["protocol_version"],
+            allow_protocol_change=args.allow_protocol_change,
+        )
+    except (OSError, ValueError, UpdateError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(installer_main())

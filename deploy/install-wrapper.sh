@@ -12,7 +12,7 @@ usage() {
   cat >&2 <<'EOF'
 Usage:
   install-wrapper.sh BUNDLE --relay https://remote.example.com --pair PAIR-CODE [--name LABEL]
-  install-wrapper.sh BUNDLE [--user USER]
+  install-wrapper.sh BUNDLE [--user USER] [--relay-ssh USER@HOST] [--allow-protocol-change]
 
 The relay and pair arguments are required for the first install. They may be
 omitted on upgrades when a device credential already exists. Linux installs
@@ -31,6 +31,8 @@ device_name=""
 target_user="${CC_REMOTE_INSTALL_USER:-}"
 install_root=""
 installed_service_label=""
+relay_ssh=""
+allow_protocol_change=0
 replace_pair=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -67,6 +69,15 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || usage
       installed_service_label="$2"
       shift 2
+      ;;
+    --relay-ssh)
+      [ "$#" -ge 2 ] || usage
+      relay_ssh="$2"
+      shift 2
+      ;;
+    --allow-protocol-change)
+      allow_protocol_change=1
+      shift
       ;;
     *) die "unknown wrapper installer argument: $1" ;;
   esac
@@ -469,6 +480,27 @@ if [ ! -f "$device_file" ] || [ -L "$device_file" ]; then
   die "device credential is missing; provide --relay and --pair"
 fi
 chmod 0600 "$device_file"
+
+# Older update commands only invoke the downloaded installer. Check the Relay
+# here too, before stopping or switching the local Wrapper, so their first
+# upgrade has the same server-first behavior. Fresh pairing is a separate flow.
+if [ -n "$previous" ] && [ -z "$pair_code" ]; then
+  upstream_args=(--root "$appdir" --bundle "$target" --user "$target_user")
+  if [ "$system" = darwin ]; then
+    upstream_args+=(--service-label "$service_label")
+  fi
+  if [ -n "$relay_ssh" ]; then
+    upstream_args+=(--relay-ssh "$relay_ssh")
+  fi
+  if [ "$allow_protocol_change" -eq 1 ]; then
+    upstream_args+=(--allow-protocol-change)
+  fi
+  (
+    cd "$target"
+    PYTHONPATH="$target" "$target/.venv/bin/python" \
+      -m cc_remote.update_relay "${upstream_args[@]}"
+  )
+fi
 
 # Mutable Work metadata and private wrapper control state live outside immutable
 # release directories. Capture them before activation so a code rollback also

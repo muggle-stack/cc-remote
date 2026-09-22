@@ -101,6 +101,11 @@ deployment.
   records that exact job before launch; an unknown outcome is inspected on retry,
   never blindly resubmitted. Public readiness precedes device activation. Pairing
   credentials do not authorize this operation. Other devices update individually.
+  The new Wrapper role installer repeats upstream verification before stopping
+  the local service, covering the first upgrade launched by v4.0.1's older
+  updater. `CC_REMOTE_RELAY_SSH` supplies an existing SSH admin target to that
+  older caller; an interactive terminal can request it when missing. First
+  pairing is separate from this existing-installation upgrade path.
   Explicit Mac registration can bind an existing immutable root and LaunchAgent;
   future installs preserve that layout and service identity. The command does not
   restart the independent Claude service, adopt source/Docker layouts, prune

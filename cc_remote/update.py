@@ -394,6 +394,8 @@ def update(*, role: str | None, target_version: str | None, check: bool,
             elif installation.metadata.get("service_label"):
                 command += ["--install-root", str(installation.root),
                             "--service-label", installation.metadata["service_label"]]
+            if installation.role == "wrapper" and allow_protocol_change:
+                command += ["--allow-protocol-change"]
             print("Activating with the release installer; previous release retained for rollback.", flush=True)
             if run_installer(command, lock_descriptor):
                 raise UpdateError("installer did not complete successfully; inspect its rollback report before retrying")
