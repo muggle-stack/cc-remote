@@ -189,8 +189,6 @@ else
 fi
 
 bash "$bundle/deploy/setup-vps.sh" "$domain" "$bundle"
-"$appdir/current/.venv/bin/python" "$appdir/current/deploy/install_cli.py" \
-  --root "$appdir" --destination "$cli_path" --role relay --domain "$domain"
 
 echo
 echo "Relay installed. Open https://$domain/ and log in."

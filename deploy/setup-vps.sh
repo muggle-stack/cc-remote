@@ -42,6 +42,8 @@ INSECURE_HTTP=0
 PRIVATE_DIRECT=0
 PUBLIC_SCHEME=https
 CADDY_TEMPLATE=""
+MANAGED_RELEASE=0
+CLI_PATH=/usr/local/bin/cc-remote
 
 [ -r "$SOURCE_DIR/deploy/setup_transaction.sh" ] || {
   echo "ERROR: $SOURCE_DIR/deploy/setup_transaction.sh is missing" >&2
@@ -179,6 +181,15 @@ python3 "$SOURCE_DIR/deploy/validate_protocol_bundle.py" \
   die "$SOURCE_DIR/deploy/$CADDY_TEMPLATE missing"
 [ -f "$SOURCE_DIR/deploy/caddy_managed_block.py" ] || die "$SOURCE_DIR/deploy/caddy_managed_block.py missing"
 [ -f "$SOURCE_DIR/deploy/cc-remote-relay.service" ] || die "$SOURCE_DIR/deploy/cc-remote-relay.service missing"
+
+if [ -f "$SOURCE_DIR/release-manifest.json" ]; then
+  (
+    cd "$SOURCE_DIR"
+    python3 -m deploy.release_manifest "$SOURCE_DIR" --role relay --os linux
+  )
+  python3 "$SOURCE_DIR/deploy/install_cli.py" --destination "$CLI_PATH" --check
+  MANAGED_RELEASE=1
+fi
 
 require_secret SESSION_SECRET 32
 if LOGIN_USERS_POLICY="$(read_env_value LOGIN_USERS_JSON 2>/dev/null)" && \
@@ -411,6 +422,13 @@ if (( ! READY )); then
   die "relay did not become ready on http://127.0.0.1:8765/healthz"
 fi
 
+# Registration is the final fallible activation step. Its own atomic writer
+# restores the command on failure; our EXIT trap restores Relay/Caddy/current.
+# Source deployments without a release manifest do not become managed installs.
+if (( MANAGED_RELEASE )); then
+  "$NEW_RELEASE_DIR/.venv/bin/python" "$NEW_RELEASE_DIR/deploy/install_cli.py" \
+    --root "$APPDIR" --destination "$CLI_PATH" --role relay --domain "$TARGET"
+fi
 DEPLOY_READY=1
 
 echo
