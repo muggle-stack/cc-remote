@@ -89,7 +89,7 @@ class RelayHub:
     def device_version(self, machine_id: str) -> dict:
         info = self._wrapper_versions.get(machine_id)
         if info and (info["wrapper_protocol"] != PROTOCOL_VERSION
-                     or info["wrapper_version"] not in (None, __version__)):
+                     or info["wrapper_version"] != __version__):
             return {"compatibility": dict(info)}
         return {}
 

@@ -124,13 +124,29 @@ def test_incompatible_device_is_visible_only_to_its_owner_and_clears_on_reconnec
         assert info["wrapper_version"] == "4.0.0"
         with TestClient(app, base_url=cfg.public_origin) as stranger:
             assert stranger.get("/api/devices").status_code == 401
+        # v4.0.1 peers share the wire protocol but do not send a product header.
+        # Expose the missing version instead of claiming their release matches.
+        headers.pop("x-cc-remote-version")
+        with client.websocket_connect("/ws", headers=headers) as wrapper:
+            wrapper.send_text(serialize(Hello(role="wrapper", machine_id=machine_id)))
+            _wait_for_device_online(client, machine_id)
+            legacy = client.get("/api/devices").json()["devices"][0]["compatibility"]
+            assert legacy["wrapper_version"] is None
+            assert legacy["wrapper_protocol"] == PROTOCOL_VERSION
+        deadline = time.monotonic() + 1
+        while client.get("/api/devices").json()["devices"][0]["online"]:
+            assert time.monotonic() < deadline, "old connection did not detach"
+            time.sleep(0.01)
         from cc_remote import __version__
 
         headers["x-cc-remote-version"] = __version__
         with client.websocket_connect("/ws", headers=headers) as wrapper:
             wrapper.send_text(serialize(Hello(role="wrapper", machine_id=machine_id)))
             _wait_for_device_online(client, machine_id)
-            assert "compatibility" not in client.get("/api/devices").json()["devices"][0]
+            deadline = time.monotonic() + 1
+            while "compatibility" in client.get("/api/devices").json()["devices"][0]:
+                assert time.monotonic() < deadline, "new hello version did not arrive"
+                time.sleep(0.01)
 
 
 def test_browser_pairs_lists_renames_and_revokes_dynamic_wrapper(tmp_path):

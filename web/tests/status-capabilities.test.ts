@@ -51,6 +51,6 @@ assert.equal(deviceVersionNotice(undefined), null);
 assert.match(deviceVersionNotice({ ...sameVersion, wrapper_protocol: 71 })!, /这台设备执行 cc-remote update/);
 assert.match(deviceVersionNotice({ ...sameVersion, wrapper_protocol: 73 })!, /VPS 服务端执行 cc-remote update/);
 assert.match(deviceVersionNotice({ ...sameVersion, wrapper_version: "4.0.0" })!, /当前仍可连接/);
-assert.equal(deviceVersionNotice({ ...sameVersion, wrapper_version: null }), null);
+assert.match(deviceVersionNotice({ ...sameVersion, wrapper_version: null })!, /设备未上报版本/);
 
 console.log("status capability tests passed");
