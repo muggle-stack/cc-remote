@@ -62,10 +62,10 @@ class Installation:
         return self.manifest["role"]
 
 
-def installation_roots(system: str) -> list[Path]:
+def installation_roots(system: str) -> dict[str, Path]:
     if system == "darwin":
-        return [Path.home() / "Library/Application Support/cc-remote"]
-    return [Path("/opt/cc-remote"), Path("/opt/cc-remote-wrapper")]
+        return {"wrapper": Path.home() / "Library/Application Support/cc-remote"}
+    return {"relay": Path("/opt/cc-remote"), "wrapper": Path("/opt/cc-remote-wrapper")}
 
 
 def read_installation(root: Path, system: str, machine: str) -> Installation:
@@ -104,12 +104,17 @@ def read_installation(root: Path, system: str, machine: str) -> Installation:
 
 def select_installation(role: str | None, system: str, machine: str) -> Installation:
     found = []
-    for root in installation_roots(system):
+    for expected_role, root in installation_roots(system).items():
+        # Standard roots have fixed roles. Do not read unrelated installations
+        # when an operator explicitly selects one role for an update.
+        if role is not None and expected_role != role:
+            continue
         if not (root / "installation.json").exists():
             continue
         installation = read_installation(root, system, machine)
-        if role is None or installation.role == role:
-            found.append(installation)
+        if installation.role != expected_role:
+            raise UpdateError(f"installation role does not match its managed directory: {root}")
+        found.append(installation)
     if not found:
         raise UpdateError(
             "no managed Release installation found; install a release containing this "

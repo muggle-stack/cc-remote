@@ -49,7 +49,7 @@ def _installation(tmp_path, monkeypatch, *, role="wrapper", system="darwin"):
     (root / "installation.json").write_text(json.dumps(metadata))
     (root / "operator-config").write_text("preserve operator settings\n")
     (root / "native-service-alive").write_text("still running\n")
-    monkeypatch.setattr(updater, "installation_roots", lambda _: [root])
+    monkeypatch.setattr(updater, "installation_roots", lambda _: {role: root})
     monkeypatch.setattr(updater, "host_platform", lambda: (system, "arm64"))
     monkeypatch.setattr(updater.os, "geteuid", lambda: 0 if system == "linux" else 501)
     # The fixture models activation privileges; its real files still belong to
@@ -271,11 +271,45 @@ def test_installer_keeps_lock_if_the_controller_disconnects(tmp_path):
 def test_multiple_roles_need_an_explicit_selection(tmp_path, monkeypatch):
     relay = _installation(tmp_path, monkeypatch, role="relay", system="linux")
     wrapper = _installation(tmp_path, monkeypatch, system="linux")
-    monkeypatch.setattr(updater, "installation_roots", lambda _: [relay.root, wrapper.root])
+    monkeypatch.setattr(updater, "installation_roots", lambda _: {"relay": relay.root, "wrapper": wrapper.root})
     with pytest.raises(updater.UpdateError, match="both roles"):
         updater.select_installation(None, "linux", "arm64")
     assert updater.select_installation("relay", "linux", "arm64") == relay
     assert updater.select_installation("wrapper", "linux", "arm64") == wrapper
+
+
+@pytest.mark.parametrize("selected_role", ["relay", "wrapper"])
+@pytest.mark.parametrize("problem", ["metadata", "current", "manifest"])
+def test_explicit_role_ignores_an_unrelated_broken_installation(tmp_path, monkeypatch, selected_role, problem):
+    installations = {
+        role: _installation(tmp_path, monkeypatch, role=role, system="linux")
+        for role in ("relay", "wrapper")
+    }
+    monkeypatch.setattr(updater, "installation_roots", lambda _: {
+        role: installation.root for role, installation in installations.items()
+    })
+    other_role = "wrapper" if selected_role == "relay" else "relay"
+    broken = installations[other_role]
+    if problem == "metadata":
+        (broken.root / "installation.json").write_text("{invalid metadata")
+    elif problem == "current":
+        (broken.root / "current").unlink()
+        (broken.root / "current").symlink_to(broken.root / "releases/missing")
+    else:
+        (broken.release / "release-manifest.json").unlink()
+
+    assert updater.select_installation(selected_role, "linux", "arm64") == installations[selected_role]
+    assert main(["update", "--check", "--role", selected_role, "--version", "4.0.1"]) == 0
+    for role in (other_role, None):
+        with pytest.raises(updater.UpdateError, match="cannot read managed installation"):
+            updater.select_installation(role, "linux", "arm64")
+
+
+def test_selected_managed_root_cannot_impersonate_another_role(tmp_path, monkeypatch):
+    wrapper = _installation(tmp_path, monkeypatch, system="linux")
+    monkeypatch.setattr(updater, "installation_roots", lambda _: {"relay": wrapper.root})
+    with pytest.raises(updater.UpdateError, match="role does not match"):
+        updater.select_installation("relay", "linux", "arm64")
 
 
 def test_custom_installation_is_not_adopted(tmp_path, monkeypatch):
