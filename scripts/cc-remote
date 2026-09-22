@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# cc-remote release management launcher. Installed by the role installer.
+set -euo pipefail
+
+if [ "$(uname -s)" = Linux ] && [ "$(id -u)" -ne 0 ]; then
+  # Relay releases and installation metadata may only be readable by root.
+  # Elevate this installed launcher, never a script downloaded from the network.
+  # Preserve explicit download settings without putting proxy credentials into
+  # command-line arguments. Never preserve Python import-path overrides.
+  kept_env=CC_REMOTE_GITHUB_REPOSITORY,CC_REMOTE_RELEASE_BASE_URL
+  kept_env+=,UV_DEFAULT_INDEX,UV_PYTHON_INSTALL_MIRROR
+  kept_env+=,HTTP_PROXY,HTTPS_PROXY,ALL_PROXY,NO_PROXY,http_proxy,https_proxy,all_proxy,no_proxy
+  exec sudo --preserve-env="$kept_env" -- "$0" "$@"
+fi
+
+case "$(uname -s)" in
+  Darwin) roots=("$HOME/Library/Application Support/cc-remote/current") ;;
+  Linux) roots=(/opt/cc-remote-wrapper/current /opt/cc-remote/current) ;;
+  *) echo "cc-remote supports macOS and Linux." >&2; exit 1 ;;
+esac
+
+for release_root in "${roots[@]}"; do
+  if [ -x "$release_root/.venv/bin/python" ] &&
+     [ -f "$release_root/cc_remote/__main__.py" ]; then
+    cd -- "$release_root"
+    exec env -u PYTHONHOME -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 \
+      "$release_root/.venv/bin/python" -s -m cc_remote "$@"
+  fi
+done
+echo "No managed cc-remote release found. Run the release installer first." >&2
+exit 1

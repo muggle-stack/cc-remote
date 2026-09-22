@@ -91,8 +91,37 @@ macOS 必须以当前桌面用户运行，安装器创建用户 LaunchAgent；Li
 `0600` 私有配置：macOS 为 `~/.cc-remote/device.json`，Linux 为
 `/etc/cc-remote/device.env`；不会进入 plist、systemd unit 或 release 目录。
 
-升级同一台机器时下载新版本 `install.sh` 后重新执行即可。Relay 仍传 `--domain`；
-Wrapper 已有设备凭据时只需：
+### 后续更新
+
+包含管理命令的新安装器会注册 `cc-remote`：macOS 位于 `~/.local/bin/cc-remote`，
+Linux 位于 `/usr/local/bin/cc-remote`。macOS 需把 `~/.local/bin` 加到 `PATH`。
+首次安装完成后，在独立终端或 SSH 中运行：
+
+```bash
+cc-remote update --check   # 只查版本，不下载安装包或重启服务
+cc-remote update           # 更新本机组件到最新稳定 Release
+```
+
+`--version` 可选择一个已发布的准确版本，不执行降级。若同机安装了两个角色，
+加 `--role relay` 或 `--role wrapper`。Linux 自动请求 `sudo`，并保留安装时的
+Wrapper 服务用户；macOS 以原桌面用户运行。只更新本机选择的角色，Relay 会带上 Web，
+其他机器的 Wrapper 需分别执行更新。
+
+命令校验 SHA-256、安装包路径、平台和版本，随后复用原安装器的不可变切换、状态快照
+与失败回滚；保留账号、配对和外部配置，不清理旧 release，也不会重新配对。同版本
+不重启，重复更新会被锁住，激活失败不会自动重试。独立 Claude 服务不在更新范围内。
+升级前先等待进程内 Claude、BTW 和排队消息处理结束；SDK 或独立服务协议变化时，
+命令会停止并要求按 [Claude 服务指南](claude-session-service.md) 完成迁移。
+
+通信协议变化时命令默认停止。先安排所有机器的维护窗口，按部署文档顺序使用
+`--version` 固定同一版并附加 `--allow-protocol-change`；这只表示已安排协调升级，
+不会自动管理远端机器。更新完成后重新加载 Web/PWA。
+
+v4.0.0 及更早版本尚未安装这个命令，需先按下面的方式升级到包含它的版本一次。
+源码、自定义目录和 Docker 部署继续使用各自流程，命令不会自动接管它们。
+
+旧版本升级同一台机器时，下载新版本 `install.sh` 后重新执行即可。Relay 仍传
+`--domain`；Wrapper 已有设备凭据时只需：
 
 ```bash
 ./install.sh wrapper

@@ -4,6 +4,13 @@
 
 ## Unreleased
 
+- Add `cc-remote update` for installer-managed local Relay/Wrapper releases,
+  with stable-version discovery, check-only and pinned-version modes, verified
+  bundles, preserved service identity, exclusive activation and protocol-change
+  guards. Reuse immutable installation and rollback; leave independent Claude
+  services and custom deployments under their existing lifecycle.
+- Preserve operator-provided macOS Wrapper environment settings during upgrades.
+
 ## v4.0.0
 
 cc-remote v4 brings persistent Claude sessions, native steering, durable history

@@ -103,8 +103,44 @@ credential is stored only in a mode-`0600` private config:
 `~/.cc-remote/device.json` on macOS or `/etc/cc-remote/device.env` on Linux. It
 is never embedded in a plist, systemd unit, or release directory.
 
-For an upgrade, download the new version's `install.sh` and rerun it. Relay
-still needs `--domain`; a previously paired Wrapper needs only:
+### Subsequent updates
+
+Installers containing the management command register `cc-remote` at
+`~/.local/bin/cc-remote` on macOS and `/usr/local/bin/cc-remote` on Linux.
+Add `~/.local/bin` to your macOS `PATH`. After the initial installation, use an
+independent terminal or SSH connection:
+
+```bash
+cc-remote update --check   # No bundle download or service restart
+cc-remote update           # Latest stable Release for the local component
+```
+
+Use `--version` to select an exact published version; downgrades are refused.
+If both roles are installed, select `--role relay` or `--role wrapper`.
+Linux requests `sudo` and retains the original Wrapper service user; macOS runs
+as the desktop user. Only the selected local role is updated. Relay includes Web;
+Wrappers on other machines must be updated separately.
+
+The command verifies SHA-256, archive paths, platform and version before calling
+the existing immutable installer with its state snapshot and failed-activation
+rollback. Account, pairing and external configuration remain intact. Previous
+releases are retained; no re-pairing occurs. The same version is a no-op, concurrent
+updates are locked out, and failed activations are not retried automatically.
+The independent Claude service is never restarted. Finish in-process Claude,
+BTW and queued work before updating. SDK/service-protocol changes stop the command
+and require the [Claude service migration procedure](claude-session-service.md).
+
+A wire-protocol change stops by default. Arrange a maintenance window on every
+machine, pin the same `--version`, and add `--allow-protocol-change` in the order
+specified by the deployment guide. This flag acknowledges coordination; it does
+not manage remote machines. Reload Web/PWA clients afterwards.
+
+v4.0.0 and earlier do not install this command. Upgrade once using the procedure
+below to a release that includes it. Source, custom-directory and Docker installs
+keep their own upgrade procedure and are not automatically adopted.
+
+To upgrade an older installation, download the new version's `install.sh` and
+rerun it. Relay still needs `--domain`; a previously paired Wrapper needs only:
 
 ```bash
 ./install.sh wrapper

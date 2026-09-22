@@ -243,6 +243,11 @@ below or configure a restricted LAN/Tailscale entry point.
 
 ## Install and upgrade
 
+Release installations that include the management CLI support
+`cc-remote update --check` and `cc-remote update`; see
+[subsequent updates](docs/installation_en.md#subsequent-updates) for the initial
+upgrade from v4.0.0, role selection and coordinated protocol upgrades.
+
 | Scenario | Guide |
 |---|---|
 | Use current features (recommended) or a development branch | [Source deployment](docs/installation_en.md#source-install): use one tested snapshot |

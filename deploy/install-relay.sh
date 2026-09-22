@@ -76,6 +76,8 @@ bundle="$(cd "$bundle" && pwd -P)"
 
 appdir=/opt/cc-remote
 env_file="$appdir/.env"
+cli_path=/usr/local/bin/cc-remote
+python3 "$bundle/deploy/install_cli.py" --destination "$cli_path" --check
 new_env=""
 cleanup() {
   [ -z "$new_env" ] || rm -f -- "$new_env"
@@ -181,8 +183,11 @@ else
 fi
 
 bash "$bundle/deploy/setup-vps.sh" "$domain" "$bundle"
+"$appdir/current/.venv/bin/python" "$appdir/current/deploy/install_cli.py" \
+  --root "$appdir" --destination "$cli_path" --role relay --domain "$domain"
 
 echo
 echo "Relay installed. Open https://$domain/ and log in."
 echo "Then open Devices, create a one-time pairing code, and run the"
 echo "wrapper installer on the Mac or Linux machine that hosts Claude/Codex."
+echo "Updates: cc-remote update (check only: cc-remote update --check)"

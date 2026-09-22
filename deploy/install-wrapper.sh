@@ -130,6 +130,7 @@ if [ "$system" = darwin ]; then
   service_file="$target_home/Library/LaunchAgents/com.muggle.cc-remote.wrapper.plist"
   service_label="com.muggle.cc-remote.wrapper"
   log_dir="$target_home/Library/Logs/cc-remote"
+  cli_path="$target_home/.local/bin/cc-remote"
 else
   [ "$(id -u)" -eq 0 ] || die "Linux wrapper installation must run as root"
   command -v systemctl >/dev/null 2>&1 || die "systemd is required"
@@ -157,7 +158,12 @@ else
   service_file=/etc/systemd/system/cc-remote-wrapper.service
   service_label=cc-remote-wrapper
   log_dir=""
+  cli_path=/usr/local/bin/cc-remote
 fi
+
+"$bundle/bin/uv" run --no-project --no-env-file --managed-python \
+  --python "$python_runtime" python "$bundle/deploy/install_cli.py" \
+  --destination "$cli_path" --check
 
 claude_bin="$target_home/.local/bin/claude"
 [ -x "$claude_bin" ] || \
@@ -453,6 +459,7 @@ from xml.sax.saxutils import escape
 source, destination, current, home, log_dir = map(Path, sys.argv[1:6])
 previous_plist = Path(sys.argv[6]) if sys.argv[6] else None
 text = source.read_text(encoding="utf-8")
+previous_environment = {}
 work_roots = {
     "CLAUDE_WORK_ROOT": str(home / ".claude" / "cc-remote" / "work"),
     "CODEX_WORK_ROOT": str(home / ".codex" / "cc-remote" / "work"),
@@ -462,6 +469,7 @@ if previous_plist is not None:
         previous = plistlib.load(stream)
     environment = previous.get("EnvironmentVariables", {})
     if isinstance(environment, dict):
+        previous_environment = environment
         for key in work_roots:
             value = environment.get(key)
             if isinstance(value, str) and value:
@@ -478,7 +486,11 @@ for marker, value in values.items():
 if any(marker in text for marker in values):
     raise SystemExit("unresolved LaunchAgent template marker")
 staged = destination.with_name(f".{destination.name}.new")
-staged.write_text(text, encoding="utf-8")
+payload = plistlib.loads(text.encode("utf-8"))
+# Operator configuration (including the independent Claude service endpoint)
+# survives a Wrapper upgrade. New installs still use the secret-free template.
+payload["EnvironmentVariables"].update(previous_environment)
+staged.write_bytes(plistlib.dumps(payload))
 staged.replace(destination)
 PY
   service_changed=1
@@ -569,6 +581,9 @@ if [ "$migration_ready" -ne 1 ]; then
   die "Claude/Codex Work profile migrations did not become ready"
 fi
 
+"$target/.venv/bin/python" "$target/deploy/install_cli.py" \
+  --root "$appdir" --destination "$cli_path" --role wrapper --user "$target_user"
+
 echo
 echo "Wrapper v$version installed from $git_sha."
 echo "Active release: $target"
@@ -580,4 +595,8 @@ if [ "$system" = darwin ]; then
   echo "Logs: $log_dir"
 else
   echo "Logs: journalctl -u $service_label -f"
+fi
+echo "Updates: $cli_path update (check only: $cli_path update --check)"
+if [ "$system" = darwin ] && ! command -v cc-remote >/dev/null 2>&1; then
+  echo 'Add ~/.local/bin to PATH to use the cc-remote command.'
 fi

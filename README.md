@@ -218,6 +218,10 @@ CLAUDE_BIN=
 
 ## 安装与升级
 
+包含管理命令的 Release 安装支持 `cc-remote update --check` 检查更新、
+`cc-remote update` 升级。v4.0.0 首次过渡、角色选择和协议协调升级见
+[后续更新](docs/installation.md#后续更新)。
+
 | 场景 | 文档 |
 |---|---|
 | 使用当前功能（推荐）、部署开发分支 | [源码部署](docs/installation.md#source-install)：使用同一份测试通过的快照 |

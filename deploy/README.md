@@ -84,6 +84,18 @@ deployment.
   verifies its `SHA256SUMS` entry before extraction, rejects unsafe archive
   paths, and then invokes the in-bundle installer. It never pipes a network
   response into a shell.
+- `cc-remote update` — local management command registered by the role installers
+  (`scripts/cc-remote`, `cc_remote/update.py`, `install_cli.py`). It discovers only
+  standard installs carrying non-secret `installation.json` metadata, downloads
+  and validates one stable role bundle, then calls its existing role installer.
+  `--check` performs no activation; `--version` selects an exact published version.
+  Both roles on one host require `--role`. Protocol changes require a coordinated
+  maintenance window and `--allow-protocol-change`. SDK/service-contract changes
+  defer to the Claude service migration procedure. The installer inherits the
+  update lock so a disconnected caller cannot accidentally start a second update.
+  The command must run outside the managed Wrapper/Relay process tree. It does
+  not update remote machines, restart the independent Claude service, adopt
+  source/Docker/custom layouts, prune releases, or automate downgrade rollback.
 - `build_release.py` / `release_manifest.py` — reproducible role-bundle builder
   and fail-closed manifest validator. Relay artifacts contain `web/dist` and
   `requirements-relay.lock`; Wrapper artifacts contain no Web tree and use
