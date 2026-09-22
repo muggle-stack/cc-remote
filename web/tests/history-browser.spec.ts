@@ -5062,6 +5062,25 @@ test("reducer history paging and live refresh keep one stable projection", async
   await expect(page.getByTestId("reducer-unique-turn-count")).toHaveText("20");
 });
 
+test("Claude history aliases keep the greeting first without duplicated conversations", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?reducer-pipeline=1&claude-aliases=1");
+  const expected = ["hi claude", ...Array.from({ length: 9 }, (_, index) =>
+    `Claude question ${index + 2}`)];
+  await expect(page.getByTestId("reducer-turn-count")).toHaveText("10");
+  await pauseOutputAndScrollToHistoryStart(page);
+  await page.getByRole("button", { name: "加载更早的历史" }).click();
+  await expect(page.getByTestId("load-count")).toHaveText("1");
+  await expect(page.getByTestId("reducer-turn-count")).toHaveText("10");
+  await expect(page.getByTestId("reducer-unique-turn-count")).toHaveText("10");
+  await expect(page.locator(".ubub")).toHaveText(expected);
+  await page.getByTestId("reducer-live-refresh").click();
+  await expect(page.locator(".ubub")).toHaveText(expected);
+  await page.getByTestId("switch-session").click();
+  await page.getByTestId("switch-session").click();
+  await pauseOutputAndScrollToHistoryStart(page);
+  await expect(page.locator(".ubub")).toHaveText(expected);
+});
+
 test("authoritative paging returns after an IndexedDB first paint", async ({
   page,
 }) => {

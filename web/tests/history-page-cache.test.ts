@@ -283,10 +283,86 @@ const mergedWrite = await cache.putPage(scope, {
   newerPageKey: "page-2",
 });
 assert.equal(mergedWrite.ok, true);
+
+// A partial write updates rows in place even when timestamps cannot establish
+// their order. Native alias materialization must also retain the cached slot.
+for (const ts of [undefined, 42]) {
+  for (const alias of [false, true]) {
+    const partialCache = new HistoryPageCache({ storage: new MemoryStorage() });
+    const pageKey = `partial-order-${ts ?? "missing"}-${alias}`;
+    const page = {
+      pageKey,
+      turns: [turn("row-a", { ts }), turn("row-b", { ts, done: false }), turn("row-c", { ts })],
+      hasOlder: false,
+      olderCursor: null,
+    };
+    assert.equal((await partialCache.putPage(scope, page)).ok, true);
+    const updated = turn(alias ? "native-b" : "row-b", {
+      ts,
+      clientMsgId: alias ? "row-b" : undefined,
+      blocks: [{ kind: "text", message_id: "answer-b", channel: "final", text: "updated answer", done: true }],
+    });
+    assert.equal((await partialCache.putPage(scope, { ...page, turns: [updated] })).ok, true);
+    const reloaded = await partialCache.getPage(scope, pageKey);
+    assert.deepEqual(reloaded?.turns.map((item) => item.id), ["row-a", updated.id, "row-c"],
+      "a middle-row update retains cached order without relying on timestamps");
+    assert.equal(reloaded?.turns[1].done, true, "the incoming lifecycle still wins");
+    assert.deepEqual(reloaded?.turns[1].blocks, updated.blocks);
+    assert.equal((await partialCache.putPage(scope, {
+      ...page, turns: [turn("row-c", { ts }), updated, turn("row-d", { ts })],
+    })).ok, true);
+    assert.deepEqual((await partialCache.getPage(scope, pageKey))?.turns.map((item) => item.id),
+      ["row-a", updated.id, "row-c", "row-d"],
+      "reordered overlapping subsets keep established slots and append genuinely new rows");
+  }
+}
 const mergedPage = await cache.getPage(scope, "page-1");
 assert.deepEqual(mergedPage?.turns.map((item) => item.id), [
   "1", "native-2", "3",
 ]);
+
+// A live-only Claude row can be evicted before its native summary arrives.
+// Both write orders must converge without relying on prompt text or a prior
+// historyTurnId binding, and old cached duplicates must heal on read as well.
+const nativeClaudeRow = turn("claude-native", {
+  clientMsgId: "claude-browser", prompt: "same question", ts: 2,
+  detailEventCount: 16, processDetailState: "present",
+});
+const liveClaudeRow = turn("claude-browser", {
+  prompt: "same question", ts: 2,
+});
+for (const [index, copies] of [
+  [liveClaudeRow, nativeClaudeRow],
+  [nativeClaudeRow, liveClaudeRow],
+].entries()) {
+  const pageKey = `claude-alias-${index}`;
+  for (const copy of copies) {
+    assert.equal((await cache.putPage(scope, {
+      pageKey, turns: [copy], hasOlder: false,
+    })).ok, true);
+  }
+  const page = await cache.getPage(scope, pageKey);
+  assert.equal(page?.turns.length, 1);
+  assert.equal(page?.turns[0].historyTurnId ?? page?.turns[0].id, "claude-native");
+  assert.equal(page?.turns[0].clientMsgId, "claude-browser");
+  assert.equal(page?.turns[0].detailEventCount, 16);
+  const stored = storage.records.get(cache.pageKey(scope, pageKey)) as HistoryPageCacheStoredRecord;
+  stored.page.turns = [nativeClaudeRow, liveClaudeRow];
+  assert.equal((await cache.getPage(scope, pageKey))?.turns.length, 1,
+    "existing cache pollution is repaired without discarding history pages");
+}
+
+const repeatedClaudePage = sanitizeHistoryPageForCache({
+  pageKey: "repeated-claude-prompts",
+  turns: [
+    nativeClaudeRow,
+    { ...nativeClaudeRow, id: "claude-native-other", clientMsgId: "claude-browser-other" },
+    turn("display-collision", { historyTurnId: "native-first" }),
+    turn("display-collision", { historyTurnId: "native-second" }),
+  ],
+});
+assert.equal(repeatedClaudePage.turns.length, 4,
+  "identical questions and display-id collisions keep separate native rows");
 
 // Concurrent partial writes to one logical page must serialize their
 // read/merge/write cycle. Otherwise both reads can observe an empty page and
