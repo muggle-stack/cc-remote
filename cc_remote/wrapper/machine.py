@@ -99,6 +99,7 @@ from cc_remote.codex_profiles import (
     CodexProfileTopologyTransition,
 )
 from cc_remote.wrapper import claude_catalog
+from cc_remote.wrapper.claude_models import claude_model_catalog
 from cc_remote.codex_daemon_restart import (
     CodexDaemonRestartState,
     read_restart_state,
@@ -18753,10 +18754,8 @@ class WrapperMachine:
     async def _handle_get_models(self, cmd) -> None:
         """Answer with the engine's catalog and effective new-session defaults.
 
-        Codex exposes its catalog through app-server. Claude has no side-effect-
-        free catalog/default RPC, so its list stays empty while bounded settings
-        reads resolve a cwd-aware model and fall back to the curated default;
-        the client keeps its static presentation table.
+        Codex uses model/list; Claude exposes its picker in the initialization
+        response. Neither discovery starts a model turn or resumes a session.
         """
         engine = getattr(cmd, "engine", None) or "cc"
         claude_profile = None
@@ -18839,7 +18838,13 @@ class WrapperMachine:
                 if isinstance(value, str) and value:
                     default_effort = value
         elif engine in {"cc", "claude"}:
-            defaults_cwd = getattr(cmd, "cwd", None) or self.cfg.cc_cwd
+            defaults_cwd = getattr(cmd, "cwd", None)
+            models = await claude_model_catalog(
+                claude_bin=self.cfg.claude_bin,
+                cwd=defaults_cwd,
+                config_dir=self._claude_config_root(claude_profile),
+                isolate_account_env=self._claude_profiles_explicit,
+            )
             default_model, default_effort = (
                 await self._claude_new_session_defaults(
                     defaults_cwd,

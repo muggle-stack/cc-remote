@@ -86,16 +86,12 @@ const CODEX_WORK_COMMANDS: Command[] = [
 // `efforts` overrides the engine's baseline effort list for THIS model — reasoning
 // levels are per-model, not per-engine.
 export interface Model { id: string; name: string; ds: string; ic: string; efforts?: Effort[] }
-// Claude Code exposes the active/default model but no supported model catalog.
-// These are presentation-only common aliases, never a capability claim. An
-// advanced user may still type `/model <id>` for a hidden/provider model; the
-// ordinary model sheet stays limited to curated choices.
+// Offline/first-paint suggestions only. Claude's native initialization catalog
+// wins once received, including models this client has never heard of.
 export const MODELS: Model[] = [
-  { id: "claude-opus-5[1m]", name: "Opus 5", ds: "最强推理 · 1M 上下文", ic: "crown" },
-  { id: "claude-mythos-5-1", name: "Mythos 5.1", ds: "限定访问 · 1M 上下文", ic: "gem" },
-  { id: "claude-sonnet-5", name: "Sonnet 5", ds: "均衡 · 更快", ic: "balance" },
-  { id: "claude-haiku-4-5", name: "Haiku 4.5", ds: "轻量 · 极速", ic: "bolt" },
-  { id: "claude-fable-5-1", name: "Fable 5.1", ds: "高能力 · 1M 上下文", ic: "book" },
+  { id: "opus[1m]", name: "Opus", ds: "跟随本机 Claude Code", ic: "crown" },
+  { id: "sonnet", name: "Sonnet", ds: "跟随本机 Claude Code", ic: "balance" },
+  { id: "haiku", name: "Haiku", ds: "跟随本机 Claude Code", ic: "bolt" },
 ];
 
 // Reasoning effort (思考强度). `name` is the RAW level id on purpose: it's what
@@ -229,9 +225,9 @@ const CODEX_LOOKS: Record<string, { name: string; ds: string; ic: string }> = {
   "gpt-5.6-luna": { name: "GPT-5.6 Luna", ds: "轻量 · 更快", ic: "bolt" },
 };
 
-const fromCatalog = (entries: CatalogModel[]): Model[] =>
+const fromCatalog = (entries: CatalogModel[], engine: string): Model[] =>
   entries.map((e) => {
-    const look = CODEX_LOOKS[e.id];
+    const look = engine === "codex" ? CODEX_LOOKS[e.id] : undefined;
     return {
       id: e.id,
       name: look?.name ?? e.display_name ?? e.id,
@@ -245,9 +241,9 @@ const fromCatalog = (entries: CatalogModel[]): Model[] =>
   });
 
 export const modelsFor = (engine?: string, catalog?: Catalog): Model[] => {
-  if (engine !== "codex") return MODELS;
-  const live = catalog?.codex;
-  return live?.length ? fromCatalog(live) : CODEX_MODELS;
+  const key = engine === "codex" ? "codex" : "claude";
+  const live = catalog?.[key];
+  return live?.length ? fromCatalog(live, key) : key === "codex" ? CODEX_MODELS : MODELS;
 };
 
 /** Model a NEW chat starts on: the engine's configured default (codex config.toml's
@@ -267,7 +263,8 @@ export const defaultModelFor = (engine?: string, catalog?: Catalog,
 /** Effort levels the SELECTED model actually accepts. Unknown/unset model falls back
  *  to the engine's baseline list. */
 export const effortsFor = (engine?: string, model?: string | null, catalog?: Catalog): Effort[] => {
-  const m = model ? modelsFor(engine, catalog).find((x) => x.id === model) : undefined;
+  const m = model ? modelsFor(engine, catalog).find((x) => x.id === model
+    || (engine !== "codex" && x.id.replace(/\[1m\]$/i, "") === model.replace(/\[1m\]$/i, ""))) : undefined;
   if (m?.efforts) return m.efforts;
   return engine === "codex" ? CODEX_EFFORTS : EFFORTS;
 };
@@ -296,7 +293,7 @@ export function effortIsSelectable(
  *  switches to a model that lacks the current level (sol `ultra` -> luna `max`). */
 export const defaultEffortFor = (engine?: string, model?: string | null, catalog?: Catalog): string => {
   const list = effortsFor(engine, model, catalog);
-  return list.reduce((a, b) => (rank(b.id) > rank(a.id) ? b : a)).id;
+  return list.length ? list.reduce((a, b) => (rank(b.id) > rank(a.id) ? b : a)).id : "model-default";
 };
 export const permsFor = (engine?: string): Perm[] => (engine === "codex" ? CODEX_PERMS : PERMS);
 
@@ -304,16 +301,14 @@ export const permsFor = (engine?: string): Perm[] => (engine === "codex" ? CODEX
 // An id we don't know (any codex model) passes through verbatim — the codex chips
 // resolve it against the live catalog themselves.
 export function matchModelId(m: string, engine?: string): string {
-  const models = modelsFor(engine);
-  const exact = models.find((x) => m === x.id);
-  if (exact) return exact.id;
-
   const base = m.replace(/\[1m\]$/i, "");
-  const hit = models.find((x) => {
-    const candidateBase = x.id.replace(/\[1m\]$/i, "");
-    return base === candidateBase;
-  });
-  return hit ? hit.id : m;
+  // Existing projections used these spellings before native discovery. Keep
+  // their identities stable; new model IDs pass through without a version map.
+  if (engine !== "codex") {
+    if (base === "claude-opus-5") return `${base}[1m]`;
+    if (base === "claude-mythos-5-1" || base === "claude-fable-5-1") return base;
+  }
+  return modelsFor(engine).find((x) => x.id.replace(/\[1m\]$/i, "") === base)?.id ?? m;
 }
 
 export interface Perm { id: string; name: string; short: string; ds: string; ic: string; danger?: boolean }

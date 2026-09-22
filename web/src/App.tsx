@@ -323,11 +323,12 @@ function catalogForEngineProfile(
   catalog: Catalog,
   engine: Engine,
   profileId?: string | null,
+  cwd?: string | null,
 ): Catalog {
-  const scoped = catalog[modelCatalogScopeKey(engine, profileId)];
+  const scoped = catalog[modelCatalogScopeKey(engine, profileId, cwd)];
   return {
     ...catalog,
-    [engine]: scoped ?? (profileId ? [] : (catalog[engine] ?? [])),
+    [engine]: scoped ?? [],
   };
 }
 
@@ -1031,7 +1032,8 @@ export default function App() {
   const newChatCatalogScopeKey = modelCatalogScopeKey(
     engine, newChatProfileId);
   const newChatCatalog = catalogForEngineProfile(
-    state.catalog, engine, newChatProfileId);
+    state.catalog, engine, newChatProfileId,
+    space === "code" ? newChatCwd : undefined);
   const newChatDefaults = resolveNewChatLocalDefaults(
     engine,
     space,
@@ -1111,7 +1113,8 @@ export default function App() {
       ? nativeProfileSessionId(rt.ccSessionId)
       : rt.ccSessionId);
   const focusedCatalog = catalogForEngineProfile(
-    state.catalog, focusedEngine, focusedAccountProfileId);
+    state.catalog, focusedEngine, focusedAccountProfileId,
+    space === "code" ? focusedSession?.cwd || currentCwd : undefined);
   const completedGoalRetired = completedGoalHasNewerUserTurn(
     rt.goal, rt.turns,
   ) || completedGoalHasNewerUserTurn(rt.goal, historyView.turns);
@@ -1147,6 +1150,9 @@ export default function App() {
   }
   const planProgressSource = planProgress?.source ?? null;
   const capabilityCwd = focusedSession?.cwd || currentCwd;
+  const requestFocusedModels = () => wsRef.current?.sendGetModels(
+    focusedEngine, focusedEngine === "claude" && space === "code" ? capabilityCwd : undefined,
+    focusedCodexProfileId, focusedClaudeProfileId);
   const focusedComposerDraftKey = composerDraftKey(
     machineId, space, focusedEngine, focusedSid ?? "",
   );
@@ -1846,11 +1852,10 @@ export default function App() {
     state.newChat,
   ]);
   useEffect(() => {
-    if (state.newChat || !focusedAccountProfileId
-        || state.connState !== "connected" || !state.wrapperOnline) return;
+    if (state.newChat || state.connState !== "connected" || !state.wrapperOnline) return;
     wsRef.current?.sendGetModels(
       focusedEngine,
-      focusedEngine === "claude" ? capabilityCwd : undefined,
+      focusedEngine === "claude" && space === "code" ? capabilityCwd : undefined,
       focusedCodexProfileId,
       focusedClaudeProfileId);
   }, [
@@ -1859,6 +1864,7 @@ export default function App() {
     focusedClaudeProfileId,
     focusedCodexProfileId,
     focusedEngine,
+    space,
     state.connState,
     state.newChat,
     state.wrapperOnline,
@@ -5720,6 +5726,9 @@ export default function App() {
             autoFocus={newChatAutoFocus}
             engine={engine}
             catalog={newChatCatalog}
+            onRequestModels={() => wsRef.current?.sendGetModels(
+              engine, engine === "claude" && space === "code" ? state.newChat?.cwd : undefined,
+              newChatCodexProfileId, newChatClaudeProfileId)}
             model={state.newChat.model}
             effort={state.newChat.effort}
             autoCompact={{
@@ -5903,6 +5912,7 @@ export default function App() {
           surface={space}
           state={rt.state}
           catalog={focusedCatalog}
+          onRequestModels={requestFocusedModels}
           connState={state.connState}
           wrapperOnline={state.wrapperOnline}
           sendMode={rt.sendMode}
@@ -6098,6 +6108,7 @@ export default function App() {
             onSelect={selectBtw}
             onCloseChat={closeBtw}
             catalog={focusedCatalog}
+            onRequestModels={requestFocusedModels}
             draftKey={activeBtwDraftKey} draftStore={btwDraftsRef.current}
             sendMode={activeBtwSendMode}
             unconfirmedQueued={unconfirmedQueued}

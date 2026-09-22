@@ -104,6 +104,7 @@ interface Props {
   engine?: "claude" | "codex";
   archived?: boolean;
   catalog?: Catalog;   // engine-reported models/efforts; falls back to data.ts
+  onRequestModels?: () => void;
   editPrompt: string | null;
   onEditConsumed: () => void;
   onSendQuery: (prompt: string, images?: QueryImg[], files?: QueryFile[]) => boolean;
@@ -505,7 +506,7 @@ export function Composer(p: Props) {
     switch (slash) {
       case "model":
         if (args) { p.onSetModel(args); flash(`正在切换模型：${args}`); }
-        else setSheetKind("models");
+        else { p.onRequestModels?.(); setSheetKind("models"); }
         break;
       case "permissions": openPermissions(); break;
       case "clear": p.onClear(); break;
@@ -940,7 +941,7 @@ export function Composer(p: Props) {
                 }}>
                 <summary><Icon name="plan" size={15} /><span>工作设置</span></summary>
                 <div className="work-settings-pop" ref={ctxWrapRef}>
-                  <button type="button" onClick={() => setSheetKind("models")}
+                  <button type="button" onClick={() => { p.onRequestModels?.(); setSheetKind("models"); }}
                     disabled={locked}>
                     <span>模型</span><b>{model?.name ?? "读取中"}</b>
                   </button>
@@ -1026,7 +1027,7 @@ export function Composer(p: Props) {
                 接管后
               </span>
             )}
-            <button className="hint-ctl" onClick={() => setSheetKind("models")}
+            <button className="hint-ctl" onClick={() => { p.onRequestModels?.(); setSheetKind("models"); }}
               disabled={locked}
               title={deferredClaudeControls
                 ? `Remote 接管后模型：${model?.name ?? "读取中"}；不是${externalClaudeOwner}当前模型`

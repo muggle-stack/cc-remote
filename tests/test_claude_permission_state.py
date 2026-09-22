@@ -234,8 +234,9 @@ def test_same_claude_model_selection_compares_through_the_pins():
     # Surrounding space is never part of the identity.
     assert same("  claude-fable-5-1  ", "claude-fable-5-1[1m]")
     # Case folds through the pin table, which is keyed lowercase.
-    assert same("opus", CLAUDE_DEFAULT_MODEL)
-    assert same("OPUS", CLAUDE_DEFAULT_MODEL)
+    assert same("opus", "opus[1m]")
+    assert not same("opus", CLAUDE_DEFAULT_MODEL)
+    assert same("OPUS", "opus[1m]")
     assert same("CLAUDE-FABLE-5-1", "claude-fable-5-1[1m]")
     # An unpinned id keeps its casing -- only the pin lookup folds. A mixed-case
     # selection therefore reads as *disagreeing* with a lowercase observation of
@@ -943,7 +944,7 @@ def test_claude_work_captures_pre_turn_context_baseline_only_once(
     asyncio.run(go())
 
 
-def test_claude_new_session_defaults_use_settings_without_sdk_probe(
+def test_claude_new_session_defaults_use_settings_without_session_probe(
     monkeypatch, tmp_path,
 ):
     home = tmp_path / "home"
@@ -968,6 +969,12 @@ def test_claude_new_session_defaults_use_settings_without_sdk_probe(
         def __init__(self, _cfg):
             raise AssertionError("default display must not start Claude CLI")
 
+    async def catalog(**kwargs):
+        assert kwargs["cwd"] == str(project / "subdir")
+        return [{"id": "claude-opus-5-5", "efforts": ["high"]}]
+
+    monkeypatch.setattr(machine_module, "claude_model_catalog", catalog)
+
     async def go():
         monkeypatch.setattr(machine_module, "SdkHandle", ForbiddenProbe)
         machine, transport = _mk_machine()
@@ -979,7 +986,8 @@ def test_claude_new_session_defaults_use_settings_without_sdk_probe(
         await machine._handle_get_models(command)
 
         assert len(transport.sent) == 1
-        assert all(event.models == [] for event in transport.sent)
+        assert all(event.models[0]["id"] == "claude-opus-5-5"
+                   for event in transport.sent)
         assert all(event.default_model == "claude-mythos-5[1m]"
                    for event in transport.sent)
         assert all(event.default_effort == "max"
@@ -1008,8 +1016,8 @@ def test_claude_new_session_defaults_use_settings_without_sdk_probe(
 
         monkeypatch.delenv("ANTHROPIC_MODEL")
         for configured, expected in (
-            ("opus", CLAUDE_DEFAULT_MODEL),
-            ("opus[1m]", CLAUDE_DEFAULT_MODEL),
+            ("opus", "opus[1m]"),
+            ("opus[1m]", "opus[1m]"),
             ("claude-opus-5", CLAUDE_DEFAULT_MODEL),
             (CLAUDE_DEFAULT_MODEL, CLAUDE_DEFAULT_MODEL),
             ("claude-fable-5-1", "claude-fable-5-1[1m]"),
@@ -1148,8 +1156,8 @@ def test_explicit_fresh_claude_model_wins_without_reading_default(
 @pytest.mark.parametrize(
     ("requested", "expected"),
     [
-        ("opus", CLAUDE_DEFAULT_MODEL),
-        ("opus[1m]", CLAUDE_DEFAULT_MODEL),
+        ("opus", "opus[1m]"),
+        ("opus[1m]", "opus[1m]"),
         ("claude-opus-5", CLAUDE_DEFAULT_MODEL),
         (CLAUDE_DEFAULT_MODEL, CLAUDE_DEFAULT_MODEL),
         ("claude-fable-5-1", "claude-fable-5-1[1m]"),

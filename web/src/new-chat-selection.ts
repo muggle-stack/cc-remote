@@ -1,5 +1,5 @@
 import type { Engine, Space } from "./protocol";
-import { modelsFor, effortsFor, type Catalog, type Effort } from "./data";
+import { modelsFor, effortsFor, type Catalog, type Effort } from "./data.ts";
 
 
 
@@ -23,11 +23,11 @@ export function newChatCatalogRequest(
       ...(codexProfileId ? { codexProfileId } : {}),
     };
   }
-  return space === "code" ? {
+  return {
     engine,
-    cwd,
+    ...(space === "code" ? { cwd } : {}),
     ...(claudeProfileId ? { claudeProfileId } : {}),
-  } : null;
+  };
 }
 
 export interface NewChatLocalDefaults {

@@ -78,8 +78,8 @@ CLAUDE_DEFAULT_MODEL = "claude-opus-5[1m]"
 CLAUDE_DEFAULT_EFFORT = "max"
 CLAUDE_MAX_BUFFER_SIZE = 16 * 1024 * 1024
 _CLAUDE_1M_MODEL_PINS = {
-    "opus": CLAUDE_DEFAULT_MODEL,
-    "opus[1m]": CLAUDE_DEFAULT_MODEL,
+    "opus": "opus[1m]",
+    "opus[1m]": "opus[1m]",
     "claude-opus-5": CLAUDE_DEFAULT_MODEL,
     "claude-opus-5[1m]": CLAUDE_DEFAULT_MODEL,
     "claude-fable-5-1": "claude-fable-5-1[1m]",
@@ -94,7 +94,7 @@ _CURRENT_LAUNCH_VALUE = object()
 
 
 def normalize_claude_model_selection(model: str | None) -> str | None:
-    """Keep curated long-context aliases pinned across every child generation."""
+    """Preserve long context without pinning native family aliases to a version."""
     if model is None:
         return None
     normalized = model.strip()

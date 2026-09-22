@@ -53,6 +53,7 @@ interface Props {
   space?: Space;
   engine?: Engine;  // which backend this new chat will use
   catalog?: Catalog;
+  onRequestModels?: () => void;
   model?: string | null;
   effort?: string | null;
   autoCompact?: AutoCompactSelection;
@@ -166,7 +167,7 @@ export function NewChatView({ cwd, controlScopeKey,
   claudeProfiles = [], defaultClaudeProfileId = null, claudeProfileId = null,
   codexProfiles = [], defaultCodexProfileId = null, codexProfileId = null,
   workDashboard, selectedProjectId, onSelectProject, onManageWork, onPickCwd,
-  onPickModel, onPickEffort, onPickAutoCompact, onPickClaudeProfile,
+  onPickModel, onPickEffort, onPickAutoCompact, onPickClaudeProfile, onRequestModels,
   onPickCodexProfile,
   permissionProfiles, onGetPermissionProfiles,
   onSend }: Props) {
@@ -560,7 +561,7 @@ export function NewChatView({ cwd, controlScopeKey,
               label={space === "work" ? "添加资料" : "添加附件"}
               disabled={creating || importing} />
             <button type="button" className="hint-ctl"
-              onClick={() => setSheetKind("models")}
+              onClick={() => { onRequestModels?.(); setSheetKind("models"); }}
               title="选择模型" disabled={creating || importing || !onPickModel}>
               {modelLabel}
             </button>

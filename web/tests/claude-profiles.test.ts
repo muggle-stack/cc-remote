@@ -47,10 +47,10 @@ try {
       "claude", "code", "/repo", undefined, "company"),
     { engine: "claude", cwd: "/repo", claudeProfileId: "company" },
   );
-  assert.equal(
+  assert.deepEqual(
     newChatCatalogRequest(
       "claude", "work", "/stale", undefined, "company"),
-    null,
+    { engine: "claude", claudeProfileId: "company" },
     "Claude Work must not probe settings through a stale Code cwd",
   );
   assert.equal(
@@ -250,13 +250,24 @@ try {
     });
   }
   assert.equal(
-    state.catalog[modelCatalogScopeKey("claude", "personal")][0].id,
+    state.catalog[modelCatalogScopeKey("claude", "personal", "/repo")][0].id,
     "personal-claude",
   );
   assert.equal(
-    state.catalog[modelCatalogScopeKey("claude", "company")][0].id,
+    state.catalog[modelCatalogScopeKey("claude", "company", "/repo")][0].id,
     "company-claude",
   );
+  state = reduce(state, { type: "event", event: {
+    v: 72, ts: 3, type: "models", engine: "claude", claude_profile_id: "company",
+    cwd: "/other", models: [{ id: "other-project-model", display_name: "Other",
+      description: "", efforts: [] }],
+  } });
+  assert.equal(state.catalog[modelCatalogScopeKey("claude", "company", "/repo")][0].id,
+    "company-claude", "late responses for another directory cannot overwrite a catalog");
+  assert.equal(state.catalog[modelCatalogScopeKey("claude", "company", "/other")][0].id,
+    "other-project-model");
+  assert.equal(state.catalog[modelCatalogScopeKey("claude", "company")], undefined,
+    "Work account-only discovery must not inherit a Code project's model list");
 } finally {
   await harness.close();
 }
