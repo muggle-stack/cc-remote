@@ -1566,8 +1566,8 @@ class SdkHandle:
                 if parse_raw and isinstance(data, dict):
                     managed_active = self._turn_active and (
                         self._managed_input_seen
-                        or (self._pending_compact and self._message_route_owner != "background"
-                            and is_managed_input(data, pending_compact=True)))
+                        or is_managed_input(data, pending_compact=(
+                            self._pending_compact and self._message_route_owner != "background")))
                     data = self._steers.annotate(data, managed_active=managed_active)
                 steer = data.get("__cc_steer") if parse_raw else None
                 intermediate = bool(parse_raw and data.get("__cc_steer_intermediate"))

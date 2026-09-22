@@ -9,11 +9,89 @@ from cc_remote.config import WrapperConfig
 from cc_remote.wrapper.sdk import ClaudeBackgroundBoundary, ClaudeServiceReplayRequired, SdkHandle
 from tests.test_claude_autocompact import _machine_with_sdk
 from tests.test_claude_service import environment, released
-from tests.test_claude_steering import NativeClient, assistant, result, until, user
+from tests.test_claude_steering import NativeClient, assistant, requesting, result, until, user
 
 
 def task_input(uid, origin):
     return {**user(uid, "background task finished"), "origin": origin}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replay", [False, True])
+@pytest.mark.parametrize("start", [
+    requesting(),
+    {"type": "stream_event", "uuid": "request", "session_id": "native-session",
+     "event": {"type": "message_start", "message": {"id": "answer", "content": []}}},
+], ids=["request", "stream"])
+async def test_activity_before_human_echo_settles_and_accepts_next_prompt(replay, start):
+    async with environment() as (service, attach):
+        client = await attach()
+        worker = service.sessions[client.id]
+        native = worker.client
+        sdk = SdkHandle(WrapperConfig(claude_service_socket=client.connection.socket_path))
+        sdk.refresh_goal = AsyncMock(return_value=None)
+        sdk.applied_auto_compact_mode = sdk.auto_compact_mode
+        sdk.applied_auto_compact_threshold_tokens = sdk.auto_compact_threshold_tokens
+        sdk.applied_effort = sdk.effort
+        sdk.force_reconnect = AsyncMock(side_effect=AssertionError("must preserve native process"))
+        machine, transport, ctx = _machine_with_sdk(sdk)
+        machine._configure_claude_sdk_callbacks(ctx, sdk)
+        runner = None
+        try:
+            if replay:
+                client.next_turn = {"id": "human", "prompt": "inspect"}
+                await client.query("inspect")
+                await client.detach()
+                await released(worker)
+            else:
+                sdk.client = client
+                sdk._start_message_pump()
+                ctx.state = "running"
+                ctx.active_msg_id = "human"
+                runner = ctx.turn_task = asyncio.create_task(machine._run_turn(ctx, "inspect"))
+                await until(lambda: native.prompts == ["inspect"])
+
+            for frame in [start.copy(), user("native-human", "inspect"), {
+                "type": "system", "subtype": "task_started", "task_id": "still-running",
+                "tool_use_id": "child-tool", "task_type": "local_bash",
+                "description": "background check", "uuid": "child-start",
+                "session_id": ctx.session_id,
+            }, assistant("answer", [{"type": "text", "text": "done"}]), result()]:
+                await native.queue.put(frame)
+            await until(lambda: worker.journal.seq == 5)
+            if replay:
+                sdk.service_metadata = worker.metadata.copy()
+                sdk.service_defer_events = True
+                await sdk.connect(resume_id="native-session", cwd="/tmp")
+                from cc_remote.wrapper.claude_service import activate
+
+                await activate(machine, ctx)
+            await until(lambda: ctx.turn_task is None and sdk._background_callbacks_pending == 0)
+            assert ctx.state == "idle"
+            assert not ctx.claude_background_followups
+            assert not sdk._steers.background_id
+            assert worker.turn is None and worker.background_start is None
+            assert ctx.claude_active_tasks == {"still-running"}
+            assert sum(e.type == "turn_end" for e in transport.sent) == 1
+
+            # Completion releases the next human input without interrupting the
+            # independent child or resubmitting the recovered prompt.
+            ctx.state = "running"
+            ctx.active_msg_id = "next-human"
+            runner = ctx.turn_task = asyncio.create_task(machine._run_turn(ctx, "next question"))
+            await until(lambda: native.prompts == ["inspect", "next question"])
+            await native.queue.put(user("native-next", "next question"))
+            await native.queue.put(assistant("next-answer", [{"type": "text", "text": "next answer"}]))
+            await native.queue.put(result())
+            await asyncio.wait_for(runner, 3)
+            await until(lambda: ctx.state == "idle")
+            assert ctx.claude_active_tasks == {"still-running"}
+            assert native.interrupts == 0 and not native.closed
+        finally:
+            if ctx.turn_task:
+                ctx.turn_task.cancel()
+                await asyncio.gather(ctx.turn_task, return_exceptions=True)
+            await sdk.detach_for_shutdown()
 
 
 @pytest.mark.asyncio
