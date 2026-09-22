@@ -416,6 +416,8 @@ def _ensure_managed_daemon_nofile(
     codex_bin: str,
     env: Mapping[str, str],
     lifecycle: Mapping[str, Any],
+    *,
+    allow_local_listener: bool = False,
 ) -> Optional[bool]:
     """Raise and verify the actual managed Linux daemon's file limit.
 
@@ -454,10 +456,19 @@ def _ensure_managed_daemon_nofile(
     except OSError:
         return False
     argv = tuple(value for value in raw_cmdline.split(b"\0") if value)
+    listeners = [
+        argv[index + 1] for index, value in enumerate(argv[:-1])
+        if value == b"--listen"
+    ] + [value.split(b"=", 1)[1] for value in argv if value.startswith(b"--listen=")]
+    expected_socket = os.fsencode(str(daemon_root.parent / "app-server-control/app-server-control.sock"))
+    local_listener = allow_local_listener and listeners in (
+        [b"unix://" + expected_socket],
+        [b"unix://"],
+    )
     if (
         executable != expected_executable
         or b"app-server" not in argv
-        or b"--remote-control" not in argv
+        or (b"--remote-control" not in argv and not local_listener)
     ):
         return False
     try:
@@ -684,11 +695,13 @@ class CodexDaemonManager:
         socket_path: Optional[str] = None,
         command_timeout: float = _COMMAND_TIMEOUT,
         require_shared: bool = False,
+        allow_restart: bool = True,
     ):
         self.mode = codex_daemon_mode(mode)
         self.socket_path = socket_path
         self.command_timeout = max(1.0, float(command_timeout))
         self.require_shared = bool(require_shared)
+        self.allow_restart = bool(allow_restart)
         self._lock = asyncio.Lock()
         self._capability_identity: Optional[tuple[object, ...]] = None
         self._capable = False
@@ -707,6 +720,7 @@ class CodexDaemonManager:
         """Whether a verified managed daemon must not degrade to stdio."""
         return bool(
             self.require_shared
+            or (not self.allow_restart and self._ready is not None)
             or (
                 self._ready is not None
                 and self._ready.verified_remote_control
@@ -904,6 +918,9 @@ class CodexDaemonManager:
                     )
                 return None
 
+            if not self.allow_restart:
+                return await self._prepare_without_restart(codex_bin, env, identity)
+
             lifecycle = await self.version(codex_bin, env)
             if lifecycle is None and self.require_shared:
                 log.info("bootstrapping required Codex profile daemon")
@@ -1030,6 +1047,52 @@ class CodexDaemonManager:
             self._managed_identity_required = True
             self._standalone_socket_path = None
             return info
+
+    async def _prepare_without_restart(
+        self, codex_bin: str, env: Mapping[str, str], identity: tuple[object, ...],
+    ) -> Optional[CodexDaemonInfo]:
+        """Prepare local sharing without interrupting native clients.
+
+        Official ``start`` reuses an existing listener. In contrast, bootstrap,
+        restart and even enable-remote-control can stop a running generation.
+        Local TUI/proxy sharing only needs the Unix listener; cloud remote
+        control is a separate native setting and is not changed here.
+        """
+        lifecycle = await self.version(codex_bin, env)
+        if lifecycle is None:
+            await self.start(codex_bin, env)
+            lifecycle = await self.version(codex_bin, env)
+        if lifecycle is None and self.require_shared:
+            prepared = await asyncio.to_thread(
+                _prepare_profile_standalone, codex_bin, env)
+            if prepared is True:
+                await self.start(codex_bin, env)
+                lifecycle = await self.version(codex_bin, env)
+        info = _existing_proxy_candidate(lifecycle) if lifecycle else None
+        if info is None:
+            self.invalidate()
+            if self.require_shared:
+                raise CodexProfileDaemonUnavailable(
+                    "Codex shared daemon unavailable; existing processes were preserved")
+            return None
+        codex_home = os.path.realpath(os.path.expanduser(
+            env.get("CODEX_HOME") or "~/.codex"))
+        if _managed_daemon_process_identity(codex_home) is not None:
+            self._managed_identity_required = True
+            nofile = await asyncio.to_thread(
+                _ensure_managed_daemon_nofile, codex_bin, env, lifecycle,
+                allow_local_listener=True)
+            if nofile is False:
+                self.invalidate()
+                raise CodexProfileDaemonUnavailable(
+                    "Codex shared daemon file limit could not be verified")
+            info = CodexDaemonInfo(
+                socket_path=info.socket_path, nofile_verified=nofile is True)
+        self._ready_identity = identity
+        self._ready = info
+        self._ready_codex_home = codex_home
+        self._standalone_socket_path = info.socket_path
+        return info
 
     async def proxy_args(
         self, codex_bin: str, env: Mapping[str, str],

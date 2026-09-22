@@ -179,17 +179,27 @@ def test_daemon_lifecycle_child_raises_nofile_without_wrapping_reads(
     )
 
 
+@pytest.mark.parametrize("listener,allow_local,accepted", [
+    ("remote", False, True), ("local", True, True), ("default", True, True),
+    ("other", True, False), ("local", False, False), ("ambiguous", True, False),
+])
 def test_linux_managed_daemon_nofile_is_applied_to_exact_pid(
-        monkeypatch, tmp_path):
+        monkeypatch, tmp_path, listener, allow_local, accepted):
     proc_root = tmp_path / "proc"
     proc = proc_root / "4321"
     proc.mkdir(parents=True)
     binary = tmp_path / "codex"
     binary.write_bytes(b"codex")
     (proc / "exe").symlink_to(binary)
-    (proc / "cmdline").write_bytes(
-        f"{binary}\0app-server\0--remote-control\0".encode()
-    )
+    socket_path = tmp_path / "codex-home/app-server-control/app-server-control.sock"
+    arguments = {
+        "remote": "--remote-control",
+        "local": f"--listen\0unix://{socket_path}",
+        "default": "--listen\0unix://",
+        "other": "--listen\0unix:///other/account.sock",
+        "ambiguous": f"--listen\0unix://{socket_path}\0--listen\0unix:///other.sock",
+    }
+    (proc / "cmdline").write_bytes(f"{binary}\0app-server\0{arguments[listener]}\0".encode())
     (proc / "stat").write_bytes(
         b"4321 (codex) " + b" ".join(
             [b"S", *([b"0"] * 18), b"123"]
@@ -218,7 +228,11 @@ def test_linux_managed_daemon_nofile_is_applied_to_exact_pid(
         str(binary),
         {"CODEX_HOME": str(tmp_path / "codex-home")},
         {"managedCodexPath": str(binary)},
-    ) is True
+        allow_local_listener=allow_local,
+    ) is accepted
+    if not accepted:
+        assert calls == []
+        return
     assert calls[1][2] == (daemon_module._DAEMON_NOFILE_SOFT_LIMIT, 524288)
     assert calls[-1][2] is None
 

@@ -103,6 +103,23 @@ credential is stored only in a mode-`0600` private config:
 `~/.cc-remote/device.json` on macOS or `/etc/cc-remote/device.env` on Linux. It
 is never embedded in a plist, systemd unit, or release directory.
 
+Codex prepares a local shared connection by default. Terminal and cc-remote
+sessions selecting the same account can use the same session service. After
+installation or upgrade activation, Wrapper checks each account's CLI, running
+server version and actual transport; the installer prints the result. Existing
+servers are reused. A private terminal opened before installation must finish
+its work and be reopened normally. Missing CLIs, version mismatches and failed
+connections are reported without restarting active Codex work. An explicit
+`CC_REMOTE_CODEX_DAEMON=off` setting is preserved.
+In the default shared mode, connection failure is reported instead of silently
+starting a private session server.
+
+These checks send no model messages and use `codex` from the service's PATH.
+Shell aliases, extra launch arguments and existing terminal connections still
+need [shared-control acceptance](../deploy/README.md#codex-code-shared-control-plane-acceptance).
+Select the same `CODEX_HOME` for multiple accounts. Native Claude CLI and Codex
+App attachment are separate; this installation does not automatically attach them.
+
 ### Subsequent updates
 
 Installers containing the management command register `cc-remote` at
@@ -126,6 +143,8 @@ the existing immutable installer with its state snapshot and failed-activation
 rollback. Account, pairing and external configuration remain intact. Previous
 releases are retained; no re-pairing occurs. The same version is a no-op, concurrent
 updates are locked out, and failed activations are not retried automatically.
+An activated Wrapper upgrade prints the Codex connection result described above;
+`--check` and same-version updates do not configure or probe Codex.
 The independent Claude service is never restarted. Finish in-process Claude,
 BTW and queued work before updating. SDK/service-protocol changes stop the command
 and require the [Claude service migration procedure](claude-session-service.md).

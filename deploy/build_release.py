@@ -47,6 +47,7 @@ _RELAY_DEPLOY = (
 )
 _WRAPPER_DEPLOY = (
     "atomic_symlink.py",
+    "check_codex_readiness.py",
     "cc-remote-wrapper.service",
     "com.muggle.cc-remote.wrapper.plist.in",
     "env.wrapper.example",

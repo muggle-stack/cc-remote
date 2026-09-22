@@ -178,6 +178,8 @@ def test_release_bundles_are_deterministic_and_role_scoped(
         assert f"{prefix}/requirements-wrapper.lock" in members
         assert f"{prefix}/deploy/install-wrapper.sh" in members
         assert f"{prefix}/deploy/install_claude_service.py" in members
+        assert f"{prefix}/deploy/check_codex_readiness.py" in members
+        assert f"{prefix}/cc_remote/wrapper/codex_readiness.py" in members
         assert f"{prefix}/cc_remote/claude_service/server.py" in members
         assert f"{prefix}/deploy/work_registry_snapshot.py" in members
         assert f"{prefix}/scripts/codex-auth-daemon-restart" in members

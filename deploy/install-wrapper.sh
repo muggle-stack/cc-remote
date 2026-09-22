@@ -549,6 +549,7 @@ fi
 
 "$target/.venv/bin/python" "$target/deploy/atomic_symlink.py" "$target" "$current"
 switched=1
+activation_started="$(date +%s)"
 
 if [ "$system" = darwin ]; then
   domain="gui/$(id -u)"
@@ -583,6 +584,20 @@ fi
 
 "$target/.venv/bin/python" "$target/deploy/install_cli.py" \
   --root "$appdir" --destination "$cli_path" --role wrapper --user "$target_user"
+
+# The real Wrapper prepares and probes each account as the service user. Read
+# its fresh result here; never run a user's Codex binary as the Linux installer.
+codex_check_args=(--home "$target_home" --release "$target" --after "$activation_started")
+if [ "$system" = darwin ]; then
+  codex_check_args+=(--plist "$service_file")
+else
+  codex_check_args+=(--env-file "$config_dir/wrapper.env")
+fi
+echo "==> checking Codex shared connections (no model messages)"
+if ! "$target/.venv/bin/python" "$target/deploy/check_codex_readiness.py" \
+    "${codex_check_args[@]}"; then
+  echo "WARNING: Wrapper is installed; Codex sharing still needs attention."
+fi
 
 echo
 echo "Wrapper v$version installed from $git_sha."

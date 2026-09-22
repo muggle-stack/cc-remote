@@ -40,6 +40,8 @@ def test_prepare_codex_daemons_starts_every_profile_best_effort(
             },
         })
         machine = WrapperMachine(cfg, _Transport())
+        assert all(not manager.allow_restart for manager in machine._codex_daemons.values())
+        assert all(manager.require_shared for manager in machine._codex_daemons.values())
         calls: list[tuple[str, str, str]] = []
         resolved = 0
 
@@ -59,7 +61,7 @@ def test_prepare_codex_daemons_starts_every_profile_best_effort(
                 calls.append((self.profile_id, binary, env["CODEX_HOME"]))
                 if self.profile_id == "stack":
                     raise RuntimeError("profile unavailable")
-                return SimpleNamespace(verified_remote_control=True)
+                return SimpleNamespace(socket_path=None, verified_remote_control=True)
 
         machine._codex_daemons = {
             profile.id: Manager(profile.id)
@@ -75,8 +77,46 @@ def test_prepare_codex_daemons_starts_every_profile_best_effort(
             ("primary", "/opt/codex", str((tmp_path / "primary").resolve())),
             ("stack", "/opt/codex", str((tmp_path / "stack").resolve())),
         }
+        receipt = json.loads((cfg.state_dir / "codex-readiness.json").read_text())
+        assert {row["profile"]: row["reason"] for row in receipt["profiles"]} == {
+            "primary": "daemon_unavailable", "stack": "connection_failed",
+        }
 
     asyncio.run(run())
+
+
+def test_default_account_check_resolves_home_even_with_legacy_none_env(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    cfg = WrapperConfig(
+        codex_daemon_mode="auto", state_dir=tmp_path / "state", codex_profiles_json="",
+        claude_work_root=tmp_path / "claude-work", codex_work_root=tmp_path / "codex-work",
+    )
+    monkeypatch.setattr(machine_module, "resolve_codex_bin", lambda: "/opt/codex")
+    async def check(profile, home, binary, daily, env, manager):
+        assert home == str((tmp_path / ".codex").resolve())
+        assert "CODEX_HOME" not in env
+        return {"profile": profile, "status": "ready"}
+    monkeypatch.setattr(machine_module.codex_readiness, "check_profile", check)
+    machine = WrapperMachine(cfg, _Transport())
+    assert machine._codex_home(machine._codex_profiles.default) is None
+    asyncio.run(machine.prepare_codex_daemons())
+    receipt = json.loads((cfg.state_dir / "codex-readiness.json").read_text())
+    assert receipt["profiles"] == [{"profile": "primary", "status": "ready"}]
+
+
+def test_disabled_sharing_publishes_without_starting_cli(monkeypatch, tmp_path) -> None:
+    cfg = WrapperConfig(
+        codex_daemon_mode="off", state_dir=tmp_path / "state", codex_profiles_json="",
+        claude_work_root=tmp_path / "claude", codex_work_root=tmp_path / "codex",
+    )
+    def unexpected():
+        raise AssertionError("disabled sharing must not resolve or start Codex")
+    monkeypatch.setattr(machine_module, "resolve_codex_bin", unexpected)
+    machine = WrapperMachine(cfg, _Transport())
+    asyncio.run(machine.prepare_codex_daemons())
+    receipt = json.loads((cfg.state_dir / "codex-readiness.json").read_text())
+    assert receipt["profiles"] == [{"profile": "primary", "status": "disabled"}]
 
 
 def test_wrapper_entrypoint_prepares_codex_before_run(monkeypatch) -> None:

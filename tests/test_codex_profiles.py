@@ -443,7 +443,7 @@ def test_one_explicit_profile_preserves_native_session_ids(tmp_path: Path) -> No
     assert (profile.id, native) == ("solo", "native-id")
 
 
-def test_only_multi_profile_machines_require_shared_daemons(
+def test_single_and_multi_profile_machines_require_shared_daemons(
     tmp_path: Path,
 ) -> None:
     multi, _transport = _machine(tmp_path)
@@ -464,7 +464,7 @@ def test_only_multi_profile_machines_require_shared_daemons(
         },
     })
     single = WrapperMachine(cfg, _StubTransport())
-    assert single._codex_daemons["solo"].require_shared is False
+    assert single._codex_daemons["solo"].require_shared is True
 
 
 @pytest.mark.parametrize("raw", ["", "explicit"])
