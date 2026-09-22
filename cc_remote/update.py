@@ -5,7 +5,7 @@ here. Activation and rollback remain owned by deploy/install-{role}.sh.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 import ast
 import hashlib
@@ -322,22 +322,29 @@ def update(*, role: str | None, target_version: str | None, check: bool,
     repository = release_repository()
     version = target_version or latest_version(repository)
     selected = version_tuple(version)
-    current = version_tuple(installation.manifest["product_version"])
-    print(f"{installation.role}: installed {installation.manifest['product_version']}; selected {version}", flush=True)
-    if selected <= current:
-        if target_version and selected < current:
-            raise UpdateError("update does not downgrade private state; use the documented rollback procedure")
-        print("Already up to date." if selected == current else "Installed version is newer than the latest release.")
-        return 0
-    if check:
-        print(f"Update available: cc-remote update --role {installation.role} --version {version}")
-        return 0
-    if system == "linux" and os.geteuid() != 0:
+    if not check and system == "linux" and os.geteuid() != 0:
         raise UpdateError("Linux activation needs root; run sudo cc-remote update")
-    if system == "darwin" and os.geteuid() == 0:
+    if not check and system == "darwin" and os.geteuid() == 0:
         raise UpdateError("run macOS updates as the desktop user, without sudo")
-    require_independent_terminal()
-    with update_lock(installation.root) as lock_descriptor:
+    with (nullcontext() if check else update_lock(installation.root)) as lock_descriptor:
+        if not check:
+            # A switched current link is provisional until its installer releases
+            # the lock. Re-read it before even reporting a no-op as successful.
+            fresh = read_installation(installation.root, system, machine)
+            if fresh.role != installation.role:
+                raise UpdateError("installation role changed; inspect it before retrying")
+            installation = fresh
+        current = version_tuple(installation.manifest["product_version"])
+        print(f"{installation.role}: installed {installation.manifest['product_version']}; selected {version}", flush=True)
+        if selected <= current:
+            if target_version and selected < current:
+                raise UpdateError("update does not downgrade private state; use the documented rollback procedure")
+            print("Already up to date." if selected == current else "Installed version is newer than the latest release.")
+            return 0
+        if check:
+            print(f"Update available: cc-remote update --role {installation.role} --version {version}")
+            return 0
+        require_independent_terminal()
         with tempfile.TemporaryDirectory(prefix="cc-remote-update-") as temporary:
             stage = Path(temporary)
             print(f"Downloading and verifying {installation.role} v{version}...", flush=True)

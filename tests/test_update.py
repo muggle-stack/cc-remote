@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import plistlib
 import shlex
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -130,16 +131,66 @@ def test_update_downloads_verified_bundle_and_preserves_install_identity(tmp_pat
     assert calls[0][1:] == expected
 
 
-def test_check_and_current_version_never_download_lock_or_activate(tmp_path, monkeypatch, capsys):
+def test_check_never_downloads_locks_or_activates(tmp_path, monkeypatch, capsys):
     installation = _installation(tmp_path, monkeypatch)
     before = sorted(installation.root.iterdir())
     monkeypatch.setattr(updater, "latest_version", lambda _: "4.0.1")
     monkeypatch.setattr(updater, "download_bundle", lambda *a: pytest.fail("unexpected download"))
     assert main(["update", "--check"]) == 0
     assert "Update available" in capsys.readouterr().out
-    assert main(["update", "--version", "4.0.0"]) == 0
+    assert main(["update", "--check", "--version", "4.0.0"]) == 0
     assert sorted(installation.root.iterdir()) == before
     assert (installation.root / "current").resolve() == installation.release
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+def test_current_version_is_not_complete_while_activation_is_locked(tmp_path, monkeypatch, capsys, pinned):
+    installation = _installation(tmp_path, monkeypatch)
+    pending = installation.root / "releases/pending"
+    shutil.copytree(installation.release, pending)
+    (pending / "release-manifest.json").write_text(json.dumps(_manifest(version="4.0.1")))
+    current = installation.root / "current"
+    current.unlink()
+    current.symlink_to(pending)
+    monkeypatch.setattr(updater, "latest_version", lambda _: "4.0.1")
+    monkeypatch.setattr(updater, "download_bundle", lambda *a: pytest.fail("unexpected download"))
+    arguments = ["update", "--version", "4.0.1"] if pinned else ["update"]
+    with updater.update_lock(installation.root):
+        assert main(arguments) == 1
+        output = capsys.readouterr()
+        assert "already running" in output.err
+        assert "Already up to date" not in output.out
+    assert main(arguments) == 0
+    assert "Already up to date" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("rolled_back", [False, True])
+def test_version_is_refreshed_after_acquiring_the_activation_lock(tmp_path, monkeypatch, capsys, rolled_back):
+    installation = _installation(tmp_path, monkeypatch)
+    mirror, marker, _ = _bundle(tmp_path, installation)
+    monkeypatch.setenv("CC_REMOTE_RELEASE_BASE_URL", mirror.as_uri())
+    concurrent = installation.root / "releases/concurrent"
+    shutil.copytree(installation.release, concurrent)
+    (concurrent / "release-manifest.json").write_text(json.dumps(_manifest(version="4.0.1")))
+    current = installation.root / "current"
+    if rolled_back:
+        current.unlink()
+        current.symlink_to(concurrent)
+    acquire = updater.acquire_install_lock
+    def prior_activation_finishes(root):
+        replacement = root / "next"
+        replacement.symlink_to(installation.release if rolled_back else concurrent)
+        replacement.replace(current)
+        return acquire(root)
+    monkeypatch.setattr(updater, "acquire_install_lock", prior_activation_finishes)
+    assert main(["update", "--version", "4.0.1"]) == 0
+    assert updater.read_installation(installation.root, "darwin", "arm64").manifest["product_version"] == "4.0.1"
+    if rolled_back:
+        assert len(json.loads(marker.read_text())) == 1
+        assert "Already up to date" not in capsys.readouterr().out
+    else:
+        assert not marker.exists()
+        assert "Already up to date" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("version", ["../4.0.1", "4.0.1;id", "v4.0.1", "4.0.1-beta", "04.0.1", "3.0.0"])
