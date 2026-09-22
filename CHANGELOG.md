@@ -2,6 +2,18 @@
 
 [中文](CHANGELOG_zh.md)
 
+## v4.0.3
+
+Fix duplicated and misplaced Claude messages when browsing overlapping history pages.
+Wire protocol remains v72. See the bilingual [release notes](docs/releases/v4.0.3.md).
+
+- Reconcile optimistic browser message IDs with their unique native user-message
+  aliases across loaded and cached history pages, keeping the newer copy's position.
+- Preserve expanded process details and native detail lookup IDs without changing
+  live completion state. Keep distinct native messages even when their text matches.
+- Repair duplicate copies when reading cached pages. Cover pagination and reloads
+  with reliability tests and Chromium/iPhone WebKit regressions.
+
 ## v4.0.2
 
 Fix stale Claude activity and coordinate device upgrades with their Relay.
