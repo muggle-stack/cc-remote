@@ -28,11 +28,11 @@ Web，Wrapper 包只含本机控制端；两者都自带 `uv`，安装时创建�
 ### 1）下载并校验引导脚本
 
 在 GitHub Release 页面确认版本与 release attestation，再在待安装机器下载同一版本的
-`install.sh` 和 `SHA256SUMS`。下例使用 `4.0.1`；请先确认对应版本已发布，或替换为已选定的已发布 tag
+`install.sh` 和 `SHA256SUMS`。下例使用 `4.0.2`；请先确认对应版本已发布，或替换为已选定的已发布 tag
 （变量中不带开头的 `v`）。该路径不会自动安装尚未发布的开发分支：
 
 ```bash
-export CC_REMOTE_VERSION=4.0.1
+export CC_REMOTE_VERSION=4.0.2
 release_base="https://github.com/muggle-stack/cc-remote/releases/download/v${CC_REMOTE_VERSION}"
 curl -fLO "$release_base/install.sh"
 curl -fLO "$release_base/SHA256SUMS"
@@ -131,6 +131,13 @@ cc-remote update --relay-ssh operator@relay-host
 本机不会先行切换。VPS 更新由独立 systemd 任务运行；连接断开后再次执行命令只核查
 `upstream-update.json` 记录的同一事务，不重复启动安装。失败时按记录中的 unit 查看
 日志与回滚结果。
+
+从 v4.0.1 首次升级时，旧命令尚不认识 `--relay-ssh`，但下载的新安装器同样会先
+检查 VPS。交互终端缺少 SSH 配置时会提示输入已有管理主机；自动化可在 Mac 使用
+`CC_REMOTE_RELAY_SSH=operator@relay-host cc-remote update`，Linux 使用
+`sudo CC_REMOTE_RELAY_SSH=operator@relay-host cc-remote update`。连接信息验证后保存，
+无需每次填写。直接运行新 Wrapper 安装器升级也会进行这个检查，并支持
+`--relay-ssh` 和 `--allow-protocol-change`。
 
 命令校验 SHA-256、安装包路径、平台和版本，随后复用原安装器的不可变切换、状态快照
 与失败回滚；保留账号、配对和外部配置，不清理旧 release，也不会重新配对。同版本

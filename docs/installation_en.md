@@ -30,13 +30,13 @@ repository, install Node, or paste tokens into service definitions.
 ### 1) Download and verify the bootstrap
 
 Confirm the version and release attestation on GitHub, then download
-`install.sh` and `SHA256SUMS` from that same release. The example uses `4.0.1`;
+`install.sh` and `SHA256SUMS` from that same release. The example uses `4.0.2`;
 first confirm that it is published, or replace it with the published tag you
 selected (without the leading `v`). This
 does not select an unpublished development-branch build:
 
 ```bash
-export CC_REMOTE_VERSION=4.0.1
+export CC_REMOTE_VERSION=4.0.2
 release_base="https://github.com/muggle-stack/cc-remote/releases/download/v${CC_REMOTE_VERSION}"
 curl -fLO "$release_base/install.sh"
 curl -fLO "$release_base/SHA256SUMS"
@@ -149,6 +149,15 @@ or an unverifiable Relay stops local activation. The server runs an independent
 systemd job; after a lost connection, the next invocation checks the same recorded
 `upstream-update.json` transaction instead of launching another. Inspect the
 recorded unit's logs and rollback report on failure.
+
+When upgrading from v4.0.1, the old command does not recognize `--relay-ssh`, but
+the downloaded installer still checks the Relay before local activation. An
+interactive terminal asks for the existing SSH admin host when needed. For
+automation, use `CC_REMOTE_RELAY_SSH=operator@relay-host cc-remote update` on Mac,
+or `sudo CC_REMOTE_RELAY_SSH=operator@relay-host cc-remote update` on Linux.
+Verified connection settings are saved for future upgrades. Direct upgrades with
+the new Wrapper installer perform the same check and accept `--relay-ssh` and
+`--allow-protocol-change`.
 
 The command verifies SHA-256, archive paths, platform and version before calling
 the existing immutable installer with its state snapshot and failed-activation
