@@ -1,7 +1,8 @@
 """Update managed Release installations through the existing role installers.
 
-No model imports, credentials, remote shell access, or service restarts belong
-here. Activation and rollback remain owned by deploy/install-{role}.sh.
+No model imports or direct service restarts belong here. Activation and
+rollback remain owned by deploy/install-{role}.sh; update_relay coordinates
+the configured upstream through its existing SSH administration boundary.
 """
 from __future__ import annotations
 
@@ -64,7 +65,8 @@ class Installation:
 
 def installation_roots(system: str) -> dict[str, Path]:
     if system == "darwin":
-        return {"wrapper": Path.home() / "Library/Application Support/cc-remote"}
+        return {"wrapper": Path(os.environ.get("CC_REMOTE_MANAGED_ROOT")
+                                or Path.home() / "Library/Application Support/cc-remote")}
     return {"relay": Path("/opt/cc-remote"), "wrapper": Path("/opt/cc-remote-wrapper")}
 
 
@@ -95,6 +97,10 @@ def read_installation(root: Path, system: str, machine: str) -> Installation:
         user = metadata.get("user")
         if not isinstance(user, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", user) or user == "root":
             raise UpdateError("wrapper installation has no valid original service user")
+        label = metadata.get("service_label")
+        if label is not None and (system != "darwin" or not isinstance(label, str)
+                                  or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,127}", label)):
+            raise UpdateError("invalid managed macOS service label")
     elif not isinstance(metadata.get("domain"), str) or not re.fullmatch(
         r"[a-z0-9][a-z0-9.-]*\.[a-z0-9.-]+", metadata["domain"]
     ):
@@ -316,7 +322,7 @@ def run_installer(command: list[str], lock_descriptor: int) -> int:
 
 
 def update(*, role: str | None, target_version: str | None, check: bool,
-           allow_protocol_change: bool = False) -> int:
+           allow_protocol_change: bool = False, relay_ssh: str | None = None) -> int:
     system, machine = host_platform()
     installation = select_installation(role, system, machine)
     repository = release_repository()
@@ -336,9 +342,22 @@ def update(*, role: str | None, target_version: str | None, check: bool,
             installation = fresh
         current = version_tuple(installation.manifest["product_version"])
         print(f"{installation.role}: installed {installation.manifest['product_version']}; selected {version}", flush=True)
+        relay = None
+        if installation.role == "wrapper":
+            from cc_remote.update_relay import RelayUpdate
+
+            relay = RelayUpdate(installation, relay_ssh)
+            if check:
+                relay.inspect()
+        elif relay_ssh:
+            raise UpdateError("--relay-ssh applies only to a device (wrapper) update")
         if selected <= current:
             if target_version and selected < current:
                 raise UpdateError("update does not downgrade private state; use the documented rollback procedure")
+            if relay and not check and selected == current:
+                require_independent_terminal()
+                relay.ensure(version, installation.manifest["protocol_version"],
+                             allow_protocol_change=allow_protocol_change)
             print("Already up to date." if selected == current else "Installed version is newer than the latest release.")
             return 0
         if check:
@@ -365,11 +384,16 @@ def update(*, role: str | None, target_version: str | None, check: bool,
             fresh = read_installation(installation.root, system, machine)
             if fresh != installation:
                 raise UpdateError("installation changed while downloading; inspect it before retrying")
+            if relay:
+                relay.ensure(version, target["protocol_version"], allow_protocol_change=allow_protocol_change)
             command = ["bash", str(bundle / "deploy" / f"install-{installation.role}.sh"), str(bundle)]
             if installation.role == "relay":
                 command += ["--domain", installation.metadata["domain"]]
             elif system == "linux":
                 command += ["--user", installation.metadata["user"]]
+            elif installation.metadata.get("service_label"):
+                command += ["--install-root", str(installation.root),
+                            "--service-label", installation.metadata["service_label"]]
             print("Activating with the release installer; previous release retained for rollback.", flush=True)
             if run_installer(command, lock_descriptor):
                 raise UpdateError("installer did not complete successfully; inspect its rollback report before retrying")

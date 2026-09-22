@@ -86,16 +86,25 @@ deployment.
   response into a shell.
 - `cc-remote update` — local management command registered by the role installers
   (`scripts/cc-remote`, `cc_remote/update.py`, `install_cli.py`). It discovers only
-  standard installs carrying non-secret `installation.json` metadata, downloads
+  registered installs carrying non-secret `installation.json` metadata, downloads
   and validates one stable role bundle, then calls its existing role installer.
   `--check` performs no activation; `--version` selects an exact published version.
   Both roles on one host require `--role`. Protocol changes require a coordinated
   maintenance window and `--allow-protocol-change`. SDK/service-contract changes
   defer to the Claude service migration procedure. The installer inherits the
   update lock so a disconnected caller cannot accidentally start a second update.
-  The command must run outside the managed Wrapper/Relay process tree. It does
-  not update remote machines, restart the independent Claude service, adopt
-  source/Docker/custom layouts, prune releases, or automate downgrade rollback.
+  The command must run outside the managed Wrapper/Relay process tree. Device
+  updates first verify the paired Relay; an already-current compatible Relay is
+  skipped. Otherwise `--relay-ssh` selects an existing administrator's SSH target
+  (saved in private `update.json`). After verifying its managed domain, an OS-owned
+  systemd job invokes the remote role installer. The private upstream transaction
+  records that exact job before launch; an unknown outcome is inspected on retry,
+  never blindly resubmitted. Public readiness precedes device activation. Pairing
+  credentials do not authorize this operation. Other devices update individually.
+  Explicit Mac registration can bind an existing immutable root and LaunchAgent;
+  future installs preserve that layout and service identity. The command does not
+  restart the independent Claude service, adopt source/Docker layouts, prune
+  releases, or automate downgrade rollback.
   Direct role installers use the same per-installation `.update.lock` before
   reading rollback state or changing services. They validate the inherited file
   descriptor from a managed update; an environment marker cannot bypass the lock.

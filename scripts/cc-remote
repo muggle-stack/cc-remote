@@ -14,7 +14,7 @@ if [ "$(uname -s)" = Linux ] && [ "$(id -u)" -ne 0 ]; then
 fi
 
 case "$(uname -s)" in
-  Darwin) roots=("$HOME/Library/Application Support/cc-remote/current") ;;
+  Darwin) roots=("${CC_REMOTE_MANAGED_ROOT:-$HOME/Library/Application Support/cc-remote}/current") ;;
   Linux)
     selected_role=""
     role_requested=0

@@ -110,13 +110,27 @@ Linux 位于 `/usr/local/bin/cc-remote`。macOS 需把 `~/.local/bin` 加到 `PA
 
 ```bash
 cc-remote update --check   # 只查版本，不下载安装包或重启服务
-cc-remote update           # 更新本机组件到最新稳定 Release
+cc-remote update           # 先检查并更新 VPS，再更新本机到同一稳定 Release
 ```
 
 `--version` 可选择一个已发布的准确版本，不执行降级。若同机安装了两个角色，
 加 `--role relay` 或 `--role wrapper`。Linux 自动请求 `sudo`，并保留安装时的
-Wrapper 服务用户；macOS 以原桌面用户运行。只更新本机选择的角色，Relay 会带上 Web，
-其他机器的 Wrapper 需分别执行更新。
+Wrapper 服务用户；macOS 以原桌面用户运行。设备更新先检查已配对 VPS 的版本；
+VPS 已是目标版本且协议兼容时，只更新本机。否则先更新 VPS 的 Relay + Web，
+公网验活成功后再切换本机。其他设备随后各自执行更新，不会重复升级已经更新的 VPS。
+
+首次需要从设备升级 VPS 时，指定一次已有管理权限的 SSH 主机，成功后保存供后续使用：
+
+```bash
+cc-remote update --relay-ssh operator@relay-host
+```
+
+也可以使用 `~/.ssh/config` 中的别名。该 SSH 账号需要能通过 `sudo -n` 运行服务器的
+托管更新器和 systemd；Linux 设备使用安装时的普通服务用户连接 SSH。不会把设备配对
+凭据当作服务器管理权限，也不会复制 SSH 私钥。若不能验证服务器版本或没有管理权限，
+本机不会先行切换。VPS 更新由独立 systemd 任务运行；连接断开后再次执行命令只核查
+`upstream-update.json` 记录的同一事务，不重复启动安装。失败时按记录中的 unit 查看
+日志与回滚结果。
 
 命令校验 SHA-256、安装包路径、平台和版本，随后复用原安装器的不可变切换、状态快照
 与失败回滚；保留账号、配对和外部配置，不清理旧 release，也不会重新配对。同版本
@@ -127,10 +141,18 @@ Wrapper 服务用户；macOS 以原桌面用户运行。只更新本机选择的
 
 通信协议变化时命令默认停止。先安排所有机器的维护窗口，按部署文档顺序使用
 `--version` 固定同一版并附加 `--allow-protocol-change`；这只表示已安排协调升级，
-不会自动管理远端机器。更新完成后重新加载 Web/PWA。
+会先更新 VPS、再更新当前设备；其余设备仍需在维护窗口内逐一更新。
+页面与设备中心会显示具体设备与服务端的版本不兼容提示。更新完成后重新加载 Web/PWA。
 
 v4.0.0 及更早版本尚未安装这个命令，需先按下面的方式升级到包含它的版本一次。
-源码、自定义目录和 Docker 部署继续使用各自流程，命令不会自动接管它们。
+源码和 Docker 部署继续使用各自流程，命令不会自动接管它们。已有 Mac 不可变 Release
+布局可在确认当前目录与 LaunchAgent 对应后，用 `deploy/install_cli.py --root ...
+--destination ~/.local/bin/cc-remote --role wrapper --user ... --service-label ...` 显式注册；
+后续更新保留该目录、服务标签与原有环境。未注册的自定义部署保持原样。
+
+默认安装根目录：Mac 为 `~/Library/Application Support/cc-remote/`，Linux 设备为
+`/opt/cc-remote-wrapper/`，VPS 为 `/opt/cc-remote/`。每个根目录的 `releases/` 保存版本，
+`current` 指向活动版本，私有配置和状态不放进 release。
 
 旧版本升级同一台机器时，下载新版本 `install.sh` 后重新执行即可。Relay 仍传
 `--domain`；Wrapper 已有设备凭据时只需：

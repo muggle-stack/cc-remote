@@ -18,6 +18,7 @@ from urllib.error import HTTPError
 import pytest
 
 from cc_remote import update as updater
+from cc_remote import update_relay
 from cc_remote.__main__ import main
 from deploy.install_cli import check_destination, install_cli
 from deploy import install_cli as cli_installer
@@ -61,6 +62,8 @@ def _installation(tmp_path, monkeypatch, *, role="wrapper", system="darwin"):
             return acquire_install_lock(path)
     monkeypatch.setattr(updater, "acquire_install_lock", native_lock)
     monkeypatch.setattr(updater, "require_independent_terminal", lambda: None)
+    monkeypatch.setattr(update_relay, "relay_origin", lambda _: "https://remote.example.test")
+    monkeypatch.setattr(update_relay, "relay_release", lambda _: {"version": "4.0.1", "protocol": 72})
     return updater.read_installation(root, system, "arm64")
 
 
@@ -259,6 +262,7 @@ def test_protocol_change_requires_explicit_coordinated_upgrade(tmp_path, monkeyp
     monkeypatch.setenv("CC_REMOTE_RELEASE_BASE_URL", mirror.as_uri())
     assert main(["update", "--version", "4.0.1"]) == 1
     assert not marker.exists()
+    monkeypatch.setattr(update_relay, "relay_release", lambda _: {"version": "4.0.1", "protocol": 73})
     assert main(["update", "--version", "4.0.1", "--allow-protocol-change"]) == 0
     assert len(json.loads(marker.read_text())) == 1
 
@@ -529,10 +533,27 @@ def test_failed_registration_restores_the_previous_command(tmp_path, monkeypatch
     assert destination.read_bytes() == previous
 
 
+def test_explicit_macos_registration_binds_existing_root_and_launch_agent(tmp_path, monkeypatch):
+    installation = _installation(tmp_path, monkeypatch)
+    source = installation.release / "bin/cc-remote"
+    source.parent.mkdir()
+    source.write_bytes((ROOT / "scripts/cc-remote").read_bytes())
+    destination = tmp_path / "local/bin/cc-remote"
+    install_cli(installation.root, destination, role="wrapper", user="service-user",
+                service_label="org.example.cc-remote")
+    assert f"export CC_REMOTE_MANAGED_ROOT={shlex.quote(str(installation.root))}" in destination.read_text()
+    installation = updater.read_installation(installation.root, "darwin", "arm64")
+    mirror, marker, _ = _bundle(tmp_path, installation)
+    monkeypatch.setenv("CC_REMOTE_RELEASE_BASE_URL", mirror.as_uri())
+    assert main(["update", "--version", "4.0.1"]) == 0
+    calls = json.loads(marker.read_text())
+    assert calls[0][1:] == ["--install-root", str(installation.root), "--service-label", "org.example.cc-remote"]
+
+
 def test_macos_upgrade_preserves_operator_environment_and_service_socket(tmp_path):
     # Execute the installer's actual plist-rendering program against private fixtures.
     script = (ROOT / "deploy/install-wrapper.sh").read_text()
-    marker = '"$service_backup" <<\'PY\'\n'
+    marker = '"$service_backup" "$service_label" <<\'PY\'\n'
     program = script.split(marker, 1)[1].split("\nPY\n", 1)[0]
     prior = tmp_path / "previous.plist"
     environment = {
@@ -546,8 +567,9 @@ def test_macos_upgrade_preserves_operator_environment_and_service_socket(tmp_pat
     subprocess.run([
         sys.executable, "-", str(ROOT / "deploy/com.muggle.cc-remote.wrapper.plist.in"),
         str(destination), str(tmp_path / "current"), str(tmp_path / "home"),
-        str(tmp_path / "logs"), str(prior),
+        str(tmp_path / "logs"), str(prior), "org.example.cc-remote",
     ], input=program, text=True, check=True)
     result = plistlib.loads(destination.read_bytes())
     assert all(result["EnvironmentVariables"][key] == value for key, value in environment.items())
     assert result["ProgramArguments"][0] == str(tmp_path / "current/.venv/bin/python")
+    assert result["Label"] == "org.example.cc-remote"

@@ -16,6 +16,7 @@ def main(argv: list[str] | None = None) -> int:
     command.add_argument("--check", action="store_true", help="check without downloading or restarting")
     command.add_argument("--version", dest="target_version", help="select an exact stable version")
     command.add_argument("--role", choices=("relay", "wrapper"), help="required when both roles are installed")
+    command.add_argument("--relay-ssh", help="SSH alias or user@host for Relay upgrades (saved after verification)")
     command.add_argument(
         "--allow-protocol-change", action="store_true",
         help="activate a protocol change during a coordinated multi-machine upgrade",
@@ -25,6 +26,7 @@ def main(argv: list[str] | None = None) -> int:
         return update(
             role=args.role, target_version=args.target_version, check=args.check,
             allow_protocol_change=args.allow_protocol_change,
+            relay_ssh=args.relay_ssh,
         )
     except (UpdateError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

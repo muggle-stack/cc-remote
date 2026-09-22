@@ -129,14 +129,26 @@ independent terminal or SSH connection:
 
 ```bash
 cc-remote update --check   # No bundle download or service restart
-cc-remote update           # Latest stable Release for the local component
+cc-remote update           # Check/update the Relay first, then this device
 ```
 
 Use `--version` to select an exact published version; downgrades are refused.
 If both roles are installed, select `--role relay` or `--role wrapper`.
 Linux requests `sudo` and retains the original Wrapper service user; macOS runs
-as the desktop user. Only the selected local role is updated. Relay includes Web;
-Wrappers on other machines must be updated separately.
+as the desktop user. Device updates check their paired Relay first. An up-to-date,
+compatible Relay is skipped; otherwise Relay + Web are updated and publicly
+health-checked before local activation. Other devices update separately and skip
+the already-updated Relay.
+
+For the first upstream upgrade, run `cc-remote update --relay-ssh operator@relay-host`
+(an SSH config alias is also supported). The target is saved for subsequent
+updates. This SSH account needs noninteractive sudo access to the managed updater
+and systemd. Linux uses the original Wrapper user's SSH identity. Pairing tokens
+never grant server administration, and private keys are not copied. Missing access
+or an unverifiable Relay stops local activation. The server runs an independent
+systemd job; after a lost connection, the next invocation checks the same recorded
+`upstream-update.json` transaction instead of launching another. Inspect the
+recorded unit's logs and rollback report on failure.
 
 The command verifies SHA-256, archive paths, platform and version before calling
 the existing immutable installer with its state snapshot and failed-activation
@@ -151,12 +163,23 @@ and require the [Claude service migration procedure](claude-session-service.md).
 
 A wire-protocol change stops by default. Arrange a maintenance window on every
 machine, pin the same `--version`, and add `--allow-protocol-change` in the order
-specified by the deployment guide. This flag acknowledges coordination; it does
-not manage remote machines. Reload Web/PWA clients afterwards.
+specified by the deployment guide. This updates Relay before the current device;
+the remaining devices still need updating during the maintenance window. The Web
+device list and conversation show incompatible device/server versions. Reload
+Web/PWA clients afterwards.
 
 v4.0.0 and earlier do not install this command. Upgrade once using the procedure
-below to a release that includes it. Source, custom-directory and Docker installs
-keep their own upgrade procedure and are not automatically adopted.
+below to a release that includes it. Source and Docker installs keep their own
+upgrade procedure. Existing immutable Mac layouts can be explicitly registered
+with `deploy/install_cli.py --root ... --destination ~/.local/bin/cc-remote
+--role wrapper --user ... --service-label ...` after verifying the root and
+LaunchAgent match. Future updates preserve that root, label and environment.
+Unregistered custom layouts are never automatically adopted.
+
+Default roots are `~/Library/Application Support/cc-remote/` on Mac,
+`/opt/cc-remote-wrapper/` for Linux devices and `/opt/cc-remote/` on the VPS.
+Each keeps immutable versions under `releases/` and selects one with `current`;
+private configuration/state stays outside release directories.
 
 To upgrade an older installation, download the new version's `install.sh` and
 rerun it. Relay still needs `--domain`; a previously paired Wrapper needs only:

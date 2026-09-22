@@ -94,9 +94,10 @@ echo() {
     else:
         assert result.returncode == (1 if phase == "fail-output" else 0), result.stderr
         assert current.resolve() == target
-        assert cli.read_bytes() == launcher
+        bound = f"export CC_REMOTE_MANAGED_ROOT={shlex.quote(str(root))}\n".encode()
+        assert cli.read_bytes().replace(bound, b"", 1) == launcher
         assert json.loads(metadata.read_text()) == {
-            "schema": 1, "role": "wrapper", "user": "fixture-user",
+            "schema": 1, "role": "wrapper", "user": "fixture-user", "service_label": "fixture-wrapper",
         }
         if phase == "fail-output":
             assert "activation was committed" in result.stderr
