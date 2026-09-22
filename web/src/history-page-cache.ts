@@ -247,13 +247,14 @@ function validRecord(
     && validPage(record.page);
 }
 
-/** Merge repeated partial evictions of one logical page. New input wins a
- * canonical overlap, while existing-only rows remain recoverable. */
+/** Merge repeated partial evictions of one logical page. New input wins an
+ * overlap's content without moving its established slot; existing-only rows
+ * remain recoverable even when timestamps are missing or equal. */
 function mergePageTurns(
   existing: readonly Turn[],
   incoming: readonly Turn[],
 ): Turn[] {
-  const turns = mergeHistoryPageCopies([...existing, ...incoming])
+  const turns = mergeHistoryPageCopies([...existing, ...incoming], "first")
     .filter((turn): turn is Turn => turn != null);
   turns.sort((left, right) => {
     if (left.ts != null && right.ts != null && left.ts !== right.ts) {

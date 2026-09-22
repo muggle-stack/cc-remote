@@ -1147,14 +1147,18 @@ function mergeTurn(
 }
 
 /** Reconcile overlapping browse/cache pages by native user identity. Keep the
- * last copy's position, display id and lifecycle; older copies can supply the
- * native lookup id and already-expanded detail. Null slots let browse keep its
- * page/cursor ownership without regrouping rows or changing live runtime state.
+ * last copy's display id and lifecycle; older copies can supply the native
+ * lookup id and already-expanded detail. Browse keeps the last copy's position
+ * and page ownership; partial cache writes keep the established first slot.
+ * Null slots preserve page boundaries without changing live runtime state.
  *
  * A client alias is usable only when it names one native row across the whole
  * window. Task/fork ids, matching prose and timestamps are never row identity:
  * multiple steered prompts may legitimately share all three. */
-export function mergeHistoryPageCopies(turns: readonly Turn[]): (Turn | null)[] {
+export function mergeHistoryPageCopies(
+  turns: readonly Turn[],
+  position: "first" | "last" = "last",
+): (Turn | null)[] {
   const canonicalId = (turn: Turn) => turn.historyTurnId || turn.id;
   const aliases = new Map<string, Set<string>>();
   const nativeIds = new Set<string>();
@@ -1180,12 +1184,14 @@ export function mergeHistoryPageCopies(turns: readonly Turn[]): (Turn | null)[] 
       if (targets?.size === 1) key = targets.values().next().value!;
     }
     const previousIndex = indexes.get(key);
-    indexes.set(key, index);
+    const retainedIndex = position === "first" ? previousIndex ?? index : index;
+    indexes.set(key, retainedIndex);
     if (previousIndex == null) return;
     const previous = result[previousIndex]!;
     const merged = mergeTurn(previous, turn, !turn.done, "second");
     result[previousIndex] = null;
-    result[index] = {
+    result[index] = null;
+    result[retainedIndex] = {
       ...merged,
       historyTurnId: key !== turn.id ? key : turn.historyTurnId,
       detailEventCount: Math.max(

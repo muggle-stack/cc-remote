@@ -8,7 +8,9 @@ Fix duplicated and misplaced Claude messages when browsing overlapping history p
 Wire protocol remains v72. See the bilingual [release notes](docs/releases/v4.0.3.md).
 
 - Reconcile optimistic browser message IDs with their unique native user-message
-  aliases across loaded and cached history pages, keeping the newer copy's position.
+  aliases across loaded and cached history pages.
+- Keep established row order during partial cache updates, including when
+  timestamps are missing or equal.
 - Preserve expanded process details and native detail lookup IDs without changing
   live completion state. Keep distinct native messages even when their text matches.
 - Repair duplicate copies when reading cached pages. Cover pagination and reloads
