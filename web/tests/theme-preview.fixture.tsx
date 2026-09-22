@@ -32,7 +32,7 @@ function demoState(engine: Engine) {
       turn_id: "theme-preview", title: "读取主题配置", tool_name: "Read", command: "web/src/themes.ts" },
     { type: "assistant_msg_start", message_id: "answer", turn_id: "theme-preview", channel: "final" },
     { type: "delta", message_id: "answer", turn_id: "theme-preview", channel: "final", text:
-      "六款主题已经准备好了，页面保留了原来的布局。\n\n### 更柔和，也更清楚\n\n背景、消息气泡、边框和按钮使用同一套配色，正文保留清晰的对比。\n\n```ts\nconst appearance = {\n  palette: 'moss',\n  rememberPerEngine: true,\n};\n```\n\n从右上角 **更多设置 → 主题** 打开配色卡，点击就能看到整页效果。每个引擎的选择会在当前浏览器单独保存。" },
+      "六款主题已经准备好了，页面保留了原来的布局。\n\n### 更柔和，也更清楚\n\n背景、消息气泡、边框和按钮使用同一套配色，正文保留清晰的对比。\n\n- `frontend.cpp:68` 使用 `std::max_element`，需要补上 `<algorithm>`。\n- `package.xml`、`test.yaml` 和 `workdir: sdk` 符合当前规范。\n\n完整记录：[查看审查报告](https://github.com/muggle-stack/cc-remote)，项目说明：[`README.md`](https://github.com/muggle-stack/cc-remote/blob/master/README.md)。\n\n```ts\nconst appearance = {\n  palette: 'moss',\n  rememberPerEngine: true,\n};\n```\n\n从右上角 **更多设置 → 主题** 打开配色卡，点击就能看到整页效果。每个引擎的选择会在当前浏览器单独保存。" },
     { type: "assistant_msg_end", message_id: "answer", turn_id: "theme-preview", channel: "final" },
     { type: "turn_end", turn_id: "theme-preview", result: { subtype: "success", duration_ms: 74000, is_error: false } },
     { type: "state", state: "idle" },

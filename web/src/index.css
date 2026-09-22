@@ -25,6 +25,8 @@ textarea,input{font:inherit}
   --text:#201E18; --dim:#75705F; --faint:#A29B88;
   --border:#E7E2D5; --border-strong:#DAD3C2; --divider:#ECE6DA;
   --accent:#C15F3C; --accent-ink:#A64B2C; --accent-weak:#F2E7DF; --accent-line:#E7D2C6;
+  /* Inline code keeps the active harness/palette hue, softened without opacity. */
+  --inline-code-ink:color-mix(in srgb,var(--accent-ink) 65%,var(--dim));
   --ok:#3F8B6E; --ok-weak:#E4EFE9;
   --warn:#B07D1E; --warn-weak:#F3EAD6;
   --danger:#BE4A3A; --danger-weak:#F5E3DF;
@@ -44,6 +46,7 @@ textarea,input{font:inherit}
   --text:#ECE9DF; --dim:#9C978A; --faint:#6B675C;
   --border:#332F29; --border-strong:#433F37; --divider:#282520;
   --accent:#DB7C5E; --accent-ink:#EB9679; --accent-weak:#352520; --accent-line:#463027;
+  --inline-code-ink:color-mix(in srgb,var(--accent-ink) 65%,var(--text));
   --ok:#5FAF8D; --ok-weak:#233029;
   --warn:#CBA24E; --warn-weak:#332C1D;
   --danger:#D96B57; --danger-weak:#3A241F;
@@ -422,8 +425,10 @@ body{
 .prose strong{ font-weight:var(--font-weight-600); }
 .prose h1,.prose h2,.prose h3{ font-family:var(--serif); font-weight:var(--font-weight-500); margin:18px 0 8px; letter-spacing:-.01em; }
 .prose h1{ font-size:22px } .prose h2{ font-size:19px } .prose h3{ font-size:16px }
-.prose code{ font-family:var(--mono); font-size:.86em; background:var(--raised);
-  border:1px solid var(--border); padding:1px 5px; border-radius:5px; }
+.prose code{ font-family:var(--mono); font-size:.86em; }
+.prose :not(pre)>code{ color:var(--inline-code-ink); }
+/* Code inside an actual link keeps its link color and underline. */
+.prose :is(a,.message-file-link,.message-link-disabled) code{ color:inherit; }
 .prose pre{ background:var(--raised); border:1px solid var(--border); border-radius:9px;
   padding:10px 12px; overflow-x:auto; overflow-y:hidden; font-size:13px; margin:8px 0; }
 .message-code-block{ position:relative; display:grid; grid-template-columns:minmax(0,1fr); margin:8px 0; }
