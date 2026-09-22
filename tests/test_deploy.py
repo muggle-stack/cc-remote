@@ -582,8 +582,11 @@ def test_release_permissions_remove_inherited_group_write_and_other_access(
     assert executable.stat().st_mode & 0o777 == 0o750
 
 
-def test_injected_post_switch_failure_restores_full_release_caddy_and_unit(
-    tmp_path,
+@pytest.mark.parametrize("activation", [
+    "readiness-failure", "registration-failure", "registration-success", "source-success",
+])
+def test_post_switch_activation_commits_or_restores_full_release_caddy_and_unit(
+    tmp_path, activation,
 ):
     appdir = tmp_path / "app"
     releases = appdir / "releases"
@@ -607,6 +610,15 @@ def test_injected_post_switch_failure_restores_full_release_caddy_and_unit(
     unit.write_text("new unit")
     unit_backup.write_text("old unit")
     systemctl_log = tmp_path / "systemctl.log"
+    cli_log = tmp_path / "cli-registration.log"
+    if activation.startswith("registration-"):
+        runtime = new_release / ".venv/bin/python"
+        runtime.parent.mkdir()
+        runtime.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$@" > "$CLI_REGISTRATION_LOG"\n'
+            + ("exit 0\n" if activation.endswith("success") else "exit 23\n")
+        )
+        runtime.chmod(0o755)
 
     harness = r'''
 set -euo pipefail
@@ -645,6 +657,18 @@ RELEASE_SWITCHED=1
 atomic_release_link "$NEW_RELEASE_DIR" "$CURRENT_LINK"
 false  # injected relay readiness failure after the complete release switch
 '''
+    if activation != "readiness-failure":
+        # Execute the real setup tail so registration must finish successfully
+        # before the transaction commits; no system package/service setup runs.
+        setup_tail = (ROOT / "deploy/setup-vps.sh").read_text().split(
+            'echo "==> waiting for relay readiness"', 1)[1]
+        harness = harness.replace(
+            "false  # injected relay readiness failure after the complete release switch",
+            f'MANAGED_RELEASE={0 if activation == "source-success" else 1}\n'
+            'CLI_PATH="$APPDIR/cc-remote"\n'
+            'TARGET=remote.example.test\nPUBLIC_SCHEME=https\nINSECURE_HTTP=0\n'
+            + setup_tail,
+        )
     result = subprocess.run(
         [
             "bash", "-c", harness, "rollback-test",
@@ -653,11 +677,28 @@ false  # injected relay readiness failure after the complete release switch
             str(caddyfile), str(caddy_backup), str(unit), str(unit_backup),
             str(systemctl_log),
         ],
-        env={**os.environ, "CURL_LOG": str(tmp_path / "curl.log")},
+        env={**os.environ, "CURL_LOG": str(tmp_path / "curl.log"),
+             "CLI_REGISTRATION_LOG": str(cli_log)},
         text=True,
         capture_output=True,
     )
 
+    if activation.startswith("registration-"):
+        arguments = cli_log.read_text().splitlines()
+        assert arguments == [
+            str(new_release / "deploy/install_cli.py"),
+            "--root", str(appdir), "--destination", str(appdir / "cc-remote"),
+            "--role", "relay", "--domain", "remote.example.test",
+        ]
+    elif activation == "source-success":
+        assert not cli_log.exists()
+    if activation.endswith("success"):
+        assert result.returncode == 0, result.stderr
+        assert current.resolve() == new_release.resolve()
+        assert caddyfile.read_text() == "new caddy"
+        assert unit.read_text() == "new unit"
+        assert not systemctl_log.exists()
+        return
     assert result.returncode != 0
     assert current.resolve() == old_release.resolve()
     for relative in ("cc_remote", "web/dist", ".venv"):

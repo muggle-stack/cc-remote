@@ -4,7 +4,7 @@
 
 自托管 · 多会话 · 多设备 · 实时工具过程 · Code / Work · Web / PWA / TUI
 
-**产品版本：v4.0.0** · Wire protocol v72
+**产品版本：v4.0.1** · Wire protocol v72
 
 [English](README_en.md) · [功能对照](#引擎与功能) · [快速开始](#快速开始) ·
 [终端工作台](#terminal-workspace) · [安装与升级](#安装与升级) · [文档](#文档) · [更新记录](CHANGELOG_zh.md)
@@ -217,6 +217,10 @@ CLAUDE_BIN=
 <a id="生产部署公网-vps-中继--你机器上的-wrapper"></a>
 
 ## 安装与升级
+
+包含管理命令的 Release 安装支持 `cc-remote update --check` 检查更新、
+`cc-remote update` 升级。v4.0.0 首次过渡、角色选择和协议协调升级见
+[后续更新](docs/installation.md#后续更新)。
 
 | 场景 | 文档 |
 |---|---|

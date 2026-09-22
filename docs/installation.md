@@ -28,11 +28,11 @@ Web，Wrapper 包只含本机控制端；两者都自带 `uv`，安装时创建�
 ### 1）下载并校验引导脚本
 
 在 GitHub Release 页面确认版本与 release attestation，再在待安装机器下载同一版本的
-`install.sh` 和 `SHA256SUMS`。下例使用 `4.0.0`；请先确认对应版本已发布，或替换为已选定的已发布 tag
+`install.sh` 和 `SHA256SUMS`。下例使用 `4.0.1`；请先确认对应版本已发布，或替换为已选定的已发布 tag
 （变量中不带开头的 `v`）。该路径不会自动安装尚未发布的开发分支：
 
 ```bash
-export CC_REMOTE_VERSION=4.0.0
+export CC_REMOTE_VERSION=4.0.1
 release_base="https://github.com/muggle-stack/cc-remote/releases/download/v${CC_REMOTE_VERSION}"
 curl -fLO "$release_base/install.sh"
 curl -fLO "$release_base/SHA256SUMS"
@@ -91,8 +91,49 @@ macOS 必须以当前桌面用户运行，安装器创建用户 LaunchAgent；Li
 `0600` 私有配置：macOS 为 `~/.cc-remote/device.json`，Linux 为
 `/etc/cc-remote/device.env`；不会进入 plist、systemd unit 或 release 目录。
 
-升级同一台机器时下载新版本 `install.sh` 后重新执行即可。Relay 仍传 `--domain`；
-Wrapper 已有设备凭据时只需：
+Codex 默认准备好本机共享连接：终端和 cc-remote 选择同一账号时，可以连接同一个
+会话服务。安装或升级激活后会逐个账号检查 CLI、服务版本和实际连接，并显示结果。
+已有服务直接复用，安装前已打开的独立终端会话不会强行迁移；等任务结束后重新打开。
+如果缺少 CLI、版本不一致或连接失败，会明确提示，不会为了修复连接而重启正在工作的
+Codex。已有的 `CC_REMOTE_CODEX_DAEMON=off` 设置也会保留。
+默认共享模式连接失败时会报错，不会悄悄另起一个独立会话服务。
+
+这个检查不发送模型消息。它使用服务环境中的 `codex`；你的 shell 别名、额外参数和
+已打开终端的实际连接仍需按[共享验收](../deploy/README.md#codex-code-shared-control-plane-acceptance)
+确认。多账号需选择相同的 `CODEX_HOME`；Claude 原生 CLI 与 Codex App 不会自动接入。
+
+### 后续更新
+
+包含管理命令的新安装器会注册 `cc-remote`：macOS 位于 `~/.local/bin/cc-remote`，
+Linux 位于 `/usr/local/bin/cc-remote`。macOS 需把 `~/.local/bin` 加到 `PATH`。
+首次安装完成后，在独立终端或 SSH 中运行：
+
+```bash
+cc-remote update --check   # 只查版本，不下载安装包或重启服务
+cc-remote update           # 更新本机组件到最新稳定 Release
+```
+
+`--version` 可选择一个已发布的准确版本，不执行降级。若同机安装了两个角色，
+加 `--role relay` 或 `--role wrapper`。Linux 自动请求 `sudo`，并保留安装时的
+Wrapper 服务用户；macOS 以原桌面用户运行。只更新本机选择的角色，Relay 会带上 Web，
+其他机器的 Wrapper 需分别执行更新。
+
+命令校验 SHA-256、安装包路径、平台和版本，随后复用原安装器的不可变切换、状态快照
+与失败回滚；保留账号、配对和外部配置，不清理旧 release，也不会重新配对。同版本
+不重启，重复更新会被锁住，激活失败不会自动重试。独立 Claude 服务不在更新范围内。
+真正升级 Wrapper 后会显示上述 Codex 连接检查结果；`--check` 和同版本更新不触发配置或检查。
+升级前先等待进程内 Claude、BTW 和排队消息处理结束；SDK 或独立服务协议变化时，
+命令会停止并要求按 [Claude 服务指南](claude-session-service.md) 完成迁移。
+
+通信协议变化时命令默认停止。先安排所有机器的维护窗口，按部署文档顺序使用
+`--version` 固定同一版并附加 `--allow-protocol-change`；这只表示已安排协调升级，
+不会自动管理远端机器。更新完成后重新加载 Web/PWA。
+
+v4.0.0 及更早版本尚未安装这个命令，需先按下面的方式升级到包含它的版本一次。
+源码、自定义目录和 Docker 部署继续使用各自流程，命令不会自动接管它们。
+
+旧版本升级同一台机器时，下载新版本 `install.sh` 后重新执行即可。Relay 仍传
+`--domain`；Wrapper 已有设备凭据时只需：
 
 ```bash
 ./install.sh wrapper

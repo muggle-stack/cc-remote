@@ -159,6 +159,8 @@ jobs:
             PYTHONPATH="$bundle" "$bundle/.smoke-venv/bin/python" \
               -m deploy.release_manifest "$bundle" \
               --role "$RELEASE_ROLE" --os "$RELEASE_OS" --arch "$RELEASE_ARCH"
+            PYTHONPATH="$bundle" "$bundle/.smoke-venv/bin/python" -m cc_remote --help
+            PYTHONPATH="$bundle" "$bundle/.smoke-venv/bin/python" -m cc_remote update --help
             if [ "$RELEASE_ROLE" = wrapper ]; then
               PYTHONPATH="$bundle" "$bundle/.smoke-venv/bin/python" -c \
                 'from cc_remote.wrapper.machine import WrapperMachine; assert WrapperMachine'

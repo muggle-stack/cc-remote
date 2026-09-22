@@ -38,6 +38,8 @@ _RELAY_DEPLOY = (
     "cc-remote-relay.service",
     "env.relay.example",
     "install-relay.sh",
+    "install_cli.py",
+    "install_lock.py",
     "python-version.txt",
     "release_manifest.py",
     "setup-vps.sh",
@@ -46,10 +48,13 @@ _RELAY_DEPLOY = (
 )
 _WRAPPER_DEPLOY = (
     "atomic_symlink.py",
+    "check_codex_readiness.py",
     "cc-remote-wrapper.service",
     "com.muggle.cc-remote.wrapper.plist.in",
     "env.wrapper.example",
     "install-wrapper.sh",
+    "install_cli.py",
+    "install_lock.py",
     "install_claude_service.py",
     "prepare_wrapper_stage.py",
     "python-version.txt",
@@ -236,6 +241,8 @@ def build_bundle(
         _copy_file(root / lock_name, staging / lock_name)
         _copy_file(uv_bin, staging / "bin" / "uv")
         (staging / "bin" / "uv").chmod(0o755)
+        _copy_file(root / "scripts" / "cc-remote", staging / "bin" / "cc-remote")
+        (staging / "bin" / "cc-remote").chmod(0o755)
         _copy_file(
             root / "deploy" / "uv-LICENSE-MIT",
             staging / "licenses" / "uv-LICENSE-MIT",

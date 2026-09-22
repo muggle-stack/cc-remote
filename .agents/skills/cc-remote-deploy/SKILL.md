@@ -45,6 +45,14 @@ Check the daily CLI and Wrapper's actual connection to the **same official
 daemon**, not just matching session files or a healthy Web UI. Accounts keep
 separate `CODEX_HOME` boundaries; Work's private control plane is not changed.
 
+Release installers print Wrapper startup's per-account connection result. This
+uses the actual service user/environment and a fresh release/process-bound
+receipt; it never sends a model turn. Treat it as transport readiness only:
+normal terminal auto-discovery still requires the acceptance evidence below.
+Startup reuses existing native servers without restarting them or changing
+Codex's separate cloud remote-control setting. Preserve and report explicit
+`off`, missing CLI, incompatible versions or failed probes.
+
 Do not assume npm versus standalone decides sharing. Verify ordinary
 `codex resume <session-id>` routing; explicit `--remote` success is not proof of
 automatic discovery. Never kill a live CLI, force takeover, modify shell aliases,

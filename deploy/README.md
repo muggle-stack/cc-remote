@@ -84,6 +84,21 @@ deployment.
   verifies its `SHA256SUMS` entry before extraction, rejects unsafe archive
   paths, and then invokes the in-bundle installer. It never pipes a network
   response into a shell.
+- `cc-remote update` — local management command registered by the role installers
+  (`scripts/cc-remote`, `cc_remote/update.py`, `install_cli.py`). It discovers only
+  standard installs carrying non-secret `installation.json` metadata, downloads
+  and validates one stable role bundle, then calls its existing role installer.
+  `--check` performs no activation; `--version` selects an exact published version.
+  Both roles on one host require `--role`. Protocol changes require a coordinated
+  maintenance window and `--allow-protocol-change`. SDK/service-contract changes
+  defer to the Claude service migration procedure. The installer inherits the
+  update lock so a disconnected caller cannot accidentally start a second update.
+  The command must run outside the managed Wrapper/Relay process tree. It does
+  not update remote machines, restart the independent Claude service, adopt
+  source/Docker/custom layouts, prune releases, or automate downgrade rollback.
+  Direct role installers use the same per-installation `.update.lock` before
+  reading rollback state or changing services. They validate the inherited file
+  descriptor from a managed update; an environment marker cannot bypass the lock.
 - `build_release.py` / `release_manifest.py` — reproducible role-bundle builder
   and fail-closed manifest validator. Relay artifacts contain `web/dist` and
   `requirements-relay.lock`; Wrapper artifacts contain no Web tree and use
@@ -102,6 +117,10 @@ deployment.
   restores the previous release/service definition on failure. The installer
   requires and explicitly selects the service user's daily
   `~/.local/bin/claude`; it never silently falls back to the SDK-bundled CLI.
+  After activation, `check_codex_readiness.py` reads a fresh, release- and
+  process-bound result from Wrapper startup. Codex is optional: missing or
+  incompatible CLI/account connections produce a separate warning instead of
+  rolling back an otherwise healthy Claude/Wrapper installation.
 - `prepare_wrapper_stage.py` — unprivileged preflight for an existing manual
   immutable-Wrapper topology. It reuses an active venv only when the dependency
   lock and Python pin are identical; otherwise it builds a platform-local venv
@@ -261,7 +280,7 @@ docker build -f deploy/Dockerfile \
   Explicit takeover may gracefully terminate the exact same-user Claude process
   with SIGTERM and then resume through the SDK, but it never kills the terminal
   shell, escalates to SIGKILL, or silently adopts a process.
-- **Codex Code:** `CC_REMOTE_CODEX_DAEMON=auto` prefers Codex's official shared
+- **Codex Code:** `CC_REMOTE_CODEX_DAEMON=auto` requires Codex's official shared
   app-server daemon. Set it to `off` only to force the legacy private stdio path.
   Optional multi-account installs provide either inline
   `CC_REMOTE_CODEX_PROFILES_JSON` or a private
@@ -290,12 +309,26 @@ This does not apply to Work's deliberately private app-server.
    home selection. Do not read or copy auth files. Both selected CLIs must
    support `app-server daemon` and `app-server proxy`; an npm installation
    alone neither proves nor disproves that capability.
-2. Keep `CC_REMOTE_CODEX_DAEMON=auto` for sharing. Wrapper startup already
-   prepares each account's daemon and enables remote control before connecting
-   to Relay; do not add a second daemon or another startup service. Check the
-   current startup's `Codex profile shared daemon ready` log and
-   `remote_control=true`. A prewarm failure, `using stdio`, or an unverified
-   existing-server candidate is not proof of shared readiness.
+2. Keep `CC_REMOTE_CODEX_DAEMON=auto` for sharing; an explicitly configured
+   `off` survives upgrades. Wrapper startup reuses each account's official
+   daemon or invokes the native idempotent `start` if it isn't reachable. It
+   does not bootstrap, restart, replace a lagging daemon, or toggle Codex's
+   separate cloud remote-control setting: those commands can interrupt native
+   clients. Local TUI/proxy sharing uses the Unix listener without cloud remote
+   control. Do not add a second daemon or another startup service.
+   If sharing is unavailable, Code reports a connection error instead of silently
+   starting a private stdio server. Explicit `off` retains the legacy private path.
+   Startup compares the CLI found on the service's PATH with Wrapper's selected
+   binary, checks account socket and CLI/server versions, and initializes their
+   official WebSocket proxy connections without creating a thread or model turn.
+   `Codex profile shared transport ready` and the private rebuildable
+   `codex-readiness.json` receipt describe this transport check. The Release
+   installer checks its source release, fresh timestamp and live process identity
+   before displaying the result. A failed or missing result never passes
+   sharing acceptance, even if the Wrapper itself was installed successfully.
+   This does not verify an operator's aliases, launch arguments or an already
+   open TUI. Complete step 4 separately; do not relabel transport readiness as a
+   verified ordinary terminal connection.
 3. As the same OS user, compare the following **read-only** probes using the
    resolved account home and both executable paths (replace placeholders):
 
@@ -331,6 +364,15 @@ via automatic discovery has not passed acceptance: compare the actual CLI
 build, home, endpoint and startup/connection errors. Do not assume all builds
 auto-attach simply because a daemon is running, or mask the difference by
 silently changing the user's shell alias.
+
+The inspected official CLI 0.154.0 automatically probes its account's default
+socket for ordinary launches. Additional launch configuration (for example
+`-c`, a config profile, strict config or a custom exec-server) can select an
+embedded server instead; a failed automatic connection can also fall back.
+See the [versioned native startup implementation](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/tui/src/lib.rs).
+Installers preserve these user choices rather than rewriting aliases or adding
+`--remote` to every invocation. Version mismatches are reported so the operator
+can finish active work before updating/restarting Codex.
 
 An existing private CLI writer is not migrated into the daemon by starting it
 later. Let the operator finish and exit that CLI normally, then reconnect to

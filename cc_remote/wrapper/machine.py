@@ -63,6 +63,8 @@ from pathlib import Path
 from uuid import uuid4
 from typing import Literal, Optional
 
+from cc_remote.wrapper import codex_readiness
+
 from claude_agent_sdk import (
     PermissionResultAllow, PermissionResultDeny, delete_session,
     fork_session, get_session_info, get_session_messages, list_sessions,
@@ -2106,7 +2108,8 @@ class WrapperMachine:
         self._codex_daemons = {
             profile.id: CodexDaemonManager(
                 getattr(cfg, "codex_daemon_mode", "auto"),
-                require_shared=self._codex_profiles.is_multi_profile,
+                require_shared=(getattr(cfg, "codex_daemon_mode", "auto") == "auto"),
+                allow_restart=False,
             )
             for profile in self._codex_profiles
         }
@@ -8861,7 +8864,11 @@ class WrapperMachine:
         Codex remains an optional engine.  One unavailable binary/profile is
         logged independently and must not prevent Relay or Claude startup.
         """
+        rows: list[dict] = []
         if getattr(self.cfg, "codex_daemon_mode", "auto") != "auto":
+            rows = [{"profile": profile.id, "status": "disabled"}
+                    for profile in self._codex_profiles]
+            self._publish_codex_readiness(rows)
             return
         try:
             codex_bin = await asyncio.to_thread(resolve_codex_bin)
@@ -8870,37 +8877,44 @@ class WrapperMachine:
                 "Codex shared daemon prewarm unavailable",
                 error_type=type(exc).__name__,
             )
+            self._publish_codex_readiness([
+                {"profile": profile.id, "status": "unavailable", "reason": "daily_cli_missing"}
+                for profile in self._codex_profiles])
             return
 
-        async def prepare(profile: CodexProfile) -> None:
+        daily_cli = shutil.which("codex")
+
+        async def prepare(profile: CodexProfile) -> dict:
             try:
-                info = await self._codex_daemon_for_profile(
-                    profile).ensure_started(
-                        codex_bin,
+                async with asyncio.timeout(40):
+                    row = await codex_readiness.check_profile(
+                        profile.id, str(profile.home), codex_bin, daily_cli,
                         codex_env(codex_bin, self._codex_home(profile)),
+                        self._codex_daemon_for_profile(profile),
                     )
             except Exception as exc:
+                row = {"profile": profile.id, "status": "unavailable",
+                       "reason": "connection_failed", "error_type": type(exc).__name__}
+            if row["status"] != "ready":
                 log.warning(
-                    "Codex profile shared daemon prewarm failed",
-                    profile_id=profile.id,
-                    error_type=type(exc).__name__,
+                    "Codex profile shared connection needs attention",
+                    profile_id=profile.id, reason=row.get("reason"),
                 )
-                return
-            if info is None:
-                log.warning(
-                    "Codex profile shared daemon prewarm unavailable",
-                    profile_id=profile.id,
-                )
-                return
-            log.info(
-                "Codex profile shared daemon ready",
-                profile_id=profile.id,
-                remote_control=info.verified_remote_control,
-            )
+            else:
+                log.info("Codex profile shared transport ready", profile_id=profile.id,
+                         terminal_connection="unverified")
+            return row
 
-        await asyncio.gather(*(
+        rows = await asyncio.gather(*(
             prepare(profile) for profile in self._codex_profiles
         ))
+        self._publish_codex_readiness(rows)
+
+    def _publish_codex_readiness(self, rows: list[dict]) -> None:
+        try:
+            codex_readiness.write_report(self.cfg.state_dir, rows)
+        except Exception as exc:
+            log.warning("Codex readiness receipt unavailable", error_type=type(exc).__name__)
 
     async def run(self) -> None:
         self._cleanup_tmp()

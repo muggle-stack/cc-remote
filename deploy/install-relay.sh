@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # First-install/update entrypoint for a role-scoped relay release bundle.
 set -euo pipefail
+installer_args=("$@")
 
 die() {
   echo "ERROR: $*" >&2
@@ -75,7 +76,14 @@ bundle="$(cd "$bundle" && pwd -P)"
 )
 
 appdir=/opt/cc-remote
+if [ -z "${CC_REMOTE_INSTALL_LOCK_FD:-}" ]; then
+  exec python3 "$bundle/deploy/install_lock.py" \
+    "$appdir" bash "$bundle/deploy/install-relay.sh" "${installer_args[@]}"
+fi
+python3 "$bundle/deploy/install_lock.py" --verify-fd "$CC_REMOTE_INSTALL_LOCK_FD" "$appdir"
 env_file="$appdir/.env"
+cli_path=/usr/local/bin/cc-remote
+python3 "$bundle/deploy/install_cli.py" --destination "$cli_path" --check
 new_env=""
 cleanup() {
   [ -z "$new_env" ] || rm -f -- "$new_env"
@@ -186,3 +194,4 @@ echo
 echo "Relay installed. Open https://$domain/ and log in."
 echo "Then open Devices, create a one-time pairing code, and run the"
 echo "wrapper installer on the Mac or Linux machine that hosts Claude/Codex."
+echo "Updates: cc-remote update (check only: cc-remote update --check)"

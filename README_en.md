@@ -4,7 +4,7 @@
 
 Self-hosted · Multiple sessions and devices · Live tool activity · Code / Work · Web / PWA / TUI
 
-**Product version: v4.0.0** · Wire protocol v72
+**Product version: v4.0.1** · Wire protocol v72
 
 [中文](README.md) · [Engine comparison](#engines-and-features) · [Quick start](#quick-start) ·
 [Terminal workspace](#terminal-workspace) · [Install and upgrade](#install-and-upgrade) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)
@@ -242,6 +242,11 @@ below or configure a restricted LAN/Tailscale entry point.
 <a id="production-deploy-public-vps-relay--wrapper-on-your-machine"></a>
 
 ## Install and upgrade
+
+Release installations that include the management CLI support
+`cc-remote update --check` and `cc-remote update`; see
+[subsequent updates](docs/installation_en.md#subsequent-updates) for the initial
+upgrade from v4.0.0, role selection and coordinated protocol upgrades.
 
 | Scenario | Guide |
 |---|---|
