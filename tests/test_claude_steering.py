@@ -322,6 +322,27 @@ def test_only_main_activity_starts_an_implicit_continuation():
     assert ended["__cc_background_end"] == identity and pending.background_id is None
 
 
+def test_human_echo_adopts_only_implicit_activity_with_legacy_terminal_annotations():
+    pending = PendingSteers()
+    explicit = pending.annotate({**user("older-task"), "origin": ORIGIN})["__cc_background_start"]
+    # A journal may restore an explicit older continuation beside a controller's
+    # implicit request claim; neither may erase the other's provenance.
+    implicit = {"id": "implicit-request", "origin_key": None, "origin": None, "managed": False}
+    pending.annotate({**requesting(), "__cc_background_start": implicit})
+    pending.annotate(user("native-human"), managed_active=True)
+    absorbed = pending.annotate({**user("absorbed"), "origin": {
+        "kind": "task-notification", "taskId": "current-task",
+    }, "__cc_background_start": {
+        "id": "service-task", "origin_key": '["task-notification", "task", "current-task"]',
+        "origin": {"kind": "task-notification", "taskId": "current-task"}, "managed": True,
+    }}, managed_active=True)["__cc_background_start"]
+    ended = pending.annotate({**result(), "__cc_background_ends": [absorbed["id"]]}, managed_active=True)
+    assert set(ended["__cc_background_ends"]) == {implicit["id"], absorbed["id"]}
+    assert pending.background_id == explicit["id"]
+    pending.annotate({**result(), "origin": ORIGIN})
+    assert pending.background_id is None
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("replayed_user", [False, True])
 @pytest.mark.parametrize("echo_before_detach", [False, True])

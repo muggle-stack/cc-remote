@@ -2,6 +2,24 @@
 
 [中文](CHANGELOG_zh.md)
 
+## v4.0.2
+
+Fix stale Claude activity and coordinate device upgrades with their Relay.
+Wire protocol remains v72. See the bilingual [release notes](docs/releases/v4.0.2.md).
+
+- Retire anonymous activity received before the native human-input echo when
+  that response ends. Preserve unrelated background tasks and support existing
+  persistent Claude services without restarting them or resubmitting prompts.
+- Check/update the paired VPS before activating a device update; skip an already
+  current compatible Relay. Preserve the exact remote transaction across lost
+  SSH connections. The downloaded installer also covers the first v4.0.1 upgrade.
+- Show authenticated device/server version mismatches in the Web device list
+  and active conversation without changing the wire protocol.
+- Allow explicit registration of existing immutable Mac installations, retaining
+  their root, LaunchAgent identity, environment and log paths.
+- Initialize Work stores before optional Codex readiness checks so a slow probe
+  cannot cause a false first-install migration failure.
+
 ## v4.0.1
 
 Add managed release updates and verify Codex shared connections after activation.

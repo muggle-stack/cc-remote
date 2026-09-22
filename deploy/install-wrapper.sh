@@ -12,7 +12,7 @@ usage() {
   cat >&2 <<'EOF'
 Usage:
   install-wrapper.sh BUNDLE --relay https://remote.example.com --pair PAIR-CODE [--name LABEL]
-  install-wrapper.sh BUNDLE [--user USER]
+  install-wrapper.sh BUNDLE [--user USER] [--relay-ssh USER@HOST] [--allow-protocol-change]
 
 The relay and pair arguments are required for the first install. They may be
 omitted on upgrades when a device credential already exists. Linux installs
@@ -29,6 +29,10 @@ relay=""
 pair_code=""
 device_name=""
 target_user="${CC_REMOTE_INSTALL_USER:-}"
+install_root=""
+installed_service_label=""
+relay_ssh=""
+allow_protocol_change=0
 replace_pair=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -54,6 +58,25 @@ while [ "$#" -gt 0 ]; do
       ;;
     --replace-pair)
       replace_pair=1
+      shift
+      ;;
+    --install-root)
+      [ "$#" -ge 2 ] || usage
+      install_root="$2"
+      shift 2
+      ;;
+    --service-label)
+      [ "$#" -ge 2 ] || usage
+      installed_service_label="$2"
+      shift 2
+      ;;
+    --relay-ssh)
+      [ "$#" -ge 2 ] || usage
+      relay_ssh="$2"
+      shift 2
+      ;;
+    --allow-protocol-change)
+      allow_protocol_change=1
       shift
       ;;
     *) die "unknown wrapper installer argument: $1" ;;
@@ -125,14 +148,26 @@ if [ "$system" = darwin ]; then
   if [ -z "$target_home" ] || [ ! -d "$target_home" ]; then
     die "HOME is invalid"
   fi
-  appdir="$target_home/Library/Application Support/cc-remote"
+  appdir="${install_root:-$target_home/Library/Application Support/cc-remote}"
   config_dir="$target_home/.cc-remote"
   device_file="$config_dir/device.json"
-  service_file="$target_home/Library/LaunchAgents/com.muggle.cc-remote.wrapper.plist"
-  service_label="com.muggle.cc-remote.wrapper"
+  service_label="${installed_service_label:-com.muggle.cc-remote.wrapper}"
+  case "$service_label" in
+    *[!A-Za-z0-9.-]*|""|[.-]*) die "invalid macOS service label" ;;
+  esac
+  case "$appdir" in
+    /*) ;;
+    *) die "macOS install root must be absolute" ;;
+  esac
+  if [ -n "$install_root" ] || [ -n "$installed_service_label" ]; then
+    [ -L "$appdir/current" ] || die "custom root must already have an immutable current release"
+    [ -f "$target_home/Library/LaunchAgents/$service_label.plist" ] || die "custom LaunchAgent does not exist"
+  fi
+  service_file="$target_home/Library/LaunchAgents/$service_label.plist"
   log_dir="$target_home/Library/Logs/cc-remote"
   cli_path="$target_home/.local/bin/cc-remote"
 else
+  [ -z "$install_root$installed_service_label" ] || die "custom install roots are supported only on macOS"
   [ "$(id -u)" -eq 0 ] || die "Linux wrapper installation must run as root"
   command -v systemctl >/dev/null 2>&1 || die "systemd is required"
   command -v getent >/dev/null 2>&1 || die "getent is required"
@@ -172,6 +207,25 @@ fi
 "$bundle/bin/uv" run --no-project --no-env-file --managed-python \
   --python "$python_runtime" python "$bundle/deploy/install_lock.py" \
   --verify-fd "$CC_REMOTE_INSTALL_LOCK_FD" "$appdir"
+
+if [ "$system" = darwin ] && { [ -n "$install_root" ] || [ -n "$installed_service_label" ]; }; then
+  "$bundle/bin/uv" run --no-project --no-env-file --managed-python \
+    --python "$python_runtime" python - "$appdir" "$service_file" "$service_label" <<'PY'
+from pathlib import Path
+import plistlib
+import sys
+
+root, service = map(Path, sys.argv[1:3])
+with service.open("rb") as stream:
+    payload = plistlib.load(stream)
+arguments = payload.get("ProgramArguments", [])
+if (payload.get("Label") != sys.argv[3] or len(arguments) < 3
+        or arguments[1:3] != ["-m", "cc_remote.wrapper"]
+        or Path(arguments[0]).resolve() != (root / "current/.venv/bin/python").resolve()
+        or Path(payload.get("WorkingDirectory", "")).resolve() != (root / "current").resolve()):
+    raise SystemExit("custom root and LaunchAgent do not identify the same Wrapper")
+PY
+fi
 
 "$bundle/bin/uv" run --no-project --no-env-file --managed-python \
   --python "$python_runtime" python "$bundle/deploy/install_cli.py" \
@@ -427,6 +481,27 @@ if [ ! -f "$device_file" ] || [ -L "$device_file" ]; then
 fi
 chmod 0600 "$device_file"
 
+# Older update commands only invoke the downloaded installer. Check the Relay
+# here too, before stopping or switching the local Wrapper, so their first
+# upgrade has the same server-first behavior. Fresh pairing is a separate flow.
+if [ -n "$previous" ] && [ -z "$pair_code" ]; then
+  upstream_args=(--root "$appdir" --bundle "$target" --user "$target_user")
+  if [ "$system" = darwin ]; then
+    upstream_args+=(--service-label "$service_label")
+  fi
+  if [ -n "$relay_ssh" ]; then
+    upstream_args+=(--relay-ssh "$relay_ssh")
+  fi
+  if [ "$allow_protocol_change" -eq 1 ]; then
+    upstream_args+=(--allow-protocol-change)
+  fi
+  (
+    cd "$target"
+    PYTHONPATH="$target" "$target/.venv/bin/python" \
+      -m cc_remote.update_relay "${upstream_args[@]}"
+  )
+fi
+
 # Mutable Work metadata and private wrapper control state live outside immutable
 # release directories. Capture them before activation so a code rollback also
 # restores the schemas understood by the previous wrapper.
@@ -465,7 +540,7 @@ if [ "$system" = darwin ]; then
   "$target/.venv/bin/python" - \
     "$target/deploy/com.muggle.cc-remote.wrapper.plist.in" \
     "$service_file" "$current" "$target_home" "$log_dir" \
-    "$service_backup" <<'PY'
+    "$service_backup" "$service_label" <<'PY'
 from pathlib import Path
 import plistlib
 import sys
@@ -502,9 +577,14 @@ if any(marker in text for marker in values):
     raise SystemExit("unresolved LaunchAgent template marker")
 staged = destination.with_name(f".{destination.name}.new")
 payload = plistlib.loads(text.encode("utf-8"))
+payload["Label"] = sys.argv[7]
 # Operator configuration (including the independent Claude service endpoint)
 # survives a Wrapper upgrade. New installs still use the secret-free template.
 payload["EnvironmentVariables"].update(previous_environment)
+if previous_plist is not None:
+    for key in ("StandardOutPath", "StandardErrorPath"):
+        if isinstance(previous.get(key), str):
+            payload[key] = previous[key]
 staged.write_bytes(plistlib.dumps(payload))
 staged.replace(destination)
 PY
@@ -613,8 +693,11 @@ fi
 
 # Keep registration after the interruptible readiness check. Once it succeeds,
 # post-install output failures must not roll back a registered installation.
-"$target/.venv/bin/python" "$target/deploy/install_cli.py" \
-  --root "$appdir" --destination "$cli_path" --role wrapper --user "$target_user"
+cli_args=(--root "$appdir" --destination "$cli_path" --role wrapper --user "$target_user")
+if [ "$system" = darwin ]; then
+  cli_args+=(--service-label "$service_label")
+fi
+"$target/.venv/bin/python" "$target/deploy/install_cli.py" "${cli_args[@]}"
 activation_committed=1
 
 echo

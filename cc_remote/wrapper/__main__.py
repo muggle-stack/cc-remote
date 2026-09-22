@@ -38,6 +38,9 @@ async def main() -> None:
         session_pages=machine.viewer_pages,
         home_pages=HomePages(cfg.state_dir / "viewer-home-pages.json")).run())
     try:
+        # The installer verifies Work schemas independently of optional Codex
+        # readiness. A slow daemon probe must not look like a failed migration.
+        await machine.initialize_work()
         # The official Codex TUI can share a thread only when its durable
         # app-server daemon already owns the control plane.  Prepare it before
         # Relay startup so a terminal opened after this service cannot win a

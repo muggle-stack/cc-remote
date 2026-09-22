@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Icon } from "../icons";
+import { deviceVersionNotice, type DeviceCompatibility } from "../device-version";
 
 export interface RemoteDevice {
   machine_id: string;
@@ -10,6 +11,7 @@ export interface RemoteDevice {
   last_seen: number | null;
   online: boolean;
   managed: boolean;
+  compatibility?: DeviceCompatibility;
 }
 
 export interface PairingState {
@@ -202,9 +204,13 @@ export function DeviceSheet({
               <span className="device-glyph"><Icon name="devices" /></span>
               <span><b>{device.label}</b><small>{device.platform || "手工配置"}{device.hostname ? ` · ${device.hostname}` : ""}</small></span>
               <span className={`device-presence ${device.online ? "online" : "offline"}`}>
-                {device.online ? "在线" : "离线"}
+                {device.compatibility && device.compatibility.wrapper_protocol !== device.compatibility.relay_protocol
+                  ? "需要更新" : device.online ? "在线" : "离线"}
               </span>
             </button>
+            {deviceVersionNotice(device.compatibility) && <p className="device-error">
+              {deviceVersionNotice(device.compatibility)}
+            </p>}
             {editing === device.machine_id && <form className="device-rename"
               onSubmit={(event) => { event.preventDefault(); void saveLabel(device); }}>
               <input autoFocus maxLength={64} value={label}

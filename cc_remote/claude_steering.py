@@ -101,6 +101,14 @@ class PendingSteers:
         kind = origin.get("kind") if isinstance(origin, dict) else None
         child = value.get("parent_tool_use_id") or value.get("parentToolUseID")
         if not child:
+            if managed_active and is_managed_input(value, pending_compact=True):
+                # A native request can precede its replayed human input. That
+                # anonymous activity now belongs to the consumed human response
+                # and must settle at its Result. Keep explicit task origins;
+                # they can still have their own, later terminal boundary.
+                for entry in self._backgrounds.values():
+                    if entry["origin_key"] is None:
+                        entry["managed"] = True
             message = value.get("message")
             content = message.get("content") if isinstance(message, dict) else None
             tool_result = isinstance(content, list) and any(
@@ -141,20 +149,24 @@ class PendingSteers:
                 }}
             elif value.get("type") == "result":
                 ended = background_end_ids(value)
-                if not ended:
-                    if kind in (None, "human"):
-                        # An unattributed Result closes the physical response,
-                        # including its in-turn task inputs. An older autonomous
-                        # response must not be consumed by a new human terminal.
-                        if managed_active:
-                            ended = tuple(key for key, entry in self._backgrounds.items()
-                                          if entry["managed"])
-                        elif kind is None:
-                            ended = tuple(self._backgrounds)
-                    else:
-                        # A precise unrelated origin remains authoritative.
-                        ended = tuple(key for key, entry in self._backgrounds.items()
-                                      if entry["origin_key"] in (None, _origin_key(origin)))
+                local_ends = ()
+                if kind in (None, "human"):
+                    # An unattributed Result closes the physical response,
+                    # including its in-turn task inputs. An older autonomous
+                    # response must not be consumed by a new human terminal.
+                    if managed_active:
+                        local_ends = tuple(key for key, entry in self._backgrounds.items()
+                                           if entry["managed"])
+                    elif kind is None:
+                        local_ends = tuple(self._backgrounds)
+                else:
+                    # A precise unrelated origin remains authoritative.
+                    local_ends = tuple(key for key, entry in self._backgrounds.items()
+                                       if entry["origin_key"] in (None, _origin_key(origin)))
+                # An older service can journal some ends without knowing about
+                # the controller's implicit pre-input claim. Retain its exact
+                # boundaries and include locally established consumption too.
+                ended = tuple(dict.fromkeys((*ended, *local_ends)))
                 if ended:
                     value = {**value, "__cc_background_ends": list(ended)}
                     if len(ended) == 1:

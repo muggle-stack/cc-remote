@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 from websockets.asyncio.client import connect
 
+from cc_remote import __version__
 from cc_remote.log import logger
 from cc_remote.protocol import ProtocolError, deserialize, serialize
 
@@ -136,7 +137,7 @@ class WrapperTransport:
         backoff = 1.0
         while not self._stop:
             try:
-                headers = {"Authorization": f"Bearer {self.token}"}
+                headers = {"Authorization": f"Bearer {self.token}", "X-CC-Remote-Version": __version__}
                 kw: dict = {
                     "additional_headers": headers,
                     "max_size": self.max_size,

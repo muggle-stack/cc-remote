@@ -13,7 +13,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from cc_remote.config import RelayConfig, WrapperConfig
 from cc_remote import device as device_cli
-from cc_remote.protocol import Hello, deserialize, serialize
+from cc_remote.protocol import PROTOCOL_VERSION, Hello, deserialize, serialize
 from cc_remote.relay.auth import SESSION_COOKIE_NAME, session_token_claims
 from cc_remote.relay import server
 from cc_remote.relay.devices import DeviceStore
@@ -91,6 +91,62 @@ def test_pairing_code_is_single_use_and_plaintext_credential_is_not_stored(tmp_p
     token = asyncio.run(scenario())
     assert os.stat(path).st_mode & 0o777 == 0o600
     assert token.encode() not in path.read_bytes()
+
+
+def test_incompatible_device_is_visible_only_to_its_owner_and_clears_on_reconnect(tmp_path):
+    cfg = _cfg(tmp_path)
+    app = create_app(cfg)
+    with TestClient(app, base_url=cfg.public_origin) as client:
+        client.post("/api/login", json={"password": cfg.login_password})
+        code = client.post("/api/devices/pairing").json()["code"]
+        paired = client.post("/api/devices/pair", json={
+            "code": code, "label": "old device", "platform": "linux", "hostname": "device",
+        }).json()
+        machine_id = paired["machine_id"]
+        headers = {"authorization": f"Bearer {paired['token']}", "x-cc-remote-version": "4.0.0"}
+        for claimed in ("another-device", machine_id):
+            with client.websocket_connect("/ws", headers=headers) as wrapper:
+                wrapper.send_text(json.dumps({
+                    "v": PROTOCOL_VERSION - 1, "type": "hello", "role": "wrapper",
+                    "machine_id": claimed,
+                }))
+                assert wrapper.receive_json()["code"] == "protocol"
+                with pytest.raises(WebSocketDisconnect):
+                    wrapper.receive_text()
+            rows = client.get("/api/devices").json()["devices"]
+            assert [item["machine_id"] for item in rows] == [machine_id]
+            if claimed != machine_id:
+                assert "compatibility" not in rows[0]
+        assert rows[0]["online"] is False
+        info = rows[0]["compatibility"]
+        assert info["wrapper_protocol"] == PROTOCOL_VERSION - 1
+        assert info["relay_protocol"] == PROTOCOL_VERSION
+        assert info["wrapper_version"] == "4.0.0"
+        with TestClient(app, base_url=cfg.public_origin) as stranger:
+            assert stranger.get("/api/devices").status_code == 401
+        # v4.0.1 peers share the wire protocol but do not send a product header.
+        # Expose the missing version instead of claiming their release matches.
+        headers.pop("x-cc-remote-version")
+        with client.websocket_connect("/ws", headers=headers) as wrapper:
+            wrapper.send_text(serialize(Hello(role="wrapper", machine_id=machine_id)))
+            _wait_for_device_online(client, machine_id)
+            legacy = client.get("/api/devices").json()["devices"][0]["compatibility"]
+            assert legacy["wrapper_version"] is None
+            assert legacy["wrapper_protocol"] == PROTOCOL_VERSION
+        deadline = time.monotonic() + 1
+        while client.get("/api/devices").json()["devices"][0]["online"]:
+            assert time.monotonic() < deadline, "old connection did not detach"
+            time.sleep(0.01)
+        from cc_remote import __version__
+
+        headers["x-cc-remote-version"] = __version__
+        with client.websocket_connect("/ws", headers=headers) as wrapper:
+            wrapper.send_text(serialize(Hello(role="wrapper", machine_id=machine_id)))
+            _wait_for_device_online(client, machine_id)
+            deadline = time.monotonic() + 1
+            while "compatibility" in client.get("/api/devices").json()["devices"][0]:
+                assert time.monotonic() < deadline, "new hello version did not arrive"
+                time.sleep(0.01)
 
 
 def test_browser_pairs_lists_renames_and_revokes_dynamic_wrapper(tmp_path):

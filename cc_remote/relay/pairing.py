@@ -14,16 +14,20 @@ out live events.
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
+import json
+import re
 import uuid
 from typing import Awaitable, Callable, Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from cc_remote import __version__
 from cc_remote.config import RelayConfig
 from cc_remote.log import logger
 from cc_remote.protocol import (
     Error, ProtocolError, WrapperDisconnected, WrapperReconnected,
-    deserialize, is_client_message, serialize,
+    PROTOCOL_VERSION, deserialize, is_client_message, serialize,
     ERR_BUSY, ERR_WRAPPER_OFFLINE, ERR_WRAPPER_ALREADY_CONNECTED, ERR_PROTOCOL,
 )
 from cc_remote.relay.forward import ClientConn, SlowClientError
@@ -69,6 +73,32 @@ class RelayHub:
         # Once a new generation owns client_id, no old generation can enter a
         # wrapper send after that point.
         self._wrapper_send_lock = asyncio.Lock()
+        self._wrapper_versions: OrderedDict[str, dict] = OrderedDict()
+
+    def remember_wrapper_version(self, machine_id: str, protocol: int, version: str | None) -> None:
+        if not isinstance(version, str) or not re.fullmatch(r"\d{1,6}\.\d{1,6}\.\d{1,6}", version):
+            version = None
+        self._wrapper_versions[machine_id] = {
+            "wrapper_version": version, "relay_version": __version__,
+            "wrapper_protocol": protocol, "relay_protocol": PROTOCOL_VERSION,
+        }
+        self._wrapper_versions.move_to_end(machine_id)
+        while len(self._wrapper_versions) > MAX_NAMED_WRAPPERS + 1:
+            self._wrapper_versions.popitem(last=False)
+
+    def device_version(self, machine_id: str) -> dict:
+        info = self._wrapper_versions.get(machine_id)
+        if info and (info["wrapper_protocol"] != PROTOCOL_VERSION
+                     or info["wrapper_version"] != __version__):
+            return {"compatibility": dict(info)}
+        return {}
+
+    @property
+    def versioned_machine_ids(self) -> tuple[str, ...]:
+        return tuple(self._wrapper_versions)
+
+    def forget_wrapper_version(self, machine_id: str) -> None:
+        self._wrapper_versions.pop(machine_id, None)
 
     @property
     def wrapper_connected(self) -> bool:
@@ -165,6 +195,27 @@ class RelayHub:
                 except ProtocolError as e:
                     log.warning("bad frame from wrapper", error=str(e))
                     mismatch = "protocol version mismatch" in str(e)
+                    if mismatch and not announced:
+                        # Version diagnostics must remain readable even when
+                        # strict wire decoding rejects an old peer. Only an
+                        # authenticated, correctly scoped hello can publish it.
+                        try:
+                            hello = json.loads(raw)
+                            peer_id = hello.get("machine_id") or "default"
+                            peer_version = hello.get("v")
+                            valid = (
+                                hello.get("type") == "hello" and hello.get("role") == "wrapper"
+                                and isinstance(peer_id, str)
+                                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}", peer_id)
+                                and type(peer_version) is int and 0 < peer_version < 1000000
+                                and expected_machine_id in (None, peer_id)
+                            )
+                            if (valid and (authorize_machine is None or await authorize_machine(peer_id))
+                                    and self._wrapper_for(peer_id) is None):
+                                self.remember_wrapper_version(peer_id, peer_version,
+                                                              getattr(ws, "headers", {}).get("x-cc-remote-version"))
+                        except (ValueError, TypeError, AttributeError):
+                            pass
                     try:
                         await ws.send_text(serialize(Error(
                             code=ERR_PROTOCOL,
@@ -258,6 +309,8 @@ class RelayHub:
                             pass
                         return
                     log.info("wrapper connected", machine_id=machine_id)
+                    self.remember_wrapper_version(machine_id, PROTOCOL_VERSION,
+                                                  getattr(ws, "headers", {}).get("x-cc-remote-version"))
                 assert machine_id is not None
                 await self._on_wrapper_msg(msg, machine_id)
         except WebSocketDisconnect:

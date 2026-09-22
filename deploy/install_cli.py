@@ -6,6 +6,8 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import stat
 import tempfile
 
@@ -38,7 +40,7 @@ def _atomic_file(destination: Path, content: bytes, mode: int) -> None:
 
 
 def install_cli(root: Path, destination: Path, *, role: str, user: str | None = None,
-                domain: str | None = None) -> None:
+                domain: str | None = None, service_label: str | None = None) -> None:
     check_destination(destination)
     current = root / "current"
     if not current.is_symlink() or current.resolve().parent != (root / "releases").resolve():
@@ -48,6 +50,18 @@ def install_cli(root: Path, destination: Path, *, role: str, user: str | None = 
     if not content.startswith(_HEADER) or not stat.S_ISREG(source.stat().st_mode):
         raise ValueError("release management launcher is missing or invalid")
     metadata = {"schema": 1, "role": role}
+    if service_label is not None:
+        if (role != "wrapper" or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,127}", service_label)
+                or not root.is_absolute() or any(char in str(root) for char in "\r\n\0")):
+            raise ValueError("invalid macOS installation root or service label")
+        # Explicit registration can adopt an existing immutable Mac layout.
+        # Bind both launcher and future installer to that same root/LaunchAgent.
+        metadata["service_label"] = service_label
+        marker = b"set -euo pipefail\n"
+        if content.count(marker) != 1:
+            raise ValueError("release management launcher cannot bind the installation root")
+        content = content.replace(marker, marker + (
+            f"export CC_REMOTE_MANAGED_ROOT={shlex.quote(str(root))}\n").encode(), 1)
     if role == "wrapper":
         if not user or user == "root":
             raise ValueError("wrapper management requires the original service user")
@@ -80,6 +94,7 @@ def main() -> int:
     parser.add_argument("--role", choices=("relay", "wrapper"))
     parser.add_argument("--user")
     parser.add_argument("--domain")
+    parser.add_argument("--service-label")
     args = parser.parse_args()
     try:
         if args.check:
@@ -87,7 +102,8 @@ def main() -> int:
         else:
             if args.root is None or args.role is None:
                 parser.error("--root and --role are required for registration")
-            install_cli(args.root, args.destination, role=args.role, user=args.user, domain=args.domain)
+            install_cli(args.root, args.destination, role=args.role, user=args.user, domain=args.domain,
+                        service_label=args.service_label)
     except (OSError, ValueError) as exc:
         parser.exit(1, f"ERROR: {exc}\n")
     return 0
