@@ -10,7 +10,7 @@ from claude_agent_sdk.types import ResultMessage, SystemMessage
 
 from cc_remote.protocol import GetContext, ProcessEvent
 from cc_remote.wrapper.claude_compaction import compact_metadata
-from cc_remote.wrapper.sdk import SdkHandle
+from cc_remote.wrapper.sdk import ClaudeBackgroundBoundary, SdkHandle
 from cc_remote.wrapper.stream import StreamTranslator
 from cc_remote.wrapper.work_context import recover_claude_context_usage
 from tests.test_claude_autocompact import SESSION_ID, _machine_with_sdk
@@ -136,7 +136,15 @@ def test_regular_prompt_does_not_claim_an_earlier_compact_boundary():
             handle.release_background_messages()
             await asyncio.wait_for(handle._background_callbacks_drained.wait(), 1)
             assert not any(isinstance(m, SystemMessage) for m in messages)
-            assert [m.subtype for m in background] == ["status", "compact_boundary"]
+            assert [m.subtype for m in background if isinstance(m, SystemMessage)] == [
+                "status", "compact_boundary"]
+            # The human terminal also retires the anonymous pre-input activity.
+            # Its boundary is internal lifecycle bookkeeping, not a second
+            # compact event or a duplicate native Result in the history.
+            assert len(background) == 3
+            assert isinstance(background[-1], ClaudeBackgroundBoundary)
+            assert background[-1].identities == (background[0]._cc_background_start["id"],)
+            assert not any(isinstance(m, ResultMessage) for m in background)
             assert isinstance(messages[-1], ResultMessage)
         finally:
             await handle._stop_message_pump()
