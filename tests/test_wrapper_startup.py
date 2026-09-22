@@ -119,7 +119,7 @@ def test_disabled_sharing_publishes_without_starting_cli(monkeypatch, tmp_path) 
     assert receipt["profiles"] == [{"profile": "primary", "status": "disabled"}]
 
 
-def test_wrapper_entrypoint_prepares_codex_before_run(monkeypatch) -> None:
+def test_wrapper_entrypoint_initializes_work_before_optional_codex_probe(monkeypatch) -> None:
     events: list[str] = []
     cfg = WrapperConfig()
 
@@ -132,7 +132,11 @@ def test_wrapper_entrypoint_prepares_codex_before_run(monkeypatch) -> None:
         def __init__(self, _cfg, _transport) -> None:
             events.append("machine")
 
+        async def initialize_work(self) -> None:
+            events.append("work-ready")
+
         async def prepare_codex_daemons(self) -> None:
+            assert "work-ready" in events
             events.append("prepare")
 
         async def run(self) -> None:
@@ -160,4 +164,21 @@ def test_wrapper_entrypoint_prepares_codex_before_run(monkeypatch) -> None:
 
     asyncio.run(wrapper_main.main())
 
-    assert events == ["scrub", "transport", "machine", "prepare", "run", "viewer-start", "viewer-stop"]
+    assert events == ["scrub", "transport", "machine", "work-ready", "prepare", "run", "viewer-start", "viewer-stop"]
+
+
+def test_work_initialization_is_not_repeated_when_run_follows_prewarm(tmp_path):
+    cfg = WrapperConfig()
+    cfg.state_dir = tmp_path / "state"
+    cfg.claude_work_root = tmp_path / "claude"
+    cfg.codex_work_root = tmp_path / "codex"
+    machine = WrapperMachine(cfg, _Transport())
+    calls = []
+    machine._work = SimpleNamespace(initialize=lambda: calls.append("initialized"))
+
+    async def run():
+        await machine.initialize_work()
+        await machine.initialize_work()
+
+    asyncio.run(run())
+    assert calls == ["initialized"]

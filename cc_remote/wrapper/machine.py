@@ -2566,6 +2566,7 @@ class WrapperMachine:
             getattr(cfg, "claude_work_root", fallback_work / "claude"),
             getattr(cfg, "codex_work_root", fallback_work / "codex"),
         )
+        self._work_initialized = False
         self._claude_work_profile_migration_ok = (
             self._claude_profile_migration_ok
         )
@@ -8852,6 +8853,12 @@ class WrapperMachine:
 
     # ---- lifecycle ----
 
+    async def initialize_work(self) -> None:
+        """Make installation-critical stores ready before optional engine probes."""
+        if not self._work_initialized:
+            await asyncio.to_thread(self._work.initialize)
+            self._work_initialized = True
+
     async def prepare_codex_daemons(self) -> None:
         """Start every Code shared daemon before native terminals can race it.
 
@@ -8918,7 +8925,7 @@ class WrapperMachine:
 
     async def run(self) -> None:
         self._cleanup_tmp()
-        await asyncio.to_thread(self._work.initialize)
+        await self.initialize_work()
         # A previous process may have died while a Claude /btw fork was live.
         # Remove its persisted private transcript before accepting any client
         # command or publishing SessionList.
