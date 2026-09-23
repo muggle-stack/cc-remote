@@ -11,10 +11,18 @@ Wire protocol remains v72. See the bilingual [release notes](docs/releases/v4.0.
   supported effort levels, without sending prompts or resuming sessions.
 - Refresh the catalog when opening model settings, scope its cache by account,
   directory and CLI build, and preserve explicitly selected historical models.
+- Keep Work discovery within its runtime policy and inherit native Claude model
+  and effort defaults instead of imposing a fixed Opus/max selection.
+- Refresh Codex models on page reload, reconnect and picker open; share concurrent
+  reads per account and retain that account's last good list on discovery failure.
+- Support Codex 0.156's protected socket aliases while preserving account ownership
+  checks and detecting replacement of the underlying app-server listener.
 - Upgrade the verified Python Claude Agent SDK from 0.2.151 to 0.2.157. Wrapper
   upgrades across this SDK boundary require the documented drain/installer path.
 - Render inline code in softer harness colors without a background badge; actual
   links retain their link styling and fenced code blocks retain their background.
+- Expand Claude thinking text by default. Pressing `/` outside an editor focuses
+  the composer without inserting a character; pressing it again types normally.
 
 ## v4.0.3
 
