@@ -1,4 +1,4 @@
-claude-agent-sdk==0.2.151
+claude-agent-sdk==0.2.157
 websockets==16.0
 fastapi==0.139.0
 uvicorn==0.50.0

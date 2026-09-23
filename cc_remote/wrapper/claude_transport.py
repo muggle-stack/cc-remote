@@ -14,7 +14,7 @@ class AccountIsolatedSubprocessCLITransport(
 ):
     """Spawn one Claude child without inherited account selectors.
 
-    Agent SDK 0.2.151 treats ``ClaudeAgentOptions.env`` as an overlay on the
+    Agent SDK 0.2.157 treats ``ClaudeAgentOptions.env`` as an overlay on the
     Wrapper process environment. Empty strings are not equivalent to unsetting
     modern Claude authentication selectors, while mutating ``os.environ`` would
     race unrelated Codex and tool spawns. This pinned adapter mirrors the SDK's

@@ -12,15 +12,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_claude_sdk_policy_is_exact():
-    assert claude_runtime.validate_sdk_version("0.2.151") == "0.2.151"
-    with pytest.raises(RuntimeError, match="not the verified 0.2.151"):
-        claude_runtime.validate_sdk_version("0.2.150")
+    assert claude_runtime.validate_sdk_version("0.2.157") == "0.2.157"
+    for unsupported in ("0.2.151", "0.2.158"):
+        with pytest.raises(RuntimeError, match="not the verified 0.2.157"):
+            claude_runtime.validate_sdk_version(unsupported)
 
 
 def test_verified_claude_sdk_matches_dependency_pin():
     expected = f"claude-agent-sdk=={claude_runtime.VERIFIED_SDK_VERSION}"
-    assert expected in (ROOT / "requirements.txt").read_text()
-    assert expected in (ROOT / "requirements.lock").read_text()
+    for name in (
+        "requirements.txt", "requirements.lock",
+        "requirements-wrapper.txt", "requirements-wrapper.lock",
+    ):
+        assert expected in (ROOT / name).read_text()
 
 
 def test_claude_runtime_prefers_bundle_then_external(monkeypatch, tmp_path):

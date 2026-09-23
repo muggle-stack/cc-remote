@@ -16,7 +16,7 @@ def claude_config_dir() -> Path:
     """Return the active native Claude Code config root."""
     configured = os.environ.get("CLAUDE_CONFIG_DIR")
     if configured:
-        # Match claude-agent-sdk 0.2.151 exactly: the environment value is a
+        # Match claude-agent-sdk 0.2.157 exactly: the environment value is a
         # filesystem path, not a shell expression, so do not expand "~" or
         # resolve symlinks behind the SDK's back.
         return Path(unicodedata.normalize("NFC", configured))
