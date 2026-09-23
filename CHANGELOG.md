@@ -163,6 +163,13 @@ preview to the Claude/Codex control plane. See the bilingual
   independently of Goals (protocol v67). Session menus and task popovers
   avoid the sidebar footer and the mobile visual viewport.
 
+- Allow a reverse proxy that reaches the relay from a non-loopback address (a
+  Tailscale IP, a LAN address, the Docker bridge gateway) to be trusted through
+  `FORWARDED_ALLOW_IPS`, which appends IPs or CIDR networks to the built-in
+  loopback defaults. Previously only a loopback proxy was trusted, so uvicorn
+  ignored `X-Forwarded-Proto` and every WebSocket was rejected with 403 while
+  page loads and `/api/*` kept working. Wildcard and malformed entries are
+  rejected at startup instead of silently never matching.
 - Backport shared improvements from the DSH branch without adding a third
   engine (protocol v66): rounded Claude/Codex Goal dialogs with native save
   confirmation and mobile keyboard recovery; directory links open `/open`, and
