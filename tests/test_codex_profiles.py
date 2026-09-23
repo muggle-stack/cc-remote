@@ -3143,7 +3143,8 @@ def test_profile_model_reads_use_catalog_default_from_matching_home(
     stack_home = str((tmp_path / "stack").resolve())
     calls: list[tuple[str, str | None]] = []
 
-    async def catalog(*, codex_home=None):
+    async def catalog(*, force=False, codex_home=None):
+        assert force is True, "an explicit picker read must refresh native models"
         calls.append(("models", codex_home))
         return [{
             "id": "stack-model",
@@ -3222,6 +3223,57 @@ def test_profile_model_reads_use_catalog_default_from_matching_home(
         ("permissions", stack_home),
         ("capabilities", stack_home),
     ]
+
+
+@pytest.mark.parametrize("explicit_profiles", [False, True])
+def test_reloaded_picker_discovers_new_model_before_internal_cache_expires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit_profiles: bool,
+) -> None:
+    from cc_remote.wrapper import codex_models
+
+    cfg = WrapperConfig()
+    cfg.state_dir = tmp_path / "state"
+    cfg.claude_work_root = tmp_path / "work" / "claude"
+    cfg.codex_work_root = tmp_path / "work" / "codex"
+    cfg.codex_profiles_json = (
+        _profiles(tmp_path / "primary", tmp_path / "stack")
+        if explicit_profiles else ""
+    )
+    transport = _StubTransport()
+    machine = WrapperMachine(cfg, transport)
+    profile = machine._codex_profile("stack" if explicit_profiles else None)
+    home = machine._codex_home(profile)
+    raw = [{"id": "old", "isDefault": True}]
+    calls = []
+
+    async def query(codex_home):
+        calls.append(codex_home)
+        return list(raw)
+
+    monkeypatch.setattr(codex_models, "_profile_cache", {})
+    monkeypatch.setattr(codex_models, "_inflight", {})
+    monkeypatch.setattr(codex_models, "_rpc_model_list", query)
+    monkeypatch.setattr(machine_module, "codex_model", lambda *a, **kw: "")
+    monkeypatch.setattr(machine_module, "codex_effort", lambda *a, **kw: "")
+
+    async def run():
+        command = SimpleNamespace(
+            engine="codex", codex_profile_id=profile.id,
+            cmd_id="models-1", client_id="client-1", cwd=None,
+        )
+        first = await machine._handle_get_models(command)
+        assert [m["id"] for m in first.models] == ["old"]
+        raw.append({"id": "newly-available"})
+        # A reload sends the same get_models command through a new client.
+        command.client_id = "client-reloaded"
+        command.cmd_id = "models-2"
+        second = await machine._handle_get_models(command)
+        assert [m["id"] for m in second.models] == ["old", "newly-available"]
+        assert second.to == "client-reloaded"
+        assert second.codex_profile_id == profile.id
+        assert calls == [home, home]
+
+    asyncio.run(run())
 
 
 def test_profile_model_resolution_isolated_and_fails_closed_for_explicit_choice(

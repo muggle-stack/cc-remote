@@ -268,6 +268,28 @@ try {
     "other-project-model");
   assert.equal(state.catalog[modelCatalogScopeKey("claude", "company")], undefined,
     "Work account-only discovery must not inherit a Code project's model list");
+  state = reduce(state, { type: "event", event: {
+    v: 72, ts: 4, type: "models", engine: "claude", claude_profile_id: "company",
+    cwd: "/repo", default_model: "company-claude", default_effort: "high",
+    models: state.catalog[modelCatalogScopeKey("claude", "company", "/repo")],
+  } });
+  const codeDefaults = state.catalogDefault;
+  const codeEfforts = state.catalogDefaultEffort;
+  const codeCwds = state.catalogDefaultCwd;
+  state = reduce(state, { type: "event", event: {
+    v: 72, ts: 5, type: "models", engine: "claude", claude_profile_id: "company",
+    default_model: null, default_effort: null,
+    models: [{ id: "work-default", display_name: "Work Default",
+      description: "", efforts: ["low", "high"], is_default: true }],
+  } });
+  assert.equal(state.catalog[modelCatalogScopeKey("claude", "company")][0].id,
+    "work-default");
+  assert.deepEqual(state.catalogDefault, codeDefaults,
+    "Work discovery cannot replace the Code model default");
+  assert.deepEqual(state.catalogDefaultEffort, codeEfforts,
+    "Work discovery cannot replace the Code effort default");
+  assert.deepEqual(state.catalogDefaultCwd, codeCwds,
+    "Work discovery cannot change which Code directory owns cached defaults");
 } finally {
   await harness.close();
 }

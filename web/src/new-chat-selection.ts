@@ -68,7 +68,8 @@ export function compatibleNewChatEffort(
   localDefaultModel: string | null,
 ): string | null {
   if (!currentEffort) return null;
-  const effectiveModel = nextModel ?? localDefaultModel;
+  const effectiveModel = nextModel ?? localDefaultModel
+    ?? (engine === "claude" ? catalog.claude?.find((entry) => entry.is_default)?.id : null);
   if (!effectiveModel) return null;
   if (!modelsFor(engine, catalog).some(
     (candidate) => candidate.id === effectiveModel,
@@ -108,5 +109,7 @@ export function newChatEfforts(
   // Without an authoritative Codex default there is no model against which an
   // explicit effort can be validated. Keep only the null/default choice.
   if (engine === "codex" && !effectiveModel) return [];
-  return effortsFor(engine, effectiveModel, catalog);
+  const model = effectiveModel
+    ?? (engine === "claude" ? catalog.claude?.find((entry) => entry.is_default)?.id : null);
+  return effortsFor(engine, model, catalog);
 }

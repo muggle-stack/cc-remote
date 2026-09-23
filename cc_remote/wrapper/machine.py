@@ -226,8 +226,6 @@ from cc_remote.wrapper.claude_questions import (
     normalize_claude_questions,
 )
 from cc_remote.wrapper.sdk import (
-    CLAUDE_DEFAULT_EFFORT,
-    CLAUDE_DEFAULT_MODEL,
     ClaudeAutonomousFollowupPending,
     ClaudeBackgroundBoundary,
     ClaudeServiceReplayRequired,
@@ -18645,8 +18643,8 @@ class WrapperMachine:
         """Resolve an explicit new-session model without starting Claude CLI.
 
         Claude's account/organization runtime Default cannot be read without a
-        live CLI, so an absent explicit value returns None. The caller then uses
-        cc-remote's curated new-session default.
+        live CLI, so an absent explicit value returns None and leaves that
+        selection to the native runtime.
         """
         root = cls._claude_project_root(cwd)
         user_settings = str(
@@ -18729,11 +18727,11 @@ class WrapperMachine:
         cwd: Optional[str],
         *,
         claude_profile: Optional[ClaudeProfile] = None,
-    ) -> tuple[Optional[str], str]:
+    ) -> tuple[Optional[str], Optional[str]]:
         raw_cwd = cwd or self.cfg.cc_cwd
         target_cwd = os.path.realpath(os.path.expanduser(raw_cwd))
         if not os.path.isdir(target_cwd):
-            return CLAUDE_DEFAULT_MODEL, CLAUDE_DEFAULT_EFFORT
+            return None, None
         profile = claude_profile or self._claude_profile()
         model = await asyncio.to_thread(
             self._claude_configured_model,
@@ -18741,15 +18739,10 @@ class WrapperMachine:
             config_dir=self._claude_config_root(profile),
             isolate_account_env=self._claude_profiles_explicit,
         )
-        # Claude Code uses ``[1m]`` as its native context-qualification marker
-        # and strips it before calling a third-party provider. Pin only models
-        # that cc-remote's curated catalog explicitly presents as 1M; every
-        # unknown/custom id remains provider-owned and passes through unchanged.
-        return (
-            normalize_claude_model_selection(model)
-            or CLAUDE_DEFAULT_MODEL,
-            CLAUDE_DEFAULT_EFFORT,
-        )
+        # Keep explicit model selections, including their context qualification.
+        # An unspecified model/effort must inherit native defaults, not force a
+        # historical Opus/max combination onto a different account's catalog.
+        return normalize_claude_model_selection(model), None
 
     async def _handle_get_models(self, cmd) -> None:
         """Answer with the engine's catalog and effective new-session defaults.
@@ -18788,10 +18781,13 @@ class WrapperMachine:
                 await self.transport.send(error)
                 return error
             codex_home = self._codex_home(codex_profile)
+        # Page reloads, reconnects and opening the picker are explicit reads.
+        # They must bypass the internal effort cache so newly available models
+        # appear immediately. The catalog coalesces concurrent reads per home.
         models = (
-            await codex_catalog()
+            await codex_catalog(force=True)
             if engine == "codex" and codex_home is None
-            else await codex_catalog(codex_home=codex_home)
+            else await codex_catalog(force=True, codex_home=codex_home)
             if engine == "codex" else []
         )
         default_model = None
@@ -18845,11 +18841,21 @@ class WrapperMachine:
                 config_dir=self._claude_config_root(claude_profile),
                 isolate_account_env=self._claude_profiles_explicit,
             )
-            default_model, default_effort = (
-                await self._claude_new_session_defaults(
-                    defaults_cwd,
-                    claude_profile=claude_profile,
-                ))
+            if defaults_cwd:
+                default_model, default_effort = (
+                    await self._claude_new_session_defaults(
+                        defaults_cwd,
+                        claude_profile=claude_profile,
+                    ))
+                if default_model is None:
+                    native_default = next((
+                        item for item in models if item.get("is_default")
+                    ), None)
+                    if native_default:
+                        default_model = native_default["id"]
+                        default_effort = native_default.get("default_effort")
+            # No cwd is Work's catalog-only request. Its native policy owns the
+            # default; do not read Code settings or overwrite Code's cwd cache.
         msg = Models(
             engine=engine, models=models, default_model=default_model,
             default_effort=default_effort, cwd=defaults_cwd,
@@ -35553,7 +35559,8 @@ class WrapperMachine:
                 auto_compact_mode = saved_controls.auto_compact_mode
                 auto_compact_threshold_tokens = (
                     saved_controls.auto_compact_threshold_tokens)
-        elif engine == "claude" and resume_id is None and model is None:
+        elif (engine == "claude" and space == "code"
+              and resume_id is None and model is None):
             # Resolve the cwd-aware default at spawn time so a fresh session
             # starts on the model shown by Remote. The browser still sends null
             # for an implicit choice; this read is local, current, and cannot be
@@ -35834,7 +35841,9 @@ class WrapperMachine:
                         "codex_home": self._codex_home(codex_profile),
                     }),
                 )
-        if effort:
+        if effort or (engine == "claude" and resume_id is None):
+            # A new Claude session with no override inherits native effort.
+            # SdkHandle's legacy resume fallback must not inject max here.
             sdk.effort = effort
             sdk.applied_effort = effort
         work_context_baseline = (

@@ -8,15 +8,18 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
+import tempfile
 import time
 
 from cc_remote.log import logger
 from cc_remote.wrapper.child_env import claude_profile_process_env
 from cc_remote.wrapper.claude_controls import valid_claude_model
 from cc_remote.wrapper.claude_runtime import resolve_claude_cli
+from cc_remote.workspaces import _claude_runtime_settings
 
 log = logger("cc_remote.wrapper.claude_models")
 _TTL = 60.0
@@ -66,7 +69,7 @@ def _normalize(raw: object) -> list[dict]:
 
 async def _read_catalog(
     binary: str, cwd: str, config_dir: str | None, isolate_account_env: bool,
-    user_only: bool,
+    work_only: bool,
 ) -> list[dict]:
     env = claude_profile_process_env(
         config_dir, isolate_account_env=isolate_account_env)
@@ -77,8 +80,21 @@ async def _read_catalog(
         "--no-session-persistence", "--safe-mode", "--strict-mcp-config",
         "--tools", "",
     ]
-    if isolate_account_env or user_only:
-        args.extend(["--setting-sources", "user"])
+    with ExitStack() as scope:
+        if work_only:
+            # Match Work's sole policy source and provider allowlist. Never load
+            # user/project customizations or put provider credentials in argv.
+            settings = scope.enter_context(tempfile.NamedTemporaryFile(
+                mode="w+", prefix="cc-remote-models-", suffix=".json"))
+            json.dump(_claude_runtime_settings(config_dir), settings)
+            settings.flush()
+            args.extend(["--setting-sources", "", "--settings", settings.name])
+        elif isolate_account_env:
+            args.extend(["--setting-sources", "user"])
+        return await _initialize_catalog(args, cwd, env)
+
+
+async def _initialize_catalog(args: list[str], cwd: str, env: dict[str, str]) -> list[dict]:
     proc = await asyncio.create_subprocess_exec(
         *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL, cwd=cwd, env=env,
@@ -128,8 +144,8 @@ async def claude_model_catalog(
 ) -> list[dict]:
     """Bounded account/cwd cache; CLI replacement bypasses the TTL immediately.
 
-    Missing cwd means account-only discovery (e.g. a new Work chat), never
-    borrowing model/provider settings from the Wrapper's Code project.
+    Missing cwd means Work discovery using its filtered runtime settings, never
+    borrowing customizations from the Wrapper's Code project or user settings.
     """
     async with _lock:
         try:

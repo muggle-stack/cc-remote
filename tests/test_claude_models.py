@@ -1,6 +1,7 @@
 """Native model discovery must never submit a prompt or cross account scopes."""
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -86,7 +87,10 @@ async def test_catalog_failure_preserves_only_same_scope_and_backs_off(monkeypat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["success", "error", "timeout", "cancel"])
-async def test_probe_only_initializes_and_always_reaps_child(monkeypatch, tmp_path, outcome):
+@pytest.mark.parametrize("work_only", [False, True])
+async def test_probe_only_initializes_and_always_reaps_child(
+    monkeypatch, tmp_path, outcome, work_only,
+):
     writes = []
     proc = SimpleNamespace(
         stdin=SimpleNamespace(write=writes.append, drain=AsyncMock(), close=lambda: None),
@@ -106,14 +110,29 @@ async def test_probe_only_initializes_and_always_reaps_child(monkeypatch, tmp_pa
     proc.stdout.readline = line
     proc.terminate = lambda: setattr(proc, "terminated", True)
     proc.wait = AsyncMock(return_value=0)
-    spawn = AsyncMock(return_value=proc)
+    async def spawn_child(*args, **kwargs):
+        if work_only:
+            path = Path(args[args.index("--settings") + 1])
+            assert path.stat().st_mode & 0o777 == 0o600
+            assert json.loads(path.read_text()) == {
+                "model": "work-model", "env": {"ANTHROPIC_API_KEY": "profile-key"}}
+        return proc
+
+    spawn = AsyncMock(side_effect=spawn_child)
     monkeypatch.setattr(models.asyncio, "create_subprocess_exec", spawn)
     monkeypatch.setattr(models, "_TIMEOUT", 0.01)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-credential")
     monkeypatch.setenv("WRAPPER_TOKEN", "control-credential")
     monkeypatch.setenv("CLAUDECODE", "nested")
     root = str(tmp_path / "profile")
-    request = models._read_catalog("/daily/claude", str(tmp_path), root, True, False)
+    Path(root).mkdir()
+    (Path(root) / "settings.json").write_text(json.dumps({
+        "model": "work-model", "env": {"ANTHROPIC_API_KEY": "profile-key",
+                                        "ANTHROPIC_CUSTOM_MODEL_OPTION": "code-only"},
+        "hooks": {"SessionStart": [{"command": "must-not-run"}]},
+        "availableModels": ["code-only"], "effortLevel": "max",
+    }))
+    request = models._read_catalog("/daily/claude", str(tmp_path), root, True, work_only)
     if outcome == "success":
         assert (await request)[0]["id"] == "future-model"
     else:
@@ -123,7 +142,11 @@ async def test_probe_only_initializes_and_always_reaps_child(monkeypatch, tmp_pa
     args, kwargs = spawn.call_args
     assert args[0] == "/daily/claude"
     assert {"--no-session-persistence", "--safe-mode", "--strict-mcp-config"} <= set(args)
-    assert args[-2:] == ("--setting-sources", "user")
+    if work_only:
+        assert args[-4:-1] == ("--setting-sources", "", "--settings")
+        assert not Path(args[-1]).exists()
+    else:
+        assert args[-2:] == ("--setting-sources", "user")
     assert not {"ANTHROPIC_API_KEY", "WRAPPER_TOKEN", "CLAUDECODE"} & kwargs["env"].keys()
     assert kwargs["env"]["CLAUDE_CONFIG_DIR"] == root
     assert len(writes) == 1
@@ -153,6 +176,45 @@ async def test_get_models_routes_selected_profile_without_resuming(monkeypatch, 
     event = transport.sent[-1]
     assert event.to == "client" and event.claude_profile_id == "company"
     assert event.models[0]["id"] == "claude-opus-5-5"
+    assert not machine.sessions
+
+
+@pytest.mark.asyncio
+async def test_work_catalog_never_resolves_code_defaults(monkeypatch, tmp_path):
+    from cc_remote.protocol import GetModels
+    from cc_remote.wrapper import machine as machine_module
+    from tests.test_multisession import _mk_machine
+
+    machine, transport = _mk_machine()
+    machine.cfg.cc_cwd = str(tmp_path)
+    defaults = AsyncMock(side_effect=AssertionError("must not read Code defaults"))
+    monkeypatch.setattr(machine, "_claude_new_session_defaults", defaults)
+    catalog = AsyncMock(return_value=[{"id": "default", "is_default": True,
+                                      "efforts": ["high"]}])
+    monkeypatch.setattr(machine_module, "claude_model_catalog", catalog)
+    await machine._handle_get_models(GetModels(engine="claude"))
+    event = transport.sent[-1]
+    assert event.models[0]["id"] == "default"
+    assert event.cwd is event.default_model is event.default_effort is None
+    assert catalog.call_args.kwargs["cwd"] is None
+    defaults.assert_not_called()
+    assert not machine.sessions
+
+
+@pytest.mark.asyncio
+async def test_code_catalog_reports_native_default_without_inventing_effort(monkeypatch, tmp_path):
+    from cc_remote.protocol import GetModels
+    from cc_remote.wrapper import machine as machine_module
+    from tests.test_multisession import _mk_machine
+
+    machine, transport = _mk_machine()
+    monkeypatch.setattr(machine, "_claude_configured_model", lambda *a, **kw: None)
+    monkeypatch.setattr(machine_module, "claude_model_catalog", AsyncMock(return_value=[
+        {"id": "default", "is_default": True, "efforts": ["low", "high"]},
+    ]))
+    await machine._handle_get_models(GetModels(engine="claude", cwd=str(tmp_path)))
+    assert transport.sent[-1].default_model == "default"
+    assert transport.sent[-1].default_effort is None
     assert not machine.sessions
 
 

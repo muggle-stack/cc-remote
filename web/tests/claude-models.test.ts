@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { MODELS, matchModelId, modelsFor, effortsFor, defaultEffortFor } from "../src/data.ts";
-import { compatibleNewChatEffort, reconcileNewChatSelection } from "../src/new-chat-selection.ts";
+import { compatibleNewChatEffort, newChatEfforts, reconcileNewChatSelection } from "../src/new-chat-selection.ts";
 
 for (const id of ["claude-fable-5-1", "claude-mythos-5-1"]) {
   assert.equal(matchModelId(`${id}[1m]`, "claude"), id);
@@ -27,3 +27,11 @@ assert.deepEqual(reconcileNewChatSelection("claude", "claude-opus-5-5", "max", c
   { model: "claude-opus-5-5", effort: "max" });
 assert.deepEqual(reconcileNewChatSelection("claude", "claude-opus-5[1m]", "max", catalog, null),
   { model: null, effort: null }, "unavailable fallback selections must clear after native discovery");
+
+const workCatalog = { claude: [
+  { id: "default", display_name: "Default", description: "Native default",
+    is_default: true, efforts: ["low", "high"] },
+] };
+assert.deepEqual(newChatEfforts("claude", null, workCatalog).map((e) => e.id), ["low", "high"]);
+assert.equal(compatibleNewChatEffort("claude", null, "max", workCatalog, null), null);
+assert.equal(compatibleNewChatEffort("claude", null, "high", workCatalog, null), "high");

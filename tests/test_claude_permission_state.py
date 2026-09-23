@@ -990,7 +990,7 @@ def test_claude_new_session_defaults_use_settings_without_session_probe(
                    for event in transport.sent)
         assert all(event.default_model == "claude-mythos-5[1m]"
                    for event in transport.sent)
-        assert all(event.default_effort == "max"
+        assert all(event.default_effort is None
                    for event in transport.sent)
         assert all(event.cwd == str(project / "subdir")
                    for event in transport.sent)
@@ -1011,8 +1011,8 @@ def test_claude_new_session_defaults_use_settings_without_session_probe(
         assert machine._claude_configured_model(str(project)) is None
         fallback_model, fallback_effort = (
             await machine._claude_new_session_defaults(str(project)))
-        assert fallback_model == CLAUDE_DEFAULT_MODEL
-        assert fallback_effort == "max"
+        assert fallback_model is None
+        assert fallback_effort is None
 
         monkeypatch.delenv("ANTHROPIC_MODEL")
         for configured, expected in (
@@ -1083,9 +1083,11 @@ def test_claude_multi_profile_default_ignores_project_and_ambient_models(
     ) is None
 
 
-def test_fresh_claude_spawn_applies_the_resolved_default_model(
+@pytest.mark.parametrize("space", ["code", "work"])
+def test_fresh_claude_spawn_inherits_native_defaults(
     monkeypatch,
     tmp_path,
+    space,
 ):
     home = tmp_path / "home"
     project = tmp_path / "project"
@@ -1107,14 +1109,27 @@ def test_fresh_claude_spawn_applies_the_resolved_default_model(
             SdkHandle, "preflight", staticmethod(lambda _path: None))
         machine, _ = _mk_machine()
         machine._load_history = lambda *_args: asyncio.sleep(0)
+        work_id = None
+        cwd = str(project)
+        if space == "work":
+            record = machine._work.for_engine("claude").create_session(
+                claude_profile_id=machine._claude_profiles.default.id)
+            work_id = record.work_id
+            cwd = record.cwd
+
+            async def forbidden_default(*args, **kwargs):
+                raise AssertionError("Work must inherit its isolated policy")
+
+            machine._claude_new_session_defaults = forbidden_default
 
         ctx = await machine._spawn(
-            resume_id=None, cwd=str(project), engine="claude")
+            resume_id=None, cwd=cwd, engine="claude", space=space, work_id=work_id)
 
         assert ctx is not None
-        assert ctx.sdk.model == CLAUDE_DEFAULT_MODEL
-        assert _FakeClaudeClient.created[-1].model_calls == [
-            CLAUDE_DEFAULT_MODEL]
+        assert ctx.sdk.model == "claude-mythos-5"
+        assert _FakeClaudeClient.created[-1].model_calls == []
+        assert _FakeClaudeClient.created[-1].options.model is None
+        assert _FakeClaudeClient.created[-1].options.effort is None
         await ctx.sdk.disconnect()
 
     asyncio.run(go())
@@ -1218,6 +1233,9 @@ def test_implicit_claude_default_failure_reports_probed_provider_model(
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
         monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+        settings = tmp_path / ".claude" / "settings.json"
+        settings.parent.mkdir()
+        settings.write_text(json.dumps({"model": CLAUDE_DEFAULT_MODEL}))
         monkeypatch.setattr(
             machine_module.WrapperMachine,
             "_claude_managed_settings_paths",
