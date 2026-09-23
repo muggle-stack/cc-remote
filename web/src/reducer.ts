@@ -124,10 +124,12 @@ export const MAX_SESSION_NOTICES = 8;
 export function modelCatalogScopeKey(
   engine: string,
   profileId?: string | null,
+  cwd?: string | null,
 ): string {
-  return (engine === "codex" || engine === "claude") && profileId
+  const account = (engine === "codex" || engine === "claude") && profileId
     ? `${engine}\u0000${profileId}`
     : engine;
+  return engine === "claude" && cwd ? `${account}\u0000${cwd}` : account;
 }
 
 export function nativeProfileSessionId(sessionId: string): string {
@@ -432,8 +434,7 @@ export interface AppState {
   // Orders the authoritative reconnect catalog and subsequent open/close
   // mutations. It is scoped to one Wrapper generation (which resets state).
   btwRevision: number;
-  // Model catalogs the engine reported (currently Codex only). Claude still sends
-  // an empty catalog plus its cwd-aware defaults; data.ts keeps the static list.
+  // Native model catalogs scoped by account and, for Claude Code, directory.
   catalog: Catalog;
   // engine -> the model a NEW no-override session starts on.
   // Never the focused session's model — that one is per-session.
@@ -4998,8 +4999,9 @@ function reduceEvent(
             ? (e.claude_profile_id ?? state.defaultClaudeProfileId)
             : null,
       );
+      const catalogKey = e.engine === "claude" && e.cwd ? `${cacheKey}\u0000${e.cwd}` : cacheKey;
       const catalog = e.models.length
-        ? { ...state.catalog, [cacheKey]: e.models }
+        ? { ...state.catalog, [catalogKey]: e.models }
         : state.catalog;
       if (e.cwd && e.cwd !== state.newChat?.cwd) {
         // Cwd-aware reads run concurrently. Never let a late response for a

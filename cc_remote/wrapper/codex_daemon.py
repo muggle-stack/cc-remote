@@ -8,6 +8,7 @@ process, so disconnecting one remote session cannot stop other Codex clients.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -362,6 +363,43 @@ def _managed_daemon_process_identity(
     return process_identity(pid)
 
 
+def _protected_socket_directory(uid: int) -> Path:
+    # Match codex-uds: independent of HOME, TMPDIR, and account settings.
+    return Path("/tmp").resolve() / f"codex-daemon-{uid}"
+
+
+def socket_identity(path: str, *, owner_uid: int | None = None) -> tuple[int, int, int]:
+    """Validate a native listener, including Codex 0.156's protected alias.
+
+    Native Unix aliases point to /tmp/codex-daemon-UID/SHA256(canonical address).
+    Accept only that exact mapping, never an arbitrary or cross-account link.
+    The physical listener's identity fences replacement behind an unchanged alias.
+    """
+    uid = os.getuid() if owner_uid is None else owner_uid
+    address = Path(path)
+    parent = address.parent
+    parent_info = parent.lstat()
+    if (not address.is_absolute() or str(parent.resolve()) != str(parent)
+            or not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != uid
+            or parent_info.st_mode & 0o022):
+        raise ValueError("Codex socket parent is not private to its owner")
+    info = address.lstat()
+    if stat.S_ISLNK(info.st_mode):
+        directory = _protected_socket_directory(uid)
+        target = directory / hashlib.sha256(os.fsencode(address)).hexdigest()
+        if info.st_uid != uid or os.readlink(address) != str(target):
+            raise ValueError("Codex socket alias does not match its account address")
+        directory_info = directory.lstat()
+        if (not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != uid
+                or stat.S_IMODE(directory_info.st_mode) != 0o700):
+            raise ValueError("Codex protected socket directory is not private")
+        info = target.lstat()
+    if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != uid
+            or info.st_mode & 0o077):
+        raise ValueError("Codex socket is not private to its owner")
+    return info.st_dev, info.st_ino, info.st_ctime_ns
+
+
 def _standalone_socket_identity(
     codex_home: str, socket_path: str,
 ) -> Optional[CodexSocketIdentity]:
@@ -370,7 +408,7 @@ def _standalone_socket_identity(
     A standalone app-server has no managed PID record. Its Unix listener is
     replaced on restart, so inode/ctime changes fence old proxies just as a
     PID/start-token change does for a managed daemon. Never substitute another
-    account's socket, follow a socket symlink, or accept a shared-writable path.
+    account's socket, follow an arbitrary symlink, or accept a shared-writable path.
     The proxy handshake still proves that the observed listener speaks Codex.
     """
     try:
@@ -380,20 +418,10 @@ def _standalone_socket_identity(
             return None
         parent = path.parent.resolve()
         parent.relative_to(home)
-        parent_stat = parent.stat()
-        info = path.lstat()
-        if (
-            not stat.S_ISDIR(parent_stat.st_mode)
-            or parent_stat.st_uid != os.getuid()
-            or parent_stat.st_mode & 0o022
-            or not stat.S_ISSOCK(info.st_mode)
-            or info.st_uid != os.getuid()
-            or info.st_mode & 0o077
-        ):
-            return None
+        device, inode, created_ns = socket_identity(str(parent / path.name))
         return CodexSocketIdentity(
             str(home), str(parent / path.name),
-            info.st_dev, info.st_ino, info.st_ctime_ns,
+            device, inode, created_ns,
         )
     except (OSError, ValueError, RuntimeError):
         return None

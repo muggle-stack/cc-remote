@@ -13,7 +13,6 @@ import json
 import os
 from pathlib import Path
 import signal
-import stat
 import tempfile
 import time
 from typing import Any
@@ -24,23 +23,12 @@ from websockets.http11 import Response
 from websockets.uri import parse_uri
 
 from cc_remote import __version__
-from cc_remote.wrapper.codex_daemon import CodexDaemonManager
+from cc_remote.wrapper.codex_daemon import CodexDaemonManager, socket_identity
 from cc_remote.wrapper.process_scan import process_identity
 
 REPORT_NAME = "codex-readiness.json"
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 _TIMEOUT = 8.0
-
-
-def socket_identity(path: str) -> tuple[int, int, int]:
-    info = os.lstat(path)
-    parent = Path(path).parent
-    parent_info = parent.stat()
-    if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid()
-            or info.st_mode & 0o077 or parent_info.st_uid != os.getuid()
-            or parent_info.st_mode & 0o022 or str(parent.resolve()) != str(parent)):
-        raise ValueError("Codex socket is not owned by the Wrapper user")
-    return info.st_dev, info.st_ino, info.st_ctime_ns
 
 
 async def probe_proxy(binary: str, env: dict[str, str], socket_path: str) -> None:
@@ -138,7 +126,7 @@ async def check_profile(
             return row
         expected = os.path.join(os.path.realpath(home),
                                 "app-server-control", "app-server-control.sock")
-        if os.path.realpath(info.socket_path) != expected:
+        if os.path.abspath(info.socket_path) != expected:
             row["reason"] = "account_socket_mismatch"
             return row
         before = socket_identity(expected)
@@ -153,8 +141,8 @@ async def check_profile(
         daily = await manager.version(daily_cli, env)
         if (
             not daily or daily.get("status") != "running"
-            or os.path.realpath(str(daily.get("socketPath", ""))) != expected
-            or os.path.realpath(str(wrapper.get("socketPath", ""))) != expected
+            or os.path.abspath(str(daily.get("socketPath", ""))) != expected
+            or os.path.abspath(str(wrapper.get("socketPath", ""))) != expected
         ):
             row["reason"] = "daily_cli_mismatch"
             return row

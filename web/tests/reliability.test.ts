@@ -7432,9 +7432,13 @@ try {
   assert.match(datePickerMarkup, /aria-haspopup="dialog"/);
   const claudeModelsMarkup = renderToStaticMarkup(createElement(ModelCommandSheet, {
     open: true, kind: "models", engine: "claude", onClose: () => undefined,
+    catalog: { claude: [{ id: "claude-opus-5-5", display_name: "Opus",
+      description: "Opus 5.5 · 1M context", efforts: ["high", "max"] }] },
   }));
-  assert.match(claudeModelsMarkup, /Opus 5/);
-  assert.match(claudeModelsMarkup, /1M 上下文/);
+  assert.match(claudeModelsMarkup, /Opus 5.5/);
+  assert.match(claudeModelsMarkup, /1M context/);
+  assert.doesNotMatch(claudeModelsMarkup, /Sonnet|Haiku/,
+    "the picker must show only the selected account's native catalog");
   assert.doesNotMatch(claudeModelsMarkup, /自定义 \/ Provider 模型 ID|custom-claude-model/,
     "Claude's ordinary model sheet must not expose raw provider ids");
   const codexModelsMarkup = renderToStaticMarkup(createElement(ModelCommandSheet, {
@@ -10670,9 +10674,9 @@ try {
     { engine: "claude", cwd: "/repo" },
     "Claude Code defaults must be resolved against the new session cwd",
   );
-  assert.equal(
+  assert.deepEqual(
     newChatCatalogRequest("claude", "work", "/stale-code-cwd"),
-    null,
+    { engine: "claude" },
     "Claude Work must not probe or inherit the Code cwd",
   );
   assert.deepEqual(
@@ -10766,6 +10770,8 @@ try {
     controlScopeKey: "machine-a:code:claude",
     model: null, effort: null,
     defaultModel: "claude-mythos-5-1", defaultEffort: "max",
+    catalog: { claude: [{ id: "claude-mythos-5-1", display_name: "Mythos 5.1",
+      description: "Native model", efforts: ["high", "max"] }] },
     onPickModel: () => {}, onPickEffort: () => {},
     onPickCwd: () => {},
     onSend: () => true,
@@ -17895,12 +17901,9 @@ assert.equal(btwEffortFrame.sid, "btw-pinned");
 assert.equal(btwEffortFrame.effort, "high");
 
 const codexModels = modelsFor("codex");
-const opus5 = MODELS.find((model) => model.id === "claude-opus-5[1m]");
-assert.ok(opus5, "Claude's curated model sheet must expose Opus 5 with 1M context");
-assert.equal(MODELS[0].id, "claude-opus-5[1m]",
-  "Opus 5 with 1M context must be the default curated Claude card");
-assert.equal(opus5.name, "Opus 5");
-assert.match(opus5.ds, /1M 上下文/);
+assert.equal(MODELS[0].id, "opus[1m]",
+  "offline suggestions keep the native family alias, not a pinned version");
+assert.equal(MODELS[0].name, "Opus");
 assert.equal(matchModelId("claude-opus-5[1m]", "claude"),
   "claude-opus-5[1m]",
   "an exact context-qualified Claude model id must not be reduced to its base alias");

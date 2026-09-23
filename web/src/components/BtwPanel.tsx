@@ -104,6 +104,7 @@ interface Props {
   onRemoveQueued: (query: PendingQuery) => void;
   onInspectQueued: (query: PendingQuery) => void;
   onSetModel: (model: string) => void;
+  onRequestModels?: () => void;
   onSetEffort: (effort: string) => void;
   onSetServiceTier: (tier: string) => boolean;
   onSetAutoCompact: (selection: AutoCompactSelection) => boolean;
@@ -622,7 +623,7 @@ export function BtwPanel(p: Props) {
         </div>
         <div className="btw-controls">
           <span>BTW 设置</span>
-          <button className="hint-ctl" onClick={() => setSheetKind("models")}
+          <button className="hint-ctl" onClick={() => { p.onRequestModels?.(); setSheetKind("models"); }}
             disabled={inputLocked || busy || !p.sid}>{model?.name ?? "模型读取中"}</button>
           <button className="hint-ctl" onClick={() => setSheetKind("efforts")}
             disabled={inputLocked || busy || !p.sid}>{effortName ?? "强度读取中"}</button>

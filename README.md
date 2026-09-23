@@ -4,7 +4,7 @@
 
 自托管 · 多会话 · 多设备 · 实时工具过程 · Code / Work · Web / PWA / TUI
 
-**产品版本：v4.0.3** · Wire protocol v72
+**产品版本：v4.0.4** · Wire protocol v72
 
 [English](README_en.md) · [功能对照](#引擎与功能) · [快速开始](#快速开始) ·
 [终端工作台](#terminal-workspace) · [安装与升级](#安装与升级) · [文档](#文档) · [更新记录](CHANGELOG_zh.md)
@@ -152,7 +152,7 @@ Wrapper 主动出站连接 Relay，设备不需要开放公网入站端口。Rel
 至少准备一个可用引擎：
 
 - **Claude**：日常 Claude Code `>= 2.1.263`，默认路径 `~/.local/bin/claude`。
-  Wrapper 使用该 CLI；Python Agent SDK 固定为 `0.2.151`。
+  Wrapper 使用该 CLI；Python Agent SDK 固定为 `0.2.157`。
 - **Codex**：已登录的官方 CLI。共享控制需要同时支持
   `codex app-server daemon --help` 和 `codex app-server proxy --help`。
 

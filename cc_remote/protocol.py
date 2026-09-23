@@ -1797,9 +1797,8 @@ class DirList(_Base):
 class GetModels(_Command):
     """client -> wrapper: what models does this engine actually offer?
 
-    `codex` answers with app-server's real catalog. Claude has no equivalent
-    catalog RPC, but can resolve explicit no-override settings for a cwd;
-    its model list therefore remains empty and the client keeps the static table.
+    Codex answers with app-server's model/list. Claude reads the native picker
+    from a prompt-free initialization and resolves no-override settings for cwd.
     """
     type: Literal["get_models"] = "get_models"
     engine: Optional[Literal["cc", "claude", "codex"]] = None

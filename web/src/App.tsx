@@ -45,7 +45,8 @@ import {
   resolveNewChatLocalDefaults,
 } from "./new-chat-selection";
 const NewChatView = lazy(() => import("./components/NewChatView").then(m => ({ default: m.NewChatView })));
-import { QuestionSheet } from "./components/QuestionSheet";
+const QuestionSheet = lazy(() => import("./components/QuestionSheet").then(
+  m => ({ default: m.QuestionSheet })));
 import { WorkDashboardSheet } from "./components/WorkDashboardSheet";
 import type { HookDraft, SkillDraft } from "./components/CapabilitiesSheet";
 import { TerminalControl } from "./components/TerminalControl";
@@ -323,11 +324,12 @@ function catalogForEngineProfile(
   catalog: Catalog,
   engine: Engine,
   profileId?: string | null,
+  cwd?: string | null,
 ): Catalog {
-  const scoped = catalog[modelCatalogScopeKey(engine, profileId)];
+  const scoped = catalog[modelCatalogScopeKey(engine, profileId, cwd)];
   return {
     ...catalog,
-    [engine]: scoped ?? (profileId ? [] : (catalog[engine] ?? [])),
+    [engine]: scoped ?? [],
   };
 }
 
@@ -1031,7 +1033,8 @@ export default function App() {
   const newChatCatalogScopeKey = modelCatalogScopeKey(
     engine, newChatProfileId);
   const newChatCatalog = catalogForEngineProfile(
-    state.catalog, engine, newChatProfileId);
+    state.catalog, engine, newChatProfileId,
+    space === "code" ? newChatCwd : undefined);
   const newChatDefaults = resolveNewChatLocalDefaults(
     engine,
     space,
@@ -1111,7 +1114,8 @@ export default function App() {
       ? nativeProfileSessionId(rt.ccSessionId)
       : rt.ccSessionId);
   const focusedCatalog = catalogForEngineProfile(
-    state.catalog, focusedEngine, focusedAccountProfileId);
+    state.catalog, focusedEngine, focusedAccountProfileId,
+    space === "code" ? focusedSession?.cwd || currentCwd : undefined);
   const completedGoalRetired = completedGoalHasNewerUserTurn(
     rt.goal, rt.turns,
   ) || completedGoalHasNewerUserTurn(rt.goal, historyView.turns);
@@ -1147,6 +1151,9 @@ export default function App() {
   }
   const planProgressSource = planProgress?.source ?? null;
   const capabilityCwd = focusedSession?.cwd || currentCwd;
+  const requestFocusedModels = () => wsRef.current?.sendGetModels(
+    focusedEngine, focusedEngine === "claude" && space === "code" ? capabilityCwd : undefined,
+    focusedCodexProfileId, focusedClaudeProfileId);
   const focusedComposerDraftKey = composerDraftKey(
     machineId, space, focusedEngine, focusedSid ?? "",
   );
@@ -1846,11 +1853,10 @@ export default function App() {
     state.newChat,
   ]);
   useEffect(() => {
-    if (state.newChat || !focusedAccountProfileId
-        || state.connState !== "connected" || !state.wrapperOnline) return;
+    if (state.newChat || state.connState !== "connected" || !state.wrapperOnline) return;
     wsRef.current?.sendGetModels(
       focusedEngine,
-      focusedEngine === "claude" ? capabilityCwd : undefined,
+      focusedEngine === "claude" && space === "code" ? capabilityCwd : undefined,
       focusedCodexProfileId,
       focusedClaudeProfileId);
   }, [
@@ -1859,6 +1865,7 @@ export default function App() {
     focusedClaudeProfileId,
     focusedCodexProfileId,
     focusedEngine,
+    space,
     state.connState,
     state.newChat,
     state.wrapperOnline,
@@ -4099,10 +4106,25 @@ export default function App() {
     };
   }, [focusedSid, requestHistory, state.connState]);
 
-  // Cmd/Ctrl+B => toggle sidebar; Cmd/Ctrl+Shift+B => open latest turn's diff
+  // An unfocused "/" focuses the composer; a second press types normally.
+  // Cmd/Ctrl+B => toggle sidebar; Cmd/Ctrl+Shift+B => open latest turn's diff.
   useEffect(() => {
     if (!authed) return;
     const onKey = (e: KeyboardEvent) => {
+      if (e.key === "/" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        if (e.defaultPrevented || e.isComposing || e.repeat
+            || e.composedPath().some((target) => target instanceof HTMLElement
+              && (target.matches("input, textarea, select, [role=textbox]")
+                || target.isContentEditable))
+            || document.querySelector('[role="dialog"], [aria-modal="true"], dialog[open]')) return;
+        const input = document.querySelector<HTMLTextAreaElement>(
+          "textarea[data-chat-composer]:not(:disabled):not([readonly])");
+        if (input) {
+          e.preventDefault();
+          input.focus({ preventScroll: true });
+        }
+        return;
+      }
       if (!(e.metaKey || e.ctrlKey)) return;
       const k = e.key.toLowerCase();
       if (k === "b" && e.shiftKey) {           // diff (shared right slot)
@@ -5720,6 +5742,9 @@ export default function App() {
             autoFocus={newChatAutoFocus}
             engine={engine}
             catalog={newChatCatalog}
+            onRequestModels={() => wsRef.current?.sendGetModels(
+              engine, engine === "claude" && space === "code" ? state.newChat?.cwd : undefined,
+              newChatCodexProfileId, newChatClaudeProfileId)}
             model={state.newChat.model}
             effort={state.newChat.effort}
             autoCompact={{
@@ -5903,6 +5928,7 @@ export default function App() {
           surface={space}
           state={rt.state}
           catalog={focusedCatalog}
+          onRequestModels={requestFocusedModels}
           connState={state.connState}
           wrapperOnline={state.wrapperOnline}
           sendMode={rt.sendMode}
@@ -6098,6 +6124,7 @@ export default function App() {
             onSelect={selectBtw}
             onCloseChat={closeBtw}
             catalog={focusedCatalog}
+            onRequestModels={requestFocusedModels}
             draftKey={activeBtwDraftKey} draftStore={btwDraftsRef.current}
             sendMode={activeBtwSendMode}
             unconfirmedQueued={unconfirmedQueued}
@@ -6193,6 +6220,8 @@ export default function App() {
         onSave={updateQueuedQuery}
         onRetry={retryQueuedQuery} /></Suspense>}
       {rt.pendingQuestion && !activeBtwQuestionVisible && (
+        <Suspense fallback={<div className="scrim show" role="dialog"
+          aria-label="正在加载操作确认" aria-busy="true" />}>
         <QuestionSheet
           key={rt.pendingQuestion.ask_id}
           header={rt.pendingQuestion.header}
@@ -6213,6 +6242,7 @@ export default function App() {
             });
           }}
         />
+        </Suspense>
       )}
       {shouldOpenCodexStatus(statusOpenSid, focusedSid, focusedEngine)
         && <Suspense fallback={null}>

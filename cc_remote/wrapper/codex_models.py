@@ -32,16 +32,16 @@ from cc_remote.wrapper.codex_runtime import (
 
 log = logger("cc_remote.wrapper.codex_models")
 
-_TTL = 600.0          # catalog is baked into the binary; re-probe only if it's upgraded
+# Internal effort/default lookups may reuse a catalog. Explicit picker requests
+# refresh it: native availability can change independently of the CLI version.
+_TTL = 600.0
 _RPC_TIMEOUT = 30.0
 _MAX_MODELS = 256
 _MAX_EFFORTS = 16
 _MAX_CATALOG_TEXT = 4096
 
-_cache: Optional[list[dict]] = None
-_cache_ts: float = 0.0
 _profile_cache: dict[str, tuple[list[dict], float]] = {}
-_lock = asyncio.Lock()
+_inflight: dict[str, asyncio.Task[list[dict]]] = {}
 
 # Cost/latency order, low -> high. Used only to clamp an unsupported request DOWN
 # to something the model accepts; unknown levels sort last so they never win.
@@ -155,32 +155,39 @@ async def codex_catalog(
     *,
     codex_home: str | None = None,
 ) -> list[dict]:
-    """Normalized model list, cached. Never raises: on failure we serve the last
-    good catalog (or []), and the web falls back to its static table."""
-    global _cache, _cache_ts
+    """Refresh on explicit reads; cache internal lookups by account home.
+
+    Concurrent readers share one native query per account. A disconnected
+    reader cannot cancel another reader's refresh, and a slow account cannot
+    block other accounts. Discovery failures retain only this account's last
+    good catalog (or []), without extending its cache lifetime.
+    """
     cache_key = _profile_cache_key(codex_home)
-    async with _lock:
-        cached, cached_ts = (
-            (_cache, _cache_ts) if not cache_key
-            else _profile_cache.get(cache_key, (None, 0.0))
-        )
-        if not force and cached is not None and (time.time() - cached_ts) < _TTL:
+    pending = _inflight.get(cache_key)
+    if pending is None:
+        cached, cached_ts = _profile_cache.get(cache_key, (None, 0.0))
+        if not force and cached is not None and time.monotonic() - cached_ts < _TTL:
             return cached
-        try:
-            data = _normalize(await _rpc_model_list(codex_home))
-        except Exception as e:
-            log.warning("codex model/list failed", error=str(e))
-            return cached or []
+        pending = asyncio.create_task(_refresh_catalog(cache_key, codex_home))
+        _inflight[cache_key] = pending
+    return await asyncio.shield(pending)
+
+
+async def _refresh_catalog(cache_key: str, codex_home: str | None) -> list[dict]:
+    cached, _ = _profile_cache.get(cache_key, (None, 0.0))
+    try:
+        data = _normalize(await _rpc_model_list(codex_home))
         if not data:
             log.warning("codex model/list returned nothing")
             return cached or []
-        now = time.time()
-        if cache_key:
-            _profile_cache[cache_key] = (data, now)
-        else:
-            _cache, _cache_ts = data, now
+        _profile_cache[cache_key] = (data, time.monotonic())
         log.info("codex catalog", count=len(data), ids=[m["id"] for m in data])
         return data
+    except Exception as e:
+        log.warning("codex model/list failed", error=str(e))
+        return cached or []
+    finally:
+        _inflight.pop(cache_key, None)
 
 
 async def efforts_for(

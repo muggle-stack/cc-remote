@@ -15,7 +15,7 @@
 
 Wrapper 使用日常 Claude Code，默认 `~/.local/bin/claude`，最低版本 `2.1.263`。
 `CLAUDE_BIN` 留空仍使用该路径；显式覆盖必须是绝对路径。Agent SDK 固定为
-`0.2.151`，不会使用 SDK 自带 CLI 替代你的日常安装。
+`0.2.157`，不会使用 SDK 自带 CLI 替代你的日常安装。
 
 原生 CLI、Desktop 和 Agent View 拥有的会话先在 Remote 中只读镜像。用户主动接管时，
 Wrapper 仅向核验过的同用户 Claude 进程发送 SIGTERM，确认释放后恢复同一会话；

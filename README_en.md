@@ -4,7 +4,7 @@
 
 Self-hosted · Multiple sessions and devices · Live tool activity · Code / Work · Web / PWA / TUI
 
-**Product version: v4.0.3** · Wire protocol v72
+**Product version: v4.0.4** · Wire protocol v72
 
 [中文](README.md) · [Engine comparison](#engines-and-features) · [Quick start](#quick-start) ·
 [Terminal workspace](#terminal-workspace) · [Install and upgrade](#install-and-upgrade) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)
@@ -173,7 +173,7 @@ development/builds use **Python 3.13 and Node 24**, matching CI and [`.nvmrc`](.
 Prepare at least one working engine:
 
 - **Claude:** daily Claude Code `>= 2.1.263`, normally at `~/.local/bin/claude`.
-  Wrapper launches that CLI; the Python Agent SDK is pinned to `0.2.151`.
+  Wrapper launches that CLI; the Python Agent SDK is pinned to `0.2.157`.
 - **Codex:** an authenticated official CLI. Shared control requires both
   `codex app-server daemon --help` and `codex app-server proxy --help`.
 

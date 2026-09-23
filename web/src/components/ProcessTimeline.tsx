@@ -118,17 +118,18 @@ function useProcessInteraction(
   };
 }
 
-function ProcessDisclosure({ className, summary, children, openOverride,
+function ProcessDisclosure({ className, summary, children, defaultOpen = false, openOverride,
   onOpenChange, onInteractionStart, onInteractionEnd }: {
   className: string;
   summary: ReactNode;
   children: ReactNode;
+  defaultOpen?: boolean;
   openOverride?: boolean;
   onOpenChange?: (open: boolean) => void;
   onInteractionStart?: () => number;
   onInteractionEnd?: (token: number, followOutput?: boolean) => void;
 }) {
-  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(defaultOpen);
   const open = openOverride ?? uncontrolledOpen;
   const tapGuard = useRef(new PointerTapGuard());
   const interaction = useProcessInteraction(onInteractionStart, onInteractionEnd);
@@ -548,13 +549,14 @@ export function ProcessActivity({ block, onOpenFile, imageAssets, onLoadImage,
   );
 }
 
-function TimelineItem({ block, onOpenFile, imageAssets, onLoadImage,
+function TimelineItem({ block, expandThinking, onOpenFile, imageAssets, onLoadImage,
   onAuthorizeImage, onPreviewImage,
   historyTurnId, historyImageAssets, onLoadHistoryImage,
   onPreviewHistoryImage,
   itemOpen, onItemOpenChange, onInteractionStart, onInteractionEnd,
   onOpenAgent }: {
   block: Block;
+  expandThinking: boolean;
   onOpenFile?: (path: string, line?: number) => void;
   imageAssets?: Record<string, InlineImageAsset>;
   onLoadImage?: (path: string, previewId?: string) => boolean;
@@ -598,6 +600,7 @@ function TimelineItem({ block, onOpenFile, imageAssets, onLoadImage,
     const key = `reasoning:${text.message_id}`;
     return (
       <ProcessDisclosure className="process-reasoning"
+        defaultOpen={expandThinking}
         openOverride={itemOpen?.(key)}
         onOpenChange={(open) => onItemOpenChange?.(key, open)}
         onInteractionStart={onInteractionStart}
@@ -974,7 +977,8 @@ export function ProcessTimeline({ blocks, done, active, outcome, problem, durati
                 active={processActive} />
             : <TimelineItem key={row.block.kind === "text"
                 ? `text-${row.block.message_id}` : `process-${row.block.item_id}`}
-                block={row.block} onOpenFile={onOpenFile}
+                block={row.block} expandThinking={engine === "claude"}
+                onOpenFile={onOpenFile}
                 imageAssets={imageAssets} onLoadImage={onLoadImage}
                 onAuthorizeImage={onAuthorizeImage}
                 onPreviewImage={onPreviewImage}

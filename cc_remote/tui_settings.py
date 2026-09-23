@@ -131,6 +131,8 @@ class SettingsForm(Overlay):
         values = {"cwd": self.values["cwd"], **self.profiles}
         if kind == "models":
             values["engine"] = self.engine
+            if self.space == "work":
+                values.pop("cwd", None)
         else:
             values.pop("claude_profile_id", None)
         return values
@@ -237,8 +239,8 @@ class SettingsForm(Overlay):
         choices = [("Engine default (no override)", None)] if self.new else []
         if field == "model":
             models = self.catalog("models").get("models", [])
-            if self.engine == "claude":
-                # Claude has no model/list RPC; same curated choices as Web.
+            if self.engine == "claude" and not models:
+                # Offline fallback only; the native CLI catalog wins.
                 models = [{"id": value} for value in CLAUDE_MODELS]
             for model in models:
                 identity = model.get("id")
@@ -258,7 +260,7 @@ class SettingsForm(Overlay):
                 {},
             )
             efforts = model.get("efforts", [])
-            if self.engine == "claude":
+            if self.engine == "claude" and not model:
                 from cc_remote.wrapper.claude_controls import CLAUDE_EFFORTS
 
                 efforts = sorted(CLAUDE_EFFORTS)
@@ -467,9 +469,5 @@ SETTING_FIELDS = {
 }
 
 CLAUDE_MODELS = (
-    "claude-opus-5[1m]",
-    "claude-mythos-5-1",
-    "claude-sonnet-5",
-    "claude-haiku-4-5",
-    "claude-fable-5-1",
+    "opus[1m]", "sonnet", "haiku",
 )

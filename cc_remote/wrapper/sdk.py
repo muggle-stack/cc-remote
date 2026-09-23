@@ -78,8 +78,8 @@ CLAUDE_DEFAULT_MODEL = "claude-opus-5[1m]"
 CLAUDE_DEFAULT_EFFORT = "max"
 CLAUDE_MAX_BUFFER_SIZE = 16 * 1024 * 1024
 _CLAUDE_1M_MODEL_PINS = {
-    "opus": CLAUDE_DEFAULT_MODEL,
-    "opus[1m]": CLAUDE_DEFAULT_MODEL,
+    "opus": "opus[1m]",
+    "opus[1m]": "opus[1m]",
     "claude-opus-5": CLAUDE_DEFAULT_MODEL,
     "claude-opus-5[1m]": CLAUDE_DEFAULT_MODEL,
     "claude-fable-5-1": "claude-fable-5-1[1m]",
@@ -94,7 +94,7 @@ _CURRENT_LAUNCH_VALUE = object()
 
 
 def normalize_claude_model_selection(model: str | None) -> str | None:
-    """Keep curated long-context aliases pinned across every child generation."""
+    """Preserve long context without pinning native family aliases to a version."""
     if model is None:
         return None
     normalized = model.strip()
@@ -437,7 +437,7 @@ class SdkHandle:
             else effort_override
         )
         if auto_compact is not None:
-            # SDK 0.2.151 has no typed option yet, but intentionally forwards
+            # SDK 0.2.157 has no typed option yet, but intentionally forwards
             # bounded extra_args to the pinned Claude Code runtime.
             extra_args["autocompact"] = auto_compact
         if self.work_mode:
@@ -529,7 +529,7 @@ class SdkHandle:
             ),
             skills=[] if self.work_mode else None,
             # The wrapper-owned Work settings file already contains the complete
-            # fail-closed sandbox including its filesystem allowlist. SDK 0.2.151
+            # fail-closed sandbox including its filesystem allowlist. SDK 0.2.157
             # replaces (rather than deep-merges) that object when `sandbox=` is
             # also supplied, silently dropping filesystem policy and inlining
             # provider credentials in argv. Pass only the policy path instead.

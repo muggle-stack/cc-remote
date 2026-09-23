@@ -13,6 +13,7 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cc_remote.wrapper.codex_readiness import REPORT_NAME
+from cc_remote.wrapper.codex_daemon import socket_identity
 from cc_remote.wrapper.process_scan import ProcessIdentity, process_identity, process_owner_uid
 from deploy.work_registry_snapshot import resolve_wrapper_state_dir
 
@@ -32,9 +33,7 @@ def socket_still_ready(row: dict, owner_uid: int) -> bool:
         path = row["socket"]
         if not isinstance(path, str) or not os.path.isabs(path):
             return False
-        info = os.lstat(path)
-        if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != owner_uid
-                or [info.st_dev, info.st_ino, info.st_ctime_ns] != row["socket_identity"]):
+        if list(socket_identity(path, owner_uid=owner_uid)) != row["socket_identity"]:
             return False
         # No account binary, authentication or model API is invoked as root.
         # Check only that the exact recently verified listener still accepts.
@@ -42,7 +41,7 @@ def socket_still_ready(row: dict, owner_uid: int) -> bool:
             connection.settimeout(0.2)
             connection.connect(path)
         return True
-    except (OSError, KeyError, TypeError, ValueError):
+    except (OSError, KeyError, TypeError, ValueError, RuntimeError):
         return False
 
 
