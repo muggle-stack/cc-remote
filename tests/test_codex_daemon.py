@@ -260,10 +260,11 @@ def test_managed_daemon_identity_uses_same_user_pid_and_start_token(
     assert daemon_module._managed_daemon_process_identity(tmp_path) is None
 
 
-@pytest.fixture
-def standalone_listener():
+@pytest.fixture(params=[False, True], ids=["socket", "native-alias"])
+def standalone_listener(request, monkeypatch):
     # Keep the path below macOS's Unix socket length limit.
-    with tempfile.TemporaryDirectory(prefix="cc-sock-", dir="/tmp") as root:
+    with (tempfile.TemporaryDirectory(prefix="cc-sock-", dir="/tmp") as root,
+          tempfile.TemporaryDirectory(prefix="ca-", dir="/tmp") as protected):
         home = Path(root).resolve()
         control = home / "app-server-control"
         control.mkdir(mode=0o700)
@@ -272,6 +273,12 @@ def standalone_listener():
             listener.bind(str(path))
             path.chmod(0o600)
             listener.listen()
+            if request.param:
+                directory = Path(protected).resolve()
+                monkeypatch.setattr(daemon_module, "_protected_socket_directory", lambda _uid: directory)
+                target = directory / hashlib.sha256(os.fsencode(path)).hexdigest()
+                path.rename(target)
+                path.symlink_to(target)
             yield home, path
 
 

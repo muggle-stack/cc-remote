@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -77,10 +78,11 @@ def test_non_disruptive_first_start_reuses_official_lifecycle(tmp_path, monkeypa
     assert calls == ["--help", "--help", "version", "start", "version"]
 
 
-@pytest.fixture
-def account_socket():
+@pytest.fixture(params=[False, True], ids=["socket", "native-alias"])
+def account_socket(request, monkeypatch):
     # macOS Unix paths are limited to 104 bytes; pytest's path can exceed that.
-    with tempfile.TemporaryDirectory(prefix="cc-readiness-", dir="/tmp") as directory:
+    with (tempfile.TemporaryDirectory(prefix="cc-readiness-", dir="/tmp") as directory,
+          tempfile.TemporaryDirectory(prefix="ca-", dir="/tmp") as protected):
         home = Path(directory).resolve()
         path = home / "app-server-control/app-server-control.sock"
         path.parent.mkdir(mode=0o700)
@@ -88,6 +90,12 @@ def account_socket():
             listener.bind(str(path))
             path.chmod(0o600)
             listener.listen()
+            if request.param:
+                root = Path(protected).resolve()
+                monkeypatch.setattr(daemon, "_protected_socket_directory", lambda _uid: root)
+                target = root / hashlib.sha256(os.fsencode(path)).hexdigest()
+                path.rename(target)
+                path.symlink_to(target)
             yield home, path
 
 
@@ -233,6 +241,44 @@ def test_installer_checks_listener_again_before_printing_ready(tmp_path, account
     result = installer.read_receipt(receipt, readiness.SOURCE_ROOT, before)
     assert result["profiles"][0]["status"] == "unavailable"
     assert result["profiles"][0]["reason"] == "daemon_changed"
+
+
+@pytest.mark.parametrize("unsafe", ["other_account", "target_symlink", "permissions", "directory"])
+def test_native_alias_rejects_unsafe_targets(account_socket, unsafe):
+    _, path = account_socket
+    if not path.is_symlink():
+        return
+    target = path.resolve()
+    if unsafe == "other_account":
+        other = path.with_name("other-account.sock")
+        other.symlink_to(target)
+        path = other
+    elif unsafe == "target_symlink":
+        renamed = target.with_name("redirected")
+        target.rename(renamed)
+        target.symlink_to(renamed)
+    elif unsafe == "permissions":
+        target.chmod(0o666)
+    else:
+        target.parent.chmod(0o750)
+    with pytest.raises(ValueError):
+        readiness.socket_identity(str(path))
+
+
+def test_receipt_fences_physical_replacement_behind_native_alias(tmp_path, account_socket):
+    _, path = account_socket
+    target = path.resolve()
+    row = {"profile": "account", "status": "ready", "socket": str(path),
+           "socket_identity": list(readiness.socket_identity(str(path)))}
+    before = time.time()
+    readiness.write_report(tmp_path, [row])
+    target.unlink()
+    with socket.socket(socket.AF_UNIX) as replacement:
+        replacement.bind(str(target))
+        target.chmod(0o600)
+        replacement.listen()
+        receipt = installer.read_receipt(tmp_path / readiness.REPORT_NAME, readiness.SOURCE_ROOT, before)
+        assert receipt["profiles"][0]["reason"] == "daemon_changed"
 
 
 @pytest.mark.parametrize("kind", ["plist", "env-file"])
