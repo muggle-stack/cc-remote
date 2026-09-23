@@ -533,7 +533,7 @@ export function NewChatView({ cwd, controlScopeKey,
           </div>
         )}
 
-        <textarea className="newchat-input"
+        <textarea className="newchat-input" data-chat-composer
           placeholder={space === "work" ? "描述要完成的工作，或上传文档、表格、演示…" : "发条消息开始…"} ref={taRef}
           value={text} onChange={(e) => {
             setText(e.target.value);

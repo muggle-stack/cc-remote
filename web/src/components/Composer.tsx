@@ -770,6 +770,7 @@ export function Composer(p: Props) {
 
   const inputControl = (placeholder: string) => (
     <textarea
+      data-chat-composer
       ref={taRef}
       rows={1}
       value={input}
