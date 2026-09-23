@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_product_version_is_consistent_across_runtime_and_web_metadata():
-    assert __version__ == "4.0.3"
+    assert __version__ == "4.0.4"
     assert re.fullmatch(r"[1-9]\d*\.\d+\.\d+", __version__)
 
     package = json.loads((ROOT / "web/package.json").read_text())

@@ -2,6 +2,20 @@
 
 [中文](CHANGELOG_zh.md)
 
+## v4.0.4
+
+Discover Claude models from the installed CLI and improve inline code emphasis.
+Wire protocol remains v72. See the bilingual [release notes](docs/releases/v4.0.4.md).
+
+- Populate Web, side-chat and TUI model pickers with the native model catalog and
+  supported effort levels, without sending prompts or resuming sessions.
+- Refresh the catalog when opening model settings, scope its cache by account,
+  directory and CLI build, and preserve explicitly selected historical models.
+- Upgrade the verified Python Claude Agent SDK from 0.2.151 to 0.2.157. Wrapper
+  upgrades across this SDK boundary require the documented drain/installer path.
+- Render inline code in softer harness colors without a background badge; actual
+  links retain their link styling and fenced code blocks retain their background.
+
 ## v4.0.3
 
 Fix duplicated and misplaced Claude messages when browsing overlapping history pages.
