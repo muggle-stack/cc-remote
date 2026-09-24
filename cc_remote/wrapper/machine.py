@@ -6940,6 +6940,13 @@ class WrapperMachine:
     def _schedule_claude_autonomous_interrupt_watchdog(
         self, ctx: SessionContext,
     ) -> None:
+        # The managed consumer already enforces this Stop's drain deadline.
+        # Anonymous pre-input activity can coexist with that consumer; it must
+        # not create a second reconnect owner. Its finalizer hands off any
+        # still-pending autonomous continuation after releasing ownership.
+        managed = ctx.turn_task
+        if managed is not None and not managed.done():
+            return
         current = ctx.claude_autonomous_interrupt_task
         if current is not None and not current.done():
             return
@@ -6971,10 +6978,12 @@ class WrapperMachine:
                 return
             except asyncio.TimeoutError:
                 pass
+            managed = ctx.turn_task
             if (
                 not self._is_resident_context(ctx)
                 or not self._claude_autonomous_followup_pending(ctx)
                 or ctx.state not in {"interrupting", "draining"}
+                or (managed is not None and not managed.done())
             ):
                 return
             log.error(
@@ -18524,9 +18533,8 @@ class WrapperMachine:
         )
         await self._emit(ctx, StateEvent(state="interrupting"))
         if self._claude_autonomous_followup_pending(ctx):
-            # No managed receive_response() consumer owns this continuation.
-            # Its Result arrives through the background pump, so give Stop its
-            # own bounded recovery path if that terminal never arrives.
+            # The scheduler only installs a watchdog without a managed reader;
+            # otherwise that reader owns Stop until its finalizer hands off.
             self._schedule_claude_autonomous_interrupt_watchdog(ctx)
         # A turn can still be reconnecting to apply effort/tier changes and may
         # not have submitted its query yet.  Serialize against that final launch
@@ -39081,6 +39089,12 @@ class WrapperMachine:
                 await asyncio.gather(
                     codex_restart_watch_task, return_exceptions=True)
             if not is_codex:
+                if (ctx.state in {"interrupting", "draining"}
+                        and self._claude_autonomous_followup_pending(ctx)):
+                    # A managed Result can precede an autonomous Result. Keep
+                    # Stop bounded by its original deadline after this reader
+                    # releases the stream; do not leave recovery ownerless.
+                    self._schedule_claude_autonomous_interrupt_watchdog(ctx)
                 # In the managed-finalizer-wins race, the background callback
                 # already attempted these schedulers while state was running.
                 # Retry after final quiescence; both schedulers are idempotent.

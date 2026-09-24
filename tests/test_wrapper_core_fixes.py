@@ -944,6 +944,111 @@ def test_interrupt_wakes_existing_queue_wait_and_enforces_drain_deadline():
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("watchdog_first", [False, True])
+def test_claude_managed_interrupt_owns_recovery_with_background_activity(watchdog_first):
+    async def run():
+        machine, transport = _mk_machine()
+        machine.cfg.drain_timeout = 0.03
+        ctx = _mk_ctx("claude-stop-owner", "claude-stop-owner")
+        ctx.engine = "claude"
+        ctx.state = "running"
+        ctx.active_msg_id = "stop-message"
+        machine.sessions[ctx.key] = ctx
+
+        class StalledSdk(_ClaudeStalledSdk):
+            async def force_reconnect(self, resume_id, cwd, **_kwargs):
+                self.reconnects += 1
+                # Real disconnect/connect yields before lifecycle reset. Both
+                # expired consumers must not reconnect the same native child.
+                await asyncio.sleep(0.02)
+                machine._reset_claude_task_lifecycle(ctx)
+
+        sdk = StalledSdk()
+        ctx.sdk = sdk
+
+        async def no_external_owner(_sid):
+            return False
+
+        machine._prime_claude_ownership = no_external_owner
+        turn = asyncio.create_task(machine._run_turn(ctx, "inspect"))
+        ctx.turn_task = turn
+        await asyncio.wait_for(sdk.reader_started.wait(), timeout=1)
+        ctx.claude_background_followups["background-request"] = "active"
+        if watchdog_first:
+            # An existing watchdog can gain a managed owner before its deadline
+            # when an already accepted steering input completes its handoff.
+            ctx.turn_task = None
+        await machine._handle_interrupt(SimpleNamespace(sid=ctx.key))
+        watchdog = ctx.claude_autonomous_interrupt_task
+        ctx.turn_task = turn
+        await asyncio.wait_for(turn, timeout=1)
+        if watchdog is not None:
+            await asyncio.gather(watchdog, return_exceptions=True)
+
+        assert sdk.reconnects == 1
+        assert ctx.state == "idle"
+        assert ctx.claude_autonomous_interrupt_task is None
+        failures = [msg for msg in transport.sent
+                    if getattr(msg, "code", None) == ERR_DRAIN_TIMEOUT]
+        assert len(failures) == 1
+        assert failures[0].msg_id == "stop-message"
+
+    asyncio.run(run())
+
+
+def test_claude_interrupt_hands_remaining_background_work_the_original_deadline():
+    async def run():
+        machine, transport = _mk_machine()
+        machine.cfg.drain_timeout = 0.1
+        ctx = _mk_ctx("claude-stop-handoff", "claude-stop-handoff")
+        ctx.engine = "claude"
+        ctx.state = "running"
+        ctx.active_msg_id = "stop-message"
+        machine.sessions[ctx.key] = ctx
+
+        class StalledSdk(_ClaudeStalledSdk):
+            async def force_reconnect(self, resume_id, cwd, **_kwargs):
+                self.reconnects += 1
+                machine._reset_claude_task_lifecycle(ctx)
+
+        sdk = StalledSdk()
+        sdk.responses = [ResultMessage(
+            subtype="error_during_execution", duration_ms=1,
+            duration_api_ms=1, is_error=True, num_turns=1,
+            session_id=ctx.session_id,
+        )]
+        ctx.sdk = sdk
+
+        async def no_external_owner(_sid):
+            return False
+
+        machine._prime_claude_ownership = no_external_owner
+        turn = asyncio.create_task(machine._run_turn(ctx, "inspect"))
+        ctx.turn_task = turn
+        await asyncio.wait_for(sdk.reader_started.wait(), timeout=1)
+        ctx.claude_background_followups["background-request"] = "active"
+        await machine._handle_interrupt(SimpleNamespace(sid=ctx.key))
+        deadline = ctx.interrupt_deadline
+        # A handoff must retain the accepted Stop's deadline, not start a fresh
+        # wait using the config value at the managed terminal.
+        machine.cfg.drain_timeout = 100
+        sdk.release.set()
+        await asyncio.wait_for(turn, timeout=1)
+
+        assert ctx.state == "interrupting"
+        assert ctx.interrupt_deadline == deadline
+        watchdog = ctx.claude_autonomous_interrupt_task
+        assert watchdog is not None
+        await asyncio.wait_for(watchdog, timeout=1)
+        assert sdk.reconnects == 1
+        assert ctx.state == "idle"
+        assert ctx.claude_autonomous_interrupt_task is None
+        assert len([msg for msg in transport.sent
+                    if getattr(msg, "code", None) == ERR_DRAIN_TIMEOUT]) == 1
+
+    asyncio.run(run())
+
+
 def test_codex_silence_emits_no_synthetic_waiting_notice_and_later_completes(
         monkeypatch):
     async def run():

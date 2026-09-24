@@ -1,5 +1,6 @@
 """No model calls or real App lifecycle changes: desktop launch regressions."""
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ from websockets.asyncio.client import connect
 from websockets.asyncio.server import unix_serve
 
 from cc_remote import codex_desktop as launcher
+from cc_remote.wrapper import codex_daemon
 from cc_remote.wrapper.process_scan import ProcessIdentity
 
 
@@ -108,12 +110,20 @@ async def test_bridge_peer_requires_exact_app_profile_and_process(
 
 
 @pytest.mark.asyncio
-async def test_real_proxy_roundtrip_and_reject_self_after_preflight(monkeypatch):
+@pytest.mark.parametrize("protected_alias", [False, True])
+async def test_real_proxy_roundtrip_and_reject_self_after_preflight(monkeypatch, protected_alias):
     with tempfile.TemporaryDirectory(prefix="cc-launch-", dir="/tmp") as root:
         profile = Path(root).resolve()
         directory = profile / "app-server-control"
         directory.mkdir(mode=0o700)
         path = directory / "app-server-control.sock"
+        listener = path
+        if protected_alias:
+            protected = profile / "p"
+            protected.mkdir(mode=0o700)
+            monkeypatch.setattr(codex_daemon, "_protected_socket_directory", lambda _uid: protected)
+            listener = protected / hashlib.sha256(os.fsencode(path)).hexdigest()
+            path.symlink_to(listener)
         frames = []
 
         async def echo(ws):
@@ -132,8 +142,8 @@ async def test_real_proxy_roundtrip_and_reject_self_after_preflight(monkeypatch)
             return f"p{os.getpid()}\nu{os.getuid()}\nn127.0.0.1:{peer_port}->127.0.0.1:{bridge.port}\n"
 
         monkeypatch.setattr(launcher, "command", command)
-        async with unix_serve(echo, str(path)):
-            path.chmod(0o600)
+        async with unix_serve(echo, str(listener)):
+            listener.chmod(0o600)
             async with await asyncio.start_server(bridge.handle, "127.0.0.1", 0, limit=16384) as server:
                 bridge.port = server.sockets[0].getsockname()[1]
                 await bridge.preflight()

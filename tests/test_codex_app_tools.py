@@ -1,5 +1,7 @@
 """Zero-model-turn coverage for the opt-in Desktop tools transport."""
+import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import socket
@@ -10,6 +12,7 @@ import tomllib
 import pytest
 
 from cc_remote import codex_app_tools as tools
+from cc_remote.wrapper import codex_daemon
 from cc_remote.wrapper.process_scan import ProcessIdentity
 
 
@@ -65,15 +68,23 @@ def test_discovery_requires_exact_shared_profile(monkeypatch, tmp_path, home, en
     "missing_listener", "ambiguous_listener", "foreign_owner", "wrong_peer",
     "bridge_reused", "app_reused", "missing_daemon", "linked_daemon",
 ])
-def test_shared_app_requires_profile_bound_bridge_and_both_connection_ends(monkeypatch, failure):
+@pytest.mark.parametrize("protected_alias", [False, True])
+def test_shared_app_requires_profile_bound_bridge_and_both_connection_ends(monkeypatch, failure, protected_alias):
     with tempfile.TemporaryDirectory(prefix="cc-bridge-", dir="/tmp") as root:
         profile = Path(root).resolve()
         directory = profile / "app-server-control"
         directory.mkdir()
         upstream = directory / "app-server-control.sock"
+        listener = upstream
+        if protected_alias:
+            protected = profile / "p"
+            protected.mkdir(mode=0o700)
+            monkeypatch.setattr(codex_daemon, "_protected_socket_directory", lambda _uid: protected)
+            listener = protected / hashlib.sha256(os.fsencode(upstream)).hexdigest()
+            upstream.symlink_to(listener)
         with socket.socket(socket.AF_UNIX) as sock:
-            sock.bind(str(upstream))
-            upstream.chmod(0o600)
+            sock.bind(str(listener))
+            listener.chmod(0o600)
             if failure == "missing_daemon":
                 upstream.unlink()
             elif failure == "linked_daemon":
@@ -136,6 +147,7 @@ def test_discovery_without_macos_is_optional(monkeypatch, tmp_path):
 
 def test_changed_official_policy_cannot_use_old_approval_rules(monkeypatch, tmp_path):
     monkeypatch.setattr(tools.sys, "platform", "darwin")
+    monkeypatch.setattr(tools, "socket_identity", lambda _path: (0, 0, 0))
     monkeypatch.setattr(tools, "_private_socket", lambda _path: None)
     monkeypatch.setattr(tools, "app_paths", lambda _app: (tmp_path, tmp_path, tmp_path, "test"))
     (tmp_path / "desktop-mcp.json").write_text(json.dumps({"mcpServers": {"codex_app": {"tools": {"new_write": {"approval_mode": "prompt"}}}}}))
@@ -144,6 +156,7 @@ def test_changed_official_policy_cannot_use_old_approval_rules(monkeypatch, tmp_
 
 def test_discovery_rejects_two_matching_apps_and_pid_reuse(monkeypatch, tmp_path):
     monkeypatch.setattr(tools.sys, "platform", "darwin")
+    monkeypatch.setattr(tools, "socket_identity", lambda _path: (0, 0, 0))
     monkeypatch.setattr(tools, "app_paths", lambda _app: (tmp_path, tmp_path, tmp_path, "test"))
     monkeypatch.setattr(tools, "_signed", lambda _path: None)
     monkeypatch.setattr(tools, "_matching_app_pids", lambda _exe: [41, 42])
@@ -205,6 +218,7 @@ def _ready_app(monkeypatch, tmp_path):
     node = tmp_path / "node"
     node.write_text("old runtime")
     monkeypatch.setattr(tools.sys, "platform", "darwin")
+    monkeypatch.setattr(tools, "socket_identity", lambda _path: (0, 0, 0))
     monkeypatch.setattr(tools, "app_paths", lambda _app: (tmp_path, node, tmp_path, "test"))
     monkeypatch.setattr(tools, "_signed", lambda _path: None)
     monkeypatch.setattr(tools, "_matching_app_pids", lambda _exe: [42])
@@ -215,6 +229,36 @@ def _ready_app(monkeypatch, tmp_path):
     socket_info = tmp_path.stat()
     monkeypatch.setattr(tools, "_private_socket", lambda _path: socket_info)
     return node
+
+
+@pytest.mark.parametrize("failure", [None, "cross_account", "shared_directory", "shared_socket"])
+def test_discovery_validates_protected_daemon_alias(monkeypatch, failure):
+    with tempfile.TemporaryDirectory(prefix="cc-app-", dir="/tmp") as root:
+        profile = Path(root).resolve()
+        control = profile / "app-server-control"
+        control.mkdir(mode=0o700)
+        address = control / "app-server-control.sock"
+        protected = profile / "p"
+        protected.mkdir(mode=0o700)
+        native_address = address if failure != "cross_account" else profile / "other.sock"
+        listener = protected / hashlib.sha256(os.fsencode(native_address)).hexdigest()
+        address.symlink_to(listener)
+        pipe = profile / "tools.sock"
+        private_socket = tools._private_socket
+        _ready_app(monkeypatch, profile)
+        monkeypatch.setattr(codex_daemon, "_protected_socket_directory", lambda _uid: protected)
+        monkeypatch.setattr(tools, "socket_identity", codex_daemon.socket_identity)
+        monkeypatch.setattr(tools, "_private_socket", private_socket)
+        monkeypatch.setattr(tools, "_pipe_from_open_logs", lambda *_args: pipe)
+        with socket.socket(socket.AF_UNIX) as daemon, socket.socket(socket.AF_UNIX) as app:
+            daemon.bind(str(listener))
+            app.bind(str(pipe))
+            listener.chmod(0o666 if failure == "shared_socket" else 0o600)
+            pipe.chmod(0o600)
+            if failure == "shared_directory":
+                protected.chmod(0o755)
+            result = tools.discover(profile, profile)
+            assert result["state"] == ("ready" if failure is None else "unavailable")
 
 
 def test_runtime_update_changes_generation_without_app_or_pipe_restart(monkeypatch, tmp_path):

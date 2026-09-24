@@ -14,6 +14,13 @@ App-process-checked loopback WebSocket bridge forwards bytes unchanged to that
 profile's private Unix control socket. There is no global environment override,
 model API proxy, App patch, automatic takeover or private stdio fallback.
 
+The launcher and App discovery share the Wrapper's native socket validation.
+Both direct private sockets and Codex 0.156's protected socket aliases are
+supported. An alias must match the selected account's exact native address hash
+under the current user's private daemon directory; arbitrary links, cross-account
+targets and sockets with shared permissions remain rejected. The App tools pipe
+keeps its separate direct-socket validation.
+
 The [official app-server protocol](https://learn.chatgpt.com/docs/app-server)
 documents WebSockets over the Unix control socket. WebSocket transport is
 experimental. The Desktop `CODEX_APP_SERVER_WS_URL` launch override is an
