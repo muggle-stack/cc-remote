@@ -394,6 +394,43 @@ try {
     /crash|warning|wrapper|private|traceback|secret/i);
 
   const hiddenDiagnostic = "provider crash at /private/token; see wrapper logs";
+  const stopTimeoutMessage = "停止确认超时，本轮未确认完成。";
+  const stopTimeout = { code: "drain_timeout", message: hiddenDiagnostic };
+  assert.equal(presentTurnProblem(stopTimeout), stopTimeoutMessage);
+  assert.equal(presentCommandProblem(stopTimeout), stopTimeoutMessage);
+  for (const message of [stopTimeoutMessage, "停止操作未及时完成，会话正在恢复。"]) {
+    assert.equal(presentHistoricalTurnProblem(message), stopTimeoutMessage,
+      "stop timeouts must survive live-to-history presentation and old caches");
+    assert.equal(presentTurnOutcome("failed", message), "停止确认超时");
+  }
+  const stopSid = "claude-stop-timeout";
+  const stopping = { ...initialState, focusedSid: stopSid,
+    sessions: [{ session_id: stopSid, engine: "claude", space: "code" }],
+    runtimes: { [stopSid]: { ...createRuntime(), state: "interrupting",
+      turns: [{ id: "stop-message", prompt: "inspect", blocks: [], done: false }],
+    } },
+  };
+  const timedOut = reduce(stopping, { type: "event", event: event({
+    type: "error", sid: stopSid, msg_id: "stop-message", ...stopTimeout,
+  }) });
+  const failedStop = timedOut.runtimes[stopSid].turns[0];
+  assert.equal(failedStop.done, true);
+  assert.equal(failedStop.error, stopTimeoutMessage);
+  assert.notEqual(failedStop.interrupted, true,
+    "a stop timeout cannot invent a confirmed native interruption");
+  const { default: TurnProblem } = await harness.ssrLoadModule("/src/components/TurnProblem.tsx");
+  const stopMarkup = renderToStaticMarkup(createElement(TurnProblem, {
+    message: failedStop.error, continuing: false,
+  }));
+  assert.match(stopMarkup, /停止确认超时，本轮未确认完成/);
+  assert.doesNotMatch(stopMarkup, /该轮未正常结束|正在恢复|private|crash/);
+  const confirmedStop = reduce(stopping, { type: "event", event: event({
+    type: "turn_end", sid: stopSid, turn_id: "stop-message",
+    result: { subtype: "error_during_execution", is_error: true, duration_ms: 1 },
+  }) }).runtimes[stopSid].turns[0];
+  assert.equal(confirmedStop.interrupted, true);
+  assert.equal(confirmedStop.error, undefined);
+  assert.equal(presentTurnOutcome("interrupted"), "已打断");
   const quotaFailure = "本轮使用的 Codex 账号额度已用完。可切换账号、补充额度，或等待恢复后重试。";
   const quotaRetry = quotaFailure + "官方提示可于 2026-09-15 09:24（设备当地时间）重试。";
   const policyFailure = "上游模型因安全策略拒绝了本次请求（cyber_policy）。"

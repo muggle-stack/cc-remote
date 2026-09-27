@@ -624,7 +624,8 @@ export function BtwPanel(p: Props) {
         <div className="btw-controls">
           <span>BTW 设置</span>
           <button className="hint-ctl" onClick={() => { p.onRequestModels?.(); setSheetKind("models"); }}
-            disabled={inputLocked || busy || !p.sid}>{model?.name ?? "模型读取中"}</button>
+            disabled={inputLocked || busy || !p.sid}>{model?.name
+              ?? (p.sid && p.rt ? "选择模型" : "模型读取中")}</button>
           <button className="hint-ctl" onClick={() => setSheetKind("efforts")}
             disabled={inputLocked || busy || !p.sid}>{effortName ?? "强度读取中"}</button>
           {p.engine === "codex" && <button type="button"
@@ -660,11 +661,10 @@ export function BtwPanel(p: Props) {
           setSheetKind(null);
         }}
       />
-      <>
-        <div className={"scrim" + (autoCompactOpen ? " show" : "")}
+      {autoCompactOpen && <>
+        <div className="scrim show"
           onClick={() => setAutoCompactOpen(false)} />
-        <div className={"sheet auto-compact-sheet"
-          + (autoCompactOpen ? " show" : "")}
+        <div className="sheet auto-compact-sheet show"
           role="dialog" aria-label="BTW 自动压缩">
           <div className="sheet-grip" />
           <div className="sheet-title">BTW 自动压缩</div>
@@ -682,7 +682,7 @@ export function BtwPanel(p: Props) {
               }} />
           </div>
         </div>
-      </>
+      </>}
       {!inputLocked && p.rt?.pendingQuestion && (
         <QuestionSheet
           key={p.rt.pendingQuestion.ask_id}

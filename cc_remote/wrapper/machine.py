@@ -399,6 +399,7 @@ from cc_remote.wrapper.process_scan import (
     process_owner_uid,
 )
 from cc_remote.wrapper.command_router import CommandRouter, UNHANDLED_COMMAND
+from cc_remote.wrapper.command_scheduler import CommandScheduler
 from cc_remote.wrapper.preview_capabilities import (
     PREVIEW_PATH_MAX_BYTES,
     PreviewCapability,
@@ -2024,6 +2025,8 @@ class WrapperMachine:
         self._timed_task_catalog = {}
         self.transport = transport
         self._command_router = CommandRouter(self)
+        self._command_scheduler = CommandScheduler(
+            self._process_command_safely, self._command_target_identity)
         self.instance_id = uuid4().hex
         # Each configured CLAUDE_CONFIG_DIR is an independent account/session
         # boundary. Keep implicit single-account mode source-compatible and
@@ -6940,6 +6943,13 @@ class WrapperMachine:
     def _schedule_claude_autonomous_interrupt_watchdog(
         self, ctx: SessionContext,
     ) -> None:
+        # The managed consumer already enforces this Stop's drain deadline.
+        # Anonymous pre-input activity can coexist with that consumer; it must
+        # not create a second reconnect owner. Its finalizer hands off any
+        # still-pending autonomous continuation after releasing ownership.
+        managed = ctx.turn_task
+        if managed is not None and not managed.done():
+            return
         current = ctx.claude_autonomous_interrupt_task
         if current is not None and not current.done():
             return
@@ -6971,10 +6981,12 @@ class WrapperMachine:
                 return
             except asyncio.TimeoutError:
                 pass
+            managed = ctx.turn_task
             if (
                 not self._is_resident_context(ctx)
                 or not self._claude_autonomous_followup_pending(ctx)
                 or ctx.state not in {"interrupting", "draining"}
+                or (managed is not None and not managed.done())
             ):
                 return
             log.error(
@@ -9026,44 +9038,10 @@ class WrapperMachine:
             self._work_schedule_task = asyncio.create_task(
                 self._work_schedule_loop())
             async for cmd in self.transport.incoming():
-                if cmd.type == "list_sessions":
-                    self._start_session_list_command(cmd)
-                    continue
-                if (cmd.type in {"get_history", "get_turn_detail", "get_agent_detail", "get_turn_file_changes"}
-                        or (cmd.type == "get_diff" and getattr(cmd, "turn_id", None))):
-                    self._start_history_command(cmd)
-                    continue
-                if cmd.type == "get_models":
-                    self._start_models_command(cmd)
-                    continue
-                if cmd.type == "steer":
-                    # turn/steer is a short app-server RPC, but it must not
-                    # monopolize the serial command lane and delay an explicit
-                    # Stop arriving from another client.
-                    self._start_interactive_control_command(cmd)
-                    continue
-                if cmd.type == "get_permission_profiles":
-                    self._start_models_command(cmd)
-                    continue
-                if cmd.type in {
-                    "get_status", "consume_rate_limit_reset_credit",
-                }:
-                    self._start_status_command(cmd)
-                    continue
-                if cmd.type in {
-                    "get_engine_capabilities", "manage_engine_plugin",
-                    "manage_engine_skill", "manage_engine_hook",
-                }:
-                    self._start_capabilities_command(cmd)
-                    continue
-                if cmd.type == "set_model":
-                    ctx = self._ctx_for(getattr(cmd, "sid", None))
-                    if (ctx is not None and ctx.engine == "claude"
-                            and ctx.space == "code"):
-                        self._start_interactive_control_command(cmd)
-                        continue
-                await self._process_command_safely(cmd)
+                await self._dispatch_incoming_command(cmd)
+            await self._command_scheduler.drain()
         finally:
+            await self._command_scheduler.close()
             models_tasks = list(self._models_command_tasks.values())
             for task in models_tasks:
                 task.cancel()
@@ -11459,6 +11437,62 @@ class WrapperMachine:
             client_id=client_id,
             to=client_id,
         ))
+
+    def _command_target_identity(self, sid: str) -> str:
+        # Resolve at admission/comparison time: a running command may still
+        # carry a tmp key after its context captures the real native identity.
+        ctx = self._ctx_for(sid)
+        return (ctx.key if ctx is not None else None) or (
+            self._resolve_session_alias(sid) or sid)
+
+    async def _dispatch_incoming_command(self, cmd) -> None:
+        """Admit commands without waiting for SDK I/O on the receive loop."""
+        if cmd.type == "list_sessions":
+            self._start_session_list_command(cmd)
+            return
+        if (cmd.type in {"get_history", "get_turn_detail", "get_agent_detail", "get_turn_file_changes"}
+                or (cmd.type == "get_diff" and getattr(cmd, "turn_id", None))):
+            self._start_history_command(cmd)
+            return
+        if cmd.type in {"get_models", "get_permission_profiles"}:
+            self._start_models_command(cmd)
+            return
+        if cmd.type == "steer":
+            self._start_interactive_control_command(cmd)
+            return
+        if cmd.type in {"get_status", "consume_rate_limit_reset_credit"}:
+            self._start_status_command(cmd)
+            return
+        if cmd.type in {
+            "get_engine_capabilities", "manage_engine_plugin",
+            "manage_engine_skill", "manage_engine_hook",
+        }:
+            self._start_capabilities_command(cmd)
+            return
+        if cmd.type == "set_model":
+            ctx = self._ctx_for(getattr(cmd, "sid", None))
+            if ctx is not None and ctx.engine == "claude" and ctx.space == "code":
+                self._start_interactive_control_command(cmd)
+                return
+
+        target = (getattr(cmd, "session_id", None)
+                  or getattr(cmd, "sid", None))
+        urgent = cmd.type in {"ping", "answer_question"}
+        # Mutations/focus changes retain their single ordered lane. Explicitly
+        # addressed query/context/stop commands only wait for that session's
+        # earlier handlers, including a cold SwitchSession. A legacy command
+        # without sid is a barrier: resolve focus after preceding switches.
+        # NewSession creates its own context and cannot target the old focus.
+        creation = cmd.type == "new_session"
+        if creation:
+            target = None
+        serial = not urgent and not (
+            target and cmd.type in {"query", "get_context", "interrupt"})
+        await self._command_scheduler.submit(
+            cmd, target=target, serial=serial,
+            barrier=not target and not creation and not urgent,
+            urgent=urgent,
+        )
 
     async def _process_command_safely(self, cmd) -> None:
         """Run one command without letting a handler failure stop the loop."""
@@ -18524,9 +18558,8 @@ class WrapperMachine:
         )
         await self._emit(ctx, StateEvent(state="interrupting"))
         if self._claude_autonomous_followup_pending(ctx):
-            # No managed receive_response() consumer owns this continuation.
-            # Its Result arrives through the background pump, so give Stop its
-            # own bounded recovery path if that terminal never arrives.
+            # The scheduler only installs a watchdog without a managed reader;
+            # otherwise that reader owns Stop until its finalizer hands off.
             self._schedule_claude_autonomous_interrupt_watchdog(ctx)
         # A turn can still be reconnecting to apply effort/tier changes and may
         # not have submitted its query yet.  Serialize against that final launch
@@ -35272,7 +35305,9 @@ class WrapperMachine:
         # engine must not evict a healthy resident Codex session and then fail.
         if engine == "claude" and broker_handle is None:
             try:
-                SdkHandle.preflight(self.cfg.claude_bin)
+                # The CLI version probe runs a blocking subprocess. Keep its
+                # bounded wait off the event loop used by every other session.
+                await asyncio.to_thread(SdkHandle.preflight, self.cfg.claude_bin)
             except Exception as exc:
                 log.warning("Claude preflight failed; engine unavailable",
                             error=str(exc))
@@ -35290,6 +35325,7 @@ class WrapperMachine:
                            if k != self.focused_sid and c.state == "idle"
                            and not c.btw and not c.queued_queries
                            and not self._query_queue_task_active(c)
+                           and not self._command_scheduler.owns_target(k)
                            and not c.query_lock.locked()
                            and not c.claude_control_persist_lock.locked()
                            and (c.auto_compact_apply_task is None
@@ -36423,7 +36459,7 @@ class WrapperMachine:
                 ERR_AUTH, "Codex Work 会话不属于当前账号，已拒绝打开 btw")
         if engine != "codex":
             try:
-                SdkHandle.preflight(self.cfg.claude_bin)
+                await asyncio.to_thread(SdkHandle.preflight, self.cfg.claude_bin)
             except Exception as exc:
                 log.warning("Claude preflight failed for btw", error=str(exc))
                 raise _BtwSpawnFailure(
@@ -36436,6 +36472,7 @@ class WrapperMachine:
                            if k != self.focused_sid and c.state == "idle"
                            and not c.btw and not c.queued_queries
                            and not self._query_queue_task_active(c)
+                           and not self._command_scheduler.owns_target(k)
                            and not c.query_lock.locked()
                            and not c.claude_control_persist_lock.locked()
                            and (c.auto_compact_apply_task is None
@@ -36595,8 +36632,23 @@ class WrapperMachine:
                 ) from exc
             ctx.btw_reserved_id = ctx.sdk.fork_session_id = reserved_id
         try:
-            await ctx.sdk.connect(
-                resume_id=parent_id, cwd=parent.cwd, fork=True)
+            connect_kwargs = {
+                "resume_id": parent_id, "cwd": parent.cwd, "fork": True,
+            }
+            if engine == "claude" and parent_space == "code":
+                # Resumed/forked Claude children deliberately skip the optional
+                # startup context probe. Without an explicit launch selection,
+                # their model remains unknown until the first turn and BTW's
+                # picker stays on "loading" indefinitely. Apply the parent's
+                # current selection to the actual child, then publish that same
+                # value through OpenBtw's owner-only Model event. Work keeps its
+                # native policy; a transcript observation must not override it.
+                inherited_model = normalize_claude_model_selection(
+                    _session_model(parent))
+                if inherited_model:
+                    ctx.sdk.model = inherited_model
+                    connect_kwargs["model_override"] = inherited_model
+            await ctx.sdk.connect(**connect_kwargs)
             if engine == "codex":
                 native_thread_id = getattr(ctx.sdk, "thread_id", None)
                 if not isinstance(native_thread_id, str) or not native_thread_id:
@@ -39081,6 +39133,12 @@ class WrapperMachine:
                 await asyncio.gather(
                     codex_restart_watch_task, return_exceptions=True)
             if not is_codex:
+                if (ctx.state in {"interrupting", "draining"}
+                        and self._claude_autonomous_followup_pending(ctx)):
+                    # A managed Result can precede an autonomous Result. Keep
+                    # Stop bounded by its original deadline after this reader
+                    # releases the stream; do not leave recovery ownerless.
+                    self._schedule_claude_autonomous_interrupt_watchdog(ctx)
                 # In the managed-finalizer-wins race, the background callback
                 # already attempted these schedulers while state was running.
                 # Retry after final quiescence; both schedulers are idempotent.

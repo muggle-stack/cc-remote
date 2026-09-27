@@ -26,6 +26,7 @@ import uuid
 from websockets.asyncio.client import connect
 
 from cc_remote import codex_app_tools as desktop
+from cc_remote.wrapper.codex_daemon import socket_identity
 from cc_remote.wrapper.process_scan import (
     ProcessIdentity,
     process_command,
@@ -57,9 +58,7 @@ def private_directory(path: Path) -> None:
 def daemon_socket(profile: Path) -> Path:
     path = profile / "app-server-control/app-server-control.sock"
     try:
-        if path.resolve(strict=True) != path:
-            raise ValueError("symlink")
-        desktop._private_socket(path)
+        socket_identity(str(path))
     except (OSError, ValueError):
         raise LaunchError("共享 daemon 尚未就绪。请先启动该账号的 cc-remote Wrapper，再点共享入口。") from None
     return path

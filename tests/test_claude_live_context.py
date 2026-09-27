@@ -7,7 +7,7 @@ import pytest
 from claude_agent_sdk.types import AssistantMessage, SystemMessage, TextBlock
 
 from cc_remote.config import WrapperConfig
-from cc_remote.protocol import ContextReport, Error, GetContext
+from cc_remote.protocol import ContextReport, Error, GetContext, Interrupt
 from cc_remote.wrapper.sdk import SdkHandle
 from tests.test_claude_autocompact import SESSION_ID, _machine_with_sdk
 
@@ -36,6 +36,50 @@ class SummaryClient:
         if self.read is not None:
             return self.read()
         return dict(SUMMARY)
+
+
+def test_stop_reaches_sdk_while_live_context_read_is_pending():
+    async def go():
+        reading, release, interrupted = (asyncio.Event() for _ in range(3))
+
+        class SlowSummaryClient(SummaryClient):
+            async def _send_control_request(self, request, timeout):
+                reading.set()
+                await release.wait()
+                return await super()._send_control_request(request, timeout)
+
+            async def interrupt(self):
+                interrupted.set()
+
+        sdk = SdkHandle(WrapperConfig())
+        sdk.client = SlowSummaryClient()
+        machine, transport, ctx = _machine_with_sdk(sdk)
+        ctx.state = "running"
+        try:
+            await machine._dispatch_incoming_command(GetContext(
+                sid=SESSION_ID, refresh=True, cmd_id="context", client_id="browser"))
+            await asyncio.wait_for(reading.wait(), 0.5)
+            await machine._dispatch_incoming_command(Interrupt(
+                sid=SESSION_ID, cmd_id="stop", client_id="browser"))
+            await asyncio.wait_for(interrupted.wait(), 0.5)
+            assert not release.is_set()
+            # Stop must still await the native terminal instead of inventing idle.
+            assert ctx.state == "interrupting" and ctx.interrupt_event.is_set()
+            release.set()
+            await asyncio.wait_for(machine._command_scheduler.drain(), 0.5)
+            report = next(frame for frame in transport.sent if isinstance(frame, ContextReport))
+            assert report.total_tokens == SUMMARY["totalTokens"]
+            assert report.source == "control"
+            assert sdk.client.requests == [(
+                {"subtype": "get_context_usage", "detail": "summary"}, 5.0)]
+            assert {frame.cmd_id for frame in transport.sent if frame.type == "command_ack"} == {
+                "context", "stop"}
+            assert ctx.state == "interrupting"
+        finally:
+            release.set()
+            await machine._command_scheduler.close()
+
+    asyncio.run(go())
 
 
 def test_live_summary_yields_to_a_pending_sdk_control_operation():

@@ -489,6 +489,68 @@ class Service:
         self.factory = factory
         self.sessions: dict[str, Session] = {}
         self.open_lock = asyncio.Lock()
+        self._opening: dict[str, asyncio.Event] = {}
+
+    @staticmethod
+    def _check_open_identity(session: Session, identity: dict, owner) -> None:
+        if any(session.metadata.get(key) != identity.get(key) for key in (
+            "profile_root", "session_id", "space", "work_id", "btw", "cwd",
+        )):
+            raise PermissionError("Claude session identity mismatch")
+        if session.controller is not None and session.controller is not owner:
+            raise ControllerLeaseConflict("Claude service already has a controller")
+
+    async def _open(self, owner, params):
+        # Only reserve/check identity and capacity under the service-wide lock.
+        # Native connect can wait on a slow CLI; unrelated sessions stay usable.
+        async with self.open_lock:
+            identity = params["metadata"]
+            session = self.sessions.get(params.get("session"))
+            if params.get("strict_session") and params.get("session") is not None and session is None:
+                raise KeyError("Claude service recovery worker no longer exists")
+            if session is None and identity.get("session_id") and not params.get("fork"):
+                session = next((item for item in self.sessions.values() if all(
+                    item.metadata.get(key) == identity.get(key)
+                    for key in ("profile_root", "session_id", "space", "work_id", "btw")
+                )), None)
+            attached = session is not None
+            if session is not None:
+                self._check_open_identity(session, identity, owner)
+                opening = self._opening.get(session.id)
+            else:
+                if len(self.sessions) >= MAX_SESSIONS:
+                    raise RuntimeError("Claude service session capacity reached")
+                session = Session(self.directory, identity, self.factory)
+                self.sessions[session.id] = session
+                opening = self._opening[session.id] = asyncio.Event()
+
+        if not attached:
+            try:
+                await session.start(params["options"], params.get("isolated", False))
+                session.controller = owner
+                return {**session.description(), "attached": False}
+            except BaseException:
+                # Retain the reservation until startup cleanup finishes. A
+                # concurrent open must not create a second native writer.
+                try:
+                    await session.close()
+                finally:
+                    self.sessions.pop(session.id, None)
+                raise
+            finally:
+                self._opening.pop(session.id, None)
+                opening.set()
+
+        if opening is not None:
+            # Cancelling a joining controller only cancels its own wait, never
+            # the creator's startup. Failure does not silently spawn a new CLI.
+            await opening.wait()
+        async with self.open_lock:
+            if self.sessions.get(session.id) is not session or session.closed:
+                raise RuntimeError("Claude service session is no longer available")
+            self._check_open_identity(session, identity, owner)
+            session.controller = owner
+            return {**session.description(), "attached": True}
 
     async def connection(self, reader, writer) -> None:
         if not same_user(writer):
@@ -546,37 +608,7 @@ class Service:
         if method == "list":
             return [session.description() for session in self.sessions.values() if not session.closed]
         if method == "open":
-            async with self.open_lock:
-                identity = params["metadata"]
-                session = self.sessions.get(params.get("session"))
-                if params.get("strict_session") and params.get("session") is not None and session is None:
-                    raise KeyError("Claude service recovery worker no longer exists")
-                if session is None and identity.get("session_id") and not params.get("fork"):
-                    session = next((item for item in self.sessions.values() if all(
-                        item.metadata.get(key) == identity.get(key)
-                        for key in ("profile_root", "session_id", "space", "work_id", "btw")
-                    )), None)
-                attached = session is not None
-                if session is not None:
-                    if any(session.metadata.get(key) != identity.get(key) for key in (
-                        "profile_root", "session_id", "space", "work_id", "btw", "cwd",
-                    )):
-                        raise PermissionError("Claude session identity mismatch")
-                    if session.controller is not None and session.controller is not owner:
-                        raise ControllerLeaseConflict("Claude service already has a controller")
-                else:
-                    if len(self.sessions) >= MAX_SESSIONS:
-                        raise RuntimeError("Claude service session capacity reached")
-                    session = Session(self.directory, identity, self.factory)
-                    self.sessions[session.id] = session
-                    try:
-                        await session.start(params["options"], params.get("isolated", False))
-                    except BaseException:
-                        self.sessions.pop(session.id, None)
-                        await session.close()
-                        raise
-                session.controller = owner
-                return {**session.description(), "attached": attached}
+            return await self._open(owner, params)
         session = self.sessions[params["session"]]
         if session.controller is not owner:
             raise PermissionError("Claude service controller lease is required")

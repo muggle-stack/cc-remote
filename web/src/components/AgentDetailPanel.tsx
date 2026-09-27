@@ -1,7 +1,8 @@
+import { useState } from "react";
 import type { AgentDetailRun } from "../agent-detail";
 import type { Engine } from "../protocol";
 import { finalTextBlocks, presentableProcessBlocks } from "../process-blocks";
-import { ClaudeWorking, EngineIcon, Icon } from "../icons";
+import { ClaudeSpark, ClaudeWorking, Icon } from "../icons";
 import { MessageBlock } from "./MessageBlock";
 import { ProcessTimeline } from "./ProcessTimeline";
 import { PanelResizer } from "./PanelResizer";
@@ -26,6 +27,7 @@ export function AgentDetailPanel({ run, engine = "claude", canGoBack, onBack, on
   onOpenAgent: (runId: string, title?: string) => void;
   onOpenFile?: (path: string, line?: number) => void;
 }) {
+  const [processOpen, setProcessOpen] = useState<Record<string, boolean>>({});
   const process = presentableProcessBlocks(run.blocks, engine);
   const final = finalTextBlocks(run.blocks);
   const done = !["running", "pending"].includes(run.status);
@@ -67,18 +69,29 @@ export function AgentDetailPanel({ run, engine = "claude", canGoBack, onBack, on
           </button>
         )}
         {process.length > 0 && (
-          <ProcessTimeline blocks={run.blocks} done={done}
-            active={!done} engine={engine} openOverride
+          <ProcessTimeline key={run.runId} blocks={run.blocks} done={done}
+            active={!done} engine={engine}
+            openOverride={processOpen[run.runId] ?? true}
+            onOpenChange={(open) => setProcessOpen((current) => ({
+              ...current, [run.runId]: open,
+            }))}
             onOpenAgent={onOpenAgent} onOpenFile={onOpenFile} />
         )}
         {final.map((block) => (
           <MessageBlock key={block.message_id} text={block.text}
             done={block.done} onOpenFile={onOpenFile} />
         ))}
-        {!done && <div className="turn-working agent-detail-working" role="status">
-          {engine === "claude" ? <ClaudeWorking size={24} /> : <EngineIcon engine={engine} size={24} />}
+        {!done && <div className="turn-working agent-detail-working" role="status"
+          aria-live="polite">
+          <ClaudeWorking size={24} />
           <span className="turn-working-tx">子代理处理中</span>
         </div>}
+        {run.status === "succeeded" && run.blocks.length > 0 && (
+          <div className="turn-done-mark">
+            <ClaudeSpark size={22}
+              label={engine === "codex" ? "Codex 子代理已完成" : "Claude 子代理已完成"} />
+          </div>
+        )}
         {!run.loading && !run.error && run.blocks.length === 0 && (
           <div className="agent-detail-empty">这个协作代理暂时没有可展示的过程。</div>
         )}

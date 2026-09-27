@@ -18,6 +18,7 @@ from collections import OrderedDict
 import json
 import re
 import uuid
+from weakref import WeakValueDictionary
 from typing import Awaitable, Callable, Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -72,8 +73,18 @@ class RelayHub:
         # Linearizes client generation replacement with client -> wrapper sends.
         # Once a new generation owns client_id, no old generation can enter a
         # wrapper send after that point.
-        self._wrapper_send_lock = asyncio.Lock()
+        self._wrapper_send_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._wrapper_versions: OrderedDict[str, dict] = OrderedDict()
+
+    def _wrapper_send_lock_for(self, machine_id: str) -> asyncio.Lock:
+        # Hold a strong reference through acquire/release (including waiters).
+        # Idle machine names must not accumulate locks, and a stalled machine's
+        # network write must never hold another machine's registration/send gate.
+        lock = self._wrapper_send_locks.get(machine_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._wrapper_send_locks[machine_id] = lock
+        return lock
 
     def remember_wrapper_version(self, machine_id: str, protocol: int, version: str | None) -> None:
         if not isinstance(version, str) or not re.fullmatch(r"\d{1,6}\.\d{1,6}\.\d{1,6}", version):
@@ -466,7 +477,7 @@ class RelayHub:
             msg.route_id = conn.route_id
             msg.owner_id = conn.owner_id
             over_capacity = False
-            async with self._wrapper_send_lock:
+            async with self._wrapper_send_lock_for(machine_id):
                 async with self._lock:
                     clients = self._clients_for(machine_id)
                     old = clients.get(client_id)
@@ -483,7 +494,7 @@ class RelayHub:
                 )
                 return
             if old is not None and old is not conn:
-                await old.stop(code=4009, reason="replaced by reconnect")
+                old.begin_stop(code=4009, reason="replaced by reconnect")
             log.info("client registered", client_id=client_id,
                      machine_id=machine_id, total=self.client_count)
 
@@ -542,7 +553,7 @@ class RelayHub:
         machine_id: str = "default",
     ) -> bool:
         """Forward iff ``conn`` still owns client_id at the send linearization point."""
-        async with self._wrapper_send_lock:
+        async with self._wrapper_send_lock_for(machine_id):
             async with self._lock:
                 current = self._clients_for(machine_id).get(client_id) is conn
                 wrapper = self._wrapper_for(machine_id)
@@ -614,4 +625,6 @@ class RelayHub:
             if clients.get(conn.client_id) is conn:
                 del clients[conn.client_id]
                 self._prune_clients_for(machine_id, clients)
-        await conn.stop(code=code, reason=reason)
+        # Remove the route and stop its sender immediately. Closing a broken
+        # browser is bounded connection cleanup, never part of wrapper ingress.
+        conn.begin_stop(code=code, reason=reason)

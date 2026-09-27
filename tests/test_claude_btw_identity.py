@@ -7,7 +7,7 @@ from uuid import UUID
 
 import pytest
 
-from cc_remote.protocol import CloseBtw, ListSessions, SessionList
+from cc_remote.protocol import CloseBtw, ListSessions, OpenBtw, SessionList
 from cc_remote.wrapper import machine as machine_module
 from cc_remote.wrapper.sdk import SdkHandle
 from tests.test_multisession import _mk_ctx, _mk_machine
@@ -25,8 +25,10 @@ def setup(monkeypatch):
         def preflight(_path):
             pass
 
-        async def connect(self, resume_id=None, cwd=None, fork=False):
-            self.launch = self._options(resume_id, cwd, fork=fork)
+        async def connect(self, resume_id=None, cwd=None, fork=False,
+                          model_override=None):
+            self.launch = self._options(
+                resume_id, cwd, fork=fork, model_override=model_override)
             handles.append(self)
             # Model a native transcript visible as soon as connect starts,
             # before _spawn_btw has inserted the context into the pool.
@@ -82,6 +84,36 @@ def test_empty_btw_is_private_without_blocking_owner_or_other_client(setup):
         assert fork.sdk._options(reserved).session_id is None
         assert fork.key.startswith("btw-")
         assert parent.session_id == "parent"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("from_announcement", [False, True])
+@pytest.mark.parametrize(("parent_model", "model"), [
+    ("claude-opus-5", "claude-opus-5[1m]"),
+    ("claude-opus-4-6[1m]", "claude-opus-4-6[1m]"),
+    ("provider-model", "provider-model"),
+])
+def test_btw_launches_with_parent_model_and_reports_it_before_first_query(
+        setup, from_announcement, parent_model, model):
+    async def run():
+        machine, transport, parent, handles, _deleted = setup
+        if from_announcement:
+            parent.announced_model = parent_model
+        else:
+            parent.sdk.model = parent_model
+        await machine._handle_open_btw(OpenBtw(
+            sid=parent.key, client_id="owner", request_id="open"))
+        # Exercise real SDK option construction, not a UI-only fallback label.
+        # No model turn or extra control RPC is needed to report this selection.
+        assert handles[0].launch.model == model
+        assert handles[0].model == model
+        events = [event for event in transport.sent if event.type == "model"]
+        assert len(events) == 1
+        assert events[0].model == model
+        assert events[0].owner_id == "owner"
+        assert events[0].sid.startswith("btw-")
+        assert machine.focused_sid == parent.key
 
     asyncio.run(run())
 

@@ -19,6 +19,7 @@ import subprocess
 import sys
 from urllib.parse import urlsplit
 
+from cc_remote.wrapper.codex_daemon import socket_identity
 from cc_remote.wrapper.process_scan import (
     ProcessIdentity,
     process_command,
@@ -136,9 +137,7 @@ def _shared_bridge(profile: Path, port: int) -> ProcessIdentity | None:
     # This supervisor forwards only to this profile's canonical private Unix
     # socket, never to a custom WebSocket backend or a private stdio server.
     upstream = profile / "app-server-control/app-server-control.sock"
-    if upstream.resolve(strict=True) != upstream:
-        return None
-    _private_socket(upstream)
+    socket_identity(str(upstream))
     return identity if process_identity(identity.pid) == identity else None
 
 
@@ -249,7 +248,7 @@ def discover(profile: Path, app: Path, expected_manifest: str | None = None) -> 
         return {"state": "unavailable", "reason": "macos_required"}
     try:
         profile = profile.resolve(strict=True)
-        _private_socket(profile / "app-server-control/app-server-control.sock")
+        socket_identity(str(profile / "app-server-control/app-server-control.sock"))
         executable, node, plugin, bundle_id = app_paths(app)
         if expected_manifest is not None:
             entry = json.loads((plugin / "desktop-mcp.json").read_text())["mcpServers"]["codex_app"]
