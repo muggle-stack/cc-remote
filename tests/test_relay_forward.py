@@ -9,6 +9,7 @@ from cc_remote.protocol import (
 )
 from cc_remote.relay.forward import ClientConn, SlowClientError
 from cc_remote.relay import pairing
+from cc_remote.relay import forward
 from cc_remote.relay.pairing import RelayHub
 
 
@@ -498,5 +499,124 @@ def test_last_named_client_disconnect_prunes_machine_bucket():
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         assert "ephemeral-machine" not in hub._machine_clients
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("slow_machine", ["default", "slow"])
+def test_blocked_wrapper_does_not_block_another_machines_client_hello(slow_machine):
+    async def run():
+        hub = RelayHub(SimpleNamespace(client_queue_cap=4))
+        slow, fast = FakeWs(), ScriptedWs()
+        if slow_machine == "default":
+            hub._wrapper_ws = slow
+        else:
+            hub._wrappers[slow_machine] = slow
+        hub._wrappers["fast"] = fast
+        conn = ClientConn(ScriptedWs(), 4, "phone")
+        hub._ensure_clients_for(slow_machine)["phone"] = conn
+        sending = asyncio.create_task(hub._forward_client_msg(
+            conn, "phone", Query(prompt="one", msg_id="one"), slow_machine))
+        await asyncio.sleep(0)
+        ws = ScriptedWs()
+        await ws.incoming.put(serialize(Hello(role="client", client_id="phone")))
+        serving = asyncio.create_task(hub.serve_client(ws, "fast"))
+        try:
+            async with asyncio.timeout(0.5):
+                while not fast.sent:
+                    await asyncio.sleep(0.001)
+            assert json.loads(fast.sent[0])["type"] == "hello"
+            assert not sending.done()
+            assert hub._clients_for(slow_machine)["phone"] is conn
+        finally:
+            slow.block.set()
+            serving.cancel()
+            await asyncio.gather(sending, serving, return_exceptions=True)
+            await conn.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("route", ["broadcast", "owner", "direct"])
+def test_stalled_client_close_does_not_block_following_frames(route):
+    class SlowCloseWs(FakeWs):
+        def __init__(self):
+            super().__init__()
+            self.closing = asyncio.Event()
+            self.release_close = asyncio.Event()
+
+        async def close(self, **kwargs):
+            self.closing.set()
+            await self.release_close.wait()
+            await super().close(**kwargs)
+
+    async def run():
+        hub = RelayHub(SimpleNamespace())
+        slow_ws, fast_ws = SlowCloseWs(), ScriptedWs()
+        slow = ClientConn(slow_ws, 1, "slow", owner_id="owner")
+        fast = ClientConn(fast_ws, 8, "fast", owner_id="owner")
+        slow.start()
+        fast.start()
+        hub._clients = {"slow": slow, "fast": fast}
+        await slow.send(Delta(message_id="old", text="in flight"))
+        await asyncio.sleep(0)
+        await slow.send(Delta(message_id="old", text="queued"))
+        routing = ({"owner_id": "owner"} if route == "owner" else
+                   {"to": "slow"} if route == "direct" else {})
+
+        async def incoming():
+            await hub._on_wrapper_msg(Delta(message_id="one", text="first", **routing))
+            await hub._on_wrapper_msg(Delta(message_id="two", text="next"))
+
+        task = asyncio.create_task(incoming())
+        try:
+            await asyncio.wait_for(slow_ws.closing.wait(), 0.5)
+            await asyncio.wait_for(asyncio.shield(task), 0.5)
+            await asyncio.sleep(0)
+            assert "slow" not in hub._clients and slow.closed
+            assert slow._sender.done()
+            assert json.loads(fast_ws.sent[-1])["message_id"] == "two"
+        finally:
+            slow_ws.release_close.set()
+            await asyncio.gather(task, return_exceptions=True)
+            await slow.stop()
+            await fast.stop()
+
+    asyncio.run(run())
+
+
+def test_client_close_is_bounded_and_survives_reader_cancellation(monkeypatch):
+    monkeypatch.setattr(forward, "CLIENT_CLOSE_TIMEOUT", 0.02)
+
+    class StuckCloseWs(FakeWs):
+        def __init__(self):
+            super().__init__()
+            self.closing = asyncio.Event()
+            self.close_cancelled = asyncio.Event()
+
+        async def close(self, **kwargs):
+            self.closed.append(kwargs)
+            self.closing.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.close_cancelled.set()
+
+    async def run():
+        ws = StuckCloseWs()
+        conn = ClientConn(ws, 1, "stuck")
+        conn.start()
+        await conn.send(Delta(message_id="m", text="one"))
+        await asyncio.sleep(0)
+        stopping = asyncio.create_task(conn.stop(code=4008, reason="slow client"))
+        await asyncio.wait_for(ws.closing.wait(), 0.5)
+        stopping.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stopping
+        await asyncio.wait_for(conn.stop(), 0.5)
+        assert ws.close_cancelled.is_set() and len(ws.closed) == 1
+        assert conn._sender.done() and conn.closed
+        with pytest.raises(ConnectionError):
+            await conn.send(Delta(message_id="m", text="two"))
 
     asyncio.run(run())

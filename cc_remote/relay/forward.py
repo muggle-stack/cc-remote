@@ -16,6 +16,9 @@ from cc_remote.log import logger
 from cc_remote.protocol import serialize
 
 log = logger("cc_remote.relay.forward")
+# Let the WebSocket backend finish its handshake/TCP close deadlines before
+# this last-resort guard. Cleanup runs off the forwarding path throughout.
+CLIENT_CLOSE_TIMEOUT = 35.0
 
 
 class SlowClientError(RuntimeError):
@@ -37,6 +40,7 @@ class ClientConn:
         self.queue: asyncio.Queue[tuple[str, int]] = asyncio.Queue(maxsize=self.cap)
         self._queued_bytes = 0
         self._sender: Optional[asyncio.Task] = None
+        self._stop_task: Optional[asyncio.Task] = None
         self._closed = False
 
     @property
@@ -50,16 +54,27 @@ class ClientConn:
     def start(self) -> None:
         self._sender = asyncio.create_task(self._run())
 
+    def begin_stop(self, *, code: int | None = None, reason: str = "") -> asyncio.Task:
+        """Retire this connection synchronously; finish socket cleanup off-path."""
+        if self._stop_task is None:
+            self._closed = True
+            if self._sender and self._sender is not asyncio.current_task():
+                self._sender.cancel()
+            self._stop_task = asyncio.create_task(self._finish_stop(code, reason))
+        return self._stop_task
+
     async def stop(self, *, code: int | None = None, reason: str = "") -> None:
-        already_closed = self._closed
-        self._closed = True
-        if code is not None and not already_closed:
+        # Cancellation of the reader must not abandon the one close operation.
+        await asyncio.shield(self.begin_stop(code=code, reason=reason))
+
+    async def _finish_stop(self, code: int | None, reason: str) -> None:
+        if code is not None:
             try:
-                await self.ws.close(code=code, reason=reason)
+                async with asyncio.timeout(CLIENT_CLOSE_TIMEOUT):
+                    await self.ws.close(code=code, reason=reason)
             except Exception:
                 pass
-        if self._sender and self._sender is not asyncio.current_task():
-            self._sender.cancel()
+        if self._sender:
             try:
                 await self._sender
             except (asyncio.CancelledError, Exception):
@@ -88,9 +103,5 @@ class ClientConn:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            self._closed = True
             log.debug("client sender ended", client_id=self.client_id, error=str(e))
-            try:
-                await self.ws.close(code=1011, reason="client sender failed")
-            except Exception:
-                pass
+            self.begin_stop(code=1011, reason="client sender failed")
