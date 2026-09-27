@@ -2,6 +2,21 @@
 
 [中文](CHANGELOG_zh.md)
 
+## v4.0.5
+
+Improve Claude responsiveness, Stop recovery, and shared-control feedback.
+Wire protocol remains v72. See the bilingual [release notes](docs/releases/v4.0.5.md).
+
+- Keep slow session startup and context reads from blocking unrelated commands;
+  preserve session ordering, bounded intake, and reliable command receipts.
+- Isolate relay sends by device and move stalled browser cleanup off the forwarding path.
+- Keep one Claude Stop recovery owner and its original deadline across background
+  handoff; distinguish a stop timeout from a confirmed interruption.
+- Fix Codex Shared launch and App discovery with protected native socket aliases,
+  retaining account, ownership, and permission checks.
+- Restore animated subagent activity and independent process expansion; initialize
+  BTW model selection from the parent and unblock `/` when its settings are closed.
+
 ## v4.0.4
 
 Discover Claude models from the installed CLI and improve inline code emphasis.
