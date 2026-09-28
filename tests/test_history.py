@@ -126,6 +126,8 @@ def test_codex_process_clock_overlay_requires_exact_logical_and_native_owner(
         ),
     ]
 
+    for turn in turns:
+        turn["processDetailState"] = "unknown"
     mm._apply_codex_process_clocks(turns, clocks)
 
     assert turns[0]["processStartedTs"] == 12_345
@@ -136,7 +138,8 @@ def test_codex_process_clock_overlay_requires_exact_logical_and_native_owner(
     assert "processStartedTs" not in turns[2]
 
 
-def test_codex_process_clock_cannot_resurrect_exact_empty_steer(tmp_path):
+@pytest.mark.parametrize("native_turn_id", [None, "native-turn"])
+def test_codex_process_clock_cannot_resurrect_exact_empty_steer(tmp_path, native_turn_id):
     rollout = tmp_path / "empty-steer.jsonl"
     rollout.write_text('{"type":"session_meta"}\n')
     machine, _transport = _mk_machine()
@@ -144,6 +147,7 @@ def test_codex_process_clock_cannot_resurrect_exact_empty_steer(tmp_path):
         rollout, "accepted-during-compaction", "native-turn", 30_000)
     empty = _empty_summary_turn(
         "native-user", client_message_id="accepted-during-compaction",
+        native_turn_id=native_turn_id,
     )
 
     mm._apply_codex_process_clocks(
@@ -2443,6 +2447,7 @@ def test_official_codex_summary_overlays_source_bound_process_clock(
                 client_message_id=client_message_id,
                 native_turn_id="native-turn",
             )
+            turn["processDetailState"] = "unknown"
             return CodexHistoryPage(
                 events=(),
                 turns=(turn,),
@@ -2853,9 +2858,8 @@ def test_cached_codex_summary_observes_new_process_clock_without_source_change(
         assert first.turns[0].processDetailState == "none"
         assert first.turns[0].processStartedTs is None
 
-        # The sidecar changes while rollout bytes and the cached SQLite source
-        # fingerprint stay identical. The cache-hit path must overlay it rather
-        # than returning the old compact-derived clock.
+        # A new clock cannot contradict this exact final-only source segment,
+        # including on the cache-hit path and with a native terminal/fork id.
         machine._codex_process_clocks.observe_start(
             rollout,
             "browser-message",
@@ -2864,8 +2868,8 @@ def test_cached_codex_summary_observes_new_process_clock_without_source_change(
         )
         cached = await machine._build_history(
             "cached-clock", limit=4, detail="summary")
-        assert cached.turns[0].processDetailState == "present"
-        assert cached.turns[0].processStartedTs == 77_000
+        assert cached.turns[0].processDetailState == "none"
+        assert cached.turns[0].processStartedTs is None
 
     asyncio.run(run())
 

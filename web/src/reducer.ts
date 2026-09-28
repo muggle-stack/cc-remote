@@ -225,6 +225,7 @@ export interface SessionRuntime {
   collaborationMode: CollaborationModeName;
   fast: boolean | null;   // null until the wrapper reports the real service tier
   replaying: boolean;
+  btwReplayPending?: Turn[];
   // True only after this connection has received this sid's Snapshot or
   // ReplayEnd. Prevents stale local "idle" state from draining work early.
   syncReady: boolean;
@@ -5664,9 +5665,7 @@ function reduceEvent(
       });
     case "replay_start": {
       const replaySid = e.sid ?? state.focusedSid;
-      // Ephemeral side chats have no canonical History endpoint. Their ring is
-      // the authoritative bounded projection, so keep and apply a retained
-      // suffix even when its older prefix has fallen out of the ring.
+      // Side chats rebuild from a private item snapshot, not durable History.
       const needsAuthoritativeHistory = (e.truncated || !!e.rebuild)
         && !replaySid?.startsWith("btw-");
       const submittedTurn = needsAuthoritativeHistory && !e.rebuild
@@ -5706,6 +5705,20 @@ function reduceEvent(
         rt.replaying = true;
         rt.syncReady = false;
         rt.truncated = e.truncated;
+        if (replaySid?.startsWith("btw-") && e.rebuild) {
+          const pending = [...rt.turns, ...(rt.btwReplayPending ?? [])].find((turn) =>
+            turn.id === rt.acceptancePending && !turnHasBoundEngineId(turn));
+          rt.btwReplayPending = pending ? [pending] : [];
+          rt.turns = [];
+          rt.liveOwner = null;
+          rt.pendingLiveBinding = null;
+          rt.pendingTerminalFences = null;
+          rt.historyFence = null;
+          rt.hydratedCacheTurnIds = [];
+          rt.liveDetailTurnIds = [];
+          rt.historyInvalidated = false;
+          rt.loading = true;
+        }
         // rebuild clears turns then refills — keep loading=true so the gap shows a
         // spinner rather than briefly flashing the empty "send a message" prompt.
         if (needsAuthoritativeHistory) {
@@ -5771,6 +5784,11 @@ function reduceEvent(
     }
     case "replay_end":
       return { ...patch(state, e.sid, (rt) => {
+        if (rt.btwReplayPending) {
+          rt.turns = [...rt.turns, ...rt.btwReplayPending.filter((pending) =>
+            !rt.turns.some((turn) => turnHasIdentityAlias(turn, pending.id)))];
+          rt.btwReplayPending = undefined;
+        }
         for (const usage of e.turn_usage ?? []) {
           rt.turnUsage = rememberTurnUsage(rt.turnUsage, usage);
         }

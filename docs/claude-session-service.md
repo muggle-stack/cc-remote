@@ -73,6 +73,16 @@ retain their independent lifetime: after the main response ends, normal prompts
 are accepted while those children continue, and later native activity can start
 another main continuation.
 
+Owners advertising `human_result_receipts` also recognize a Result whose
+`user_message_uuid` / `user_message_uuids` includes the latest consumed human
+input, even when native Code labels its origin `task-notification`. They journal
+that exact ownership before SDK parsing. Old/foreign receipts and child Results
+cannot finish the current input, and queued inputs still require their own echo.
+Older owners retain their original terminal ledger; a Wrapper-only upgrade
+does not activate this fix or make an unacknowledgeable terminal commit. Upgrade
+the service with the drain procedure below. Never resubmit an accepted query or
+restart a live owner just to clear its running indicator.
+
 Native Code can also absorb a queued task notification between tool batches in
 an already-running human response. Its JSONL entry is a `queued_command`
 attachment; the SDK projects it as a replayed `UserMessage` with non-human origin

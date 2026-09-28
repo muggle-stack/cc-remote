@@ -321,6 +321,7 @@ from cc_remote.wrapper.codex_stream import (
     codex_history_file_changes,
     codex_history_process_append,
     codex_history_window_info,
+    codex_next_user_boundary_ts,
     codex_native_rollback_turns,
     codex_translate_history,
 )
@@ -328,9 +329,14 @@ from cc_remote.wrapper.codex_history import (
     CodexHistoryCursorError,
     CodexHistoryInvalidResponse,
     CodexHistoryPage,
+    CodexHistoryProjectionTooLarge,
     CodexHistoryUnsupported,
     CodexOfficialHistory,
 )
+from cc_remote.wrapper.codex_detail_pages import (
+    CodexDetailPages, CodexDetailCursorExpired, PREFIX as CODEX_DETAIL_CURSOR_PREFIX,
+)
+from cc_remote.wrapper.btw_history import BtwHistory
 from cc_remote.wrapper.codex_sessions import (
     CODEX_EXACT_CATALOG_MAX_IDS,
     list_codex_sessions, codex_exact_catalog_rows, codex_session_cwd,
@@ -1724,12 +1730,10 @@ def _apply_codex_process_clocks(
         if (
             turn.get("processDetailState") == "none"
             and turn.get("done") is True
-            and not turn.get("forkPointId")
         ):
-            # A completed segment without the native terminal/fork belongs to
-            # a steer boundary. An acceptance-time clock cannot contradict its
-            # exact empty source projection. The enclosing task's own clock can
-            # still recover work omitted from an opaque/compacted history tail.
+            # A clock proves activity, not public process content. Exact empty
+            # segments stay empty even when they own the native terminal. Opaque
+            # or bounded projections use unknown/present instead of none.
             continue
         visible_id = turn.get("id")
         client_message_id = turn.get("clientMsgId")
@@ -1746,6 +1750,9 @@ def _apply_codex_process_clocks(
             native_turn_id if isinstance(native_turn_id, str) else None,
         )
         if started_ms is None:
+            continue
+        if (isinstance(turn.get("ts"), int) and started_ms < turn["ts"]
+                or isinstance(turn.get("doneTs"), int) and started_ms > turn["doneTs"]):
             continue
         current = turn.get("processStartedTs")
         turn["processStartedTs"] = (
@@ -2392,6 +2399,7 @@ class WrapperMachine:
             recover_user=self._recover_official_codex_user,
             recover_users=self._recover_official_codex_users,
         )
+        self._codex_detail_pages = CodexDetailPages()
         # In-memory at-most-once window for client retries. The outer and inner
         # OrderedDicts are both bounded; wrapper process restart intentionally
         # resets this window (documented residual risk, not durable exactly-once).
@@ -10399,6 +10407,8 @@ class WrapperMachine:
                 )
         if is_downstream(msg):
             msg.seq = ctx.next_seq()
+            if ctx.btw:
+                self._btw_history(ctx).observe(msg)
             ctx.buffer.append(msg)
         self._observe_active_turn_binding(ctx, msg)
         live = (
@@ -13247,6 +13257,21 @@ class WrapperMachine:
         if not sid:
             return
         try:
+            if ctx.btw:
+                # Ephemeral native threads reject both persisted-history APIs.
+                # Their private presentation snapshot is captured before the
+                # lossy queue and never goes through a normal session route.
+                if not ctx.owner_client_id:
+                    return
+                async with ctx.emit_lock:
+                    completions = getattr(ctx.sdk, "btw_completions", None)
+                    if completions is not None and turn_id in completions.truncated:
+                        self._btw_history(ctx).truncated = True
+                    for frame in self._btw_replay(ctx):
+                        await self.transport.send(frame.model_copy(update={
+                            "sid": ctx.key, "owner_id": ctx.owner_client_id,
+                        }))
+                return
             await self._push_mirrored_history(sid)
             log.info(
                 "codex overflow projection repaired",
@@ -14528,6 +14553,12 @@ class WrapperMachine:
                             and source_window_boundary_offset is not None
                             else None
                         ),
+                        source_turn_id=source_window_native_turn_id,
+                        segment_end_ts=(await asyncio.to_thread(
+                            codex_next_user_boundary_ts, path, end_offset,
+                            source_window.newest_native_turn_id,
+                            end_offset=source_fingerprint.size if source_fingerprint is not None else None,
+                        ) if before is not None else None),
                         snapshot_in_progress=(
                             in_progress and before is None
                         ),
@@ -14585,6 +14616,12 @@ class WrapperMachine:
                                     source_window_process_started_ms,
                                 )
                             events.insert(0, recovered_user)
+                            if source_window_native_turn_id is not None:
+                                events.insert(1, TurnBinding(
+                                    msg_id=recovered_user.msg_id,
+                                    turn_id=source_window_native_turn_id,
+                                    ts=recovered_user.ts,
+                                ))
             except Exception as e:
                 log.warning("codex get_history failed", session_id=sid, error=str(e))
                 history_error = "历史暂时不可用，请稍后重试"
@@ -15719,6 +15756,19 @@ class WrapperMachine:
                 source=source_before,
                 **alias_kwargs,
             )
+        except CodexHistoryProjectionTooLarge as exc:
+            # The source already proved user segments missing from the summary.
+            # A bounded native item read cannot repair a very long steered turn.
+            # Switch the whole newest-page family only against that same frozen
+            # source; an older official cursor must never enter rollout paging.
+            if before is None and _minimum_user_segments and source_before is not None:
+                source_after = await asyncio.to_thread(
+                    HistorySourceFingerprint.capture, source_before.path)
+                if source_after == source_before:
+                    raise _CodexOfficialProjectionIncomplete(
+                        "bounded official history omits source-proven user segments",
+                    ) from exc
+            raise
         finally:
             take_identities = getattr(
                 self._codex_history,
@@ -16587,6 +16637,35 @@ class WrapperMachine:
             or watch.get("engine") == "codex"
         )
         raw_before = getattr(cmd, "before", None)
+        if is_codex and (raw_before is None or raw_before.startswith(CODEX_DETAIL_CURSOR_PREFIX)):
+            try:
+                path = await asyncio.to_thread(self._codex_rollout_for_wire, sid)
+                if path:
+                    source_page = await asyncio.to_thread(
+                        self._codex_detail_pages.read,
+                        path, sid, cmd.turn_id, revision,
+                        before=raw_before, limit=getattr(cmd, "limit", 192),
+                        window_bytes=self.cfg.codex_history_window_max_bytes,
+                        max_bytes=min(8 * 1024 * 1024,
+                                      max(512 * 1024, self.cfg.ws_max_size_bytes // 2)),
+                        tool_result_max=self.cfg.tool_result_max,
+                        paginate=_turn_detail_page,
+                    )
+                    if self._history_revision(sid) != revision:
+                        raise CodexDetailCursorExpired("history revision changed")
+                    if source_page is not None:
+                        page, has_more, oldest, has_newer, newer = source_page
+                        return await send(page, has_more=has_more, oldest_cursor=oldest,
+                                          has_newer=has_newer, newer_cursor=newer)
+                elif raw_before is not None:
+                    raise CodexDetailCursorExpired("rollout is unavailable")
+            except CodexDetailCursorExpired:
+                return await send(error="详细过程已更新，请重新加载该轮", reset_required=True)
+            except (OSError, ValueError):
+                if raw_before is not None:
+                    return await send(error="详细过程已更新，请重新加载该轮", reset_required=True)
+                # An initial read can still use the ordinary official/indexed
+                # path when the optional local rollout is unavailable.
         try:
             snapshot_cursor = _decode_turn_detail_snapshot_cursor(raw_before)
         except ValueError:
@@ -20123,6 +20202,32 @@ class WrapperMachine:
         log.info("btw closed", btw_sid=sid)
         return close_event
 
+    def _btw_history(self, ctx: SessionContext) -> BtwHistory:
+        if ctx.btw_history is None:
+            ctx.btw_history = BtwHistory(
+                min(self.cfg.ring_max_bytes, 24 * 1024 * 1024),
+                min(self.cfg.ring_max_events, 10000),
+            )
+            # Compatibility for an already-populated ring/test fixture. New
+            # forks enter here on their first emit, before any token eviction.
+            for _, event in ctx.buffer._buf:
+                ctx.btw_history.observe(event)
+        return ctx.btw_history
+
+    def _btw_replay(self, ctx: SessionContext) -> list:
+        history = self._btw_history(ctx)
+        completions = getattr(ctx.sdk, "btw_completions", None)
+        if completions is not None:
+            for native_id in tuple(completions.turns):
+                history.repair(native_id, completions.snapshots(native_id),
+                               item_order=completions.item_order(native_id))
+        return history.replay(
+            tail_seq=ctx.buffer.tail_seq, generation=self.instance_id,
+            max_bytes=self.BTW_REPLAY_MAX_BYTES,
+            max_events=self.BTW_REPLAY_MAX_EVENTS,
+            turn_usage=ctx.buffer.latest_turn_usage(),
+        )
+
     async def _handle_sync_btw(self, cmd: SyncBtw):
         """Hydrate one selected side chat without replaying every BTW on Hello."""
         client_id = getattr(cmd, "client_id", None)
@@ -20163,21 +20268,7 @@ class WrapperMachine:
                     await self._close_pending_ask_locked(
                         ctx, ask_id, reason="timeout")
 
-            same_generation = cmd.generation == self.instance_id
-            cursor = cmd.cursor if same_generation else 0
-            frames = ctx.buffer.replay_from_bounded(
-                cursor,
-                max_bytes=self.BTW_REPLAY_MAX_BYTES,
-                max_events=self.BTW_REPLAY_MAX_EVENTS,
-                rebuild=not same_generation,
-                generation=self.instance_id,
-            )
-            frames = self._reseed_active_binding_for_hello(
-                ctx,
-                frames,
-                cursor=cursor,
-                same_generation=same_generation,
-            )
+            frames = self._btw_replay(ctx)
             for frame in frames:
                 if not self._hello_replay_frame_visible(frame, client_id):
                     continue

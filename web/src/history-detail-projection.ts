@@ -175,7 +175,19 @@ function materializeSegments(
         // Retry/repair windows may overlap at an exact native block boundary.
         // The later source page refreshes that payload in place; equal text or
         // titles are never treated as identity evidence.
-        blocks[existing] = block;
+        const previous = blocks[existing];
+        if (previous.kind === "tool" && block.kind === "tool"
+            && block.tool === "tool" && Object.keys(block.input).length === 0) {
+          // A rollout byte window can begin with an output whose call is on
+          // the preceding page. Keep the recovered call metadata and take the
+          // newer result; the generic output-only envelope is not a new tool.
+          blocks[existing] = { ...previous, ...block,
+            tool: previous.tool, input: previous.input, category: previous.category,
+            title: previous.title, parent_id: previous.parent_id, server: previous.server,
+            startedTs: previous.startedTs ?? block.startedTs };
+        } else {
+          blocks[existing] = block;
+        }
       }
     }
   }

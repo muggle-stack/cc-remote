@@ -5,6 +5,7 @@ import json
 import pytest
 
 from cc_remote.wrapper import machine as mm
+from cc_remote.wrapper import codex_history as history_module
 from cc_remote.wrapper.codex_history import CodexOfficialHistory
 from cc_remote.wrapper.codex_rpc import CodexRpcResponseTooLarge
 from cc_remote.wrapper.history_store import history_image_from_events
@@ -120,6 +121,59 @@ async def test_source_proven_steers_are_not_deleted_when_official_items_are_inco
     old = await machine._build_requested_history(
         "steered", before=head.oldest_id, limit=2, cwd="/tmp", detail="summary")
     assert old.error and not old.authoritative
+    assert not machine._codex_rollout_history_active("steered")
+
+
+@pytest.mark.asyncio
+async def test_bounded_steer_head_uses_one_source_pagination_family(monkeypatch, tmp_path):
+    machine, calls = setup_history(monkeypatch, tmp_path, oversized=True)
+    monkeypatch.setattr(history_module, "_MAX_ITEM_PAGES", 1)
+    revision = machine._history_revision("steered")
+    page = await machine._build_requested_history(
+        "steered", before=None, limit=8, cwd="/tmp", detail="summary")
+    assert page.error is None and page.authoritative
+    assert page.revision != revision
+    assert machine._codex_rollout_history_active("steered")
+    prompts = [turn.prompt for turn in page.turns]
+    native_reads = len(calls)
+    while page.has_more:
+        page = await machine._build_requested_history(
+            "steered", before=page.oldest_id, limit=8, cwd="/tmp", detail="summary")
+        assert page.error is None and page.authoritative
+        prompts = [turn.prompt for turn in page.turns] + prompts
+    assert len(calls) == native_reads
+    assert prompts == [f"prompt {i}/{j}" for i in range(8)
+                       for j in range({0: 4, 1: 2}.get(i, 1))]
+
+
+@pytest.mark.asyncio
+async def test_bounded_older_steer_page_keeps_official_cursor_family(monkeypatch, tmp_path):
+    machine, _ = setup_history(monkeypatch, tmp_path, oversized=True)
+    head = await machine._build_requested_history(
+        "steered", before=None, limit=6, cwd="/tmp", detail="summary")
+    monkeypatch.setattr(history_module, "_MAX_ITEM_PAGES", 1)
+    old = await machine._build_requested_history(
+        "steered", before=head.oldest_id, limit=2, cwd="/tmp", detail="summary")
+    assert old.error and not old.authoritative
+    assert not machine._codex_rollout_history_active("steered")
+
+
+@pytest.mark.asyncio
+async def test_bounded_steer_head_does_not_fallback_after_source_changes(monkeypatch, tmp_path):
+    machine, _ = setup_history(monkeypatch, tmp_path, oversized=True)
+    source = tmp_path / "steered.jsonl"
+
+    async def changing_items(*_args):
+        with source.open("a") as stream:
+            stream.write(json.dumps({"type": "event_msg", "payload": {
+                "type": "agent_message", "message": "new live output",
+            }}) + "\n")
+        raise history_module.CodexHistoryProjectionTooLarge("item budget")
+
+    monkeypatch.setattr(machine._codex_history, "_items_for_turn", changing_items)
+    head = await machine._build_requested_history(
+        "steered", before=None, limit=8, cwd="/tmp", detail="summary")
+    assert head.error and not head.authoritative
     assert not machine._codex_rollout_history_active("steered")
 
 

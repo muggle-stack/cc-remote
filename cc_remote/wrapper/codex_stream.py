@@ -629,7 +629,7 @@ def _legacy_user_item_before(
     path: str,
     offset: int,
 ) -> tuple[int, str | None]:
-    """Return the preceding record offset and its legacy native user id."""
+    """Include a preceding legacy user envelope, never a preceding tool row."""
     if offset <= 0:
         return 0, None
     try:
@@ -651,8 +651,12 @@ def _legacy_user_item_before(
     except (json.JSONDecodeError, ValueError):
         return previous, None
     if not isinstance(row, dict) or row.get("type") != "response_item":
-        return previous, None
-    return previous, _legacy_response_user_item_id(row.get("payload"))
+        return offset, None
+    payload = row.get("payload")
+    if (not isinstance(payload, dict) or payload.get("type") != "message"
+            or payload.get("role") != "user"):
+        return offset, None
+    return previous, _legacy_response_user_item_id(payload)
 
 
 def _fallback_history_id(path: str, kind: str, offset: int, raw_ts: str,
@@ -2025,6 +2029,7 @@ def codex_history_boundary_user(
                 msg_id=message_id,
                 client_msg_id=client_id,
                 prompt=user.prompt,
+                ts=0,
             )
             if pending_images:
                 event.images = pending_images
@@ -2041,7 +2046,7 @@ def codex_history_boundary_user(
     if goal_prompt is None or user_index != 0:
         return None
     prompt, timestamp = goal_prompt
-    event = UserMsg(msg_id=cursor, prompt=prompt)
+    event = UserMsg(msg_id=cursor, prompt=prompt, ts=0)
     if timestamp is not None:
         event.ts = timestamp
     return event
@@ -4015,6 +4020,43 @@ def is_turn_terminal(msg: dict) -> bool:
 
 # ---- on-disk Codex rollout -> wire events (session history) ----
 
+def codex_next_user_boundary_ts(
+    path: str, offset: int, native_turn_id: str | None, *, end_offset: int | None = None,
+) -> float | None:
+    """Read only an adjacent user boundary, never infer completion from EOF.
+
+    Page ends can also be arbitrary source windows or frozen active tails.
+    Only an actual following user record proves a visible segment is closed.
+    Legacy response_item/user must be paired with its immediately next replay.
+    """
+    try:
+        with open(path, "rb") as stream:
+            stream.seek(offset)
+            for index in range(2):
+                limit = _MAX_HISTORY_BOUNDARY_RECORD_BYTES + 1
+                if end_offset is not None:
+                    limit = min(limit, max(0, end_offset - stream.tell()))
+                if limit == 0:
+                    return None
+                line = stream.readline(limit)
+                if not line.endswith(b"\n") or len(line) > _MAX_HISTORY_BOUNDARY_RECORD_BYTES:
+                    return None
+                row = json.loads(line)
+                payload = row.get("payload") or {}
+                if (index == 0 and row.get("type") == "response_item"
+                        and payload.get("type") == "message" and payload.get("role") == "user"):
+                    continue
+                user = codex_rollout_user_message(payload) if row.get("type") == "event_msg" else None
+                if (user is None or not user.prompt
+                        or is_codex_account_switch_message(user.raw_text)
+                        or (user.turn_id and native_turn_id and user.turn_id != native_turn_id)):
+                    return None
+                return datetime.fromisoformat(row["timestamp"].replace("Z", "+00:00")).timestamp() - 0.001
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    return None
+
+
 def codex_translate_history(
     path: str,
     tool_result_max: int,
@@ -4022,6 +4064,8 @@ def codex_translate_history(
     start_offset: int = 0,
     end_offset: int | None = None,
     source_continuation: str | None = None,
+    source_turn_id: str | None = None,
+    segment_end_ts: float | None = None,
     snapshot_in_progress: bool = False,
     active_task_ids: set[str] | frozenset[str] | tuple[str, ...] = (),
     client_message_ids: dict[str, str] | None = None,
@@ -4039,7 +4083,7 @@ def codex_translate_history(
     turn_open = False
     active_turn_id: str | None = None
     active_msg_id: str | None = None
-    pending_turn_id: str | None = None
+    pending_turn_id: str | None = source_turn_id
     turn_visible = False
     turn_text_visible = False
     turn_final_visible = False
@@ -4051,6 +4095,7 @@ def codex_translate_history(
     cur_mid: str | None = None
     cur_channel = "unknown"
     last_ts = None
+    source_stamp = 0.0
     pending_images: list = []   # input_image blocks seen before the next user_message
     pending_legacy_user_item_id: str | None = None
     pending_compactions: list[
@@ -4084,6 +4129,7 @@ def codex_translate_history(
     seen_process_items: set[str] = set()
     history_tools: dict[str, tuple[str, str, str | None, str | None, dict]] = {}
     seen_agent_messages: set[tuple[str, str, str]] = set()
+    seen_agent_item_ids: set[str] = set()
     seen_reasoning: set[tuple[str, str]] = set()
 
     def _ts(iso: str):
@@ -4091,6 +4137,14 @@ def codex_translate_history(
             return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
         except Exception:
             return None
+
+    def append_event(event) -> None:
+        # History is a projection of source time, never reconstruction time.
+        # Explicit timestamps (users, deferred messages and native terminals)
+        # win; other events inherit their current JSONL record's timestamp.
+        if "ts" not in event.model_fields_set:
+            event.ts = source_stamp
+        events.append(event)
 
     def _stable_id(kind: str, line_no: int, raw_ts: str = "", identity=None) -> str:
         """Deterministic fallback for rollout records that carry no item id."""
@@ -4136,13 +4190,14 @@ def codex_translate_history(
             cur_mid = _history_id(item_id, "assistant", line_no, raw_ts)
             assistant_open = True
             cur_channel = channel
-            events.append(AssistantMsgStart(
-                message_id=cur_mid, channel=channel))
+            append_event(AssistantMsgStart(
+                message_id=cur_mid, channel=channel,
+                ts=_ts(raw_ts) if _ts(raw_ts) is not None else source_stamp))
 
     def close_assistant(**message_fields):
         nonlocal assistant_open, cur_mid, cur_channel
         if assistant_open and cur_mid:
-            events.append(AssistantMsgEnd(
+            append_event(AssistantMsgEnd(
                 message_id=cur_mid, channel=cur_channel, **message_fields))
         assistant_open = False
         cur_mid = None
@@ -4163,7 +4218,7 @@ def codex_translate_history(
         )
         if stamp is not None:
             event.ts = stamp
-        events.append(event)
+        append_event(event)
         turn_visible = True
 
     def flush_pending_compactions(target_owner: str | None) -> None:
@@ -4197,18 +4252,19 @@ def codex_translate_history(
         nonlocal turn_visible
         history_tools[tool_id] = (
             tool, category, title, server, tool_input)
-        for event in reversed(events):
-            if isinstance(event, ToolUse) and event.tool_use_id == tool_id:
-                event.tool = tool
-                event.category = category
-                event.title = title
-                event.server = server
-                event.input = tool_input
-                seen_tool_uses.add(tool_id)
-                turn_visible = True
-                return
+        if tool_id in seen_tool_uses:
+            for event in reversed(events):
+                if isinstance(event, ToolUse) and event.tool_use_id == tool_id:
+                    event.tool = tool
+                    event.category = category
+                    event.title = title
+                    event.server = server
+                    event.input = tool_input
+                    seen_tool_uses.add(tool_id)
+                    turn_visible = True
+                    return
         ensure_assistant(line_no, raw_ts)
-        events.append(ToolUse(
+        append_event(ToolUse(
             message_id=cur_mid or "",
             tool_use_id=tool_id,
             tool=tool,
@@ -4222,15 +4278,18 @@ def codex_translate_history(
 
     def upsert_tool_result(result: ToolResult) -> None:
         nonlocal turn_visible
-        for index in range(len(events) - 1, -1, -1):
-            event = events[index]
-            if (isinstance(event, ToolResult)
-                    and event.tool_use_id == result.tool_use_id):
-                events[index] = result
-                seen_tool_results.add(result.tool_use_id)
-                turn_visible = True
-                return
-        events.append(result)
+        if "ts" not in result.model_fields_set:
+            result.ts = source_stamp
+        if result.tool_use_id in seen_tool_results:
+            for index in range(len(events) - 1, -1, -1):
+                event = events[index]
+                if (isinstance(event, ToolResult)
+                        and event.tool_use_id == result.tool_use_id):
+                    events[index] = result
+                    seen_tool_results.add(result.tool_use_id)
+                    turn_visible = True
+                    return
+        append_event(result)
         seen_tool_results.add(result.tool_use_id)
         turn_visible = True
 
@@ -4264,7 +4323,7 @@ def codex_translate_history(
         user = UserMsg(msg_id=uid, prompt=prompt)
         if prompt_ts is not None:
             user.ts = prompt_ts
-        events.append(user)
+        append_event(user)
         turn_open = True
         turn_visible = False
         turn_text_visible = False
@@ -4310,7 +4369,7 @@ def codex_translate_history(
             # continuation. Bind it before its terminal arrives so history
             # cannot invent a message id or a parser-time start timestamp.
             active_msg_id = str(active_turn_id)
-            events.append(TurnBinding(
+            append_event(TurnBinding(
                 msg_id=active_msg_id, turn_id=active_msg_id,
                 ts=pending_task_started[1] or 0,
             ))
@@ -4347,6 +4406,9 @@ def codex_translate_history(
         item_id=None,
     ) -> None:
         nonlocal turn_visible, turn_text_visible, turn_final_visible
+        native_id = item_id or payload.get("id") or payload.get("message_id")
+        if isinstance(native_id, str) and native_id in seen_agent_item_ids:
+            return
         open_assistant_only_turn()
         text = payload.get("message") or ""
         channel = _assistant_channel(payload.get("phase"))
@@ -4356,8 +4418,10 @@ def codex_translate_history(
              if payload.get("delivery") == "async" else channel),
             text,
         )
-        if not text or key in seen_agent_messages:
+        if not text or (native_id is None and key in seen_agent_messages):
             return
+        if isinstance(native_id, str):
+            seen_agent_item_ids.add(native_id)
         seen_agent_messages.add(key)
         close_assistant()
         ensure_assistant(
@@ -4370,9 +4434,11 @@ def codex_translate_history(
         turn_text_visible = True
         if channel == "final" and payload.get("delivery") != "async":
             turn_final_visible = True
-        events.append(Delta(
-            message_id=cur_mid, text=text, channel=channel))
-        close_assistant(**_async_message_fields(payload))
+        append_event(Delta(
+            message_id=cur_mid, text=text, channel=channel,
+            ts=_ts(raw_ts) if _ts(raw_ts) is not None else source_stamp))
+        close_assistant(ts=_ts(raw_ts) if _ts(raw_ts) is not None else source_stamp,
+                        **_async_message_fields(payload))
 
     def emit_completed_plan_answer(
         line_no: int,
@@ -4391,7 +4457,7 @@ def codex_translate_history(
             channel="final",
             force_new=True,
         )
-        events.append(Delta(
+        append_event(Delta(
             message_id=cur_mid, text=text, channel="final"))
         close_assistant()
         seen_agent_messages.add((turn_key, "final", text))
@@ -4460,7 +4526,7 @@ def codex_translate_history(
         terminal_ts = completed_ts if completed_ts is not None else last_ts
         if terminal_ts is not None:
             te.ts = terminal_ts
-        events.append(te)
+        append_event(te)
         turn_open = False
         pending_turn_id = None
         active_turn_id = None
@@ -4497,6 +4563,7 @@ def codex_translate_history(
             p = d.get("payload") if isinstance(d.get("payload"), dict) else {}
             raw_ts = d.get("timestamp", "")
             ts = _ts(raw_ts)
+            source_stamp = ts if ts is not None else last_ts or 0.0
             payload_type = p.get("type")
             paired_legacy_user_item_id = None
             if pending_legacy_user_item_id is not None:
@@ -4694,6 +4761,7 @@ def codex_translate_history(
                         if steered_same_task or active_mid_task_steer:
                             close_turn(
                                 "steered", 0, False,
+                                completed_ts=ts - 0.001 if ts is not None else last_ts,
                                 authoritative_boundary=False)
                         else:
                             close_turn(
@@ -4748,7 +4816,7 @@ def codex_translate_history(
                         um.images = pending_images
                     if ts is not None:
                         um.ts = ts
-                    events.append(um)
+                    append_event(um)
                     turn_open = True
                     turn_has_user = True
                     turn_continuation_reason = None
@@ -4777,7 +4845,7 @@ def codex_translate_history(
                     plan_tool_ids.add(tool_id)
                     seen_tool_uses.add(tool_id)
                     turn_visible = True
-                    events.append(plan_event)
+                    append_event(plan_event)
                 else:
                     ensure_assistant(line_no, raw_ts)
                     tool, category, title, server = _hist_tool_presentation(
@@ -4787,7 +4855,7 @@ def codex_translate_history(
                     if tool_id not in seen_tool_uses:
                         seen_tool_uses.add(tool_id)
                         turn_visible = True
-                        events.append(ToolUse(
+                        append_event(ToolUse(
                             message_id=cur_mid or "",
                             tool_use_id=tool_id,
                             tool=tool,
@@ -4811,7 +4879,7 @@ def codex_translate_history(
                         ensure_assistant(line_no, raw_ts)
                         tool, category, title, server, hist_input = tool_meta
                         seen_tool_uses.add(tool_id)
-                        events.append(ToolUse(
+                        append_event(ToolUse(
                             message_id=cur_mid or "", tool_use_id=tool_id,
                             tool=tool, input=hist_input, category=category,
                             title=title, server=server))
@@ -4843,7 +4911,7 @@ def codex_translate_history(
                             raw_output, tool_result_max)
                         exit_code = _history_exit_code(output)
                         is_error = structured_error or _exit_is_error(output)
-                        events.append(ToolResult(
+                        append_event(ToolResult(
                             tool_use_id=tool_id,
                             content=output,
                             is_error=is_error,
@@ -4851,7 +4919,21 @@ def codex_translate_history(
                             status="failed" if is_error else "succeeded",
                             exit_code=exit_code,
                         ))
-            elif t == "event_msg" and payload_type == "exec_command_end":
+            elif t == "event_msg" and (
+                payload_type == "exec_command_end"
+                or (payload_type == "item_completed" and isinstance(p.get("item"), dict)
+                    and str(p["item"].get("type")).replace("_", "").lower() == "commandexecution")
+            ):
+                if payload_type == "item_completed":
+                    native_turn = active_turn_id or pending_turn_id
+                    if p.get("turn_id") is not None and p["turn_id"] != native_turn:
+                        continue
+                    item = p["item"]
+                    p = {**item, "call_id": item.get("id"),
+                         "parsed_cmd": item.get("parsed_cmd", item.get("commandActions")),
+                         "process_id": item.get("process_id", item.get("processId")),
+                         "aggregated_output": item.get("aggregated_output", item.get("aggregatedOutput")),
+                         "exit_code": item.get("exit_code", item.get("exitCode"))}
                 open_assistant_only_turn()
                 tool_id = _history_id(
                     p.get("call_id"), "tool", line_no, raw_ts)
@@ -4892,7 +4974,9 @@ def codex_translate_history(
                         truncated=True if truncated else None,
                         status=status,
                         exit_code=exit_code,
-                        duration_ms=_legacy_duration_ms(p.get("duration")),
+                        duration_ms=(_duration_ms(p.get("durationMs"))
+                                     if p.get("durationMs") is not None
+                                     else _legacy_duration_ms(p.get("duration"))),
                     ))
             elif t == "event_msg" and payload_type == "mcp_tool_call_end":
                 open_assistant_only_turn()
@@ -4942,7 +5026,7 @@ def codex_translate_history(
                     )
                     if image_event is not None:
                         image_event.ts = ts if ts is not None else 0
-                        events.append(image_event)
+                        append_event(image_event)
                         turn_visible = True
             elif (
                 (t == "response_item" and str(payload_type).lower() == "filechange")
@@ -4975,16 +5059,45 @@ def codex_translate_history(
             elif t == "event_msg" and payload_type == "item_completed":
                 item = p.get("item") if isinstance(p.get("item"), dict) else {}
                 item_type = str(item.get("type") or "").replace("_", "").lower()
-                if item_type == "subagentactivity":
+                if item_type == "agentmessage":
+                    # New rollouts persist the public message here, using
+                    # PascalCase Text parts. Raw response_item messages also
+                    # contain private compaction summaries and are NOT a
+                    # substitute for this public lifecycle record.
+                    text = item.get("text")
+                    if not isinstance(text, str):
+                        content = item.get("content")
+                        text = "".join(
+                            part["text"] for part in (content if isinstance(content, list) else [])
+                            if isinstance(part, dict)
+                            and str(part.get("type", "")).lower() == "text"
+                            and isinstance(part.get("text"), str)
+                        )
+                    emit_agent_message({
+                        **item, "message": text,
+                    }, line_no, raw_ts, item.get("id"))
+                elif item_type == "contextcompaction":
+                    marker = (
+                        _history_id(item.get("id"), "compaction", line_no, raw_ts),
+                        ts,
+                        _history_optional_turn_id(p.get("turn_id") or active_turn_id or pending_turn_id),
+                    )
+                    if turn_open:
+                        append_compaction(marker)
+                    else:
+                        pending_compactions.append(marker)
+                        if len(pending_compactions) > _MAX_PENDING_HISTORY_COMPACTIONS:
+                            del pending_compactions[0]
+                elif item_type == "subagentactivity":
                     open_assistant_only_turn()
-                    events.append(_subagent_event({
+                    append_event(_subagent_event({
                         **item, "agentThreadId": item.get("agentThreadId") or item.get("agent_thread_id"),
                         "agentPath": item.get("agentPath") or item.get("agent_path"),
                     }, _history_optional_turn_id(p.get("turn_id") or active_turn_id or pending_turn_id), True))
                     turn_visible = True
                 elif item_type == "collabagenttoolcall":
                     open_assistant_only_turn()
-                    events.append(_collab_event({
+                    append_event(_collab_event({
                         **item,
                         "receiverThreadIds": item.get("receiverThreadIds") or item.get("receiver_thread_ids"),
                         "senderThreadId": item.get("senderThreadId") or item.get("sender_thread_id"),
@@ -5003,7 +5116,7 @@ def codex_translate_history(
                     )
                     if item_id not in seen_process_items:
                         seen_process_items.add(item_id)
-                        events.append(ProcessEvent(
+                        append_event(ProcessEvent(
                             item_id=item_id,
                             kind="plan",
                             phase="end",
@@ -5022,7 +5135,7 @@ def codex_translate_history(
                 if summary and key not in seen_reasoning:
                     seen_reasoning.add(key)
                     open_assistant_only_turn()
-                    events.append(ProcessEvent(
+                    append_event(ProcessEvent(
                         item_id=_history_id(
                             p.get("id"), "reasoning", line_no, raw_ts),
                         kind="reasoning",
@@ -5039,7 +5152,7 @@ def codex_translate_history(
                 if summary and key not in seen_reasoning:
                     seen_reasoning.add(key)
                     open_assistant_only_turn()
-                    events.append(ProcessEvent(
+                    append_event(ProcessEvent(
                         item_id=_history_id(
                             p.get("id") or p.get("event_id"),
                             "reasoning", line_no, raw_ts),
@@ -5063,7 +5176,7 @@ def codex_translate_history(
                 if tool_id not in seen_tool_uses:
                     seen_tool_uses.add(tool_id)
                     turn_visible = True
-                    events.append(ToolUse(
+                    append_event(ToolUse(
                         message_id=cur_mid or "",
                         tool_use_id=tool_id,
                         tool="apply_patch",
@@ -5083,7 +5196,7 @@ def codex_translate_history(
                     output, output_truncated = bounded_text(
                         p.get("stdout") or p.get("stderr") or "",
                         tool_result_max)
-                    events.append(ToolResult(
+                    append_event(ToolResult(
                         tool_use_id=tool_id,
                         content=output,
                         is_error=not success,
@@ -5106,7 +5219,7 @@ def codex_translate_history(
                 if tool_id not in seen_tool_uses:
                     seen_tool_uses.add(tool_id)
                     turn_visible = True
-                    events.append(ToolUse(
+                    append_event(ToolUse(
                         message_id=cur_mid or "",
                         tool_use_id=tool_id,
                         tool="webSearch",
@@ -5118,7 +5231,7 @@ def codex_translate_history(
                     ))
                 if tool_id not in seen_tool_results:
                     seen_tool_results.add(tool_id)
-                    events.append(ToolResult(
+                    append_event(ToolResult(
                         tool_use_id=tool_id,
                         content="",
                         is_error=False,
@@ -5132,7 +5245,7 @@ def codex_translate_history(
                     "agentThreadId": p.get("agent_thread_id"),
                     "agentPath": p.get("agent_path"),
                 }
-                events.append(_subagent_event(
+                append_event(_subagent_event(
                     item,
                     _history_optional_turn_id(
                         active_turn_id or pending_turn_id),
@@ -5172,7 +5285,7 @@ def codex_translate_history(
                         close_assistant()
                         ensure_assistant(
                             line_no, raw_ts, channel="final", force_new=True)
-                        events.append(Delta(
+                        append_event(Delta(
                             message_id=cur_mid, text=last, channel="final"))
                         close_assistant()
                         seen_agent_messages.add((turn_key, "final", last))
@@ -5183,7 +5296,7 @@ def codex_translate_history(
                     if terminal_error is None:
                         emit_completed_plan_answer(line_no, raw_ts)
                     if terminal_error is not None:
-                        events.append(Error(
+                        append_event(Error(
                             code=ERR_CC_CRASH,
                             message=_provider_failure_message(terminal_error),
                             msg_id=active_msg_id,
@@ -5194,7 +5307,7 @@ def codex_translate_history(
                         close_turn("success", _duration(p), False,
                                    _completed_ts(p, ts), p.get("turn_id"))
                     else:
-                        events.append(Error(
+                        append_event(Error(
                             code=ERR_CC_CRASH,
                             message=_EMPTY_COMPLETED_MESSAGE,
                             msg_id=active_msg_id,
@@ -5225,13 +5338,17 @@ def codex_translate_history(
             # session_meta / world_state / token_count / private reasoning : skipped
             if ts is not None:
                 last_ts = ts
-    if pending_agent_message is not None and not snapshot_in_progress:
+    if pending_agent_message is not None and (not snapshot_in_progress or segment_end_ts is not None):
         payload, pending_line, pending_ts = pending_agent_message
         emit_agent_message(payload, pending_line, pending_ts)
     # A file can be read while Codex is still appending the current turn. Close
     # only its current text block; deliberately omit TurnEnd so the reducer keeps
     # the turn not-done instead of fabricating a completed status.
     close_assistant()
+    if segment_end_ts is not None:
+        # A following user record closes this visible segment, not the native
+        # task. Never emit a native terminal id/fork point for this boundary.
+        close_turn("steered", 0, False, segment_end_ts, authoritative_boundary=False)
     return events, model
 
 

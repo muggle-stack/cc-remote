@@ -1123,6 +1123,7 @@ function HistoryConversationBrowserFixture() {
   const detailOlderErrorOnce = params.has("detail-older-error-once");
   const detailRetainedPreview = params.has("detail-retained-preview");
   const detailRestoredPage = params.get("detail-restored-page");
+  const detailInitialOpen = params.get("detail-initial-open");
   const detailScrollCancel = params.has("detail-scroll-cancel");
   const mermaid = params.has("mermaid");
   const actualMermaid = params.has("actual-mermaid");
@@ -1159,6 +1160,8 @@ function HistoryConversationBrowserFixture() {
     }
     if (detailPaging) {
       let detailTurn = detailPagingTurn("deferred", false, detailRetainedPreview);
+      if (detailInitialOpen === "restored") detailTurn.detailRestoreOpen = true;
+      if (detailInitialOpen === "default") detailTurn.done = false;
       if (detailRestoredPage === "process") {
         detailTurn = {
           ...detailPagingTurn("latest"),
@@ -1235,7 +1238,7 @@ function HistoryConversationBrowserFixture() {
     }
     return INITIAL;
   }, [
-    actualMermaid, compactTools, detailPaging, detailRetainedPreview, detailRestoredPage,
+    actualMermaid, compactTools, detailPaging, detailRetainedPreview, detailRestoredPage, detailInitialOpen,
     detailScrollCancel, dualImage,
     interactiveTimeline, math, streamingMath,
     deepBrowse, invalidMermaid, large, largeCount, paragraphs, mermaid, mermaidHistory,

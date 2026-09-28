@@ -37,6 +37,7 @@ from typing import Any, Awaitable, Callable, Optional
 from cc_remote import __version__
 from cc_remote.log import logger
 from cc_remote.wrapper.token_usage import CodexUsageTracker
+from cc_remote.wrapper.btw_history import CodexBtwCompletions
 from cc_remote.protocol import (
     MAX_SAFE_WIRE_INTEGER,
     MAX_SAFE_WIRE_TIMESTAMP_SECONDS,
@@ -1527,6 +1528,7 @@ class CodexHandle:
         self._ephemeral_server_identity: Optional[CodexServerIdentity] = None
         self._ephemeral_private_generation: Optional[int] = None
         self._ephemeral_thread_gone = False
+        self.btw_completions: CodexBtwCompletions | None = None
         # A shared daemon can publish every subscribed thread immediately after
         # initialize, before thread/resume returns and assigns ``thread_id``.
         # Freeze the requested resume id across that bind window so only the
@@ -2389,6 +2391,11 @@ class CodexHandle:
                 self.thread_id = _thread_id_of(res)
                 bound_thread_id = self.thread_id
                 self._ephemeral_thread_id = self.thread_id
+                self.btw_completions = CodexBtwCompletions(
+                    min(getattr(self.cfg, "ring_max_bytes", 24 * 1024 * 1024), 24 * 1024 * 1024),
+                    min(getattr(self.cfg, "ring_max_events", 10000), 10000),
+                    self.cfg.tool_result_max,
+                )
                 self._ephemeral_server_identity = self._daemon_process_identity
                 self._ephemeral_private_generation = (
                     None if daemon_proxy else self._generation)
@@ -2648,6 +2655,8 @@ class CodexHandle:
         assert self.proc is not None and self.thread_id, "connect() first"
         thread_id = self.thread_id
         self._open_managed_stream()
+        if self.btw_completions is not None:
+            self.btw_completions.initial_owner = client_user_message_id
         queue = self._turn_q
         params = {
             "threadId": thread_id,
@@ -3817,6 +3826,8 @@ class CodexHandle:
         turn_id = self._spontaneous_queue_turn_id
         if q is None or turn_id is None:
             return False
+        if self.btw_completions is not None:
+            self.btw_completions.observe(message)
         method = message.get("method")
         terminal = method == "turn/completed"
         size = (
@@ -3857,6 +3868,8 @@ class CodexHandle:
         q = self._turn_q
         if not isinstance(q, _SpontaneousNotificationQueue):
             return False
+        if self.btw_completions is not None:
+            self.btw_completions.observe(message)
         method = message.get("method")
         terminal = method == "turn/completed"
         size = (

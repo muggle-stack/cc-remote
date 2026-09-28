@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from cc_remote.protocol import AskUser, BackgroundProcessItem, State
 from cc_remote.wrapper.ringbuffer import RingBuffer
+from cc_remote.wrapper.btw_history import BtwHistory
 from cc_remote.wrapper.sdk import SdkHandle
 from cc_remote.wrapper.stream import StreamTranslator
 from cc_remote.wrapper.turn_changes import TurnChangeTracker
@@ -234,6 +235,7 @@ class SessionContext:
     # inherits its context. Never persisted, excluded from the session list, and
     # discarded on close. Its turns reuse the normal _run_turn path.
     btw: bool = False
+    btw_history: BtwHistory | None = None
     claude_service_background_replay: object | None = None
     parent_sid: Optional[str] = None
     # Relay-authenticated account identity for a private side chat. The legacy

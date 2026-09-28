@@ -19,7 +19,9 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-from cc_remote.claude_steering import PendingSteers, background_end_ids, is_managed_input, steer_message
+from cc_remote.claude_steering import (
+    PendingSteers, background_end_ids, is_human_result, is_managed_input, steer_message,
+)
 
 from .wire import (
     ControllerLeaseConflict, decode_sdk, encode_sdk, private_directory,
@@ -79,9 +81,7 @@ class Journal:
 
 
 def _human_result(data: dict) -> bool:
-    origin = data.get("origin")
-    kind = origin.get("kind") if isinstance(origin, dict) else None
-    return data.get("type") == "result" and kind in (None, "human")
+    return is_human_result(data)
 
 
 class Session:
@@ -282,6 +282,7 @@ class Session:
             "native_steering": True,
             "background_steering": True,
             "background_activity_steering": True,
+            "human_result_receipts": True,
             "pending_steers": {uid: {"id": data["id"]} for uid, data in self.steers.pending.items()},
         }
 
@@ -407,6 +408,7 @@ class Session:
                 self.turn = {**params["turn"], "start_seq": self.journal.seq, "started_at": time.time(),
                              "previous_origin_id": self.origin_id}
                 self.managed_input_seen = False
+                self.steers.begin_turn()
                 self.pending_compact = (isinstance(prompt, str)
                                         and prompt.split(maxsplit=1)[:1] == ["/compact"])
                 self.terminal_seq = None
