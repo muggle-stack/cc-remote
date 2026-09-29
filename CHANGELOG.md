@@ -2,6 +2,22 @@
 
 [中文](CHANGELOG_zh.md)
 
+## v4.0.6
+
+Preserve session history and completion state, recover sessions safely, and add
+optional active Claude quota reads. Wire protocol remains v72. See the bilingual
+[release notes](docs/releases/v4.0.6.md).
+
+- Preserve long-turn output, paged process details, side-chat user boundaries and
+  Codex steering identities through history hydration and live replay.
+- Match Claude terminal receipts to consumed human input and recover old sessions
+  only after a proven service restart, without replaying accepted queries.
+- Retain rejected prompts and attachments for manual retry; restore local file
+  preview links and ignore cost-only Claude transcript growth.
+- Refresh Claude quota on focus/reconnect, meter open/manual refresh and visible
+  page polling through optional account-scoped, operator-owned usage helpers.
+  Preserve valid cached readings on failure and distinguish missing configuration.
+
 ## v4.0.5
 
 Improve Claude responsiveness, Stop recovery, and shared-control feedback.
