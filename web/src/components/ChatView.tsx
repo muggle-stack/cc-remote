@@ -2244,7 +2244,7 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
     setMeasurementBoundary(null);
     syncScrollState(controller.resume(readScrollMetrics(el)));
     applyScrollCommand(
-      scrollCoordinatorRef.current.requestBottom("smooth"),
+      scrollCoordinatorRef.current.requestBottom("auto"),
     );
   };
 
