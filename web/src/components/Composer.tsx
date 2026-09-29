@@ -1061,8 +1061,8 @@ export function Composer(p: Props) {
                 open={usageOpen}
                 report={p.statusReport ?? null}
                 rateLimits={p.rateLimits}
-                error={p.engine === "codex" ? p.statusError : null}
-                loading={p.engine === "codex" && p.statusLoading}
+                error={p.statusError}
+                loading={p.statusLoading}
                 disabled={locked}
                 onToggle={() => {
                   if (locked) return;
@@ -1070,10 +1070,9 @@ export function Composer(p: Props) {
                   setCtxOpen(false);
                   setAutoCompactOpen(false);
                   setUsageOpen(opening);
-                  if (opening && p.engine === "codex") p.onRefreshUsage?.();
+                  if (opening) p.onRefreshUsage?.();
                 }}
-                onRefresh={p.engine === "codex"
-                  ? () => p.onRefreshUsage?.() : undefined}
+                onRefresh={() => p.onRefreshUsage?.()}
                 onOpenStatus={p.engine === "codex" && p.onStatus ? () => {
                   setUsageOpen(false);
                   p.onStatus?.();

@@ -865,6 +865,7 @@ try {
     error: null,
     loading: false,
     onToggle: () => {},
+    onRefresh: () => {},
   }));
   assert.match(claudeUsageMarkup, /5 小时额度/);
   assert.match(claudeUsageMarkup, /每周额度/);
@@ -872,9 +873,28 @@ try {
   assert.match(claudeUsageMarkup, /剩余 65%/);
   assert.match(claudeUsageMarkup, /剩余 30%/);
   assert.match(claudeUsageMarkup, /剩余 20%/);
-  assert.match(claudeUsageMarkup, /原生额度事件自动同步/);
-  assert.doesNotMatch(claudeUsageMarkup, />刷新<|完整状态/,
-    "Claude SDK has no supported pull/status API, so the popover is push-only");
+  assert.match(claudeUsageMarkup, /来自当前 Claude 账户/);
+  assert.match(claudeUsageMarkup, />刷新</);
+  assert.doesNotMatch(claudeUsageMarkup, /完整状态/);
+  for (const failure of [null, "usage request failed", "usage helper unavailable"]) {
+    const report = { ...quotaReport, account: null,
+      rate_limits: claudeState.runtimes[claudeSid].rateLimits,
+      component_errors: failure ? [`rate_limits: ${failure}`] : [] };
+    const markup = renderToStaticMarkup(createElement(UsageMeter, {
+      engine: "claude", open: true, report,
+      onToggle: () => {}, onRefresh: () => {},
+    }));
+    assert.match(markup, /剩余 65%/);
+    if (failure) assert.match(markup, /当前显示上次同步数据/);
+    else assert.doesNotMatch(markup, /刷新失败|暂不支持/);
+    const empty = renderToStaticMarkup(createElement(UsageMeter, {
+      engine: "claude", open: true, report: { ...report, rate_limits: [] },
+      onToggle: () => {}, onRefresh: () => {},
+    }));
+    assert.doesNotMatch(empty, /剩余 0%|已用尽|先发送/);
+    assert.match(empty, failure === "usage helper unavailable" ? /未配置主动额度查询/
+      : failure ? /额度刷新失败/ : /额度尚未同步/);
+  }
   const compactUsageMarkup = renderToStaticMarkup(createElement(UsageMeter, {
     open: false,
     report: quotaReport,

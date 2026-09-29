@@ -1,10 +1,12 @@
-"""Sanitized, expiring Claude Agent SDK rate-limit projection.
+"""Sanitized, expiring Claude account rate-limit projection.
 
 The SDK has no supported pull API for account usage.  Claude Code emits
 ``RateLimitEvent`` records when its native quota state changes, so the wrapper
 keeps only those public fields long enough to survive a browser reconnect or a
 wrapper restart.  Model credentials, account identity and the SDK's raw payload
-are never persisted.
+are never persisted. An optional external usage helper supplies read-only
+snapshots using the same cache; its percentages have different units from SDK
+events and are parsed separately.
 """
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ import json
 import math
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -90,6 +93,7 @@ class ClaudeRateLimitStore:
     def __init__(self, state_dir: str | os.PathLike[str]):
         self.path = Path(state_dir) / "claude-rate-limits.json"
         self._limits = self._load()
+        self.revisions: dict[str, int] = {}
 
     def _load(self) -> dict[str, dict[str, Any]]:
         try:
@@ -248,6 +252,7 @@ class ClaudeRateLimitStore:
         changed = False
         observed: dict[str, dict[str, Any]] = {}
         for name, (raw_reset, used, status) in windows.items():
+            self.revisions[name] = self.revisions.get(name, 0) + 1
             resets_at = _reset_timestamp(raw_reset, observed_at)
             if raw_reset is not None and resets_at is None:
                 changed = self._limits.pop(name, None) is not None or changed
@@ -265,6 +270,60 @@ class ClaudeRateLimitStore:
         if changed:
             self._persist()
         return self._updates(observed)
+
+    def observe_usage(self, payload: dict, revisions: dict[str, int], *,
+                      now: int | None = None) -> None:
+        """Apply a GET snapshot without overwriting a newer native event.
+
+        OAuth usage percentages are 0..100 (SDK utilization is 0..1). Null
+        windows remove their old observation; absent windows are not invented.
+        Validate everything before changing or persisting any cache entry.
+        """
+        observed_at = int(time.time()) if now is None else int(now)
+        parsed: dict[str, dict | None] = {}
+        for name in _RATE_LIMITS:
+            if name not in payload:
+                continue
+            window = payload[name]
+            if window is None:
+                parsed[name] = None
+                continue
+            if not isinstance(window, dict):
+                raise ValueError("invalid usage window")
+            used = window.get("utilization")
+            if (isinstance(used, bool) or not isinstance(used, (int, float))
+                    or not math.isfinite(used) or not 0 <= used <= 100):
+                raise ValueError("invalid usage percentage")
+            raw_reset = window.get("resets_at")
+            reset = None
+            if raw_reset is not None:
+                if not isinstance(raw_reset, str) or len(raw_reset) > 64:
+                    raise ValueError("invalid usage reset")
+                try:
+                    stamp = datetime.fromisoformat(raw_reset.replace("Z", "+00:00"))
+                    if stamp.tzinfo is None:
+                        raise ValueError()
+                    reset = int(stamp.timestamp())
+                except (ValueError, OverflowError):
+                    raise ValueError("invalid usage reset") from None
+                if reset <= observed_at:
+                    parsed[name] = None
+                    continue
+            parsed[name] = {
+                "resets_at": reset, "used_percent": round(used),
+                "status": "rejected" if used >= 100 else "allowed",
+                "observed_at": observed_at,
+            }
+        if not parsed:
+            raise ValueError("usage windows missing")
+        for name, entry in parsed.items():
+            if self.revisions.get(name, 0) != revisions.get(name, 0):
+                continue
+            if entry is None:
+                self._limits.pop(name, None)
+            else:
+                self._limits[name] = entry
+        self._persist()
 
     def snapshot(self, *, now: int | None = None) -> tuple[RateLimitUpdate, ...]:
         observed_at = int(time.time()) if now is None else int(now)

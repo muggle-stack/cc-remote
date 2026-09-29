@@ -198,6 +198,7 @@ from cc_remote.wrapper.claude_rate_limits import (
     ClaudeRateLimitStore,
     ClaudeRateLimitStoreError,
 )
+from cc_remote.wrapper.claude_usage import ClaudeUsageError, ClaudeUsageReader
 from cc_remote.wrapper.codex_controls import (
     CODEX_WEB_SEARCH_MODES,
     CodexControls,
@@ -2213,6 +2214,7 @@ class WrapperMachine:
             self._claude_rate_limit_stores[profile.id] = store
         self._claude_rate_limits = self._claude_rate_limit_stores.get(
             self._claude_profiles.default.id)
+        self._claude_usage_reader = ClaudeUsageReader(cfg.state_dir)
         # A History token changes for every wrapper process and every local
         # destructive conversation mutation.  Browsers persist this token with
         # IndexedDB turns, so a fresh wrapper can never merge a pre-crash cache
@@ -21469,6 +21471,8 @@ class WrapperMachine:
         ctx = self._ctx_for(getattr(cmd, "sid", None))
         if ctx is None:
             return await self._missing_session_error(cmd, "读取状态")
+        if ctx.engine == "claude":
+            return await self._handle_get_claude_status(ctx, cmd)
         if ctx.engine != "codex":
             error = Error(
                 code=ERR_INTERNAL,
@@ -21520,6 +21524,45 @@ class WrapperMachine:
                 )
                 await self._emit(ctx, error)
                 return error
+
+    async def _handle_get_claude_status(self, ctx, cmd):
+        """Read account quota without connecting or controlling a chat worker."""
+        profile = self._claude_profile_for_ctx(ctx)
+        store = self._claude_rate_limit_stores.get(profile.id)
+
+        async def apply(read):
+            if store is None:
+                raise ClaudeUsageError("usage cache unavailable")
+            async with self._claude_rate_limit_lock:
+                revisions = dict(store.revisions)
+            payload = await read()
+            async with self._claude_rate_limit_lock:
+                try:
+                    await asyncio.to_thread(store.observe_usage, payload, revisions)
+                except (ValueError, ClaudeRateLimitStoreError):
+                    raise ClaudeUsageError("usage response invalid") from None
+
+        try:
+            failure = await self._claude_usage_reader.refresh(profile, apply)
+        except ClaudeUsageError as exc:
+            failure = str(exc)
+        windows = await self._claude_rate_limit_snapshot(ctx)
+        report = StatusReport(
+            thread={"thread_id": ctx.session_id or ctx.key,
+                    "session_id": ctx.session_id,
+                    "status": "active" if ctx.state == "running" else "idle"},
+            runtime={}, context={},
+            rate_limits=[{
+                "limit_id": update.limit_id, "limit_name": update.name,
+                "rate_limit_reached_type": update.reached_type,
+                "primary": update.primary, "secondary": update.secondary,
+            } for update in windows],
+            component_errors=[f"rate_limits: {failure}"] if failure else [],
+            request_id=getattr(cmd, "cmd_id", None),
+            to=getattr(cmd, "client_id", None),
+        )
+        await self._emit(ctx, report)
+        return report
 
     async def _handle_consume_rate_limit_reset_credit(self, cmd):
         """Redeem one native account reset credit and refresh its snapshot."""

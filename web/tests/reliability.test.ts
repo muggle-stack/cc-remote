@@ -18263,7 +18263,7 @@ assert.match(composerSource,
   /locked = offline \|\| !!controlUi\?\.locked \|\| p\.archived === true/,
   "archived history must keep the composer read-only");
 assert.match(composerSource,
-  /loading=\{p\.engine === "codex" && p\.statusLoading\}[\s\S]{0,80}disabled=\{locked\}[\s\S]{0,100}if \(locked\) return/,
+  /loading=\{p\.statusLoading\}[\s\S]{0,80}disabled=\{locked\}[\s\S]{0,100}if \(locked\) return/,
   "a locked composer must not reopen live account controls");
 assert.match(composerSource,
   /aria-label="上下文占用"[\s\S]{0,100}disabled=\{locked\}[\s\S]{0,100}if \(locked\) return/,
