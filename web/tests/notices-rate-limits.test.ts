@@ -376,6 +376,31 @@ try {
   }], 1_000).length, 0,
   "elapsed SDK windows must disappear without waiting for another event");
 
+  const unifiedReset = Math.floor(Date.now() / 1000) + 3_600;
+  for (const rejected of [false, true]) {
+    const unifiedState = reduce({
+      ...initialState, focusedSid: claudeSid,
+      runtimes: { [claudeSid]: createRuntime() },
+    }, { type: "event", event: event({
+      type: "rate_limit_update", sid: claudeSid,
+      limit_id: "claude", name: "Claude",
+      reached_type: rejected ? "five_hour" : "",
+      primary: { used_percent: rejected ? 100 : 1,
+        resets_at: unifiedReset, window_duration_mins: 300 },
+      secondary: { used_percent: 0,
+        resets_at: unifiedReset + 86_400, window_duration_mins: 10_080 },
+    }) });
+    const unifiedLimits = unifiedState.runtimes[claudeSid].rateLimits;
+    assert.equal(unifiedLimits[0].rate_limit_reached_type, rejected ? "five_hour" : "");
+    const unifiedHtml = renderToStaticMarkup(createElement(UsageMeter, {
+      engine: "claude", open: true, rateLimits: unifiedLimits,
+      onToggle: () => {}, onRefresh: () => {}, onOpenStatus: () => {},
+    }));
+    assert.ok(unifiedHtml.includes(`剩余 ${rejected ? 0 : 99}%`));
+    assert.ok(unifiedHtml.includes("剩余 100%"),
+      "zero utilization in a unified weekly window must remain visible");
+  }
+
   const officialDiagnostic = event({
     type: "notice", notice_id: "codex-notice-private-diagnostic",
     severity: "warning", category: "runtime",

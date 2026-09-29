@@ -1078,7 +1078,7 @@ def codex_user_item_text(item: object) -> str | None:
 def codex_rollout_user_message(
     payload: object,
 ) -> CodexRolloutUserMessage | None:
-    """Normalize legacy and 0.147 persisted user-message records."""
+    """Normalize legacy and current persisted user-message records."""
     if not isinstance(payload, dict):
         return None
     payload_type = payload.get("type")
@@ -1096,7 +1096,7 @@ def codex_rollout_user_message(
             return None
         raw_text = codex_user_item_text(item)
         message_id = item.get("id")
-        client_id = item.get("clientId", client_id)
+        client_id = item.get("clientId") or item.get("client_id") or client_id
     else:
         return None
     if not isinstance(raw_text, str):

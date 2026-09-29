@@ -233,6 +233,7 @@ class SdkHandle:
         self.client: ClaudeSDKClient | None = None
         self.service_metadata: dict | None = None
         self.service_socket_override: str | None = None
+        self._service_owner_identity = None
         self.service_recovery: dict | None = None
         self.service_turn_metadata: dict | None = None
         self.service_defer_events = False
@@ -409,7 +410,15 @@ class SdkHandle:
             "set_mode('plan'); 'just do it' / 'go ahead' -> set_mode('bypassPermissions') "
             "or 'acceptEdits'. The user has no Shift+Tab here, so calling this is how you "
             "enter plan mode for them.\n"
-            "Modes: default, acceptEdits, plan, auto, bypassPermissions."
+            "Modes: default, acceptEdits, plan, auto, bypassPermissions.\n\n"
+            "The user is reading your replies in cc-remote's browser. When sharing "
+            "files or directories available on this machine, use clickable Markdown "
+            "links with absolute paths, for example [Listen](</absolute/path/audio.wav>) "
+            "or [Open folder](</absolute/path/output/>), rather than bare paths or "
+            "file:// URLs. These links open cc-remote's file browser or preview, "
+            "including audio playback. Link directly to existing audio files when "
+            "the user asks to listen; no separate HTML page or web server is needed. "
+            "Only link to real files and directories; preserve their actual paths."
         )
         # showThinkingSummaries is an interactive CLI preference. SDK sessions
         # must request the readable summary explicitly. Pass only display here:
@@ -612,6 +621,7 @@ class SdkHandle:
                     "applied_effort": launch_effort,
                 },
                 isolated=self.isolate_account_env,
+                previous_owner_identity=self._service_owner_identity,
             )
         elif self.isolate_account_env:
             self.client = ClaudeSDKClient(
@@ -622,6 +632,11 @@ class SdkHandle:
             self.client = ClaudeSDKClient(options=opts)
         self._conversation_rewind_capability = None
         await self.client.connect()
+        if self.service_metadata is not None and getattr(self.client, "id", None):
+            # Retain both across failed closes/connects. A worker ID alone
+            # cannot distinguish a restarted service from a lost live lease.
+            self.service_metadata["service_id"] = self.client.id
+            self._service_owner_identity = self.client.owner_identity
         self.service_recovery = getattr(self.client, "recovery", None)
         description = getattr(self.client, "description", {})
         if description.get("attached"):
@@ -1880,6 +1895,14 @@ class SdkHandle:
                     return
         finally:
             self._turn_consumer_active = False
+
+    @property
+    def service_restart_required(self) -> bool:
+        """A confirmed dead service may be resumed, never its accepted query."""
+        from cc_remote.claude_service.client import service_owner_exited
+
+        return self.service_metadata is not None and service_owner_exited(
+            self._service_owner_identity)
 
     @property
     def message_pump_failed(self) -> bool:

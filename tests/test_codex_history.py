@@ -2150,7 +2150,8 @@ def test_live_rollout_user_recovery_bounds_the_reverse_search(tmp_path):
     ) is None
 
 
-def test_codex_0147_rollout_uses_official_user_item_identity(tmp_path):
+@pytest.mark.parametrize("client_field", ["clientId", "client_id"])
+def test_codex_0147_rollout_uses_official_user_item_identity(tmp_path, client_field):
     rollout = tmp_path / "rollout-modern-user.jsonl"
     rollout.write_text("".join(json.dumps(row) + "\n" for row in [
         {
@@ -2176,7 +2177,7 @@ def test_codex_0147_rollout_uses_official_user_item_identity(tmp_path):
                 "turn_id": "native-modern",
                 "item": {
                     "id": "user-modern",
-                    "clientId": "cli-message-modern",
+                    client_field: "cli-message-modern",
                     "type": "UserMessage",
                     "content": [{"type": "text", "text": "inspect modern"}],
                 },

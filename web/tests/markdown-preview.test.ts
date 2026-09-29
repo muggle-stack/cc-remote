@@ -1390,6 +1390,46 @@ $$`,
   assert.match(messageMarkup, /在 Remote 中打开/);
   assert.doesNotMatch(messageMarkup, /href="\/home\/nancy/);
 
+  for (const [href, path] of [
+    ["/tmp/listen/short.wav", "/tmp/listen/short.wav"],
+    ["file:///tmp/listen/short.wav", "/tmp/listen/short.wav"],
+    ["file://localhost/tmp/listen/long%20clip.wav", "/tmp/listen/long clip.wav"],
+    ["file:///tmp/listen/", "/tmp/listen/"],
+  ]) {
+    const markup = renderToStaticMarkup(createElement(MessageBlock, {
+      text: `| 音频 |\n|---|\n| [试听](${href}) |`,
+      done: true,
+      onOpenFile: () => {},
+    }));
+    assert.match(markup, /<button[^>]*class="message-file-link"/,
+      `${href} must enter the authenticated preview instead of becoming a disabled link`);
+    assert.ok(markup.includes(`aria-label="在 Remote 中打开 ${path}"`));
+    assert.doesNotMatch(markup, /href=|message-link-disabled/);
+  }
+  for (const href of [
+    "file://other-host/tmp/clip.wav", "file:///tmp/bad%00.wav",
+    "javascript:alert(1)", "data:text/html,test", "vscode://file/tmp/clip.wav",
+  ]) {
+    const markup = renderToStaticMarkup(createElement(MessageBlock, {
+      text: `[试听](<${href}>)`, done: true, onOpenFile: () => {},
+    }));
+    assert.match(markup, /message-link-disabled/);
+    assert.doesNotMatch(markup, /message-file-link|href=/,
+      "local-file support must not allow remote authorities or other URI schemes");
+  }
+  const unavailableFilePreview = renderToStaticMarkup(createElement(MessageBlock, {
+    text: "[试听](file:///tmp/clip.wav)", done: true,
+  }));
+  assert.match(unavailableFilePreview, /message-link-disabled/);
+  assert.doesNotMatch(unavailableFilePreview, /href=/,
+    "without a session preview callback, never navigate the browser to file://");
+  const fileUrlImage = renderToStaticMarkup(createElement(MessageBlock, {
+    text: "![image](file:///tmp/clip.png)", done: true, onLoadImage: () => true,
+  }));
+  assert.match(fileUrlImage, /message-image-error/);
+  assert.doesNotMatch(fileUrlImage, /<img|message-image-loading/,
+    "the link exception must not change the existing image URL policy");
+
   const source = Array.from({ length: 740 }, (_, index) => `line ${index + 1}`).join("\n");
   const sourceMarkup = renderToStaticMarkup(createElement(ArtifactPanel, {
     artifact: {

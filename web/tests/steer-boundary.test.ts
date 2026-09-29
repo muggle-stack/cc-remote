@@ -143,6 +143,59 @@ try {
   const { initialState, createRuntime, reduce } =
     await harness.ssrLoadModule("/src/reducer.ts");
   const { ChatView } = await harness.ssrLoadModule("/src/components/ChatView.tsx");
+  {
+    let state = { ...initialState, focusedSid: "s", runtimes: { s: {
+      ...createRuntime(), state: "running", syncReady: true,
+      legacyLiveFallbackBlocked: true,
+    } } };
+    let seq = 0;
+    const emit = (body: Record<string, unknown>) => {
+      seq += 1;
+      state = reduce(state, { type: "event", event: {
+        v: 72, sid: "s", ts: seq, seq, ...body,
+      } });
+    };
+    emit({ type: "user_msg", msg_id: "browser-original", prompt: "same prompt" });
+    emit({ type: "turn_binding", msg_id: "browser-original", turn_id: task });
+    for (const name of ["original", "one", "two"]) {
+      if (name !== "original") {
+        // Managed external input publishes the boundary before its history alias.
+        emit({ type: "turn_steered", msg_id: `external-${name}`, turn_id: task,
+          prompt: "same prompt" });
+        emit({ type: "user_msg", msg_id: `native-${name}`,
+          client_msg_id: `external-${name}`, prompt: "same prompt" });
+      }
+      emit({ type: "assistant_msg_start", message_id: `answer-${name}`,
+        turn_id: task, channel: "commentary" });
+      emit({ type: "delta", message_id: `answer-${name}`, turn_id: task,
+        channel: "commentary", text: `working on ${name}` });
+      emit({ type: "assistant_msg_end", message_id: `answer-${name}`,
+        turn_id: task, channel: "commentary" });
+    }
+    const runtime = state.runtimes.s;
+    const rows = runtime.turns as Turn[];
+    assert.equal(runtime.liveOwner?.turnId, "external-two");
+    assert.equal(runtime.state, "running", "a steer must not end the native task");
+    assert.deepEqual(rows.map(turn => turn.done), [true, true, false]);
+    assert.deepEqual(rows.map(turn => turn.blocks.filter(block => block.kind === "text")
+      .map(block => block.message_id)), [["answer-original"], ["answer-one"], ["answer-two"]]);
+    const canonical = rows.map((turn, index) => ({ ...turn,
+      id: ["native-original", "native-one", "native-two"][index],
+      clientMsgId: ["browser-original", "external-one", "external-two"][index],
+    }));
+    const refreshed = mergeInitialHistory(canonical, rows, {
+      preserveLiveTailOpen: true, reconcileReplayOrphans: true,
+      activeOwnerId: runtime.liveOwner.turnId,
+    }, true);
+    assert.equal(refreshed.length, 3, "history aliases must not duplicate user rows");
+    assert.deepEqual(refreshed.map(turn => turn.done), [true, true, false]);
+    emit({ type: "turn_end", turn_id: task, result: {
+      subtype: "success", duration_ms: 1000, is_error: false,
+    } });
+    assert.ok(state.runtimes.s.turns.every((turn: Turn) => turn.done));
+    emit({ type: "state", state: "idle" });
+    assert.equal(state.runtimes.s.liveOwner, null);
+  }
   for (const local of [false, true]) {
   for (const channel of ["final", "commentary"] as const) {
   for (const explicitTask of [undefined, task]) {
