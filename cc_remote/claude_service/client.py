@@ -23,6 +23,24 @@ callback_identity: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "claude_service_callback", default=None)
 
 
+def service_owner_exited(identity) -> bool:
+    """Prove an exact local owner exited; an unreadable PID is not proof."""
+    if identity is None:
+        return False
+    from cc_remote.wrapper.process_scan import process_identity
+
+    current = process_identity(identity.pid)
+    if current is not None:
+        return current != identity
+    try:
+        os.kill(identity.pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        pass
+    return False
+
+
 class Connection:
     def __init__(self, socket_path: str):
         self.socket_path = os.path.expanduser(socket_path)
@@ -101,7 +119,8 @@ def options_payload(options) -> dict:
 
 
 class RemoteClient:
-    def __init__(self, socket_path, *, options, metadata, isolated=False):
+    def __init__(self, socket_path, *, options, metadata, isolated=False,
+                 previous_owner_identity=None):
         self.connection = Connection(socket_path)
         self.options = options
         self.metadata = metadata
@@ -119,6 +138,7 @@ class RemoteClient:
         self.last_seq = 0
         self.ready = asyncio.Event()
         self.owner_identity = None
+        self.previous_owner_identity = previous_owner_identity
 
     async def connect(self) -> None:
         await self.connection.connect()
@@ -136,12 +156,32 @@ class RemoteClient:
                 claude_sdk_process_env(self.options.env, environment)
                 if self.isolated else {**environment, **self.options.env}
             )
+            worker_id = self.metadata.get("service_id")
+            from cc_remote.wrapper.process_scan import process_identity
+
+            owner = process_identity(hello["pid"])
+            if (worker_id and self.options.resume and not self.options.fork_session
+                    and owner is not None and owner != self.previous_owner_identity
+                    and service_owner_exited(self.previous_owner_identity)):
+                sessions = await self.connection.call("list")
+                if not any(item["id"] == worker_id or all(
+                    item["metadata"].get(key) == self.metadata.get(key)
+                    for key in ("profile_root", "session_id", "space", "work_id", "btw")
+                ) for item in sessions):
+                    # A restarted service has no old in-memory worker. Resume
+                    # the same native transcript using its full account/cwd
+                    # identity, without submitting any prior accepted input.
+                    # Keep the hint until open succeeds so a failed connection
+                    # does not erase recovery authority. A replacement worker
+                    # already owning this transcript needs ordinary replay
+                    # recovery, not this idle control/new-input reconnect.
+                    worker_id = None
             self.description = await self._open({
                 "options": payload,
                 "metadata": self.metadata,
                 "isolated": self.isolated,
                 "fork": self.options.fork_session,
-                "session": self.metadata.get("service_id"),
+                "session": worker_id,
                 "strict_session": bool(hello.get("strict_controller_leases")),
             }, legacy=not hello.get("strict_controller_leases"))
         except BaseException:

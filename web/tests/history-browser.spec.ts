@@ -5401,6 +5401,25 @@ test("turn detail stays bounded and older pages load explicitly without jumping"
   )).toBeLessThan(2);
 });
 
+for (const opening of ["default", "restored"]) {
+  test(`initially ${opening} open process detail requests once and retries only explicitly`, async ({ page }) => {
+    await page.goto("/tests/history-browser.html?detail-paging=1&delay=600&detail-error-once=1"
+      + `&detail-initial-open=${opening}`);
+    const header = page.locator(".turn-process-head");
+    await expect(header).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator("html")).toHaveAttribute("data-detail-requests", "1");
+    // Automatic restoration must not start an explicit-click scroll transaction.
+    await expect(page.locator(".thread")).toHaveAttribute("data-detail-anchor-active", "false");
+    await expect(page.getByRole("alert")).toContainText("详细过程暂时不可用");
+    await page.waitForTimeout(750);
+    await expect(page.locator("html")).toHaveAttribute("data-detail-requests", "1");
+    await page.getByRole("button", {name: "重试", exact: true}).click();
+    await expect(page.locator("html")).toHaveAttribute("data-detail-requests", "2");
+    await expect(header).toHaveAttribute("aria-busy", "false");
+    await expect(page.getByRole("alert")).toHaveCount(0);
+  });
+}
+
 test("a loading process can collapse and reopen without issuing a duplicate read", async ({
   page,
 }) => {

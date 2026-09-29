@@ -5,6 +5,7 @@ import { createServer } from "vite";
 
 import {
   installAuthoritativeTurnDetailPage,
+  mergeDetailWithLiveTail,
   mergeAuthoritativeTurnDetail,
   mergeInitialHistory,
   restoreCachedTurnDetails,
@@ -17,6 +18,40 @@ import {
   projectAgentEvents,
 } from "../src/agent-detail.ts";
 import type { AgentDetail } from "../src/protocol.ts";
+import { installTurnDetailProjectionPage } from "../src/history-detail-projection.ts";
+
+const runningWithCommentary: Turn = {
+  id: "running-detail", prompt: "inspect", done: false,
+  blocks: [{kind: "text", message_id: "live-progress", channel: "commentary",
+    text: "Already visible progress", done: true, liveOrder: 0},
+  {kind: "process", item_id: "command-1", processKind: "command",
+    title: "Check", phase: "start", status: "running", done: false, liveOrder: 1}],
+};
+const sourceCommand = {
+  ...runningWithCommentary.blocks[1], done: true, status: "succeeded",
+} as ProcessBlock;
+const installedRunning = installAuthoritativeTurnDetailPage(
+  runningWithCommentary, {...runningWithCommentary, blocks: [sourceCommand]},
+  {hasMore: true, oldestCursor: "older", hasNewer: false},
+  {segments: [], blocks: [sourceCommand], capped: false,
+    hasMore: true, oldestCursor: "older", hasNewer: false, newerCursor: null},
+);
+const runningDisplay = mergeDetailWithLiveTail(
+  installedRunning.detailProjection!.blocks, installedRunning.blocks);
+assert.equal(runningDisplay.length, 2);
+assert.equal(runningDisplay[0].kind, "text",
+  "a partial history page must retain live commentary in its original order");
+assert.equal(runningDisplay[1].done, true,
+  "retaining the live row must not resurrect a completed tool");
+assert.equal(installedRunning.done, false);
+const settledRunning = installAuthoritativeTurnDetailPage(
+  {...installedRunning, done: true}, {...installedRunning, blocks: [sourceCommand]},
+  {hasMore: false, hasNewer: false},
+  {segments: [], blocks: [sourceCommand], capped: false,
+    hasMore: false, oldestCursor: null, hasNewer: false, newerCursor: null},
+);
+assert.equal(settledRunning.blocks.length, 0,
+  "completed source detail retires the provisional live row");
 
 const agentEvents: ServerEvent[] = [{
   v: 37, type: "process", item_id: "nested-agent", kind: "agent",
@@ -124,6 +159,39 @@ const processAfterStaleZeroCache = mergeInitialHistory(
 assert.equal(processAfterStaleZeroCache.processStartedTs, 10_000);
 assert.equal(processAfterStaleZeroCache.processDoneTs, 14_000,
   "a stale parser-time zero interval cannot stretch source-backed timing");
+
+const sourceBoundedProcess = { ...sourceTimedProcess, ts: 5_000, doneTs: 15_000 };
+const correctedClock = mergeInitialHistory([sourceBoundedProcess], [{
+  ...sourceBoundedProcess, processStartedTs: 10_000, processDoneTs: 99_000,
+}])[0];
+assert.equal(correctedClock.processDoneTs, 14_000,
+  "cached reconstruction time beyond the source terminal must not win a max merge");
+
+const finalOnlySegment: Turn = {
+  ...exactDirectDetail, id: "final-only-steer", clientMsgId: "client-final",
+  forkPointId: "native-task", done: true, processDetailState: "none", detailEventCount: 0,
+};
+const falseProcessClaim: Turn = {
+  ...finalOnlySegment, processDetailState: "present", detailReasons: ["process"],
+  detailEventCount: 1, processStartedTs: 99_000,
+};
+const correctedFinalSummary = mergeInitialHistory([finalOnlySegment], [falseProcessClaim], {}, true)[0];
+assert.equal(correctedFinalSummary.processDetailState, "none",
+  "a native fork point does not protect a false metadata-only process claim");
+const correctedFinalDetail = installAuthoritativeTurnDetailPage(
+  falseProcessClaim, finalOnlySegment, {hasMore: false, hasNewer: false},
+);
+assert.equal(correctedFinalDetail.processDetailState, "none");
+assert.equal(correctedFinalDetail.detailEventCount, 0);
+assert.equal(correctedFinalDetail.processStartedTs, undefined);
+assert.equal(correctedFinalDetail.detailError, undefined);
+for (const page of [{hasMore: true, hasNewer: false}, {hasMore: false, hasNewer: true}]) {
+  assert.equal(installAuthoritativeTurnDetailPage(falseProcessClaim, finalOnlySegment, page)
+    .processDetailState, "present", "an unread adjacent page is not evidence of absence");
+}
+assert.equal(installAuthoritativeTurnDetailPage(
+  {...falseProcessClaim, done: false}, finalOnlySegment, {hasMore: false, hasNewer: false},
+).processDetailState, "present", "an active response can still produce process content");
 
 const partialDirectDetail = installAuthoritativeTurnDetailPage(
   { ...opaqueDirectSummary, id: "partial-direct" },
@@ -244,6 +312,31 @@ try {
   const event = (body: Record<string, unknown>): ServerEvent => ({
     v: 37, ts: 10, ...body,
   } as ServerEvent);
+
+  const decodeSeam = (events: ServerEvent[]): Turn | undefined => {
+    let state = { ...initialState, focusedSid: "seam", runtimes: { seam: createRuntime() } };
+    for (const item of events) state = reduce(state, {
+      type: "event", event: { ...item, sid: "seam" },
+    });
+    return state.runtimes.seam.turns.find((turn: Turn) => turn.id === "human");
+  };
+  const seamUse = event({ type: "tool_use", message_id: "message", tool_use_id: "call",
+    tool: "shell", category: "command", input: { command: "ls" }, title: "List files" });
+  const seamUser = event({ type: "user_msg", msg_id: "human", prompt: "inspect" });
+  const newestSeam = installTurnDetailProjectionPage(undefined, {
+    events: [seamUser, event({ ...seamUse, tool: "tool", category: "tool", input: {}, title: null }),
+      event({ type: "tool_result", tool_use_id: "call", content: "files", is_error: false })],
+    hasMore: true, oldestCursor: "older",
+  }, decodeSeam);
+  const joinedSeam = installTurnDetailProjectionPage(newestSeam.projection, {
+    before: "older", events: [seamUser, seamUse], hasMore: false,
+    hasNewer: true, newerCursor: "newer",
+  }, decodeSeam).projection.blocks;
+  assert.equal(joinedSeam.length, 1, "one call spanning byte windows stays one tool");
+  assert.equal(joinedSeam[0].kind === "tool" && joinedSeam[0].tool, "shell");
+  assert.deepEqual(joinedSeam[0].kind === "tool" && joinedSeam[0].input, { command: "ls" });
+  assert.equal(joinedSeam[0].kind === "tool" && joinedSeam[0].result?.content, "files");
+  assert.equal(joinedSeam[0].done, true);
 
   let multiBtwState = reduce(initialState, {
     type: "event", event: event({

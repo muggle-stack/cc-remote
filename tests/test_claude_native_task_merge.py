@@ -71,7 +71,8 @@ def assert_one_response(events):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("persistent", [False, True])
 @pytest.mark.parametrize("stop_reason", ["end_turn", None])
-async def test_absorbed_notifications_keep_one_main_response_and_accept_next_prompt(persistent, stop_reason):
+@pytest.mark.parametrize("receipt", [False, True])
+async def test_absorbed_notifications_keep_one_main_response_and_accept_next_prompt(persistent, stop_reason, receipt):
     async with environment() as (service, attach):
         client = await attach() if persistent else NativeClient()
         worker = service.sessions[client.id] if persistent else None
@@ -88,7 +89,11 @@ async def test_absorbed_notifications_keep_one_main_response_and_accept_next_pro
             runner = ctx.turn_task = asyncio.create_task(machine._run_turn(ctx, "check both"))
             inputs = native.prompts if persistent else native.inputs
             await until(lambda: len(inputs) == 1)
-            for frame in response_frames(stop_reason):
+            frames = response_frames(stop_reason)
+            if receipt:
+                frames[-1].update(origin={"kind": "task-notification"},
+                                  user_message_uuid=HUMAN, user_message_uuids=[HUMAN])
+            for frame in frames:
                 await native.queue.put(frame)
             await asyncio.wait_for(runner, 3)
             await until(lambda: sdk._background_callbacks_pending == 0 and ctx.state == "idle")
@@ -169,6 +174,7 @@ async def test_absorbed_task_after_foreign_terminal_retains_the_open_human_respo
     try:
         await sdk.query("check both")
         frames = response_frames("end_turn")
+        frames[-1].update(origin={"kind": "task-notification"}, user_message_uuids=[HUMAN])
         frames[2:2] = [
             task_input("channel-input", {"kind": "channel"}),
             assistant("channel-answer", [{"type": "text", "text": "channel report"}]),

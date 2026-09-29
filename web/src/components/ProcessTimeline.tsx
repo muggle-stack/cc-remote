@@ -719,7 +719,7 @@ export function ProcessTimeline({ blocks, done, active, outcome, problem, durati
   deferredCount?: number;
   detailLoading?: boolean;
   detailError?: string | null;
-  onLoadDetail?: () => boolean | void;
+  onLoadDetail?: (automatic?: boolean) => boolean | void;
   onRetryDetail?: () => boolean | void;
   canLoadEarlier?: boolean;
   canLoadNewer?: boolean;
@@ -800,6 +800,7 @@ export function ProcessTimeline({ blocks, done, active, outcome, problem, durati
   const [localDetailError, setLocalDetailError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   const manuallyToggled = useRef(false);
+  const detailAttempt = useRef<{ turn?: string; requested: boolean }>({ requested: false });
   const tapGuard = useRef(new PointerTapGuard());
   const interaction = useProcessInteraction(onInteractionStart, onInteractionEnd);
 
@@ -822,6 +823,24 @@ export function ProcessTimeline({ blocks, done, active, outcome, problem, durati
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [processActive]);
+
+  useEffect(() => {
+    // A restored/default-open disclosure needs the same request as a click.
+    // One attempt per opening prevents rerenders, StrictMode and failed loads
+    // from starting a retry loop. Explicit Retry remains available.
+    if (detailAttempt.current.turn !== historyTurnId || !open || !needsAuthoritativeDetail) {
+      detailAttempt.current = { turn: historyTurnId, requested: false };
+    }
+    if (!open || !needsAuthoritativeDetail) return;
+    if (detailLoading) {
+      detailAttempt.current.requested = true;
+      return;
+    }
+    if (detailAttempt.current.requested || detailError || localDetailError || !onLoadDetail) return;
+    detailAttempt.current.requested = true;
+    if (onLoadDetail(true) === false) setLocalDetailError(DETAIL_REQUEST_ERROR);
+  }, [open, needsAuthoritativeDetail, detailLoading, detailError, localDetailError,
+    onLoadDetail, historyTurnId]);
 
   const hasDeferredOnly = timelineItems.length === 0 && needsAuthoritativeDetail;
   const waitingForContent = timelineItems.length === 0
@@ -866,6 +885,7 @@ export function ProcessTimeline({ blocks, done, active, outcome, problem, durati
   const elapsed = rawElapsed != null && rawElapsed >= 500
     ? rawElapsed : null;
   const requestDetail = (load = onLoadDetail) => {
+    detailAttempt.current = { turn: historyTurnId, requested: true };
     setLocalDetailError(null);
     if (load?.() === false) {
       setLocalDetailError(DETAIL_REQUEST_ERROR);
@@ -961,7 +981,9 @@ export function ProcessTimeline({ blocks, done, active, outcome, problem, durati
         {(hasDeferredOnly || waitingForContent)
           && !visibleDetailError && (
           <div className="process-detail-loading" role="status">
-            {hasDeferredOnly ? "正在加载过程…" : "等待模型响应…"}
+            {hasDeferredOnly ? detailLoading ? "正在加载过程…" : (
+              <button type="button" onClick={() => requestDetail()}>加载过程</button>
+            ) : "等待模型响应…"}
           </div>
         )}
         {canLoadEarlier && (

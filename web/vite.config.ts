@@ -27,10 +27,10 @@ export default defineConfig({
             },
             {
               name: "initial-vendor",
-              // Keep small, shared projection primitives out of the entry
-              // without adding a fifth startup request. They have no UI side
-              // effects and change only with the bounded-history contract.
-              test: /node_modules[\\/]|preload-helper|src[\\/](?:compaction-orphans|history-browse|history-requests|runtime-bounds|remote-viewer|file-changes|tool-command)\.ts$|src[\\/]icons\.tsx$/,
+              // Keep relay delivery, reducer and projection primitives together.
+              // This compresses their common field names without increasing
+              // startup requests or pulling any lazy UI into the initial load.
+              test: /node_modules[\\/]|preload-helper|src[\\/](?:compaction-orphans|history-browse|history-requests|history-detail-projection|reducer|runtime-bounds|remote-viewer|file-changes|tool-command|ws)\.ts$|src[\\/]icons\.tsx$/,
               tags: ["$initial"],
               priority: 10,
             },

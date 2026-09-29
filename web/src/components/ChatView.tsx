@@ -2826,8 +2826,9 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
                 detailError={processDetailError}
                 externalPlanItemId={externalPlanItemId}
                 onLoadDetail={onLoadDetail
-                  ? () => requestProcessDetail(
-                      t.id, undefined, "initial", false)
+                  ? (automatic) => automatic
+                    ? onLoadDetail(t.id)
+                    : requestProcessDetail(t.id, undefined, "initial", false)
                   : undefined}
                 onRetryDetail={onLoadDetail && detailRetryDirection
                   ? () => requestProcessDetail(

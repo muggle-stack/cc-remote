@@ -1,10 +1,12 @@
-"""Sanitized, expiring Claude Agent SDK rate-limit projection.
+"""Sanitized, expiring Claude account rate-limit projection.
 
 The SDK has no supported pull API for account usage.  Claude Code emits
 ``RateLimitEvent`` records when its native quota state changes, so the wrapper
 keeps only those public fields long enough to survive a browser reconnect or a
 wrapper restart.  Model credentials, account identity and the SDK's raw payload
-are never persisted.
+are never persisted. An optional external usage helper supplies read-only
+snapshots using the same cache; its percentages have different units from SDK
+events and are parsed separately.
 """
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ import json
 import math
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -90,6 +93,7 @@ class ClaudeRateLimitStore:
     def __init__(self, state_dir: str | os.PathLike[str]):
         self.path = Path(state_dir) / "claude-rate-limits.json"
         self._limits = self._load()
+        self.revisions: dict[str, int] = {}
 
     def _load(self) -> dict[str, dict[str, Any]]:
         try:
@@ -196,53 +200,130 @@ class ClaudeRateLimitStore:
                 "Claude rate-limit cache could not be persisted") from exc
 
     @staticmethod
-    def _update(
-        rate_type: str, entry: dict[str, Any],
-    ) -> RateLimitUpdate:
-        limit_id, name, slot, duration = _RATE_LIMITS[rate_type]
-        window = StatusRateLimitWindow(
-            used_percent=entry.get("used_percent"),
-            resets_at=entry.get("resets_at"),
-            window_duration_mins=duration,
-        )
-        return RateLimitUpdate(
-            limit_id=limit_id,
-            name=name,
-            # Empty is an explicit clear for a previously rejected window.
-            reached_type=(rate_type if entry.get("status") == "rejected" else ""),
-            primary=window if slot == "primary" else None,
-            secondary=window if slot == "secondary" else None,
-        )
+    def _updates(limits: dict[str, dict[str, Any]]) -> tuple[RateLimitUpdate, ...]:
+        grouped: dict[str, dict[str, Any]] = {}
+        for rate_type in _RATE_LIMITS:
+            entry = limits.get(rate_type)
+            if entry is None:
+                continue
+            limit_id, name, slot, duration = _RATE_LIMITS[rate_type]
+            update = grouped.setdefault(limit_id, {
+                "limit_id": limit_id, "name": name, "reached_type": "",
+            })
+            update[slot] = StatusRateLimitWindow(
+                used_percent=entry.get("used_percent"),
+                resets_at=entry.get("resets_at"),
+                window_duration_mins=duration,
+            )
+            # Account windows share a bucket. An allowed companion window
+            # must not clear the rejection reported in this same observation.
+            if entry.get("status") == "rejected" and not update["reached_type"]:
+                update["reached_type"] = rate_type
+        return tuple(RateLimitUpdate(**update) for update in grouped.values())
 
-    def observe(self, info: Any, *, now: int | None = None) -> RateLimitUpdate | None:
+    def observe(self, info: Any, *, now: int | None = None) -> tuple[RateLimitUpdate, ...]:
         observed_at = int(time.time()) if now is None else int(now)
         rate_type = getattr(info, "rate_limit_type", None)
-        if rate_type not in _RATE_LIMITS:
-            return None
-        raw_reset = getattr(info, "resets_at", None)
-        resets_at = _reset_timestamp(raw_reset, observed_at)
-        if raw_reset is not None and resets_at is None:
-            if rate_type in self._limits:
-                self._limits.pop(rate_type, None)
-                self._persist()
-            return None
-        status = getattr(info, "status", None)
-        if status not in {"allowed", "allowed_warning", "rejected"}:
-            status = "allowed"
-        used_percent = _used_percent(getattr(info, "utilization", None))
-        if status == "rejected":
-            used_percent = 100
-        entry = {
-            "resets_at": resets_at,
-            "used_percent": used_percent,
-            "status": status,
-            "observed_at": observed_at,
-        }
-        changed = self._limits.get(rate_type) != entry
-        self._limits[rate_type] = entry
+        windows: dict[str, tuple[Any, Any, Any]] = {}
+        if isinstance(rate_type, str) and rate_type in _RATE_LIMITS:
+            windows[rate_type] = (
+                getattr(info, "resets_at", None),
+                getattr(info, "utilization", None),
+                getattr(info, "status", None),
+            )
+        # The pinned SDK preserves newer CLI fields in raw. Read only known
+        # public windows; never persist the rest of that payload. Top-level
+        # status belongs to rateLimitType, not every unified window.
+        raw = getattr(info, "raw", None)
+        unified = raw.get("unifiedWindows") if isinstance(raw, dict) else None
+        if isinstance(unified, dict):
+            for name in _RATE_LIMITS:
+                window = unified.get(name)
+                if not isinstance(window, dict) or not (
+                    "utilization" in window or "resetsAt" in window
+                ):
+                    continue
+                reset, used, status = windows.get(name, (None, None, "allowed"))
+                windows[name] = (
+                    window.get("resetsAt", reset),
+                    window.get("utilization", used),
+                    status,
+                )
+        changed = False
+        observed: dict[str, dict[str, Any]] = {}
+        for name, (raw_reset, used, status) in windows.items():
+            self.revisions[name] = self.revisions.get(name, 0) + 1
+            resets_at = _reset_timestamp(raw_reset, observed_at)
+            if raw_reset is not None and resets_at is None:
+                changed = self._limits.pop(name, None) is not None or changed
+                continue
+            if status not in {"allowed", "allowed_warning", "rejected"}:
+                status = "allowed"
+            entry = {
+                "resets_at": resets_at,
+                "used_percent": 100 if status == "rejected" else _used_percent(used),
+                "status": status,
+                "observed_at": observed_at,
+            }
+            changed = self._limits.get(name) != entry or changed
+            self._limits[name] = observed[name] = entry
         if changed:
             self._persist()
-        return self._update(rate_type, entry)
+        return self._updates(observed)
+
+    def observe_usage(self, payload: dict, revisions: dict[str, int], *,
+                      now: int | None = None) -> None:
+        """Apply a GET snapshot without overwriting a newer native event.
+
+        OAuth usage percentages are 0..100 (SDK utilization is 0..1). Null
+        windows remove their old observation; absent windows are not invented.
+        Validate everything before changing or persisting any cache entry.
+        """
+        observed_at = int(time.time()) if now is None else int(now)
+        parsed: dict[str, dict | None] = {}
+        for name in _RATE_LIMITS:
+            if name not in payload:
+                continue
+            window = payload[name]
+            if window is None:
+                parsed[name] = None
+                continue
+            if not isinstance(window, dict):
+                raise ValueError("invalid usage window")
+            used = window.get("utilization")
+            if (isinstance(used, bool) or not isinstance(used, (int, float))
+                    or not math.isfinite(used) or not 0 <= used <= 100):
+                raise ValueError("invalid usage percentage")
+            raw_reset = window.get("resets_at")
+            reset = None
+            if raw_reset is not None:
+                if not isinstance(raw_reset, str) or len(raw_reset) > 64:
+                    raise ValueError("invalid usage reset")
+                try:
+                    stamp = datetime.fromisoformat(raw_reset.replace("Z", "+00:00"))
+                    if stamp.tzinfo is None:
+                        raise ValueError()
+                    reset = int(stamp.timestamp())
+                except (ValueError, OverflowError):
+                    raise ValueError("invalid usage reset") from None
+                if reset <= observed_at:
+                    parsed[name] = None
+                    continue
+            parsed[name] = {
+                "resets_at": reset, "used_percent": round(used),
+                "status": "rejected" if used >= 100 else "allowed",
+                "observed_at": observed_at,
+            }
+        if not parsed:
+            raise ValueError("usage windows missing")
+        for name, entry in parsed.items():
+            if self.revisions.get(name, 0) != revisions.get(name, 0):
+                continue
+            if entry is None:
+                self._limits.pop(name, None)
+            else:
+                self._limits[name] = entry
+        self._persist()
 
     def snapshot(self, *, now: int | None = None) -> tuple[RateLimitUpdate, ...]:
         observed_at = int(time.time()) if now is None else int(now)
@@ -269,8 +350,4 @@ class ClaudeRateLimitStore:
             for rate_type in expired:
                 self._limits.pop(rate_type, None)
             self._persist()
-        return tuple(
-            self._update(rate_type, self._limits[rate_type])
-            for rate_type in _RATE_LIMITS
-            if rate_type in self._limits
-        )
+        return self._updates(self._limits)

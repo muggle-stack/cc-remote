@@ -35,7 +35,7 @@ from mcp.server import Server
 
 from cc_remote.config import WrapperConfig
 from cc_remote.claude_steering import (
-    ClaudeSteerRejected, PendingSteers, background_end_ids, is_managed_input, steer_message,
+    ClaudeSteerRejected, PendingSteers, background_end_ids, is_human_result, is_managed_input, steer_message,
 )
 from cc_remote.log import logger
 from cc_remote.protocol import MAX_SAFE_WIRE_INTEGER
@@ -233,6 +233,7 @@ class SdkHandle:
         self.client: ClaudeSDKClient | None = None
         self.service_metadata: dict | None = None
         self.service_socket_override: str | None = None
+        self._service_owner_identity = None
         self.service_recovery: dict | None = None
         self.service_turn_metadata: dict | None = None
         self.service_defer_events = False
@@ -409,7 +410,15 @@ class SdkHandle:
             "set_mode('plan'); 'just do it' / 'go ahead' -> set_mode('bypassPermissions') "
             "or 'acceptEdits'. The user has no Shift+Tab here, so calling this is how you "
             "enter plan mode for them.\n"
-            "Modes: default, acceptEdits, plan, auto, bypassPermissions."
+            "Modes: default, acceptEdits, plan, auto, bypassPermissions.\n\n"
+            "The user is reading your replies in cc-remote's browser. When sharing "
+            "files or directories available on this machine, use clickable Markdown "
+            "links with absolute paths, for example [Listen](</absolute/path/audio.wav>) "
+            "or [Open folder](</absolute/path/output/>), rather than bare paths or "
+            "file:// URLs. These links open cc-remote's file browser or preview, "
+            "including audio playback. Link directly to existing audio files when "
+            "the user asks to listen; no separate HTML page or web server is needed. "
+            "Only link to real files and directories; preserve their actual paths."
         )
         # showThinkingSummaries is an interactive CLI preference. SDK sessions
         # must request the readable summary explicitly. Pass only display here:
@@ -612,6 +621,7 @@ class SdkHandle:
                     "applied_effort": launch_effort,
                 },
                 isolated=self.isolate_account_env,
+                previous_owner_identity=self._service_owner_identity,
             )
         elif self.isolate_account_env:
             self.client = ClaudeSDKClient(
@@ -622,6 +632,11 @@ class SdkHandle:
             self.client = ClaudeSDKClient(options=opts)
         self._conversation_rewind_capability = None
         await self.client.connect()
+        if self.service_metadata is not None and getattr(self.client, "id", None):
+            # Retain both across failed closes/connects. A worker ID alone
+            # cannot distinguish a restarted service from a lost live lease.
+            self.service_metadata["service_id"] = self.client.id
+            self._service_owner_identity = self.client.owner_identity
         self.service_recovery = getattr(self.client, "recovery", None)
         description = getattr(self.client, "description", {})
         if description.get("attached"):
@@ -1071,6 +1086,7 @@ class SdkHandle:
                     self.next_turn_id = None
                     self._turn_active = True
                     self._managed_input_seen = False
+                    self._steers.begin_turn()
                     try:
                         await client.query(prompt)
                     except BaseException:
@@ -1568,7 +1584,13 @@ class SdkHandle:
                         self._managed_input_seen
                         or is_managed_input(data, pending_compact=(
                             self._pending_compact and self._message_route_owner != "background")))
-                    data = self._steers.annotate(data, managed_active=managed_active)
+                    data = self._steers.annotate(
+                        data, managed_active=managed_active,
+                        # An older service still owns its origin-only terminal
+                        # ledger. Do not issue commits it cannot acknowledge.
+                        result_receipts=(service_seq is None or getattr(
+                            client, "description", {}).get("human_result_receipts") is True),
+                    )
                 steer = data.get("__cc_steer") if parse_raw else None
                 intermediate = bool(parse_raw and data.get("__cc_steer_intermediate"))
                 message = self._parse_compat_message(data) if parse_raw else data
@@ -1675,11 +1697,12 @@ class SdkHandle:
                         self._activate_pending_turn_route()
                         self._message_route_owner = owner
                     elif isinstance(message, ResultMessage):
-                        # Result.origin is the authoritative boundary in the
-                        # pinned SDK. A non-human result closes only the injected
-                        # turn; the browser query remains pending for its later
-                        # human/legacy-unattributed result on the same stream.
-                        if origin_kind is not None and origin_kind != "human":
+                        # Raw consumption receipts survive SDK parsing through
+                        # the shared journal annotation. Without an exact match,
+                        # an unrelated task Result cannot complete human work.
+                        human_result = (is_human_result(data) if parse_raw
+                                        else origin_kind in (None, "human"))
+                        if not human_result:
                             owner = "background"
                         elif (getattr(message, "_cc_background_ends", ())
                               and not self._managed_input_seen):
@@ -1872,6 +1895,14 @@ class SdkHandle:
                     return
         finally:
             self._turn_consumer_active = False
+
+    @property
+    def service_restart_required(self) -> bool:
+        """A confirmed dead service may be resumed, never its accepted query."""
+        from cc_remote.claude_service.client import service_owner_exited
+
+        return self.service_metadata is not None and service_owner_exited(
+            self._service_owner_identity)
 
     @property
     def message_pump_failed(self) -> bool:

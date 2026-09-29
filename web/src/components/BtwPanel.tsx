@@ -490,6 +490,9 @@ export function BtwPanel(p: Props) {
       <NoticeStack notices={p.rt?.notices ?? []}
         onDismiss={p.onDismissNotice} />
       <div className="btw-body">
+        {p.rt?.truncated && <div className="btw-history-note" role="status">
+          较早的部分过程已超出临时对话保留范围
+        </div>}
         {awaitingFirstChat
           ? <div className="btw-empty">
               <span className="thinking"><span/><span/><span/></span>

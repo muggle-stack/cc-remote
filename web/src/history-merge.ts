@@ -78,8 +78,8 @@ function hasDeferredTurnDetail(turn: Turn): boolean {
     || (turn.detailEventCount ?? 0) > 0;
 }
 
-function isExactClosedSteer(summary: Turn, detail: Turn): boolean {
-  return summary.done && !!summary.clientMsgId && !summary.forkPointId
+function isExactClosedSegment(summary: Turn, detail: Turn): boolean {
+  return summary.done
     && sharesExactTurnAlias(summary, detail);
 }
 
@@ -149,6 +149,7 @@ function trustworthyProcessStartedTs(turn: Turn): number | undefined {
   const started = turn.processStartedTs;
   const done = turn.processDoneTs;
   if (started == null) return undefined;
+  if (turn.doneTs != null && started > turn.doneTs) return undefined;
   // Older projections assigned every hydrated native item the same parser
   // timestamp. Do not let that invalid zero interval combine with a newer
   // source witness and manufacture a duration stretching to refresh time.
@@ -162,6 +163,7 @@ function trustworthyProcessDoneTs(turn: Turn): number | undefined {
   if (started == null || done == null || done - started < 500) {
     return undefined;
   }
+  if (turn.doneTs != null && done > turn.doneTs) return undefined;
   return done;
 }
 
@@ -1264,7 +1266,7 @@ export function mergeAuthoritativeTurnDetail(
       ownsProcessBlock(indexedBlockOwners(canonicalTurns!), index));
   }
   const merged = mergeTurn(summary, detail, false, "second", false, false,
-    isExactClosedSteer(canonical, detail));
+    isExactClosedSegment(canonical, detail));
   return {
     ...merged,
     id: summary.id,
@@ -1387,10 +1389,29 @@ export function installAuthoritativeTurnDetailPage(
   // selected heavy-process page. Expanding or paging details must not make
   // their gallery disappear again. Retain references only, never image bytes.
   const outputImages = generatedOutputImages([...summary.blocks, ...processBlocks]);
-  const detailImageIds = new Set(generatedOutputImages(detailWithoutFinals)
+  // A page describes a bounded source window, not the absence of records
+  // already received on the live stream. Keep the bounded live row while its
+  // native turn is open; rendering merges it with detail by item identity.
+  // A later completed detail read can retire this provisional tail.
+  const liveCandidates = summary.done ? [] : summary.blocks.filter(
+    (block) => !isFinalTextBlock(block));
+  const liveIds = new Set(liveCandidates.map(blockIdentity));
+  const liveProcess = mergeBlocks(
+    processBlocks, liveCandidates, false, false, false, "combine",
+  ).filter(block => liveIds.has(blockIdentity(block)));
+  const retainedProcess = mergeDetailWithLiveTail(detailWithoutFinals, liveProcess);
+  const detailImageIds = new Set(generatedOutputImages(retainedProcess)
     .map(generatedImageIdentity));
   let processDetailState = mergedProcessDetailState(
     summary, detail, processBlocks);
+  const exactEmptyDetail = summary.done && detail.done
+    && sharesExactTurnAlias(summary, detail) && !hasMore && !hasNewer
+    && !detailProjection?.capped
+    && !processBlocks.some(isPresentableProcessBlock)
+    && !summary.blocks.some(isPresentableProcessBlock)
+    && !summary.liveSpillBlocks?.some(isPresentableProcessBlock)
+    && statedProcessDetailState(detail) === "none";
+  if (exactEmptyDetail) processDetailState = "none";
   // A bounded page containing only the final answer is not an exact
   // process-free conclusion while adjacent source pages remain unread. Keep
   // the honest unknown state mounted so automatic/manual pagination cannot
@@ -1415,8 +1436,8 @@ export function installAuthoritativeTurnDetailPage(
     // ordinary live-turn 256 item / 16 MiB cap cannot evict them. Legacy
     // callers without a projection retain the pre-v21 behavior.
     blocks: detailProjection
-      ? [...outputImages, ...canonicalFinals]
-      : [...detailWithoutFinals,
+      ? [...mergeDetailWithLiveTail(outputImages, liveProcess), ...canonicalFinals]
+      : [...retainedProcess,
           ...outputImages.filter(image => !detailImageIds.has(generatedImageIdentity(image))),
           ...canonicalFinals],
     done: summary.done,
@@ -1426,7 +1447,7 @@ export function installAuthoritativeTurnDetailPage(
     interrupted: summary.interrupted,
     error: summary.error,
     progress: summary.progress,
-    detailEventCount: summary.detailEventCount,
+    detailEventCount: exactEmptyDetail ? 0 : summary.detailEventCount,
     detailLoaded: !restoreIncomplete && !incompleteUnknownProcess,
     detailLoading: false,
     detailError: undefined,
@@ -1805,7 +1826,7 @@ export function mergeInitialHistory(
         !!options.preserveLiveTailOpen && !!options.reconcileReplayOrphans
           && liveIndex === activeOwnerIndex,
         (settledCodex || !!options.reconcileReplayOrphans)
-          && isExactClosedSteer(historyTurn, liveTurn),
+          && isExactClosedSegment(historyTurn, liveTurn),
       );
       if (settledCodex && sharesExactTurnAlias(historyTurn, liveTurn)) {
         merged[index] = restoreUnownedHistoryIdentity(

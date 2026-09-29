@@ -3,7 +3,7 @@ import { createContext, isValidElement, useContext, useEffect, useId,
   type ComponentPropsWithoutRef,
   type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import ReactMarkdown, { type Components } from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform, type Components, type UrlTransform } from "react-markdown";
 import { parseLocalFileTarget } from "../file-link";
 import { RemoteViewerContext } from "../remote-viewer-context";
 import { ViewerPagesContext } from "../viewer-pages-context";
@@ -438,6 +438,14 @@ function MarkdownImage({ src, alt, title }: ComponentPropsWithoutRef<"img">) {
     onPreviewImage={onPreviewImage} />;
 }
 
+// Keep local file anchors until MarkdownLink turns them into preview buttons.
+// Images and all other schemes retain react-markdown's default URL policy.
+const messageUrlTransform: UrlTransform = (url, key, node) => {
+  if (key === "href" && node.tagName === "a"
+      && /^file:\/\//i.test(url) && parseLocalFileTarget(url)) return url;
+  return defaultUrlTransform(url);
+};
+
 function MarkdownLink({
   href = "", children, title,
 }: ComponentPropsWithoutRef<"a">) {
@@ -672,6 +680,7 @@ export function MessageBlock({ text, done, onOpenFile, imageAssets,
           if (part.kind === "markdown") return <ReactMarkdown key={`markdown-${index}`}
               remarkPlugins={remarkPlugins}
               rehypePlugins={rehypePlugins}
+              urlTransform={messageUrlTransform}
               components={MESSAGE_MARKDOWN_COMPONENTS}>{part.text}</ReactMarkdown>;
           if (part.kind === "visualization") return <CodexVisualizationCard
             key={`visualization-${index}`} path={part.path} title={part.title}

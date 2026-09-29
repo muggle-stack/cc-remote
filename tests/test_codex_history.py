@@ -10,6 +10,7 @@ import cc_remote.wrapper.codex_stream as codex_stream_module
 from cc_remote.wrapper.codex_history import (
     CodexHistoryCursorError,
     CodexHistoryInvalidResponse,
+    CodexHistoryProjectionTooLarge,
     CodexHistoryUnsupported,
     CodexOfficialHistory,
 )
@@ -37,6 +38,49 @@ _PNG_1X1 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
     "/x8AAusB9Y9Zl1sAAAAASUVORK5CYII="
 )
+
+
+def test_rollout_public_agent_items_keep_ids_without_compaction_summaries(tmp_path):
+    path = tmp_path / "public-messages.jsonl"
+    def completed(item):
+        return {"type": "event_msg", "payload": {
+            "type": "item_completed", "turn_id": "native-turn", "item": item,
+        }}
+    first = completed({
+        "type": "AgentMessage", "id": "comment-1", "phase": "commentary",
+        "content": [{"type": "Text", "text": "Checking progress."}],
+    })
+    second = completed({
+        **first["payload"]["item"], "id": "comment-2",
+    })
+    final = completed({
+        "type": "AgentMessage", "id": "final-1", "phase": "final_answer",
+        "content": [{"type": "Text", "text": "Finished."}],
+    })
+    rows = [
+        {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "native-turn"}},
+        completed({"type": "UserMessage", "id": "user-1",
+                   "content": [{"type": "text", "text": "Inspect."}]}),
+        first, first,
+        {"type": "response_item", "payload": {
+            "type": "message", "role": "assistant", "phase": "final_answer",
+            "content": [{"type": "output_text", "text": "PRIVATE COMPACTION SUMMARY"}],
+        }},
+        completed({"type": "ContextCompaction", "id": "compact-1"}),
+        second, final,
+        {"type": "event_msg", "payload": {"type": "task_complete",
+            "turn_id": "native-turn", "last_agent_message": "Finished."}},
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    events, _ = codex_translate_history(str(path), 65536)
+    deltas = [e for e in events if e.type == "delta"]
+    assert [(e.message_id, e.channel, e.text) for e in deltas] == [
+        ("comment-1", "commentary", "Checking progress."),
+        ("comment-2", "commentary", "Checking progress."),
+        ("final-1", "final", "Finished."),
+    ]
+    assert len([e for e in events if e.type == "turn_end"]) == 1
+    assert any(e.type == "process" and e.kind == "compaction" for e in events)
 
 
 def _user(
@@ -2106,7 +2150,8 @@ def test_live_rollout_user_recovery_bounds_the_reverse_search(tmp_path):
     ) is None
 
 
-def test_codex_0147_rollout_uses_official_user_item_identity(tmp_path):
+@pytest.mark.parametrize("client_field", ["clientId", "client_id"])
+def test_codex_0147_rollout_uses_official_user_item_identity(tmp_path, client_field):
     rollout = tmp_path / "rollout-modern-user.jsonl"
     rollout.write_text("".join(json.dumps(row) + "\n" for row in [
         {
@@ -2132,7 +2177,7 @@ def test_codex_0147_rollout_uses_official_user_item_identity(tmp_path):
                 "turn_id": "native-modern",
                 "item": {
                     "id": "user-modern",
-                    "clientId": "cli-message-modern",
+                    client_field: "cli-message-modern",
                     "type": "UserMessage",
                     "content": [{"type": "text", "text": "inspect modern"}],
                 },
@@ -3060,7 +3105,7 @@ def test_item_pages_never_issue_more_than_sixteen_rpcs():
     async def run():
         history = CodexOfficialHistory(64 * 1024, rpc=rpc)
         with pytest.raises(
-            CodexHistoryInvalidResponse,
+            CodexHistoryProjectionTooLarge,
             match="exceeded its page limit",
         ):
             await history._items_for_turn("thread-1", "native-1")

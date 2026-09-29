@@ -72,6 +72,93 @@ def requesting(uid="request"):
     return {"type": "system", "subtype": "status", "status": "requesting", "uuid": uid}
 
 
+def test_result_receipt_requires_latest_consumed_input_and_preserves_pending_steers():
+    from cc_remote.claude_steering import is_human_result
+
+    steers = PendingSteers()
+    steers.annotate(user("first"), managed_active=True)
+    steers.add("second", {"id": "second-remote"})
+    value = steers.annotate({**result(), "origin": ORIGIN,
+                             "user_message_uuids": ["first"]}, managed_active=True)
+    assert is_human_result(value) and value["__cc_steer_intermediate"]
+    assert "second" in steers.pending
+    steers.annotate(user("second"), managed_active=True)
+    for fields in ({"user_message_uuid": "first"},
+                   {"user_message_uuids": ["foreign"]},
+                   {"user_message_uuid": "second", "parent_tool_use_id": "child"}):
+        value = steers.annotate({**result(), "origin": ORIGIN, **fields}, managed_active=True)
+        assert not is_human_result(value)
+
+    value = steers.annotate({**result(), "origin": ORIGIN,
+                             "user_message_uuids": ["first", "second"]}, managed_active=True)
+    assert is_human_result(value) and not value.get("__cc_steer_intermediate")
+    # A duplicate receipt or the next task-only Result cannot claim a new query.
+    steers.begin_turn()
+    for origin in (None, ORIGIN):
+        value = steers.annotate({**result(), "origin": origin, "user_message_uuid": "second"})
+        assert not is_human_result(value)
+
+
+def test_receipts_do_not_change_older_service_terminal_ledger():
+    from cc_remote.claude_steering import is_human_result
+
+    steers = PendingSteers()
+    steers.annotate(user("human"), managed_active=True)
+    value = steers.annotate({**result(), "origin": ORIGIN, "user_message_uuid": "human"},
+                            managed_active=True, result_receipts=False)
+    assert "__cc_managed_result" not in value and not is_human_result(value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persistent", [False, True])
+async def test_task_origin_result_consumes_exact_steer_and_commits_original_root(persistent):
+    async with environment() as (service, attach):
+        client = await attach() if persistent else NativeClient()
+        worker = service.sessions[client.id] if persistent else None
+        native = worker.client if worker else client
+        sdk = SdkHandle(WrapperConfig(turn_reader_queue_cap=1))
+        sdk.client = client
+        sdk._start_message_pump()
+        consumer = None
+        try:
+            sdk.next_turn_id = "root"
+            await sdk.query("first")
+
+            async def read():
+                return [m async for m in sdk.receive_response()]
+
+            consumer = asyncio.create_task(read())
+            await native.queue.put(user("human", "first"))
+            await until(lambda: sdk._managed_input_seen)
+            await sdk.steer("guide", native_id="native-guide", metadata={"id": "guide"})
+            await native.queue.put({**result(), "origin": ORIGIN, "user_message_uuid": "human"})
+            await native.queue.put(user("native-guide", "guide"))
+            await until(lambda: not sdk._steers.pending)
+            assert not consumer.done()
+            if worker:
+                assert worker.terminal_seq is None and worker.turn["id"] == "root"
+            await native.queue.put({**result(), "origin": ORIGIN,
+                                    "user_message_uuids": ["native-guide"], "queued_turn_count": 0})
+            messages = await asyncio.wait_for(consumer, 3)
+            assert isinstance(messages[-1], ResultMessage)
+            await sdk.ack_service_message(messages[-1], turn_id="root")
+            sdk.release_background_messages()
+            if worker:
+                assert worker.turn is None
+            sdk.next_turn_id = "next"
+            await sdk.query("next")
+            await native.queue.put(user("next-native", "next"))
+            await native.queue.put(result())
+            messages = await asyncio.wait_for(read(), 3)
+            await sdk.ack_service_message(messages[-1], turn_id="next")
+            assert native.interrupts == 0
+        finally:
+            if consumer:
+                consumer.cancel()
+                await asyncio.gather(consumer, return_exceptions=True)
+            await sdk._stop_message_pump()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("persistent", [False, True])
 @pytest.mark.parametrize("finish", ["result", "steer", "stop"])

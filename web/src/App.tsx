@@ -3617,7 +3617,7 @@ export default function App() {
             const eventEngine = session?.engine
               ?? (stateRef.current.focusedSid === msg.sid
                 ? engineRef.current : undefined);
-            if (eventEngine === "codex") {
+            if (eventEngine === "codex" || eventEngine === "claude") {
               if (stateRef.current.runtimes[msg.sid]?.statusRequestId) {
                 deferredStatusRefreshRef.current.add(msg.sid);
               } else {
@@ -4346,7 +4346,7 @@ export default function App() {
   ]);
 
   const refreshStatus = useCallback(() => {
-    if (!focusedSid || focusedEngine !== "codex") return;
+    if (!focusedSid) return;
     const current = stateRef.current;
     if (current.sessions.find(
       (session) => session.session_id === focusedSid)?.tag === "archived") return;
@@ -4355,7 +4355,7 @@ export default function App() {
     if (requestId) {
       dispatch({ type: "begin_status_request", sid: focusedSid, requestId });
     }
-  }, [focusedEngine, focusedSid]);
+  }, [focusedSid]);
   const consumeResetCredit = useCallback((creditId?: string | null) => {
     if (!focusedSid || focusedEngine !== "codex") return false;
     const current = stateRef.current;
@@ -4384,23 +4384,23 @@ export default function App() {
     return requestId !== null;
   }, [focusedEngine, focusedSid]);
   useEffect(() => {
-    if (!authed || !focusedSid || focusedEngine !== "codex" || state.newChat
+    if (!authed || !focusedSid || state.newChat
         || archivedBrowse
-        || rt.state !== "idle"
+        || (focusedEngine === "codex" && rt.state !== "idle")
         || state.connState !== "connected" || !state.wrapperOnline) return;
-    if (stateRef.current.runtimes[focusedSid]?.statusRequestId) return;
     refreshStatus();
-  }, [
-    authed,
-    archivedBrowse,
-    focusedEngine,
-    focusedSid,
-    refreshStatus,
-    rt.state,
-    state.connState,
-    state.newChat,
-    state.wrapperOnline,
-  ]);
+    if (focusedEngine !== "claude") return;
+    // Account reads do not use the chat reader. The Wrapper coalesces requests
+    // across sessions/tabs; background pages need no periodic refresh.
+    const refreshVisible = () => {
+      if (document.visibilityState === "visible") refreshStatus();
+    };
+    const timer = window.setInterval(refreshVisible, 60_000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [authed, focusedSid, focusedEngine, state.newChat, archivedBrowse,
+    state.connState, state.wrapperOnline, refreshStatus, rt.state]);
 
   useEffect(() => {
     const artifact = state.artifact;

@@ -6932,6 +6932,116 @@ def test_managed_codex_turn_emits_authoritative_browser_turn_binding():
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("initial_echo", [False, True])
+def test_managed_codex_turn_projects_external_steers_once(initial_echo):
+    async def run():
+        machine, transport = _mk_machine()
+        ctx = _mk_ctx("managed-steers", "managed-steers")
+        ctx.engine = "codex"
+        ctx.state = "running"
+        ctx.active_msg_id = "browser-original"
+        ctx.turn_task = asyncio.current_task()
+        machine.sessions[ctx.key] = ctx
+        observations = []
+        first_steer_output = asyncio.Event()
+        original_send = transport.send
+
+        async def observe(message):
+            if isinstance(message, Delta):
+                lease = machine._codex_turn_leases.get(ctx.key)
+                observations.append((
+                    message.text, ctx.state, ctx.active_msg_id,
+                    ctx.active_turn_binding.msg_id,
+                    lease.msg_id if lease else None,
+                ))
+                if message.text == "one":
+                    first_steer_output.set()
+            await original_send(message)
+
+        transport.send = observe
+
+        def user(item_id, client_id, *, turn_id="native-turn", method="item/completed"):
+            return {"method": method, "params": {
+                "threadId": ctx.session_id, "turnId": turn_id,
+                "item": {"type": "userMessage", "id": item_id,
+                         "clientId": client_id, "text": "same prompt"},
+            }}
+
+        def delta(name):
+            return {"method": "item/agentMessage/delta", "params": {
+                "threadId": ctx.session_id, "turnId": "native-turn",
+                "itemId": "answer-" + name, "delta": name,
+            }}
+
+        class AcceptedSdk:
+            tier_dirty = False
+            model = None
+            effort = None
+            collaboration_mode = "default"
+            service_tier = None
+            shared_daemon_affinity = True
+
+            async def query(self, _prompt, images=None, *, client_user_message_id=None):
+                assert client_user_message_id == "browser-original"
+                return "native-turn"
+
+            async def receive_response(self):
+                # An unlabelled first echo cannot prove an external steer.
+                yield user("unattributed", None)
+                if initial_echo:
+                    yield user("native-original", "browser-original")
+                yield delta("original")
+                yield user("foreign-user", "foreign-client", turn_id="other-turn")
+                yield user("native-one", "external-one", method="item/started")
+                yield user("native-one", "external-one")
+                yield delta("one")
+                await first_steer_output.wait()
+                # Simulate _handle_steer's already-published RPC acceptance.
+                accepted = TurnSteered(msg_id="remote-steer", turn_id="native-turn",
+                                       prompt="same prompt")
+                ctx.active_msg_id = accepted.msg_id
+                machine._remember_codex_published_steer(ctx, accepted)
+                machine._rebind_codex_turn(ctx, accepted.turn_id, accepted.msg_id)
+                await machine._emit(ctx, accepted)
+                yield user("native-two", "external-two", method="item/started")
+                yield user("native-one", "external-one")
+                yield user("native-original", "browser-original")
+                yield user("native-remote", "remote-steer")
+                yield user("native-two", "external-two")
+                yield delta("two")
+                yield {"method": "turn/completed", "params": {
+                    "threadId": ctx.session_id,
+                    "turn": {"id": "native-turn", "status": "completed"},
+                }}
+
+        ctx.sdk = AcceptedSdk()
+        machine._ensure_codex_daemon_generation = (
+            lambda *_args, **_kwargs: asyncio.sleep(0, result=True))
+        machine._begin_codex_checkpoint = lambda _ctx: asyncio.sleep(0)
+        machine._accept_codex_checkpoint = lambda _ctx: asyncio.sleep(0)
+        await asyncio.wait_for(machine._run_turn(ctx, "same prompt"), timeout=2)
+
+        assert observations == [
+            ("original", "running", "browser-original", "browser-original", "browser-original"),
+            ("one", "running", "external-one", "external-one", "external-one"),
+            ("two", "running", "external-two", "external-two", "external-two"),
+        ]
+        assert [(event.msg_id, event.turn_id) for event in transport.sent
+                if isinstance(event, TurnSteered)] == [
+            ("external-one", "native-turn"), ("remote-steer", "native-turn"),
+            ("external-two", "native-turn"),
+        ]
+        assert [(event.msg_id, event.client_msg_id) for event in transport.sent
+                if isinstance(event, UserMsg) and event.client_msg_id] == [
+            ("native-one", "external-one"), ("native-two", "external-two"),
+        ]
+        terminals = [event for event in transport.sent if isinstance(event, TurnEnd)]
+        assert len(terminals) == 1 and not terminals[0].result.is_error
+        assert ctx.state == "idle"
+
+    asyncio.run(run())
+
+
 def test_managed_codex_turn_replaces_stale_effort_with_model_default():
     async def run():
         machine, transport = _mk_machine()

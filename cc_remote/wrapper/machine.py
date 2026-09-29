@@ -198,6 +198,7 @@ from cc_remote.wrapper.claude_rate_limits import (
     ClaudeRateLimitStore,
     ClaudeRateLimitStoreError,
 )
+from cc_remote.wrapper.claude_usage import ClaudeUsageError, ClaudeUsageReader
 from cc_remote.wrapper.codex_controls import (
     CODEX_WEB_SEARCH_MODES,
     CodexControls,
@@ -321,6 +322,7 @@ from cc_remote.wrapper.codex_stream import (
     codex_history_file_changes,
     codex_history_process_append,
     codex_history_window_info,
+    codex_next_user_boundary_ts,
     codex_native_rollback_turns,
     codex_translate_history,
 )
@@ -328,9 +330,14 @@ from cc_remote.wrapper.codex_history import (
     CodexHistoryCursorError,
     CodexHistoryInvalidResponse,
     CodexHistoryPage,
+    CodexHistoryProjectionTooLarge,
     CodexHistoryUnsupported,
     CodexOfficialHistory,
 )
+from cc_remote.wrapper.codex_detail_pages import (
+    CodexDetailPages, CodexDetailCursorExpired, PREFIX as CODEX_DETAIL_CURSOR_PREFIX,
+)
+from cc_remote.wrapper.btw_history import BtwHistory
 from cc_remote.wrapper.codex_sessions import (
     CODEX_EXACT_CATALOG_MAX_IDS,
     list_codex_sessions, codex_exact_catalog_rows, codex_session_cwd,
@@ -1724,12 +1731,10 @@ def _apply_codex_process_clocks(
         if (
             turn.get("processDetailState") == "none"
             and turn.get("done") is True
-            and not turn.get("forkPointId")
         ):
-            # A completed segment without the native terminal/fork belongs to
-            # a steer boundary. An acceptance-time clock cannot contradict its
-            # exact empty source projection. The enclosing task's own clock can
-            # still recover work omitted from an opaque/compacted history tail.
+            # A clock proves activity, not public process content. Exact empty
+            # segments stay empty even when they own the native terminal. Opaque
+            # or bounded projections use unknown/present instead of none.
             continue
         visible_id = turn.get("id")
         client_message_id = turn.get("clientMsgId")
@@ -1746,6 +1751,9 @@ def _apply_codex_process_clocks(
             native_turn_id if isinstance(native_turn_id, str) else None,
         )
         if started_ms is None:
+            continue
+        if (isinstance(turn.get("ts"), int) and started_ms < turn["ts"]
+                or isinstance(turn.get("doneTs"), int) and started_ms > turn["doneTs"]):
             continue
         current = turn.get("processStartedTs")
         turn["processStartedTs"] = (
@@ -2206,6 +2214,7 @@ class WrapperMachine:
             self._claude_rate_limit_stores[profile.id] = store
         self._claude_rate_limits = self._claude_rate_limit_stores.get(
             self._claude_profiles.default.id)
+        self._claude_usage_reader = ClaudeUsageReader(cfg.state_dir)
         # A History token changes for every wrapper process and every local
         # destructive conversation mutation.  Browsers persist this token with
         # IndexedDB turns, so a fresh wrapper can never merge a pre-crash cache
@@ -2392,6 +2401,7 @@ class WrapperMachine:
             recover_user=self._recover_official_codex_user,
             recover_users=self._recover_official_codex_users,
         )
+        self._codex_detail_pages = CodexDetailPages()
         # In-memory at-most-once window for client retries. The outer and inner
         # OrderedDicts are both bounded; wrapper process restart intentionally
         # resets this window (documented residual risk, not durable exactly-once).
@@ -10399,6 +10409,8 @@ class WrapperMachine:
                 )
         if is_downstream(msg):
             msg.seq = ctx.next_seq()
+            if ctx.btw:
+                self._btw_history(ctx).observe(msg)
             ctx.buffer.append(msg)
         self._observe_active_turn_binding(ctx, msg)
         live = (
@@ -13247,6 +13259,21 @@ class WrapperMachine:
         if not sid:
             return
         try:
+            if ctx.btw:
+                # Ephemeral native threads reject both persisted-history APIs.
+                # Their private presentation snapshot is captured before the
+                # lossy queue and never goes through a normal session route.
+                if not ctx.owner_client_id:
+                    return
+                async with ctx.emit_lock:
+                    completions = getattr(ctx.sdk, "btw_completions", None)
+                    if completions is not None and turn_id in completions.truncated:
+                        self._btw_history(ctx).truncated = True
+                    for frame in self._btw_replay(ctx):
+                        await self.transport.send(frame.model_copy(update={
+                            "sid": ctx.key, "owner_id": ctx.owner_client_id,
+                        }))
+                return
             await self._push_mirrored_history(sid)
             log.info(
                 "codex overflow projection repaired",
@@ -14528,6 +14555,12 @@ class WrapperMachine:
                             and source_window_boundary_offset is not None
                             else None
                         ),
+                        source_turn_id=source_window_native_turn_id,
+                        segment_end_ts=(await asyncio.to_thread(
+                            codex_next_user_boundary_ts, path, end_offset,
+                            source_window.newest_native_turn_id,
+                            end_offset=source_fingerprint.size if source_fingerprint is not None else None,
+                        ) if before is not None else None),
                         snapshot_in_progress=(
                             in_progress and before is None
                         ),
@@ -14585,6 +14618,12 @@ class WrapperMachine:
                                     source_window_process_started_ms,
                                 )
                             events.insert(0, recovered_user)
+                            if source_window_native_turn_id is not None:
+                                events.insert(1, TurnBinding(
+                                    msg_id=recovered_user.msg_id,
+                                    turn_id=source_window_native_turn_id,
+                                    ts=recovered_user.ts,
+                                ))
             except Exception as e:
                 log.warning("codex get_history failed", session_id=sid, error=str(e))
                 history_error = "历史暂时不可用，请稍后重试"
@@ -15719,6 +15758,19 @@ class WrapperMachine:
                 source=source_before,
                 **alias_kwargs,
             )
+        except CodexHistoryProjectionTooLarge as exc:
+            # The source already proved user segments missing from the summary.
+            # A bounded native item read cannot repair a very long steered turn.
+            # Switch the whole newest-page family only against that same frozen
+            # source; an older official cursor must never enter rollout paging.
+            if before is None and _minimum_user_segments and source_before is not None:
+                source_after = await asyncio.to_thread(
+                    HistorySourceFingerprint.capture, source_before.path)
+                if source_after == source_before:
+                    raise _CodexOfficialProjectionIncomplete(
+                        "bounded official history omits source-proven user segments",
+                    ) from exc
+            raise
         finally:
             take_identities = getattr(
                 self._codex_history,
@@ -16587,6 +16639,35 @@ class WrapperMachine:
             or watch.get("engine") == "codex"
         )
         raw_before = getattr(cmd, "before", None)
+        if is_codex and (raw_before is None or raw_before.startswith(CODEX_DETAIL_CURSOR_PREFIX)):
+            try:
+                path = await asyncio.to_thread(self._codex_rollout_for_wire, sid)
+                if path:
+                    source_page = await asyncio.to_thread(
+                        self._codex_detail_pages.read,
+                        path, sid, cmd.turn_id, revision,
+                        before=raw_before, limit=getattr(cmd, "limit", 192),
+                        window_bytes=self.cfg.codex_history_window_max_bytes,
+                        max_bytes=min(8 * 1024 * 1024,
+                                      max(512 * 1024, self.cfg.ws_max_size_bytes // 2)),
+                        tool_result_max=self.cfg.tool_result_max,
+                        paginate=_turn_detail_page,
+                    )
+                    if self._history_revision(sid) != revision:
+                        raise CodexDetailCursorExpired("history revision changed")
+                    if source_page is not None:
+                        page, has_more, oldest, has_newer, newer = source_page
+                        return await send(page, has_more=has_more, oldest_cursor=oldest,
+                                          has_newer=has_newer, newer_cursor=newer)
+                elif raw_before is not None:
+                    raise CodexDetailCursorExpired("rollout is unavailable")
+            except CodexDetailCursorExpired:
+                return await send(error="详细过程已更新，请重新加载该轮", reset_required=True)
+            except (OSError, ValueError):
+                if raw_before is not None:
+                    return await send(error="详细过程已更新，请重新加载该轮", reset_required=True)
+                # An initial read can still use the ordinary official/indexed
+                # path when the optional local rollout is unavailable.
         try:
             snapshot_cursor = _decode_turn_detail_snapshot_cursor(raw_before)
         except ValueError:
@@ -17834,6 +17915,21 @@ class WrapperMachine:
         # can recover a response that was lost with the original WebSocket.
         return None
 
+    async def _reject_query(self, ctx, cmd, error: Error) -> Error:
+        """A pre-acceptance rejection belongs to the sender, not the live turn.
+
+        The reliable command cache handles lost ACKs. Never put this response
+        in the shared ring: reconnect replay rewrites recipients and would make
+        another browser mistake an unsent message for a failed engine turn.
+        """
+        error.sid = (self._ctx_wire_sid(ctx) if ctx is not None
+                     else getattr(cmd, "sid", None))
+        error.msg_id = getattr(cmd, "msg_id", None)
+        error.request_id = getattr(cmd, "cmd_id", None)
+        error.to = getattr(cmd, "client_id", None)
+        await self.transport.send(error)
+        return error
+
     async def _handle_query(self, cmd):
         sid = getattr(cmd, "sid", None)
         ctx = self._ctx_for(sid)
@@ -17844,13 +17940,13 @@ class WrapperMachine:
             error = Error(code=ERR_NOT_RUNNING,
                 message="该会话未启动(可能启动失败),重新点进这个会话再发",
                 msg_id=getattr(cmd, "msg_id", None))
-            await self._emit_to_sid(sid, error)
-            return error
+            return await self._reject_query(ctx, cmd, error)
         if getattr(cmd, "delivery", "immediate") != "immediate":
             return await self._enqueue_deferred_query(ctx, cmd)
         async with ctx.query_lock:
             if not self._is_resident_context(ctx):
-                return await self._missing_session_error(cmd, "发送消息")
+                return await self._reject_query(ctx, cmd, Error(
+                    code=ERR_NOT_RUNNING, message="该会话未启动，无法发送消息"))
             return await self._handle_immediate_query(ctx, cmd)
 
     async def _handle_immediate_query(
@@ -17863,14 +17959,12 @@ class WrapperMachine:
         if await self._refresh_btw_availability(ctx):
             error = Error(code=ERR_NOT_RUNNING, message=self.BTW_DESTROYED_MESSAGE,
                           msg_id=getattr(cmd, "msg_id", None))
-            await self._emit(ctx, error)
-            return error
+            return await self._reject_query(ctx, cmd, error)
         if ctx.state != "idle":
             error = Error(
                 code=ERR_BUSY, message="该会话正忙,先 interrupt",
                 msg_id=getattr(cmd, "msg_id", None))
-            await self._emit(ctx, error)
-            return error
+            return await self._reject_query(ctx, cmd, error)
         if self._claude_autonomous_followup_pending(ctx):
             # Claude may emit a task notification after the parent Result and
             # immediately start an autonomous response while the wrapper still
@@ -17882,8 +17976,7 @@ class WrapperMachine:
                 message="Claude 正在处理后台任务结果，请稍后重试或排队发送",
                 msg_id=getattr(cmd, "msg_id", None),
             )
-            await self._emit(ctx, error)
-            return error
+            return await self._reject_query(ctx, cmd, error)
         if ctx.engine == "claude" and ctx.space == "code":
             await self._adopt_claude_broker_handle(ctx)
             if ctx.state != "idle":
@@ -17892,8 +17985,7 @@ class WrapperMachine:
                     message="该会话正由终端中的 Claude 回合运行，先 interrupt",
                     msg_id=getattr(cmd, "msg_id", None),
                 )
-                await self._emit(ctx, error)
-                return error
+                return await self._reject_query(ctx, cmd, error)
         is_claude_broker = bool(getattr(ctx.sdk, "is_claude_broker", False))
         is_codex_shared = self._codex_shared_affinity(ctx)
         if (
@@ -17907,8 +17999,7 @@ class WrapperMachine:
                          else "Codex 共享通道重连失败，本次未发送；请重试"),
                 msg_id=getattr(cmd, "msg_id", None),
             )
-            await self._emit(ctx, error)
-            return error
+            return await self._reject_query(ctx, cmd, error)
         if is_claude_broker:
             try:
                 metadata = await ctx.sdk.refresh_status()
@@ -17924,8 +18015,7 @@ class WrapperMachine:
                         message="Claude 连接暂不可用，本次消息未发送，请稍后重试。",
                         msg_id=getattr(cmd, "msg_id", None),
                     )
-                    await self._emit(ctx, error)
-                    return error
+                    return await self._reject_query(ctx, cmd, error)
                 else:
                     # A terminal session exit was proven and the context is now
                     # a fully connected SDK handle. Continue through the normal
@@ -17941,8 +18031,7 @@ class WrapperMachine:
                     message="本机终端正在编辑输入；完成、发送或取消后再从 Remote 发送",
                     msg_id=getattr(cmd, "msg_id", None),
                 )
-                await self._emit(ctx, error)
-                return error
+                return await self._reject_query(ctx, cmd, error)
         route_sid = self._ctx_wire_sid(ctx)
         if route_sid:
             self._watch_session(route_sid)
@@ -17971,15 +18060,13 @@ class WrapperMachine:
                     message=message,
                     msg_id=getattr(cmd, "msg_id", None),
                 )
-                await self._emit(ctx, error)
-                return error
+                return await self._reject_query(ctx, cmd, error)
         if not cmd.prompt and not cmd.images and not cmd.files:
             error = Error(
                 code=ERR_BAD_PROMPT,
                 message="消息内容为空，请输入内容或添加附件。",
                 msg_id=getattr(cmd, "msg_id", None))
-            await self._emit(ctx, error)
-            return error
+            return await self._reject_query(ctx, cmd, error)
         attachment_error = validate_attachments(
             getattr(cmd, "images", None), getattr(cmd, "files", None))
         if attachment_error:
@@ -17988,8 +18075,7 @@ class WrapperMachine:
                 message="附件不符合要求，请调整后重试。",
                 msg_id=getattr(cmd, "msg_id", None),
             )
-            await self._emit(ctx, error)
-            return error
+            return await self._reject_query(ctx, cmd, error)
         if ctx.space == "work" and ctx.work_id:
             try:
                 await asyncio.to_thread(
@@ -18004,8 +18090,7 @@ class WrapperMachine:
                     message="工作资料同步失败，本轮尚未发送；请重试",
                     msg_id=getattr(cmd, "msg_id", None),
                 )
-                await self._emit(ctx, error)
-                return error
+                return await self._reject_query(ctx, cmd, error)
         if self._claude_autonomous_followup_pending(ctx):
             # Ownership and Work preflights above contain awaits. A task
             # notification can start its autonomous follow-up during one of
@@ -18015,21 +18100,18 @@ class WrapperMachine:
                 message="Claude 正在处理后台任务结果，请稍后重试或排队发送",
                 msg_id=getattr(cmd, "msg_id", None),
             )
-            await self._emit(ctx, error)
-            return error
+            return await self._reject_query(ctx, cmd, error)
         if ctx.engine == "claude" and not is_claude_broker:
             context_error = await self._prepare_claude_context_before_query(
                 ctx, msg_id=getattr(cmd, "msg_id", None))
             if context_error is not None:
-                await self._emit(ctx, context_error)
-                return context_error
+                return await self._reject_query(ctx, cmd, context_error)
         if ctx.engine == "codex":
             await self._apply_codex_context(ctx)
             if ctx.state != "idle" or getattr(ctx.sdk, "turn_active", False):
                 error = Error(code=ERR_BUSY, message="会话已开始新回合，请稍后重试或排队发送",
                               msg_id=getattr(cmd, "msg_id", None))
-                await self._emit(ctx, error)
-                return error
+                return await self._reject_query(ctx, cmd, error)
         # All synchronous rejection paths have passed. A new conversation may
         # now finish before the next sidebar catalog read, so remember its first
         # accepted prompt under the temporary key; capture migrates it to the
@@ -19369,6 +19451,12 @@ class WrapperMachine:
                     if not self._is_resident_context(ctx):
                         return await self._missing_session_error(
                             cmd, "切换模型")
+                    if getattr(ctx.sdk, "service_restart_required", False):
+                        recovered = await self._reload_stale_claude_context_control(
+                            ctx, expected_sdk=ctx.sdk,
+                            expected_client=getattr(ctx.sdk, "client", None))
+                        if not recovered:
+                            raise RuntimeError("Claude service recovery is not ready")
                     await ctx.sdk.set_model(requested_model)
             else:
                 await ctx.sdk.set_model(requested_model)
@@ -20123,6 +20211,32 @@ class WrapperMachine:
         log.info("btw closed", btw_sid=sid)
         return close_event
 
+    def _btw_history(self, ctx: SessionContext) -> BtwHistory:
+        if ctx.btw_history is None:
+            ctx.btw_history = BtwHistory(
+                min(self.cfg.ring_max_bytes, 24 * 1024 * 1024),
+                min(self.cfg.ring_max_events, 10000),
+            )
+            # Compatibility for an already-populated ring/test fixture. New
+            # forks enter here on their first emit, before any token eviction.
+            for _, event in ctx.buffer._buf:
+                ctx.btw_history.observe(event)
+        return ctx.btw_history
+
+    def _btw_replay(self, ctx: SessionContext) -> list:
+        history = self._btw_history(ctx)
+        completions = getattr(ctx.sdk, "btw_completions", None)
+        if completions is not None:
+            for native_id in tuple(completions.turns):
+                history.repair(native_id, completions.snapshots(native_id),
+                               item_order=completions.item_order(native_id))
+        return history.replay(
+            tail_seq=ctx.buffer.tail_seq, generation=self.instance_id,
+            max_bytes=self.BTW_REPLAY_MAX_BYTES,
+            max_events=self.BTW_REPLAY_MAX_EVENTS,
+            turn_usage=ctx.buffer.latest_turn_usage(),
+        )
+
     async def _handle_sync_btw(self, cmd: SyncBtw):
         """Hydrate one selected side chat without replaying every BTW on Hello."""
         client_id = getattr(cmd, "client_id", None)
@@ -20163,21 +20277,7 @@ class WrapperMachine:
                     await self._close_pending_ask_locked(
                         ctx, ask_id, reason="timeout")
 
-            same_generation = cmd.generation == self.instance_id
-            cursor = cmd.cursor if same_generation else 0
-            frames = ctx.buffer.replay_from_bounded(
-                cursor,
-                max_bytes=self.BTW_REPLAY_MAX_BYTES,
-                max_events=self.BTW_REPLAY_MAX_EVENTS,
-                rebuild=not same_generation,
-                generation=self.instance_id,
-            )
-            frames = self._reseed_active_binding_for_hello(
-                ctx,
-                frames,
-                cursor=cursor,
-                same_generation=same_generation,
-            )
+            frames = self._btw_replay(ctx)
             for frame in frames:
                 if not self._hello_replay_frame_visible(frame, client_id):
                     continue
@@ -20897,7 +20997,7 @@ class WrapperMachine:
         # fail-closed boundary merely to paint Context metadata.
         if ctx.write_state != "writable":
             return "external"
-        if ctx.needs_reload:
+        if ctx.needs_reload or getattr(ctx.sdk, "service_restart_required", False):
             return "stale"
         return "ready"
 
@@ -20908,11 +21008,12 @@ class WrapperMachine:
         expected_sdk,
         expected_client,
     ) -> bool:
-        """Resume external transcript growth without crossing a new owner."""
+        """Resume a stale transcript/dead service without crossing a new owner."""
         if (ctx.sdk is not expected_sdk
                 or getattr(ctx.sdk, "client", None) is not expected_client
                 or getattr(ctx.sdk, "is_claude_broker", False)
-                or not ctx.needs_reload):
+                or not (ctx.needs_reload or getattr(
+                    ctx.sdk, "service_restart_required", False))):
             return False
         readiness = await self._claude_context_refresh_readiness(
             ctx,
@@ -20925,25 +21026,29 @@ class WrapperMachine:
         async def reconnect_if_still_stale() -> bool:
             if (ctx.sdk is not expected_sdk
                     or getattr(ctx.sdk, "client", None) is not expected_client
-                    or not ctx.needs_reload
+                    or not (ctx.needs_reload or getattr(
+                        ctx.sdk, "service_restart_required", False))
                     or self._claude_context_work_active(ctx)
                     or ctx.write_state != "writable"):
                 return False
             resume_id, fork = self._claude_reconnect_identity(ctx)
+            transcript_changed = ctx.needs_reload
             # Clear first so a watcher append during reconnect can reassert the
             # stale bit without being overwritten after the await.
             ctx.needs_reload = False
             try:
-                await self._stage_claude_handoff_controls(ctx)
+                if transcript_changed:
+                    await self._stage_claude_handoff_controls(ctx)
                 await expected_sdk.force_reconnect(
                     resume_id=resume_id,
                     cwd=ctx.cwd,
-                    reason="external transcript change before context",
+                    reason=("external transcript change before context"
+                            if transcript_changed else "persistent Claude service restart"),
                     preserve_model=True,
                     fork=fork,
                 )
             except Exception as reconnect_exc:
-                ctx.needs_reload = True
+                ctx.needs_reload = ctx.needs_reload or transcript_changed
                 log.warning(
                     "Claude context stale-generation reload failed",
                     session_id=ctx.session_id,
@@ -21366,6 +21471,8 @@ class WrapperMachine:
         ctx = self._ctx_for(getattr(cmd, "sid", None))
         if ctx is None:
             return await self._missing_session_error(cmd, "读取状态")
+        if ctx.engine == "claude":
+            return await self._handle_get_claude_status(ctx, cmd)
         if ctx.engine != "codex":
             error = Error(
                 code=ERR_INTERNAL,
@@ -21417,6 +21524,45 @@ class WrapperMachine:
                 )
                 await self._emit(ctx, error)
                 return error
+
+    async def _handle_get_claude_status(self, ctx, cmd):
+        """Read account quota without connecting or controlling a chat worker."""
+        profile = self._claude_profile_for_ctx(ctx)
+        store = self._claude_rate_limit_stores.get(profile.id)
+
+        async def apply(read):
+            if store is None:
+                raise ClaudeUsageError("usage cache unavailable")
+            async with self._claude_rate_limit_lock:
+                revisions = dict(store.revisions)
+            payload = await read()
+            async with self._claude_rate_limit_lock:
+                try:
+                    await asyncio.to_thread(store.observe_usage, payload, revisions)
+                except (ValueError, ClaudeRateLimitStoreError):
+                    raise ClaudeUsageError("usage response invalid") from None
+
+        try:
+            failure = await self._claude_usage_reader.refresh(profile, apply)
+        except ClaudeUsageError as exc:
+            failure = str(exc)
+        windows = await self._claude_rate_limit_snapshot(ctx)
+        report = StatusReport(
+            thread={"thread_id": ctx.session_id or ctx.key,
+                    "session_id": ctx.session_id,
+                    "status": "active" if ctx.state == "running" else "idle"},
+            runtime={}, context={},
+            rate_limits=[{
+                "limit_id": update.limit_id, "limit_name": update.name,
+                "rate_limit_reached_type": update.reached_type,
+                "primary": update.primary, "secondary": update.secondary,
+            } for update in windows],
+            component_errors=[f"rate_limits: {failure}"] if failure else [],
+            request_id=getattr(cmd, "cmd_id", None),
+            to=getattr(cmd, "client_id", None),
+        )
+        await self._emit(ctx, report)
+        return report
 
     async def _handle_consume_rate_limit_reset_credit(self, cmd):
         """Redeem one native account reset credit and refresh its snapshot."""
@@ -21637,12 +21783,12 @@ class WrapperMachine:
             return True
         async with self._claude_rate_limit_lock:
             try:
-                update = await asyncio.to_thread(
+                updates = await asyncio.to_thread(
                     store.observe, message.rate_limit_info)
             except ClaudeRateLimitStoreError:
                 log.warning("Claude rate-limit update could not be cached")
                 return True
-            if update is None:
+            if not updates:
                 return True
         # Each CLAUDE_CONFIG_DIR is an authentication boundary. Seed only
         # resident normal sessions from the same profile;
@@ -21656,7 +21802,8 @@ class WrapperMachine:
         )
         async with self._claude_rate_limit_emit_lock:
             for target in targets:
-                await self._emit(target, update.model_copy(deep=True))
+                for update in updates:
+                    await self._emit(target, update.model_copy(deep=True))
         return True
 
     async def _observe_claude_model_fallback(self, ctx: SessionContext, message) -> None:
@@ -37472,6 +37619,10 @@ class WrapperMachine:
         codex_handoff_to_spontaneous = False
         codex_query_reconnected = False
         native_turn_id: Optional[str] = None
+        codex_initial_msg_id = ctx.active_msg_id
+        codex_initial_user_seen = False
+        codex_seen_user_items: set[str] = set()
+        codex_seen_user_clients: set[str] = set()
         file_meta = ([{"filename": item.get("filename", "attachment")}
                       for item in (files or [])] or None)
         prelaunch_terminal_emitted = False
@@ -37668,6 +37819,55 @@ class WrapperMachine:
                 if not wait_task.done():
                     wait_task.cancel()
                     await asyncio.gather(wait_task, return_exceptions=True)
+
+        async def publish_codex_user(raw: dict) -> None:
+            """Move the visible segment on an exact managed-task user boundary."""
+            nonlocal codex_initial_user_seen
+            user = codex_live_user_message(raw)
+            if user is None or user.turn_id != native_turn_id:
+                return
+            if user.client_id is not None:
+                await self._remember_codex_live_user_alias(ctx, user)
+            if user.message_id in codex_seen_user_items:
+                return
+            initial = bool(codex_initial_msg_id and codex_initial_msg_id in {
+                user.message_id, user.client_id,
+            })
+            if not initial and not user.client_id and not codex_initial_user_seen:
+                # A missed initial echo cannot turn an unlabelled first item
+                # into a second input. Never guess from equal prompt text.
+                return
+            if len(codex_seen_user_items) >= self.CODEX_LIVE_USER_ITEM_IDS:
+                return
+            codex_seen_user_items.add(user.message_id)
+            if initial:
+                codex_initial_user_seen = True
+                return
+            if user.client_id is not None:
+                if (
+                    ctx.codex_published_steers.get(user.client_id) == native_turn_id
+                    or user.client_id in codex_seen_user_clients
+                ):
+                    # Remote already published its boundary at RPC acceptance.
+                    # A late echo must not steal activity from a newer input.
+                    return
+                codex_seen_user_clients.add(user.client_id)
+            msg_id = user.client_id or user.message_id
+            ctx.active_msg_id = msg_id
+            self._rebind_codex_turn(ctx, user.turn_id, msg_id)
+            await self._emit(ctx, TurnSteered(
+                msg_id=msg_id,
+                turn_id=user.turn_id,
+                prompt=user.prompt,
+            ))
+            if user.client_id is not None:
+                # Reconcile the canonical history id only after the boundary;
+                # pre-inserting UserMsg would leave the previous row open.
+                await self._emit(ctx, UserMsg(
+                    msg_id=user.message_id,
+                    client_msg_id=user.client_id,
+                    prompt=user.prompt,
+                ))
 
         async def emit_codex_event(event) -> None:
             nonlocal notice_active
@@ -37921,7 +38121,8 @@ class WrapperMachine:
         async def reconnect_claude(reason: str) -> None:
             """Reconnect without hiding transcript changes during the await."""
             check_delivery = getattr(ctx.sdk, "check_service_delivery", None)
-            if check_delivery is not None:
+            if (check_delivery is not None
+                    and not getattr(ctx.sdk, "service_restart_required", False)):
                 check_delivery()
             external_change = reason.startswith("external transcript change")
             if external_change:
@@ -37951,7 +38152,8 @@ class WrapperMachine:
             if not _recover_service and not _adopt_steer:
                 if not is_codex:
                     check_delivery = getattr(ctx.sdk, "check_service_delivery", None)
-                    if check_delivery is not None:
+                    if (check_delivery is not None
+                            and not getattr(ctx.sdk, "service_restart_required", False)):
                         check_delivery()
                 # An EXTERNAL process (a native `claude`/`codex` in the user's terminal)
                 # appended to this session's transcript since we resumed it, so our child's
@@ -38004,7 +38206,8 @@ class WrapperMachine:
                 # the failed prompt automatically because it may already have run.
                 if (
                     not is_codex
-                    and getattr(ctx.sdk, "message_pump_failed", False)
+                    and (getattr(ctx.sdk, "message_pump_failed", False)
+                         or getattr(ctx.sdk, "service_restart_required", False))
                 ):
                     log.warning(
                         "recovering failed Claude SDK message pump before query",
@@ -38398,17 +38601,7 @@ class WrapperMachine:
                         continue
                     await ctx.codex_steer_gate.wait()
                     await self._confirm_uncertain_codex_steer(ctx, msg)
-                    live_user = codex_live_user_message(msg)
-                    if (
-                        live_user is not None
-                        and live_user.client_id is not None
-                    ):
-                        # Only an upstream clientId can prove a native user-item
-                        # alias. Initial Query also keeps its source-bound
-                        # segment-0 fallback for older app-server generations;
-                        # never guess from an unlabelled prompt or timestamp.
-                        await self._remember_codex_live_user_alias(
-                            ctx, live_user)
+                    await publish_codex_user(msg)
                     sid = codex_session_id(msg)
                     if sid and not ctx.session_id:
                         await self._capture_session_id(ctx, sid)

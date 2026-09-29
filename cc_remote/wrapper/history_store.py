@@ -69,7 +69,10 @@ from cc_remote.wrapper.usage_limit import is_usage_limit_failure
 # v42 replaces recovered text prefixes and bounds summary answer block counts.
 # v43 makes manual /compact a visible turn owning its native boundary.
 # v44 restores consumed human queued_command attachments as visible inputs.
-_SCHEMA_VERSION = 44
+# v45 restores public AgentMessage records in new Codex rollouts and the
+# native owner of source-window tails. Old tools-only projections must rebuild.
+# v46 restores native commands, source clocks and closed segment envelopes.
+_SCHEMA_VERSION = 46
 _FINGERPRINT_SAMPLE_BYTES = 64 * 1024
 _DEFAULT_MAX_ENTRIES = 128
 _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
@@ -1465,7 +1468,7 @@ class HistoryIndexStore:
                 for table in ("history_pages", "history_turn_details"):
                     connection.execute(
                         f"DELETE FROM {table} WHERE engine='codex'")
-            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43):
+            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45):
                 # The independent v22-v44 invalidations above suffice.
                 pass
             elif current not in (0, _SCHEMA_VERSION):
@@ -1648,6 +1651,12 @@ class HistoryIndexStore:
                 )
                 """
             )
+            if 0 < current < 46:
+                # v46 reads public command lifecycle records and source clocks in
+                # Codex rollouts. Rebuild only the derived Codex projections;
+                # native sources, other engines and binary assets stay valid.
+                for table in ("history_pages", "history_turn_details"):
+                    connection.execute(f"DELETE FROM {table} WHERE engine='codex'")
             if current != _SCHEMA_VERSION:
                 connection.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
         try:

@@ -78,6 +78,10 @@ class CodexHistoryInvalidResponse(CodexHistoryError):
     """The app-server returned malformed or internally inconsistent history."""
 
 
+class CodexHistoryProjectionTooLarge(CodexHistoryInvalidResponse):
+    """Valid item pagination reached our bounded projection budget."""
+
+
 class CodexHistoryCursorError(CodexHistoryInvalidResponse):
     """A browser-safe cursor has no mapping in this wrapper generation."""
 
@@ -1295,7 +1299,7 @@ class CodexOfficialHistory:
         page_count = 0
         while True:
             if page_count >= _MAX_ITEM_PAGES:
-                raise CodexHistoryInvalidResponse(
+                raise CodexHistoryProjectionTooLarge(
                     "Codex item pagination exceeded its page limit")
             page_count += 1
             response = await self._call("thread/items/list", {
@@ -1336,7 +1340,7 @@ class CodexOfficialHistory:
                 seen_items.add(item_id)
                 items.append(normalized_item)
                 if len(items) > _MAX_DETAIL_ITEMS:
-                    raise CodexHistoryUnsupported(
+                    raise CodexHistoryProjectionTooLarge(
                         "Codex turn exceeds the bounded official item projection")
             if next_cursor is None:
                 return items
@@ -1416,6 +1420,9 @@ class CodexOfficialHistory:
                 try:
                     items = await self._items_for_turn(
                         thread_id, locator.native_turn_id)
+                except CodexHistoryProjectionTooLarge as exc:
+                    raise CodexHistoryUnsupported(
+                        "official Codex turn detail exceeds projection budget") from exc
                 except CodexRpcRejected as exc:
                     if not _unsupported(exc):
                         raise

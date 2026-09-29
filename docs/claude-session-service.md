@@ -36,9 +36,17 @@ that exact worker retries lease conflicts for at most five seconds. This does
 not replace a live controller, resubmit a prompt or retry an unknown response.
 Older services' coarse conflict errors are checked against the listed worker's
 full identity before retry. When strict leases are negotiated, a missing explicit
-worker is rejected; only confirmed native close clears the Wrapper's worker
-identity for a deliberate reconnect. Older controllers keep their existing
-reconnect behavior without opting into strict leases.
+worker is rejected. A confirmed native close clears the Wrapper's worker identity
+for a deliberate reconnect. After a service restart, the Wrapper can also resume
+the same native transcript when it proves that the previous process identity has
+exited, the socket belongs to a different process generation, and neither the old
+worker nor a replacement owning that transcript is present. An unreadable process
+identity or a live old owner is not sufficient.
+Model switching and explicit idle context refresh use this recovery before their
+control request; the next user query can recover too, without resubmitting any
+previously accepted input. Cached history/context reads never trigger it. Older
+controllers keep their existing reconnect behavior without opting into strict
+leases.
 
 Accepted steering uploads survive reader/control failures and ordinary service
 detach because their native turn may still need them. A confirmed native close
@@ -72,6 +80,16 @@ replay of its terminal must not close a later continuation. Running child tasks
 retain their independent lifetime: after the main response ends, normal prompts
 are accepted while those children continue, and later native activity can start
 another main continuation.
+
+Owners advertising `human_result_receipts` also recognize a Result whose
+`user_message_uuid` / `user_message_uuids` includes the latest consumed human
+input, even when native Code labels its origin `task-notification`. They journal
+that exact ownership before SDK parsing. Old/foreign receipts and child Results
+cannot finish the current input, and queued inputs still require their own echo.
+Older owners retain their original terminal ledger; a Wrapper-only upgrade
+does not activate this fix or make an unacknowledgeable terminal commit. Upgrade
+the service with the drain procedure below. Never resubmit an accepted query or
+restart a live owner just to clear its running indicator.
 
 Native Code can also absorb a queued task notification between tool batches in
 an already-running human response. Its JSONL entry is a `queued_command`

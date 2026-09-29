@@ -159,6 +159,12 @@ export function UsageMeter({
     quotas.fiveHour || quotas.weekly || quotas.overall
   );
   const hasAnyQuota = hasAccountQuota || specializedWindows.length > 0;
+  const claudeReadError = engine === "claude"
+    ? report?.component_errors.find((reason) => reason.startsWith("rate_limits:"))
+    : undefined;
+  const claudeReadNote = claudeReadError?.endsWith("usage helper unavailable")
+    ? "未配置主动额度查询，等待原生同步。"
+    : claudeReadError ? "额度刷新失败，请重试。" : null;
   const provider = engine === "claude" ? "Claude" : "Codex";
   const quotaSummary = hasOverallQuota
     ? `${provider} 总额度${compactPercent(overall)}`
@@ -217,7 +223,7 @@ export function UsageMeter({
       ) : !hasAnyQuota ? (
         <div className="ctx-pop-loading">
           {engine === "claude"
-            ? "尚未收到 Claude Code 的额度事件；原生额度更新后会自动同步。"
+            ? claudeReadNote ?? "额度尚未同步，请刷新。"
             : visibleReport?.account?.auth_type === "chatgpt"
             ? "账户已登录；本次额度读取失败，请刷新重试。"
             : "当前 Codex app-server 暂未提供账户额度。"}
@@ -240,12 +246,13 @@ export function UsageMeter({
           />
         ))}
       </>}
+      {hasAnyQuota && claudeReadNote && <div className="ctx-pop-loading" role="status">
+        {claudeReadNote} 当前显示上次同步数据。
+      </div>}
       <div className="usage-pop-actions">
         <span>{error ? "旧账户数据已隐藏"
           : loading ? "正在更新…"
-          : engine === "claude"
-            ? "Claude Code 原生额度事件自动同步"
-            : "来自当前 Codex 账户"}</span>
+          : `来自当前 ${provider} 账户`}</span>
         {onRefresh && <button type="button" onClick={onRefresh}
           disabled={loading}>刷新</button>}
         {onOpenStatus && <button type="button" onClick={onOpenStatus}>完整状态</button>}

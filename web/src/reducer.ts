@@ -225,6 +225,7 @@ export interface SessionRuntime {
   collaborationMode: CollaborationModeName;
   fast: boolean | null;   // null until the wrapper reports the real service tier
   replaying: boolean;
+  btwReplayPending?: Turn[];
   // True only after this connection has received this sid's Snapshot or
   // ReplayEnd. Prevents stale local "idle" state from draining work early.
   syncReady: boolean;
@@ -374,6 +375,9 @@ export interface SessionRuntime {
   acceptancePending: string | null;
   acceptanceKind: "query" | "steer" | "steer_unknown" | null;
   acceptanceHistoryBaseline: QueryAcceptanceHistoryHead | null;
+  // Private retry payload, released on exact acceptance. Turn history keeps
+  // only attachment metadata and cannot reconstruct an unsent attachment.
+  acceptanceQuery: PendingQuery | null;
 }
 
 export interface AppState {
@@ -499,6 +503,7 @@ export function createRuntime(): SessionRuntime {
     queue: [], pendingSend: null, failedDeferred: [],
     acceptancePending: null,
     acceptanceKind: null,
+    acceptanceQuery: null,
     acceptanceHistoryBaseline: null,
   };
 }
@@ -1695,6 +1700,7 @@ function clearAcceptance(runtime: SessionRuntime): void {
   runtime.acceptancePending = null;
   runtime.acceptanceKind = null;
   runtime.acceptanceHistoryBaseline = null;
+  runtime.acceptanceQuery = null;
 }
 
 function finishTurnWithoutTerminal(
@@ -2414,6 +2420,10 @@ export function reduce(state: AppState, action: Action): AppState {
             acceptanceKind: action.type === "steer_sent"
               ? "steer" : "query",
             acceptanceHistoryBaseline,
+            acceptanceQuery: action.type === "query_sent" ? {
+              msg_id: action.msg_id, prompt: action.prompt,
+              images: action.images, files: action.files,
+            } : null,
           },
         };
       }
@@ -3667,6 +3677,8 @@ function reduceEvent(
             acceptanceHistoryBaseline: source.acceptancePending
               ? source.acceptanceHistoryBaseline
               : mergeTarget.acceptanceHistoryBaseline,
+            acceptanceQuery: source.acceptancePending
+              ? source.acceptanceQuery : mergeTarget.acceptanceQuery,
             notices: mergeNotices(mergeTarget.notices, source.notices),
           };
           switchControlGeneration(mergedRuntime, mergedControlGeneration);
@@ -4826,6 +4838,7 @@ function reduceEvent(
               : base.takeoverMessage,
             acceptancePending: acceptanceRuntime.acceptancePending,
             acceptanceKind: acceptanceRuntime.acceptanceKind,
+            acceptanceQuery: acceptanceRuntime.acceptanceQuery,
             acceptanceHistoryBaseline:
               acceptanceRuntime.acceptanceHistoryBaseline,
           },
@@ -5664,9 +5677,7 @@ function reduceEvent(
       });
     case "replay_start": {
       const replaySid = e.sid ?? state.focusedSid;
-      // Ephemeral side chats have no canonical History endpoint. Their ring is
-      // the authoritative bounded projection, so keep and apply a retained
-      // suffix even when its older prefix has fallen out of the ring.
+      // Side chats rebuild from a private item snapshot, not durable History.
       const needsAuthoritativeHistory = (e.truncated || !!e.rebuild)
         && !replaySid?.startsWith("btw-");
       const submittedTurn = needsAuthoritativeHistory && !e.rebuild
@@ -5706,6 +5717,20 @@ function reduceEvent(
         rt.replaying = true;
         rt.syncReady = false;
         rt.truncated = e.truncated;
+        if (replaySid?.startsWith("btw-") && e.rebuild) {
+          const pending = [...rt.turns, ...(rt.btwReplayPending ?? [])].find((turn) =>
+            turn.id === rt.acceptancePending && !turnHasBoundEngineId(turn));
+          rt.btwReplayPending = pending ? [pending] : [];
+          rt.turns = [];
+          rt.liveOwner = null;
+          rt.pendingLiveBinding = null;
+          rt.pendingTerminalFences = null;
+          rt.historyFence = null;
+          rt.hydratedCacheTurnIds = [];
+          rt.liveDetailTurnIds = [];
+          rt.historyInvalidated = false;
+          rt.loading = true;
+        }
         // rebuild clears turns then refills — keep loading=true so the gap shows a
         // spinner rather than briefly flashing the empty "send a message" prompt.
         if (needsAuthoritativeHistory) {
@@ -5771,6 +5796,11 @@ function reduceEvent(
     }
     case "replay_end":
       return { ...patch(state, e.sid, (rt) => {
+        if (rt.btwReplayPending) {
+          rt.turns = [...rt.turns, ...rt.btwReplayPending.filter((pending) =>
+            !rt.turns.some((turn) => turnHasIdentityAlias(turn, pending.id)))];
+          rt.btwReplayPending = undefined;
+        }
         for (const usage of e.turn_usage ?? []) {
           rt.turnUsage = rememberTurnUsage(rt.turnUsage, usage);
         }
@@ -5854,6 +5884,7 @@ function reduceEvent(
         });
         return { ...next, banner: presentCommandProblem(e) };
       }
+      const sendRejection = e.code === "busy" || e.code === "not_running" || e.code === "bad_prompt";
       if (e.msg_id) {
         const key = e.sid ?? state.focusedSid;
         const runtime = key ? state.runtimes[key] : undefined;
@@ -5861,9 +5892,16 @@ function reduceEvent(
           (query) => query.msg_id === e.msg_id);
         const pending = runtime?.pendingSend?.msg_id === e.msg_id
           ? runtime.pendingSend : undefined;
-        const deferred = queued ?? pending;
+        const rejectedQuery = (sendRejection || e.request_id)
+          && runtime?.acceptancePending === e.msg_id
+          && runtime.acceptanceKind === "query" ? runtime.acceptanceQuery : null;
+        if (rejectedQuery && runtime?.turns.some((turn) => turn.id === e.msg_id
+            && (turnHasBoundEngineId(turn) || mutableTurnBlocks(turn).length > 0))) return state;
+        const deferred = queued ?? pending ?? rejectedQuery;
         if (deferred && key) {
-          const problem = presentCommandProblem(e);
+          const problem = rejectedQuery
+            ? sendRejection ? presentTurnProblem(e) : "本次消息未发送，请稍后重试。"
+            : presentCommandProblem(e);
           if (deferred.queueState === "queued") {
             const next = patch(state, key, (rt) => {
               rt.queue = rt.queue.map((query) =>
@@ -5901,6 +5939,12 @@ function reduceEvent(
                 failedAt: Date.now(),
               },
             ];
+            if (rejectedQuery) {
+              // Preserve the complete input in the bounded "未发送" list, not
+              // as a failed engine turn. Retrying requires an explicit click.
+              rt.turns = rt.turns.filter((turn) => turn.id !== e.msg_id);
+              clearAcceptance(rt);
+            }
           });
           return {
             ...next,
@@ -5911,6 +5955,12 @@ function reduceEvent(
       }
       if (!e.msg_id) {
         return { ...state, banner: presentCommandProblem(e) };
+      }
+      if (sendRejection || e.request_id) {
+        // A rejected command never owns an engine terminal. Older wrappers
+        // broadcast/replayed these errors to observers; without this browser's
+        // exact pending query, there is no conversation row to create or fail.
+        return state;
       }
       return patch(state, e.sid, (rt) => {
         rt.loading = false; // never leave a spinner spinning behind an error

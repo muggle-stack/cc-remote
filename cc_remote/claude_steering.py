@@ -68,6 +68,17 @@ def is_managed_input(value: dict, *, pending_compact: bool = False) -> bool:
     return False
 
 
+def is_human_result(value: dict) -> bool:
+    """Use an exact consumption receipt before falling back to legacy origin."""
+    if (value.get("type") != "result" or value.get("parent_tool_use_id")
+            or value.get("parentToolUseID")):
+        return False
+    if "__cc_managed_result" in value:
+        return value["__cc_managed_result"] is True
+    origin = value.get("origin")
+    return not isinstance(origin, dict) or origin.get("kind") in (None, "human")
+
+
 class PendingSteers:
     """Fence accepted inputs against their exact replayed human UUIDs.
 
@@ -83,6 +94,10 @@ class PendingSteers:
         self.background_origin: str | None = None
         self.background_origin_data: dict | None = None
         self._backgrounds: dict[str, dict] = {}
+        self._consumed_user_id: str | None = None
+
+    def begin_turn(self) -> None:
+        self._consumed_user_id = None
 
     def handoff_background(self, identity: str | None) -> None:
         self._backgrounds.pop(identity, None)
@@ -96,10 +111,31 @@ class PendingSteers:
             raise ClaudeSteerRejected("Claude steering capacity reached")
         self.pending[native_id] = metadata
 
-    def annotate(self, value: dict, *, managed_active: bool = False) -> dict:
+    def annotate(self, value: dict, *, managed_active: bool = False,
+                 result_receipts: bool = True) -> dict:
         origin = value.get("origin")
         kind = origin.get("kind") if isinstance(origin, dict) else None
         child = value.get("parent_tool_use_id") or value.get("parentToolUseID")
+        uid = value.get("uuid")
+        if (is_managed_input(value) and value.get("type") == "user"
+                and isinstance(uid, str) and uid
+                and (managed_active or uid in self.pending or value.get("__cc_steer"))):
+            self._consumed_user_id = uid
+        if value.get("type") == "result" and not child:
+            receipts = value.get("user_message_uuids")
+            receipts = receipts if isinstance(receipts, list) else []
+            receipts = [uid for uid in receipts if isinstance(uid, str) and uid]
+            receipt = value.get("user_message_uuid")
+            if isinstance(receipt, str) and receipt:
+                receipts.append(receipt)
+            if receipts and result_receipts and "__cc_managed_result" not in value:
+                # Task notifications can be absorbed into the human response.
+                # The Result must consume the latest echoed input, not merely
+                # an older input in the same session. Preserve this decision in
+                # the journal: the pinned SDK parser drops the receipt fields.
+                value = {**value, "__cc_managed_result":
+                         self._consumed_user_id is not None
+                         and self._consumed_user_id in receipts}
         if not child:
             if managed_active and is_managed_input(value, pending_compact=True):
                 # A native request can precede its replayed human input. That
@@ -150,7 +186,7 @@ class PendingSteers:
             elif value.get("type") == "result":
                 ended = background_end_ids(value)
                 local_ends = ()
-                if kind in (None, "human"):
+                if is_human_result(value):
                     # An unattributed Result closes the physical response,
                     # including its in-turn task inputs. An older autonomous
                     # response must not be consumed by a new human terminal.
@@ -159,7 +195,7 @@ class PendingSteers:
                                            if entry["managed"])
                     elif kind is None:
                         local_ends = tuple(self._backgrounds)
-                else:
+                elif isinstance(origin, dict) and kind not in (None, "human"):
                     # A precise unrelated origin remains authoritative.
                     local_ends = tuple(key for key, entry in self._backgrounds.items()
                                        if entry["origin_key"] in (None, _origin_key(origin)))
@@ -184,14 +220,16 @@ class PendingSteers:
             if metadata is not None:
                 return {**value, "type": "system", "subtype": "cc_remote_steer_cancelled",
                         "__cc_steer_cancelled": metadata}
+        if value.get("type") == "result" and is_human_result(value):
+            self._consumed_user_id = None
+            if self.pending:
+                return {**value, "__cc_steer_intermediate": True}
         if kind not in (None, "human") or child:
             return value
         if value.get("type") == "user":
             metadata = self.pending.pop(value.get("uuid"), None)
             if metadata is not None:
                 return {**value, "__cc_steer": value.get("__cc_steer", metadata)}
-        elif value.get("type") == "result" and self.pending:
-            return {**value, "__cc_steer_intermediate": True}
         return value
 
     async def interrupt(self, client) -> None:

@@ -376,6 +376,31 @@ try {
   }], 1_000).length, 0,
   "elapsed SDK windows must disappear without waiting for another event");
 
+  const unifiedReset = Math.floor(Date.now() / 1000) + 3_600;
+  for (const rejected of [false, true]) {
+    const unifiedState = reduce({
+      ...initialState, focusedSid: claudeSid,
+      runtimes: { [claudeSid]: createRuntime() },
+    }, { type: "event", event: event({
+      type: "rate_limit_update", sid: claudeSid,
+      limit_id: "claude", name: "Claude",
+      reached_type: rejected ? "five_hour" : "",
+      primary: { used_percent: rejected ? 100 : 1,
+        resets_at: unifiedReset, window_duration_mins: 300 },
+      secondary: { used_percent: 0,
+        resets_at: unifiedReset + 86_400, window_duration_mins: 10_080 },
+    }) });
+    const unifiedLimits = unifiedState.runtimes[claudeSid].rateLimits;
+    assert.equal(unifiedLimits[0].rate_limit_reached_type, rejected ? "five_hour" : "");
+    const unifiedHtml = renderToStaticMarkup(createElement(UsageMeter, {
+      engine: "claude", open: true, rateLimits: unifiedLimits,
+      onToggle: () => {}, onRefresh: () => {}, onOpenStatus: () => {},
+    }));
+    assert.ok(unifiedHtml.includes(`剩余 ${rejected ? 0 : 99}%`));
+    assert.ok(unifiedHtml.includes("剩余 100%"),
+      "zero utilization in a unified weekly window must remain visible");
+  }
+
   const officialDiagnostic = event({
     type: "notice", notice_id: "codex-notice-private-diagnostic",
     severity: "warning", category: "runtime",
@@ -840,6 +865,7 @@ try {
     error: null,
     loading: false,
     onToggle: () => {},
+    onRefresh: () => {},
   }));
   assert.match(claudeUsageMarkup, /5 小时额度/);
   assert.match(claudeUsageMarkup, /每周额度/);
@@ -847,9 +873,28 @@ try {
   assert.match(claudeUsageMarkup, /剩余 65%/);
   assert.match(claudeUsageMarkup, /剩余 30%/);
   assert.match(claudeUsageMarkup, /剩余 20%/);
-  assert.match(claudeUsageMarkup, /原生额度事件自动同步/);
-  assert.doesNotMatch(claudeUsageMarkup, />刷新<|完整状态/,
-    "Claude SDK has no supported pull/status API, so the popover is push-only");
+  assert.match(claudeUsageMarkup, /来自当前 Claude 账户/);
+  assert.match(claudeUsageMarkup, />刷新</);
+  assert.doesNotMatch(claudeUsageMarkup, /完整状态/);
+  for (const failure of [null, "usage request failed", "usage helper unavailable"]) {
+    const report = { ...quotaReport, account: null,
+      rate_limits: claudeState.runtimes[claudeSid].rateLimits,
+      component_errors: failure ? [`rate_limits: ${failure}`] : [] };
+    const markup = renderToStaticMarkup(createElement(UsageMeter, {
+      engine: "claude", open: true, report,
+      onToggle: () => {}, onRefresh: () => {},
+    }));
+    assert.match(markup, /剩余 65%/);
+    if (failure) assert.match(markup, /当前显示上次同步数据/);
+    else assert.doesNotMatch(markup, /刷新失败|暂不支持/);
+    const empty = renderToStaticMarkup(createElement(UsageMeter, {
+      engine: "claude", open: true, report: { ...report, rate_limits: [] },
+      onToggle: () => {}, onRefresh: () => {},
+    }));
+    assert.doesNotMatch(empty, /剩余 0%|已用尽|先发送/);
+    assert.match(empty, failure === "usage helper unavailable" ? /未配置主动额度查询/
+      : failure ? /额度刷新失败/ : /额度尚未同步/);
+  }
   const compactUsageMarkup = renderToStaticMarkup(createElement(UsageMeter, {
     open: false,
     report: quotaReport,

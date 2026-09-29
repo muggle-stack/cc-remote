@@ -38,6 +38,20 @@ def _watch(path) -> dict:
     }
 
 
+@pytest.fixture
+def cost_state_row() -> bytes:
+    return (json.dumps({
+        "type": "cost-state",
+        "sessionId": "sid",
+        "totalCostUSD": 0.06,
+        "totalAPIDuration": 1200,
+        "totalDuration": 10000,
+        "modelUsage": {
+            "test-model": {"inputTokens": 12, "outputTokens": 3},
+        },
+    }) + "\n").encode()
+
+
 def _fake_process(
     root: Path,
     pid: int,
@@ -1239,6 +1253,110 @@ def test_claude_growth_classifier_rejects_partial_jsonl():
     ) == ("unknown", ())
 
 
+@pytest.mark.parametrize("count", [1, 3])
+def test_cost_state_only_growth_is_metadata(cost_state_row, count):
+    assert classify_claude_growth(cost_state_row * count) == ("metadata", ())
+
+
+@pytest.mark.parametrize("row, expected", [
+    ({"type": "assistant", "entrypoint": "sdk-py", "uuid": "sdk-msg"},
+     ("sdk", ("sdk-msg",))),
+    ({"type": "user", "entrypoint": "cli"}, ("external", ())),
+    ({"type": "cost-state", "entrypoint": "cli"}, ("external", ())),
+    ({"type": "cost-state", "promptSource": "cli"}, ("external", ())),
+    ({"type": "user"}, ("unknown", ())),
+    ({"type": "future-metadata"}, ("unknown", ())),
+    ({"type": "ai-title"}, ("unknown", ())),
+    ({"type": "mode"}, ("unknown", ())),
+    ({"type": "permission-mode"}, ("unknown", ())),
+    ({"type": "queue-operation"}, ("unknown", ())),
+])
+def test_cost_state_does_not_hide_other_growth(cost_state_row, row, expected):
+    data = cost_state_row + (json.dumps(row) + "\n").encode() + cost_state_row
+    assert classify_claude_growth(data) == expected
+
+
+@pytest.mark.parametrize("suffix", [b'{"type":"assistant"', b"not-json\n"])
+def test_cost_state_does_not_hide_incomplete_growth(cost_state_row, suffix):
+    assert classify_claude_growth(cost_state_row + suffix) == ("unknown", ())
+    assert classify_claude_growth(cost_state_row[:-1]) == ("unknown", ())
+
+
+@pytest.mark.parametrize("foreign_owner, scan_complete, pending_reload", [
+    (False, True, False),
+    (True, True, False),
+    (False, False, False),
+    (False, True, True),
+])
+def test_cost_state_watch_preserves_ownership_protection(
+    tmp_path, cost_state_row, foreign_owner, scan_complete, pending_reload,
+):
+    async def go():
+        machine, _ = _mk_machine()
+        path = tmp_path / "session.jsonl"
+        path.write_bytes(b"")
+        ctx = _mk_ctx("sid", "sid")
+        ctx.needs_reload = pending_reload
+        invalidations = []
+        ctx.sdk = SimpleNamespace(
+            invalidate_context_usage_cache=lambda: invalidations.append(True))
+        machine.sessions["sid"] = ctx
+        watch = _watch(path)
+        machine._watch["sid"] = watch
+        mirrored = []
+
+        async def mirror(sid):
+            mirrored.append(sid)
+
+        machine._push_mirrored_history = mirror
+        path.write_bytes(cost_state_row * 3)
+        holders = {ProcessIdentity(102, 1002)} if foreign_owner else set()
+        await machine._poll_claude_watch(
+            "sid", watch, holders, 1000.0,
+            ownership_scan_complete=scan_complete,
+        )
+
+        assert watch["size"] == path.stat().st_size
+        assert ctx.needs_reload is (foreign_owner or pending_reload)
+        assert machine._is_external("sid") is (foreign_owner or not scan_complete)
+        assert bool(invalidations) is foreign_owner
+        assert bool(mirrored) is (foreign_owner or not scan_complete)
+        assert ctx.external_ts == (1000.0 if foreign_owner else 0.0)
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("replace_file", [False, True])
+def test_cost_state_does_not_hide_transcript_replacement(
+    tmp_path, cost_state_row, replace_file,
+):
+    async def go():
+        machine, _ = _mk_machine()
+        path = tmp_path / "session.jsonl"
+        path.write_bytes(cost_state_row * 3)
+        ctx = _mk_ctx("sid", "sid")
+        machine.sessions["sid"] = ctx
+        watch = _watch(path)
+        machine._watch["sid"] = watch
+        machine._push_mirrored_history = lambda _sid: asyncio.sleep(0)
+
+        if replace_file:
+            replacement = tmp_path / "replacement.jsonl"
+            replacement.write_bytes(cost_state_row * 3)
+            replacement.replace(path)
+        else:
+            path.write_bytes(cost_state_row)
+        await machine._poll_claude_watch(
+            "sid", watch, set(), 1000.0,
+            ownership_scan_complete=True,
+        )
+
+        assert ctx.needs_reload is True
+        assert ctx.claude_native_controls_dirty is True
+
+    asyncio.run(go())
+
+
 @pytest.mark.parametrize("entrypoint, expected", [("sdk-py", "sdk"), ("cli", "external"), (None, "external")])
 def test_injected_system_prompt_keeps_its_native_process_provenance(entrypoint, expected):
     row = {"type": "user", "uuid": "injected", "entrypoint": entrypoint,
@@ -1686,6 +1804,62 @@ def test_queued_claude_takeover_unlocks_only_after_exact_owner_exits(
         states = [event for event in transport.sent
                   if getattr(event, "type", None) == "takeover_state"]
         assert states and states[-1].pending is False
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("poll_during_reconnect", [False, True])
+def test_cost_state_during_effort_reconnect_does_not_cancel_query(
+    tmp_path, monkeypatch, cost_state_row, poll_during_reconnect,
+):
+    async def go():
+        machine, transport = _mk_machine()
+        path = tmp_path / "session.jsonl"
+        path.write_bytes(b"")
+        ctx = _mk_ctx("sid", "sid")
+        ctx.state = "running"
+        ctx.active_msg_id = "msg-effort"
+        sdk = _ClaudeRunSdk()
+        sdk.effort = "high"
+        ctx.sdk = sdk
+        machine.sessions["sid"] = ctx
+        watch = _watch(path)
+        machine._watch["sid"] = watch
+        mirrored = []
+
+        async def mirror(sid):
+            mirrored.append(sid)
+
+        machine._push_mirrored_history = mirror
+
+        async def probe(_paths, _cwds):
+            return HolderScan({"sid": set()}, True)
+
+        monkeypatch.setattr(machine, "_probe_claude_holders", probe)
+        reconnect = sdk.force_reconnect
+
+        async def reconnect_with_cost_state(**kwargs):
+            await reconnect(**kwargs)
+            with path.open("ab") as stream:
+                stream.write(cost_state_row)
+            if poll_during_reconnect:
+                await machine._poll_claude_watch(
+                    "sid", watch, set(), 1000.0,
+                    ownership_scan_complete=True,
+                )
+
+        monkeypatch.setattr(sdk, "force_reconnect", reconnect_with_cost_state)
+        await machine._run_turn(ctx, "hello")
+
+        assert sdk.reconnects == 1
+        assert sdk.reconnect_args[0]["reason"] == "effort change"
+        assert sdk.applied_effort == "high"
+        assert sdk.queries == 1
+        assert ctx.state == "idle"
+        assert ctx.needs_reload is False
+        assert watch["size"] == path.stat().st_size
+        assert mirrored == []
+        assert not [event for event in transport.sent if event.type == "error"]
 
     asyncio.run(go())
 

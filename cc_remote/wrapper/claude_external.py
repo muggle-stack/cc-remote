@@ -41,6 +41,7 @@ _SDK_PROMPT_SOURCES = frozenset({"sdk"})
 _NEUTRAL_METADATA_TYPES = frozenset({
     "ai-title",
     "atis-latch",
+    "cost-state",
     "mode",
     "permission-mode",
     "queue-operation",
@@ -119,13 +120,15 @@ def _resolve_continue_target(
 def classify_claude_growth(
     data: bytes,
     owned_message_ids: Collection[str] = (),
-) -> tuple[Literal["sdk", "external", "unknown"], tuple[str, ...]]:
+) -> tuple[Literal["sdk", "external", "metadata", "unknown"], tuple[str, ...]]:
     """Attribute complete Claude JSONL growth without a time heuristic.
 
     Agent SDK transcript rows carry ``entrypoint=sdk-py`` (and user rows also
     carry ``promptSource=sdk``), while native TUI rows carry ``entrypoint=cli``.
     A few metadata rows have no direct origin; ``last-prompt`` and file-history
     rows can still be attributed through the message UUID they reference.
+    Cost-only growth is ``metadata``: it advances no conversation and proves
+    nothing about process ownership.
 
     Unknown or partial data deliberately remains unknown so the machine can
     fail closed unless an SDK operation is actively writing. An explicit
@@ -200,6 +203,11 @@ def classify_claude_growth(
     if sdk_evidence:
         # Preserve insertion order while avoiding unbounded duplicate ids.
         return "sdk", tuple(dict.fromkeys(new_owned))
+    # Reconnect/exit may flush statistics without any accompanying SDK rows.
+    # Keep this narrower than the attribution-neutral allowlist: a standalone
+    # mode/permission/queue update still needs its original ownership checks.
+    if all(row.get("type") == "cost-state" for row in rows):
+        return "metadata", ()
     return "unknown", ()
 
 
