@@ -35583,6 +35583,17 @@ class WrapperMachine:
                     ERR_BUSY, "Claude broker 的工作目录已不存在，未连接该会话",
                     route="sid", sid=resume_id)
                 return None
+        elif resume_id and _service_recovering:
+            # A live service can expose a native UUID before the first prompt
+            # materializes its transcript. Reattach that exact worker using its
+            # listed cwd; the service still checks account/session/cwd identity.
+            if not (_service_worker_id and _service_socket and cwd
+                    and os.path.isdir(cwd)):
+                await reject(
+                    ERR_INVALID_CWD, "Claude 服务会话的工作目录不可访问，未恢复会话。",
+                    route="sid", sid=wire_resume_id)
+                return None
+            target_cwd = os.path.realpath(cwd)
         elif resume_id:
             try:
                 assert claude_profile is not None
