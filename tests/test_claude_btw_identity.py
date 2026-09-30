@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -128,7 +128,7 @@ def test_close_cleans_reserved_identity_even_without_a_first_turn(setup, capture
             await machine._capture_session_id(fork, reserved)
         await machine._handle_close_btw(CloseBtw(sid=fork.key, client_id="owner"))
         assert deleted == [reserved]
-        assert reserved not in machine._load_private_btw_sessions()
+        assert machine._load_private_btw_sessions()[reserved]["retired"] is True
         assert parent.key in machine.sessions
 
     asyncio.run(run())
@@ -161,7 +161,8 @@ def test_failed_fork_retains_privacy_until_native_writer_is_stopped(
             await machine._spawn_btw(parent, owner_client_id="owner")
         reserved = handles[0].launch.session_id
         assert deleted == [reserved]
-        assert (reserved in machine._load_private_btw_sessions()) is disconnect_failed
+        guard = machine._load_private_btw_sessions()[reserved]
+        assert guard.get("retired", False) is not disconnect_failed
         assert list(machine.sessions) == [parent.key]
 
     asyncio.run(run())
@@ -193,5 +194,22 @@ def test_reservation_is_not_counted_twice_against_private_fork_cap(setup, monkey
         assert first.btw_reserved_id != second.btw_reserved_id
         with pytest.raises(machine_module._BtwSpawnFailure):
             await machine._spawn_btw(parent, owner_client_id="owner")
+
+    asyncio.run(run())
+
+
+def test_closed_forks_do_not_exhaust_pending_or_resident_capacity(setup):
+    async def run():
+        machine, transport, parent, _handles, _deleted = setup
+        for _ in range(machine.PRIVATE_BTW_CAP + 1):
+            sid = str(uuid4())
+            machine._remember_private_btw(sid, parent.cwd)
+            assert await machine._delete_private_btw(sid, parent.cwd)
+        restarted = machine.__class__(machine.cfg, transport)
+        assert len(restarted._private_btw_sessions) == machine.PRIVATE_BTW_CAP + 1
+        assert not restarted.sessions
+        fork = await machine._spawn_btw(parent, owner_client_id="owner")
+        assert fork.key in machine.sessions
+        assert machine.focused_sid == parent.key
 
     asyncio.run(run())

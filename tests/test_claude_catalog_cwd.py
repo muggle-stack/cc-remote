@@ -182,3 +182,64 @@ def test_cwd_recovery_stops_at_scan_budget_and_keeps_existing_native_metadata(tm
     assert claude_catalog.recover_session_cwd(info, path) is info
     info.cwd = "/already-known"
     assert claude_catalog.recover_session_cwd(info, path) is info
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("directory", [None, "/original-project"])
+def test_catalog_hides_metadata_stub_without_removing_real_history(
+    tmp_path, monkeypatch, explicit, directory,
+):
+    root = tmp_path / "profile"
+    path = write_image_transcript(root)
+    original = path.read_bytes()
+    stub_sid = "22222222-2222-4222-8222-222222222222"
+    stub = path.with_name(f"{stub_sid}.jsonl")
+    records = [
+        {"type": "last-prompt", "sessionId": stub_sid, "lastPrompt": "copied parent prompt"},
+        {"type": "mode", "sessionId": stub_sid, "mode": "normal"},
+        {"type": "atis-latch", "sessionId": stub_sid, "atis": ""},
+        {"type": "cost-state", "sessionId": stub_sid, "totalCostUSD": 1},
+    ]
+    stub.write_text("".join(json.dumps(row) + "\n" for row in records))
+    stub_bytes = stub.read_bytes()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    assert get_session_info(stub_sid) is not None  # The pinned SDK reproducer.
+    machine, _ = _mk_machine()
+    if explicit:
+        from cc_remote.claude_profiles import ClaudeProfileRegistry
+
+        machine._claude_profiles = ClaudeProfileRegistry.from_json(json.dumps({
+            "selected": {"label": "Selected", "config_dir": str(root), "default": True},
+            "other": {"label": "Other", "config_dir": str(tmp_path / "other")},
+        }))
+    listed = machine._claude_catalog_list_sessions(
+        machine._claude_profiles.default, limit=10, directory=directory,
+        include_worktrees=False,
+    )
+    assert [info.session_id for info in listed] == [SID]
+    assert path.read_bytes() == original
+    assert stub.read_bytes() == stub_bytes
+
+
+@pytest.mark.parametrize("suffix", [
+    json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}}) + "\n",
+    json.dumps({"type": "assistant", "message": {"role": "assistant", "content": "hi"}}) + "\n",
+    json.dumps({"type": "queue-operation", "operation": "enqueue", "content": "hi"}) + "\n",
+    json.dumps({"type": "future-native-record"}) + "\n",
+    json.dumps({"type": []}) + "\n",
+    '{"type":"user"',
+    '{"type":"mode"}',
+    '[1,2,3]\n',
+])
+def test_metadata_filter_preserves_conversations_pending_unknown_and_partial_rows(tmp_path, suffix):
+    path = tmp_path / "native.jsonl"
+    path.write_text('{"type":"last-prompt","lastPrompt":"title"}\n' + suffix)
+    assert claude_catalog.is_metadata_only(path) is False
+
+
+def test_metadata_filter_preserves_large_files_and_unreadable_sources(tmp_path):
+    path = tmp_path / "native.jsonl"
+    assert claude_catalog.is_metadata_only(path) is False
+    path.write_text(json.dumps({"type": "last-prompt", "lastPrompt": "A" * 100_000}) + "\n")
+    assert claude_catalog.is_metadata_only(path) is False
+    assert claude_catalog.is_metadata_only(None) is False

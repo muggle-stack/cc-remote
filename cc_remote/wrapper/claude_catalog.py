@@ -52,6 +52,46 @@ _CWD_RECORD_BYTES = 2 * MAX_TOTAL_ATTACHMENT_BYTES
 # Native queue records can repeat those images before the actual user row.
 # Bound the scan independently while allowing both copies and leading metadata.
 _CWD_SCAN_BYTES = 3 * _CWD_RECORD_BYTES
+_CATALOG_METADATA_TYPES = frozenset({
+    "last-prompt", "mode", "atis-latch", "cost-state", "custom-title",
+    "ai-title", "tag",
+})
+
+
+def is_metadata_only(path: str | os.PathLike[str] | None) -> bool:
+    """Exclude only a complete, small file proven to contain no conversation.
+
+    Native shutdown can recreate a deleted fork with a last-prompt and cost
+    receipt. The SDK treats that title as sufficient catalog evidence. Never
+    infer an empty session from a truncated head: queued images, unknown rows,
+    partial writes and large transcripts all remain visible.
+    """
+    if path is None:
+        return False
+    source = Path(path)
+    try:
+        if source.stat().st_size > LITE_READ_BUF_SIZE:
+            return False
+        with source.open("rb") as stream:
+            data = stream.read(LITE_READ_BUF_SIZE + 1)
+    except OSError:
+        return False
+    if (not data or len(data) > LITE_READ_BUF_SIZE
+            or not data.endswith(b"\n")):
+        return False
+    found = False
+    for line in data.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except (ValueError, UnicodeError):
+            return False
+        if (not isinstance(row, dict) or not isinstance(row.get("type"), str)
+                or row["type"] not in _CATALOG_METADATA_TYPES):
+            return False
+        found = True
+    return found
 
 
 def projects_dir(config_dir: str | os.PathLike[str]) -> Path:
@@ -314,7 +354,7 @@ def list_sessions(
             info = _parse_session_info_from_lite(
                 session_id, lite, project_path)
             info = recover_session_cwd(info, entry)
-            if info is None:
+            if info is None or is_metadata_only(entry):
                 continue
             previous = by_id.get(session_id)
             if previous is None or info.last_modified > previous.last_modified:
