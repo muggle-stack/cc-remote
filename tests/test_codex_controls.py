@@ -1067,11 +1067,11 @@ def test_stale_codex_session_list_paints_before_refresh_finishes(monkeypatch):
 
 
 @pytest.mark.parametrize("model", ["gpt-5.6-terra", "gpt-5.6-luna"])
-def test_codex_model_id_is_exact_through_wrapper_and_turn_start(model):
+def test_codex_model_id_is_exact_through_wrapper_and_turn_start(model, tmp_path):
     async def run():
         machine, transport = _mk_machine()
         ctx = _mk_ctx("codex-model", "codex-model")
-        handle = CodexHandle(_Cfg())
+        handle = CodexHandle(_Cfg(), codex_home=str(tmp_path))
         handle.proc = SimpleNamespace(returncode=None)
         handle.thread_id = "codex-model"
         ctx.sdk = handle
@@ -3794,9 +3794,13 @@ def test_codex_handle_has_no_retired_model_or_effort_fallback(tmp_path):
     assert handle.applied_effort is None
 
 
-def test_codex_thread_settings_update_uses_official_01441_shapes():
+def test_codex_thread_settings_update_uses_official_01441_shapes(monkeypatch, tmp_path):
+    async def catalog(**_kwargs):
+        return [{"id": "gpt-after", "service_tiers": [{"id": "priority"}]}]
+
+    monkeypatch.setattr(codex_handle_module, "codex_catalog", catalog)
     async def run():
-        handle = CodexHandle(_Cfg())
+        handle = CodexHandle(_Cfg(), codex_home=str(tmp_path))
         handle.thread_id = "thread-settings"
         handle.model = "gpt-before"
         handle.effort = "high"
@@ -3850,7 +3854,7 @@ def test_codex_thread_settings_update_uses_official_01441_shapes():
                 },
             }),
             ("thread/settings/update", {
-                "threadId": "thread-settings", "serviceTier": "fast",
+                "threadId": "thread-settings", "serviceTier": "priority",
             }),
             ("thread/settings/update", {
                 "threadId": "thread-settings", "serviceTier": None,
@@ -4902,11 +4906,11 @@ def test_codex_ephemeral_fork_replaces_coding_prompt_only_for_work(
     asyncio.run(run())
 
 
-def test_codex_model_change_emits_app_server_adjusted_effort():
+def test_codex_model_change_emits_app_server_adjusted_effort(tmp_path):
     async def run():
         machine, transport = _mk_machine()
         ctx = _mk_ctx("codex-model", "codex-model")
-        handle = CodexHandle(_Cfg())
+        handle = CodexHandle(_Cfg(), codex_home=str(tmp_path))
         handle.thread_id = "codex-model"
         handle.model = "gpt-before"
         handle.effort = "ultra"
@@ -4945,6 +4949,7 @@ def test_codex_model_change_emits_app_server_adjusted_effort():
                 for event in transport.sent] == [
             ("model", "gpt-provider-fallback", None),
             ("effort", None, "max"),
+            ("fast", None, None),
         ]
         handle._reader.cancel()
         await asyncio.gather(handle._reader, return_exceptions=True)
@@ -7957,12 +7962,17 @@ def test_fast_toggle_uses_target_thread_state_and_can_clear_override():
     asyncio.run(run())
 
 
-def test_fast_accepts_app_server_priority_normalization():
+def test_fast_accepts_app_server_priority_normalization(monkeypatch):
+    async def catalog(**_kwargs):
+        return [{"id": "test-model", "service_tiers": [{"id": "priority"}]}]
+
+    monkeypatch.setattr(codex_handle_module, "codex_catalog", catalog)
     async def run():
         machine, transport = _mk_machine()
         ctx = _mk_ctx("c1", "c1")
         handle = CodexHandle(_Cfg())
         handle.thread_id = "c1"
+        handle.model = "test-model"
         handle._reader = asyncio.create_task(asyncio.Event().wait())
         ctx.engine = "codex"
         ctx.sdk = handle
@@ -7970,7 +7980,7 @@ def test_fast_accepts_app_server_priority_normalization():
 
         async def request(method, params=None):
             assert (method, params) == ("thread/settings/update", {
-                "threadId": "c1", "serviceTier": "fast",
+                "threadId": "c1", "serviceTier": "priority",
             })
             await handle._dispatch({
                 "method": "thread/settings/updated",

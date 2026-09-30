@@ -6,6 +6,8 @@ import {
   lazy, Suspense, useEffect, useRef, useState, type ClipboardEvent,
 } from "react";
 import { Icon } from "../icons";
+import { SpeedPicker } from "./SpeedPicker";
+import { newChatSpeed } from "../codex-speed";
 import {
   modelsFor, parseSlash, type Catalog, type Effort, type Model,
 } from "../data";
@@ -100,6 +102,7 @@ interface NewChatExecutionControls {
   permissionProfile: string | null;
   webSearch: CodexWebSearchMode | null;
   serviceTier: CodexServiceTier;
+  serviceTierScope?: string;
 }
 
 const defaultExecutionControls = (
@@ -235,9 +238,8 @@ export function NewChatView({ cwd, controlScopeKey,
     permissionMode,
     permissionProfile,
     webSearch,
-    serviceTier,
+    serviceTier: requestedServiceTier,
   } = scopedExecutionControls;
-  const fastSelected = serviceTier === "fast";
   const updateExecutionControls = (
     patch: Partial<Omit<NewChatExecutionControls, "scopeKey">>,
   ) => {
@@ -266,6 +268,14 @@ export function NewChatView({ cwd, controlScopeKey,
     && !creating && !importing && !selectedProfileMissing;
   const modelList = modelsFor(engine, catalog);
   const effectiveModel = model ?? defaultModel;
+  const speedScope = `${controlScopeKey}:${accountProfileId}:${effectiveModel}`;
+  const serviceTier = newChatSpeed(
+    scopedExecutionControls.serviceTierScope === speedScope ? requestedServiceTier : "default",
+    effectiveModel, catalog);
+  useEffect(() => {
+    setExecutionControls((current) => current.serviceTier === "default"
+      ? current : { ...current, serviceTier: "default" });
+  }, [effectiveModel, accountProfileId]);
   const effortList = newChatEfforts(engine, effectiveModel, catalog);
   const localModelName = displayModel(defaultModel, modelList);
   const localEffortName = model === null
@@ -571,18 +581,13 @@ export function NewChatView({ cwd, controlScopeKey,
               disabled={creating || importing || !onPickEffort}>
               {effortLabel}
             </button>
-            {engine === "codex" && space === "work" && (
-              <button type="button"
-                className={"hint-ctl fast-chip" + (fastSelected ? " on" : "")}
-                aria-label="新工作 Fast 服务档位"
-                aria-pressed={fastSelected}
-                onClick={() => updateExecutionControls({
-                  serviceTier: fastSelected ? "default" : "fast",
-                })}
-                title="Fast：快速 / 标准（首条消息生效）"
-                disabled={creating || importing}>
-                {fastSelected ? "快速" : "标准"}
-              </button>
+            {engine === "codex" && (
+              <SpeedPicker newSession model={effectiveModel} catalog={catalog}
+                value={serviceTier} scopeKey={`${controlScopeKey}:${accountProfileId}`}
+                disabled={creating || importing} onRefresh={onRequestModels}
+                onChange={(tier) => updateExecutionControls({
+                  serviceTier: tier, serviceTierScope: speedScope,
+                })} />
             )}
             {engine === "codex" && space === "code" && (
               <button type="button" className="newchat-access"

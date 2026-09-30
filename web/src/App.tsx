@@ -5952,7 +5952,7 @@ export default function App() {
           permissionProfiles={rt.permissionProfiles}
           webSearch={rt.webSearch}
           collaborationMode={rt.collaborationMode}
-          fast={rt.fast}
+          serviceTier={rt.serviceTier}
           control={rt.control}
           external={rt.external}
           takeoverPending={rt.takeoverPending}

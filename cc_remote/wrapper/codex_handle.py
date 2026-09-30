@@ -44,6 +44,7 @@ from cc_remote.protocol import (
     MAX_STATUS_RESET_CREDITS,
     MAX_STATUS_USAGE_BUCKETS,
     Notice,
+    Fast,
     RateLimitUpdate,
     ThreadGoal,
 )
@@ -59,7 +60,7 @@ from cc_remote.wrapper.codex_sessions import (
     codex_approval,
     codex_context_window,
     codex_effort,
-    codex_fast_enabled,
+    codex_service_tier,
     codex_model,
     codex_rollout_path,
     codex_web_search,
@@ -75,6 +76,9 @@ from cc_remote.wrapper.codex_runtime import (
     resolve_codex_bin as _runtime_resolve_codex_bin,
 )
 from cc_remote.wrapper.codex_permissions import normalize_permission_profiles
+from cc_remote.wrapper.codex_models import (
+    codex_catalog, normalize_service_tier, resolve_service_tier,
+)
 from cc_remote.wrapper.work_prompt import (
     WORK_BASE_INSTRUCTIONS,
     WORK_DEVELOPER_INSTRUCTIONS,
@@ -175,7 +179,7 @@ InteractionCallback = Callable[[str, dict], Awaitable[dict[str, Any]]]
 GoalCallback = Callable[[Optional[dict[str, Any]]], Awaitable[None]]
 TurnLifecycleCallback = Callable[[str, str], Awaitable[None]]
 ThreadStartedCallback = Callable[[str], None]
-RuntimeEvent = Notice | RateLimitUpdate
+RuntimeEvent = Notice | RateLimitUpdate | Fast
 RuntimeEventCallback = Callable[[RuntimeEvent], Awaitable[None]]
 
 
@@ -1755,10 +1759,8 @@ class CodexHandle:
         )
         self.collaboration_mode: str = "default"            # default | plan; independent of approval
         self.service_tier: Optional[str] = (
-            "fast" if (
-                codex_fast_enabled() if self.codex_home is None
-                else codex_fast_enabled(codex_home=self.codex_home)
-            ) else None
+            codex_service_tier() if self.codex_home is None
+            else codex_service_tier(codex_home=self.codex_home)
         )                                                    # thread-scoped; None = standard
 
     async def activate_runtime_events(self) -> None:
@@ -1887,11 +1889,12 @@ class CodexHandle:
     async def _publish_runtime_event(self, event: RuntimeEvent) -> None:
         key = _runtime_event_key(event)
         async with self._runtime_event_lock:
-            if isinstance(event, RateLimitUpdate):
+            if isinstance(event, (RateLimitUpdate, Fast)):
                 # Rate values can legitimately cycle (99 -> 100 -> 99). Dedup
                 # only a consecutive identical snapshot for the same public
                 # limit, not every value observed in the global LRU window.
-                identity = event.limit_id or "__default__"
+                identity = ("speed" if isinstance(event, Fast)
+                            else "rate:" + (event.limit_id or "__default__"))
                 previous = self._runtime_rate_keys.get(identity)
                 if previous == key and key in self._runtime_event_seen:
                     self._runtime_event_seen.move_to_end(key)
@@ -1899,6 +1902,8 @@ class CodexHandle:
                     return
                 if previous is not None:
                     self._runtime_event_seen.pop(previous, None)
+                    if isinstance(event, Fast):
+                        self._runtime_event_pending.pop(previous, None)
                 self._runtime_rate_keys[identity] = key
                 self._runtime_rate_keys.move_to_end(identity)
                 while len(self._runtime_rate_keys) > _STATUS_RATE_LIMIT_MAX:
@@ -4836,10 +4841,25 @@ class CodexHandle:
             bounds = await asyncio.to_thread(model_context_bounds, model, self.codex_home)
             if bounds is None or configured_window > bounds.max_window:
                 raise ValueError("当前会话的上下文配置超过目标模型上限；请先恢复默认上下文设置")
-        authoritative = await self._update_thread_settings(
-            model=model, wait_for_notification=True)
-        if not authoritative:
-            self.model = model
+        # Validate and mutate in the same lane as speed changes. A stale model
+        # check must never apply a paid tier to a different model.
+        async with self._thread_settings_lock:
+            settings: dict[str, Any] = {"model": model}
+            if normalize_service_tier(self.service_tier) != "default":
+                catalog = await codex_catalog(codex_home=self.codex_home)
+                try:
+                    tier = resolve_service_tier(model, self.service_tier, catalog)
+                except ValueError:
+                    # Never carry a model-specific paid tier onto an unsupported
+                    # model or silently upgrade it to a different paid speed.
+                    tier = None
+                settings["serviceTier"] = tier
+            authoritative = await self._update_thread_settings_serialized(
+                wait_for_notification=True, **settings)
+            if not authoritative:
+                self.model = model
+                if "serviceTier" in settings:
+                    self.service_tier = settings["serviceTier"]
         log.info("codex thread model set", requested=model, applied=self.model)
 
     async def set_cwd(
@@ -4895,13 +4915,17 @@ class CodexHandle:
         return authoritative
 
     async def set_service_tier(self, tier: Optional[str]) -> None:
-        normalized = tier if tier and tier != "default" else None
-        if normalized not in {None, "fast"}:
-            raise ValueError(f"unsupported Codex service tier: {tier}")
-        authoritative = await self._update_thread_settings(
-            serviceTier=normalized, wait_for_notification=True)
-        if not authoritative:
-            self.service_tier = normalized
+        async with self._thread_settings_lock:
+            scope = (self.model, self.thread_id, self._generation)
+            catalog = (await codex_catalog(codex_home=self.codex_home)
+                       if normalize_service_tier(tier) != "default" else [])
+            if scope != (self.model, self.thread_id, self._generation):
+                raise ValueError("模型或会话已变化，请重新选择速度。")
+            normalized = resolve_service_tier(self.model, tier, catalog)
+            authoritative = await self._update_thread_settings_serialized(
+                serviceTier=normalized, wait_for_notification=True)
+            if not authoritative:
+                self.service_tier = normalized
         log.info("codex thread service tier set", requested=normalized,
                  applied=self.service_tier)
 
@@ -7334,6 +7358,10 @@ class CodexHandle:
                     and isinstance(settings, dict)):
                 self._apply_thread_settings(settings)
                 self._thread_settings_updated.set()
+                if "serviceTier" in settings:
+                    tier = normalize_service_tier(self.service_tier)
+                    await self._publish_runtime_event(Fast(
+                        on=tier != "default", tier=tier))
         elif method == "thread/status/changed":
             params = m.get("params") or {}
             status = params.get("status")

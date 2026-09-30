@@ -164,7 +164,8 @@ def test_surrogate_filename_is_a_clean_validation_error():
     [
         lambda: SetModel(model="m" * 257),
         lambda: SetEffort(effort="bogus"),
-        lambda: SetServiceTier(service_tier="bogus"),
+        lambda: SetServiceTier(service_tier="x" * 65),
+        lambda: SetServiceTier(service_tier="invalid tier"),
         lambda: SetCollaborationMode(mode="bogus"),
         lambda: SetPerm(mode="bogus"),
         lambda: SwitchSession(session_id="sid-1", engine="bogus"),

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Read Codex speed options from the current account's native model catalog and
+  offer them in a model-bound picker for Code, Work, and side conversations.
+  Preserve exact native tiers across reconnects and clear unsupported tiers
+  when changing models. Ultrafast appears only when the account/model offers it.
+- Wire protocol v73 requires coordinated Relay, Web, and Wrapper deployment.
+
 [中文](CHANGELOG_zh.md)
 
 ## v4.0.6

@@ -11,6 +11,7 @@ import { ChatView } from "./ChatView";
 import type { QueryAcceptanceResult } from "../outbox";
 import { CommandSheet } from "./CommandSheet";
 import { Icon } from "../icons";
+import { SpeedPicker } from "./SpeedPicker";
 import { PanelTabs, type RightPanelView } from "./PanelTabs";
 import { NoticeStack } from "./NoticeStack";
 import type {
@@ -631,13 +632,13 @@ export function BtwPanel(p: Props) {
               ?? (p.sid && p.rt ? "选择模型" : "模型读取中")}</button>
           <button className="hint-ctl" onClick={() => setSheetKind("efforts")}
             disabled={inputLocked || busy || !p.sid}>{effortName ?? "强度读取中"}</button>
-          {p.engine === "codex" && <button type="button"
-            className={"hint-ctl fast-chip" + (p.rt?.fast ? " on" : "")}
-            aria-label="BTW 服务档位" aria-pressed={!!p.rt?.fast}
-            disabled={attachmentsLocked} title="仅设置此侧边对话，下条消息生效"
-            onClick={() => {
-              if (!p.onSetServiceTier("toggle")) flash("服务档位设置暂未发送，请稍后重试。");
-            }}>{p.rt?.fast == null ? "档位读取中" : p.rt.fast ? "快速" : "标准"}</button>}
+          {p.engine === "codex" && <SpeedPicker
+            model={p.rt?.model} catalog={p.catalog} value={p.rt?.serviceTier}
+            scopeKey={p.sid ?? ""} disabled={attachmentsLocked}
+            onRefresh={p.onRequestModels}
+            onChange={(tier) => {
+              if (!p.onSetServiceTier(tier)) flash("速度设置暂未发送，请稍后重试。");
+            }} />}
         </div>
       </div>
       {dragOver && <div className="drop-overlay drop-overlay-btw" aria-hidden="true">

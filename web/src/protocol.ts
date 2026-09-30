@@ -19,11 +19,12 @@ export type PermissionMode = "default" | "acceptEdits" | "plan" | "auto" | "bypa
 export type CollaborationModeName = "default" | "plan";
 export type ControlMode = "remote" | "codex_shared" | "claude_broker" | "external_cli" | "agent_view" | "desktop";
 export type WriteState = "writable" | "read_only" | "takeover_pending" | "input_busy";
-export type ServiceTier = "" | "default" | "fast" | "toggle";
+// Native model/list supplies the allowed tier ids; the Wrapper validates them.
+export type ServiceTier = string;
 export type DiffTheme = "light" | "dark";
 export type CodexPermissionMode = "never" | "on-request" | "untrusted";
 export type CodexPermissionProfileId = string;
-export type CodexServiceTier = "default" | "fast";
+export type CodexServiceTier = string;
 export type CodexWebSearchMode = "cached" | "live";
 export type NoticeSeverity = "info" | "warning";
 export type NoticeCategory = "runtime" | "guardian" | "config" | "deprecation" | "security" | "rate_limit";
@@ -148,7 +149,7 @@ export interface AutoCompact extends Base {
   mutable: boolean;
   error?: string | null;
 }
-export interface Fast extends Base { type: "fast"; on: boolean }
+export interface Fast extends Base { type: "fast"; on: boolean; tier?: string | null }
 export interface CollaborationMode extends Base { type: "collaboration_mode"; mode: CollaborationModeName }
 export interface OpenBtw extends Base { type: "open_btw"; request_id: string; client_id?: string }
 export interface CloseBtw extends Base { type: "close_btw" }
@@ -519,7 +520,10 @@ export interface CatalogModel {
   efforts: string[];
   default_effort?: string | null;
   is_default?: boolean;
+  service_tiers?: ModelServiceTier[] | null;
+  default_service_tier?: string | null;
 }
+export interface ModelServiceTier { id: string; name: string; description: string }
 // Effective controls for a NEW no-override session. These are display metadata,
 // not the focused session's controls and not implicit overrides on NewSession.
 export interface Models extends Base { type: "models"; engine: string; models: CatalogModel[]; default_model?: string | null; default_effort?: string | null; cwd?: string | null; claude_profile_id?: string | null; codex_profile_id?: string | null }
@@ -720,7 +724,7 @@ export type ServerEvent = FilesListed | CodexContext
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnUsage | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 72;
+export const PROTOCOL_VERSION = 73;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

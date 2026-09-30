@@ -352,6 +352,8 @@ from cc_remote.wrapper.codex_models import (
     clamp_effort,
     codex_catalog,
     default_effort_for,
+    normalize_service_tier,
+    resolve_service_tier,
 )
 from cc_remote.wrapper.codex_rpc import (
     CodexRpcOutcomeUnknown, CodexRpcRejected, codex_rpc, codex_rpc_batch,
@@ -506,8 +508,12 @@ _CODEX_ARCHIVE_NOFILE_SOFT_LIMIT = 4096
 
 
 def _codex_fast_on(value: Optional[str]) -> bool:
-    """0.144.1 accepts ``fast`` but reports the persisted tier as ``priority``."""
-    return value in CODEX_FAST_SERVICE_TIERS
+    """Retain the binary compatibility flag for any native nonstandard tier."""
+    return normalize_service_tier(value) != "default"
+
+
+def _codex_speed_event(value: Optional[str]) -> Fast:
+    return Fast(on=_codex_fast_on(value), tier=normalize_service_tier(value))
 
 
 def _codex_terminal_status(message: dict) -> str:
@@ -19471,6 +19477,9 @@ class WrapperMachine:
                 responses: list[object] = []
                 await self._publish_codex_model_effort(
                     ctx, force=True, published=responses)
+                speed = _codex_speed_event(getattr(ctx.sdk, "service_tier", None))
+                await self._emit(ctx, speed)
+                responses.append(speed)
                 return tuple(responses)
             applied_model = getattr(ctx.sdk, "model", None) or requested_model
             ctx.announced_model = applied_model
@@ -19897,25 +19906,27 @@ class WrapperMachine:
             )
             await self._emit(ctx, error)
             return error
-        if cmd.service_tier == "toggle":
-            on = not _codex_fast_on(
-                getattr(ctx.sdk, "service_tier", None))
-        else:
-            on = (cmd.service_tier == "fast")
+        control_error = await self._runtime_control_preflight(
+            ctx, action="切换速度")
+        if control_error is not None:
+            return control_error
+        tier = cmd.service_tier
+        if tier == "toggle":
+            tier = (None if _codex_fast_on(
+                getattr(ctx.sdk, "service_tier", None)) else "fast")
         try:
-            await ctx.sdk.set_service_tier("fast" if on else None)
-            applied_on = _codex_fast_on(
-                getattr(ctx.sdk, "service_tier", None))
-            event = Fast(on=applied_on)
+            await ctx.sdk.set_service_tier(tier)
+            event = _codex_speed_event(getattr(ctx.sdk, "service_tier", None))
             await self._emit(ctx, event)
             log.info("codex thread service tier set", sid=ctx.session_id,
-                     requested=on, applied=applied_on)
+                     requested=tier, applied=event.tier)
             return event
         except Exception as e:
             log.exception("set_service_tier failed", error=str(e))
             error = Error(
                 code=ERR_INTERNAL,
-                message="服务档位切换未完成，请重试。",
+                message=str(e) if isinstance(e, ValueError)
+                else "速度切换未完成，请重试。",
                 request_id=getattr(cmd, "cmd_id", None),
                 to=getattr(cmd, "client_id", None),
             )
@@ -20030,7 +20041,7 @@ class WrapperMachine:
             if tier is None or isinstance(tier, str):
                 if ctx.sdk.service_tier != tier:
                     ctx.sdk.service_tier = tier
-                    await self._emit(ctx, Fast(on=_codex_fast_on(tier)))
+                    await self._emit(ctx, _codex_speed_event(tier))
         mode = settings.get("collaboration_mode")
         if (mode in CODEX_COLLABORATION_MODES
                 and getattr(ctx.sdk, "collaboration_mode", "default") != mode):
@@ -20334,8 +20345,8 @@ class WrapperMachine:
                     await send(WebSearch(mode=web_search))
                 await send(CollaborationMode(
                     mode=getattr(ctx.sdk, "collaboration_mode", "default")))
-                await send(Fast(on=_codex_fast_on(
-                    getattr(ctx.sdk, "service_tier", None))))
+                await send(_codex_speed_event(
+                    getattr(ctx.sdk, "service_tier", None)))
         return None
 
     async def _handle_set_perm(self, cmd):
@@ -21728,10 +21739,10 @@ class WrapperMachine:
         await self._emit(ctx, GoalState(goal=goal))
 
     async def _on_codex_runtime_event(
-        self, ctx: SessionContext, event: Notice | RateLimitUpdate,
+        self, ctx: SessionContext, event: Notice | RateLimitUpdate | Fast,
     ) -> None:
         """Route sanitized app-server notices only after ctx has an identity."""
-        if not isinstance(event, (Notice, RateLimitUpdate)):
+        if not isinstance(event, (Notice, RateLimitUpdate, Fast)):
             return
         if not self._ctx_wire_sid(ctx):
             # An absent sid is a broadcast at the relay.  Initialization events
@@ -27503,7 +27514,7 @@ class WrapperMachine:
                 search_event = WebSearch(mode=web_search)
                 await self._emit(ctx, search_event)
                 cached_responses.append(search_event)
-            fast_event = Fast(on=_codex_fast_on(ctx.sdk.service_tier))
+            fast_event = _codex_speed_event(ctx.sdk.service_tier)
             await self._emit(ctx, fast_event)
             cached_responses.append(fast_event)
             collaboration_mode = getattr(
@@ -27959,7 +27970,7 @@ class WrapperMachine:
                 mode=collaboration_mode)
             await self._emit(ctx, collaboration_event)
             cached_responses.append(collaboration_event)
-            fast_event = Fast(on=_codex_fast_on(ctx.sdk.service_tier))
+            fast_event = _codex_speed_event(ctx.sdk.service_tier)
             await self._emit(ctx, fast_event)
             cached_responses.append(fast_event)
             # SessionFocus precedes this point, so the temp-keyed browser runtime
@@ -35898,9 +35909,17 @@ class WrapperMachine:
             if space != "work" and web_search in CODEX_WEB_SEARCH_MODES:
                 sdk.web_search_override = web_search
                 sdk.web_search = web_search
-            if service_tier in {"default", "fast"}:
-                sdk.service_tier = (
-                    "fast" if service_tier == "fast" else None)
+            if service_tier is not None:
+                try:
+                    speed_catalog = (
+                        await codex_catalog(codex_home=self._codex_home(codex_profile))
+                        if normalize_service_tier(service_tier) != "default" else [])
+                    sdk.service_tier = resolve_service_tier(
+                        model or sdk.model, service_tier, speed_catalog)
+                except ValueError as exc:
+                    await reject(ERR_BAD_PROMPT, str(exc),
+                                 route="sid", sid=wire_resume_id)
+                    return None
             # Seed from the session's own bounded rollout tail, never config.toml.
             # CodexHandle.connect then adopts thread/resume's authoritative fields;
             # the rollout remains required for collaboration mode, which 0.144.1's
@@ -36491,8 +36510,7 @@ class WrapperMachine:
                 ctx.announced_collaboration_mode = collaboration_mode
                 await self._emit(ctx, CollaborationMode(
                     mode=collaboration_mode))
-                await self._emit(ctx, Fast(
-                    on=_codex_fast_on(ctx.sdk.service_tier)))
+                await self._emit(ctx, _codex_speed_event(ctx.sdk.service_tier))
             else:
                 await self._publish_claude_auto_compact(ctx, force=True)
         log.info("session spawned", resume=resume_id, cwd=target_cwd, key=key,
@@ -38518,8 +38536,7 @@ class WrapperMachine:
                     ctx.announced_collaboration_mode = collaboration_mode
                     await self._emit(ctx, CollaborationMode(
                         mode=collaboration_mode))
-                await self._emit(ctx, Fast(
-                    on=_codex_fast_on(ctx.sdk.service_tier)))
+                await self._emit(ctx, _codex_speed_event(ctx.sdk.service_tier))
             reader_task = asyncio.create_task(reader(queue, reader_exc))
             if codex_query_reconnected and _session_effort(ctx) is None:
                 self._schedule_codex_model_effort_publish(ctx)

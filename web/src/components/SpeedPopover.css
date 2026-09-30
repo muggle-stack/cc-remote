@@ -1,0 +1,16 @@
+.speed-pop{ position:fixed; z-index:120; box-sizing:border-box; overflow:auto;
+  padding:8px; border:1px solid var(--border-strong); border-radius:14px;
+  background:var(--surface); color:var(--text); box-shadow:var(--shadow-lg); }
+.speed-pop header{ display:flex; flex-direction:column; gap:3px; padding:8px 10px 10px; }
+.speed-pop header strong{ font-size:13px; }
+.speed-pop header span{ font-size:11px; color:var(--dim); overflow-wrap:anywhere; }
+.speed-pop>button{ width:100%; display:flex; align-items:center; justify-content:space-between;
+  gap:14px; padding:10px; border:0; border-radius:8px; background:transparent;
+  color:var(--text); text-align:left; cursor:pointer; }
+.speed-pop>button:hover,.speed-pop>button:focus-visible{ background:var(--raised); }
+.speed-pop>button[aria-checked=true]{ color:var(--accent-text,var(--accent)); background:var(--raised); }
+.speed-pop>button>span{ display:flex; flex-direction:column; gap:4px; min-width:0; }
+.speed-pop>button b{ font-size:13px; }
+.speed-pop>button small{ color:var(--dim); font-size:11px; line-height:1.5; overflow-wrap:anywhere; }
+.speed-pop>button svg{ flex:none; }
+.speed-pop>p,.speed-pop>footer{ margin:0; padding:8px 10px; color:var(--faint); font-size:11px; line-height:1.5; }
