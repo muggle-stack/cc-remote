@@ -9,6 +9,7 @@ queue is drained on disconnect to avoid double-delivery on reconnect.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections import deque
 from typing import AsyncIterator, Awaitable, Callable, Optional
 from urllib.parse import urlsplit
@@ -141,13 +142,20 @@ class WrapperTransport:
                 kw: dict = {
                     "additional_headers": headers,
                     "max_size": self.max_size,
-                    # websockets 16 defaults proxy=True, including NO_PROXY /
-                    # proxy_bypass handling. Do not force a configured proxy for
-                    # loopback relay URLs: that can expose the Bearer token.
+                    # Select only the operator's explicit HTTP proxy variables.
+                    # websockets 16 otherwise consults macOS system settings,
+                    # which may select an unavailable SOCKS proxy.
                     "max_queue": 4,
                 }
                 if urlsplit(self.url).hostname in {"127.0.0.1", "::1", "localhost"}:
                     kw["proxy"] = None
+                else:
+                    kw["proxy"] = (
+                        os.environ.get("HTTPS_PROXY")
+                        or os.environ.get("https_proxy")
+                        or os.environ.get("HTTP_PROXY")
+                        or os.environ.get("http_proxy")
+                    ) or None
                 async with connect(self.url, **kw) as ws:
                     log.info("connected to relay", url=self.url)
                     backoff = 1.0
