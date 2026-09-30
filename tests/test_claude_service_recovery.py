@@ -10,7 +10,36 @@ from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
 from cc_remote.claude_service.client import RemoteClient
 from cc_remote.wrapper import claude_service
 from tests.test_claude_service import environment, released
-from tests.test_multisession import _mk_machine
+from tests.test_multisession import _mk_ctx, _mk_machine
+
+
+@pytest.mark.parametrize("native_id", [None, "11111111-1111-4111-8111-111111111111"])
+def test_startup_reuses_recovered_default_claude_resident(native_id, tmp_path, monkeypatch):
+    from tests.test_codex_controls import _FiniteTransport
+
+    async def go():
+        machine, _ = _mk_machine()
+        machine.cfg.cc_cwd = str(tmp_path.resolve())
+        machine.cfg.resume_session_id = ""
+        machine.transport = _FiniteTransport()
+        ctx = _mk_ctx(native_id or "tmp-prewarm", native_id)
+        ctx.cwd = machine.cfg.cc_cwd
+        ctx.claude_profile_id = machine._claude_profile().id
+        ctx.sdk = SimpleNamespace(detach_for_shutdown=AsyncMock())
+
+        async def restore(target):
+            target.sessions[ctx.key] = ctx
+
+        monkeypatch.setattr(claude_service, "restore", restore)
+        spawn = AsyncMock(return_value=None)
+        monkeypatch.setattr(machine, "_spawn", spawn)
+        await machine.run()
+        spawn.assert_not_awaited()
+        assert machine.focused_sid == ctx.key
+        assert list(machine.sessions) == [ctx.key]
+        ctx.sdk.detach_for_shutdown.assert_awaited_once()
+
+    asyncio.run(go())
 
 
 def test_live_prewarm_recovery_does_not_require_a_materialized_transcript(monkeypatch):

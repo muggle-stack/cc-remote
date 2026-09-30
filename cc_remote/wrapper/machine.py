@@ -9063,6 +9063,15 @@ class WrapperMachine:
                 self._ctx_by_sid(bootstrap_wire_sid)
                 if bootstrap_wire_sid else None
             )
+            if ctx is None and bootstrap_sid is None:
+                # An untouched prewarm may have no persisted bootstrap route.
+                # Reuse the recovered default-account resident in this cwd
+                # instead of accumulating another native process each restart.
+                ctx = next((candidate for candidate in self.sessions.values()
+                            if candidate.engine == "claude"
+                            and candidate.space == "code"
+                            and candidate.claude_profile_id == self._claude_profile().id
+                            and candidate.cwd == os.path.realpath(self.cfg.cc_cwd)), None)
             if (
                 ctx is None
                 and len(self.sessions) < self.cfg.max_concurrent_sessions
