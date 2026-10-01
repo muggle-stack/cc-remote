@@ -13,6 +13,7 @@ import os
 from collections import deque
 from typing import AsyncIterator, Awaitable, Callable, Optional
 from urllib.parse import urlsplit
+from urllib.request import getproxies_environment, proxy_bypass_environment
 
 from websockets.asyncio.client import connect
 
@@ -147,7 +148,10 @@ class WrapperTransport:
                     # which may select an unavailable SOCKS proxy.
                     "max_queue": 4,
                 }
-                if urlsplit(self.url).hostname in {"127.0.0.1", "::1", "localhost"}:
+                target = urlsplit(self.url)
+                if (target.hostname in {"127.0.0.1", "::1", "localhost"}
+                        or proxy_bypass_environment(
+                            target.netloc, getproxies_environment())):
                     kw["proxy"] = None
                 else:
                     kw["proxy"] = (
