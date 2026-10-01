@@ -30,13 +30,13 @@ repository, install Node, or paste tokens into service definitions.
 ### 1) Download and verify the bootstrap
 
 Confirm the version and release attestation on GitHub, then download
-`install.sh` and `SHA256SUMS` from that same release. The example uses `4.0.6`;
+`install.sh` and `SHA256SUMS` from that same release. The example uses `4.0.7`;
 first confirm that it is published, or replace it with the published tag you
 selected (without the leading `v`). This
 does not select an unpublished development-branch build:
 
 ```bash
-export CC_REMOTE_VERSION=4.0.6
+export CC_REMOTE_VERSION=4.0.7
 release_base="https://github.com/muggle-stack/cc-remote/releases/download/v${CC_REMOTE_VERSION}"
 curl -fLO "$release_base/install.sh"
 curl -fLO "$release_base/SHA256SUMS"
@@ -450,11 +450,15 @@ should get streaming replies, interrupt, and multi-device sync.
 
 ### Behind a corporate HTTP proxy?
 
-The wrapper dials out via `websockets`, which honors `HTTPS_PROXY` / `ALL_PROXY`.
-Add it to `/etc/cc-remote/wrapper.env`:
+The Wrapper's Relay connection uses explicit `HTTPS_PROXY` / `HTTP_PROXY`
+(including lowercase variants) and honors `NO_PROXY` / `no_proxy`. Loopback
+addresses always connect directly. System proxies and `ALL_PROXY` are not
+automatically selected, so system SOCKS settings cannot redirect this control
+connection. Add the settings to `/etc/cc-remote/wrapper.env`:
 
 ```ini
-HTTPS_PROXY=http://your-proxy:port      # for SOCKS use ALL_PROXY=socks5://...
+HTTPS_PROXY=http://your-proxy:port
+NO_PROXY=localhost,127.0.0.1,::1,relay.internal.example
 ```
 
 (If the proxy does TLS MITM, add its root CA to the system trust store.)

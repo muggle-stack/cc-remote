@@ -28,11 +28,11 @@ Web，Wrapper 包只含本机控制端；两者都自带 `uv`，安装时创建�
 ### 1）下载并校验引导脚本
 
 在 GitHub Release 页面确认版本与 release attestation，再在待安装机器下载同一版本的
-`install.sh` 和 `SHA256SUMS`。下例使用 `4.0.6`；请先确认对应版本已发布，或替换为已选定的已发布 tag
+`install.sh` 和 `SHA256SUMS`。下例使用 `4.0.7`；请先确认对应版本已发布，或替换为已选定的已发布 tag
 （变量中不带开头的 `v`）。该路径不会自动安装尚未发布的开发分支：
 
 ```bash
-export CC_REMOTE_VERSION=4.0.6
+export CC_REMOTE_VERSION=4.0.7
 release_base="https://github.com/muggle-stack/cc-remote/releases/download/v${CC_REMOTE_VERSION}"
 curl -fLO "$release_base/install.sh"
 curl -fLO "$release_base/SHA256SUMS"
@@ -394,11 +394,13 @@ Relay 只保存设备凭据的哈希；配对成功后明文凭据不会再次�
 
 ### 公司/内网走 HTTP 代理出网？
 
-wrapper 用 `websockets` 出站，认 `HTTPS_PROXY` / `ALL_PROXY` 环境变量。在
-`/etc/cc-remote/wrapper.env` 加：
+Wrapper 的 Relay 连接使用显式 `HTTPS_PROXY` / `HTTP_PROXY`（也支持小写），
+并遵循 `NO_PROXY` / `no_proxy`；本机回环地址始终直连。它不会自动采用系统代理
+或 `ALL_PROXY`，避免系统 SOCKS 设置影响控制连接。在 `/etc/cc-remote/wrapper.env` 加：
 
 ```ini
-HTTPS_PROXY=http://your-proxy:port      # SOCKS 用 ALL_PROXY=socks5://...
+HTTPS_PROXY=http://your-proxy:port
+NO_PROXY=localhost,127.0.0.1,::1,relay.internal.example
 ```
 
 （若代理做 TLS 中间人，需把它的根证书加进系统信任。）
