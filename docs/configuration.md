@@ -204,5 +204,7 @@ hook 和 Wrapper 应使用相同的 `CC_REMOTE_STATE_DIR`；日志默认为
 订阅登录或供应商认证留在各自目录；Profile 只选择原生配置边界，
 cc-remote 不下发模型凭据，也不充当模型 API 网关。
 
-Wrapper 到 Relay 的代理使用外部配置中的 `HTTPS_PROXY` / `ALL_PROXY`；
+Wrapper 到 Relay 的代理优先使用外部配置中的 `HTTPS_PROXY`，其次是 `HTTP_PROXY`，
+支持同名小写变量覆盖（含空值清除），遵循 `NO_PROXY` / `no_proxy` 且本机回环地址直连；
+不会自动采用 `ALL_PROXY` 或系统代理。
 `CC_REMOTE_CODEX_PROXY` 只影响 Wrapper 启动的 Codex 子进程，两者对应不同连接。

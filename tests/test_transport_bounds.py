@@ -135,6 +135,38 @@ def test_outbound_queue_stores_serialized_bytes_with_generation():
                                "NO_PROXY": "relay.example"},
      "http://proxy.example:7890"),
     ("wss://relay.example/ws", {"ALL_PROXY": "socks5://proxy.example:9999"}, None),
+    ("wss://relay.example/ws", {"HTTPS_PROXY": "http://old.example:7890",
+                               "https_proxy": "http://new.example:8080"},
+     "http://new.example:8080"),
+    ("wss://relay.example/ws", {"https_proxy": "http://new.example:8080",
+                               "HTTPS_PROXY": "http://old.example:7890"},
+     "http://new.example:8080"),
+    ("wss://relay.example/ws", {"HTTP_PROXY": "http://old.example:7890",
+                               "http_proxy": "http://new.example:8080"},
+     "http://new.example:8080"),
+    ("wss://relay.example/ws", {"HTTPS_PROXY": "http://old.example:7890",
+                               "https_proxy": ""}, None),
+    ("wss://relay.example/ws", {"HTTP_PROXY": "http://old.example:7890",
+                               "http_proxy": ""}, None),
+    ("wss://relay.example/ws", {"HTTPS_PROXY": "http://old.example:7890",
+                               "https_proxy": "",
+                               "HTTP_PROXY": "http://fallback.example:8080"},
+     "http://fallback.example:8080"),
+    ("wss://relay.example/ws", {"https_proxy": "http://secure.example:8080",
+                               "http_proxy": "http://fallback.example:8080"},
+     "http://secure.example:8080"),
+    ("wss://relay.example/ws", {"HTTPS_PROXY": "http://proxy.example:7890",
+                               "NO_PROXY": "*", "no_proxy": ""},
+     "http://proxy.example:7890"),
+    ("wss://relay.example/ws", {"HTTPS_PROXY": "http://proxy.example:7890",
+                               "NO_PROXY": "other.example", "no_proxy": "relay.example"},
+     None),
+    ("wss://relay.example/ws", {"HTTP_PROXY": "http://inherited.example:7890",
+                               "REQUEST_METHOD": "GET"}, None),
+    ("wss://relay.example/ws", {"HTTP_PROXY": "http://inherited.example:7890",
+                               "http_proxy": "http://explicit.example:8080",
+                               "REQUEST_METHOD": "GET"},
+     "http://explicit.example:8080"),
 ])
 def test_connect_honors_explicit_http_proxy_and_bypass(
     monkeypatch, url, environment, expected_proxy,
@@ -147,6 +179,7 @@ def test_connect_honors_explicit_http_proxy_and_bypass(
     for key in list(os.environ):
         if key.lower().endswith("_proxy"):
             monkeypatch.delenv(key)
+    monkeypatch.delenv("REQUEST_METHOD", raising=False)
     for key, value in environment.items():
         monkeypatch.setenv(key, value)
 

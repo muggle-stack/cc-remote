@@ -450,8 +450,10 @@ should get streaming replies, interrupt, and multi-device sync.
 
 ### Behind a corporate HTTP proxy?
 
-The Wrapper's Relay connection uses explicit `HTTPS_PROXY` / `HTTP_PROXY`
-(including lowercase variants) and honors `NO_PROXY` / `no_proxy`. Loopback
+The Wrapper's Relay connection prefers explicit `HTTPS_PROXY`, then `HTTP_PROXY`
+(including lowercase variants). Lowercase variables override their uppercase
+counterparts; an empty lowercase value clears the corresponding uppercase setting.
+The connection honors `NO_PROXY` / `no_proxy`. Loopback
 addresses always connect directly. System proxies and `ALL_PROXY` are not
 automatically selected, so system SOCKS settings cannot redirect this control
 connection. Add the settings to `/etc/cc-remote/wrapper.env`:

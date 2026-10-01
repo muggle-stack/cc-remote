@@ -9,7 +9,6 @@ queue is drained on disconnect to avoid double-delivery on reconnect.
 from __future__ import annotations
 
 import asyncio
-import os
 from collections import deque
 from typing import AsyncIterator, Awaitable, Callable, Optional
 from urllib.parse import urlsplit
@@ -149,17 +148,13 @@ class WrapperTransport:
                     "max_queue": 4,
                 }
                 target = urlsplit(self.url)
+                proxies = getproxies_environment()
                 if (target.hostname in {"127.0.0.1", "::1", "localhost"}
                         or proxy_bypass_environment(
-                            target.netloc, getproxies_environment())):
+                            target.netloc, proxies)):
                     kw["proxy"] = None
                 else:
-                    kw["proxy"] = (
-                        os.environ.get("HTTPS_PROXY")
-                        or os.environ.get("https_proxy")
-                        or os.environ.get("HTTP_PROXY")
-                        or os.environ.get("http_proxy")
-                    ) or None
+                    kw["proxy"] = proxies.get("https") or proxies.get("http") or None
                 async with connect(self.url, **kw) as ws:
                     log.info("connected to relay", url=self.url)
                     backoff = 1.0

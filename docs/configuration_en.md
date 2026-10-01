@@ -224,6 +224,9 @@ Subscription or provider credentials remain there. Profiles select the native
 configuration boundary; cc-remote does not distribute model credentials or act as
 a model API gateway.
 
-For proxying the Wrapper-to-Relay connection, set `HTTPS_PROXY` / `ALL_PROXY` in
-external Wrapper configuration. `CC_REMOTE_CODEX_PROXY` instead affects only
+The Wrapper-to-Relay connection prefers `HTTPS_PROXY`, then `HTTP_PROXY`, in
+external Wrapper configuration. Lowercase counterparts take precedence, including
+empty values that clear inherited uppercase settings. `NO_PROXY` / `no_proxy`
+and loopback bypass apply; `ALL_PROXY` and system proxies are not selected.
+`CC_REMOTE_CODEX_PROXY` instead affects only
 Wrapper-launched Codex children. These control different connections.

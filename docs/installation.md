@@ -394,8 +394,9 @@ Relay 只保存设备凭据的哈希；配对成功后明文凭据不会再次�
 
 ### 公司/内网走 HTTP 代理出网？
 
-Wrapper 的 Relay 连接使用显式 `HTTPS_PROXY` / `HTTP_PROXY`（也支持小写），
-并遵循 `NO_PROXY` / `no_proxy`；本机回环地址始终直连。它不会自动采用系统代理
+Wrapper 的 Relay 连接优先使用显式 `HTTPS_PROXY`，其次是 `HTTP_PROXY`（也支持小写）。
+同名大小写变量同时存在时，小写优先；小写空值会清除对应的大写配置。
+连接遵循 `NO_PROXY` / `no_proxy`；本机回环地址始终直连。它不会自动采用系统代理
 或 `ALL_PROXY`，避免系统 SOCKS 设置影响控制连接。在 `/etc/cc-remote/wrapper.env` 加：
 
 ```ini
