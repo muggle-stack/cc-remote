@@ -3,6 +3,8 @@
 import asyncio
 import base64
 import json
+import os
+from uuid import UUID
 
 import pytest
 from claude_agent_sdk import get_session_info
@@ -219,6 +221,55 @@ def test_catalog_hides_metadata_stub_without_removing_real_history(
     assert [info.session_id for info in listed] == [SID]
     assert path.read_bytes() == original
     assert stub.read_bytes() == stub_bytes
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("directory", [None, "/original-project"])
+@pytest.mark.parametrize("limit", [0, 1, 2, 200])
+def test_catalog_limit_counts_real_sessions_after_metadata_filter(
+    tmp_path, monkeypatch, explicit, directory, limit,
+):
+    root = tmp_path / "profile"
+    image = write_image_transcript(root)
+    os.utime(image, (1_700_000_002, 1_700_000_002))
+    newer_sid, older_sid = str(UUID(int=1)), str(UUID(int=2))
+    for sid, modified in [(newer_sid, 1_700_000_003), (older_sid, 1_700_000_001)]:
+        path = image.with_name(f"{sid}.jsonl")
+        path.write_text(json.dumps({
+            "type": "user", "uuid": "human", "parentUuid": None,
+            "sessionId": sid, "cwd": "/original-project",
+            "message": {"role": "user", "content": "real conversation"},
+        }) + "\n")
+        os.utime(path, (modified, modified))
+    # More recent shutdown stubs than the sidebar's entire 200-session cap.
+    for index in range(201):
+        sid = str(UUID(int=index + 10))
+        stub = image.with_name(f"{sid}.jsonl")
+        stub.write_text(json.dumps({
+            "type": "last-prompt", "sessionId": sid,
+            "lastPrompt": "copied parent prompt",
+        }) + "\n")
+        modified = 1_700_000_010 + index
+        os.utime(stub, (modified, modified))
+    originals = {path: path.read_bytes() for path in image.parent.iterdir()}
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    machine, _ = _mk_machine()
+    if explicit:
+        from cc_remote.claude_profiles import ClaudeProfileRegistry
+
+        machine._claude_profiles_explicit = True
+        machine._claude_profiles = ClaudeProfileRegistry.from_json(json.dumps({
+            "selected": {"label": "Selected", "config_dir": str(root), "default": True},
+            "other": {"label": "Other", "config_dir": str(tmp_path / "other")},
+        }))
+    listed = machine._claude_catalog_list_sessions(
+        machine._claude_profiles.default, limit=limit, directory=directory,
+        include_worktrees=False,
+    )
+    expected = [newer_sid, SID, older_sid]
+    assert [info.session_id for info in listed] == (expected[:limit] if limit > 0 else expected)
+    assert all(info.cwd == "/original-project" for info in listed)
+    assert {path: path.read_bytes() for path in image.parent.iterdir()} == originals
 
 
 @pytest.mark.parametrize("suffix", [

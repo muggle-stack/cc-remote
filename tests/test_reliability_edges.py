@@ -592,7 +592,8 @@ def test_session_lists_echo_engine_and_are_unicast_to_each_requester(monkeypatch
         ]
         assert lists[-1].space == "work"
         assert codex_calls == [200]
-        assert len(calls) == 1 and calls[0][1] == 200
+        # The wrapper applies the cap after filtering native metadata stubs.
+        assert len(calls) == 1 and calls[0][1] is None
         assert calls[0][0] != caller_thread
 
     asyncio.run(run())

@@ -3018,16 +3018,20 @@ class WrapperMachine:
         include_worktrees: bool = True,
     ):
         if self._claude_config_root(profile) is None:
+            # The SDK sorts before limiting. Keep older candidates available
+            # until metadata-only stubs have been excluded from the quota.
             if directory is None:
-                sessions = list_sessions(limit=limit)
+                sessions = list_sessions(limit=None)
             else:
                 sessions = list_sessions(
-                    limit=limit,
+                    limit=None,
                     directory=directory,
                     include_worktrees=include_worktrees,
                 )
             result = []
             for info in sessions:
+                if 0 < limit <= len(result):
+                    break
                 size = getattr(info, "file_size", None)
                 if info.cwd and (
                         info.first_prompt or (
