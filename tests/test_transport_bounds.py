@@ -116,11 +116,80 @@ def test_outbound_queue_stores_serialized_bytes_with_generation():
     asyncio.run(run())
 
 
-def test_connect_relies_on_websockets_proxy_bypass(monkeypatch):
+@pytest.mark.parametrize(("url", "environment", "expected_proxy"), [
+    ("ws://127.0.0.1:8765/ws", {"HTTPS_PROXY": "http://proxy.example:7890"}, None),
+    ("ws://[::1]:8765/ws", {"HTTPS_PROXY": "http://proxy.example:7890"}, None),
+    ("wss://relay.example/ws", {"HTTPS_PROXY": "http://proxy.example:7890"},
+     "http://proxy.example:7890"),
+    ("wss://relay.example/ws", {"http_proxy": "http://proxy.example:7890"},
+     "http://proxy.example:7890"),
+    ("wss://relay.example/ws", {"HTTPS_PROXY": "http://proxy.example:7890",
+                               "NO_PROXY": "relay.example"}, None),
+    ("wss://relay.internal.example/ws", {"HTTPS_PROXY": "http://proxy.example:7890",
+                                        "no_proxy": ".internal.example"}, None),
+    ("ws://10.0.0.2:8765/ws", {"HTTP_PROXY": "http://proxy.example:7890",
+                              "NO_PROXY": "10.0.0.2:8765"}, None),
+    ("wss://relay.example/ws", {"HTTPS_PROXY": "http://proxy.example:7890",
+                               "NO_PROXY": "*"}, None),
+    ("wss://other.example/ws", {"HTTPS_PROXY": "http://proxy.example:7890",
+                               "NO_PROXY": "relay.example"},
+     "http://proxy.example:7890"),
+    ("wss://relay.example/ws", {"ALL_PROXY": "socks5://proxy.example:9999"}, None),
+    ("wss://relay.example/ws", {"HTTPS_PROXY": "http://old.example:7890",
+                               "https_proxy": "http://new.example:8080"},
+     "http://new.example:8080"),
+    ("wss://relay.example/ws", {"https_proxy": "http://new.example:8080",
+                               "HTTPS_PROXY": "http://old.example:7890"},
+     "http://new.example:8080"),
+    ("wss://relay.example/ws", {"HTTP_PROXY": "http://old.example:7890",
+                               "http_proxy": "http://new.example:8080"},
+     "http://new.example:8080"),
+    ("wss://relay.example/ws", {"HTTPS_PROXY": "http://old.example:7890",
+                               "https_proxy": ""}, None),
+    ("wss://relay.example/ws", {"HTTP_PROXY": "http://old.example:7890",
+                               "http_proxy": ""}, None),
+    ("wss://relay.example/ws", {"HTTPS_PROXY": "http://old.example:7890",
+                               "https_proxy": "",
+                               "HTTP_PROXY": "http://fallback.example:8080"},
+     "http://fallback.example:8080"),
+    ("wss://relay.example/ws", {"https_proxy": "http://secure.example:8080",
+                               "http_proxy": "http://fallback.example:8080"},
+     "http://secure.example:8080"),
+    ("wss://relay.example/ws", {"HTTPS_PROXY": "http://proxy.example:7890",
+                               "NO_PROXY": "*", "no_proxy": ""},
+     "http://proxy.example:7890"),
+    ("wss://relay.example/ws", {"HTTPS_PROXY": "http://proxy.example:7890",
+                               "NO_PROXY": "other.example", "no_proxy": "relay.example"},
+     None),
+    ("wss://relay.example/ws", {"HTTP_PROXY": "http://inherited.example:7890",
+                               "REQUEST_METHOD": "GET"}, None),
+    ("wss://relay.example/ws", {"HTTP_PROXY": "http://inherited.example:7890",
+                               "http_proxy": "http://explicit.example:8080",
+                               "REQUEST_METHOD": "GET"},
+     "http://explicit.example:8080"),
+])
+def test_connect_honors_explicit_http_proxy_and_bypass(
+    monkeypatch, url, environment, expected_proxy,
+):
+    import os
+    import urllib.request
+
     import cc_remote.wrapper.transport as transport_module
 
+    for key in list(os.environ):
+        if key.lower().endswith("_proxy"):
+            monkeypatch.delenv(key)
+    monkeypatch.delenv("REQUEST_METHOD", raising=False)
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+
+    def system_proxy_lookup():
+        pytest.fail("transport must not consult system proxy settings")
+
+    monkeypatch.setattr(urllib.request, "getproxies", system_proxy_lookup)
+
     async def run():
-        transport = WrapperTransport("ws://127.0.0.1:8765/ws", "secret")
+        transport = WrapperTransport(url, "secret")
         called = {}
 
         def fake_connect(url, **kwargs):
@@ -131,7 +200,7 @@ def test_connect_relies_on_websockets_proxy_bypass(monkeypatch):
         monkeypatch.setattr(transport_module, "connect", fake_connect)
         await transport._run()
         assert called["kwargs"]["max_queue"] == 4
-        assert called["kwargs"]["proxy"] is None
+        assert called["kwargs"]["proxy"] == expected_proxy
 
     asyncio.run(run())
 

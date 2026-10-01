@@ -31,13 +31,13 @@ assert.deepEqual(matchCommands("fas", "claude", "work"), []);
 const composerSource = readFileSync(resolve(
   process.cwd(), "src/components/Composer.tsx"), "utf8");
 assert.match(composerSource,
-  /p\.engine === "codex"[\s\S]{0,220}className="work-fast-setting"[\s\S]{0,320}p\.onSetServiceTier\?\.\("toggle"\)/,
-  "existing Codex Work sessions must expose their authoritative Fast toggle");
+  /<SpeedPicker row model=\{p\.model\} catalog=\{p\.catalog\}/,
+  "Codex Work must use the selected model's native speed options");
 
 const newChatSource = readFileSync(resolve(
   process.cwd(), "src/components/NewChatView.tsx"), "utf8");
 assert.match(newChatSource,
-  /engine === "codex" && space === "work"[\s\S]{0,260}aria-label="新工作 Fast 服务档位"/,
-  "only a new Codex Work form should expose the Fast selection");
+  /engine === "codex"[\s\S]{0,80}<SpeedPicker newSession/,
+  "new Codex Code and Work forms must expose native speed selection");
 assert.match(newChatSource, /engine === "codex" \? serviceTier : undefined/,
   "the atomic first turn must carry the selected service tier");

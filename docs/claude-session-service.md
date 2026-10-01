@@ -188,6 +188,16 @@ instance, and Wrapper-owned deferred queries must drain before restarting the
 Wrapper. Deployment automation must check these separately: a healthy service
 socket alone does not prove that every active operation has migrated.
 
+Claude BTW cleanup retains a compact, account-scoped privacy receipt after
+deleting its transcript. A late native shutdown flush may recreate the file;
+the receipt prevents that private fork from entering ordinary session lists or
+cold resumes, including after a Wrapper restart. Receipts are not resident
+sessions and do not count against the pending-cleanup limit. The bounded store
+refuses new private identities when full rather than forgetting an old one.
+Small, complete metadata-only files are also excluded from the catalog without
+modifying native history; queued inputs and large or partially written files
+are preserved.
+
 The SDK service stays on its original immutable source and venv while its
 sessions are alive. Keep that release; `service.json` records the source and
 process identity. If an upgrade changes the pinned SDK or local service

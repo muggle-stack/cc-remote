@@ -30,13 +30,13 @@ repository, install Node, or paste tokens into service definitions.
 ### 1) Download and verify the bootstrap
 
 Confirm the version and release attestation on GitHub, then download
-`install.sh` and `SHA256SUMS` from that same release. The example uses `4.0.6`;
+`install.sh` and `SHA256SUMS` from that same release. The example uses `4.0.7`;
 first confirm that it is published, or replace it with the published tag you
 selected (without the leading `v`). This
 does not select an unpublished development-branch build:
 
 ```bash
-export CC_REMOTE_VERSION=4.0.6
+export CC_REMOTE_VERSION=4.0.7
 release_base="https://github.com/muggle-stack/cc-remote/releases/download/v${CC_REMOTE_VERSION}"
 curl -fLO "$release_base/install.sh"
 curl -fLO "$release_base/SHA256SUMS"
@@ -276,7 +276,7 @@ as described in the deployment contract. No browser secret is needed for a build
 
 **Stage every target before changing live services.** The commands below describe
 the Relay and Wrapper separately; do not activate Relay until every Wrapper stage
-has passed validation. Protocol v72 cannot be mixed with older clients. Stop old
+has passed validation. Protocol v73 cannot be mixed with older clients. Stop old
 incompatible Wrappers, activate Relay + Web, then activate Wrappers and hard-refresh
 browser tabs. Wrapper activation must snapshot Work SQLite and private profile
 control state with `deploy/work_registry_snapshot.py`; this is not limited to
@@ -338,7 +338,7 @@ The script installs `python3-venv` + Caddy, creates the `ccremote` service user,
 builds an immutable release and its venv, merges Caddy configuration, atomically
 switches `current`, and restarts the relay. If restart/readiness fails, `current`,
 the Caddyfile, and the systemd unit roll back as one transaction and the previous
-release's `/healthz` is verified. Start the v72 wrapper after success.
+release's `/healthz` is verified. Start the v73 wrapper after success.
 
 Verify:
 
@@ -450,11 +450,17 @@ should get streaming replies, interrupt, and multi-device sync.
 
 ### Behind a corporate HTTP proxy?
 
-The wrapper dials out via `websockets`, which honors `HTTPS_PROXY` / `ALL_PROXY`.
-Add it to `/etc/cc-remote/wrapper.env`:
+The Wrapper's Relay connection prefers explicit `HTTPS_PROXY`, then `HTTP_PROXY`
+(including lowercase variants). Lowercase variables override their uppercase
+counterparts; an empty lowercase value clears the corresponding uppercase setting.
+The connection honors `NO_PROXY` / `no_proxy`. Loopback
+addresses always connect directly. System proxies and `ALL_PROXY` are not
+automatically selected, so system SOCKS settings cannot redirect this control
+connection. Add the settings to `/etc/cc-remote/wrapper.env`:
 
 ```ini
-HTTPS_PROXY=http://your-proxy:port      # for SOCKS use ALL_PROXY=socks5://...
+HTTPS_PROXY=http://your-proxy:port
+NO_PROXY=localhost,127.0.0.1,::1,relay.internal.example
 ```
 
 (If the proxy does TLS MITM, add its root CA to the system trust store.)

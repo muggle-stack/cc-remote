@@ -10858,8 +10858,10 @@ try {
   const codexNewChatControls = codexNewChatMarkup.match(
     /<div class="newchat-ctls">([\s\S]*?)<\/div>/,
   )?.[1] ?? "";
-  assert.doesNotMatch(codexNewChatControls, /不询问|Plan|标准/,
+  assert.doesNotMatch(codexNewChatControls, /不询问|Plan/,
     "the compact footer must not duplicate controls that live in its sheet");
+  assert.match(codexNewChatControls, /aria-label="速度：标准"/,
+    "new Codex chats expose the model-bound speed picker");
   assert.match(codexNewChatMarkup, /class="newchat-access"/);
   assert.doesNotMatch(codexNewChatMarkup, /role="dialog"/,
     "closed selection surfaces are mounted only when opened");
@@ -18364,8 +18366,8 @@ assert.doesNotMatch(composerSource, /发消息…/,
   "the compact composer placeholder must not wrap a redundant send label");
 assert.match(composerSource, /输入 \/ 命令，\$ Skill/,
   "the Codex placeholder must retain command and Skill discovery");
-assert.match(composerSource, /p\.fast \? "快速" : "标准"/,
-  "the Fast control must use stable text labels");
+assert.match(composerSource, /<SpeedPicker model=\{p\.model\} catalog=\{p\.catalog\}/,
+  "the speed control must use the current model's native catalog");
 assert.doesNotMatch(composerSource, /⚡/,
   "the Fast control must not add a lightning marker");
 const workDashboardSource = readFileSync(

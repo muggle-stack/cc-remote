@@ -1381,7 +1381,7 @@ export class RelayWs {
                  permissionMode?: "never" | "on-request" | "untrusted",
                  permissionProfile?: string,
                  webSearch?: "cached" | "live",
-                 serviceTier?: "default" | "fast",
+                 serviceTier?: string,
                  space: Space = "code", projectId?: string | null,
                  codexProfileId?: string | null,
                  autoCompact?: {

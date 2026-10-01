@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from typing import Optional
 
@@ -39,6 +40,57 @@ _RPC_TIMEOUT = 30.0
 _MAX_MODELS = 256
 _MAX_EFFORTS = 16
 _MAX_CATALOG_TEXT = 4096
+_MAX_SERVICE_TIERS = 16
+_SERVICE_TIER_ID = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
+
+
+def normalize_service_tier(value: str | None) -> str:
+    """Keep native tier ids; ``fast`` is the CLI alias for ``priority``."""
+    if not value or value == "default":
+        return "default"
+    return "priority" if value == "fast" else value
+
+
+def _service_tiers(model: dict) -> list[dict[str, str]] | None:
+    # Missing metadata is unknown, not an authoritative empty entitlement list.
+    raw = model.get("serviceTiers")
+    if not isinstance(raw, list):
+        return None
+    result: list[dict[str, str]] = []
+    seen = {"default", "toggle"}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        tier = item.get("id")
+        if not isinstance(tier, str) or not _SERVICE_TIER_ID.fullmatch(tier):
+            continue
+        tier = normalize_service_tier(tier)
+        if tier in seen:
+            continue
+        seen.add(tier)
+        result.append({
+            "id": tier,
+            "name": str(item.get("name") or tier)[:128],
+            "description": str(item.get("description") or "")[:_MAX_CATALOG_TEXT],
+        })
+        if len(result) >= _MAX_SERVICE_TIERS:
+            break
+    return result
+
+
+def resolve_service_tier(
+    model: str | None, tier: str | None, catalog: list[dict],
+) -> str | None:
+    """Validate a paid tier against this account AND model before changing it."""
+    normalized = normalize_service_tier(tier)
+    if normalized == "default":
+        return None
+    entry = next((m for m in catalog if m.get("id") == model), None)
+    if entry is None or entry.get("service_tiers") is None:
+        raise ValueError("未读取到当前模型的速度档位，请刷新模型列表后重试。")
+    if not any(t.get("id") == normalized for t in entry["service_tiers"]):
+        raise ValueError("当前账号的所选模型不支持此速度档位，请重新选择。")
+    return normalized
 
 _profile_cache: dict[str, tuple[list[dict], float]] = {}
 _inflight: dict[str, asyncio.Task[list[dict]]] = {}
@@ -101,9 +153,24 @@ async def _rpc_model_list(codex_home: str | None = None) -> list[dict]:
                     }}})
         await asyncio.wait_for(await_result(1), _RPC_TIMEOUT)
         await send({"jsonrpc": "2.0", "method": "initialized"})
-        await send({"jsonrpc": "2.0", "id": 2, "method": "model/list", "params": {}})
-        res = await asyncio.wait_for(await_result(2), _RPC_TIMEOUT)
-        return (res or {}).get("data") or []
+        result: list[dict] = []
+        cursor = None
+        seen: set[str] = set()
+        for rid in range(2, 18):
+            params: dict = {"limit": _MAX_MODELS}
+            if cursor:
+                params["cursor"] = cursor
+            await send({"jsonrpc": "2.0", "id": rid,
+                        "method": "model/list", "params": params})
+            res = await asyncio.wait_for(await_result(rid), _RPC_TIMEOUT)
+            result.extend((res or {}).get("data") or [])
+            cursor = (res or {}).get("nextCursor")
+            if not cursor:
+                return result
+            if not isinstance(cursor, str) or cursor in seen or len(result) >= _MAX_MODELS:
+                raise RuntimeError("Codex model catalog pagination exceeded bounds")
+            seen.add(cursor)
+        raise RuntimeError("Codex model catalog pagination exceeded bounds")
     finally:
         if proc.stdin is not None:
             proc.stdin.close()
@@ -144,6 +211,10 @@ def _normalize(raw: list[dict]) -> list[dict]:
                 str(m.get("defaultReasoningEffort"))[:64]
                 if m.get("defaultReasoningEffort") else None),
             "is_default": bool(m.get("isDefault")),
+            "service_tiers": _service_tiers(m),
+            "default_service_tier": normalize_service_tier(
+                m.get("defaultServiceTier")
+                if isinstance(m.get("defaultServiceTier"), str) else None)[:64],
         })
         if len(out) >= _MAX_MODELS:
             break

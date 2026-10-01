@@ -56,6 +56,7 @@ import {
 import { PendingImageAttachments } from "./PendingImageAttachments";
 import { QueuedQueryChip } from "./QueuedQueryChip";
 import { UsageMeter } from "./UsageMeter";
+const SpeedPicker = lazy(() => import("./SpeedPicker").then(m => ({ default: m.SpeedPicker })));
 import { PasteCards } from "./PasteCards";
 import { uuid } from "../util";
 import {
@@ -93,7 +94,7 @@ interface Props {
   permissionProfiles: PermissionProfileInfo[] | null;
   webSearch: "cached" | "live" | null;
   collaborationMode: CollaborationModeName;
-  fast?: boolean | null;   // null until the wrapper reports the real service tier
+  serviceTier?: string | null;
   control?: SessionControl | null;
   // A native `claude`/`codex` in the terminal owns this session and is appending to
   // its transcript. We mirror it live but must NOT write: a cc session has a single
@@ -951,14 +952,11 @@ export function Composer(p: Props) {
                     <span>思考强度</span><b>{effortName ?? "读取中"}</b>
                   </button>
                   {p.engine === "codex" && (
-                    <button type="button" className="work-fast-setting"
-                      aria-pressed={!!p.fast}
-                      onClick={() => p.onSetServiceTier?.("toggle")}
+                    <Suspense fallback={null}><SpeedPicker row model={p.model} catalog={p.catalog}
+                      scopeKey={p.draftKey} value={p.serviceTier}
                       disabled={locked || !p.onSetServiceTier}
-                      title="Fast：快速 / 标准（下条消息生效）">
-                      <span>服务档位</span><b>{p.fast == null
-                        ? "读取中" : p.fast ? "快速" : "标准"}</b>
-                    </button>
+                      onRefresh={p.onRequestModels}
+                      onChange={(tier) => p.onSetServiceTier?.(tier)} /></Suspense>
                   )}
                   <button type="button" aria-expanded={ctxOpen}
                     onClick={() => {
@@ -1048,12 +1046,11 @@ export function Composer(p: Props) {
               >Plan</button>
             )}
             {p.engine === "codex" && (
-              <button
-                className={"hint-ctl fast-chip" + (p.fast ? " on" : "")}
-                onClick={() => p.onSetServiceTier?.("toggle")}
-                disabled={locked}
-                title="Fast 服务档位:快 / 标准(下条消息生效)"
-              >{p.fast == null ? "档位读取中" : p.fast ? "快速" : "标准"}</button>
+              <Suspense fallback={null}><SpeedPicker model={p.model} catalog={p.catalog}
+                scopeKey={p.draftKey} value={p.serviceTier}
+                disabled={locked || !p.onSetServiceTier}
+                onRefresh={p.onRequestModels}
+                onChange={(tier) => p.onSetServiceTier?.(tier)} /></Suspense>
             )}
             {(p.engine === "codex" || p.engine === "claude") && (
               <UsageMeter

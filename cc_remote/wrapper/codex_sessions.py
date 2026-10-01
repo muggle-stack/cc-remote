@@ -906,6 +906,16 @@ def codex_fast_enabled(
     }
 
 
+def codex_service_tier(
+    *, codex_home: str | os.PathLike[str] | None = None,
+) -> Optional[str]:
+    """Preserve native speed defaults, including account-specific new tiers."""
+    value = _config_value("service_tier", "", codex_home=codex_home)
+    if not isinstance(value, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", value):
+        return None
+    return None if value == "default" else value
+
+
 def codex_approval(
     default: str = "never",
     *,

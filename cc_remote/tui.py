@@ -993,7 +993,8 @@ class Tui:
                     f"[perm: {_safe_remote_text(d.get('mode'))}]"))
         elif t == "fast":
             if self._for_me(d):
-                self._line(CYAN("[fast: " + ("on" if d.get("on") else "off") + "]"))
+                tier = d.get("tier") or ("priority" if d.get("on") else "default")
+                self._line(CYAN(f"[speed: {_safe_remote_text(tier)}]"))
         elif t == "error":
             if (d.get("code") != "wrapper_offline" and d.get("request_id")
                     and d.get("request_id") == self._pending_new_request):

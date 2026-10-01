@@ -12,6 +12,7 @@ import asyncio
 from collections import deque
 from typing import AsyncIterator, Awaitable, Callable, Optional
 from urllib.parse import urlsplit
+from urllib.request import getproxies_environment, proxy_bypass_environment
 
 from websockets.asyncio.client import connect
 
@@ -141,13 +142,19 @@ class WrapperTransport:
                 kw: dict = {
                     "additional_headers": headers,
                     "max_size": self.max_size,
-                    # websockets 16 defaults proxy=True, including NO_PROXY /
-                    # proxy_bypass handling. Do not force a configured proxy for
-                    # loopback relay URLs: that can expose the Bearer token.
+                    # Select only the operator's explicit HTTP proxy variables.
+                    # websockets 16 otherwise consults macOS system settings,
+                    # which may select an unavailable SOCKS proxy.
                     "max_queue": 4,
                 }
-                if urlsplit(self.url).hostname in {"127.0.0.1", "::1", "localhost"}:
+                target = urlsplit(self.url)
+                proxies = getproxies_environment()
+                if (target.hostname in {"127.0.0.1", "::1", "localhost"}
+                        or proxy_bypass_environment(
+                            target.netloc, proxies)):
                     kw["proxy"] = None
+                else:
+                    kw["proxy"] = proxies.get("https") or proxies.get("http") or None
                 async with connect(self.url, **kw) as ws:
                     log.info("connected to relay", url=self.url)
                     backoff = 1.0

@@ -1263,7 +1263,7 @@ def test_claude_session_list_is_withheld_until_btw_real_id_is_tombstoned(
     asyncio.run(run())
 
 
-def test_claude_btw_tombstone_survives_restart_until_delete_succeeds(monkeypatch):
+def test_claude_btw_tombstone_survives_restart_and_successful_delete(monkeypatch):
     async def run():
         machine, transport = _mk_machine()
         real_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
@@ -1288,7 +1288,10 @@ def test_claude_btw_tombstone_survives_restart_until_delete_succeeds(monkeypatch
         monkeypatch.setattr(machine_module, "delete_session",
                             lambda *_args, **_kwargs: None)
         await restarted._cleanup_private_btw_sessions()
-        assert real_id not in restarted._private_btw_sessions
+        assert restarted._private_btw_sessions[real_id]["retired"] is True
+        assert "cwd" not in restarted._private_btw_sessions[real_id]
+        reloaded = machine.__class__(machine.cfg, transport)
+        assert reloaded._private_btw_sessions[real_id]["retired"] is True
 
     asyncio.run(run())
 
@@ -1350,7 +1353,7 @@ def test_btw_capture_persistence_failure_terminates_and_deletes_fork(
         assert fork.sdk.disconnected is True
         assert fork.key not in machine.sessions
         assert fork.btw_real_id == real_id
-        assert real_id not in machine._private_btw_sessions
+        assert real_id in machine._private_btw_sessions
         assert deleted == [(real_id, fork.cwd)]
         assert machine._preview_capability_store.snapshot(
             "claude", "code", fork.key,

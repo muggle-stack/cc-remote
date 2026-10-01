@@ -2,6 +2,24 @@
 
 [中文](CHANGELOG_zh.md)
 
+## v4.0.7
+
+Add model-specific Codex speed selection and repair Claude recovery and private
+side-chat cleanup. Wire protocol v73 requires a coordinated upgrade. See the
+bilingual [release notes](docs/releases/v4.0.7.md).
+
+- Read Codex speed options from the current account's native model catalog and
+  offer them in a model-bound picker for Code, Work, and side conversations.
+  Preserve exact native tiers across reconnects and clear unsupported tiers
+  when changing models. Ultrafast appears only when the account/model offers it.
+- Recover live Claude prewarm sessions before their first transcript exists and
+  reuse recovered default-account residents instead of spawning extra workers.
+- Retain private side-chat identity receipts after cleanup so late native writes
+  cannot expose retired forks; hide proven metadata-only catalog entries.
+- Jump to the latest message immediately when the bottom button is clicked.
+- Use explicit HTTP proxy settings for the Relay connection while preserving
+  environment bypass rules and direct loopback access.
+
 ## v4.0.6
 
 Preserve session history and completion state, recover sessions safely, and add

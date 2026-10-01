@@ -189,10 +189,11 @@ def test_literal_unions_match_python_protocol():
         "NoticeCategory": NoticeCategory,
         "RateLimitResetOutcome": RateLimitResetOutcome,
         "CodexThreadStatus": CodexThreadStatus,
-        "ServiceTier": SetServiceTier.model_fields["service_tier"].annotation,
     }
     for name, annotation in aliases.items():
         assert _alias_literals(name) == set(get_args(annotation)), name
+    assert SetServiceTier.model_fields["service_tier"].annotation is str
+    assert re.search(r"export type ServiceTier = string;", TS_PROTOCOL)
 
 
 def test_process_timeline_has_an_icon_for_every_process_kind():

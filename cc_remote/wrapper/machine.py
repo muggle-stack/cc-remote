@@ -352,6 +352,8 @@ from cc_remote.wrapper.codex_models import (
     clamp_effort,
     codex_catalog,
     default_effort_for,
+    normalize_service_tier,
+    resolve_service_tier,
 )
 from cc_remote.wrapper.codex_rpc import (
     CodexRpcOutcomeUnknown, CodexRpcRejected, codex_rpc, codex_rpc_batch,
@@ -506,8 +508,12 @@ _CODEX_ARCHIVE_NOFILE_SOFT_LIMIT = 4096
 
 
 def _codex_fast_on(value: Optional[str]) -> bool:
-    """0.144.1 accepts ``fast`` but reports the persisted tier as ``priority``."""
-    return value in CODEX_FAST_SERVICE_TIERS
+    """Retain the binary compatibility flag for any native nonstandard tier."""
+    return normalize_service_tier(value) != "default"
+
+
+def _codex_speed_event(value: Optional[str]) -> Fast:
+    return Fast(on=_codex_fast_on(value), tier=normalize_service_tier(value))
 
 
 def _codex_terminal_status(message: dict) -> str:
@@ -1903,11 +1909,13 @@ class WrapperMachine:
     SESSION_ALIAS_TTL = 7 * 24 * 3600
     SESSION_ALIAS_FILE_MAX_BYTES = 2 * 1024 * 1024
     SESSION_ALIAS_PROFILE_META_KEY = "__cc_remote_profile__"
-    # A worst-case 4096-byte cwd can expand ~6x under JSON escaping. 64 entries
-    # therefore still fit the 2 MiB state-file cap while matching the maximum
-    # number of resident sessions allowed by config validation.
+    # Pending cleanup retains cwd; completed cleanup keeps only an exact id
+    # receipt, never a resident session. A native writer can flush after unlink,
+    # so receipts must not expire or be pruned into public catalog entries.
     PRIVATE_BTW_CAP = 64
-    PRIVATE_BTW_FILE_MAX_BYTES = 2 * 1024 * 1024
+    PRIVATE_BTW_RETIRED_CAP = 8192
+    # Bounded compact receipts plus 64 worst-case JSON-escaped cwd records.
+    PRIVATE_BTW_FILE_MAX_BYTES = 4 * 1024 * 1024
     # Leave ample headroom under the relay's 16 MiB / 4096-item per-client queue
     # for envelopes and concurrent control state. Only the selected BTW is
     # hydrated, and both queue dimensions must stay bounded.
@@ -2547,9 +2555,9 @@ class WrapperMachine:
             self._rollback_commands = None
             log.exception("rollback command journal unavailable")
         # Claude fork_session writes a real transcript even though /btw is an
-        # ephemeral, owner-only UI. Persist tombstones until that transcript is
-        # deleted so a crash or failed cleanup cannot expose it in SessionList or
-        # let another client cold-resume it as a normal session.
+        # ephemeral, owner-only UI. Persist tombstones even after unlink: a
+        # surviving native writer can recreate the file during shutdown. These
+        # exact ids must never enter SessionList or an ordinary cold resume.
         self._private_btw_profile_revision = 0
         self._private_btw_sessions = self._load_private_btw_sessions()
         # Catalog/default reads stay off the serial mutation/query command lane
@@ -3010,17 +3018,35 @@ class WrapperMachine:
         include_worktrees: bool = True,
     ):
         if self._claude_config_root(profile) is None:
+            # The SDK sorts before limiting. Keep older candidates available
+            # until metadata-only stubs have been excluded from the quota.
             if directory is None:
-                sessions = list_sessions(limit=limit)
+                sessions = list_sessions(limit=None)
             else:
                 sessions = list_sessions(
-                    limit=limit,
+                    limit=None,
                     directory=directory,
                     include_worktrees=include_worktrees,
                 )
-            return [claude_catalog.recover_session_cwd(
-                info, transcript_path(info.session_id)) if not info.cwd else info
-                for info in sessions]
+            result = []
+            for info in sessions:
+                if 0 < limit <= len(result):
+                    break
+                size = getattr(info, "file_size", None)
+                if info.cwd and (
+                        info.first_prompt or (
+                            isinstance(size, int)
+                            and size > claude_catalog.LITE_READ_BUF_SIZE
+                        )):
+                    # Proven prompt / large file: preserve the native fast path
+                    # instead of globbing every project bucket for every row.
+                    result.append(info)
+                    continue
+                path = transcript_path(info.session_id)
+                if claude_catalog.is_metadata_only(path):
+                    continue
+                result.append(claude_catalog.recover_session_cwd(info, path))
+            return result
         return claude_catalog.list_sessions(
             self._claude_catalog_root(profile),
             limit=limit,
@@ -8695,26 +8721,38 @@ class WrapperMachine:
                     raise ValueError(
                         "private btw profile metadata is invalid")
                 self._private_btw_profile_revision = profile_meta["revision"]
-            if len(raw) > self.PRIVATE_BTW_CAP:
+            if len(raw) > self.PRIVATE_BTW_CAP + self.PRIVATE_BTW_RETIRED_CAP:
                 raise ValueError("private btw state has an invalid shape")
             for sid, entry in raw.items():
                 if not isinstance(entry, dict):
                     raise ValueError("private btw state has an invalid entry")
                 cwd = entry.get("cwd")
                 created = entry.get("created_at", 0)
+                retired = entry.get("retired", False)
                 if (
                     isinstance(sid, str)
                     and re.fullmatch(
                         r"[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}",
                         sid,
                     )
-                    and isinstance(cwd, str) and "\x00" not in cwd
-                    and len(cwd.encode("utf-8", "surrogatepass")) <= 4096
                     and isinstance(created, (int, float))
+                    and not isinstance(created, bool) and math.isfinite(created)
+                    and isinstance(retired, bool)
+                    and (retired or (
+                        isinstance(cwd, str) and "\x00" not in cwd
+                        and len(cwd.encode("utf-8", "surrogatepass")) <= 4096
+                    ))
                 ):
-                    entries[sid] = {"cwd": cwd, "created_at": created}
+                    entries[sid] = (
+                        {"created_at": created, "retired": True} if retired else
+                        {"cwd": cwd, "created_at": created}
+                    )
                 else:
                     raise ValueError("private btw state has an invalid entry")
+            pending = sum(entry.get("retired") is not True for entry in entries.values())
+            if (pending > self.PRIVATE_BTW_CAP
+                    or len(entries) - pending > self.PRIVATE_BTW_RETIRED_CAP):
+                raise ValueError("private btw state has an invalid shape")
         except FileNotFoundError:
             pass
         except Exception as exc:
@@ -8793,23 +8831,48 @@ class WrapperMachine:
 
     def _remember_private_btw(self, session_id: str, cwd: str) -> None:
         updated = OrderedDict(self._private_btw_sessions)
+        if updated.get(session_id, {}).get("retired") is True:
+            raise RuntimeError("private btw identity has already been retired")
         updated[session_id] = {
             "cwd": cwd, "created_at": time.time(),
         }
         updated.move_to_end(session_id)
-        # Reaching this bound means cleanup is persistently broken. Fail closed by
-        # retaining the oldest tombstones and refusing to forget a private id.
-        if len(updated) > self.PRIVATE_BTW_CAP:
+        pending = sum(entry.get("retired") is not True for entry in updated.values())
+        # Never turn capacity pressure into a privacy leak by forgetting ids.
+        if (pending > self.PRIVATE_BTW_CAP
+                or (session_id not in self._private_btw_sessions
+                    and len(updated) - pending >= self.PRIVATE_BTW_RETIRED_CAP)):
             raise RuntimeError("private btw tombstone capacity exhausted")
         self._persist_private_btw_sessions(updated)
         self._private_btw_sessions = updated
+
+    def _retire_private_btw(self, session_id: str) -> None:
+        entry = self._private_btw_sessions.get(session_id)
+        if entry is None or entry.get("retired") is True:
+            return
+        updated = OrderedDict(self._private_btw_sessions)
+        updated[session_id] = {
+            "created_at": entry["created_at"], "retired": True,
+        }
+        retired = sum(entry.get("retired") is True for entry in updated.values())
+        try:
+            if retired > self.PRIVATE_BTW_RETIRED_CAP:
+                raise RuntimeError("private btw receipt capacity exhausted")
+            self._persist_private_btw_sessions(updated)
+        except RuntimeError as exc:
+            # Keep the pending guard on disk and in RAM. Compaction is optional;
+            # deleting the transcript is never permission to publish its id.
+            log.warning("private btw receipt compaction not persisted",
+                        error_type=type(exc).__name__)
+        else:
+            self._private_btw_sessions = updated
 
     async def _delete_private_btw(
         self,
         session_id: str,
         cwd: str,
         *,
-        forget: bool = True,
+        retire: bool = True,
         claude_profile_id: str | None = None,
     ) -> bool:
         try:
@@ -8840,35 +8903,25 @@ class WrapperMachine:
             log.warning("btw fork transcript delete failed", forked=session_id,
                         error=str(exc))
             return False
-        if forget:
-            updated = OrderedDict(self._private_btw_sessions)
-            updated.pop(wire_sid, None)
-            try:
-                self._persist_private_btw_sessions(updated)
-            except RuntimeError as exc:
-                # The transcript is gone, so retaining a stale in-memory/on-disk
-                # tombstone is safe. Never forget it only in RAM while disk still
-                # claims the private fork exists.
-                log.warning("private btw tombstone removal not persisted",
-                            error_type=type(exc).__name__)
-            else:
-                self._private_btw_sessions = updated
+        if retire:
+            self._retire_private_btw(wire_sid)
         log.info("btw fork transcript deleted", forked=wire_sid)
         return True
 
     async def _cleanup_private_btw_sessions(self) -> None:
         for session_id, entry in list(self._private_btw_sessions.items()):
-            await self._delete_private_btw(session_id, entry["cwd"])
+            if entry.get("retired") is not True:
+                await self._delete_private_btw(session_id, entry["cwd"])
 
     async def _delete_claude_btw_transcripts(
-        self, ctx: SessionContext, *, forget: bool,
+        self, ctx: SessionContext, *, retire: bool,
     ) -> None:
         if ctx.engine != "claude":
             return
         for sid in dict.fromkeys((ctx.btw_real_id, ctx.btw_reserved_id)):
             if sid:
                 await self._delete_private_btw(
-                    sid, ctx.cwd, forget=forget,
+                    sid, ctx.cwd, retire=retire,
                     claude_profile_id=ctx.claude_profile_id,
                 )
 
@@ -9014,6 +9067,15 @@ class WrapperMachine:
                 self._ctx_by_sid(bootstrap_wire_sid)
                 if bootstrap_wire_sid else None
             )
+            if ctx is None and bootstrap_sid is None:
+                # An untouched prewarm may have no persisted bootstrap route.
+                # Reuse the recovered default-account resident in this cwd
+                # instead of accumulating another native process each restart.
+                ctx = next((candidate for candidate in self.sessions.values()
+                            if candidate.engine == "claude"
+                            and candidate.space == "code"
+                            and candidate.claude_profile_id == self._claude_profile().id
+                            and candidate.cwd == os.path.realpath(self.cfg.cc_cwd)), None)
             if (
                 ctx is None
                 and len(self.sessions) < self.cfg.max_concurrent_sessions
@@ -9215,7 +9277,7 @@ class WrapperMachine:
                     await self._cleanup_codex_steer_attachments(c)
                 if c.btw:
                     await self._delete_claude_btw_transcripts(
-                        c, forget=disconnected)
+                        c, retire=disconnected)
             terminal_tasks = list(self._codex_terminal_persist_tasks)
             # Stop every producer first, then give the remaining small fsyncs a
             # chance to finish. Draining earlier could miss a terminal emitted
@@ -19471,6 +19533,9 @@ class WrapperMachine:
                 responses: list[object] = []
                 await self._publish_codex_model_effort(
                     ctx, force=True, published=responses)
+                speed = _codex_speed_event(getattr(ctx.sdk, "service_tier", None))
+                await self._emit(ctx, speed)
+                responses.append(speed)
                 return tuple(responses)
             applied_model = getattr(ctx.sdk, "model", None) or requested_model
             ctx.announced_model = applied_model
@@ -19897,25 +19962,27 @@ class WrapperMachine:
             )
             await self._emit(ctx, error)
             return error
-        if cmd.service_tier == "toggle":
-            on = not _codex_fast_on(
-                getattr(ctx.sdk, "service_tier", None))
-        else:
-            on = (cmd.service_tier == "fast")
+        control_error = await self._runtime_control_preflight(
+            ctx, action="切换速度")
+        if control_error is not None:
+            return control_error
+        tier = cmd.service_tier
+        if tier == "toggle":
+            tier = (None if _codex_fast_on(
+                getattr(ctx.sdk, "service_tier", None)) else "fast")
         try:
-            await ctx.sdk.set_service_tier("fast" if on else None)
-            applied_on = _codex_fast_on(
-                getattr(ctx.sdk, "service_tier", None))
-            event = Fast(on=applied_on)
+            await ctx.sdk.set_service_tier(tier)
+            event = _codex_speed_event(getattr(ctx.sdk, "service_tier", None))
             await self._emit(ctx, event)
             log.info("codex thread service tier set", sid=ctx.session_id,
-                     requested=on, applied=applied_on)
+                     requested=tier, applied=event.tier)
             return event
         except Exception as e:
             log.exception("set_service_tier failed", error=str(e))
             error = Error(
                 code=ERR_INTERNAL,
-                message="服务档位切换未完成，请重试。",
+                message=str(e) if isinstance(e, ValueError)
+                else "速度切换未完成，请重试。",
                 request_id=getattr(cmd, "cmd_id", None),
                 to=getattr(cmd, "client_id", None),
             )
@@ -20030,7 +20097,7 @@ class WrapperMachine:
             if tier is None or isinstance(tier, str):
                 if ctx.sdk.service_tier != tier:
                     ctx.sdk.service_tier = tier
-                    await self._emit(ctx, Fast(on=_codex_fast_on(tier)))
+                    await self._emit(ctx, _codex_speed_event(tier))
         mode = settings.get("collaboration_mode")
         if (mode in CODEX_COLLABORATION_MODES
                 and getattr(ctx.sdk, "collaboration_mode", "default") != mode):
@@ -20204,10 +20271,10 @@ class WrapperMachine:
         finally:
             await self._cleanup_codex_steer_attachments(ctx)
         # Codex forks are ephemeral (no rollout). Claude fork_session persists a
-        # transcript under btw_real_id; keep its tombstone on deletion failure so
-        # it stays hidden and cannot be cold-resumed.
+        # transcript under btw_real_id; keep an exact privacy receipt even after
+        # deletion so a late native flush cannot make it cold-resumable.
         await self._delete_claude_btw_transcripts(
-            ctx, forget=disconnected)
+            ctx, retire=disconnected)
         log.info("btw closed", btw_sid=sid)
         return close_event
 
@@ -20334,8 +20401,8 @@ class WrapperMachine:
                     await send(WebSearch(mode=web_search))
                 await send(CollaborationMode(
                     mode=getattr(ctx.sdk, "collaboration_mode", "default")))
-                await send(Fast(on=_codex_fast_on(
-                    getattr(ctx.sdk, "service_tier", None))))
+                await send(_codex_speed_event(
+                    getattr(ctx.sdk, "service_tier", None)))
         return None
 
     async def _handle_set_perm(self, cmd):
@@ -21728,10 +21795,10 @@ class WrapperMachine:
         await self._emit(ctx, GoalState(goal=goal))
 
     async def _on_codex_runtime_event(
-        self, ctx: SessionContext, event: Notice | RateLimitUpdate,
+        self, ctx: SessionContext, event: Notice | RateLimitUpdate | Fast,
     ) -> None:
         """Route sanitized app-server notices only after ctx has an identity."""
-        if not isinstance(event, (Notice, RateLimitUpdate)):
+        if not isinstance(event, (Notice, RateLimitUpdate, Fast)):
             return
         if not self._ctx_wire_sid(ctx):
             # An absent sid is a broadcast at the relay.  Initialization events
@@ -26129,6 +26196,7 @@ class WrapperMachine:
                             if (not isinstance(broker_sid, str) or not broker_sid
                                     or len(broker_sid) > 256
                                     or broker_sid in known
+                                    or broker_sid in private_btw_ids
                                     or not isinstance(broker_cwd, str)
                                     or not broker_cwd):
                                 continue
@@ -27503,7 +27571,7 @@ class WrapperMachine:
                 search_event = WebSearch(mode=web_search)
                 await self._emit(ctx, search_event)
                 cached_responses.append(search_event)
-            fast_event = Fast(on=_codex_fast_on(ctx.sdk.service_tier))
+            fast_event = _codex_speed_event(ctx.sdk.service_tier)
             await self._emit(ctx, fast_event)
             cached_responses.append(fast_event)
             collaboration_mode = getattr(
@@ -27598,10 +27666,10 @@ class WrapperMachine:
                 else:
                     deleted = True
                 if disconnected and deleted:
-                    # No live writer and no transcript remain. A stale tombstone may
-                    # still exist on disk if replace succeeded before fsync failed;
-                    # that is harmless and startup cleanup will remove it.
-                    self._private_btw_sessions.pop(wire_btw_sid, None)
+                    # A late native flush can recreate even a deleted file. Keep
+                    # the RAM guard and retry a compact durable receipt rather
+                    # than forgetting the identity on successful unlink.
+                    self._retire_private_btw(wire_btw_sid)
                 raise RuntimeError(
                     "private btw state persistence failed; fork terminated"
                 ) from persist_error
@@ -27959,7 +28027,7 @@ class WrapperMachine:
                 mode=collaboration_mode)
             await self._emit(ctx, collaboration_event)
             cached_responses.append(collaboration_event)
-            fast_event = Fast(on=_codex_fast_on(ctx.sdk.service_tier))
+            fast_event = _codex_speed_event(ctx.sdk.service_tier)
             await self._emit(ctx, fast_event)
             cached_responses.append(fast_event)
             # SessionFocus precedes this point, so the temp-keyed browser runtime
@@ -35528,6 +35596,17 @@ class WrapperMachine:
                     ERR_BUSY, "Claude broker 的工作目录已不存在，未连接该会话",
                     route="sid", sid=resume_id)
                 return None
+        elif resume_id and _service_recovering:
+            # A live service can expose a native UUID before the first prompt
+            # materializes its transcript. Reattach that exact worker using its
+            # listed cwd; the service still checks account/session/cwd identity.
+            if not (_service_worker_id and _service_socket and cwd
+                    and os.path.isdir(cwd)):
+                await reject(
+                    ERR_INVALID_CWD, "Claude 服务会话的工作目录不可访问，未恢复会话。",
+                    route="sid", sid=wire_resume_id)
+                return None
+            target_cwd = os.path.realpath(cwd)
         elif resume_id:
             try:
                 assert claude_profile is not None
@@ -35898,9 +35977,17 @@ class WrapperMachine:
             if space != "work" and web_search in CODEX_WEB_SEARCH_MODES:
                 sdk.web_search_override = web_search
                 sdk.web_search = web_search
-            if service_tier in {"default", "fast"}:
-                sdk.service_tier = (
-                    "fast" if service_tier == "fast" else None)
+            if service_tier is not None:
+                try:
+                    speed_catalog = (
+                        await codex_catalog(codex_home=self._codex_home(codex_profile))
+                        if normalize_service_tier(service_tier) != "default" else [])
+                    sdk.service_tier = resolve_service_tier(
+                        model or sdk.model, service_tier, speed_catalog)
+                except ValueError as exc:
+                    await reject(ERR_BAD_PROMPT, str(exc),
+                                 route="sid", sid=wire_resume_id)
+                    return None
             # Seed from the session's own bounded rollout tail, never config.toml.
             # CodexHandle.connect then adopts thread/resume's authoritative fields;
             # the rollout remains required for collaboration mode, which 0.144.1's
@@ -36491,8 +36578,7 @@ class WrapperMachine:
                 ctx.announced_collaboration_mode = collaboration_mode
                 await self._emit(ctx, CollaborationMode(
                     mode=collaboration_mode))
-                await self._emit(ctx, Fast(
-                    on=_codex_fast_on(ctx.sdk.service_tier)))
+                await self._emit(ctx, _codex_speed_event(ctx.sdk.service_tier))
             else:
                 await self._publish_claude_auto_compact(ctx, force=True)
         log.info("session spawned", resume=resume_id, cwd=target_cwd, key=key,
@@ -36527,8 +36613,14 @@ class WrapperMachine:
             if resident.btw and resident.engine != "codex"
             and not resident.btw_real_id and not resident.btw_reserved_id
         )
-        if (len(self._private_btw_sessions) + pending_private_forks
-                >= self.PRIVATE_BTW_CAP):
+        pending_private_ids = sum(
+            entry.get("retired") is not True
+            for entry in self._private_btw_sessions.values()
+        )
+        if (parent.engine == "claude" and (
+                pending_private_ids + pending_private_forks >= self.PRIVATE_BTW_CAP
+                or len(self._private_btw_sessions) - pending_private_ids
+                    >= self.PRIVATE_BTW_RETIRED_CAP)):
             raise _BtwSpawnFailure(
                 ERR_BUSY, "临时侧边会话已满，请稍后重试。")
         parent_id = parent.session_id
@@ -36836,7 +36928,7 @@ class WrapperMachine:
             except Exception:
                 log.warning("btw fork cancellation cleanup failed")
             await self._delete_claude_btw_transcripts(
-                ctx, forget=disconnected)
+                ctx, retire=disconnected)
             raise
         except Exception as e:
             # connect() can fail after starting a private app-server/SDK child,
@@ -36850,7 +36942,7 @@ class WrapperMachine:
             except Exception:
                 log.warning("btw fork failure cleanup failed")
             await self._delete_claude_btw_transcripts(
-                ctx, forget=disconnected)
+                ctx, retire=disconnected)
             log.exception("btw fork initialization failed", error=str(e))
             raise _BtwSpawnFailure(
                 ERR_CC_CRASH, "临时侧边会话暂时无法打开，请稍后重试。"
@@ -38518,8 +38610,7 @@ class WrapperMachine:
                     ctx.announced_collaboration_mode = collaboration_mode
                     await self._emit(ctx, CollaborationMode(
                         mode=collaboration_mode))
-                await self._emit(ctx, Fast(
-                    on=_codex_fast_on(ctx.sdk.service_tier)))
+                await self._emit(ctx, _codex_speed_event(ctx.sdk.service_tier))
             reader_task = asyncio.create_task(reader(queue, reader_exc))
             if codex_query_reconnected and _session_effort(ctx) is None:
                 self._schedule_codex_model_effort_publish(ctx)

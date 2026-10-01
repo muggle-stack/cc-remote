@@ -224,6 +224,7 @@ export interface SessionRuntime {
   webSearch: "cached" | "live" | null;
   collaborationMode: CollaborationModeName;
   fast: boolean | null;   // null until the wrapper reports the real service tier
+  serviceTier: string | null;
   replaying: boolean;
   btwReplayPending?: Turn[];
   // True only after this connection has received this sid's Snapshot or
@@ -475,6 +476,7 @@ export function createRuntime(): SessionRuntime {
     permissionProfile: null, permissionProfiles: null, webSearch: null,
     collaborationMode: "default",
     fast: null,
+    serviceTier: null,
     control: null, controlGeneration: null, hasRevisionedControl: false,
     takeoverPending: false, takeoverMessage: null,
     replaying: false, syncReady: false, truncated: false,
@@ -5466,7 +5468,10 @@ function reduceEvent(
         }
       });
     case "fast":
-      return patch(state, e.sid, (rt) => { rt.fast = e.on; });
+      return patch(state, e.sid, (rt) => {
+        rt.fast = e.on;
+        rt.serviceTier = e.tier ?? (e.on ? "priority" : "default");
+      });
     case "collaboration_mode":
       return patch(state, e.sid, (rt) => {
         rt.collaborationMode = e.mode;

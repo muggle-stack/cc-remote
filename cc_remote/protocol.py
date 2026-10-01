@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 72
+PROTOCOL_VERSION = 73
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -608,7 +608,8 @@ class SetServiceTier(_Command):
     app-server's persisted per-thread service tier; "" / "default" clears the
     override. 0.144.1 reports the applied Fast tier as ``priority``."""
     type: Literal["set_service_tier"] = "set_service_tier"
-    service_tier: Literal["", "default", "fast", "toggle"]
+    # Native model/list is the allowlist, scoped to the account and model.
+    service_tier: str = Field(max_length=64, pattern=r"^(?:[a-z][a-z0-9_-]*)?$")
 
 
 class SetCollaborationMode(_Command):
@@ -802,6 +803,7 @@ class Fast(_Base):
     the fast tier or standard — not just that it was 'toggled'."""
     type: Literal["fast"] = "fast"
     on: bool
+    tier: Optional[str] = Field(default=None, max_length=64)
 
 
 class CollaborationMode(_Base):
@@ -1350,7 +1352,9 @@ class NewSession(_Command):
     ] = None  # Codex only; persisted before the first turn
     permission_profile: Optional[PermissionProfileId] = None  # Codex only
     web_search: Optional[WebSearchMode] = None  # Codex Code only
-    service_tier: Optional[Literal["default", "fast"]] = None  # Codex only
+    service_tier: Optional[str] = Field(
+        default=None, min_length=1, max_length=64,
+        pattern=r"^[a-z][a-z0-9_-]*$")  # Codex only, native catalog validated
     prompt: Optional[str] = Field(default=None, max_length=2 * 1024 * 1024)
     msg_id: Optional[WireId] = None
     images: Optional[list[QueryImage]] = Field(default=None, max_length=MAX_ATTACHMENT_COUNT)
@@ -1358,6 +1362,8 @@ class NewSession(_Command):
 
     @model_validator(mode="after")
     def initial_query_requires_message_id(self):
+        if self.service_tier == "toggle":
+            raise ValueError("a new session requires an explicit service tier")
         if _attachment_count(self.images, self.files) > MAX_ATTACHMENT_COUNT:
             raise ValueError(
                 f"new_session attachments exceed {MAX_ATTACHMENT_COUNT} items")
