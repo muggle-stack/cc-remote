@@ -37,6 +37,19 @@ migration, remaining in-process `/btw` turns, and deferred queues separately;
 wait for them to drain instead of interrupting work. Do not restart or replace
 an active SDK service to satisfy a version/readiness check.
 
+## Keep only one rollback generation
+
+Apply [deployment backup retention](../../../deploy/README.md#deployment-backup-retention)
+on every in-scope host/install. Before creating another deployment backup, remove
+confirmed older, unreferenced backup generations, keeping the latest complete
+rollback set. After coordinated activation passes acceptance, replace that set
+with the version just superseded and its matching state/configuration snapshot.
+The active installation is not a backup. Do not accumulate dated copies, duplicate
+archives or Trash entries between deployments. Preserve active dependencies and
+unresolved transaction recovery files; report any deferred cleanup and recheck it
+on the next deployment. Include retained paths and actual space reclaimed in the
+handoff. This is an agent workflow requirement, not automatic installer pruning.
+
 ## Codex CLI sharing is an acceptance check
 
 For every enabled Codex **Code** account, follow

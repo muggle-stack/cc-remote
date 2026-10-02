@@ -24,6 +24,8 @@ Before changing a live service:
 1. Inspect the source worktree, target installation, current release, service
    manager, and health. Preserve unrelated changes; do not normalize a dirty
    worktree or silently replace a custom installation layout.
+   Apply [backup retention](#deployment-backup-retention) before creating another
+   deployment backup or staging copy.
 2. Select the matching supported path. Prefer a tested source snapshot for
    current features using the [source deployment guide](../docs/installation_en.md#source-install).
    Use `install.sh` when the operator selects a published release that includes
@@ -76,8 +78,51 @@ After these checks, offer the [optional Codex App attachment](#optional-codex-ap
 on eligible desktops. Its consent/availability is reported separately and never
 turns a healthy core deployment into a failure.
 On failure, use the installer-owned rollback or the retained previous
-release and matching state snapshot; do not delete old releases during the
-deployment.
+release and matching state snapshot. Never prune the active transaction's
+rollback set during activation or recovery; remove older unreferenced generations
+beforehand and finalize retention after coordinated acceptance as specified below.
+
+### Deployment backup retention
+
+Agent-led deployments must leave **the active installation plus at most one
+complete previous rollback generation per installation on each in-scope host**.
+A generation includes the matching release code/runtime, configuration copies
+and private state snapshot needed to restore it; these are one recovery set,
+not separate allowances for multiple historical copies. An intact immutable
+release can serve as the code backup without another archive of the same tree.
+
+1. Before creating the next backup or staging copy, identify the active release,
+   the newest complete known-good rollback set, and any unresolved deployment
+   transaction. Remove only confirmed older, superseded deployment backups and
+   unused duplicate uploads/archives. Determine generations from release and
+   transaction records, not filename age alone; check resolved paths before
+   deletion and keep cleanup inside the verified installation/backup locations.
+2. Create and validate the new pre-upgrade snapshot using the normal transaction
+   procedure. Keep the existing valid rollback set until coordinated acceptance
+   succeeds. Temporary coexistence during this transaction must not become
+   permanent retention; never delete the sole usable backup to make room for
+   an unverified replacement.
+3. After all protocol tiers pass acceptance and the transaction is committed,
+   retain only the version just superseded and its matching recovery files.
+   Remove the older rollback generation and completed, unneeded staging/upload
+   copies. On failure or unknown outcome, preserve the exact transaction's
+   recovery set and settle it before further cleanup or deployment attempts.
+
+Do not delete native transcripts, credentials, current private state, project
+files or unrelated user backups under this policy. A release still referenced
+by a running service (including the independent Claude service), a shared venv,
+an active job or the retained rollback set is a live dependency, not an unused
+backup. If these references temporarily prevent the retention limit, retain the
+referenced files, report the exact reason and recheck on the next deployment;
+do not stop active work to meet the limit.
+
+Report retained rollback paths, deleted generations, measured space reclaimed
+and any deferred paths. Moving old copies into another backup directory or Trash
+does not reclaim disk space or satisfy this policy. This is an agent-operated
+cleanup step: the existing installers and `cc-remote update` do not automatically
+prune releases or backups.
+
+### Deployment entrypoints
 
 - `install.sh` — versioned GitHub Release bootstrap. It requires an explicit
   `relay` or `wrapper` role, detects OS/CPU, downloads that one role archive,
