@@ -2,6 +2,14 @@
 
 [中文](CHANGELOG_zh.md)
 
+## Unreleased
+
+- Display native Codex cross-session messages and open their source conversations
+  in a scoped read-only history view. Wire protocol v74 requires a coordinated
+  Relay, Web, and Wrapper upgrade.
+- Keep at most one complete previous deployment rollback generation, preserving
+  active dependencies and unresolved transaction recovery files.
+
 ## v4.0.7
 
 Add model-specific Codex speed selection and repair Claude recovery and private
