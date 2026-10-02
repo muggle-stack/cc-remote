@@ -16,6 +16,10 @@ from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable
 
+from cc_remote.wrapper.codex_delegation import (
+    normalize_codex_delegation_item, parse_codex_delegation,
+)
+
 from cc_remote.protocol import TurnEnd, TurnResult, UserMsg
 from cc_remote.wrapper.claude_compaction import compact_completion_events
 from cc_remote.wrapper.codex_history_prefetch import CodexHistoryPrefetch
@@ -224,6 +228,7 @@ def _validated_turn(
                     "invalid Codex user content")
 
     normalized = dict(value)
+    normalized["items"] = [normalize_codex_delegation_item(item) for item in items]
     normalized["startedAt"] = _optional_nonnegative_int(
         value.get("startedAt"), "startedAt")
     normalized["completedAt"] = _optional_nonnegative_int(
@@ -265,11 +270,14 @@ def _user_message(item: dict[str, Any], *, ts: float | None) -> UserMsg:
                     "invalid Codex image data")
             images.append({"media_type": media_type, "data": data})
 
+    prompt = "".join(prompt_parts)
+    delegation = parse_codex_delegation(prompt)
     kwargs: dict[str, Any] = {
+        "source_thread_id": delegation.source_thread_id if delegation else item.get("_ccRemoteSourceThreadId"),
         "msg_id": _wire_id(item.get("id"), "user"),
         "client_msg_id": _optional_wire_id(
             item.get("clientId"), "client-message"),
-        "prompt": "".join(prompt_parts),
+        "prompt": delegation.prompt if delegation else prompt,
         "images": images or None,
     }
     if ts is not None:
@@ -1017,6 +1025,7 @@ class CodexOfficialHistory:
                                 "type": "text",
                                 "text": recovered.prompt,
                             }],
+                            "_ccRemoteSourceThreadId": recovered.source_thread_id,
                             "_ccRemoteImages": [
                                 dict(image) for image in recovered.images or []
                             ],

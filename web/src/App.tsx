@@ -1,3 +1,5 @@
+import type { ServerEvent } from "./protocol";
+import { resolveRelatedSession, relatedSessionTitle } from "./session-messages";
 import {
   lazy,
   Suspense,
@@ -32,6 +34,8 @@ import { TurnFilePageRequests, type LoadTurnFilePage } from "./turn-file-pages";
 import { Icon } from "./icons";
 import { ChatView } from "./components/ChatView";
 import { Composer } from "./components/Composer";
+const SessionMessagePreview = lazy(() => import("./components/SessionMessagePreview").then((m) => ({ default: m.SessionMessagePreview })));
+
 const BackgroundTaskControl = lazy(() => import("./components/BackgroundTaskControl"));
 import type { QueuedQueryEditor } from "./components/QueuedQueryDialog";
 import { ReconnectBanner } from "./components/ReconnectBanner";
@@ -477,6 +481,10 @@ export default function App() {
   const stateRef = useRef(state);
   stateRef.current = state;
   const wsRef = useRef<RelayWs | null>(null);
+  const [sessionMessagePreview, setSessionMessagePreview] = useState<{
+    scope: string; originSid: string; session: SessionInfo; returnLabel: string;
+  } | null>(null);
+  const sessionMessagePreviewEvents = useRef<((event: ServerEvent) => boolean) | null>(null);
   const goalApiRef = useRef<GoalApi | null>(null);
   const getGoalApi = useCallback(async () => {
     const transport = wsRef.current;
@@ -2208,6 +2216,7 @@ export default function App() {
       const ws = new RelayWs({
         onEvent: (msg, ownership) => {
           if (!acceptsLifecycle()) return;
+          if (sessionMessagePreviewEvents.current?.(msg)) return;
           if (turnFileRequestsRef.current.accept(msg)) return;
           if (goalApiRef.current?.accept(msg)) return;
           const settlesContextRequest = !!(
@@ -5784,8 +5793,29 @@ export default function App() {
             onSend={sendFirstMessage} /></Suspense>
         ) : (
           <>
+            {sessionMessagePreview?.scope === activeScopeKey
+              && sessionMessagePreview.originSid === focusedSid
+              && state.sessions.some((s) => s.session_id === sessionMessagePreview.session.session_id)
+              && <Suspense fallback={null}><SessionMessagePreview key={`${activeScopeKey}:${sessionMessagePreview.session.session_id}`}
+                session={sessionMessagePreview.session} returnLabel={sessionMessagePreview.returnLabel}
+                returnSid={sessionMessagePreview.originSid}
+                onClose={() => setSessionMessagePreview(null)}
+                api={{ receive: sessionMessagePreviewEvents,
+                  history: (sid, before, cwd) => wsRef.current?.sendGetHistory(sid, before, 12, cwd) ?? false,
+                  detail: (sid, turnId, revision, before) => wsRef.current?.sendGetTurnDetail(sid, turnId, revision, before) ?? false,
+                }} /></Suspense>}
             <ChatView key={`${activeScopeKey}\u0000${focusedSid ?? ""}`}
               sid={focusedSid} turns={historyView.turns}
+              sessionLink={(nativeId) => {
+                const session = resolveRelatedSession(nativeId, focusedSid, state.sessions);
+                return { title: relatedSessionTitle(session, nativeId), available: !!session };
+              }}
+              onOpenSession={focusedEngine === "codex" && space === "code" ? (nativeId) => {
+                const session = resolveRelatedSession(nativeId, focusedSid, state.sessions);
+                if (!session || !focusedSid) return;
+                setSessionMessagePreview({ scope: activeScopeKey, originSid: focusedSid,
+                  session, returnLabel: relatedSessionTitle(focusedSession, focusedSid) });
+              } : undefined}
               loading={!!rt.loading || historyView.recovering}
               surface={space}
               engine={focusedEngine} forkingPointId={forkingPointId}

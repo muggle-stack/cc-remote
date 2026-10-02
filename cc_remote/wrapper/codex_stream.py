@@ -21,6 +21,10 @@ from typing import Callable
 
 from pydantic import ValidationError
 
+from cc_remote.wrapper.codex_delegation import (
+    normalize_codex_delegation_item, parse_codex_delegation,
+)
+
 from cc_remote.attachments import (
     ALLOWED_IMAGE_TYPES,
     MAX_IMAGE_DIMENSION,
@@ -136,6 +140,7 @@ class CodexLiveUserMessage:
     turn_id: str
     prompt: str
     client_id: str | None = None
+    source_thread_id: str | None = None
 
 
 def codex_live_user_message(message: object) -> CodexLiveUserMessage | None:
@@ -146,6 +151,8 @@ def codex_live_user_message(message: object) -> CodexLiveUserMessage | None:
         return None
     params = message.get("params")
     item = params.get("item") if isinstance(params, dict) else None
+    if isinstance(item, dict):
+        item = normalize_codex_delegation_item(item)
     if not isinstance(item, dict) or item.get("type") != "userMessage":
         return None
     message_id = item.get("id")
@@ -163,7 +170,9 @@ def codex_live_user_message(message: object) -> CodexLiveUserMessage | None:
     client_id = item.get("clientId")
     if not isinstance(client_id, str) or not _SAFE_WIRE_ID.fullmatch(client_id):
         client_id = None
+    delegation = parse_codex_delegation(codex_user_item_text(item))
     return CodexLiveUserMessage(
+        source_thread_id=delegation.source_thread_id if delegation else None,
         message_id=message_id,
         turn_id=turn_id,
         prompt=prompt,
@@ -675,6 +684,8 @@ def _history_user_cursors(
             or (
                 b'"user_message"' not in line
                 and b'"UserMessage"' not in line
+                and b'"FunctionCallOutput"' not in line
+                and b'"functionCallOutput"' not in line
             )):
         return None
     try:
@@ -1631,7 +1642,7 @@ def codex_history_process_append(
         if (any(marker in line for marker in (
             b'"task_started"', b'"user_message"', b'"session_meta"',
             b'"thread_goal_updated"', b'"thread_goal_cleared"',
-        )) or re.search(rb'"usermessage"|"role"\s*:\s*"user"', line, re.I)):
+        )) or re.search(rb'"usermessage"|"functioncalloutput"|"role"\s*:\s*"user"', line, re.I)):
             return None
         if _history_generated_image_record(line):
             process.observe(None)
@@ -2029,6 +2040,7 @@ def codex_history_boundary_user(
                 msg_id=message_id,
                 client_msg_id=client_id,
                 prompt=user.prompt,
+                source_thread_id=user.source_thread_id,
                 ts=0,
             )
             if pending_images:
@@ -4810,6 +4822,7 @@ def codex_translate_history(
                     um = UserMsg(
                         msg_id=uid,
                         client_msg_id=user_client_id,
+                        source_thread_id=user_record.source_thread_id,
                         prompt=msg,
                     )
                     if pending_images:

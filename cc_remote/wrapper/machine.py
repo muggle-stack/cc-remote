@@ -304,6 +304,7 @@ from cc_remote.wrapper.codex_process_clocks import (
     CodexProcessClockStoreError,
 )
 from cc_remote.wrapper.codex_permissions import codex_permission_profiles
+from cc_remote.wrapper.codex_delegation import is_codex_delegation_output
 from cc_remote.wrapper.codex_stream import (
     CodexHistoryImageView, CodexHistoryNativeWitness,
     CodexHistoryProcessPageWitness, CodexLiveUserMessage,
@@ -22402,6 +22403,7 @@ class WrapperMachine:
                     msg_id=user.message_id,
                     client_msg_id=user.client_id,
                     prompt=user.prompt,
+                    source_thread_id=user.source_thread_id,
                 ))
                 await self._emit(ctx, TurnBinding(
                     msg_id=user.message_id,
@@ -22433,6 +22435,7 @@ class WrapperMachine:
                     msg_id=user.message_id,
                     client_msg_id=user.client_id,
                     prompt=user.prompt,
+                    source_thread_id=user.source_thread_id,
                 ))
                 await self._emit(ctx, TurnBinding(
                     msg_id=user.client_id,
@@ -22454,6 +22457,7 @@ class WrapperMachine:
                 msg_id=user.message_id,
                 turn_id=current_turn_id,
                 prompt=user.prompt,
+                source_thread_id=user.source_thread_id,
             ))
             return True
 
@@ -22462,7 +22466,8 @@ class WrapperMachine:
                 return False
             params = raw.get("params")
             item = params.get("item") if isinstance(params, dict) else None
-            return isinstance(item, dict) and item.get("type") == "userMessage"
+            return (isinstance(item, dict) and item.get("type") == "userMessage"
+                    or is_codex_delegation_output(item))
 
         def raw_proves_automatic_output(raw: dict) -> bool:
             method = raw.get("method")
@@ -37925,7 +37930,8 @@ class WrapperMachine:
             initial = bool(codex_initial_msg_id and codex_initial_msg_id in {
                 user.message_id, user.client_id,
             })
-            if not initial and not user.client_id and not codex_initial_user_seen:
+            if (not initial and not user.client_id and not user.source_thread_id
+                    and not codex_initial_user_seen):
                 # A missed initial echo cannot turn an unlabelled first item
                 # into a second input. Never guess from equal prompt text.
                 return
@@ -37951,6 +37957,7 @@ class WrapperMachine:
                 msg_id=msg_id,
                 turn_id=user.turn_id,
                 prompt=user.prompt,
+                source_thread_id=user.source_thread_id,
             ))
             if user.client_id is not None:
                 # Reconcile the canonical history id only after the boundary;
@@ -37959,6 +37966,7 @@ class WrapperMachine:
                     msg_id=user.message_id,
                     client_msg_id=user.client_id,
                     prompt=user.prompt,
+                    source_thread_id=user.source_thread_id,
                 ))
 
         async def emit_codex_event(event) -> None:

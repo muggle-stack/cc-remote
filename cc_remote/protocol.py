@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 73
+PROTOCOL_VERSION = 74
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -889,6 +889,7 @@ class UserMsg(_Base):
     # the later live echo.
     client_msg_id: Optional[WireId] = None
     timed_task: Optional[TimedMessage] = None
+    source_thread_id: Optional[WireId] = None
     prompt: str
     images: Optional[list[QueryImage]] = Field(default=None, max_length=MAX_ATTACHMENT_COUNT)
     # Metadata only: file bodies stay out of replay/cache, while names remain
@@ -901,6 +902,7 @@ class TurnSteered(_Base):
     type: Literal["turn_steered"] = "turn_steered"
     msg_id: WireId
     turn_id: WireId
+    source_thread_id: Optional[WireId] = None
     prompt: str
     images: Optional[list[QueryImage]] = Field(
         default=None, max_length=MAX_ATTACHMENT_COUNT)
@@ -2474,12 +2476,21 @@ class GetHistory(_Command):
     detail: Literal["summary", "full"] = "full"
 
 
+class SessionMessageReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    itemId: WireId
+    threadId: WireId
+    status: Literal["sending", "sent", "failed"]
+
+
 class ConversationTurn(BaseModel):
     """Canonical lightweight turn rendered without replaying raw events."""
     model_config = ConfigDict(extra="forbid")
     id: WireId
     clientMsgId: Optional[WireId] = None
     timedTask: Optional[TimedMessage] = None
+    sourceThreadId: Optional[WireId] = None
+    sessionMessages: Optional[list[SessionMessageReceipt]] = Field(default=None, max_length=16)
     prompt: str = Field(default="", max_length=128 * 1024)
     blocks: list[dict[str, Any]] = Field(default_factory=list, max_length=32)
     done: bool = False

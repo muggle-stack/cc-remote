@@ -6032,6 +6032,10 @@ function reduceEvent(
         if (existing) {
           if (!existing.prompt && e.prompt) existing.prompt = e.prompt;
           if (e.timed_task) existing.timedTask = e.timed_task;
+          if (e.source_thread_id) {
+            existing.sourceThreadId = e.source_thread_id;
+            existing.prompt = e.prompt;
+          }
           if (!existing.images && imgs) existing.images = imgs;
           if (fileMeta) existing.files = fileMeta;
           else if (existing.files) existing.files = existing.files.map(
@@ -6046,6 +6050,7 @@ function reduceEvent(
             id: e.msg_id,
             clientMsgId: e.client_msg_id ?? undefined,
             timedTask: e.timed_task ?? undefined,
+            sourceThreadId: e.source_thread_id ?? undefined,
             prompt: e.prompt,
             images: imgs,
             files: fileMeta,
@@ -6113,6 +6118,10 @@ function reduceEvent(
           // Reliable-command replay can deliver the correlated narrative frame
           // again after reconnect. Other duplicates only refresh metadata.
           existing.prompt ||= e.prompt;
+          if (e.source_thread_id) {
+            existing.sourceThreadId = e.source_thread_id;
+            existing.prompt = e.prompt;
+          }
           existing.images ??= imgs;
           if (fileMeta) existing.files = fileMeta;
           existing.ts ??= stamp;
@@ -6148,6 +6157,7 @@ function reduceEvent(
           id: e.msg_id,
           clientMsgId: e.msg_id,
           liveTaskId: e.turn_id,
+          sourceThreadId: e.source_thread_id ?? undefined,
           prompt: e.prompt,
           images: imgs,
           files: fileMeta,

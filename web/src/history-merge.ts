@@ -1065,6 +1065,8 @@ function mergeTurn(
     id: live.id,
     clientMsgId: history.clientMsgId ?? live.clientMsgId,
     timedTask: history.timedTask ?? live.timedTask,
+    sourceThreadId: history.sourceThreadId ?? live.sourceThreadId,
+    sessionMessages: history.sessionMessages ?? live.sessionMessages,
     historyTurnId,
     forkPointId: history.forkPointId ?? live.forkPointId,
     checkpointId: history.checkpointId ?? live.checkpointId,

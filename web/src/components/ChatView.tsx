@@ -88,6 +88,7 @@ import { mergeDetailWithLiveTail } from "../history-merge";
 import { presentAsyncQuestionReplies } from "../async-question-presentation";
 import type { QueryAcceptanceResult } from "../outbox";
 
+const SessionMessageLinks = lazy(() => import("./SessionMessageLinks"));
 const TurnUsageIndicator = lazy(() => import("./TurnUsageIndicator").then(m => ({ default: m.TurnUsageIndicator })));
 const AsyncQuestionCard = lazy(() => import("./AsyncQuestionCard"));
 const AsyncQuestionHost = lazy(() => import("./AsyncQuestionDialog"));
@@ -326,9 +327,12 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
   onTextSelectionGuardChange,
   externalPlanProgress,
   onOpenAgent,
+  sessionLink, onOpenSession,
   activeTurnId = null,
   ambiguousActiveTurnIds = [],
   surface = "code" }: {
+  sessionLink?: (nativeId: string) => { title: string; available: boolean };
+  onOpenSession?: (nativeId: string) => void;
   turnUsage?: TurnUsageReadings;
   sid: string | null;
   turns: Turn[];
@@ -2928,6 +2932,10 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
             {(t.prompt || (t.images && t.images.length) || (t.imageRefs && t.imageRefs.length) || (t.files && t.files.length)) && (
               <div className="ubub-wrap">
                 {t.prompt && <div className="ubub">
+                  {engine === "codex" && t.sourceThreadId && <Suspense fallback={null}>
+                    <SessionMessageLinks turn={t} source resolve={sessionLink}
+                      onOpen={onOpenSession ? (id) => { pauseOutputFollow(); onOpenSession(id); } : undefined} />
+                  </Suspense>}
                   {t.timedTask && <TimedMessageTag task={t.timedTask} />}
                   {supplemental.replies.has(t.id)
                   ? <div className="supplemental-answer">
@@ -3002,6 +3010,11 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
               </div>
             )}
             {showProcessTimeline && renderProcess()}
+            {engine === "codex" && (!!t.sessionMessages?.length || t.blocks.some((b) =>
+              b.kind === "tool" && b.tool.endsWith("send_message_to_thread"))) && <Suspense fallback={null}>
+              <SessionMessageLinks turn={t} resolve={sessionLink}
+                onOpen={onOpenSession ? (id) => { pauseOutputFollow(); onOpenSession(id); } : undefined} />
+            </Suspense>}
             {modelNotices.map((notice) => <div className="turn-model-notice" key={notice.item_id} role="note">
               <Icon name="notify" size={15} />
               <span>{notice.summary}</span>

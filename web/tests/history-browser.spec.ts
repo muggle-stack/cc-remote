@@ -10993,3 +10993,37 @@ test("live token usage updates immediately and supports explicit keyboard activa
   await page.locator(".composer").dispatchEvent("pointerdown");
   await expect(card).toBeHidden();
 });
+
+
+test("session message source preview returns to the same reading position", async ({ page }, testInfo) => {
+  await page.goto("/tests/history-browser.html?session-messages=1");
+  const thread = page.locator(".thread").first();
+  await expect(page.getByRole("button", { name: /来自会话/ }).last()).toBeVisible();
+  const source = page.getByRole("button", { name: /来自会话/ }).last();
+  await source.scrollIntoViewIfNeeded();
+  const before = await thread.evaluate((node) => node.scrollTop);
+  await source.click();
+  const preview = page.getByRole("dialog", { name: "关联会话历史" });
+  await expect(preview).toBeVisible();
+  await expect(preview.getByText("让代码审查会话帮忙检查这次改动。")).toBeVisible();
+  await expect(preview.getByRole("button", { name: /已发送给/ })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("session-source.png") });
+  await preview.getByRole("button", { name: "更早记录", exact: true }).click();
+  await expect(preview.getByText("更早的开发记录")).toBeVisible();
+  await preview.getByRole("button", { name: "较新记录", exact: true }).click();
+  await expect(preview.getByText("让代码审查会话帮忙检查这次改动。")).toBeVisible();
+  await preview.getByRole("button", { name: "返回代码审查" }).click();
+  await expect(preview).toHaveCount(0);
+  expect(Math.abs(await thread.evaluate((node) => node.scrollTop) - before)).toBeLessThan(3);
+  await source.click();
+  await preview.getByRole("button", { name: /已发送给 代码审查/ }).click();
+  await expect(preview).toHaveCount(0);
+  await source.click();
+  await expect(preview).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(preview).toHaveCount(0);
+  expect(Math.abs(await thread.evaluate((node) => node.scrollTop) - before)).toBeLessThan(3);
+  // StrictMode reattaches effects on each open; every command remains read-only.
+  expect(JSON.parse(await page.getByTestId("session-read-commands").textContent() ?? "[]"))
+    .toEqual(Array(8).fill("get_history"));
+});

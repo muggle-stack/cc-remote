@@ -11,6 +11,7 @@ import type {
   ToolCategory,
   TurnChangeSummary,
   TimedMessage,
+  SessionMessageReceipt,
 } from "../protocol";
 
 /** Browser-only fallback used when an authoritative idle History snapshot
@@ -130,6 +131,8 @@ export interface TurnDetailProjection {
 export interface Turn {
   id: string;
   timedTask?: TimedMessage | null;
+  sourceThreadId?: string | null;
+  sessionMessages?: SessionMessageReceipt[] | null;
   fileChanges?: TurnChangeSummary | null;
   fileChangesTurnId?: string;
   /** Codex turn/steer's browser id persisted beside a distinct history cursor. */

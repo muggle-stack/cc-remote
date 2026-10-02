@@ -1,0 +1,37 @@
+.session-message-source, .session-message-sent {
+  display: flex; align-items: center; gap: 7px;
+  border: 0; background: transparent; color: var(--accent);
+  font: inherit; font-size: 12px; text-align: left;
+  padding: 0; cursor: pointer; max-width: 100%;
+}
+.session-message-source { margin-bottom: 8px; }
+.session-message-source > span:first-of-type, .session-message-sent > span:first-of-type {
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.session-message-source:disabled, .session-message-sent:disabled { cursor: default; opacity: .72; }
+.session-message-sent { margin: 10px 0; }
+.session-message-source:not(:disabled):hover, .session-message-sent:not(:disabled):hover { filter: brightness(1.15); }
+.session-message-preview {
+  width: min(1100px, 96vw); height: min(900px, 94dvh); max-width: 100vw; max-height: 100dvh;
+  padding: 0; border: 1px solid var(--border); border-radius: 16px;
+  background: var(--bg); color: var(--text);
+}
+.session-message-preview[open] { display: flex; flex-direction: column; }
+.session-message-preview::backdrop { background: rgb(0 0 0 / .55); }
+.session-message-preview-header { display: flex; align-items: center; gap: 20px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.session-message-preview-header strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-message-back { display: flex; align-items: center; gap: 5px; max-width: 50%; flex-shrink: 0; }
+.session-message-back span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-message-preview-header button, .session-message-preview-pages button, .session-message-error button {
+  color: inherit; background: transparent; border: 0; cursor: pointer; font: inherit;
+}
+.session-message-preview button:disabled { opacity: .45; cursor: default; }
+.session-message-preview .thread-shell { flex: 1; min-height: 0; }
+.session-message-preview-pages { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; border-top: 1px solid var(--border); font-size: 13px; }
+.session-message-preview-pages span { opacity: .55; }
+.session-message-error { padding: 12px 20px; display: flex; gap: 16px; }
+@media (max-width: 700px) {
+  .session-message-preview { width: 100vw; height: 100dvh; border: 0; border-radius: 0; }
+  .session-message-preview-header { padding-top: max(16px, env(safe-area-inset-top)); }
+  .session-message-preview-pages { padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+}

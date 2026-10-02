@@ -1,3 +1,4 @@
+import "./session-messages.test.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -1387,8 +1388,8 @@ assert.match(historyAppSource,
 assert.match(historyAppSource,
   /requestHistoryTurnDetail = useCallback\([\s\S]{0,120}autoLoad = false/,
   "every detail entry point must default to one bounded page");
-assert.match(cacheSource, /const CACHE_VER = 27/,
-  "native recovery repair must invalidate browser summaries split by internal prompts");
+assert.match(cacheSource, /const CACHE_VER = 28/,
+  "native message provenance must invalidate browser summaries missing source metadata");
 assert.match(cacheSource, /objectStore\(STORE\)\.delete\(sessionId\)/);
 assert.match(cacheSource, /job\.epoch !== sessionEpoch\(job\.sid\)/,
   "a debounced pre-marker write must not recreate the deleted cache row");

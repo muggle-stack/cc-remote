@@ -22,7 +22,8 @@ const DEFAULT_HISTORY_PAGE_CACHE_BYTES = 64 * 1024 * 1024;
 // v8 preserves native model-fallback notices and immutable turn-change metadata.
 // v9 discards old official-summary pages which omitted their file lists.
 // v10 removes internal Claude recovery prompts cached as human page boundaries.
-const RECORD_VERSION = 10;
+// v11 preserves native Codex cross-thread provenance and sender receipts.
+const RECORD_VERSION = 11;
 
 export interface HistoryPageCacheSessionScope {
   machineId: string;
