@@ -164,6 +164,8 @@ test("mobile sidebar handles keyboard height, rotation, reduced motion and deskt
   await page.getByRole("button", { name: "收起", exact: true }).click();
   await settled(page, false);
   expect(await page.locator(".pane").evaluate(node => getComputedStyle(node).transform)).toBe("none");
+  // A resting filter creates a containing block and breaks fixed popovers.
+  await expect.poll(() => page.locator(".pane").evaluate(node => getComputedStyle(node).filter)).toBe("none");
   await page.emulateMedia({ reducedMotion: "reduce" });
   await touch(page, "touchstart", 50, 280, 2000);
   await touch(page, "touchmove", 300, 280, 2200);
@@ -172,6 +174,7 @@ test("mobile sidebar handles keyboard height, rotation, reduced motion and deskt
   await page.setViewportSize({ width: 1200, height: 800 });
   await expect.poll(async () => (await bounds(page)).pane.x).toBe(352);
   expect((await bounds(page)).pane.width).toBe(848);
+  expect(await page.locator(".pane").evaluate(node => getComputedStyle(node).filter)).toBe("none");
   await expect.poll(() => page.locator(".pane").evaluate(node => (node as HTMLElement).inert)).toBe(false);
   await touch(page, "touchstart", 500, 280, 3000);
   expect(await touch(page, "touchmove", 700, 280, 3200)).toBe(false);

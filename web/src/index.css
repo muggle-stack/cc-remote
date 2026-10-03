@@ -957,10 +957,9 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .ptab.on{ color:var(--accent-text,var(--accent)); background:var(--accent-weak); }
 .ptab:not(.on):hover{ color:var(--text); }
 
-/* desktop: an open right panel PUSHES the chat left (split), not covers it.
-   mobile keeps the full-width bottom-sheet overlay (panels' max-width media
-   query), so this only applies >=981px. */
-.pane{ transition:padding-right .26s var(--ease); }
+/* Reserve the final right-panel width in one layout. Animating this padding
+   repeatedly wraps paragraphs and remeasures virtual history while opening.
+   The floating panel keeps its own slide-in animation; mobile stays overlay. */
 @media (min-width:981px){
   .shell.panel-open .pane{ padding-right:calc(var(--panel-w) + 28px); }
 }
@@ -1880,9 +1879,13 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
   /* Translate the full-width chat without reflowing history or its composer.
      Closed/resting panes have no transform, preserving fixed popover geometry. */
   .shell > .pane{ width:100%; margin-left:0; transform:none;
-    transition:transform .3s var(--ease); }
+    border-radius:calc(var(--sidebar-progress) * 26px) 0 0 calc(var(--sidebar-progress) * 26px);
+    transition:transform .3s var(--ease),border-radius .3s var(--ease),filter .3s var(--ease); }
   .shell:is(.sidebar-open,[data-sidebar-motion]) > .pane{
     z-index:1; transform:translate3d(var(--sidebar-x),0,0); will-change:transform;
+    /* Direct filtering also works in WebKit's translated sibling layers.
+       Resting/closed panes keep filter:none for viewport-fixed popovers. */
+    filter:blur(calc(var(--sidebar-progress) * .7px));
     box-shadow:-6px 0 22px rgba(0,0,0,.14); }
   .shell > .sessions{ position:absolute; top:0; width:var(--mobile-sidebar-width); height:100%; z-index:0;
     visibility:hidden; transform:translate3d(calc((var(--sidebar-x) - var(--mobile-sidebar-width)) * .22),0,0);
@@ -1890,7 +1893,9 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
   .shell:is(.sidebar-open,[data-sidebar-motion]) > .sessions{ visibility:visible; }
   .shell > .scrim-side{ position:absolute; top:0; height:100%; z-index:2;
     transform:translate3d(var(--sidebar-x),0,0); opacity:var(--sidebar-progress);
-    background:rgba(0,0,0,.12); transition:transform .3s var(--ease),opacity .3s var(--ease); }
+    border-radius:calc(var(--sidebar-progress) * 26px) 0 0 calc(var(--sidebar-progress) * 26px);
+    background:rgba(0,0,0,.12);
+    transition:transform .3s var(--ease),opacity .3s var(--ease),border-radius .3s var(--ease); }
   :root[data-theme="dark"] .shell > .scrim-side{ background:rgba(0,0,0,.18); }
   /* Light palettes need a gentle separation, not a gray sheet over the chat. */
   :root:not([data-theme="dark"]) .shell > .scrim-side{
@@ -1908,7 +1913,7 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
      plus a matching pane offset keeps the slide smooth without that failure. */
   .shell{ display:block; height:var(--app-height,100dvh); }
   .pane{ width:100%; margin-left:0;
-    transition:margin-left .3s var(--ease),width .3s var(--ease),padding-right .26s var(--ease); }
+    transition:margin-left .3s var(--ease),width .3s var(--ease); }
   .shell.sidebar-open .pane{ width:calc(100% - 352px); margin-left:352px; }
   .sessions{ position:fixed; width:352px; height:var(--app-height,100dvh); overflow:hidden; }
   .s-inner{ width:100%; }

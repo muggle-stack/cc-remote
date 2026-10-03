@@ -33,6 +33,7 @@ import { TurnFilePageRequests, type LoadTurnFilePage } from "./turn-file-pages";
 import { Icon } from "./icons";
 import { ChatView } from "./components/ChatView";
 import { Composer } from "./components/Composer";
+import { usePanelWidthPreference } from "./use-panel-width";
 const SessionMessagePreview = lazy(() => import("./components/SessionMessagePreview").then((m) => ({ default: m.SessionMessagePreview })));
 
 const BackgroundTaskControl = lazy(() => import("./components/BackgroundTaskControl"));
@@ -336,6 +337,7 @@ function catalogForEngineProfile(
 }
 
 export default function App() {
+  usePanelWidthPreference();
   const initialEngineRef = useRef(normalizeEngine(localStorage.getItem(ENGINE_KEY)));
   const initialSpacesRef = useRef(readEngineSpaces(localStorage, initialEngineRef.current));
   const [engine, setEngine] = useState<Engine>(initialEngineRef.current);

@@ -210,7 +210,9 @@ async function mockRightPanelRelay(
     localStorage.setItem("cc_remote_engine", engine);
     localStorage.setItem("cc_remote_machine", "layout-machine");
     // Preserve a user's resize preference while opening/closing the slot.
-    localStorage.setItem("cc_remote_artifact_panel_width", "520");
+    if (localStorage.getItem("cc_remote_artifact_panel_width") === null) {
+      localStorage.setItem("cc_remote_artifact_panel_width", "520");
+    }
     if (sessionStorage.getItem("cc-remote:btw-panel-scopes-v1") === null) {
       sessionStorage.setItem("cc-remote:btw-panel-scopes-v1", JSON.stringify(visible
         ? [JSON.stringify(["layout-machine", "code", engine, "layout-parent"])] : []));
@@ -2903,14 +2905,14 @@ for (const sideChat of [false, true]) {
 }
 
 async function expectRightPanelSpace(
-  page: import("@playwright/test").Page, open: boolean, desktop = true,
+  page: import("@playwright/test").Page, open: boolean, desktop = true, panelWidth = 520,
 ) {
   const shell = page.locator(".shell");
   if (open) await expect(shell).toHaveClass(/\bpanel-open\b/);
   else await expect(shell).not.toHaveClass(/\bpanel-open\b/);
   // CSS transitions and persisted resize width must settle to actual geometry.
   await expect(page.locator(".pane")).toHaveCSS(
-    "padding-right", open && desktop ? "548px" : "0px");
+    "padding-right", open && desktop ? `${panelWidth + 28}px` : "0px");
 }
 
 const VIEWER_LINK_SITE = { id: "robot", label: "机器人结构", machine_id: "layout-machine",
@@ -3220,6 +3222,67 @@ test("side chat scope keeps late fork creation and sibling visibility with the o
   await expect(page.locator(".btw-chat-tab")).toHaveCount(1);
   expect(relay.commands.filter((c) => c.type === "open_btw")).toHaveLength(2);
   expect(relay.commands.filter((c) => c.type === "close_btw")).toHaveLength(0);
+});
+
+test("right panel layout avoids repeated paragraph reflow while side chat opens and closes", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1160, height: 881 });
+  await mockRightPanelRelay(page, { seedTurns: [{
+    id: "layout-reflow", prompt: "查看长段落", done: true,
+    blocks: [{ kind: "text", message_id: "layout-reflow-answer", channel: "final", done: true,
+      text: Array.from({ length: 14 }, (_, i) => `${i + 1}. ${"打开侧边聊天时，正文应稳定地显示在分配好的区域里，保留当前阅读位置。".repeat(5)}`).join("\n\n") }],
+  }] });
+  await page.goto("/");
+  const thread = page.locator(".pane .thread");
+  await expect(thread.locator(".prose")).toBeVisible();
+  await page.evaluate(() => document.fonts.ready);
+  await page.waitForTimeout(500);
+  for (const open of [true, false, true]) {
+    const frames = await page.evaluate(async () => {
+      const thread = document.querySelector<HTMLElement>(".pane .thread")!;
+      const prose = thread.querySelector<HTMLElement>(".prose")!;
+      const frames: { width: number; height: number; top: number; scroll: number }[] = [];
+      const record = () => {
+        const rect = prose.getBoundingClientRect();
+        frames.push({ width: Math.round(rect.width), height: Math.round(rect.height),
+          top: Math.round(rect.top), scroll: thread.scrollTop });
+      };
+      record();
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "K", ctrlKey: true, shiftKey: true, bubbles: true }));
+      const start = performance.now();
+      await new Promise<void>(resolve => {
+        const frame = () => {
+          record();
+          if (performance.now() - start >= 650) resolve();
+          else requestAnimationFrame(frame);
+        };
+        requestAnimationFrame(frame);
+      });
+      return frames;
+    });
+    await testInfo.attach(`side-chat-${open ? "open" : "close"}-${Date.now()}.json`, {
+      body: JSON.stringify(frames), contentType: "application/json",
+    });
+    await expectRightPanelSpace(page, open);
+    if (open) {
+      expect(await page.locator(".btw-panel").evaluate(node => node.getBoundingClientRect().width)).toBe(520);
+    }
+    // Text gets one final layout; only the floating panel animates into place.
+    expect(new Set(frames.map(frame => frame.width)).size).toBeLessThanOrEqual(2);
+    expect(new Set(frames.map(frame => frame.height)).size).toBeLessThanOrEqual(2);
+  }
+  // A deliberate resize remains responsive and survives hide/show and reload.
+  const handle = page.getByRole("button", { name: "调整 BTW 面板宽度", exact: true });
+  await handle.focus();
+  await handle.press("ArrowLeft");
+  await expectRightPanelSpace(page, true, true, 544);
+  expect(await page.locator(".btw-panel").evaluate(node => node.getBoundingClientRect().width)).toBe(544);
+  await page.keyboard.press("Control+Shift+k");
+  await expectRightPanelSpace(page, false);
+  await page.keyboard.press("Control+Shift+k");
+  expect(await page.locator(".btw-panel").evaluate(node => node.getBoundingClientRect().width)).toBe(544);
+  await page.reload();
+  await expectRightPanelSpace(page, true, true, 544);
+  expect(await page.locator(".btw-panel").evaluate(node => node.getBoundingClientRect().width)).toBe(544);
 });
 
 test("right panel layout releases collapsed and reload-restored side chat space", async ({

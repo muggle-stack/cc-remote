@@ -7,11 +7,7 @@ import {
 } from "react";
 
 import { clampPanelWidth } from "../responsive-layout";
-
-// Keep the historical key so an existing preview-panel preference also
-// applies to BTW and Agent detail panels.
-const PANEL_WIDTH_KEY = "cc_remote_artifact_panel_width";
-const DESKTOP_PANEL_QUERY = "(min-width: 981px)";
+import { DESKTOP_PANEL_QUERY, PANEL_WIDTH_KEY } from "../use-panel-width";
 
 export function PanelResizer({ ariaLabel }: { ariaLabel: string }) {
   const handleRef = useRef<HTMLButtonElement>(null);
@@ -33,24 +29,10 @@ export function PanelResizer({ ariaLabel }: { ariaLabel: string }) {
     return width;
   }, []);
 
-  useEffect(() => {
-    if (!window.matchMedia(DESKTOP_PANEL_QUERY).matches) return;
-    const saved = Number.parseFloat(
-      localStorage.getItem(PANEL_WIDTH_KEY) || "",
-    );
-    if (Number.isFinite(saved)) applyPanelWidth(saved);
-    const fitPanel = () => {
-      if (!window.matchMedia(DESKTOP_PANEL_QUERY).matches) return;
-      const current = panelElement()?.getBoundingClientRect().width;
-      if (current) applyPanelWidth(current);
-    };
-    window.addEventListener("resize", fitPanel);
-    return () => {
-      window.removeEventListener("resize", fitPanel);
-      resizeRef.current = null;
-      document.documentElement.classList.remove("panel-resizing");
-    };
-  }, [applyPanelWidth, panelElement]);
+  useEffect(() => () => {
+    resizeRef.current = null;
+    document.documentElement.classList.remove("panel-resizing");
+  }, []);
 
   const startResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
     const panel = panelElement();
