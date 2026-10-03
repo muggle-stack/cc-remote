@@ -333,6 +333,84 @@ try {
   send({ type: "state", state: "idle", seq: 21 });
   assert.equal(continuationState.runtimes[sid].liveOwner, null);
   assert.equal(isComposerBusy(continuationState.runtimes[sid].state), false);
+
+  // A resident Claude can continue a settled turn after the browser has only
+  // loaded its lightweight summary. A subsequent summary omits the Bash item,
+  // but must not move that already-observed work behind its own final answer.
+  const summarySid = "claude-summary-continuation";
+  const originalAnswer = {
+    kind: "text", message_id: "original-answer", channel: "final",
+    text: "Waiting for CI.", done: true, startedTs: 2_000,
+  };
+  const continuedAnswer = {
+    kind: "text", message_id: "continued-answer", channel: "final",
+    text: "CI passed.", done: true, background: true,
+    startedTs: 30_000, doneTs: 33_000,
+  };
+  let summaryState = {
+    ...initialState, focusedSid: summarySid,
+    sessions: [{ session_id: summarySid, engine: "claude" }],
+    runtimes: { [summarySid]: createRuntime() },
+  };
+  const summarySend = (body: Record<string, unknown>) => {
+    summaryState = reduce(summaryState, { type: "event", event: event({
+      sid: summarySid, ...body,
+    }) });
+  };
+  const refreshSummary = (continued: boolean) => summarySend({
+    type: "history", session_id: summarySid, revision: "summary-r1",
+    detail: "summary", in_progress: false, has_more: true, events: [],
+    turns: [{ id: "summary-parent", prompt: "check CI", done: true,
+      ts: 1_000, doneTs: 3_000, processDetailState: "present",
+      blocks: continued ? [originalAnswer, continuedAnswer] : [originalAnswer] }],
+  });
+  refreshSummary(false);
+  summarySend({ type: "state", state: "running", msg_id: "summary-parent", continuation: true });
+  summarySend({ type: "assistant_msg_start", turn_id: "summary-parent",
+    message_id: "check-message", channel: "commentary", background: true, ts: 28 });
+  summarySend({ type: "tool_use", turn_id: "summary-parent", message_id: "check-message",
+    tool_use_id: "check-ci", tool: "Bash", input: { command: "check CI" }, background: true, ts: 28 });
+  summarySend({ type: "assistant_msg_end", turn_id: "summary-parent",
+    message_id: "check-message", channel: "commentary", background: true, ts: 28 });
+  summarySend({ type: "tool_result", turn_id: "summary-parent", tool_use_id: "check-ci",
+    content: "passed", is_error: false, background: true, ts: 29 });
+  summarySend({ type: "assistant_msg_start", turn_id: "summary-parent",
+    message_id: "continued-answer", channel: "final", background: true, ts: 30 });
+  summarySend({ type: "delta", turn_id: "summary-parent", message_id: "continued-answer",
+    channel: "final", text: "CI passed.", background: true, ts: 31 });
+  summarySend({ type: "assistant_msg_end", turn_id: "summary-parent",
+    message_id: "continued-answer", channel: "final", background: true, ts: 33 });
+  summarySend({ type: "state", state: "idle", ts: 33 });
+  const summaryMarkup = () => renderToStaticMarkup(createElement(ChatView, {
+    sid: summarySid, engine: "claude", turns: summaryState.runtimes[summarySid].turns,
+  }));
+  assert.equal(summaryMarkup().split("Claude 继续处理").length - 1, 1);
+  refreshSummary(true);
+  assert.equal(summaryMarkup().split("Claude 继续处理").length - 1, 1,
+    "a summary refresh keeps the observed tool before its continuation answer");
+  assert.match(summaryMarkup(), /Claude 继续处理[\s\S]*已处理[\s\S]*CI passed\./);
+  assert.equal(summaryState.runtimes[summarySid].turns[0].done, true);
+  assert.equal(summaryState.runtimes[summarySid].liveOwner, null,
+    "repairing presentation order does not reopen the completed parent");
+
+  summarySend({ type: "state", state: "running", msg_id: "summary-parent", continuation: true });
+  summarySend({ type: "assistant_msg_start", turn_id: "summary-parent",
+    message_id: "next-thought", channel: "thinking", background: true, ts: 40 });
+  assert.equal(summaryMarkup().split("Claude 继续处理").length - 1, 2,
+    "a genuinely new continuation still appears immediately, even before text arrives");
+  summarySend({ type: "delta", turn_id: "summary-parent", message_id: "next-thought",
+    channel: "thinking", text: "Checking the next task.", background: true, ts: 41 });
+  summarySend({ type: "assistant_msg_end", turn_id: "summary-parent",
+    message_id: "next-thought", channel: "thinking", background: true, ts: 42 });
+  summarySend({ type: "assistant_msg_start", turn_id: "summary-parent",
+    message_id: "next-answer", channel: "final", background: true, ts: 43 });
+  summarySend({ type: "delta", turn_id: "summary-parent", message_id: "next-answer",
+    channel: "final", text: "Next task passed.", background: true, ts: 44 });
+  summarySend({ type: "assistant_msg_end", turn_id: "summary-parent",
+    message_id: "next-answer", channel: "final", background: true, ts: 45 });
+  summarySend({ type: "state", state: "idle", ts: 45 });
+  assert.equal(summaryMarkup().split("Claude 继续处理").length - 1, 2);
+  assert.match(summaryMarkup(), /CI passed\.[\s\S]*Claude 继续处理[\s\S]*Next task passed\./);
 } finally {
   await harness.close();
 }

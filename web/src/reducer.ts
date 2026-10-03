@@ -714,6 +714,11 @@ function allocateLiveOrder(turn: Turn): number {
 }
 
 function appendLiveBlock<T extends Block>(turn: Turn, block: T): T {
+  // A Claude continuation can append to a completed summary loaded before
+  // this browser saw any stream frames. Establish one chronology for that
+  // source prefix and the new tail now, not only when the row spills. Otherwise
+  // a later answer-only summary can put the retained tools after their answer.
+  ensureLiveBlockOrder(turn);
   if (block.liveOrder == null) block.liveOrder = allocateLiveOrder(turn);
   turn.blocks.push(block);
   return block;
