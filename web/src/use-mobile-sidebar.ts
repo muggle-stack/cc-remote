@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { sidebarDragIntent, sidebarReleaseOpen } from "./responsive-layout";
+import { sidebarOpenFeedback } from "./sidebar-feedback";
 
 const MOBILE = "(max-width: 979px)";
 const LOCKED_TARGET = "[data-lock-horizontal-swipe], input, textarea, select, "
@@ -150,7 +151,9 @@ export function useMobileSidebar(open: boolean, onOpenChange?: (open: boolean) =
       const sample = gesture.samples.find(value => event.timeStamp - value.time <= 100);
       const elapsed = sample ? event.timeStamp - sample.time : 0;
       const velocity = sample && elapsed > 0 ? (touch.clientX - sample.x) / elapsed : 0;
-      settle(sidebarReleaseOpen(gesture.offset, gesture.width, velocity), gesture);
+      const next = sidebarReleaseOpen(gesture.offset, gesture.width, velocity);
+      if (next && !gesture.wasOpen) sidebarOpenFeedback();
+      settle(next, gesture);
     };
     const click = (event: MouseEvent) => {
       if (event.detail && performance.now() < suppressClickUntil) {

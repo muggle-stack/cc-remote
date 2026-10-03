@@ -1721,6 +1721,12 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .tt{ position:fixed; top:16px; right:16px; z-index:61; }
 
 /* SESSIONS SIDEBAR */
+.sidebar-native-toggle{ position:relative; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+/* Keep the genuine switch in the tap path for Safari haptics. It is the only
+   accessible control; the existing title remains its visual presentation. */
+.sidebar-native-toggle > input{ position:absolute; inset:0; width:100%; height:100%; margin:0;
+  opacity:0; cursor:inherit; }
+.sidebar-native-toggle:has(> input:focus-visible){ outline:2px solid var(--accent); outline-offset:2px; border-radius:6px; }
 .scrim-side{ position:fixed; inset:0; z-index:25; background:rgba(30,22,12,.34); opacity:0; pointer-events:none; transition:.2s; }
 .scrim-side.show{ opacity:1; pointer-events:auto; }
 :root[data-theme="dark"] .scrim-side{ background:rgba(0,0,0,.55); }
@@ -1874,26 +1880,30 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .sgroup-toggle .label{ font-size:11.5px; font-weight:var(--font-weight-600); letter-spacing:.06em; text-transform:uppercase; color:var(--faint); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .sgroup-toggle .count{ font-size:10.5px; color:var(--faint); font-weight:var(--font-weight-500); flex:none; }
 @media (max-width:979px){
-  .shell{ --mobile-sidebar-width:min(352px,82vw); --sidebar-x:0px; --sidebar-progress:0; }
+  .shell{ --mobile-sidebar-width:min(352px,82vw); --sidebar-x:0px; --sidebar-progress:0;
+    --sidebar-page-radius:calc(var(--sidebar-progress) * clamp(36px,12vw,48px));
+    /* The drawer is the continuous lower surface, including the areas revealed
+       behind BOTH rounded page corners beyond the drawer's content width. */
+    background:var(--sidebar); isolation:isolate; }
   .shell.sidebar-open{ --sidebar-x:var(--mobile-sidebar-width); --sidebar-progress:1; }
   /* Translate the full-width chat without reflowing history or its composer.
      Closed/resting panes have no transform, preserving fixed popover geometry. */
   .shell > .pane{ width:100%; margin-left:0; transform:none;
-    border-radius:calc(var(--sidebar-progress) * 26px) 0 0 calc(var(--sidebar-progress) * 26px);
+    border-radius:var(--sidebar-page-radius);
     transition:transform .3s var(--ease),border-radius .3s var(--ease),filter .3s var(--ease); }
   .shell:is(.sidebar-open,[data-sidebar-motion]) > .pane{
     z-index:1; transform:translate3d(var(--sidebar-x),0,0); will-change:transform;
     /* Direct filtering also works in WebKit's translated sibling layers.
        Resting/closed panes keep filter:none for viewport-fixed popovers. */
     filter:blur(calc(var(--sidebar-progress) * .7px));
-    box-shadow:-6px 0 22px rgba(0,0,0,.14); }
+    box-shadow:-12px 0 36px -8px rgba(0,0,0,.32),0 0 0 1px rgba(255,255,255,.04); }
   .shell > .sessions{ position:absolute; top:0; width:var(--mobile-sidebar-width); height:100%; z-index:0;
     visibility:hidden; transform:translate3d(calc((var(--sidebar-x) - var(--mobile-sidebar-width)) * .22),0,0);
     transition:transform .3s var(--ease),visibility .3s; }
   .shell:is(.sidebar-open,[data-sidebar-motion]) > .sessions{ visibility:visible; }
   .shell > .scrim-side{ position:absolute; top:0; height:100%; z-index:2;
     transform:translate3d(var(--sidebar-x),0,0); opacity:var(--sidebar-progress);
-    border-radius:calc(var(--sidebar-progress) * 26px) 0 0 calc(var(--sidebar-progress) * 26px);
+    border-radius:var(--sidebar-page-radius);
     background:rgba(0,0,0,.12);
     transition:transform .3s var(--ease),opacity .3s var(--ease),border-radius .3s var(--ease); }
   :root[data-theme="dark"] .shell > .scrim-side{ background:rgba(0,0,0,.18); }
@@ -1901,9 +1911,8 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
   :root:not([data-theme="dark"]) .shell > .scrim-side{
     background:color-mix(in srgb,var(--dim) 3%,transparent); }
   :root:not([data-theme="dark"]) .shell:is(.sidebar-open,[data-sidebar-motion]) > .pane{
-    box-shadow:-2px 0 10px -3px color-mix(in srgb,var(--dim) 14%,transparent); }
-  :root:not([data-theme="dark"]) .shell > .sessions{
-    background:linear-gradient(to bottom,var(--bg),var(--sidebar) 112px); }
+    box-shadow:-12px 0 36px -8px color-mix(in srgb,var(--dim) 24%,transparent),
+      0 0 0 1px color-mix(in srgb,var(--dim) 7%,transparent); }
   .shell[data-sidebar-motion="dragging"] > :is(.pane,.sessions,.scrim-side){ transition:none; }
   .shell[data-sidebar-motion] > .scrim-side{ pointer-events:auto; }
 }

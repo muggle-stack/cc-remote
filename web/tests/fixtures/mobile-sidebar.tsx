@@ -2,6 +2,7 @@ import { StrictMode, useEffect, useState } from "react";
 import { SessionsSidebar } from "../../src/components/SessionsSidebar";
 import { ChatView } from "../../src/components/ChatView";
 import { useMobileViewport } from "../../src/use-mobile-viewport";
+import { SidebarToggle } from "../../src/components/SidebarToggle";
 import type { SessionInfo } from "../../src/protocol";
 import type { Turn } from "../../src/reducer";
 
@@ -40,7 +41,7 @@ function SidebarScene() {
       onPin={noop} onDelete={noop} onForkWorktree={noop} onMigrate={noop} />
     <section className="pane code-pane">
       <header className="c-head">
-        <button type="button" data-testid="sidebar-toggle" onClick={() => setOpen(value => !value)}>☰</button>
+        <SidebarToggle testId="sidebar-toggle" open={open} onOpenChange={setOpen}>☰</SidebarToggle>
         <span className="ttl">Code</span><span className="chip">Codex</span>
       </header>
       <ChatView sid="sidebar-fixture" engine="codex" turns={turns} loading={false}

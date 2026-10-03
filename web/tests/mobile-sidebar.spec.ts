@@ -212,3 +212,127 @@ test("mobile sidebar native touch input preserves browser scroll ownership", asy
   await settled(page, false);
   await input.detach();
 });
+
+test("mobile sidebar reveals one lower surface behind both rounded page corners", async ({ page }) => {
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+    await page.getByTestId("sidebar-toggle").click();
+    await settled(page, true);
+    const layers = await page.evaluate(() => {
+      const shell = document.querySelector(".shell")!;
+      const pane = document.querySelector(".pane")!;
+      const sidebar = document.querySelector(".sessions")!;
+      const scrim = document.querySelector(".scrim-side")!;
+      const rect = pane.getBoundingClientRect();
+      const cornerTarget = (y: number) => document.elementFromPoint(rect.left + 2, y) === shell;
+      return {
+        shellBg: getComputedStyle(shell).backgroundColor,
+        sidebarBg: getComputedStyle(sidebar).backgroundColor,
+        pageZ: Number(getComputedStyle(pane).zIndex), sidebarZ: Number(getComputedStyle(sidebar).zIndex),
+        top: parseFloat(getComputedStyle(pane).borderTopLeftRadius),
+        bottom: parseFloat(getComputedStyle(pane).borderBottomLeftRadius),
+        scrimBottom: getComputedStyle(scrim).borderBottomLeftRadius,
+        pageBottom: getComputedStyle(pane).borderBottomLeftRadius,
+        topCutout: cornerTarget(rect.top + 2), bottomCutout: cornerTarget(rect.bottom - 2),
+      };
+    });
+    expect(layers.shellBg).toBe(layers.sidebarBg);
+    expect(layers.pageZ).toBeGreaterThan(layers.sidebarZ);
+    expect(layers.top).toBeGreaterThanOrEqual(36);
+    expect(layers.bottom).toBe(layers.top);
+    expect(layers.scrimBottom).toBe(layers.pageBottom);
+    expect(layers.topCutout).toBe(true);
+    expect(layers.bottomCutout).toBe(true);
+    await page.screenshot({ path: test.info().outputPath(`sidebar-layered-${theme}.png`) });
+    await page.getByRole("button", { name: "收起", exact: true }).click();
+    await settled(page, false);
+    await expect.poll(() => page.locator(".pane").evaluate(node => getComputedStyle(node).borderRadius)).toBe("0px");
+  }
+});
+
+test("mobile sidebar opening feedback fires once and ignores canceled drags and desktop", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, value: 1 });
+    Object.defineProperty(navigator, "vibrate", { configurable: true, value: (duration: number) => {
+      document.body.dataset.pulses = String(Number(document.body.dataset.pulses ?? 0) + 1);
+      document.body.dataset.pulseDuration = String(duration);
+      return true;
+    } });
+  });
+  await page.reload();
+  await expect(page.locator(".thread")).toBeVisible();
+  const count = () => page.evaluate(() => Number(document.body.dataset.pulses ?? 0));
+  expect(await count()).toBe(0);
+  await touch(page, "touchstart", 50, 280, 1000);
+  await touch(page, "touchmove", 140, 280, 1200);
+  await touch(page, "touchend", 140, 280, 1400);
+  await settled(page, false);
+  expect(await count()).toBe(0);
+  await touch(page, "touchstart", 50, 280, 2000);
+  await touch(page, "touchmove", 280, 280, 2200);
+  await touch(page, "touchcancel", 280, 280, 2400);
+  await settled(page, false);
+  expect(await count()).toBe(0);
+  await page.getByTestId("sidebar-toggle").click();
+  await settled(page, true);
+  expect(await count()).toBe(1);
+  await page.evaluate(() => window.dispatchEvent(new Event("sidebar-fixture-stream")));
+  expect(await count()).toBe(1);
+  await page.getByRole("button", { name: "收起", exact: true }).click();
+  await settled(page, false);
+  await touch(page, "touchstart", 50, 280, 3000);
+  await touch(page, "touchmove", 280, 280, 3200);
+  await touch(page, "touchend", 280, 280, 3400);
+  await settled(page, true);
+  expect(await count()).toBe(2);
+  await page.getByRole("button", { name: "收起", exact: true }).click();
+  await settled(page, false);
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await page.getByTestId("sidebar-toggle").click();
+  expect(await count()).toBe(2);
+});
+
+test("mobile sidebar still opens when the browser rejects feedback", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, value: 1 });
+    Object.defineProperty(navigator, "vibrate", { configurable: true, value: () => { throw new Error("Unavailable"); } });
+  });
+  await page.reload();
+  await expect(page.locator(".thread")).toBeVisible();
+  await page.getByTestId("sidebar-toggle").click();
+  await settled(page, true);
+});
+
+test("mobile sidebar Safari toggle uses a genuine native switch and follows swipe state", async ({ page }) => {
+  test.skip(!await page.evaluate(() => "switch" in document.createElement("input")),
+    "Native switch feedback is a WebKit capability; physical vibration still needs an iPhone.");
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, "maxTouchPoints", { configurable: true, value: 1 });
+    Object.defineProperty(navigator, "vibrate", { configurable: true, value: undefined });
+    document.addEventListener("click", event => {
+      if (event.target instanceof HTMLInputElement && event.target.hasAttribute("switch")) {
+        document.body.dataset.nativeFeedback = JSON.stringify({
+          trusted: event.isTrusted, active: navigator.userActivation.isActive,
+        });
+      }
+    }, true);
+  });
+  await page.getByTestId("sidebar-toggle").click();
+  await settled(page, true);
+  expect(await page.evaluate(() => JSON.parse(document.body.dataset.nativeFeedback ?? "null"))).toEqual({
+    trusted: true, active: true,
+  });
+  const control = page.getByRole("switch", { name: "显示会话侧栏", includeHidden: true });
+  expect(await control.isChecked()).toBe(true);
+  await page.getByRole("button", { name: "收起", exact: true }).click();
+  await settled(page, false);
+  expect(await control.isChecked()).toBe(false);
+  await touch(page, "touchstart", 50, 280, 1000);
+  await touch(page, "touchmove", 280, 280, 1200);
+  await touch(page, "touchend", 280, 280, 1400);
+  await settled(page, true);
+  expect(await control.isChecked()).toBe(true);
+  await page.setViewportSize({ width: 1200, height: 800 });
+  await expect(page.getByTestId("sidebar-toggle")).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator('input[switch]')).toHaveCount(0);
+});

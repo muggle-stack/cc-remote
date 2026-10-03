@@ -34,6 +34,7 @@ import { Icon } from "./icons";
 import { ChatView } from "./components/ChatView";
 import { Composer } from "./components/Composer";
 import { usePanelWidthPreference } from "./use-panel-width";
+import { SidebarToggle } from "./components/SidebarToggle";
 const SessionMessagePreview = lazy(() => import("./components/SessionMessagePreview").then((m) => ({ default: m.SessionMessagePreview })));
 
 const BackgroundTaskControl = lazy(() => import("./components/BackgroundTaskControl"));
@@ -5650,10 +5651,10 @@ export default function App() {
         <header className={`c-head ${space}-head`}>
           <div className="titlewrap">
             <div className="ttl">
-              <button className="surface-head-title" onClick={() => setSidebarOpen(true)}>
+              <SidebarToggle className="surface-head-title" open={sidebarOpen} onOpenChange={setSidebarOpen}>
                 <span className="surface-head-mark"><Icon name={space === "work" ? "work" : "code"} size={18} /></span>
                 <span>{space === "work" ? "Work" : "Code"}</span>
-              </button>
+              </SidebarToggle>
               {focusedWorkProfile && (
                 <span className={`work-profile-owner tone-${focusedWorkProfile.tone}`}
                   title={`${focusedEngine === "codex" ? "Codex" : "Claude"} 账号：${focusedWorkProfile.fullLabel}`}
