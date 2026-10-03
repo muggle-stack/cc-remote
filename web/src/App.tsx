@@ -8,7 +8,6 @@ import {
   useReducer,
   useRef,
   useState,
-  type TouchEvent,
 } from "react";
 import { RelayWs, sessionScopeKey, type EventOwnership } from "./ws";
 import type { QueryAcceptanceResult } from "./outbox";
@@ -129,7 +128,6 @@ import { matchesBtwRequest,
 import type { EngineCapabilities, EngineCapabilityItem, EngineCapabilityKind, WorkArtifactInfo, WorkDashboard } from "./protocol";
 import { isMarkdownPath } from "./preview-path";
 import { parseGitDiff } from "./diff";
-import { resolveSidebarSwipe } from "./responsive-layout";
 import {
   bumpSessionActivity,
   mergeSessionActivityState,
@@ -316,8 +314,8 @@ interface QueuedQueryEditorState extends QueuedQueryEditor {
 
 const MAX_TERMINAL_HISTORY_REPAIR_ATTEMPTS = 2;
 
-// The sidebar is an overlay on mobile (<980px, matches index.css) but a
-// persistent grid column on desktop. So auto-close it after picking a session
+// The sidebar pushes the page on mobile (<980px, matches index.css) but is a
+// persistent column on desktop. So auto-close it after picking a session
 // ONLY on mobile; on desktop keep it open.
 const isMobile = () => window.matchMedia("(max-width: 979px)").matches;
 
@@ -659,9 +657,6 @@ export default function App() {
   const notificationListRequestRef = useRef<string | null>(null);
   const notificationOriginRef = useRef<NotificationOrigin | null>(null);
   const pendingNotificationErrorRef = useRef<string | null>(null);
-  const touchStartX = useRef(0);
-  const touchStartY = useRef(0);
-  const touchSwipeLocked = useRef(false);
   const artifactDirtyRef = useRef(false);
   const setArtifactDirty = useCallback((dirty: boolean) => {
     artifactDirtyRef.current = dirty;
@@ -1626,29 +1621,6 @@ export default function App() {
         : null,
     );
   }, [authed, machineId, notificationMode]);
-
-  // Swipe right -> open sidebar, swipe left -> close (mobile). Interactive
-  // vertical scrollers opt out so a diagonal scroll never becomes navigation.
-  const onTouchStart = (e: TouchEvent) => {
-    const touch = e.touches[0];
-    touchStartX.current = touch.clientX;
-    touchStartY.current = touch.clientY;
-    touchSwipeLocked.current = e.target instanceof Element
-      && !!e.target.closest("[data-lock-horizontal-swipe]");
-  };
-  const onTouchEnd = (e: TouchEvent) => {
-    const touch = e.changedTouches[0];
-    const action = resolveSidebarSwipe(
-      touchStartX.current,
-      touchStartY.current,
-      touch.clientX,
-      touch.clientY,
-      window.innerWidth,
-      touchSwipeLocked.current,
-    );
-    if (action === "open") setSidebarOpen(true);
-    else if (action === "close") setSidebarOpen(false);
-  };
 
   useEffect(() => {
     try {
@@ -5567,9 +5539,10 @@ export default function App() {
     <ViewerPagesProvider scope={visibleParentSid && authed
       ? { machineId, sid: visibleParentSid, space, engine } : null} onOpen={openViewerPage}>
     <RemoteViewerContext.Provider value={visibleParentSid ? openViewerLink : null}>
-    <div className={"shell" + (sidebarOpen ? " sidebar-open" : "") + (visibleRightPanel !== null ? " panel-open" : "")} onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
+    <div className={"shell" + (sidebarOpen ? " sidebar-open" : "") + (visibleRightPanel !== null ? " panel-open" : "")}>
       <Suspense fallback={null}><SessionsSidebar
         open={sidebarOpen}
+        onOpenChange={setSidebarOpen}
         engine={engine}
         space={space}
         profileScopeKey={activeScopeKey}

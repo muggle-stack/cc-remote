@@ -19,6 +19,7 @@ import { codexProfilePresentation } from "../codex-profile-presentation";
 import { newWorkProfileForSidebarFilter } from "../work-profile-selection";
 import { manualUnreadKey } from "../manual-unread";
 import { useManualUnread } from "../use-manual-unread";
+import { useMobileSidebar } from "../use-mobile-sidebar";
 const SessionCardMenu = lazy(() => import("./SessionCardMenu").then(module => ({ default: module.SessionCardMenu })));
 const TimedTaskIndicator = lazy(() => import("./TimedTaskIndicator").then(module => ({ default: module.TimedTaskIndicator })));
 
@@ -43,6 +44,7 @@ interface Props {
   onNew: (profileId?: string) => void;
   onNewInDir: (cwd: string) => void;
   onClose: () => void;
+  onOpenChange?: (open: boolean) => void;
   onRename: (id: string, title: string) => void;
   onArchive: (id: string, archived: boolean) => void;
   onPin: (session: SessionInfo, pinned: boolean) => void;
@@ -77,8 +79,9 @@ export function SessionsSidebar({ open, engine, space,
   profileScopeKey, machineId, claudeProfiles = [], defaultClaudeProfileId,
   codexProfiles = [], defaultCodexProfileId,
   onSpaceChange, sessions, liveStates,
-  completionBadges, activeSessionId, onSelect, onNew, onNewInDir, onClose,
+  completionBadges, activeSessionId, onSelect, onNew, onNewInDir, onClose, onOpenChange,
   onRename, onArchive, onPin, onDelete, onForkWorktree, onMigrate }: Props) {
+  const sidebarRef = useMobileSidebar(open, onOpenChange);
   const manualUnread = useManualUnread();
   const [q, setQ] = useState("");
   const [menuCardId, setMenuCardId] = useState<string | null>(null);
@@ -457,9 +460,8 @@ export function SessionsSidebar({ open, engine, space,
   return (
     <>
       <div className={"scrim-side" + (open ? " show" : "")} onClick={onClose} />
-      <aside className={"sessions" + (open ? " show" : "")}>
-        {/* Keep sidebar contents stable while the desktop shell and panel slide
-            in tandem; mobile uses the same panel transform as an overlay. */}
+      <aside ref={sidebarRef} className={"sessions" + (open ? " show" : "")} inert={!open} aria-hidden={!open}>
+        {/* Keep the contents stable while the shell animates both surfaces. */}
         <div className="s-inner">
           <div className="s-head">
             <div className="brand" onClick={onClose}>
