@@ -1892,6 +1892,13 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
     transform:translate3d(var(--sidebar-x),0,0); opacity:var(--sidebar-progress);
     background:rgba(0,0,0,.12); transition:transform .3s var(--ease),opacity .3s var(--ease); }
   :root[data-theme="dark"] .shell > .scrim-side{ background:rgba(0,0,0,.18); }
+  /* Light palettes need a gentle separation, not a gray sheet over the chat. */
+  :root:not([data-theme="dark"]) .shell > .scrim-side{
+    background:color-mix(in srgb,var(--dim) 3%,transparent); }
+  :root:not([data-theme="dark"]) .shell:is(.sidebar-open,[data-sidebar-motion]) > .pane{
+    box-shadow:-2px 0 10px -3px color-mix(in srgb,var(--dim) 14%,transparent); }
+  :root:not([data-theme="dark"]) .shell > .sessions{
+    background:linear-gradient(to bottom,var(--bg),var(--sidebar) 112px); }
   .shell[data-sidebar-motion="dragging"] > :is(.pane,.sessions,.scrim-side){ transition:none; }
   .shell[data-sidebar-motion] > .scrim-side{ pointer-events:auto; }
 }
