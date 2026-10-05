@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -12,7 +13,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from cc_remote.wrapper.codex_readiness import REPORT_NAME
+from cc_remote.wrapper.codex_readiness import REPORT_NAME, probe_config
 from cc_remote.wrapper.codex_daemon import socket_identity
 from cc_remote.wrapper.process_scan import ProcessIdentity, process_identity, process_owner_uid
 from deploy.work_registry_snapshot import resolve_wrapper_state_dir
@@ -25,7 +26,29 @@ _REASONS = {
     "version_mismatch": "Codex CLI 与运行中的服务版本不一致；当前任务保留，结束后再更新或重开 Codex。",
     "daemon_changed": "检查期间 Codex 服务发生变化，本次未确认连接。",
     "connection_failed": "连接检查未通过；现有任务保留，请检查 Wrapper 日志。",
+    "configuration_failed": "实时配置读取失败；连接就绪不足以确认可用，请检查服务工作目录及配置。",
+    "wrong_probe_user": "实时配置检查须以 Wrapper 服务用户执行，不可代用 root 或其他账号。",
 }
+
+
+async def refresh_configuration(report: dict) -> None:
+    """Supplement the activation receipt with fresh, non-mutating native RPCs."""
+    owner = process_owner_uid(report["wrapper"]["pid"])
+    for row in report["profiles"]:
+        if row["status"] != "ready":
+            continue
+        if owner != os.geteuid():
+            row.update(status="unavailable", reason="wrong_probe_user")
+            continue
+        try:
+            expected = str(Path(row["home"]) / "app-server-control/app-server-control.sock")
+            if row["socket"] != expected:
+                raise ValueError("account endpoint mismatch")
+            await probe_config(expected)
+            row["live_config_verified"] = True
+        except Exception as exc:
+            row.update(status="unavailable", reason="configuration_failed",
+                       error_type=type(exc).__name__)
 
 
 def socket_still_ready(row: dict, owner_uid: int) -> bool:
@@ -87,7 +110,9 @@ def describe(report: dict) -> bool:
         # Values come from private configuration but must not inject terminal controls.
         profile = json.dumps(row["profile"], ensure_ascii=False)
         if row["status"] == "ready":
-            print(f"Codex {profile}: 共享连接已就绪（CLI 与 cc-remote 的连接检查通过）。")
+            detail = ("共享连接与实时配置读取检查通过。" if row.get("live_config_verified")
+                      else "共享连接已就绪（CLI 与 cc-remote 的连接检查通过）。")
+            print(f"Codex {profile}: {detail}")
         elif row["status"] == "disabled":
             print(f"Codex {profile}: 保留已有的关闭设置，未启用共享连接。")
         else:
@@ -107,6 +132,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--plist", type=Path)
     parser.add_argument("--wait", type=float, default=45)
+    parser.add_argument("--live-config", action="store_true",
+                        help="also read config from each live daemon as its service user; no model turn")
     args = parser.parse_args(argv)
     try:
         state = resolve_wrapper_state_dir(args.home, env_file=args.env_file, plist=args.plist)
@@ -114,6 +141,8 @@ def main(argv: list[str] | None = None) -> int:
         while True:
             report = read_receipt(state / REPORT_NAME, args.release, args.after)
             if report is not None:
+                if args.live_config:
+                    asyncio.run(refresh_configuration(report))
                 return 0 if describe(report) else 1
             if time.monotonic() >= deadline:
                 print("Codex: 未收到本次启动的连接检查结果，请检查 Wrapper 日志；不能据此确认已共享。")

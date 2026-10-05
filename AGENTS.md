@@ -31,6 +31,10 @@ transactions. A dropped SSH/control connection is an unknown result: inspect
 the original transaction and live state before deciding whether a retry is
 safe. Deployment is complete only after protocol/build identity, service
 stability, public health, and expected Wrapper connectivity are verified.
+Use `deploy/cleanup.py` for reviewed retention inventories, never an ad hoc
+deletion script. Preserve process cwd/open-file and retained runtime dependencies
+even beyond the rollback generation limit. Repeat acceptance after cleanup,
+including live Codex config reads; incomplete visibility means retain the files.
 For Codex Code, also follow `deploy/README.md`'s shared-control-plane acceptance:
 verify each account's daily CLI and Wrapper connect to the same official
 app-server, not a private stdio fallback. Do not force takeover or kill a live

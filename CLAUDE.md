@@ -18,6 +18,9 @@ For deployment, upgrade, verification or recovery, read the repository skill at
 even if this client does not discover `.agents/skills` automatically. It routes
 to the maintained [`deploy/README.md`](deploy/README.md) automation contract,
 installation paths and shared-control acceptance; do not invent another flow.
+Use `deploy/cleanup.py` for retention; preserve live cwd/open-file and runtime
+dependencies beyond the rollback count. Incomplete visibility means retain the
+files. Final acceptance, including live Codex config reads, runs after cleanup.
 
 Codex Code acceptance requires the daily CLI and Wrapper to use the same
 official daemon for each account. An online Web UI alone is insufficient. Never

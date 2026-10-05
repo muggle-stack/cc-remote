@@ -35,6 +35,7 @@ _RELAY_DEPLOY = (
     "Caddyfile.insecure",
     "Caddyfile.viewer.example",
     "caddy_managed_block.py",
+    "cleanup.py",
     "cc-remote-relay.service",
     "env.relay.example",
     "install-relay.sh",
@@ -49,6 +50,7 @@ _RELAY_DEPLOY = (
 _WRAPPER_DEPLOY = (
     "atomic_symlink.py",
     "check_codex_readiness.py",
+    "cleanup.py",
     "cc-remote-wrapper.service",
     "com.muggle.cc-remote.wrapper.plist.in",
     "env.wrapper.example",

@@ -18,6 +18,7 @@ import time
 from typing import Any
 
 from websockets.client import ClientProtocol
+from websockets.asyncio.client import unix_connect
 from websockets.frames import Frame, Opcode
 from websockets.http11 import Response
 from websockets.uri import parse_uri
@@ -29,6 +30,43 @@ from cc_remote.wrapper.process_scan import process_identity
 REPORT_NAME = "codex-readiness.json"
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 _TIMEOUT = 8.0
+
+
+async def probe_config(socket_path: str) -> None:
+    """Read live config without starting/resuming a thread or an account CLI.
+
+    A listening daemon can still have a deleted working directory. Initialization
+    alone doesn't exercise the config loader used to start the next turn. Never
+    expose the config or raw native errors in this acceptance check.
+    """
+    before = socket_identity(socket_path, owner_uid=os.geteuid())
+    async with asyncio.timeout(_TIMEOUT):
+        async with unix_connect(
+            socket_path, uri="ws://localhost/", proxy=None,
+            open_timeout=_TIMEOUT, close_timeout=1, max_size=2 * 1024 * 1024,
+        ) as connection:
+            async def request(request_id: int, method: str, params: dict) -> dict:
+                await connection.send(json.dumps({
+                    "id": request_id, "method": method, "params": params,
+                }))
+                while True:
+                    response = json.loads(await connection.recv())
+                    if not isinstance(response, dict) or response.get("id") != request_id:
+                        continue
+                    if "error" in response or not isinstance(response.get("result"), dict):
+                        raise RuntimeError("Codex live configuration check failed")
+                    return response["result"]
+
+            await request(1, "initialize", {
+                "clientInfo": {"name": "cc-remote-readiness", "version": __version__},
+            })
+            await connection.send('{"method":"initialized"}')
+            # No cwd override: validate the daemon's own configuration base.
+            result = await request(2, "config/read", {"includeLayers": False})
+            if not isinstance(result.get("config"), dict):
+                raise RuntimeError("Codex live configuration response is invalid")
+    if socket_identity(socket_path, owner_uid=os.geteuid()) != before:
+        raise RuntimeError("Codex daemon changed during configuration check")
 
 
 async def probe_proxy(binary: str, env: dict[str, str], socket_path: str) -> None:

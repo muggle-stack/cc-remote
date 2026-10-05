@@ -71,7 +71,8 @@ Success requires all of the following: the expected immutable releases are
 active, Python and served Web build metadata report the same protocol/product,
 services have stable PIDs without restart loops, the public health endpoint is
 healthy, expected Wrappers reconnect, and recent logs contain no new fatal
-errors. Installations using Codex Code must also verify the
+errors. These checks must pass **after the final cleanup**, not just before it.
+Installations using Codex Code must also verify the
 [shared CLI control plane](#codex-code-shared-control-plane-acceptance);
 an online Wrapper alone does not prove bidirectional CLI access.
 After these checks, offer the [optional Codex App attachment](#optional-codex-app-attachment)
@@ -84,8 +85,10 @@ beforehand and finalize retention after coordinated acceptance as specified belo
 
 ### Deployment backup retention
 
-Agent-led deployments must leave **the active installation plus at most one
-complete previous rollback generation per installation on each in-scope host**.
+Agent-led deployments retain **the active installation, one complete previous
+rollback generation, and every still-referenced runtime dependency** on each
+in-scope host. Runtime dependency protection always overrides the generation
+count; an older release is not disposable merely because two newer ones exist.
 A generation includes the matching release code/runtime, configuration copies
 and private state snapshot needed to restore it; these are one recovery set,
 not separate allowances for multiple historical copies. An intact immutable
@@ -94,9 +97,10 @@ release can serve as the code backup without another archive of the same tree.
 1. Before creating the next backup or staging copy, identify the active release,
    the newest complete known-good rollback set, and any unresolved deployment
    transaction. Remove only confirmed older, superseded deployment backups and
-   unused duplicate uploads/archives. Determine generations from release and
-   transaction records, not filename age alone; check resolved paths before
-   deletion and keep cleanup inside the verified installation/backup locations.
+   unused duplicate uploads/archives using `deploy/cleanup.py`. Determine
+   generations from release and transaction records, not filename age alone.
+   Preview an explicit private inventory before applying it; do not generate a
+   separate retention script or bypass a deferred result with `rm`/`rmtree`.
 2. Create and validate the new pre-upgrade snapshot using the normal transaction
    procedure. Keep the existing valid rollback set until coordinated acceptance
    succeeds. Temporary coexistence during this transaction must not become
@@ -105,22 +109,126 @@ release can serve as the code backup without another archive of the same tree.
 3. After all protocol tiers pass acceptance and the transaction is committed,
    retain only the version just superseded and its matching recovery files.
    Remove the older rollback generation and completed, unneeded staging/upload
-   copies. On failure or unknown outcome, preserve the exact transaction's
-   recovery set and settle it before further cleanup or deployment attempts.
+   copies. Quarantine candidates, repeat acceptance while their bytes remain
+   recoverable, then delete and verify again. On failure or unknown outcome,
+   preserve the exact transaction's recovery set and settle it before further
+   cleanup or deployment attempts. Deployment is complete only after this final
+   acceptance; earlier health checks are provisional.
 
 Do not delete native transcripts, credentials, current private state, project
 files or unrelated user backups under this policy. A release still referenced
-by a running service (including the independent Claude service), a shared venv,
-an active job or the retained rollback set is a live dependency, not an unused
-backup. If these references temporarily prevent the retention limit, retain the
-referenced files, report the exact reason and recheck on the next deployment;
-do not stop active work to meet the limit.
+by a running service (including the independent Claude service), a process cwd,
+an executable, an open/mapped file, a shared venv, an active job or the retained
+rollback set is a live dependency. Checking `ps ... args` alone misses processes
+whose argv is independent of their cwd. Include dormant service definitions and
+configuration-dependent runtime paths explicitly as protected dependencies too.
+Incomplete process visibility or uncertain provenance defers cleanup. Do not
+stop a daemon or active work just to meet the retention count.
 
-Report retained rollback paths, deleted generations, measured space reclaimed
-and any deferred paths. Moving old copies into another backup directory or Trash
+Codex lifecycle commands use the service user's stable home directory, never a
+Wrapper release, as their working directory. Existing daemons are not restarted
+to apply this: retain any old release they still use until their normal lifecycle
+has moved them away. This startup rule and the cleanup checks protect different
+boundaries; neither replaces the other.
+
+Report retained rollback paths, deleted generations, removed allocated bytes
+and any deferred paths. Allocated bytes are not a measurement of free-space gain
+(for example, shared filesystem blocks may remain in use). Moving old copies
+into another backup directory or Trash
 does not reclaim disk space or satisfy this policy. This is an agent-operated
 cleanup step: the existing installers and `cc-remote update` do not automatically
 prune releases or backups.
+
+#### Repository cleanup command
+
+`cleanup.py` ships in both role bundles. It acquires the same `.update.lock` as
+the installers, verifies the bound `current` link and completed transaction
+records, and examines process cwd/executable/open-file references with `lsof`
+plus argv references with `ps`. It also traces transitive symlink dependencies of
+retained trees and live candidates, including shared venvs. Broken links,
+unreadable paths or an exceeded scan bound stop cleanup. `lsof` is required;
+missing tools, warnings and incomplete scans stop the
+operation. User-owned private installations inspect that user's processes;
+shared/system installations must run as root to cover every service user.
+
+Create a mode-0600 JSON inventory **outside the source repository**, from the
+actual installation and its transaction records. All paths must be absolute,
+canonical, and owned/maintained within the operator's deployment scope. The tool
+does not discover unknown external transactions, infer generation age, or select
+files for you. List all relevant transaction records; if any outcome is unresolved,
+settle it first and retain its recovery set. Never list credentials, native
+sessions, live private state, project files or unrelated backups as candidates.
+
+Inventory schema (replace the illustrative paths):
+
+```json
+{
+  "schema": 1,
+  "installation_root": "/opt/cc-remote",
+  "current_release": "/opt/cc-remote/releases/release-new",
+  "rollback_paths": [
+    "/opt/cc-remote/releases/release-previous",
+    "/opt/cc-remote/rollback-data/before-new"
+  ],
+  "protected_paths": [],
+  "cleanup_roots": ["/opt/cc-remote/releases"],
+  "candidates": ["/opt/cc-remote/releases/release-old"],
+  "transactions": [
+    {"path": "/opt/cc-remote/transactions/activation.json", "field": "phase", "equals": "committed"}
+  ],
+  "checks": [
+    {"name": "release and public health", "argv": ["/absolute/path/to/read-only-health-check"], "cwd": "/"}
+  ]
+}
+```
+
+`rollback_paths` describes one complete recovery generation, including its
+configuration/state snapshots; it must contain exactly one previous release.
+Use `protected_paths` for additional service/runtime dependencies. Candidates
+must be direct children of explicitly named, dedicated `cleanup_roots`; nested
+candidates, symlink boundaries and mounts are rejected. Transaction expectations
+accept only completed states (`committed`, `complete`, `deployed_verified`,
+`ready`), and the records must remain unchanged throughout cleanup. Unknown
+layouts remain retained until their provenance is established.
+
+`checks` are operator-reviewed **read-only** argv arrays (no shell interpolation),
+run before retirement, after quarantine, and after removal. They must cover the
+actual role's release identity, stable services and health. For a Codex Wrapper,
+also include a fresh configuration check, executed **as the Wrapper service user**:
+
+```bash
+<wrapper-python> deploy/check_codex_readiness.py \
+  --home <service-home> --release <active-release> --after <activation-epoch> \
+  --live-config --wait 0
+# Add the installation's existing --plist or --env-file selector when needed.
+```
+
+On a root-managed Linux cleanup, use `runuser`/`sudo -u` in that check's argv to
+select the real service user. `--live-config` sends only initialize and
+`config/read` to existing account sockets: it neither starts a daemon nor
+creates/resumes a thread or sends a model message, and never prints configuration
+contents. It catches a daemon that accepts connections but can no longer load
+configuration. Verify an existing idle session's Wrapper status route separately
+as part of final acceptance; do not send a model turn without authorization.
+
+```bash
+<python> deploy/cleanup.py /private/path/cleanup-inventory.json
+<python> deploy/cleanup.py /private/path/cleanup-inventory.json --apply
+```
+
+Preview does not run acceptance commands or remove artifacts. Apply rescans live
+references immediately before each rename and permanent deletion. Candidates are
+temporarily renamed beside their original path; a failed quarantine check restores
+the intact directory. A new live reference defers deletion and restores that path.
+Checks are observations, not a lock on arbitrary external programs: operators must
+not launch jobs against retired paths during cleanup.
+
+The private `<installation-root>/.cleanup-transaction.json` records intent before
+each mutation. Exit 0 means success (or preview), 2 means applied cleanup completed
+with retained/deferred artifacts, and 1 means failure. A lost connection, partial
+deletion, or failed final check requires inspection of this exact journal before
+retrying. Do not remove the journal or rerun the command to hide an unknown result.
+Quarantine is temporary transaction state, not another retained backup or Trash.
 
 ### Deployment entrypoints
 

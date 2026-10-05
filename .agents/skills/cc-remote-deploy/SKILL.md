@@ -37,18 +37,26 @@ migration, remaining in-process `/btw` turns, and deferred queues separately;
 wait for them to drain instead of interrupting work. Do not restart or replace
 an active SDK service to satisfy a version/readiness check.
 
-## Keep only one rollback generation
+## Retain rollback and all live dependencies
 
 Apply [deployment backup retention](../../../deploy/README.md#deployment-backup-retention)
-on every in-scope host/install. Before creating another deployment backup, remove
-confirmed older, unreferenced backup generations, keeping the latest complete
-rollback set. After coordinated activation passes acceptance, replace that set
-with the version just superseded and its matching state/configuration snapshot.
-The active installation is not a backup. Do not accumulate dated copies, duplicate
-archives or Trash entries between deployments. Preserve active dependencies and
-unresolved transaction recovery files; report any deferred cleanup and recheck it
-on the next deployment. Include retained paths and actual space reclaimed in the
-handoff. This is an agent workflow requirement, not automatic installer pruning.
+on every in-scope host/install. Use the repository's `deploy/cleanup.py` with a
+private, reviewed inventory; do not write an ad hoc `rm`/`rmtree` retention script.
+Keep the active installation, one complete previous rollback generation, and
+every live dependency. Dependency protection overrides the generation count.
+Include all unresolved transactions and service dependencies in the inventory;
+unknown provenance or incomplete process visibility means deferred cleanup.
+
+Follow the documented preview, quarantine, fresh acceptance and final removal
+steps. Process argv alone is not evidence that a release is unused: cwd,
+executables, open files and retained symlink targets count too. A cleanup that
+fails or loses control remains an unresolved journal, not a reason to retry.
+After cleanup, repeat live config checks as each Codex service user and verify
+the Wrapper session route and public health. A pre-cleanup readiness receipt is
+not final acceptance. Report retained/deferred paths and removed allocated bytes;
+do not equate those bytes with actual free-space gain. No daemon or active task
+may be stopped solely to make an artifact deletable. Installers do not prune
+automatically.
 
 ## Codex CLI sharing is an acceptance check
 

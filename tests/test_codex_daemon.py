@@ -179,6 +179,31 @@ def test_daemon_lifecycle_child_raises_nofile_without_wrapping_reads(
     )
 
 
+def test_daemon_command_does_not_inherit_retired_release_cwd(tmp_path, monkeypatch):
+    release = tmp_path / "release"
+    home = tmp_path / "account-home"
+    release.mkdir()
+    home.mkdir()
+    monkeypatch.chdir(release)
+    # Exercise a real child, without invoking Codex or starting a daemon.
+    result = daemon_module._run_command(
+        (daemon_module.sys.executable, "-c", "import os; print(os.getcwd())"),
+        {"HOME": str(home)}, 5,
+    )
+    assert result.returncode == 0
+    assert Path(result.stdout.decode().strip()) == home.resolve()
+
+
+@pytest.mark.parametrize("home", ["relative-home", "/missing-cc-remote-test-home"])
+def test_daemon_command_refuses_unsafe_working_directory(monkeypatch, home):
+    def unexpected(*args, **kwargs):
+        pytest.fail("must not fall back to disposable caller cwd")
+    monkeypatch.setattr(daemon_module.subprocess, "run", unexpected)
+    result = daemon_module._run_command(("codex", "app-server", "daemon", "start"),
+                                       {"HOME": home}, 1)
+    assert result.returncode == 127
+
+
 @pytest.mark.parametrize("listener,allow_local,accepted", [
     ("remote", False, True), ("local", True, True), ("default", True, True),
     ("other", True, False), ("local", False, False), ("ambiguous", True, False),
