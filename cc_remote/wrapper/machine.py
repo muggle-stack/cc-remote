@@ -26108,10 +26108,6 @@ class WrapperMachine:
                 c.key for c in self.sessions.values()
                 if c.key and c.session_id and c.engine == "claude"
             }
-            resident_state = {
-                c.key: c.state for c in self.sessions.values()
-                if c.key and c.session_id and c.engine == "claude"
-            }
             work_records = await asyncio.to_thread(
                 self._work.for_engine("claude").records_by_profile_session)
             pinned_ids = (self._session_pins.ids("claude")
@@ -26163,7 +26159,6 @@ class WrapperMachine:
                         tag=("archived" if record and record.archived else
                              (info.tag or "")[:128] or None),
                         pinned=wire_sid in pinned_ids,
-                        state=resident_state.get(wire_sid),
                         engine="claude", space=space,
                         work_id=record.work_id if record else None,
                         native_session_id=info.session_id,
@@ -26209,14 +26204,23 @@ class WrapperMachine:
                                 session_id=broker_sid,
                                 summary="Claude Remote",
                                 cwd=broker_cwd[:4096],
-                                state=resident_state.get(broker_sid, "idle"),
+                                state="idle",
                                 pinned=broker_sid in pinned_ids,
                                 engine="claude",
                                 space="code",
                                 **self._session_presentation_fields("claude", broker_sid),
                             ))
                             known.add(broker_sid)
+            # Catalog metadata reads above can yield across a turn boundary.
+            # Sample activity only after the final read, so this later list
+            # cannot reintroduce running after the already-emitted idle frame
+            # (or erase a new running frame). Keep profile-qualified identities.
+            resident_state = {
+                c.key: c.state for c in self.sessions.values()
+                if c.key and c.session_id and c.engine == "claude"
+            }
             for session in sessions:
+                session.state = resident_state.get(session.session_id, session.state)
                 self._remember_notification_title(
                     session.session_id, session.summary or session.first_prompt)
             event = SessionList(
