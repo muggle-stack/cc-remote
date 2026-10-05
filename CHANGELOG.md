@@ -2,13 +2,27 @@
 
 [中文](CHANGELOG_zh.md)
 
-## Unreleased
+## v4.0.8
+
+Add native Codex cross-session message views and responsive mobile drawers;
+fix session state, model restoration and deployment cleanup. Wire protocol v74
+requires a coordinated upgrade. See the bilingual
+[release notes](docs/releases/v4.0.8.md).
 
 - Display native Codex cross-session messages and open their source conversations
-  in a scoped read-only history view. Wire protocol v74 requires a coordinated
-  Relay, Web, and Wrapper upgrade.
-- Keep at most one complete previous deployment rollback generation, preserving
-  active dependencies and unresolved transaction recovery files.
+  in a scoped read-only history view, preserving delivery outcomes and the
+  original conversation's reading position.
+- Reveal the mobile sidebar beneath a rounded foreground conversation, with
+  theme-aware shading, optional opening feedback and responsive repeated swipes.
+- Stabilize the main conversation layout when opening desktop BTW side chats.
+- Preserve Claude continuation order during live history refreshes and prevent
+  slow session-list reads from restoring a completed session's running badge.
+- Restore the native Codex model and settings when resuming long sessions.
+- Keep one complete previous deployment rollback generation, plus all active
+  dependencies and unresolved recovery files. Trace retained artifacts' complete
+  dependency chains and refuse cleanup when process visibility is incomplete.
+- Start Codex daemon lifecycle commands from a stable home directory and add a
+  read-only configuration check to deployment acceptance.
 
 ## v4.0.7
 
