@@ -1880,32 +1880,35 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .sgroup-toggle .label{ font-size:11.5px; font-weight:var(--font-weight-600); letter-spacing:.06em; text-transform:uppercase; color:var(--faint); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .sgroup-toggle .count{ font-size:10.5px; color:var(--faint); font-weight:var(--font-weight-500); flex:none; }
 @media (max-width:979px){
-  .shell{ --mobile-sidebar-width:min(352px,82vw); --sidebar-x:0px; --sidebar-progress:0;
-    --sidebar-page-radius:calc(var(--sidebar-progress) * clamp(36px,12vw,48px));
+  .shell{ --mobile-sidebar-width:min(352px,82vw);
     /* The drawer is the continuous lower surface, including the areas revealed
        behind BOTH rounded page corners beyond the drawer's content width. */
     background:var(--sidebar); isolation:isolate; }
-  .shell.sidebar-open{ --sidebar-x:var(--mobile-sidebar-width); --sidebar-progress:1; }
   /* Translate the full-width chat without reflowing history or its composer.
      Closed/resting panes have no transform, preserving fixed popover geometry. */
   .shell > .pane{ width:100%; margin-left:0; transform:none;
-    border-radius:var(--sidebar-page-radius);
-    transition:transform .3s var(--ease),border-radius .3s var(--ease),filter .3s var(--ease); }
+    border-radius:0; transition:none; }
   .shell:is(.sidebar-open,[data-sidebar-motion]) > .pane{
-    z-index:1; transform:translate3d(var(--sidebar-x),0,0); will-change:transform;
+    z-index:1; transform:translate3d(0,0,0); will-change:transform;
+    transition:transform .26s var(--ease);
     /* Direct filtering also works in WebKit's translated sibling layers.
        Resting/closed panes keep filter:none for viewport-fixed popovers. */
-    filter:blur(calc(var(--sidebar-progress) * .7px));
+    /* Keep the raster/clip stable while moving it. Re-filtering and reshaping
+       a long conversation on every finger position defeats the compositor. */
+    filter:blur(.7px); border-radius:clamp(36px,12vw,48px);
     box-shadow:-12px 0 36px -8px rgba(0,0,0,.32),0 0 0 1px rgba(255,255,255,.04); }
+  .shell.sidebar-open > .pane{ transform:translate3d(var(--mobile-sidebar-width),0,0); }
   .shell > .sessions{ position:absolute; top:0; width:var(--mobile-sidebar-width); height:100%; z-index:0;
-    visibility:hidden; transform:translate3d(calc((var(--sidebar-x) - var(--mobile-sidebar-width)) * .22),0,0);
-    transition:transform .3s var(--ease),visibility .3s; }
+    visibility:hidden; transform:translate3d(-22%,0,0);
+    transition:transform .26s var(--ease),visibility .26s; }
   .shell:is(.sidebar-open,[data-sidebar-motion]) > .sessions{ visibility:visible; }
+  .shell.sidebar-open > .sessions{ transform:translate3d(0,0,0); }
   .shell > .scrim-side{ position:absolute; top:0; height:100%; z-index:2;
-    transform:translate3d(var(--sidebar-x),0,0); opacity:var(--sidebar-progress);
-    border-radius:var(--sidebar-page-radius);
+    transform:translate3d(0,0,0); opacity:0; border-radius:0;
     background:rgba(0,0,0,.12);
-    transition:transform .3s var(--ease),opacity .3s var(--ease),border-radius .3s var(--ease); }
+    transition:transform .26s var(--ease),opacity .26s var(--ease); }
+  .shell:is(.sidebar-open,[data-sidebar-motion]) > .scrim-side{ border-radius:clamp(36px,12vw,48px); }
+  .shell.sidebar-open > .scrim-side{ transform:translate3d(var(--mobile-sidebar-width),0,0); opacity:1; }
   :root[data-theme="dark"] .shell > .scrim-side{ background:rgba(0,0,0,.18); }
   /* Light palettes need a gentle separation, not a gray sheet over the chat. */
   :root:not([data-theme="dark"]) .shell > .scrim-side{
@@ -1913,7 +1916,7 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
   :root:not([data-theme="dark"]) .shell:is(.sidebar-open,[data-sidebar-motion]) > .pane{
     box-shadow:-12px 0 36px -8px color-mix(in srgb,var(--dim) 24%,transparent),
       0 0 0 1px color-mix(in srgb,var(--dim) 7%,transparent); }
-  .shell[data-sidebar-motion="dragging"] > :is(.pane,.sessions,.scrim-side){ transition:none; }
+  .shell:is([data-sidebar-motion="dragging"],[data-sidebar-motion="holding"]) > :is(.pane,.sessions,.scrim-side){ transition:none; }
   .shell[data-sidebar-motion] > .scrim-side{ pointer-events:auto; }
 }
 @media (min-width:980px){

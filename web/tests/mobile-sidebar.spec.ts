@@ -100,6 +100,117 @@ test("mobile sidebar settles short drags, directional flicks and interrupted ges
   }
 });
 
+test("mobile sidebar reopens from the middle of the chat after a reverse swipe", async ({ page }) => {
+  await page.getByTestId("sidebar-toggle").click();
+  await settled(page, true);
+  await touch(page, "touchstart", 280, 280, 1000, ".sessions");
+  await touch(page, "touchmove", 210, 280, 1020, ".sessions");
+  await touch(page, "touchend", 180, 280, 1040, ".sessions");
+  await settled(page, false);
+  // The next opening swipe starts where the previous closing swipe finished.
+  await touch(page, "touchstart", 180, 280, 1100);
+  expect(await touch(page, "touchmove", 240, 280, 1120)).toBe(true);
+  await touch(page, "touchend", 290, 280, 1140);
+  await settled(page, true);
+});
+
+test("mobile sidebar keeps a new touch when the previous settle would finish", async ({ page }) => {
+  await touch(page, "touchstart", 50, 280, 1000);
+  await touch(page, "touchmove", 100, 280, 1200);
+  await touch(page, "touchend", 100, 280, 1400);
+  // Press during the closing animation; hold across the previous cleanup timer.
+  await touch(page, "touchstart", 55, 280, 1500);
+  await page.waitForTimeout(420);
+  expect(await touch(page, "touchmove", 180, 280, 1520)).toBe(true);
+  await touch(page, "touchend", 240, 280, 1540);
+  await settled(page, true);
+});
+
+test("mobile sidebar keeps recent flick velocity when touchend repeats the last coordinate", async ({ page }) => {
+  await touch(page, "touchstart", 180, 280, 1000);
+  await touch(page, "touchmove", 205, 280, 1040);
+  await touch(page, "touchmove", 230, 280, 1080);
+  await touch(page, "touchend", 230, 280, 1150);
+  await settled(page, true);
+  await touch(page, "touchstart", 280, 280, 2000, ".sessions");
+  await touch(page, "touchmove", 255, 280, 2040, ".sessions");
+  await touch(page, "touchmove", 230, 280, 2080, ".sessions");
+  await touch(page, "touchend", 230, 280, 2150, ".sessions");
+  await settled(page, false);
+  // Holding after a short drag cancels its momentum; distance decides instead.
+  await touch(page, "touchstart", 180, 280, 3000);
+  await touch(page, "touchmove", 205, 280, 3040);
+  await touch(page, "touchmove", 230, 280, 3080);
+  await touch(page, "touchend", 230, 280, 3300);
+  await settled(page, false);
+});
+
+test("mobile sidebar repeatedly reverses before settling and releases a vertical interruption", async ({ page }) => {
+  for (let index = 0; index < 12; index++) {
+    const opening = index % 2 === 0;
+    const start = opening ? 180 : 280;
+    const end = opening ? 280 : 180;
+    const time = 1000 + index * 100;
+    const selector = opening ? ".thread" : ".sessions";
+    await touch(page, "touchstart", start, 280, time, selector);
+    expect(await touch(page, "touchmove", (start + end) / 2, 280, time + 20, selector)).toBe(true);
+    await touch(page, "touchend", end, 280, time + 40, selector);
+    await expect(page.locator(".shell")).toHaveClass(opening ? /sidebar-open/ : /^shell(?: fixture-streaming)?$/);
+    await page.waitForTimeout(20);
+  }
+  await settled(page, false);
+  await touch(page, "touchstart", 180, 280, 3000);
+  await touch(page, "touchmove", 250, 280, 3020);
+  await touch(page, "touchend", 280, 280, 3040);
+  await touch(page, "touchstart", 200, 280, 3100, ".sessions");
+  expect(await touch(page, "touchmove", 200, 320, 3120, ".sessions")).toBe(false);
+  await touch(page, "touchend", 200, 320, 3140, ".sessions");
+  await settled(page, true);
+});
+
+test("mobile sidebar native touches reverse across the exposed closing surface", async ({ page, browserName }) => {
+  test.skip(browserName !== "chromium", "Trusted swipe injection uses Chromium CDP; WebKit checks the same rapid state transitions separately.");
+  const input = await page.context().newCDPSession(page);
+  await input.send("Emulation.setTouchEmulationEnabled", { enabled: true });
+  // Keep the source cadence explicit: waiting for each CDP acknowledgement can
+  // otherwise turn a 16ms flick into a slow drag on a busy test runner.
+  let timestamp = Date.now() / 1000;
+  const send = (type: "touchStart" | "touchMove" | "touchEnd", x: number) =>
+    input.send("Input.dispatchTouchEvent", { type, timestamp: timestamp += .016,
+      touchPoints: type === "touchEnd" ? [] : [{ x, y: 300, id: 1 }] });
+  for (let index = 0; index < 10; index++) {
+    const opening = index % 2 === 0;
+    const start = opening ? 180 : 280;
+    const end = opening ? 280 : 180;
+    await send("touchStart", start);
+    for (let step = 1; step <= 4; step++) {
+      await send("touchMove", start + (end - start) * step / 4);
+      await page.waitForTimeout(16);
+    }
+    await send("touchEnd", end);
+    if (opening) await expect(page.locator(".shell")).toHaveClass(/sidebar-open/);
+    else await expect(page.locator(".shell")).not.toHaveClass(/sidebar-open/);
+    await page.waitForTimeout(16);
+  }
+  // While closing, the exposed sidebar is inert. Hit testing reaches the shell
+  // itself; a swipe from this surface must still be able to reverse the drawer.
+  await page.locator(".shell").evaluate(shell => {
+    shell.addEventListener("touchstart", event => {
+      shell.setAttribute("data-native-touch-target", event.target === shell ? "shell" : "child");
+    }, { once: true });
+  });
+  await send("touchStart", 20);
+  await expect(page.locator(".shell")).toHaveAttribute("data-native-touch-target", "shell");
+  await send("touchMove", 70);
+  await send("touchEnd", 120);
+  await expect(page.locator(".shell")).toHaveClass(/sidebar-open/);
+  await send("touchStart", 280);
+  await send("touchMove", 230);
+  await send("touchEnd", 180);
+  await settled(page, false);
+  await input.detach();
+});
+
 test("mobile sidebar preserves vertical scrolling, horizontal scrollers, editors and selection", async ({ page }) => {
   await touch(page, "touchstart", 50, 280, 1000);
   expect(await touch(page, "touchmove", 60, 310, 1020)).toBe(false);
