@@ -106,6 +106,46 @@ def test_shared_venv_dependencies_are_transitive_and_cycles_are_bounded(installa
     assert old.is_dir()
 
 
+def test_nested_protection_keeps_sibling_dependency_during_single_candidate_rescan(installation):
+    _, _, _, old, inventory, _ = installation
+    retained = old.parent / "retained-build"
+    retained.mkdir()
+    protected = retained / "service-config"
+    protected.write_text("protected")
+    (retained / ".venv").symlink_to(old)
+    update_inventory(installation, candidates=[str(old), str(retained)],
+                     protected_paths=[str(protected)])
+    # Pre-rename checks request one candidate, but another retained candidate
+    # still protects its dependencies even without a live process reference.
+    reasons = module.protections(module.load_inventory(inventory), [old])[old]
+    assert "symlink dependency" in " ".join(reasons)
+    assert module.cleanup(inventory, apply=True)["status"] == "deferred"
+    assert old.is_dir() and retained.is_dir()
+
+
+@pytest.mark.parametrize("apply", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_dependency_on_candidate_child_retains_whole_dependency_closure(installation, apply, reverse):
+    root, current, _, old, inventory, _ = installation
+    retained = old.parent / "retained-build"
+    retained.mkdir()
+    (retained / "package").mkdir()
+    (current / "package").symlink_to(retained / "package")
+    (retained / ".venv").symlink_to(old)
+    (old / "cycle").symlink_to(retained)
+    candidates = [old, retained]
+    if reverse:
+        candidates.reverse()
+    update_inventory(installation, candidates=[str(p) for p in candidates])
+    report = module.cleanup(inventory, apply=apply)
+    assert all(row["state"] == "deferred" for row in report["candidates"])
+    assert old.is_dir() and retained.is_dir()
+    assert (retained / ".venv").resolve(strict=True) == old
+    assert not list(old.parent.glob(".cc-remote-retired-*"))
+    if apply:
+        assert json.loads((root / module.JOURNAL).read_text())["status"] == "deferred"
+
+
 def test_newly_busy_candidate_protects_its_dependency_before_other_candidate_moves(installation, monkeypatch):
     _, _, _, old, inventory, _ = installation
     busy = old.parent / "busy-build"
@@ -242,8 +282,23 @@ def test_lsof_parser_preserves_space_paths_and_cwd_without_argv():
     assert module.parse_lsof(b'p42\0\nfcwd\0n/opt/old release\0\nf9\0n/opt/file name\0\n') == [
         (42, "cwd", Path("/opt/old release")), (42, "9", Path("/opt/file name")),
     ]
+
+
+@pytest.mark.parametrize("record", [
+    b'p42\0\nfNOFD\0nPermission denied\0',
+    b'p42\0\nfcwd\0n/proc/42/cwd (readlink: Permission denied)\0',
+    b'p42\0\nfrtd\0n/proc/42/root (readlink: Operation not permitted)\0',
+])
+def test_unobservable_process_record_stops_cleanup(installation, monkeypatch, record):
+    root, _, _, old, inventory, _ = installation
+    monkeypatch.setattr(module, "scan_command", lambda argv: record)
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/lsof")
+    monkeypatch.setattr(module, "process_references", REAL_PROCESS_REFERENCES)
     with pytest.raises(module.CleanupError, match="not fully observable"):
-        module.parse_lsof(b'p42\0\nfNOFD\0nPermission denied\0')
+        module.cleanup(inventory, apply=True)
+    assert old.is_dir()
+    assert not list(old.parent.glob(".cc-remote-retired-*"))
+    assert not (root / module.JOURNAL).exists()
 
 
 @pytest.mark.parametrize("failure", ["missing", "warning", "exit"])
@@ -269,21 +324,33 @@ def test_check_timeout_never_discloses_private_arguments(installation, monkeypat
 
 @pytest.mark.skipif(not shutil.which("lsof"), reason="live process regression requires lsof")
 def test_cli_previews_and_applies_isolated_installation_with_real_scans(installation):
-    _, current, previous, old, inventory, _ = installation
+    root, current, previous, old, inventory, _ = installation
     command = [sys.executable, str(Path(module.__file__).resolve()), str(inventory)]
-    preview = subprocess.run(command, capture_output=True, text=True, timeout=60, check=True)
-    assert json.loads(preview.stdout)["candidates"][0]["state"] == "planned"
-    assert old.is_dir()
-    applied = subprocess.run([*command, "--apply"], capture_output=True, text=True, timeout=60, check=True)
-    report = json.loads(applied.stdout)
-    assert report["status"] == "complete"
-    assert report["candidates"][0]["state"] == "removed"
-    assert current.is_dir() and previous.is_dir() and not old.exists()
+    for apply in (False, True):
+        result = subprocess.run([*command, *(["--apply"] if apply else [])],
+                                capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            # Hosted Linux runners can have same-user nondumpable processes.
+            # The real CLI must refuse cleanup in that environment, not ignore
+            # denied /proc records or require elevated test-suite privileges.
+            assert result.returncode == 1
+            assert result.stderr.strip() == (
+                "Cleanup stopped (CleanupError): process files are not fully observable")
+            assert not result.stdout.strip()
+            assert old.is_dir()
+            assert not (root / module.JOURNAL).exists()
+        else:
+            report = json.loads(result.stdout)
+            assert report["status"] == ("complete" if apply else "preview")
+            assert report["candidates"][0]["state"] == ("removed" if apply else "planned")
+            assert old.exists() is not apply
+        assert current.is_dir() and previous.is_dir()
+        assert not list(old.parent.glob(".cc-remote-retired-*"))
 
 
 @pytest.mark.skipif(not shutil.which("lsof"), reason="live process regression requires lsof")
 @pytest.mark.parametrize("reference", ["cwd", "file"])
-def test_real_process_reference_absent_from_command_line_is_protected(installation, reference):
+def test_real_process_reference_absent_from_command_line_is_protected(installation, monkeypatch, reference):
     _, _, _, old, inventory, _ = installation
     code = ("import os,time; "
             "f=open(os.environ['CLEANUP_TEST_FILE']) if os.environ['CLEANUP_TEST_KIND']=='file' else None; "
@@ -294,6 +361,14 @@ def test_real_process_reference_absent_from_command_line_is_protected(installati
             stdout=subprocess.PIPE, text=True)
     try:
         assert proc.stdout.readline().strip() == "ready"
+        scan_command = module.scan_command
+        def scan_fixture_process(argv):
+            # Exercise real lsof and ps against this fixture's owned process,
+            # independently of unrelated runner processes with restricted /proc.
+            if Path(argv[0]).name == "lsof":
+                argv = [*argv, "-a", "-p", str(proc.pid)]
+            return scan_command(argv)
+        monkeypatch.setattr(module, "scan_command", scan_fixture_process)
         found = REAL_PROCESS_REFERENCES([old])[old]
         assert any(reason.startswith(f"pid {proc.pid}:") for reason in found)
         assert f"pid {proc.pid}: argv" not in found

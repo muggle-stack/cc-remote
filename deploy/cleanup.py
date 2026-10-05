@@ -238,13 +238,14 @@ def artifact_entries(root: Path):
                 pending.extend(Path(entry.path) for entry in entries)
 
 
-def symlink_dependencies(roots: list[Path]) -> set[Path]:
+def symlink_dependencies(roots: list[Path], *, candidates: list[Path] | None = None) -> set[Path]:
     """Read a bounded dependency closure, including links through shared venvs.
 
     This traversal only reads. Deletion uses artifact_entries, which never
     follows links. Cycles and shared directories are visited just once.
     """
     pending = list(roots)
+    queued_artifacts = set(roots)
     visited = set()
     targets = set()
     while pending:
@@ -267,6 +268,13 @@ def symlink_dependencies(roots: list[Path]) -> set[Path]:
                 target = path.resolve(strict=True)
                 targets.add(target)
                 pending.append(target)
+                # Retaining a child retains the entire candidate. Its sibling
+                # links may protect further artifacts outside the target tree.
+                for candidate in candidates or []:
+                    if (candidate not in queued_artifacts and overlaps(target, candidate)
+                            and candidate.exists()):
+                        queued_artifacts.add(candidate)
+                        pending.append(candidate)
             elif stat.S_ISDIR(info.st_mode):
                 with os.scandir(path) as children:
                     entries.extend(Path(child.path) for child in children)
@@ -278,20 +286,20 @@ def protections(plan: dict, paths: list[Path]) -> dict[Path, list[str]]:
     observed = process_references(list(dict.fromkeys([
         *plan["candidates"], *plan.get("quarantined_paths", []), *paths,
     ])))
-    found = {p: observed[p] for p in paths}
+    found = {p: list(reasons) for p, reasons in observed.items()}
     for protected in plan["protected"]:
-        for candidate in paths:
+        for candidate in found:
             if overlaps(candidate, protected):
                 found[candidate].append("active release, rollback, transaction or explicit dependency")
-    # A candidate already retained for a live process can itself depend on
-    # another candidate. Trace those dependencies before retiring either one.
+    # Every retained candidate protects its complete dependency closure, even
+    # when this is a single-path rescan or only a nested file is protected.
     roots = [p for p in plan["protected"] if p.exists()]
-    roots.extend(p for p, reasons in observed.items() if reasons and p.exists())
-    for target in symlink_dependencies(roots):
+    roots.extend(p for p, reasons in found.items() if reasons and p.exists())
+    for target in symlink_dependencies(roots, candidates=list(found)):
         for candidate in paths:
             if overlaps(target, candidate):
                 found[candidate].append("symlink dependency of retained artifact")
-    return found
+    return {p: found[p] for p in paths}
 
 
 def run_checks(plan: dict) -> None:
