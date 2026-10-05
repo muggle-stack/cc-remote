@@ -33,6 +33,7 @@ from cc_remote.wrapper import claude_catalog, machine as machine_module
 from cc_remote.wrapper.machine import WrapperMachine
 from cc_remote.wrapper.session_presentation import SessionPresentationStore
 from cc_remote.viewer_pages import PageRef, PageScope, ViewerPageStore
+from tests.test_multisession import _mk_ctx
 
 
 NATIVE_ID = "11111111-1111-4111-8111-111111111111"
@@ -843,6 +844,80 @@ def test_claude_profile_transitions_migrate_viewer_scopes_once(
     assert store.list(codex_scope)[0]["label"] == "Personal"
     assert ViewerPageStore(store.path).list(scope) == store.list(scope)
     assert multi.sessions == recovered.sessions == single.sessions == {}
+
+
+@pytest.mark.parametrize("late_read", ["presentation", "broker"])
+@pytest.mark.parametrize("next_state", ["idle", "running", None])
+def test_claude_catalog_samples_activity_after_async_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    late_read: str,
+    next_state: str | None,
+) -> None:
+    personal, company = tmp_path / "personal", tmp_path / "company"
+    _write_transcript(personal, "personal prompt")
+    _write_transcript(company, "company prompt")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(personal))
+    cfg = WrapperConfig()
+    cfg.state_dir = tmp_path / "state"
+    cfg.claude_work_root = tmp_path / "work" / "claude"
+    cfg.codex_work_root = tmp_path / "work" / "codex"
+    # Exercise both namespaced accounts and the legacy broker's final await.
+    cfg.claude_profiles_json = (
+        _profiles(personal, company) if late_read == "presentation" else ""
+    )
+    transport = _StubTransport()
+    machine = WrapperMachine(cfg, transport)
+
+    async def run():
+        sid = machine._claude_wire_sid(machine._claude_profiles.default, NATIVE_ID)
+        ctx = _mk_ctx(sid, NATIVE_ID)
+        ctx.claude_profile_id = machine._claude_profiles.default.id
+        ctx.state = "idle" if next_state == "running" else "running"
+        machine.sessions[sid] = ctx
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def delayed_read(*_args):
+            entered.set()
+            await release.wait()
+            return {"sessions": []}
+
+        if late_read == "presentation":
+            monkeypatch.setattr(
+                machine, "_claim_legacy_presentation_from_claude_catalog",
+                delayed_read,
+            )
+        else:
+            machine._claude_broker_enabled = True
+            machine._claude_broker = SimpleNamespace(list=delayed_read)
+
+        pending = asyncio.create_task(machine._handle_list_sessions(ListSessions(
+            engine="claude", space="code", client_id="viewer")))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        try:
+            # The terminal/start/eviction reaches the viewer while the older
+            # catalog request is still waiting on unrelated metadata I/O.
+            if next_state is None:
+                del machine.sessions[sid]
+            else:
+                await machine._set_state(ctx, next_state)
+        finally:
+            release.set()
+        listing = await asyncio.wait_for(pending, timeout=5)
+        assert isinstance(listing, SessionList)
+        row = next(row for row in listing.sessions if row.session_id == sid)
+        assert row.state == next_state
+        assert transport.sent[-1] is listing
+        if next_state is not None:
+            assert transport.sent[-2].type == "state"
+            assert transport.sent[-2].sid == sid
+            assert transport.sent[-2].state == next_state
+        if late_read == "presentation":
+            other = next(row for row in listing.sessions
+                         if row.session_id == f"company@{NATIVE_ID}")
+            assert other.state is None
+
+    asyncio.run(run())
 
 
 def test_claude_session_list_fails_closed_during_profile_migration() -> None:

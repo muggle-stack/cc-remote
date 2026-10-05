@@ -102,7 +102,13 @@ class _CommandResult:
 def _run_command(
     argv: tuple[str, ...], env: Mapping[str, str], timeout: float,
 ) -> _CommandResult:
-    """Blocking subprocess boundary, kept separate for deterministic tests."""
+    """Run native lifecycle commands outside the disposable Wrapper release."""
+    # Native start/restart inherits this cwd into the durable app-server. A
+    # release can be retired while that server survives several Wrapper upgrades.
+    # Never fall back to the caller's cwd, including for read-only lifecycle probes.
+    home = env.get("HOME") or str(Path.home())
+    if not os.path.isabs(home) or not os.path.isdir(home):
+        return _CommandResult(127, b"", b"InvalidDaemonWorkingDirectory")
     command_argv = argv
     if os.name == "posix" and any(
         argv[index:index + 2] == ("app-server", "daemon")
@@ -126,6 +132,7 @@ def _run_command(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=dict(env),
+            cwd=home,
             timeout=timeout,
             check=False,
         )

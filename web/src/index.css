@@ -957,10 +957,9 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .ptab.on{ color:var(--accent-text,var(--accent)); background:var(--accent-weak); }
 .ptab:not(.on):hover{ color:var(--text); }
 
-/* desktop: an open right panel PUSHES the chat left (split), not covers it.
-   mobile keeps the full-width bottom-sheet overlay (panels' max-width media
-   query), so this only applies >=981px. */
-.pane{ transition:padding-right .26s var(--ease); }
+/* Reserve the final right-panel width in one layout. Animating this padding
+   repeatedly wraps paragraphs and remeasures virtual history while opening.
+   The floating panel keeps its own slide-in animation; mobile stays overlay. */
 @media (min-width:981px){
   .shell.panel-open .pane{ padding-right:calc(var(--panel-w) + 28px); }
 }
@@ -1722,6 +1721,12 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .tt{ position:fixed; top:16px; right:16px; z-index:61; }
 
 /* SESSIONS SIDEBAR */
+.sidebar-native-toggle{ position:relative; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+/* Keep the genuine switch in the tap path for Safari haptics. It is the only
+   accessible control; the existing title remains its visual presentation. */
+.sidebar-native-toggle > input{ position:absolute; inset:0; width:100%; height:100%; margin:0;
+  opacity:0; cursor:inherit; }
+.sidebar-native-toggle:has(> input:focus-visible){ outline:2px solid var(--accent); outline-offset:2px; border-radius:6px; }
 .scrim-side{ position:fixed; inset:0; z-index:25; background:rgba(30,22,12,.34); opacity:0; pointer-events:none; transition:.2s; }
 .scrim-side.show{ opacity:1; pointer-events:auto; }
 :root[data-theme="dark"] .scrim-side{ background:rgba(0,0,0,.55); }
@@ -1874,13 +1879,53 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .sgroup-toggle:focus-visible~.sgroup-path-tip{ opacity:1; visibility:visible; transform:translateY(0); }
 .sgroup-toggle .label{ font-size:11.5px; font-weight:var(--font-weight-600); letter-spacing:.06em; text-transform:uppercase; color:var(--faint); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .sgroup-toggle .count{ font-size:10.5px; color:var(--faint); font-weight:var(--font-weight-500); flex:none; }
+@media (max-width:979px){
+  .shell{ --mobile-sidebar-width:min(352px,82vw);
+    /* The drawer is the continuous lower surface, including the areas revealed
+       behind BOTH rounded page corners beyond the drawer's content width. */
+    background:var(--sidebar); isolation:isolate; }
+  /* Translate the full-width chat without reflowing history or its composer.
+     Closed/resting panes have no transform, preserving fixed popover geometry. */
+  .shell > .pane{ width:100%; margin-left:0; transform:none;
+    border-radius:0; transition:none; }
+  .shell:is(.sidebar-open,[data-sidebar-motion]) > .pane{
+    z-index:1; transform:translate3d(0,0,0); will-change:transform;
+    transition:transform .26s var(--ease);
+    /* Direct filtering also works in WebKit's translated sibling layers.
+       Resting/closed panes keep filter:none for viewport-fixed popovers. */
+    /* Keep the raster/clip stable while moving it. Re-filtering and reshaping
+       a long conversation on every finger position defeats the compositor. */
+    filter:blur(.7px); border-radius:clamp(36px,12vw,48px);
+    box-shadow:-12px 0 36px -8px rgba(0,0,0,.32),0 0 0 1px rgba(255,255,255,.04); }
+  .shell.sidebar-open > .pane{ transform:translate3d(var(--mobile-sidebar-width),0,0); }
+  .shell > .sessions{ position:absolute; top:0; width:var(--mobile-sidebar-width); height:100%; z-index:0;
+    visibility:hidden; transform:translate3d(-22%,0,0);
+    transition:transform .26s var(--ease),visibility .26s; }
+  .shell:is(.sidebar-open,[data-sidebar-motion]) > .sessions{ visibility:visible; }
+  .shell.sidebar-open > .sessions{ transform:translate3d(0,0,0); }
+  .shell > .scrim-side{ position:absolute; top:0; height:100%; z-index:2;
+    transform:translate3d(0,0,0); opacity:0; border-radius:0;
+    background:rgba(0,0,0,.12);
+    transition:transform .26s var(--ease),opacity .26s var(--ease); }
+  .shell:is(.sidebar-open,[data-sidebar-motion]) > .scrim-side{ border-radius:clamp(36px,12vw,48px); }
+  .shell.sidebar-open > .scrim-side{ transform:translate3d(var(--mobile-sidebar-width),0,0); opacity:1; }
+  :root[data-theme="dark"] .shell > .scrim-side{ background:rgba(0,0,0,.18); }
+  /* Light palettes need a gentle separation, not a gray sheet over the chat. */
+  :root:not([data-theme="dark"]) .shell > .scrim-side{
+    background:color-mix(in srgb,var(--dim) 3%,transparent); }
+  :root:not([data-theme="dark"]) .shell:is(.sidebar-open,[data-sidebar-motion]) > .pane{
+    box-shadow:-12px 0 36px -8px color-mix(in srgb,var(--dim) 24%,transparent),
+      0 0 0 1px color-mix(in srgb,var(--dim) 7%,transparent); }
+  .shell:is([data-sidebar-motion="dragging"],[data-sidebar-motion="holding"]) > :is(.pane,.sessions,.scrim-side){ transition:none; }
+  .shell[data-sidebar-motion] > .scrim-side{ pointer-events:auto; }
+}
 @media (min-width:980px){
   /* Animate two ordinary lengths instead of grid-template-columns. Chromium
      can strand an interpolated 0px/1fr grid track; a fixed sidebar transform
      plus a matching pane offset keeps the slide smooth without that failure. */
   .shell{ display:block; height:var(--app-height,100dvh); }
   .pane{ width:100%; margin-left:0;
-    transition:margin-left .3s var(--ease),width .3s var(--ease),padding-right .26s var(--ease); }
+    transition:margin-left .3s var(--ease),width .3s var(--ease); }
   .shell.sidebar-open .pane{ width:calc(100% - 352px); margin-left:352px; }
   .sessions{ position:fixed; width:352px; height:var(--app-height,100dvh); overflow:hidden; }
   .s-inner{ width:100%; }

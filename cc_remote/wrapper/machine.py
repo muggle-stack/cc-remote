@@ -304,6 +304,7 @@ from cc_remote.wrapper.codex_process_clocks import (
     CodexProcessClockStoreError,
 )
 from cc_remote.wrapper.codex_permissions import codex_permission_profiles
+from cc_remote.wrapper.codex_delegation import is_codex_delegation_output
 from cc_remote.wrapper.codex_stream import (
     CodexHistoryImageView, CodexHistoryNativeWitness,
     CodexHistoryProcessPageWitness, CodexLiveUserMessage,
@@ -22402,6 +22403,7 @@ class WrapperMachine:
                     msg_id=user.message_id,
                     client_msg_id=user.client_id,
                     prompt=user.prompt,
+                    source_thread_id=user.source_thread_id,
                 ))
                 await self._emit(ctx, TurnBinding(
                     msg_id=user.message_id,
@@ -22433,6 +22435,7 @@ class WrapperMachine:
                     msg_id=user.message_id,
                     client_msg_id=user.client_id,
                     prompt=user.prompt,
+                    source_thread_id=user.source_thread_id,
                 ))
                 await self._emit(ctx, TurnBinding(
                     msg_id=user.client_id,
@@ -22454,6 +22457,7 @@ class WrapperMachine:
                 msg_id=user.message_id,
                 turn_id=current_turn_id,
                 prompt=user.prompt,
+                source_thread_id=user.source_thread_id,
             ))
             return True
 
@@ -22462,7 +22466,8 @@ class WrapperMachine:
                 return False
             params = raw.get("params")
             item = params.get("item") if isinstance(params, dict) else None
-            return isinstance(item, dict) and item.get("type") == "userMessage"
+            return (isinstance(item, dict) and item.get("type") == "userMessage"
+                    or is_codex_delegation_output(item))
 
         def raw_proves_automatic_output(raw: dict) -> bool:
             method = raw.get("method")
@@ -26103,10 +26108,6 @@ class WrapperMachine:
                 c.key for c in self.sessions.values()
                 if c.key and c.session_id and c.engine == "claude"
             }
-            resident_state = {
-                c.key: c.state for c in self.sessions.values()
-                if c.key and c.session_id and c.engine == "claude"
-            }
             work_records = await asyncio.to_thread(
                 self._work.for_engine("claude").records_by_profile_session)
             pinned_ids = (self._session_pins.ids("claude")
@@ -26158,7 +26159,6 @@ class WrapperMachine:
                         tag=("archived" if record and record.archived else
                              (info.tag or "")[:128] or None),
                         pinned=wire_sid in pinned_ids,
-                        state=resident_state.get(wire_sid),
                         engine="claude", space=space,
                         work_id=record.work_id if record else None,
                         native_session_id=info.session_id,
@@ -26204,14 +26204,23 @@ class WrapperMachine:
                                 session_id=broker_sid,
                                 summary="Claude Remote",
                                 cwd=broker_cwd[:4096],
-                                state=resident_state.get(broker_sid, "idle"),
+                                state="idle",
                                 pinned=broker_sid in pinned_ids,
                                 engine="claude",
                                 space="code",
                                 **self._session_presentation_fields("claude", broker_sid),
                             ))
                             known.add(broker_sid)
+            # Catalog metadata reads above can yield across a turn boundary.
+            # Sample activity only after the final read, so this later list
+            # cannot reintroduce running after the already-emitted idle frame
+            # (or erase a new running frame). Keep profile-qualified identities.
+            resident_state = {
+                c.key: c.state for c in self.sessions.values()
+                if c.key and c.session_id and c.engine == "claude"
+            }
             for session in sessions:
+                session.state = resident_state.get(session.session_id, session.state)
                 self._remember_notification_title(
                     session.session_id, session.summary or session.first_prompt)
             event = SessionList(
@@ -36081,7 +36090,7 @@ class WrapperMachine:
                 if mode in CODEX_COLLABORATION_MODES:
                     sdk.collaboration_mode = mode
                 try:
-                    resolved_model, model_replaced = (
+                    resolved_model, _ = (
                         await self._resolve_codex_profile_model(
                             codex_profile,
                             model,
@@ -36097,7 +36106,7 @@ class WrapperMachine:
                     )
                     return None
                 model = resolved_model
-                if model and (model_replaced or explicit_codex_model):
+                if model and explicit_codex_model:
                     codex_resume_model_reconcile = model
             if model:
                 sdk.model = model
@@ -36222,6 +36231,18 @@ class WrapperMachine:
                 await ctx.sdk.connect(
                     **codex_connect_options,
                 )
+                if resume_id and not explicit_codex_model:
+                    # A missing/stale rollout tail cannot retire a live choice.
+                    # Validate the authoritative resume model before deciding
+                    # whether this account's advertised default must replace it.
+                    native_model = getattr(ctx.sdk, "model", None)
+                    resolved_model, model_replaced = (
+                        await self._resolve_codex_profile_model(
+                            codex_profile, native_model,
+                        )
+                    )
+                    if native_model and model_replaced:
+                        codex_resume_model_reconcile = resolved_model
                 if (
                     resume_id
                     and codex_resume_model_reconcile
@@ -37925,7 +37946,8 @@ class WrapperMachine:
             initial = bool(codex_initial_msg_id and codex_initial_msg_id in {
                 user.message_id, user.client_id,
             })
-            if not initial and not user.client_id and not codex_initial_user_seen:
+            if (not initial and not user.client_id and not user.source_thread_id
+                    and not codex_initial_user_seen):
                 # A missed initial echo cannot turn an unlabelled first item
                 # into a second input. Never guess from equal prompt text.
                 return
@@ -37951,6 +37973,7 @@ class WrapperMachine:
                 msg_id=msg_id,
                 turn_id=user.turn_id,
                 prompt=user.prompt,
+                source_thread_id=user.source_thread_id,
             ))
             if user.client_id is not None:
                 # Reconcile the canonical history id only after the boundary;
@@ -37959,6 +37982,7 @@ class WrapperMachine:
                     msg_id=user.message_id,
                     client_msg_id=user.client_id,
                     prompt=user.prompt,
+                    source_thread_id=user.source_thread_id,
                 ))
 
         async def emit_codex_event(event) -> None:

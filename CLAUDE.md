@@ -18,6 +18,9 @@ For deployment, upgrade, verification or recovery, read the repository skill at
 even if this client does not discover `.agents/skills` automatically. It routes
 to the maintained [`deploy/README.md`](deploy/README.md) automation contract,
 installation paths and shared-control acceptance; do not invent another flow.
+Use `deploy/cleanup.py` for retention; preserve live cwd/open-file and runtime
+dependencies beyond the rollback count. Incomplete visibility means retain the
+files. Final acceptance, including live Codex config reads, runs after cleanup.
 
 Codex Code acceptance requires the daily CLI and Wrapper to use the same
 official daemon for each account. An online Web UI alone is insufficient. Never
@@ -97,7 +100,7 @@ a separate choice; sharing alone does not authorize them.
   `useLayoutEffect` is deliberately dependency-free — late virtualizer/image
   measurements settle without a React render, and constraining it to its read
   set reintroduces a full-viewport jump on touch release.
-- **Protocol version gate**: current wire protocol v73 is declared by
+- **Protocol version gate**: current wire protocol v74 is declared by
   `PROTOCOL_VERSION` in both `protocol.py` and `web/src/protocol.ts`.
   `deserialize` hard-rejects a version mismatch, and
   `_Base` is `extra="forbid"`, so ANY protocol change must be deployed to all

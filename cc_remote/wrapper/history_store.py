@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from cc_remote.wrapper.codex_delegation import codex_message_target
+
 from cc_remote.attachments import (
     ALLOWED_IMAGE_TYPES,
     MAX_IMAGE_DIMENSION,
@@ -72,7 +74,8 @@ from cc_remote.wrapper.usage_limit import is_usage_limit_failure
 # v45 restores public AgentMessage records in new Codex rollouts and the
 # native owner of source-window tails. Old tools-only projections must rebuild.
 # v46 restores native commands, source clocks and closed segment envelopes.
-_SCHEMA_VERSION = 46
+# v47 preserves native cross-thread provenance and outgoing message receipts.
+_SCHEMA_VERSION = 47
 _FINGERPRINT_SAMPLE_BYTES = 64 * 1024
 _DEFAULT_MAX_ENTRIES = 128
 _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
@@ -563,6 +566,8 @@ def materialize_history_turns(
         prompt = ""
         has_user = False
         client_msg_id = None
+        source_thread_id = None
+        session_messages: dict[str, dict] = {}
         prompt_truncated = False
         image_refs: list[dict[str, Any]] = []
         deferred_image_count = 0
@@ -697,6 +702,7 @@ def materialize_history_turns(
                 started_ms = _event_ms(event.get("ts"))
             if event_type == "user_msg":
                 has_user = True
+                source_thread_id = event.get("source_thread_id")
                 if isinstance(event.get("client_msg_id"), str):
                     client_msg_id = event["client_msg_id"]
                 if isinstance(event.get("prompt"), str):
@@ -798,6 +804,18 @@ def materialize_history_turns(
             elif event_type == "error":
                 if isinstance(event.get("message"), str):
                     error = _historical_turn_failure(event["message"])
+            if event_type == "tool_use" and len(session_messages) < 16:
+                target = codex_message_target(event.get("tool"), event.get("input"), event.get("server"))
+                item_id = event.get("tool_use_id")
+                if target and isinstance(item_id, str):
+                    session_messages.setdefault(item_id, {
+                        "itemId": item_id, "threadId": target, "status": "sending",
+                    })
+            elif event_type == "tool_result" and event.get("tool_use_id") in session_messages:
+                session_messages[event["tool_use_id"]]["status"] = (
+                    "failed" if event.get("is_error") or event.get("status") in {
+                        "failed", "cancelled", "declined", "interrupted",
+                    } else "sent")
             if include_live_detail and event_type == "tool_use":
                 tool_id = event.get("tool_use_id")
                 message_id = event.get("message_id")
@@ -1217,6 +1235,8 @@ def materialize_history_turns(
         }
         optional = {
             "clientMsgId": client_msg_id,
+            "sourceThreadId": source_thread_id,
+            "sessionMessages": list(session_messages.values()) or None,
             "forkPointId": fork_point,
             "checkpointId": checkpoint_id,
             "imageRefs": image_refs or None,
@@ -1438,6 +1458,10 @@ class HistoryIndexStore:
                 for table in ("history_pages", "history_turn_details"):
                     connection.execute(
                         f"DELETE FROM {table} WHERE engine='codex'")
+            if 0 < current < 47:
+                # v47 projects native Codex cross-thread input envelopes.
+                for table in ("history_pages", "history_turn_details"):
+                    connection.execute(f"DELETE FROM {table} WHERE engine='codex'")
             if current in (10, 11, 12, 13, 14, 15, 16):
                 # v16 makes browser/native ownership durable; v17 reuses the
                 # adjacent native response-item id for legacy Codex user rows.
@@ -1468,7 +1492,7 @@ class HistoryIndexStore:
                 for table in ("history_pages", "history_turn_details"):
                     connection.execute(
                         f"DELETE FROM {table} WHERE engine='codex'")
-            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45):
+            elif current in (21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46):
                 # The independent v22-v44 invalidations above suffice.
                 pass
             elif current not in (0, _SCHEMA_VERSION):

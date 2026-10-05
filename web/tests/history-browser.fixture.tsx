@@ -1,3 +1,5 @@
+import { SessionMessagesFixture } from "./fixtures/session-messages";
+import { MobileSidebarFixture } from "./fixtures/mobile-sidebar";
 import {
   useCallback,
   useEffect,
@@ -3082,7 +3084,9 @@ function CodexFileCitationFixture() {
 
 const rootParams = new URLSearchParams(window.location.search);
 createRoot(document.getElementById("root")!).render(
-  rootParams.has("turn-usage") ? <TurnUsageFixture />
+  rootParams.has("mobile-sidebar") ? <MobileSidebarFixture />
+    : rootParams.has("session-messages") ? <SessionMessagesFixture />
+    : rootParams.has("turn-usage") ? <TurnUsageFixture />
     : rootParams.has("artifact-mermaid")
     ? <MermaidArtifactFixture />
     : rootParams.has("artifact-audio")

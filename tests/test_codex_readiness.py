@@ -309,6 +309,62 @@ def test_install_report_keeps_cli_discovery_unverified_and_errors_separate(capsy
     assert "版本不一致" in output
 
 
+@pytest.mark.parametrize("mode", ["ready", "deleted_cwd", "invalid", "hang", "swapped"])
+def test_live_config_probe_rejects_healthy_handshake_but_unusable_config(monkeypatch, mode):
+    calls = []
+    monkeypatch.setattr(readiness, "_TIMEOUT", 0.15 if mode == "hang" else 3)
+    async def handler(ws):
+        request = json.loads(await ws.recv())
+        calls.append(request["method"])
+        await ws.send(json.dumps({"id": 1, "result": {}}))
+        calls.append(json.loads(await ws.recv())["method"])
+        request = json.loads(await ws.recv())
+        calls.append(request["method"])
+        assert request["params"] == {"includeLayers": False}
+        if mode == "hang":
+            await ws.wait_closed()
+            return
+        result = {"config": {"private-value": "must-not-be-printed"}}
+        if mode == "invalid":
+            result = {}
+        response = ({"id": 2, "error": {"message": "private config path: ENOENT"}}
+                    if mode == "deleted_cwd" else {"id": 2, "result": result})
+        await ws.send(json.dumps(response))
+        await ws.wait_closed()
+    async def check():
+        with tempfile.TemporaryDirectory(prefix="cc-config-", dir="/tmp") as directory:
+            path = str(Path(directory).resolve() / "socket")
+            async with unix_serve(handler, path, close_timeout=0.1):
+                os.chmod(path, 0o600)
+                if mode == "swapped":
+                    identities = iter([(1, 2, 3), (1, 4, 5)])
+                    monkeypatch.setattr(readiness, "socket_identity", lambda *a, **kw: next(identities))
+                if mode == "ready":
+                    await readiness.probe_config(path)
+                else:
+                    with pytest.raises((RuntimeError, TimeoutError)) as error:
+                        await readiness.probe_config(path)
+                    assert "private" not in str(error.value)
+    asyncio.run(check())
+    assert calls == ["initialize", "initialized", "config/read"]
+
+
+@pytest.mark.parametrize("wrong_user", [False, True])
+def test_live_installer_check_is_fresh_and_runs_only_as_service_owner(monkeypatch, wrong_user):
+    calls = []
+    async def probe(path):
+        calls.append(path)
+        raise RuntimeError("secret diagnostic")
+    monkeypatch.setattr(installer, "probe_config", probe)
+    monkeypatch.setattr(installer, "process_owner_uid", lambda pid: os.geteuid() + int(wrong_user))
+    report = {"wrapper": {"pid": 123}, "profiles": [{"profile": "account", "status": "ready",
+              "home": "/account", "socket": "/account/app-server-control/app-server-control.sock"}]}
+    asyncio.run(installer.refresh_configuration(report))
+    assert report["profiles"][0]["reason"] == ("wrong_probe_user" if wrong_user else "configuration_failed")
+    assert len(calls) == int(not wrong_user)
+    assert "secret" not in json.dumps(report)
+
+
 def test_missing_receipt_does_not_pass_acceptance(tmp_path, capsys):
     assert installer.main([
         "--home", str(tmp_path), "--release", str(tmp_path), "--after", "0", "--wait", "0",

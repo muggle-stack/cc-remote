@@ -31,6 +31,10 @@ transactions. A dropped SSH/control connection is an unknown result: inspect
 the original transaction and live state before deciding whether a retry is
 safe. Deployment is complete only after protocol/build identity, service
 stability, public health, and expected Wrapper connectivity are verified.
+Use `deploy/cleanup.py` for reviewed retention inventories, never an ad hoc
+deletion script. Preserve process cwd/open-file and retained runtime dependencies
+even beyond the rollback generation limit. Repeat acceptance after cleanup,
+including live Codex config reads; incomplete visibility means retain the files.
 For Codex Code, also follow `deploy/README.md`'s shared-control-plane acceptance:
 verify each account's daily CLI and Wrapper connect to the same official
 app-server, not a private stdio fallback. Do not force takeover or kill a live
@@ -106,7 +110,7 @@ attachment and optional App-control MCP tools are separate user choices.
   transport, never the caller's Origin. Uvicorn trusts forwarded transport
   metadata only from loopback Caddy. Never put tokens in URLs or protocol
   message bodies; logging redacts token/password fields.
-- **Protocol version gate**: current wire protocol v73 is declared by
+- **Protocol version gate**: current wire protocol v74 is declared by
   `PROTOCOL_VERSION` in both `protocol.py` and `web/src/protocol.ts`.
   `deserialize` hard-rejects a version mismatch, and
   `_Base` is `extra="forbid"`, so ANY protocol change must be deployed to all

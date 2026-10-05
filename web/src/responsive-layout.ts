@@ -1,23 +1,12 @@
-export type SidebarSwipeAction = "open" | "close" | null;
+export function sidebarDragIntent(dx: number, dy: number): "pending" | "horizontal" | "vertical" {
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < 10) return "pending";
+  return Math.abs(dx) > Math.abs(dy) * 1.25 ? "horizontal" : "vertical";
+}
 
-const SWIPE_THRESHOLD_PX = 50;
-const HORIZONTAL_INTENT_RATIO = 1.25;
-
-export function resolveSidebarSwipe(
-  startX: number,
-  startY: number,
-  endX: number,
-  endY: number,
-  viewportWidth: number,
-  locked: boolean,
-): SidebarSwipeAction {
-  if (locked) return null;
-  const dx = endX - startX;
-  const dy = endY - startY;
-  if (Math.abs(dx) <= SWIPE_THRESHOLD_PX
-      || Math.abs(dx) <= Math.abs(dy) * HORIZONTAL_INTENT_RATIO) return null;
-  if (dx > 0 && startX < viewportWidth / 3) return "open";
-  return dx < 0 ? "close" : null;
+export function sidebarReleaseOpen(offset: number, width: number, velocity: number): boolean {
+  // A recent flick carries the drawer; a held/slow drag settles by distance.
+  if (Math.abs(velocity) >= 0.45) return velocity > 0;
+  return offset >= width / 2;
 }
 
 const PANEL_MIN_WIDTH_PX = 360;

@@ -1,3 +1,5 @@
+import type { ServerEvent } from "./protocol";
+import { resolveRelatedSession, relatedSessionTitle } from "./session-messages";
 import {
   lazy,
   Suspense,
@@ -6,7 +8,6 @@ import {
   useReducer,
   useRef,
   useState,
-  type TouchEvent,
 } from "react";
 import { RelayWs, sessionScopeKey, type EventOwnership } from "./ws";
 import type { QueryAcceptanceResult } from "./outbox";
@@ -32,6 +33,10 @@ import { TurnFilePageRequests, type LoadTurnFilePage } from "./turn-file-pages";
 import { Icon } from "./icons";
 import { ChatView } from "./components/ChatView";
 import { Composer } from "./components/Composer";
+import { usePanelWidthPreference } from "./use-panel-width";
+import { SidebarToggle } from "./components/SidebarToggle";
+const SessionMessagePreview = lazy(() => import("./components/SessionMessagePreview").then((m) => ({ default: m.SessionMessagePreview })));
+
 const BackgroundTaskControl = lazy(() => import("./components/BackgroundTaskControl"));
 import type { QueuedQueryEditor } from "./components/QueuedQueryDialog";
 import { ReconnectBanner } from "./components/ReconnectBanner";
@@ -125,7 +130,6 @@ import { matchesBtwRequest,
 import type { EngineCapabilities, EngineCapabilityItem, EngineCapabilityKind, WorkArtifactInfo, WorkDashboard } from "./protocol";
 import { isMarkdownPath } from "./preview-path";
 import { parseGitDiff } from "./diff";
-import { resolveSidebarSwipe } from "./responsive-layout";
 import {
   bumpSessionActivity,
   mergeSessionActivityState,
@@ -312,8 +316,8 @@ interface QueuedQueryEditorState extends QueuedQueryEditor {
 
 const MAX_TERMINAL_HISTORY_REPAIR_ATTEMPTS = 2;
 
-// The sidebar is an overlay on mobile (<980px, matches index.css) but a
-// persistent grid column on desktop. So auto-close it after picking a session
+// The sidebar pushes the page on mobile (<980px, matches index.css) but is a
+// persistent column on desktop. So auto-close it after picking a session
 // ONLY on mobile; on desktop keep it open.
 const isMobile = () => window.matchMedia("(max-width: 979px)").matches;
 
@@ -334,6 +338,7 @@ function catalogForEngineProfile(
 }
 
 export default function App() {
+  usePanelWidthPreference();
   const initialEngineRef = useRef(normalizeEngine(localStorage.getItem(ENGINE_KEY)));
   const initialSpacesRef = useRef(readEngineSpaces(localStorage, initialEngineRef.current));
   const [engine, setEngine] = useState<Engine>(initialEngineRef.current);
@@ -477,6 +482,10 @@ export default function App() {
   const stateRef = useRef(state);
   stateRef.current = state;
   const wsRef = useRef<RelayWs | null>(null);
+  const [sessionMessagePreview, setSessionMessagePreview] = useState<{
+    scope: string; originSid: string; session: SessionInfo; returnLabel: string;
+  } | null>(null);
+  const sessionMessagePreviewEvents = useRef<((event: ServerEvent) => boolean) | null>(null);
   const goalApiRef = useRef<GoalApi | null>(null);
   const getGoalApi = useCallback(async () => {
     const transport = wsRef.current;
@@ -651,9 +660,6 @@ export default function App() {
   const notificationListRequestRef = useRef<string | null>(null);
   const notificationOriginRef = useRef<NotificationOrigin | null>(null);
   const pendingNotificationErrorRef = useRef<string | null>(null);
-  const touchStartX = useRef(0);
-  const touchStartY = useRef(0);
-  const touchSwipeLocked = useRef(false);
   const artifactDirtyRef = useRef(false);
   const setArtifactDirty = useCallback((dirty: boolean) => {
     artifactDirtyRef.current = dirty;
@@ -1619,29 +1625,6 @@ export default function App() {
     );
   }, [authed, machineId, notificationMode]);
 
-  // Swipe right -> open sidebar, swipe left -> close (mobile). Interactive
-  // vertical scrollers opt out so a diagonal scroll never becomes navigation.
-  const onTouchStart = (e: TouchEvent) => {
-    const touch = e.touches[0];
-    touchStartX.current = touch.clientX;
-    touchStartY.current = touch.clientY;
-    touchSwipeLocked.current = e.target instanceof Element
-      && !!e.target.closest("[data-lock-horizontal-swipe]");
-  };
-  const onTouchEnd = (e: TouchEvent) => {
-    const touch = e.changedTouches[0];
-    const action = resolveSidebarSwipe(
-      touchStartX.current,
-      touchStartY.current,
-      touch.clientX,
-      touch.clientY,
-      window.innerWidth,
-      touchSwipeLocked.current,
-    );
-    if (action === "open") setSidebarOpen(true);
-    else if (action === "close") setSidebarOpen(false);
-  };
-
   useEffect(() => {
     try {
       sessionStorage.setItem(
@@ -2208,6 +2191,7 @@ export default function App() {
       const ws = new RelayWs({
         onEvent: (msg, ownership) => {
           if (!acceptsLifecycle()) return;
+          if (sessionMessagePreviewEvents.current?.(msg)) return;
           if (turnFileRequestsRef.current.accept(msg)) return;
           if (goalApiRef.current?.accept(msg)) return;
           const settlesContextRequest = !!(
@@ -5558,9 +5542,10 @@ export default function App() {
     <ViewerPagesProvider scope={visibleParentSid && authed
       ? { machineId, sid: visibleParentSid, space, engine } : null} onOpen={openViewerPage}>
     <RemoteViewerContext.Provider value={visibleParentSid ? openViewerLink : null}>
-    <div className={"shell" + (sidebarOpen ? " sidebar-open" : "") + (visibleRightPanel !== null ? " panel-open" : "")} onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
+    <div className={"shell" + (sidebarOpen ? " sidebar-open" : "") + (visibleRightPanel !== null ? " panel-open" : "")}>
       <Suspense fallback={null}><SessionsSidebar
         open={sidebarOpen}
+        onOpenChange={setSidebarOpen}
         engine={engine}
         space={space}
         profileScopeKey={activeScopeKey}
@@ -5666,10 +5651,10 @@ export default function App() {
         <header className={`c-head ${space}-head`}>
           <div className="titlewrap">
             <div className="ttl">
-              <button className="surface-head-title" onClick={() => setSidebarOpen(true)}>
+              <SidebarToggle className="surface-head-title" open={sidebarOpen} onOpenChange={setSidebarOpen}>
                 <span className="surface-head-mark"><Icon name={space === "work" ? "work" : "code"} size={18} /></span>
                 <span>{space === "work" ? "Work" : "Code"}</span>
-              </button>
+              </SidebarToggle>
               {focusedWorkProfile && (
                 <span className={`work-profile-owner tone-${focusedWorkProfile.tone}`}
                   title={`${focusedEngine === "codex" ? "Codex" : "Claude"} 账号：${focusedWorkProfile.fullLabel}`}
@@ -5784,8 +5769,29 @@ export default function App() {
             onSend={sendFirstMessage} /></Suspense>
         ) : (
           <>
+            {sessionMessagePreview?.scope === activeScopeKey
+              && sessionMessagePreview.originSid === focusedSid
+              && state.sessions.some((s) => s.session_id === sessionMessagePreview.session.session_id)
+              && <Suspense fallback={null}><SessionMessagePreview key={`${activeScopeKey}:${sessionMessagePreview.session.session_id}`}
+                session={sessionMessagePreview.session} returnLabel={sessionMessagePreview.returnLabel}
+                returnSid={sessionMessagePreview.originSid}
+                onClose={() => setSessionMessagePreview(null)}
+                api={{ receive: sessionMessagePreviewEvents,
+                  history: (sid, before, cwd) => wsRef.current?.sendGetHistory(sid, before, 12, cwd) ?? false,
+                  detail: (sid, turnId, revision, before) => wsRef.current?.sendGetTurnDetail(sid, turnId, revision, before) ?? false,
+                }} /></Suspense>}
             <ChatView key={`${activeScopeKey}\u0000${focusedSid ?? ""}`}
               sid={focusedSid} turns={historyView.turns}
+              sessionLink={(nativeId) => {
+                const session = resolveRelatedSession(nativeId, focusedSid, state.sessions);
+                return { title: relatedSessionTitle(session, nativeId), available: !!session };
+              }}
+              onOpenSession={focusedEngine === "codex" && space === "code" ? (nativeId) => {
+                const session = resolveRelatedSession(nativeId, focusedSid, state.sessions);
+                if (!session || !focusedSid) return;
+                setSessionMessagePreview({ scope: activeScopeKey, originSid: focusedSid,
+                  session, returnLabel: relatedSessionTitle(focusedSession, focusedSid) });
+              } : undefined}
               loading={!!rt.loading || historyView.recovering}
               surface={space}
               engine={focusedEngine} forkingPointId={forkingPointId}

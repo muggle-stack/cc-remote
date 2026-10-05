@@ -1,3 +1,4 @@
+import "./session-messages.test.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -144,7 +145,7 @@ import type {
   ThreadGoal,
 } from "../src/protocol.ts";
 import type { Block, Turn } from "../src/reducer.ts";
-import { clampPanelWidth, resolveSidebarSwipe } from "../src/responsive-layout.ts";
+import { clampPanelWidth } from "../src/responsive-layout.ts";
 import {
   classifyTurnNotification,
   turnNotificationBody,
@@ -1094,12 +1095,6 @@ const derivedWorkContext = workContextMetrics({
 assert.equal(derivedWorkContext.sessionTokens, 194);
 assert.ok(Math.abs(derivedWorkContext.sessionPercentage - 194 / 353_400 * 100) < 1e-9);
 
-assert.equal(resolveSidebarSwipe(12, 200, 84, 205, 390, false), "open");
-assert.equal(resolveSidebarSwipe(300, 200, 230, 205, 390, false), "close");
-assert.equal(resolveSidebarSwipe(12, 100, 78, 240, 390, false), null,
-  "a mostly vertical gesture must not navigate");
-assert.equal(resolveSidebarSwipe(12, 200, 84, 205, 390, true), null,
-  "an interactive vertical scroller must own its gesture");
 assert.equal(clampPanelWidth(200, 1440), 360);
 assert.equal(clampPanelWidth(2_000, 1440), 1_020);
 assert.equal(clampPanelWidth(600, 1_000), 580);
@@ -1387,8 +1382,8 @@ assert.match(historyAppSource,
 assert.match(historyAppSource,
   /requestHistoryTurnDetail = useCallback\([\s\S]{0,120}autoLoad = false/,
   "every detail entry point must default to one bounded page");
-assert.match(cacheSource, /const CACHE_VER = 27/,
-  "native recovery repair must invalidate browser summaries split by internal prompts");
+assert.match(cacheSource, /const CACHE_VER = 28/,
+  "native message provenance must invalidate browser summaries missing source metadata");
 assert.match(cacheSource, /objectStore\(STORE\)\.delete\(sessionId\)/);
 assert.match(cacheSource, /job\.epoch !== sessionEpoch\(job\.sid\)/,
   "a debounced pre-marker write must not recreate the deleted cache row");
@@ -18075,7 +18070,6 @@ for (const optimisticAction of ["set_model", "set_effort", "set_perm", "set_coll
 assert.match(appSource,
   /const \{[\s\S]{0,160}cwd,[\s\S]{0,160}autoCompactMode,[\s\S]{0,120}\} = state\.newChat/,
   "new-session autocompact must be captured with cwd/model before the atomic create");
-assert.match(appSource, /data-lock-horizontal-swipe/);
 assert.match(appSource, /surface=\{space\}/);
 assert.match(appSource, /draftKey=\{focusedComposerDraftKey\}/);
 assert.match(appSource, /composerDraftsRef\.current\.rekey/,

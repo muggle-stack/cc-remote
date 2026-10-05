@@ -3406,8 +3406,20 @@ def test_machine_forced_model_effort_publish_falls_back_after_probe_churn():
     asyncio.run(run())
 
 
-def test_codex_resume_restores_rollout_effort_after_nullable_resume(
-        monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "rollout_model,native_model,explicit_model,expected_model,expected_updates",
+    [
+        ("retired-model", "retired-model", None, "current-model", ["current-model"]),
+        (None, "selected-model", None, "selected-model", []),
+        ("retired-model", "selected-model", None, "selected-model", []),
+        ("current-model", "selected-model", None, "selected-model", []),
+        (None, "retired-model", None, "current-model", ["current-model"]),
+        (None, "selected-model", "current-model", "current-model", ["current-model"]),
+    ],
+)
+def test_codex_resume_preserves_native_model_and_restores_nullable_effort(
+        monkeypatch, tmp_path, rollout_model, native_model, explicit_model,
+        expected_model, expected_updates):
     class FakeCodexHandle:
         def __init__(self, _cfg, cwd=None, daemon_mode=None,
                      daemon_manager=None):
@@ -3452,9 +3464,9 @@ def test_codex_resume_restores_rollout_effort_after_nullable_resume(
             self.thread_id = kwargs["resume_id"]
             self.preconnect_effort = self.effort
             self.preconnect_model = self.model
-            # Model the resume response echoing the retired native value over
-            # the wrapper's pre-connect catalog replacement.
-            self.model = "retired-model"
+            # The native selection can be newer than a stale or unreadable
+            # rollout tail; availability must be decided after this receipt.
+            self.model = native_model
             # Some app-server versions omit the effective override on resume.
             self.effort = None
             self.applied_effort = None
@@ -3487,7 +3499,7 @@ def test_codex_resume_restores_rollout_effort_after_nullable_resume(
             machine_module,
             "codex_session_settings",
             lambda *_args, **_kwargs: {
-                "model": "retired-model",
+                "model": rollout_model,
                 "effort": "high",
             },
         )
@@ -3498,6 +3510,10 @@ def test_codex_resume_restores_rollout_effort_after_nullable_resume(
                 "efforts": ["high"],
                 "default_effort": "high",
                 "is_default": True,
+            }, {
+                "id": "selected-model",
+                "efforts": ["high"],
+                "default_effort": "high",
             }]
 
         monkeypatch.setattr(machine_module, "codex_catalog", catalog)
@@ -3517,12 +3533,13 @@ def test_codex_resume_restores_rollout_effort_after_nullable_resume(
             resume_id=thread_id,
             engine="codex",
             space="code",
+            model=explicit_model,
         )
 
         assert ctx is not None
         assert ctx.sdk.preconnect_model == "current-model"
-        assert ctx.sdk.set_model_calls == ["current-model"]
-        assert ctx.sdk.model == "current-model"
+        assert ctx.sdk.set_model_calls == expected_updates
+        assert ctx.sdk.model == expected_model
         assert ctx.sdk.preconnect_effort == "high"
         assert ctx.sdk.effort == "high"
         assert ctx.sdk.applied_effort == "high"

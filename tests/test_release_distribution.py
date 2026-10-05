@@ -158,6 +158,7 @@ def test_release_bundles_are_deterministic_and_role_scoped(
     assert f"{prefix}/bin/cc-remote" in members
     assert f"{prefix}/cc_remote/__main__.py" in members
     assert f"{prefix}/deploy/install_cli.py" in members
+    assert f"{prefix}/deploy/cleanup.py" in members
     assert f"{prefix}/licenses/uv-LICENSE-MIT" in members
     assert f"{prefix}/cc_remote/protocol.py" in members
     assert not any("/tests/" in name for name in members)

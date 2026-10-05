@@ -20,6 +20,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
+from cc_remote.wrapper.codex_delegation import (
+    normalize_codex_delegation_item, parse_codex_delegation,
+)
+
 from cc_remote.protocol import (
     MAX_SAFE_WIRE_INTEGER,
     MAX_SAFE_WIRE_TIMESTAMP_SECONDS,
@@ -98,6 +102,7 @@ class CodexRolloutUserMessage:
 
     raw_text: str
     prompt: str | None
+    source_thread_id: str | None = None
     message_id: str | None = None
     client_id: str | None = None
     turn_id: str | None = None
@@ -1043,6 +1048,9 @@ def visible_codex_user_message(message: object) -> str | None:
     text = message.strip()
     if not text:
         return None
+    delegation = parse_codex_delegation(text)
+    if delegation is not None:
+        return delegation.prompt
     marker = text.rfind(_CODEX_REQUEST_MARKER)
     if marker >= 0:
         request = text[marker + len(_CODEX_REQUEST_MARKER):].strip()
@@ -1089,6 +1097,8 @@ def codex_rollout_user_message(
         raw_text = payload.get("message")
     elif payload_type == "item_completed":
         item = payload.get("item")
+        if isinstance(item, dict):
+            item = normalize_codex_delegation_item(item)
         if (
             not isinstance(item, dict)
             or str(item.get("type") or "").lower() != "usermessage"
@@ -1101,7 +1111,9 @@ def codex_rollout_user_message(
         return None
     if not isinstance(raw_text, str):
         return None
+    delegation = parse_codex_delegation(raw_text)
     return CodexRolloutUserMessage(
+        source_thread_id=delegation.source_thread_id if delegation else None,
         raw_text=raw_text,
         prompt=visible_codex_user_message(raw_text),
         message_id=message_id if isinstance(message_id, str) else None,
