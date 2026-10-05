@@ -1918,6 +1918,54 @@ def test_codex_session_settings_restores_last_valid_collaboration_mode(
     }
 
 
+@pytest.mark.parametrize("tail_starts_inside_record", [False, True])
+def test_codex_settings_skip_oversized_record_and_read_newer_selection(
+        monkeypatch, tmp_path, tail_starts_inside_record):
+    rollout = tmp_path / "rollout-session-1.jsonl"
+    old = json.dumps({
+        "type": "turn_context", "payload": {"model": "gpt-old"},
+    }) + "\n"
+    latest = json.dumps({
+        "type": "event_msg", "payload": {
+            "type": "thread_settings_applied",
+            "thread_settings": {
+                "model": "gpt-selected", "reasoning_effort": "xhigh",
+                "service_tier": "priority",
+            },
+        },
+    }) + "\n"
+    rollout.write_text(old + ("x" * 6000) + "\n" + latest)
+    monkeypatch.setattr(codex_sessions_module, "MAX_JSONL_RECORD_BYTES", 256)
+    monkeypatch.setattr(
+        codex_sessions_module, "_rollout_path", lambda _sid: str(rollout))
+
+    assert codex_session_settings(
+        "session-1", max_bytes=2000 if tail_starts_inside_record else 10000,
+    ) == {
+        "model": "gpt-selected", "effort": "xhigh",
+        "service_tier": "priority",
+    }
+
+
+def test_codex_settings_tail_stops_at_captured_source_size(
+        monkeypatch, tmp_path):
+    rollout = tmp_path / "rollout-session-1.jsonl"
+    first = json.dumps({
+        "type": "turn_context", "payload": {"model": "gpt-snapshot"},
+    }) + "\n"
+    appended = json.dumps({
+        "type": "turn_context", "payload": {"model": "gpt-after-snapshot"},
+    }) + "\n"
+    rollout.write_text(first + appended)
+    monkeypatch.setattr(
+        codex_sessions_module, "_rollout_path", lambda _sid: str(rollout))
+    monkeypatch.setattr(codex_sessions_module.os.path, "getsize", lambda _p: len(first))
+
+    assert codex_session_settings("session-1", max_bytes=len(first)) == {
+        "model": "gpt-snapshot",
+    }
+
+
 def test_codex_session_settings_restores_applied_update_before_next_turn(
         monkeypatch, tmp_path):
     rollout = tmp_path / "rollout-session-1.jsonl"

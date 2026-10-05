@@ -36090,7 +36090,7 @@ class WrapperMachine:
                 if mode in CODEX_COLLABORATION_MODES:
                     sdk.collaboration_mode = mode
                 try:
-                    resolved_model, model_replaced = (
+                    resolved_model, _ = (
                         await self._resolve_codex_profile_model(
                             codex_profile,
                             model,
@@ -36106,7 +36106,7 @@ class WrapperMachine:
                     )
                     return None
                 model = resolved_model
-                if model and (model_replaced or explicit_codex_model):
+                if model and explicit_codex_model:
                     codex_resume_model_reconcile = model
             if model:
                 sdk.model = model
@@ -36231,6 +36231,18 @@ class WrapperMachine:
                 await ctx.sdk.connect(
                     **codex_connect_options,
                 )
+                if resume_id and not explicit_codex_model:
+                    # A missing/stale rollout tail cannot retire a live choice.
+                    # Validate the authoritative resume model before deciding
+                    # whether this account's advertised default must replace it.
+                    native_model = getattr(ctx.sdk, "model", None)
+                    resolved_model, model_replaced = (
+                        await self._resolve_codex_profile_model(
+                            codex_profile, native_model,
+                        )
+                    )
+                    if native_model and model_replaced:
+                        codex_resume_model_reconcile = resolved_model
                 if (
                     resume_id
                     and codex_resume_model_reconcile

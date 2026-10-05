@@ -955,8 +955,8 @@ def codex_session_settings(
     which 0.144.1 does not include in that response. Config.toml is never a valid
     resume source because it holds only fresh-thread global defaults.
 
-    Returns {} when the rollout is missing/unreadable; the caller falls back to the
-    config defaults (correct for a brand-new session).
+    Returns {} when the bounded tail has no readable settings. This is read
+    uncertainty, not evidence that a resumed thread should use global defaults.
     """
     path = (
         _rollout_path(session_id)
@@ -977,23 +977,33 @@ def codex_session_settings(
         tail_bytes = max(1, int(max_bytes))
         start = max(0, size - tail_bytes)
         with open(path, "rb") as f:
+            def read_chunk():
+                remaining = size - f.tell()
+                return f.readline(min(MAX_JSONL_RECORD_BYTES + 1, remaining)) \
+                    if remaining > 0 else b""
+
             if start:
                 f.seek(start - 1)
                 starts_at_record = f.read(1) == b"\n"
                 f.seek(start)
                 if not starts_at_record:
-                    discarded = f.readline(MAX_JSONL_RECORD_BYTES + 1)
-                    if not discarded.endswith(b"\n"):
+                    # The tail may begin inside a large image/tool record.
+                    # Recover its newline in bounded chunks inside this snapshot
+                    # instead of losing all newer settings behind that record.
+                    discarded = read_chunk()
+                    while discarded and not discarded.endswith(b"\n"):
+                        discarded = read_chunk()
+                    if not discarded:
                         return {}
             while True:
-                raw = f.readline(MAX_JSONL_RECORD_BYTES + 1)
+                raw = read_chunk()
                 if not raw:
                     break
                 if len(raw) > MAX_JSONL_RECORD_BYTES:
-                    if not raw.endswith(b"\n"):
-                        # The remainder is still the same oversized record. Stop:
-                        # a boundary cannot be recovered without exceeding our cap.
-                        break
+                    # Skip one oversized record, retaining both the per-record
+                    # allocation cap and the total tail scan budget.
+                    while raw and not raw.endswith(b"\n"):
+                        raw = read_chunk()
                     continue
                 try:
                     line = raw.decode("utf-8")
