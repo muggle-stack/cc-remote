@@ -197,7 +197,12 @@ function browserBindings(): MobileViewportBindings {
     setDelay: (listener, delayMs) => window.setTimeout(listener, delayMs),
     clearDelay: (id) => window.clearTimeout(id),
     isEditableFocused: () => isEditableElement(document.activeElement),
-    resetLayoutScroll: () => window.scrollTo(0, 0),
+    resetLayoutScroll: () => {
+      // Focus can leave a drawer toggle too, without any keyboard pan. Avoid
+      // issuing delayed programmatic scrolls while a nested pane is coasting
+      // when the document is already at its intended position.
+      if (window.scrollX !== 0 || window.scrollY !== 0) window.scrollTo(0, 0);
+    },
   };
 }
 

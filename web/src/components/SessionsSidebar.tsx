@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState, type TouchEvent } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type TouchEvent } from "react";
 import type { ClaudeProfileInfo, CodexProfileInfo, Engine, SessionInfo, Space, State } from "../protocol";
 import type { CompletionBadgeKind } from "../completion-badges";
 import { Icon, ClaudeMark } from "../icons";
@@ -96,6 +96,11 @@ export function SessionsSidebar({ open, engine, space,
   const [expandedDirectories, setExpandedDirectories] = useState<Record<string, boolean>>({});
   const pressTimer = useRef<number | null>(null);
   const pressStart = useRef<{ x: number; y: number } | null>(null);
+  const cancelPress = useCallback(() => {
+    if (pressTimer.current !== null) window.clearTimeout(pressTimer.current);
+    pressTimer.current = null;
+    pressStart.current = null;
+  }, []);
 
   const accountProfiles = engine === "codex" ? codexProfiles : claudeProfiles;
   const defaultAccountProfileId = engine === "codex"
@@ -192,7 +197,10 @@ export function SessionsSidebar({ open, engine, space,
   const closeMenu = () => { setMenuCardId(null); setLifting(false); };
 
   // reset menu/lift state when the sidebar closes (so it doesn't linger into the next open)
-  useEffect(() => { if (!open) { setMenuCardId(null); setLifting(false); } }, [open]);
+  useEffect(() => {
+    if (!open) { cancelPress(); setMenuCardId(null); setLifting(false); }
+    return cancelPress;
+  }, [open, cancelPress]);
 
   useEffect(() => {
     if (!showProfileManagement
@@ -226,26 +234,26 @@ export function SessionsSidebar({ open, engine, space,
   }, [menuCardId, lifting]);
 
   // long-press (500ms hold, no >10px move) => lift the card + dim the rest + show actions.
-  // A swipe (handled by the shell) moves >10px and cancels the timer.
+  // Browser scroll/zoom ownership can cancel a touch before a >10px move
+  // reaches React. Clear on cancellation and scroll too, including momentum;
+  // a timer left behind must not lift a card halfway through a native fling.
   const onCardTouchStart = (s: SessionInfo, e: TouchEvent) => {
+    cancelPress();
+    if (e.touches.length !== 1) return;
     pressStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
     pressTimer.current = window.setTimeout(() => {
+      cancelPress();
       setMenuCardId(s.session_id);
       setLifting(true);
       if (navigator.vibrate) navigator.vibrate(15);
     }, 500);
   };
   const onCardTouchMove = (e: TouchEvent) => {
+    if (e.touches.length !== 1) { cancelPress(); return; }
     if (!pressStart.current) return;
     const dx = Math.abs(e.touches[0].clientX - pressStart.current.x);
     const dy = Math.abs(e.touches[0].clientY - pressStart.current.y);
-    if ((dx > 10 || dy > 10) && pressTimer.current) {
-      clearTimeout(pressTimer.current);
-      pressTimer.current = null;
-    }
-  };
-  const onCardTouchEnd = () => {
-    if (pressTimer.current) { clearTimeout(pressTimer.current); pressTimer.current = null; }
+    if (dx > 10 || dy > 10) cancelPress();
   };
 
   const renderCard = (s: SessionInfo, showLocation = false) => {
@@ -319,7 +327,9 @@ export function SessionsSidebar({ open, engine, space,
         className={"scard" + (profilePresentation ? " has-profile-ribbon" : "") + (isActive ? " active" : "") + (isArchived ? " archived" : "") + (isMenu ? " menu-open" : "") + (isMenu && lifting ? " lifting" : "")}
         onTouchStart={(e) => onCardTouchStart(s, e)}
         onTouchMove={onCardTouchMove}
-        onTouchEnd={onCardTouchEnd}
+        onTouchEnd={cancelPress}
+        onTouchCancel={cancelPress}
+        onPointerCancel={cancelPress}
         onClick={onTitleClick}
       >
         {profilePresentation && (
@@ -461,6 +471,8 @@ export function SessionsSidebar({ open, engine, space,
     <>
       <div className={"scrim-side" + (open ? " show" : "")} onClick={onClose} />
       <aside ref={sidebarRef} className={"sessions" + (open ? " show" : "")} inert={!open} aria-hidden={!open}>
+        {/* Fade a sibling surface, never the native list scroller's ancestors. */}
+        <div className="s-fade" aria-hidden="true" />
         {/* Keep the contents stable while the shell animates both surfaces. */}
         <div className="s-inner">
           <div className="s-head">
@@ -512,7 +524,7 @@ export function SessionsSidebar({ open, engine, space,
               placeholder={space === "work" ? "搜索工作…" : "搜索会话、路径…"}
               aria-label={space === "work" ? "搜索工作" : "搜索会话"} />
           </div>
-          <div className="s-scroll" onClick={closeMenu}>
+          <div className="s-scroll" onClick={closeMenu} onScrollCapture={cancelPress}>
             {filtered.length === 0 && <div className="s-group">{sessions.length === 0 ? "暂无会话" : "无匹配"}</div>}
             {pinned.length > 0 && renderGroup("__pinned__", pinned, "置顶")}
             {groupKeys.map((k) => renderGroup(k, groups[k]))}

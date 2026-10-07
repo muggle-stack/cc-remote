@@ -1,4 +1,4 @@
-import { createContext, isValidElement, useContext, useEffect, useId,
+import { createContext, isValidElement, memo, useContext, useEffect, useId,
   useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore,
   type ComponentPropsWithoutRef,
   type ReactNode } from "react";
@@ -27,6 +27,12 @@ import { useSanitizedSvgUrl } from "../use-sanitized-svg";
 import { MermaidBlock } from "./MermaidBlock";
 import { PreviewAuthorizationPrompt } from "./PreviewAuthorizationPrompt";
 import { useMarkdownExtras } from "../use-markdown-extras";
+
+// Keep the parser behind its own memo boundary. MessageBlock still receives
+// fresh callbacks/assets through context, but an unchanged displayed string
+// must not run the Markdown pipeline on each raw delta, scroll or drawer update.
+// Context consumers inside the cached tree continue to update independently.
+const MessageMarkdown = memo(ReactMarkdown);
 
 const CODEX_DIRECTIVE_LABELS: Record<string, string> = {
   "git-stage": "Git 变更已暂存",
@@ -644,6 +650,9 @@ export function MessageBlock({ text, done, onOpenFile, imageAssets,
 
   useEffect(() => () => {
     if (timer.current) clearTimeout(timer.current);
+    // StrictMode reconnects effects on mount; a canceled timer must not keep
+    // subsequent text updates waiting for a callback that will never run.
+    timer.current = null;
   }, []);
 
   const markdownContext = useMemo<MessageMarkdownContextValue>(() => ({
@@ -677,11 +686,11 @@ export function MessageBlock({ text, done, onOpenFile, imageAssets,
     <MessageMarkdownContext.Provider value={markdownContext}>
       <div className="prose">
         {parts.map((part, index) => {
-          if (part.kind === "markdown") return <ReactMarkdown key={`markdown-${index}`}
+          if (part.kind === "markdown") return <MessageMarkdown key={`markdown-${index}`}
               remarkPlugins={remarkPlugins}
               rehypePlugins={rehypePlugins}
               urlTransform={messageUrlTransform}
-              components={MESSAGE_MARKDOWN_COMPONENTS}>{part.text}</ReactMarkdown>;
+              components={MESSAGE_MARKDOWN_COMPONENTS}>{part.text}</MessageMarkdown>;
           if (part.kind === "visualization") return <CodexVisualizationCard
             key={`visualization-${index}`} path={part.path} title={part.title}
             onOpenFile={onOpenFile} />;

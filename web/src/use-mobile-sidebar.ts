@@ -1,10 +1,31 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import { sidebarDragIntent, sidebarReleaseOpen } from "./responsive-layout";
+import { sidebarDragIntent } from "./responsive-layout";
 import { sidebarOpenFeedback } from "./sidebar-feedback";
 
 const MOBILE = "(max-width: 979px)";
 const LOCKED_TARGET = "[data-lock-horizontal-swipe], input, textarea, select, "
-  + "[contenteditable]:not([contenteditable=false]), [role=slider], [role=dialog], [role=menu], [role=listbox], pre";
+  + "[contenteditable]:not([contenteditable=false]), [role=slider], [role=dialog], [role=menu], [role=listbox]";
+
+function sidebarReleaseOpen(offset: number, width: number, velocity: number): boolean {
+  // A recent flick carries the drawer; a held/slow drag settles by distance.
+  if (Math.abs(velocity) >= 0.45) return velocity > 0;
+  return offset >= width / 2;
+}
+
+function sidebarReleaseMotion(from: number, to: number, velocity: number) {
+  const distance = Math.abs(to - from);
+  if (distance < .1) return { duration: 0, easing: "linear" };
+  const speed = Math.max(0, velocity * Math.sign(to - from));
+  // Let a short flick keep travelling instead of jumping to the same fast
+  // ease-out as a full-width swipe. Match its initial speed, then arrive at
+  // rest without overshoot. Opposing/held gestures start their return at rest.
+  let duration = Math.min(420, Math.max(160, 420 * Math.sqrt(distance / 320)));
+  if (speed > 0) duration = Math.min(duration, 3 * distance / speed);
+  // With x control points at 1/3 and 2/3, time is linear in the Bezier
+  // parameter. Its initial speed is 3*y1*distance/duration and final speed 0.
+  const y1 = Math.min(1, speed * duration / (3 * distance));
+  return { duration, easing: `cubic-bezier(.333333,${y1},.666667,1)` };
+}
 
 interface Drag {
   id: number;
@@ -15,7 +36,7 @@ interface Drag {
   width: number;
   wasOpen: boolean;
   claimed: boolean;
-  interrupted: boolean;
+  movingAtStart: boolean;
   samples: { x: number; time: number }[];
 }
 
@@ -35,33 +56,51 @@ export function useMobileSidebar(open: boolean, onOpenChange?: (open: boolean) =
     const media = window.matchMedia(MOBILE);
     const page = shell.querySelector<HTMLElement>(":scope > .pane");
     const scrim = shell.querySelector<HTMLElement>(":scope > .scrim-side");
-    if (!page || !scrim) return;
+    const fade = sidebar.querySelector<HTMLElement>(":scope > .s-fade");
+    if (!page || !scrim || !fade) return;
+    const layers = [page, sidebar, scrim, fade];
     let viewportWidth = window.innerWidth;
     let drag: Drag | null = null;
-    let frame = 0;
     let timer = 0;
     let expectedOpen: boolean | null = null;
     let settleOffset = 0;
     let suppressClickUntil = 0;
     const write = (offset: number, width: number) => {
-      // Non-inherited properties invalidate these three layers only. Shell-level
+      const progress = offset / width;
+      // Non-inherited properties invalidate these layers only. Shell-level
       // custom properties used to invalidate the conversation on every frame.
       page.style.transform = `translate3d(${offset}px,0,0)`;
+      // Match the fully-open CSS endpoint; a held/reversed gesture must retain
+      // its partial blur instead of toggling the final filter at first touch.
+      page.style.filter = `blur(${.7 * progress}px)`;
+      // Cutting the full rounded clip in on the first claimed move made that
+      // frame visibly jump. Grow the page and its veil together with the drag.
+      const radius = `calc(${progress} * clamp(36px, 12vw, 48px))`;
+      page.style.borderRadius = radius;
+      scrim.style.borderRadius = radius;
       sidebar.style.transform = `translate3d(${(offset - width) * .22}px,0,0)`;
       scrim.style.transform = `translate3d(${offset}px,0,0)`;
-      scrim.style.opacity = `${offset / width}`;
+      scrim.style.opacity = `${progress}`;
+      fade.style.opacity = `${1 - progress}`;
     };
-    const clearMotion = () => {
-      cancelAnimationFrame(frame);
+    const clearMotion = (preserveTouch = false) => {
       clearTimeout(timer);
-      frame = timer = 0;
-      drag = null;
+      timer = 0;
+      if (!preserveTouch) drag = null;
       expectedOpen = null;
       delete shell.dataset.sidebarMotion;
       page.style.removeProperty("transform");
+      page.style.removeProperty("filter");
+      page.style.removeProperty("border-radius");
       sidebar.style.removeProperty("transform");
       scrim.style.removeProperty("transform");
       scrim.style.removeProperty("opacity");
+      scrim.style.removeProperty("border-radius");
+      fade.style.removeProperty("opacity");
+      for (const layer of layers) {
+        layer.style.removeProperty("transition-duration");
+        layer.style.removeProperty("transition-timing-function");
+      }
     };
     const syncFocus = () => {
       const active = document.activeElement;
@@ -70,29 +109,56 @@ export function useMobileSidebar(open: boolean, onOpenChange?: (open: boolean) =
       // The controller lives with the lazy sidebar; only it owns pane inertness.
       page.inert = media.matches && openRef.current;
     };
-    const finishLater = () => {
-      // transitionend normally finishes first; this covers reduced motion and
-      // missing/canceled events without leaving an untouchable closing layer.
-      timer = window.setTimeout(clearMotion,
-        window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 320);
+    const finishMotion = () => {
+      clearTimeout(timer);
+      timer = 0;
+      if (drag?.claimed || shell.dataset.sidebarMotion !== "settling") return;
+      // The compositor can finish before React commits the conversation. Keep
+      // the inline endpoint until the class agrees, otherwise cleanup exposes
+      // the previous position for a frame (or longer under streaming load).
+      if (openRef.current !== (settleOffset > 0)) return;
+      const transform = getComputedStyle(page).transform;
+      const offset = transform === "none" ? 0 : new DOMMatrixReadOnly(transform).m41;
+      if (Math.abs(offset - settleOffset) < .1) clearMotion(true);
+      else timer = window.setTimeout(finishMotion, 80);
     };
-    const settle = (next: boolean, gesture: Drag, commit = true) => {
-      cancelAnimationFrame(frame);
+    const finishLater = (duration = 260) => {
+      // The timer is a fallback check, not permission to snap an unfinished
+      // transition to its endpoint. A delayed state commit also calls finish.
+      clearTimeout(timer);
+      timer = window.setTimeout(finishMotion,
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : duration + 80);
+    };
+    const settle = (next: boolean, gesture: Drag, velocity = 0) => {
       clearTimeout(timer);
       // Flush the final finger position before enabling the settle transition.
       write(gesture.offset, gesture.width);
       void getComputedStyle(page).transform;
       drag = null;
-      frame = 0;
-      expectedOpen = commit ? next : null;
+      expectedOpen = next;
       settleOffset = next ? gesture.width : 0;
+      const motion = sidebarReleaseMotion(gesture.offset, settleOffset, velocity);
+      // Give every layer the same motion. These direct, non-inherited values
+      // avoid invalidating the conversation and keep playback on CSS's
+      // animation path, with no per-frame JavaScript after release.
+      for (const layer of layers) {
+        layer.style.transitionDuration = `${motion.duration}ms`;
+        layer.style.transitionTimingFunction = motion.easing;
+      }
       shell.dataset.sidebarMotion = "settling";
       write(settleOffset, gesture.width);
-      if (commit) onOpenChange(next);
-      finishLater();
+      finishLater(motion.duration);
+      onOpenChange(next);
     };
     syncRef.current = () => {
-      if (expectedOpen === openRef.current) expectedOpen = null;
+      if (expectedOpen === openRef.current) {
+        expectedOpen = null;
+        // The active transition/fallback owns completion. Reading its computed
+        // transform during this React commit forces an extra style flush on
+        // the very frame that starts the animation. Only retry immediately if
+        // completion already ran and was waiting for this delayed commit.
+        if (!timer) finishMotion();
+      }
       else {
         clearMotion();
         // Button/selection changes also keep effects alive through the closing
@@ -106,8 +172,7 @@ export function useMobileSidebar(open: boolean, onOpenChange?: (open: boolean) =
       syncFocus();
     };
     const abandon = () => {
-      if (drag?.interrupted) settle(drag.wasOpen, drag, false);
-      else drag = null;
+      drag = null;
     };
     const cancel = () => {
       if (drag?.claimed) settle(drag.wasOpen, drag);
@@ -115,7 +180,8 @@ export function useMobileSidebar(open: boolean, onOpenChange?: (open: boolean) =
     };
     const locked = (target: Element) => {
       if (target.closest(LOCKED_TARGET) || window.getSelection()?.isCollapsed === false) return true;
-      // Preserve nested horizontal scrollers, including account filters/tables.
+      // Preserve actual horizontal scrollers, including code, account filters
+      // and tables. Wrapped mobile code is an ordinary navigation surface.
       for (let node: Element | null = target; node && node !== shell; node = node.parentElement) {
         if (node.scrollWidth > node.clientWidth + 2
             && /auto|scroll/.test(getComputedStyle(node).overflowX)) return true;
@@ -133,19 +199,13 @@ export function useMobileSidebar(open: boolean, onOpenChange?: (open: boolean) =
       if (!width) return;
       const base = Math.max(0, Math.min(width,
         page.getBoundingClientRect().left - shell.getBoundingClientRect().left));
-      const interrupted = shell.dataset.sidebarMotion === "settling";
-      // A new press owns the previous animation immediately, even before its
-      // direction is known. Its old cleanup must never discard this touch.
-      cancelAnimationFrame(frame);
-      clearTimeout(timer);
-      frame = timer = 0;
-      if (interrupted) {
-        shell.dataset.sidebarMotion = "holding";
-        write(base, width);
-      }
+      // A touch is only a candidate until horizontal intent is known. Pausing
+      // the ancestor animation here, then restarting it on vertical takeover,
+      // changes the list's layers during native scrolling. Leave both the
+      // animation and its cleanup alone; completion preserves this candidate.
       drag = { id: touch.identifier, x: touch.clientX, y: touch.clientY,
-        base, offset: base, width, wasOpen: openRef.current, claimed: false,
-        interrupted,
+        base, offset: base, width, wasOpen: expectedOpen ?? openRef.current, claimed: false,
+        movingAtStart: shell.dataset.sidebarMotion === "settling",
         samples: [{ x: touch.clientX, time: event.timeStamp }] };
     };
     const move = (event: TouchEvent) => {
@@ -160,8 +220,18 @@ export function useMobileSidebar(open: boolean, onOpenChange?: (open: boolean) =
         if (intent === "vertical" || (!drag.wasOpen && drag.base === 0 && dx < 0)) {
           abandon(); return;
         }
-        // Once native scrolling owns the touch, do not turn it into navigation.
-        if (!event.cancelable || window.getSelection()?.isCollapsed === false) { abandon(); return; }
+        // CSS reserves horizontal panning before the first input event. Chrome
+        // can make later touchmoves non-cancelable after a pending first sample
+        // even when it did NOT start scrolling. pointercancel, not cancelable,
+        // tells us when native scrolling/zoom actually took ownership.
+        if (window.getSelection()?.isCollapsed === false) { abandon(); return; }
+        if (drag.movingAtStart) {
+          // The old transition may have advanced (or finished) while this
+          // touch was pending. A real horizontal reversal starts from today's
+          // visible position, never the stale position at touchstart.
+          drag.base = Math.max(0, Math.min(drag.width,
+            page.getBoundingClientRect().left - shell.getBoundingClientRect().left));
+        }
         clearTimeout(timer);
         timer = 0;
         shell.dataset.sidebarMotion = "dragging";
@@ -171,10 +241,10 @@ export function useMobileSidebar(open: boolean, onOpenChange?: (open: boolean) =
       drag.offset = Math.max(0, Math.min(drag.width, drag.base + dx));
       drag.samples = drag.samples.filter(sample => event.timeStamp - sample.time <= 100);
       drag.samples.push({ x: touch.clientX, time: event.timeStamp });
-      if (!frame) frame = requestAnimationFrame(() => {
-        frame = 0;
-        if (drag?.claimed) write(drag.offset, drag.width);
-      });
+      // Touchmove may already arrive just before paint. Deferring it through
+      // another rAF leaves an older position on screen, especially on reversal.
+      // These style-only writes need no layout read or React render per move.
+      write(drag.offset, drag.width);
     };
     const end = (event: TouchEvent) => {
       if (!drag) return;
@@ -197,7 +267,7 @@ export function useMobileSidebar(open: boolean, onOpenChange?: (open: boolean) =
       const velocity = sample && elapsed > 0 ? (final.x - sample.x) / elapsed : 0;
       const next = sidebarReleaseOpen(gesture.offset, gesture.width, velocity);
       if (next && !gesture.wasOpen) sidebarOpenFeedback();
-      settle(next, gesture);
+      settle(next, gesture, velocity);
     };
     const click = (event: MouseEvent) => {
       if (event.detail && performance.now() < suppressClickUntil) {
@@ -209,13 +279,14 @@ export function useMobileSidebar(open: boolean, onOpenChange?: (open: boolean) =
       // drag. Genuine new touch presses reset suppression in start() above.
       if (event.pointerType !== "touch") suppressClickUntil = 0;
     };
+    const pointerCancel = (event: PointerEvent) => {
+      if (event.pointerType === "touch") cancel();
+    };
     const transitionEnd = (event: TransitionEvent) => {
       if (event.target === page && event.propertyName === "transform"
-          && !drag && shell.dataset.sidebarMotion === "settling") {
+          && !drag?.claimed && shell.dataset.sidebarMotion === "settling") {
         // An earlier transition's queued event must not finish its replacement.
-        const transform = getComputedStyle(page).transform;
-        const offset = transform === "none" ? 0 : new DOMMatrixReadOnly(transform).m41;
-        if (Math.abs(offset - settleOffset) < 1) clearMotion();
+        finishMotion();
       }
     };
     const resize = () => {
@@ -233,6 +304,7 @@ export function useMobileSidebar(open: boolean, onOpenChange?: (open: boolean) =
     shell.addEventListener("touchcancel", cancel);
     shell.addEventListener("click", click, true);
     shell.addEventListener("pointerdown", pointerDown, true);
+    shell.addEventListener("pointercancel", pointerCancel, true);
     shell.addEventListener("transitionend", transitionEnd);
     window.addEventListener("resize", resize);
     media.addEventListener("change", resize);
@@ -245,6 +317,7 @@ export function useMobileSidebar(open: boolean, onOpenChange?: (open: boolean) =
       shell.removeEventListener("touchcancel", cancel);
       shell.removeEventListener("click", click, true);
       shell.removeEventListener("pointerdown", pointerDown, true);
+      shell.removeEventListener("pointercancel", pointerCancel, true);
       shell.removeEventListener("transitionend", transitionEnd);
       window.removeEventListener("resize", resize);
       media.removeEventListener("change", resize);
