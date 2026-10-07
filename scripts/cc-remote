@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # cc-remote release management launcher. Installed by the role installer.
 set -euo pipefail
+managed_wrapper_root="/opt/cc-remote-wrapper"
 
 if [ "$(uname -s)" = Linux ] && [ "$(id -u)" -ne 0 ]; then
   # Relay releases and installation metadata may only be readable by root.
@@ -16,6 +17,7 @@ fi
 case "$(uname -s)" in
   Darwin) roots=("${CC_REMOTE_MANAGED_ROOT:-$HOME/Library/Application Support/cc-remote}/current") ;;
   Linux)
+    export CC_REMOTE_MANAGED_ROOT="$managed_wrapper_root"
     selected_role=""
     role_requested=0
     role_value_next=0
@@ -41,11 +43,11 @@ case "$(uname -s)" in
       }
       case "$selected_role" in
         relay) roots=("/opt/cc-remote/current") ;;
-        wrapper) roots=("/opt/cc-remote-wrapper/current") ;;
+        wrapper) roots=("$managed_wrapper_root/current") ;;
         *) echo "--role requires relay or wrapper." >&2; exit 2 ;;
       esac
     else
-      roots=("/opt/cc-remote-wrapper/current" "/opt/cc-remote/current")
+      roots=("$managed_wrapper_root/current" "/opt/cc-remote/current")
     fi
     ;;
   *) echo "cc-remote supports macOS and Linux." >&2; exit 1 ;;

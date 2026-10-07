@@ -36,8 +36,8 @@ def _manifest(role="wrapper", system="darwin", version="4.0.0"):
     }
 
 
-def _installation(tmp_path, monkeypatch, *, role="wrapper", system="darwin"):
-    root = tmp_path / f"managed {role}"
+def _installation(tmp_path, monkeypatch, *, role="wrapper", system="darwin", root_name=None):
+    root = tmp_path / (root_name or f"managed {role}")
     release = root / "releases/old"
     release.mkdir(parents=True)
     (root / "current").symlink_to(release)
@@ -144,6 +144,35 @@ def test_check_never_downloads_locks_or_activates(tmp_path, monkeypatch, capsys)
     assert main(["update", "--check", "--version", "4.0.0"]) == 0
     assert sorted(installation.root.iterdir()) == before
     assert (installation.root / "current").resolve() == installation.release
+
+
+@pytest.mark.parametrize("check,recorded,exit_code", [(True, True, 0), (False, False, 0),
+                                                    (False, True, 0), (False, True, 1)])
+def test_same_version_retention_is_locked_and_check_stays_read_only(
+    tmp_path, monkeypatch, capsys, check, recorded, exit_code,
+):
+    installation = _installation(tmp_path, monkeypatch)
+    retention = installation.release / "deploy/release_retention.py"
+    retention.parent.mkdir()
+    retention.write_text("fixture")
+    if recorded:
+        (installation.root / ".release-generations.json").write_text("{}")
+    calls = []
+    def run(argv, descriptor):
+        from deploy.install_lock import verify_install_lock
+        with monkeypatch.context() as actual_identity:
+            actual_identity.setattr(updater.os, "geteuid", os.getuid)
+            verify_install_lock(installation.root, descriptor)
+        calls.append(argv)
+        return exit_code
+    monkeypatch.setattr(updater, "run_installer", run)
+    monkeypatch.setattr(updater, "download_bundle", lambda *a: pytest.fail("unexpected install"))
+    assert main(["update", "--version", "4.0.0", *(["--check"] if check else [])]) == 0
+    assert len(calls) == int(recorded and not check)
+    if calls:
+        assert calls[0][-3:] == ["prune", "--root", str(installation.root)]
+    if exit_code:
+        assert "retained" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("pinned", [False, True])
@@ -573,3 +602,28 @@ def test_macos_upgrade_preserves_operator_environment_and_service_socket(tmp_pat
     assert all(result["EnvironmentVariables"][key] == value for key, value in environment.items())
     assert result["ProgramArguments"][0] == str(tmp_path / "current/.venv/bin/python")
     assert result["Label"] == "org.example.cc-remote"
+
+
+def test_supervisor_update_downloads_bundle_and_preserves_full_binding(tmp_path, monkeypatch):
+    from deploy import linux_service
+    installation = _installation(tmp_path.resolve(), monkeypatch, system='linux', root_name='managed')
+    root = installation.root
+    profile = dict(manager='supervisor', name='wrapper', user='root', home=str(root / 'home'),
+                   service_file=str(root / 'wrapper.conf'),
+                   supervisor_config=str(root / 'supervisor.conf'),
+                   env_file=str(root / 'wrapper.env'), device_file=str(root / 'device.json'))
+    (root / 'installation.json').write_text(json.dumps(
+        dict(schema=1, role='wrapper', user='root', linux_service=profile)))
+    monkeypatch.setattr(linux_service, 'trusted', lambda _: None)
+    mirror, marker, _ = _bundle(tmp_path, installation)
+    monkeypatch.setenv('CC_REMOTE_RELEASE_BASE_URL', mirror.as_uri())
+    assert main(['update', '--version', '4.0.1']) == 0
+    [call] = json.loads(marker.read_text())
+    for flag, value in [('--user', 'root'), ('--install-root', str(root)),
+                        ('--service-manager', 'supervisor'), ('--service-name', 'wrapper'),
+                        ('--home', profile['home']), ('--device-file', profile['device_file']),
+                        ('--env-file', profile['env_file']), ('--service-file', profile['service_file']),
+                        ('--supervisor-config', profile['supervisor_config'])]:
+        assert call[call.index(flag) + 1] == value
+    assert '--adopt-supervisor' not in call
+    assert (root / 'operator-config').read_text() == 'preserve operator settings\n'

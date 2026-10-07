@@ -281,7 +281,7 @@ def test_receipt_fences_physical_replacement_behind_native_alias(tmp_path, accou
         assert receipt["profiles"][0]["reason"] == "daemon_changed"
 
 
-@pytest.mark.parametrize("kind", ["plist", "env-file"])
+@pytest.mark.parametrize("kind", ["plist", "env-file", "state-dir"])
 def test_installer_uses_service_state_root_without_executing_config(tmp_path, kind, capsys):
     state = tmp_path / "custom state"
     before = time.time()
@@ -289,8 +289,10 @@ def test_installer_uses_service_state_root_without_executing_config(tmp_path, ki
     config = tmp_path / "config"
     if kind == "plist":
         config.write_bytes(plistlib.dumps({"EnvironmentVariables": {"CC_REMOTE_STATE_DIR": str(state)}}))
-    else:
+    elif kind == "env-file":
         config.write_text(f'CC_REMOTE_STATE_DIR="{state}"\nIGNORED=$(touch /bad)\n')
+    else:
+        config = state
     assert installer.main([
         "--home", str(tmp_path), "--release", str(readiness.SOURCE_ROOT),
         "--after", str(before), f"--{kind}", str(config), "--wait", "0",

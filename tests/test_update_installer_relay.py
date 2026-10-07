@@ -88,7 +88,8 @@ def test_real_installer_block_runs_new_bundle_preflight_before_local_stop(tmp_pa
     assert stop < source.index('if [ "$service_was_running" -eq 1 ]; then', stop)
     settings = {"previous": str(previous), "pair_code": "", "appdir": str(root),
                 "target": str(target), "target_user": "service-user", "system": "darwin",
-                "service_label": "org.example.wrapper", "relay_ssh": "", "allow_protocol_change": "0"}
+                "service_label": "org.example.wrapper", "relay_ssh": "", "allow_protocol_change": "0",
+                "adopt_root": ""}
     marker = tmp_path / "local-service-stopped"
     # A v4.0.1 caller has no new CLI flags or coordination environment marker.
     harness = "set -euo pipefail\n" + "\n".join(
@@ -117,3 +118,33 @@ def test_first_upgrade_can_request_an_existing_ssh_target(tmp_path, monkeypatch)
     monkeypatch.setattr(relay, "_finish", lambda _: remote.update(version="4.0.1"))
     relay.ensure("4.0.1", 72, allow_protocol_change=False)
     assert json.loads(relay.settings.read_text()) == {"relay_ssh": "operator@relay"}
+
+
+@pytest.mark.parametrize('compatible', [True, False])
+def test_explicit_migration_reads_old_contract_but_keeps_upstream_records_in_new_root(
+    tmp_path, monkeypatch, compatible,
+):
+    import shutil
+
+    installation = _installation(tmp_path, monkeypatch, system='linux')
+    destination = tmp_path / 'standard-install'
+    destination.mkdir()
+    bundle = tmp_path / 'downloaded'
+    shutil.copytree(installation.release, bundle)
+    (bundle / 'release-manifest.json').write_text(json.dumps(_manifest(system='linux', version='4.0.1')))
+    if not compatible:
+        (bundle / 'requirements-wrapper.lock').write_text('claude-agent-sdk==0.2.157\n')
+    calls = []
+    def ensure(self, *args, **kwargs):
+        assert self.journal.parent == destination
+        assert self.settings.parent == destination
+        assert self.installation.release == installation.release
+        calls.append(args)
+    monkeypatch.setattr(update_relay.RelayUpdate, 'ensure', ensure)
+    assert update_relay.installer_main([
+        '--root', str(destination), '--previous-root', str(installation.root),
+        '--bundle', str(bundle), '--user', 'service-user',
+    ]) == (0 if compatible else 1)
+    assert bool(calls) is compatible
+    assert not (destination / 'current').exists()
+    assert (installation.root / 'current').resolve() == installation.release

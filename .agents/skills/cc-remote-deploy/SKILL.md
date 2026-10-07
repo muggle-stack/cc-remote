@@ -24,6 +24,13 @@ Prefer one tested source snapshot for current features. Use a published Release
 when the user selects that version and its contents meet the requested scope;
 do not assume the latest published tag includes the current branch's features.
 
+For an existing Linux Supervisor installation (including a container), follow
+[the explicit adoption procedure](../../../docs/installation_en.md#linux-supervisor-installation-and-adoption).
+Reconcile the actual launcher environment first. Use the standard Wrapper installer
+with its service binding, register the CLI, and verify `cc-remote update --check`;
+copying a release and manually restarting Supervisor is not a complete installation.
+Never reload the entire supervisor or restart the independent Claude service.
+
 Use the operator's actual inventory and existing service ownership. Freeze one
 tested snapshot for all protocol tiers, preserve private configuration/state,
 and use the repository's immutable activation transactions. Lost connectivity
@@ -55,8 +62,12 @@ After cleanup, repeat live config checks as each Codex service user and verify
 the Wrapper session route and public health. A pre-cleanup readiness receipt is
 not final acceptance. Report retained/deferred paths and removed allocated bytes;
 do not equate those bytes with actual free-space gain. No daemon or active task
-may be stopped solely to make an artifact deletable. Installers do not prune
-automatically.
+may be stopped solely to make an artifact deletable. Managed Release installers
+containing `release_retention.py` now generate an inventory from their own
+activation ledger and call `cleanup.py` after acceptance; published v4.0.9 does
+not contain that behavior. Inspect their retention result rather than duplicating
+it with another script. Unknown/source/manual backups still need the explicit
+reviewed inventory. A deferred cleanup does not authorize deleting its files.
 
 ## Codex CLI sharing is an acceptance check
 

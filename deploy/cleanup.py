@@ -19,7 +19,7 @@ import time
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from deploy.install_lock import acquire_install_lock
+from deploy.install_lock import acquire_install_lock, verify_install_lock
 
 JOURNAL = ".cleanup-transaction.json"
 MAX_JSON = 1024 * 1024
@@ -342,12 +342,16 @@ def write_journal(path: Path, report: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def cleanup(inventory: Path, *, apply: bool = False) -> dict:
+def cleanup(inventory: Path, *, apply: bool = False, lock_descriptor: int | None = None) -> dict:
     plan = load_inventory(inventory)
     journal = plan["root"] / JOURNAL
     # Share the installer's lock. A dropped control connection cannot overlap a
     # second installer/cleanup; leftover journals are inspected, never replayed.
-    lock = acquire_install_lock(plan["root"])
+    if lock_descriptor is None:
+        lock = acquire_install_lock(plan["root"])
+    else:
+        verify_install_lock(plan["root"], lock_descriptor)
+        lock = os.dup(lock_descriptor)
     moved: list[tuple[Path, Path, dict]] = []
     report = {"schema": 1, "inventory_sha256": plan["digest"], "started_at": time.time(),
               "mode": "apply" if apply else "preview", "status": "preview",

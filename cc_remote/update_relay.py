@@ -42,6 +42,12 @@ def relay_origin(installation: Installation) -> str:
                 value = json.loads(path.read_text()).get("relay_url")
         except (OSError, ValueError, AttributeError) as exc:
             raise UpdateError("cannot read this device's Relay URL; check its pairing configuration") from exc
+    elif installation.metadata.get('linux_service'):
+        from deploy.linux_service import environment, validate
+        try:
+            value = environment(validate(installation.metadata['linux_service'])).get('RELAY_URL')
+        except (OSError, ValueError) as exc:
+            raise UpdateError("cannot read the bound Linux service's Relay configuration") from exc
     else:
         config = {**dotenv_values("/etc/cc-remote/wrapper.env"),
                   **dotenv_values("/etc/cc-remote/device.env")}
@@ -137,7 +143,8 @@ class RelayUpdate:
                 pwd.getpwnam(user)
             except KeyError as exc:
                 raise UpdateError("the original Wrapper service user no longer exists") from exc
-            args = ["sudo", "-H", "-u", user, "--", *args]
+            if user != 'root':
+                args = ["runuser", "-u", user, "--", *args] if self.installation.metadata.get('linux_service') else ["sudo", "-H", "-u", user, "--", *args]
         try:
             response = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -248,25 +255,36 @@ def installer_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--bundle", required=True, type=Path)
     parser.add_argument("--user", required=True)
+    parser.add_argument("--previous-root", type=Path,
+                        help="validated Linux legacy root during explicit migration")
     parser.add_argument("--service-label")
+    parser.add_argument("--linux-service", type=Path)
     parser.add_argument("--relay-ssh")
     parser.add_argument("--allow-protocol-change", action="store_true")
     args = parser.parse_args(argv)
     try:
-        current = args.root / "current"
+        previous_root = args.previous_root or args.root
+        current = previous_root / "current"
         previous = current.resolve(strict=True)
-        if not current.is_symlink() or previous.parent != (args.root / "releases").resolve():
+        if not current.is_symlink() or previous.parent != (previous_root / "releases").resolve():
             raise UpdateError("current must identify an existing immutable Wrapper release")
         old = load_manifest(previous / "release-manifest.json")
         target = load_manifest(args.bundle / "release-manifest.json")
         if (old["role"] != "wrapper" or target["role"] != "wrapper"
                 or any(old[key] != target[key] for key in ("os", "arch"))):
             raise UpdateError("upstream preflight requires matching Wrapper installations")
+        if args.previous_root or args.linux_service:
+            from cc_remote.update import _claude_contract
+            if old["os"] != "linux" or _claude_contract(previous) != _claude_contract(args.bundle):
+                raise UpdateError("migration requires a compatible Claude SDK/service contract")
         if old["protocol_version"] != target["protocol_version"] and not args.allow_protocol_change:
             raise UpdateError("protocol changes; coordinate all devices and use --allow-protocol-change")
         metadata = {"schema": 1, "role": "wrapper", "user": args.user}
         if args.service_label:
             metadata["service_label"] = args.service_label
+        if args.linux_service:
+            from deploy.linux_service import validate
+            metadata['linux_service'] = validate(json.loads(args.linux_service.read_text()))
         installation = Installation(args.root, previous, old, metadata)
         RelayUpdate(installation, args.relay_ssh).ensure(
             target["product_version"], target["protocol_version"],

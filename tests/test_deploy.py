@@ -665,7 +665,7 @@ false  # injected relay readiness failure after the complete release switch
         harness = harness.replace(
             "false  # injected relay readiness failure after the complete release switch",
             f'MANAGED_RELEASE={0 if activation == "source-success" else 1}\n'
-            'CLI_PATH="$APPDIR/cc-remote"\n'
+            'CLI_PATH="$APPDIR/cc-remote"\nRETENTION_GENERATION=""\n'
             'TARGET=remote.example.test\nPUBLIC_SCHEME=https\nINSECURE_HTTP=0\n'
             + setup_tail,
         )

@@ -166,6 +166,7 @@ def resolve_work_roots(
     *,
     env_file: Path | None = None,
     plist: Path | None = None,
+    environment: dict[str, str] | None = None,
 ) -> dict[str, Path]:
     """Resolve the service's provider roots without executing its config."""
     home_input = Path(os.path.expanduser(str(home)))
@@ -178,6 +179,7 @@ def resolve_work_roots(
     }
     values.update(_env_file_values(env_file))
     values.update(_plist_values(plist))
+    values.update({k: v for k, v in (environment or {}).items() if k in values and v})
     roots = {
         engine: _absolute_path(values[key], home, label=key)
         for engine, key in _ROOT_KEYS.items()
@@ -199,6 +201,7 @@ def resolve_wrapper_state_dir(
     *,
     env_file: Path | None = None,
     plist: Path | None = None,
+    environment: dict[str, str] | None = None,
 ) -> Path:
     """Resolve the old service's private state directory without executing it."""
     home_input = Path(os.path.expanduser(str(home)))
@@ -208,6 +211,7 @@ def resolve_wrapper_state_dir(
     values = {_STATE_DIR_KEY: str(home / ".cc-remote")}
     values.update(_env_file_values(env_file))
     values.update(_plist_values(plist))
+    values.update({k: v for k, v in (environment or {}).items() if k in values and v})
     state_dir = _absolute_path(
         values[_STATE_DIR_KEY], home, label=_STATE_DIR_KEY)
     if state_dir == Path(state_dir.anchor):

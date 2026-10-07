@@ -10,6 +10,9 @@ import re
 import shlex
 import stat
 import tempfile
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 _HEADER = b"#!/usr/bin/env bash\n# cc-remote release management launcher."
@@ -40,7 +43,8 @@ def _atomic_file(destination: Path, content: bytes, mode: int) -> None:
 
 
 def install_cli(root: Path, destination: Path, *, role: str, user: str | None = None,
-                domain: str | None = None, service_label: str | None = None) -> None:
+                domain: str | None = None, service_label: str | None = None,
+                linux_service: dict | None = None) -> None:
     check_destination(destination)
     current = root / "current"
     if not current.is_symlink() or current.resolve().parent != (root / "releases").resolve():
@@ -62,8 +66,34 @@ def install_cli(root: Path, destination: Path, *, role: str, user: str | None = 
             raise ValueError("release management launcher cannot bind the installation root")
         content = content.replace(marker, marker + (
             f"export CC_REMOTE_MANAGED_ROOT={shlex.quote(str(root))}\n").encode(), 1)
+    if linux_service is not None:
+        from deploy.linux_service import validate, trusted, absolute
+        validate(linux_service)
+        if role != 'wrapper' or linux_service['user'] != user or service_label is not None:
+            raise ValueError('Linux service binding does not match installation')
+        trusted(absolute(str(root)))
+        trusted(destination)
+        metadata['linux_service'] = linux_service
+        marker = b'managed_wrapper_root="/opt/cc-remote-wrapper"\n'
+        if content.count(marker) != 1:
+            raise ValueError('release launcher cannot bind Linux root')
+        content = content.replace(marker, f'managed_wrapper_root={shlex.quote(str(root))}\n'.encode(), 1)
+    elif role == 'relay' and destination.exists():
+        # Co-installed Relay updates must preserve the trusted Wrapper binding.
+        for line in destination.read_text().splitlines():
+            if line.startswith('managed_wrapper_root='):
+                value = shlex.split(line)
+                if len(value) != 1:
+                    raise ValueError('invalid existing Wrapper launcher binding')
+                bound = value[0].partition('=')[2]
+                from deploy.linux_service import absolute, trusted
+                trusted(destination)
+                trusted(absolute(bound))
+                content = content.replace(b'managed_wrapper_root="/opt/cc-remote-wrapper"\n',
+                                          f'managed_wrapper_root={shlex.quote(bound)}\n'.encode(), 1)
+                break
     if role == "wrapper":
-        if not user or user == "root":
+        if not user or (user == "root" and linux_service is None):
             raise ValueError("wrapper management requires the original service user")
         metadata["user"] = user
     elif role == "relay":
@@ -95,6 +125,7 @@ def main() -> int:
     parser.add_argument("--user")
     parser.add_argument("--domain")
     parser.add_argument("--service-label")
+    parser.add_argument("--linux-service", type=Path)
     args = parser.parse_args()
     try:
         if args.check:
@@ -103,7 +134,8 @@ def main() -> int:
             if args.root is None or args.role is None:
                 parser.error("--root and --role are required for registration")
             install_cli(args.root, args.destination, role=args.role, user=args.user, domain=args.domain,
-                        service_label=args.service_label)
+                        service_label=args.service_label,
+                        linux_service=json.loads(args.linux_service.read_text()) if args.linux_service else None)
     except (OSError, ValueError) as exc:
         parser.exit(1, f"ERROR: {exc}\n")
     return 0

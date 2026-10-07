@@ -131,12 +131,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--after", required=True, type=float)
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--plist", type=Path)
+    parser.add_argument("--state-dir", type=Path,
+                        help="resolved private state root for a service-user live probe")
     parser.add_argument("--wait", type=float, default=45)
     parser.add_argument("--live-config", action="store_true",
                         help="also read config from each live daemon as its service user; no model turn")
     args = parser.parse_args(argv)
     try:
-        state = resolve_wrapper_state_dir(args.home, env_file=args.env_file, plist=args.plist)
+        state = args.state_dir or resolve_wrapper_state_dir(
+            args.home, env_file=args.env_file, plist=args.plist)
         deadline = time.monotonic() + max(0, min(args.wait, 45))
         while True:
             report = read_receipt(state / REPORT_NAME, args.release, args.after)

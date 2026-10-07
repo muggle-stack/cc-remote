@@ -159,6 +159,7 @@ def test_release_bundles_are_deterministic_and_role_scoped(
     assert f"{prefix}/cc_remote/__main__.py" in members
     assert f"{prefix}/deploy/install_cli.py" in members
     assert f"{prefix}/deploy/cleanup.py" in members
+    assert f"{prefix}/deploy/release_retention.py" in members
     assert f"{prefix}/licenses/uv-LICENSE-MIT" in members
     assert f"{prefix}/cc_remote/protocol.py" in members
     assert not any("/tests/" in name for name in members)
@@ -182,6 +183,7 @@ def test_release_bundles_are_deterministic_and_role_scoped(
         assert f"{prefix}/deploy/install_lock.py" in members
         assert f"{prefix}/deploy/install_claude_service.py" in members
         assert f"{prefix}/deploy/check_codex_readiness.py" in members
+        assert f"{prefix}/deploy/adopt_wrapper.py" in members
         assert f"{prefix}/cc_remote/wrapper/codex_readiness.py" in members
         assert f"{prefix}/cc_remote/claude_service/server.py" in members
         assert f"{prefix}/deploy/work_registry_snapshot.py" in members

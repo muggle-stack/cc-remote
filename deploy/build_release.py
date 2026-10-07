@@ -31,11 +31,13 @@ _SYSTEMS = {"linux", "darwin"}
 _ARCHES = {"x86_64", "arm64"}
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
 _RELAY_DEPLOY = (
+    "linux_service.py",
     "Caddyfile",
     "Caddyfile.insecure",
     "Caddyfile.viewer.example",
     "caddy_managed_block.py",
     "cleanup.py",
+    "release_retention.py",
     "cc-remote-relay.service",
     "env.relay.example",
     "install-relay.sh",
@@ -48,9 +50,13 @@ _RELAY_DEPLOY = (
     "validate_protocol_bundle.py",
 )
 _WRAPPER_DEPLOY = (
+    "linux_service.py",
+    "wrapper_exec.py",
+    "adopt_wrapper.py",
     "atomic_symlink.py",
     "check_codex_readiness.py",
     "cleanup.py",
+    "release_retention.py",
     "cc-remote-wrapper.service",
     "com.muggle.cc-remote.wrapper.plist.in",
     "env.wrapper.example",

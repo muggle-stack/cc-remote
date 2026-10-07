@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize("previous_install", [False, True])
-@pytest.mark.parametrize("phase", ["interrupt-readiness", "success", "fail-output"])
+@pytest.mark.parametrize("phase", ["interrupt-readiness", "success", "fail-output", "retention-failure"])
 def test_wrapper_registration_matches_the_activation_commit(tmp_path, previous_install, phase):
     root = tmp_path / "managed installation"
     target = root / "releases/new"
@@ -31,6 +31,7 @@ def test_wrapper_registration_matches_the_activation_commit(tmp_path, previous_i
         "    assert os.getppid() == int(os.environ['TEST_INSTALLER_PID'])\n"
         "    os.kill(os.getppid(), signal.SIGTERM)\n"
     )
+    (target / "deploy/release_retention.py").write_text("raise SystemExit(1)\n")
     (target / "bin").mkdir()
     launcher = (ROOT / "scripts/cc-remote").read_bytes()
     (target / "bin/cc-remote").write_bytes(launcher)
@@ -48,7 +49,7 @@ def test_wrapper_registration_matches_the_activation_commit(tmp_path, previous_i
         metadata.write_bytes(old_metadata)
 
     settings = {
-        "system": "darwin", "appdir": str(root), "target": str(target),
+        "system": "darwin", "appdir": str(root), "target": str(target), "adopt_root": "",
         "previous": str(previous) if previous_install else "", "current": str(current),
         "cli_path": str(cli), "target_user": "fixture-user", "target_home": str(tmp_path),
         "service_file": str(tmp_path / "wrapper.plist"), "service_label": "fixture-wrapper",
@@ -58,6 +59,7 @@ def test_wrapper_registration_matches_the_activation_commit(tmp_path, previous_i
         "rollback_snapshot": "", "snapshot_created": "0", "service_changed": "0",
         "device_changed": "0", "service_stopped": "0", "service_was_running": "0",
         "switched": "1", "activation_committed": "0",
+        "retention_generation": "fixture-generation" if phase == "retention-failure" else "",
     }
     source = (ROOT / "deploy/install-wrapper.sh").read_text()
     helpers = source[source.index("restart_after_rollback() {"):]
@@ -102,3 +104,5 @@ echo() {
         if phase == "fail-output":
             assert "activation was committed" in result.stderr
             assert "activation failed" not in result.stderr
+        if phase == "retention-failure":
+            assert "all backups retained" in result.stdout

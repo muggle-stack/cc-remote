@@ -44,6 +44,7 @@ PUBLIC_SCHEME=https
 CADDY_TEMPLATE=""
 MANAGED_RELEASE=0
 CLI_PATH=/usr/local/bin/cc-remote
+RETENTION_GENERATION=""
 
 [ -r "$SOURCE_DIR/deploy/setup_transaction.sh" ] || {
   echo "ERROR: $SOURCE_DIR/deploy/setup_transaction.sh is missing" >&2
@@ -337,6 +338,15 @@ harden_release_permissions "$NEW_RELEASE_DIR"
 chown -R root:ccremote "$RUNTIMES_DIR"
 harden_release_permissions "$RUNTIMES_DIR"
 
+if (( MANAGED_RELEASE )); then
+  RETENTION_GENERATION="$(
+    "$NEW_RELEASE_DIR/.venv/bin/python" "$NEW_RELEASE_DIR/deploy/release_retention.py" begin \
+      --root "$APPDIR" --release "$NEW_RELEASE_DIR" --previous "$PREVIOUS_RELEASE" \
+      --role relay --home /root --service cc-remote-relay --service-file "$RELAY_UNIT_FILE" \
+      --config "$CADDYFILE" --config "$ENV_FILE" --config "$APPDIR/installation.json"
+  )"
+fi
+
 echo "==> Caddy config ($PUBLIC_SCHEME://$TARGET)"
 CADDY_SITE="$(mktemp /etc/caddy/cc-remote-site.XXXXXX)"
 CADDY_CANDIDATE="$(mktemp /etc/caddy/Caddyfile.cc-remote.XXXXXX)"
@@ -430,6 +440,16 @@ if (( MANAGED_RELEASE )); then
     --root "$APPDIR" --destination "$CLI_PATH" --role relay --domain "$TARGET"
 fi
 DEPLOY_READY=1
+
+if [ -n "$RETENTION_GENERATION" ]; then
+  if "$NEW_RELEASE_DIR/.venv/bin/python" "$NEW_RELEASE_DIR/deploy/release_retention.py" commit \
+      --root "$APPDIR" --generation "$RETENTION_GENERATION"; then
+    "$NEW_RELEASE_DIR/.venv/bin/python" "$NEW_RELEASE_DIR/deploy/release_retention.py" prune \
+      --root "$APPDIR" || echo "WARNING: Older backups retained; inspect the retention report."
+  else
+    echo "WARNING: Installed, but retention acceptance is incomplete; all backups retained."
+  fi
+fi
 
 echo
 echo "Active release: $NEW_RELEASE_DIR"

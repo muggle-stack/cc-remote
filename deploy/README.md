@@ -135,9 +135,32 @@ Report retained rollback paths, deleted generations, removed allocated bytes
 and any deferred paths. Allocated bytes are not a measurement of free-space gain
 (for example, shared filesystem blocks may remain in use). Moving old copies
 into another backup directory or Trash
-does not reclaim disk space or satisfy this policy. This is an agent-operated
-cleanup step: the existing installers and `cc-remote update` do not automatically
-prune releases or backups.
+does not reclaim disk space or satisfy this policy.
+
+Current-source **managed Release installers** apply this policy automatically
+after activation and registration. `release_retention.py` records the exact
+artifact identities in `.release-generations.json`, captures the previous service
+and external configuration in `rollback-config/`, and binds the matching private
+state snapshot in `rollback-data/`. It builds a bounded inventory and delegates
+all deletion to `cleanup.py`, inheriting the installation lock. Fresh acceptance
+checks public Relay/Web identity, stable service identity, Wrapper connectivity,
+snapshot integrity and live Codex configuration as the service user. Process,
+symlink and dormant service/configuration dependencies override retention limits.
+
+Failed/incomplete acceptance or insufficient process visibility retains files and
+warns without rolling back an already committed installation. A same-version
+`cc-remote update` retries deferred retention with fresh checks, without restarting
+services or sending model messages; `--check` is read-only. An interrupted
+installation's prepared record requires explicit inspection, not automatic retry.
+Unknown backups/uploads and external legacy roots remain outside automatic
+deletion and still require the reviewed agent inventory below. Configuration
+backup `files.json` records each original destination, absence, owner and mode;
+keep it with that generation for administrator-controlled recovery.
+
+**Published v4.0.9 does not include automatic retention or Linux legacy migration.**
+These take effect with an installer bundle containing the new code, including
+upgrades initiated by older management CLIs. Source/manual deployments continue
+to use reviewed cleanup inventories and their existing activation transactions.
 
 #### Repository cleanup command
 
@@ -261,11 +284,23 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
   pairing is separate from this existing-installation upgrade path.
   Explicit Mac registration can bind an existing immutable root and LaunchAgent;
   future installs preserve that layout and service identity. The command does not
-  restart the independent Claude service, adopt source/Docker layouts, prune
-  releases, or automate downgrade rollback.
+  restart the independent Claude service, automatically adopt source/Docker
+  layouts, or automate downgrade rollback. Recorded managed generations use the
+  retention procedure above.
   Direct role installers use the same per-installation `.update.lock` before
   reading rollback state or changing services. They validate the inherited file
   descriptor from a managed update; an environment marker cannot bypass the lock.
+- `linux_service.py` / `wrapper_exec.py` — Linux Supervisor adapter for the same
+  Wrapper installer/update transaction. Explicitly bind the root, Unix control
+  config, program/file, user, HOME and external environment/device files. Require
+  root-owned non-replaceable code/config paths. Never infer arbitrary launchers:
+  first adoption requires `--adopt-supervisor` and operator-reconciled environment
+  selectors. Only replace/reload that program; preserve other sections and the
+  independent Claude service. Snapshot selectors, Relay preflight, readiness and
+  retention use that same binding. See the complete
+  [Supervisor installation/adoption procedure](../docs/installation_en.md#linux-supervisor-installation-and-adoption).
+  Partial process visibility defers retention; it is not permission to delete
+  container releases. Container recreation/persistence remains runtime-owned.
 - `build_release.py` / `release_manifest.py` — reproducible role-bundle builder
   and fail-closed manifest validator. Relay artifacts contain `web/dist` and
   `requirements-relay.lock`; Wrapper artifacts contain no Web tree and use
@@ -280,7 +315,8 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
 - `install-wrapper.sh` — first-install/upgrade entry for published macOS and
   Linux Wrapper bundles. It builds the immutable release before pairing and
   activation, stores device authority outside the release, atomically switches
-  `current`, installs a per-user LaunchAgent or root-managed systemd unit, and
+  `current`, installs a per-user LaunchAgent, root-managed systemd unit or
+  explicitly selected Supervisor program, and
   restores the previous release/service definition on failure. The installer
   requires and explicitly selects the service user's daily
   `~/.local/bin/claude`; it never silently falls back to the SDK-bundled CLI.
@@ -288,6 +324,16 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
   process-bound result from Wrapper startup. Codex is optional: missing or
   incompatible CLI/account connections produce a separate warning instead of
   rolling back an otherwise healthy Claude/Wrapper installation.
+  An existing Linux immutable system-service installation can explicitly migrate
+  with `--adopt-root /absolute/legacy/root --user USER`. `adopt_wrapper.py` checks
+  its actual user, command, ownership, environment layout and absence of drop-ins
+  before activation. The standard `/opt/cc-remote-wrapper` destination must not
+  already be installed. The old root is preserved; external credentials and
+  service policy survive both migration and subsequent upgrades. A failure restores
+  the old service and state rather than registering an incomplete destination.
+  Unsupported layouts require explicit reconciliation, not a first-install
+  overwrite. Root privileges are required; a narrowly authorized custom activation
+  helper is not permission to bypass the system installer or its ownership checks.
 - `prepare_wrapper_stage.py` — unprivileged preflight for an existing manual
   immutable-Wrapper topology. It reuses an active venv only when the dependency
   lock and Python pin are identical; otherwise it builds a platform-local venv
