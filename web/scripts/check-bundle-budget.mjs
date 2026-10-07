@@ -32,7 +32,9 @@ const DIST = resolve(import.meta.dirname, "../dist");
 // Native compaction animation and exact boundary replacement add <1 KiB of
 // startup JS. Keep entry, compressed-size and request-count limits unchanged.
 const MAX_ENTRY_BYTES = 537 * 1024;
-const MAX_INITIAL_BYTES = 938 * 1024;
+// Viewport portals for image/paste overlays keep mobile page layers stable.
+// They add <0.1 KiB, with no extra request/dependency; round the cap to a KiB.
+const MAX_INITIAL_BYTES = 939 * 1024;
 // Cross-thread provenance, scoped navigation and receipts add <2 KiB gzip.
 // The history reader and link UI load on demand; other caps stay unchanged.
 const MAX_INITIAL_GZIP_BYTES = 282 * 1024;

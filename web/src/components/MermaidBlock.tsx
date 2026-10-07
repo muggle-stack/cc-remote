@@ -5,7 +5,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { createPortal } from "react-dom";
 import { Icon } from "../icons";
 import {
   mermaidPreviewSvg,
@@ -174,12 +173,9 @@ export function MermaidBlock({ source }: { source: string }) {
       </div>}
     </div>
     {preview && typeof document !== "undefined"
-      ? createPortal(
-          <ImageLightbox sanitizedSvg={preview.svg} alt="Mermaid 图表预览"
-            dialogLabel="Mermaid 图表预览" closeLabel="关闭 Mermaid 图表预览"
-            onClose={closePreview} />,
-          document.body,
-        )
+      ? <ImageLightbox sanitizedSvg={preview.svg} alt="Mermaid 图表预览"
+          dialogLabel="Mermaid 图表预览" closeLabel="关闭 Mermaid 图表预览"
+          onClose={closePreview} />
       : null}
     </>
   );

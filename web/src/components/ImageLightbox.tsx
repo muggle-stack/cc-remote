@@ -6,6 +6,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import { Icon } from "../icons";
 import {
   panImageTransform,
@@ -310,7 +311,7 @@ export function ImageLightbox(props: ImageLightboxProps) {
     requestClose();
   };
 
-  return <div ref={stageRef}
+  return createPortal(<div ref={stageRef}
     className={`image-lightbox${entered ? " entered" : ""}${interacting ? " interacting" : ""}`}
     role="dialog" aria-modal="true" aria-label={dialogLabel}
     onPointerDown={onPointerDown} onPointerMove={onPointerMove}
@@ -335,5 +336,5 @@ export function ImageLightbox(props: ImageLightboxProps) {
       onClick={(event) => { event.stopPropagation(); requestClose(); }}>
       <Icon name="close" size={22} />
     </button>
-  </div>;
+  </div>, document.body);
 }

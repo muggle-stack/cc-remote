@@ -1,12 +1,10 @@
 export function sidebarDragIntent(dx: number, dy: number): "pending" | "horizontal" | "vertical" {
-  if (Math.max(Math.abs(dx), Math.abs(dy)) < 10) return "pending";
-  return Math.abs(dx) > Math.abs(dy) * 1.25 ? "horizontal" : "vertical";
-}
-
-export function sidebarReleaseOpen(offset: number, width: number, velocity: number): boolean {
-  // A recent flick carries the drawer; a held/slow drag settles by distance.
-  if (Math.abs(velocity) >= 0.45) return velocity > 0;
-  return offset >= width / 2;
+  const x = Math.abs(dx), y = Math.abs(dy);
+  if (Math.max(x, y) < 10) return "pending";
+  if (x > y * 1.25) return "horizontal";
+  if (y > x * 1.25) return "vertical";
+  // A diagonal first sample is not enough to abandon the entire gesture.
+  return "pending";
 }
 
 const PANEL_MIN_WIDTH_PX = 360;

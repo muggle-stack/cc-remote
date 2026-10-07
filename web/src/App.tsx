@@ -35,6 +35,8 @@ import { ChatView } from "./components/ChatView";
 import { Composer } from "./components/Composer";
 import { usePanelWidthPreference } from "./use-panel-width";
 import { SidebarToggle } from "./components/SidebarToggle";
+import { SidebarShell, SidebarState } from "./components/SidebarLayout";
+import { useSidebarController } from "./sidebar-state";
 const SessionMessagePreview = lazy(() => import("./components/SessionMessagePreview").then((m) => ({ default: m.SessionMessagePreview })));
 
 const BackgroundTaskControl = lazy(() => import("./components/BackgroundTaskControl"));
@@ -348,7 +350,8 @@ export default function App() {
   const spacesByEngineRef = useRef<Record<Engine, Space>>(initialSpacesRef.current);
   const [authed, setAuthed] = useState(false);
   const [authReady, setAuthReady] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const sidebar = useSidebarController();
+  const setSidebarOpen = sidebar.setOpen;
   const [dirPickerOpen, setDirPickerOpen] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [newChatAutoFocus, setNewChatAutoFocus] = useState(true);
@@ -1967,7 +1970,7 @@ export default function App() {
       wsRef.current?.sendGetWorkArtifacts(selectedEngine, id);
     }
     if (isMobile()) setSidebarOpen(false);
-  }, [clearForkFocusLease, machineId, requestHistory, resumeListedSession]);
+  }, [clearForkFocusLease, machineId, requestHistory, resumeListedSession, setSidebarOpen]);
 
   useEffect(() => {
     const target = pendingNotificationTarget;
@@ -3848,6 +3851,7 @@ export default function App() {
     requestSkillCatalog,
     sendContextRequestTo,
     setBtwOpeningFor,
+    setSidebarOpen,
     settleCancelledHistoryBrowse,
     settleTerminalHistoryRepair,
     startForkFocusLease,
@@ -4130,7 +4134,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [authed]);
+  }, [authed, setSidebarOpen]);
 
   // Shift+Tab follows each engine's real mode control: Claude cycles permission
   // modes; Codex toggles collaboration mode without touching approvalPolicy.
@@ -5542,8 +5546,8 @@ export default function App() {
     <ViewerPagesProvider scope={visibleParentSid && authed
       ? { machineId, sid: visibleParentSid, space, engine } : null} onOpen={openViewerPage}>
     <RemoteViewerContext.Provider value={visibleParentSid ? openViewerLink : null}>
-    <div className={"shell" + (sidebarOpen ? " sidebar-open" : "") + (visibleRightPanel !== null ? " panel-open" : "")}>
-      <Suspense fallback={null}><SessionsSidebar
+    <SidebarShell controller={sidebar} className={visibleRightPanel !== null ? "panel-open" : ""}>
+      <SidebarState controller={sidebar}>{sidebarOpen => <Suspense fallback={null}><SessionsSidebar
         open={sidebarOpen}
         onOpenChange={setSidebarOpen}
         engine={engine}
@@ -5619,7 +5623,7 @@ export default function App() {
         }}
         onForkWorktree={openForkWorktree}
         onMigrate={openSessionMigration}
-      /></Suspense>
+      /></Suspense>}</SidebarState>
       {dirPickerOpen && <Suspense fallback={null}><DirPicker
         open={dirPickerOpen}
         path={state.dirPicker?.path ?? null}
@@ -5651,10 +5655,10 @@ export default function App() {
         <header className={`c-head ${space}-head`}>
           <div className="titlewrap">
             <div className="ttl">
-              <SidebarToggle className="surface-head-title" open={sidebarOpen} onOpenChange={setSidebarOpen}>
+              <SidebarState controller={sidebar}>{sidebarOpen => <SidebarToggle className="surface-head-title" open={sidebarOpen} onOpenChange={setSidebarOpen}>
                 <span className="surface-head-mark"><Icon name={space === "work" ? "work" : "code"} size={18} /></span>
                 <span>{space === "work" ? "Work" : "Code"}</span>
-              </SidebarToggle>
+              </SidebarToggle>}</SidebarState>
               {focusedWorkProfile && (
                 <span className={`work-profile-owner tone-${focusedWorkProfile.tone}`}
                   title={`${focusedEngine === "codex" ? "Codex" : "Claude"} 账号：${focusedWorkProfile.fullLabel}`}
@@ -6427,7 +6431,7 @@ export default function App() {
           setDeviceSheetOpen(false);
         }}
         onClose={() => setDeviceSheetOpen(false)} />
-    </div>
+    </SidebarShell>
     </RemoteViewerContext.Provider>
     </ViewerPagesProvider>
   );

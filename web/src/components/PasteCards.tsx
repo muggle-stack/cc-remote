@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import type { ComposerPaste } from "../composer-pastes";
 import {
@@ -85,7 +86,7 @@ export function PasteCards({ pastes, onChange, disabled = false }: Props) {
       </article>
     ))}
 
-    {editingPaste && (
+    {editingPaste && createPortal(
       <div className="paste-preview-backdrop" role="presentation"
         onMouseDown={(event) => {
           if (event.target === event.currentTarget) closeEditor();
@@ -127,7 +128,7 @@ export function PasteCards({ pastes, onChange, disabled = false }: Props) {
               }}>保存</button>
           </footer>
         </section>
-      </div>
+      </div>, document.body,
     )}
   </>;
 }

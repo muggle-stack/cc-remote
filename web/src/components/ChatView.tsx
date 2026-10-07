@@ -28,6 +28,7 @@ import { claudeContinuations, type ClaudeContinuation } from "../claude-continua
 import { TimedMessageTag } from "./TimedMessageTag";
 import { Icon, ClaudeMark, ClaudeWorking, ClaudeSpark } from "../icons";
 import { canForkTurn } from "../session-worktree";
+import { sidebarDragIntent } from "../responsive-layout";
 import {
   GeneratedImagePreview,
   ProcessTimeline,
@@ -454,6 +455,7 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
   const lastScrollTopRef = useRef(0);
   const renderedScrollScopeRef = useRef<string | null>(null);
   const touchYRef = useRef<number | null>(null);
+  const touchOriginRef = useRef<{ x: number; y: number; vertical: boolean } | null>(null);
   const touchMomentumActiveRef = useRef(false);
   const touchEventClockOffsetRef = useRef<number | null>(null);
   const touchTransactionBoundaryRef =
@@ -1693,6 +1695,7 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
       cancelHistoryAnchor();
       clearHistoryRequestTimeout();
       touchYRef.current = null;
+      touchOriginRef.current = null;
       touchTransactionBoundaryRef.current = null;
       touchEventClockOffsetRef.current = null;
       userScrollIntentRef.current = false;
@@ -2132,9 +2135,26 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
     touchEventClockOffsetRef.current =
       window.performance.now() - event.timeStamp;
     touchYRef.current = event.touches[0]?.clientY ?? null;
+    const touch = event.touches[0];
+    touchOriginRef.current = touch
+      ? { x: touch.clientX, y: touch.clientY, vertical: false } : null;
   };
 
   const onTouchMove = (event: TouchEvent<HTMLDivElement>) => {
+    // The shell's native listener claims sidebar navigation before React's
+    // delegated listener runs. Do not read layout after it writes transforms,
+    // cancel history transactions, or pause output for a horizontal swipe.
+    if (event.defaultPrevented || event.touches.length !== 1) return;
+    const touch = event.touches[0];
+    const origin = touchOriginRef.current;
+    if (origin && !origin.vertical) {
+      // Even before the sidebar reaches its claim threshold, small vertical
+      // finger noise must not be mistaken for reading older messages. Once a
+      // vertical pan wins, keep its history semantics through later reversals.
+      if (sidebarDragIntent(touch.clientX - origin.x, touch.clientY - origin.y)
+          !== "vertical") return;
+      origin.vertical = true;
+    }
     const currentY = event.touches[0]?.clientY;
     const previousY = touchYRef.current;
     if (currentY == null || previousY == null) return;
@@ -2207,7 +2227,14 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
     });
   };
 
-  const clearTouch = () => {
+  const clearTouch = (event: TouchEvent<HTMLDivElement>) => {
+    const origin = touchOriginRef.current;
+    const touch = event.changedTouches[0];
+    // Chrome may make touchend non-cancelable after a pending first movement,
+    // even for a CSS-reserved horizontal gesture. It still must not rebuild
+    // history on the first release-animation frame.
+    const navigationTouch = origin && !origin.vertical && (event.defaultPrevented
+      || (touch && sidebarDragIntent(touch.clientX - origin.x, touch.clientY - origin.y) === "horizontal"));
     // Mobile WebKit may defer React's scroll event until touchend. Capture the
     // DOM's already-moved reading row before clearing the touch lock, otherwise
     // the residual prepend correction can restore the pre-gesture row first.
@@ -2217,6 +2244,7 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
     touchTransactionBoundaryRef.current = null;
     touchEventClockOffsetRef.current = null;
     touchYRef.current = null;
+    touchOriginRef.current = null;
     historyLoadGateRef.current.endGesture();
     // touchend only releases the finger. Mobile WebKit can keep scrolling for
     // several native frames afterwards, so restart the complete idle window
@@ -2227,7 +2255,10 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
     // A page can finish while the finger is still down. Re-render after the
     // native touch ends so the retained history transaction can correct and
     // release its exact reading boundary without fighting the gesture.
-    setScrollPolicyEpoch((value) => value + 1);
+    // A horizontal navigation gesture did not move the reading boundary. Its
+    // normal idle lease still flushes pending history, but rebuilding the chat
+    // here would block the sidebar's first automatic-animation frame.
+    if (!navigationTouch) setScrollPolicyEpoch((value) => value + 1);
     const anchor = historyAnchorRef.current.current();
     if (anchor?.phase === "applied") {
       scheduleHistoryAnchorRelease(anchor.generation);
