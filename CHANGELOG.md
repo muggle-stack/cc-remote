@@ -2,6 +2,20 @@
 
 [中文](CHANGELOG_zh.md)
 
+## v4.0.9
+
+Improve mobile sidebar gestures and preserve session-list momentum after opening.
+Wire protocol v74 is unchanged. See the bilingual [release notes](docs/releases/v4.0.9.md).
+
+- Reduce conversation and Markdown rendering during sidebar navigation and streaming.
+- Preserve flick speed and repeated gesture reversals; make fade, blur and rounded
+  corners follow drag progress in both themes.
+- Keep mobile scroll layers stable and avoid interrupting a list fling started
+  during the opening animation; cancel abandoned long presses.
+- Preserve viewport positioning for image previews and paste editors.
+- iPhone PWA testing confirms the immediate-scroll interruption is resolved;
+  a small first-drag jitter remains.
+
 ## v4.0.8
 
 Add native Codex cross-session message views and responsive mobile drawers;
