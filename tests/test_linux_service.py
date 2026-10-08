@@ -125,6 +125,81 @@ def fresh_binding(binding):
     return root, {**profile, 'service_file': str(root / 'fresh.conf')}
 
 
+@pytest.fixture
+def preflight_binding(fresh_binding):
+    root, profile = fresh_binding
+    release = root / 'releases/old'
+    release.mkdir(parents=True)
+    (root / 'current').symlink_to(release)
+    cli = Path(profile['home']) / '.local/bin/claude'
+    cli.parent.mkdir(parents=True)
+    cli.write_text('#!/bin/sh\nexit 0\n')
+    cli.chmod(0o755)
+    return root, profile
+
+
+@pytest.mark.parametrize('mode', ['fresh', 'adopt', 'update'])
+@pytest.mark.parametrize('legacy', [False, True])
+def test_preflight_accepts_old_and_new_supervisor_config_fields(preflight_binding, monkeypatch, mode, legacy):
+    root, profile = preflight_binding
+    if mode == 'adopt':
+        Path(profile['service_file']).write_text('[program:wrapper]\ncommand=/bin/sleep 120\n')
+    elif mode == 'update':
+        service.render(root, profile, root / 'unused')
+        (root / 'installation.json').write_text(json.dumps({'linux_service': profile}))
+    program = service.supervisor_program(profile, optional=True)
+    configs = [] if program is None else [dict(name='wrapper', group='wrapper', command=program['command'])]
+    if configs and not legacy:
+        configs[0].update(directory=program.get('directory', 'none'), uid=0 if mode == 'update' else 'none')
+    calls = []
+
+    def reload_config():
+        calls.append('reloadConfig')
+        return [[['unrelated-added'], ['claude-service'], ['unrelated-removed']]]
+
+    monkeypatch.setattr(service, 'rpc', lambda _: SimpleNamespace(
+        getAllConfigInfo=lambda: configs, reloadConfig=reload_config,
+        getProcessInfo=lambda _: {'statename': 'STOPPED', 'pid': 0, 'start': 0}))
+    before = {path: path.read_bytes() for path in root.rglob('*') if path.is_file()}
+    service.preflight(root, profile, adopt=mode == 'adopt')
+    assert calls == ([] if mode == 'fresh' else ['reloadConfig'])
+    assert all(path.read_bytes() == content for path, content in before.items())
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+@pytest.mark.parametrize('change', ['added', 'changed', 'removed', 'fault'])
+def test_preflight_requires_native_diff_even_when_rpc_fields_match_or_are_absent(
+    preflight_binding, monkeypatch, legacy, change,
+):
+    root, profile = preflight_binding
+    service.render(root, profile, root / 'unused')
+    config = dict(name='wrapper', group='wrapper', command=service.supervisor_program(profile)['command'])
+    if not legacy:
+        config.update(directory=str(root / 'current'), uid=0)
+
+    def reload_config():
+        if change == 'fault':
+            raise xmlrpc.client.Fault(92, 'CANT_REREAD')
+        return [[['wrapper'] if change == name else [] for name in ('added', 'changed', 'removed')]]
+
+    monkeypatch.setattr(service, 'rpc', lambda _: SimpleNamespace(
+        getAllConfigInfo=lambda: [config], reloadConfig=reload_config))
+    with pytest.raises((ValueError, xmlrpc.client.Fault), match='unapplied|CANT_REREAD'):
+        service.preflight(root, profile)
+
+
+@pytest.mark.parametrize('field,value', [('directory', '/wrong'), ('uid', 12345)])
+def test_preflight_checks_identity_fields_when_supervisor_exposes_them(preflight_binding, monkeypatch, field, value):
+    root, profile = preflight_binding
+    service.render(root, profile, root / 'unused')
+    config = dict(name='wrapper', group='wrapper', command=service.supervisor_program(profile)['command'],
+                  directory=str(root / 'current'), uid=0)
+    config[field] = value
+    monkeypatch.setattr(service, 'rpc', lambda _: SimpleNamespace(getAllConfigInfo=lambda: [config]))
+    with pytest.raises(ValueError, match='differs from disk'):
+        service.preflight(root, profile)
+
+
 @pytest.mark.parametrize('loaded', [False, True])
 def test_remove_fresh_group_is_scoped_and_idempotent(fresh_binding, monkeypatch, loaded):
     _, profile = fresh_binding

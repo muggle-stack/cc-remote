@@ -231,6 +231,9 @@ Current source supports an existing Supervisor, including Linux containers witho
 systemd. **v4.0.9 does not include this feature**: first install/adopt using a bundle
 containing it, then use the same `cc-remote update`. The installer does not install
 systemd, start supervisord, or rebuild a container image.
+Older interfaces, including Supervisor 4.2.1/4.2.4, retain the same preflight
+checks. Unapplied changes to the selected service must be reconciled first;
+the installer does not skip validation or automatically restart other services.
 
 Use an existing root-owned Supervisor with a local Unix control socket. Specify
 its actual configuration explicitly; do not rely on supervisorctl search paths.

@@ -310,7 +310,11 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
   root-owned non-replaceable code/config paths. Never infer arbitrary launchers:
   first adoption requires `--adopt-supervisor` and operator-reconciled environment
   selectors. Only replace/reload that program; preserve other sections and the
-  independent Claude service. A failed fresh installation removes its newly
+  independent Claude service. Preflight supports older Supervisor RPC responses
+  (including 4.2.1/4.2.4) without the directory/uid fields added in 4.2.5. Always
+  require the native `reloadConfig` comparison against active groups to report
+  no changes for the bound program; a reread does not apply those changes.
+  A failed fresh installation removes its newly
   loaded Supervisor group after stopping it and removing the new definition;
   previously configured programs remain registered during rollback.
   Snapshot selectors, Relay preflight, readiness and

@@ -334,10 +334,16 @@ def preflight(root: Path, profile: dict, *, adopt: bool = False) -> None:
     require(expected_user == ('root' if managed else profile['user']), 'Supervisor Wrapper user mismatch')
     configs = [x for x in server.getAllConfigInfo() if x['name'] == profile['name']]
     require(len(configs) == 1 and configs[0]['group'] == profile['name']
-            and shlex.split(configs[0]['command']) == command
-            and configs[0]['directory'] == program.get('directory', 'none')
-            and configs[0]['uid'] == (pwd.getpwnam(expected_user).pw_uid if 'user' in program else 'none'),
+            and shlex.split(configs[0]['command']) == command,
             'loaded Supervisor config differs from disk; reconcile it before updating')
+    expected = {'directory': program.get('directory', 'none'),
+                'uid': pwd.getpwnam(expected_user).pw_uid if 'user' in program else 'none'}
+    require(all(key not in configs[0] or configs[0][key] == value for key, value in expected.items()),
+            'loaded Supervisor config differs from disk; reconcile it before updating')
+    # Before 4.2.5 getAllConfigInfo omits directory/uid. The native comparison
+    # below still checks both against the active process-group configuration
+    # (even for stopped programs). It reads config without applying changes;
+    # never skip it just because the fields above are absent or match.
     changes = server.reloadConfig()[0]
     require(not any(profile['name'] in group for group in changes),
             'Supervisor program has unapplied configuration changes; reconcile it before updating')

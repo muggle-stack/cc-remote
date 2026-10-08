@@ -190,6 +190,8 @@ Claude 服务，不复制原生会话。自定义命令、额外 systemd drop-in
 当前源码支持已有 Supervisor 管理的 Wrapper，包括没有 systemd 的 Linux 容器。
 **v4.0.9 不包含此功能**；必须先使用包含该改动的安装包完成一次安装/接管，之后直接
 执行 `cc-remote update`。无需安装 systemd，也不负责启动 Supervisor 守护进程或重建镜像。
+兼容 Supervisor 4.2.1/4.2.4 的旧接口，仍会校验目标服务的实际配置；若磁盘配置有尚未
+应用的变更，安装器会要求先核对，不会跳过检查或自动重启其他服务。
 
 先确认 Supervisor 已以 root 运行并配置本地 Unix 管理 socket；显式指定实际配置文件，
 不依赖 `supervisorctl` 的默认搜索路径。准备 root 所有、0600 的外部 Wrapper 环境文件，
