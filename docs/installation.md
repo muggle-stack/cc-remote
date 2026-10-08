@@ -23,7 +23,7 @@ Web，Wrapper 包只含本机控制端；两者都自带 `uv`，安装时创建�
 |---|---|---|---|
 | Relay | Ubuntu 22.04+ / Debian 12+ | x86_64、arm64 | systemd + Caddy |
 | Wrapper | macOS | Intel、Apple Silicon | 当前用户 LaunchAgent |
-| Wrapper | glibc Linux + systemd（推荐 Ubuntu 22.04+ / Debian 12+） | x86_64、arm64 | 指定普通用户的 systemd 服务 |
+| Wrapper | glibc Linux + systemd 或已有 Supervisor（推荐 Ubuntu 22.04+ / Debian 12+） | x86_64、arm64 | 指定用户的 systemd / Supervisor 服务 |
 
 ### 1）下载并校验引导脚本
 
@@ -126,7 +126,7 @@ cc-remote update --relay-ssh operator@relay-host
 ```
 
 也可以使用 `~/.ssh/config` 中的别名。该 SSH 账号需要能通过 `sudo -n` 运行服务器的
-托管更新器和 systemd；Linux 设备使用安装时的普通服务用户连接 SSH。不会把设备配对
+托管更新器和 systemd；Linux 设备使用安装登记的服务用户连接 SSH。不会把设备配对
 凭据当作服务器管理权限，也不会复制 SSH 私钥。若不能验证服务器版本或没有管理权限，
 本机不会先行切换。VPS 更新由独立 systemd 任务运行；连接断开后再次执行命令只核查
 `upstream-update.json` 记录的同一事务，不重复启动安装。失败时按记录中的 unit 查看
@@ -140,11 +140,22 @@ cc-remote update --relay-ssh operator@relay-host
 `--relay-ssh` 和 `--allow-protocol-change`。
 
 命令校验 SHA-256、安装包路径、平台和版本，随后复用原安装器的不可变切换、状态快照
-与失败回滚；保留账号、配对和外部配置，不清理旧 release，也不会重新配对。同版本
-不重启，重复更新会被锁住，激活失败不会自动重试。独立 Claude 服务不在更新范围内。
-真正升级 Wrapper 后会显示上述 Codex 连接检查结果；`--check` 和同版本更新不触发配置或检查。
+与失败回滚；保留账号、配对和外部配置，不会重新配对。同版本不重启服务，重复更新会被
+锁住，激活失败不会自动重试。独立 Claude 服务不在更新范围内。更新使用预构建 Web 与
+锁定依赖，不在用户机器上执行 CI、pytest 或 Node 构建；Electron 本体另行更新。
+真正升级 Wrapper 后会显示上述 Codex 连接检查结果；`--check` 不触发配置或本地验收。
 升级前先等待进程内 Claude、BTW 和排队消息处理结束；SDK 或独立服务协议变化时，
 命令会停止并要求按 [Claude 服务指南](claude-session-service.md) 完成迁移。
+
+当前源码的安装器会在切换前记录旧版代码、服务配置和私有状态快照；新版本通过验收后，
+保留当前版本及上一版完整回滚资料，通过 `deploy/cleanup.py` 清理有记录的更早版本。
+独立 Claude 服务、Codex daemon、进程工作目录、打开文件或保留版本的符号链接仍引用的
+旧文件会继续保留，不为清理重启任务。来源不明、权限不足、验收失败或事务未完成时保留
+文件并告警；清理失败不会撤销已完成的升级。再次执行同版本 `cc-remote update` 会在
+重新验活、读取原生 Codex 配置后重试安全清理，`--check` 始终不清理。
+记录位于安装根目录的 `.release-generations.json`、`rollback-config/` 和 `rollback-data/`。
+原有未知备份不会按文件名猜测后删除。**v4.0.9 仍保留旧版本、不自动清理**；新规则随包含
+此改动的安装包生效，即使升级是由旧版更新命令发起的。
 
 通信协议变化时命令默认停止。先安排所有机器的维护窗口，按部署文档顺序使用
 `--version` 固定同一版并附加 `--allow-protocol-change`；这只表示已安排协调升级，
@@ -152,10 +163,72 @@ cc-remote update --relay-ssh operator@relay-host
 页面与设备中心会显示具体设备与服务端的版本不兼容提示。更新完成后重新加载 Web/PWA。
 
 v4.0.0 及更早版本尚未安装这个命令，需先按下面的方式升级到包含它的版本一次。
-源码和 Docker 部署继续使用各自流程，命令不会自动接管它们。已有 Mac 不可变 Release
+未登记的源码部署和镜像重建不会自动接管；已有 Supervisor 管理的 Linux Wrapper
+可按下方流程接入相同更新器。已有 Mac 不可变 Release
 布局可在确认当前目录与 LaunchAgent 对应后，用 `deploy/install_cli.py --root ...
 --destination ~/.local/bin/cc-remote --role wrapper --user ... --service-label ...` 显式注册；
 后续更新保留该目录、服务标签与原有环境。未注册的自定义部署保持原样。
+
+#### Linux 旧安装迁入更新器
+
+仅复制源码或手工切换 `current` 不会自动安装更新命令。当前源码提供显式迁移入口；
+需要下载包含此功能的 Release 安装器（v4.0.9 不支持），由管理员在独立终端执行：
+
+```bash
+./install.sh wrapper --user youruser --adopt-root /absolute/legacy/installation
+```
+
+它校验原 `cc-remote-wrapper` systemd 服务的用户、命令、不可变目录与环境文件，
+将 Wrapper 迁到 `/opt/cc-remote-wrapper/` 并注册 `/usr/local/bin/cc-remote`。
+现有 `/etc/cc-remote/` 凭据、代理、账号和服务策略保留；不传新配对码，不重启独立
+Claude 服务，不复制原生会话。自定义命令、额外 systemd drop-in 或不明布局会拒绝迁移，
+需先按部署文档核对。原安装树保留用于回滚和运行依赖，迁移首轮不自动清理；后续标准
+更新只清理新目录内有记录的旧资料。不要在迁移期间并发执行旧部署任务。
+
+#### Linux Supervisor 安装与首次接管
+
+当前源码支持已有 Supervisor 管理的 Wrapper，包括没有 systemd 的 Linux 容器。
+**v4.0.9 不包含此功能**；必须先使用包含该改动的安装包完成一次安装/接管，之后直接
+执行 `cc-remote update`。无需安装 systemd，也不负责启动 Supervisor 守护进程或重建镜像。
+兼容 Supervisor 4.2.1/4.2.4 的旧接口，仍会校验目标服务的实际配置；若磁盘配置有尚未
+应用的变更，安装器会要求先核对，不会跳过检查或自动重启其他服务。
+
+先确认 Supervisor 已以 root 运行并配置本地 Unix 管理 socket；显式指定实际配置文件，
+不依赖 `supervisorctl` 的默认搜索路径。准备 root 所有、0600 的外部 Wrapper 环境文件，
+参照 `deploy/env.wrapper.example`。已有自定义启动脚本需要先核对并保留其中的状态目录、
+工作目录、账号选择、代理、`CLAUDE_BIN` 和 `CC_REMOTE_CLAUDE_SERVICE_SOCKET`；不要复制
+Claude/Codex 登录凭据。文件值按字面读取，不运行 shell，不展开变量。
+
+```bash
+# 在独立终端中由管理员执行；占位路径按现有安装填写。
+./install.sh wrapper --user root --home /root \
+  --service-manager supervisor --install-root /srv/cc-remote \
+  --supervisor-config /etc/supervisor/supervisord.conf \
+  --service-file /etc/supervisor/conf.d/cc-remote.conf --service-name wrapper \
+  --env-file /etc/cc-remote/wrapper.env --device-file /root/.cc-remote/device.json \
+  --adopt-supervisor
+```
+
+`--adopt-supervisor` 仅用于首次显式替换旧 Wrapper 启动命令；必须已有该命名程序和
+`current → releases/<旧版>` 的不可变目录。若程序写在 Supervisor 主配置里，
+`--service-file` 可以与 `--supervisor-config` 相同；只改该程序段，其他服务段保持原样。
+接管前人工确认外部环境文件与原脚本等效，尤其是 Work/私有状态路径；安装器不会执行
+或猜测任意脚本的环境。需要清除旧脚本原本清除的继承变量时，可在环境文件使用
+`CC_REMOTE_SUPERVISOR_UNSET_ENV=ALL_PROXY,all_proxy,CLAUDE_CONFIG_DIR,CODEX_HOME`，
+仅限账号选择、Python 环境和代理变量。不要为了接管改变既有账号选择。
+
+全新安装不传 `--adopt-supervisor`，改用未占用的专用程序文件，并加 `--relay ... --pair ...`；
+该文件须被已有 Supervisor 的 `[include] files=` 覆盖。`--user` 可选择已存在的普通用户；
+只有显式指定 root 才以 root 运行。程序的可信启动器先读取外部配置，然后切换到指定用户
+和 HOME。JSON 配对文件保留在原位置；也支持 `--device-file /etc/cc-remote/device.env`。
+安装根目录和启动配置须由 root 管理且不能被其他用户替换；不自动接管可写源码树。
+
+安装器复用同一套下载校验、安装锁、版本切换、私有状态快照及失败回滚，只启停命名的
+Wrapper，不执行 Supervisor `reload`/`restart all`，不重启独立 Claude 服务。验收后注册
+`/usr/local/bin/cc-remote` 和 `installation.json`；后续更新自动沿用目录、用户、HOME、
+配置文件及管理方式，无需重复这些参数。旧版及匹配配置/数据仍按上述保留规则处理；
+容器缺少完整进程可见性时会推迟清理。镜像重建后的数据持久化、Supervisor 自启动由运行
+环境管理；这与容器内安装和更新 cc-remote 是两回事。
 
 默认安装根目录：Mac 为 `~/Library/Application Support/cc-remote/`，Linux 设备为
 `/opt/cc-remote-wrapper/`，VPS 为 `/opt/cc-remote/`。每个根目录的 `releases/` 保存版本，

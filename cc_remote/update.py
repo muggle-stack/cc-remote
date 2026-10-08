@@ -67,7 +67,7 @@ def installation_roots(system: str) -> dict[str, Path]:
     if system == "darwin":
         return {"wrapper": Path(os.environ.get("CC_REMOTE_MANAGED_ROOT")
                                 or Path.home() / "Library/Application Support/cc-remote")}
-    return {"relay": Path("/opt/cc-remote"), "wrapper": Path("/opt/cc-remote-wrapper")}
+    return {"relay": Path("/opt/cc-remote"), "wrapper": Path(os.environ.get("CC_REMOTE_MANAGED_ROOT") or "/opt/cc-remote-wrapper")}
 
 
 def read_installation(root: Path, system: str, machine: str) -> Installation:
@@ -95,8 +95,19 @@ def read_installation(root: Path, system: str, machine: str) -> Installation:
         raise UpdateError("installation has an invalid protocol version")
     if manifest["role"] == "wrapper":
         user = metadata.get("user")
-        if not isinstance(user, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", user) or user == "root":
+        if not isinstance(user, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", user) or (user == "root" and not metadata.get("linux_service")):
             raise UpdateError("wrapper installation has no valid original service user")
+        profile = metadata.get('linux_service')
+        if profile is not None:
+            from deploy.linux_service import validate, trusted, absolute
+            try:
+                validate(profile)
+                if system != 'linux' or profile['user'] != user:
+                    raise ValueError('service binding mismatch')
+                trusted(absolute(str(root)))
+                trusted(metadata_path)
+            except (ValueError, OSError) as exc:
+                raise UpdateError('invalid managed Linux service binding') from exc
         label = metadata.get("service_label")
         if label is not None and (system != "darwin" or not isinstance(label, str)
                                   or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,127}", label)):
@@ -358,6 +369,14 @@ def update(*, role: str | None, target_version: str | None, check: bool,
                 require_independent_terminal()
                 relay.ensure(version, installation.manifest["protocol_version"],
                              allow_protocol_change=allow_protocol_change)
+            if not check and selected == current:
+                retention = installation.release / "deploy/release_retention.py"
+                if retention.is_file() and (installation.root / ".release-generations.json").exists():
+                    require_independent_terminal()
+                    if run_installer([str(installation.release / ".venv/bin/python"), "-I", "-B",
+                                      str(retention), "prune", "--root", str(installation.root)],
+                                     lock_descriptor):
+                        print("WARNING: Update is current; older backups retained pending safe cleanup.")
             print("Already up to date." if selected == current else "Installed version is newer than the latest release.")
             return 0
         if check:
@@ -391,6 +410,11 @@ def update(*, role: str | None, target_version: str | None, check: bool,
                 command += ["--domain", installation.metadata["domain"]]
             elif system == "linux":
                 command += ["--user", installation.metadata["user"]]
+                if profile := installation.metadata.get('linux_service'):
+                    command += ['--install-root', str(installation.root), '--service-manager', profile['manager'],
+                                '--service-name', profile['name'], '--service-file', profile['service_file'],
+                                '--home', profile['home'], '--env-file', profile['env_file'],
+                                '--device-file', profile['device_file'], '--supervisor-config', profile['supervisor_config']]
             elif installation.metadata.get("service_label"):
                 command += ["--install-root", str(installation.root),
                             "--service-label", installation.metadata["service_label"]]

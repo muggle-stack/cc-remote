@@ -135,9 +135,65 @@ Report retained rollback paths, deleted generations, removed allocated bytes
 and any deferred paths. Allocated bytes are not a measurement of free-space gain
 (for example, shared filesystem blocks may remain in use). Moving old copies
 into another backup directory or Trash
-does not reclaim disk space or satisfy this policy. This is an agent-operated
-cleanup step: the existing installers and `cc-remote update` do not automatically
-prune releases or backups.
+does not reclaim disk space or satisfy this policy.
+
+Current-source **managed Release installers** apply this policy automatically
+after activation and registration. `release_retention.py` records the exact
+artifact identities in `.release-generations.json`, captures the previous service
+and external configuration in `rollback-config/`, and binds the matching private
+state snapshot in `rollback-data/`. It builds a bounded inventory and delegates
+all deletion to `cleanup.py`, inheriting the installation lock. Fresh acceptance
+checks public Relay/Web identity, stable service identity, Wrapper connectivity,
+snapshot integrity and live Codex configuration as the service user. Process,
+symlink and dormant service/configuration dependencies override retention limits.
+Linux discovery reads the installed systemd system/global/user load paths and
+the actual `UnitPath` of running managers, including runtime and generated units.
+Missing tools, unreachable managers or unreadable directories defer cleanup;
+there is no fallback to a partial hard-coded directory list.
+Environment-file discovery handles spaced assignments and continued lines,
+preserves literal spaces in filenames, and retains dependencies even across
+overrides/resets. Unresolved specifiers, wildcards or ambiguous quoting/escapes
+defer cleanup instead of treating an optional file as absent.
+Literal paths in service definitions, launchd plists and external environment
+files are resolved component by component, including multi-hop aliases and
+intermediate links owned by an old release. Those releases retain their runtime
+dependency closure. Bare systemd `Exec*` filenames are resolved using the installed
+systemd's `systemd-path search-binaries-default`, never the updater's shell PATH.
+Discovery also retains a superset of literal `ExecSearchPath` and service `PATH`
+overrides across definitions, drop-ins and environment files, following every
+matching executable alias. Missing discovery tools, unresolved executables,
+custom filesystem namespaces/inherited PATH, broken/cyclic links, unreadable
+paths or ambiguous expressions defer cleanup. Supervisor commands still require
+absolute paths. An absolute interpreter is not proof of a literal payload:
+shell command strings, inline code, module lookup (including Python `-m`),
+relative scripts and known command launchers such as `env`/`nohup` defer cleanup.
+This guard also checks executable aliases and launchd `ProgramArguments`; it
+never substitutes the updater's PATH for a service manager's inherited PATH.
+Direct absolute script arguments remain literal dependencies, including the
+installer's isolated Python `wrapper_exec.py` command. Hosts with unresolved
+indirect commands need an explicitly reviewed retention inventory; a successful
+update can therefore retain more than one previous generation. Discovery never
+executes a service or recursively crawls arbitrary external directories.
+The generated inventory also stores the service discovery context. Cleanup
+rediscovers load paths, definitions, environment files and aliases before each
+quarantine rename and permanent deletion, after any artifact tree walk. A newly
+referenced candidate or incomplete scan stops the transaction and restores all
+still-intact quarantined artifacts; regenerate the inventory before retrying.
+
+Failed/incomplete acceptance or insufficient process visibility retains files and
+warns without rolling back an already committed installation. A same-version
+`cc-remote update` retries deferred retention with fresh checks, without restarting
+services or sending model messages; `--check` is read-only. An interrupted
+installation's prepared record requires explicit inspection, not automatic retry.
+Unknown backups/uploads and external legacy roots remain outside automatic
+deletion and still require the reviewed agent inventory below. Configuration
+backup `files.json` records each original destination, absence, owner and mode;
+keep it with that generation for administrator-controlled recovery.
+
+**Published v4.0.9 does not include automatic retention or Linux legacy migration.**
+These take effect with an installer bundle containing the new code, including
+upgrades initiated by older management CLIs. Source/manual deployments continue
+to use reviewed cleanup inventories and their existing activation transactions.
 
 #### Repository cleanup command
 
@@ -171,6 +227,7 @@ Inventory schema (replace the illustrative paths):
     "/opt/cc-remote/rollback-data/before-new"
   ],
   "protected_paths": [],
+  "service_context": {"home": "/home/cc-remote"},
   "cleanup_roots": ["/opt/cc-remote/releases"],
   "candidates": ["/opt/cc-remote/releases/release-old"],
   "transactions": [
@@ -190,6 +247,12 @@ candidates, symlink boundaries and mounts are rejected. Transaction expectations
 accept only completed states (`committed`, `complete`, `deployed_verified`,
 `ready`), and the records must remain unchanged throughout cleanup. Unknown
 layouts remain retained until their provenance is established.
+
+`service_context` enables repeated dormant-service discovery during cleanup.
+Use the actual service HOME and, for Supervisor, include the registered
+`linux_service` binding in that object. Managed installers always supply it;
+older manual inventories without this optional field retain their static
+`protected_paths` contract and must be refreshed/reviewed by the operator.
 
 `checks` are operator-reviewed **read-only** argv arrays (no shell interpolation),
 run before retirement, after quarantine, and after removal. They must cover the
@@ -220,8 +283,8 @@ Preview does not run acceptance commands or remove artifacts. Apply rescans live
 references immediately before each rename and permanent deletion. Candidates are
 temporarily renamed beside their original path; a failed quarantine check restores
 the intact directory. A new live reference defers deletion and restores that path.
-Checks are observations, not a lock on arbitrary external programs: operators must
-not launch jobs against retired paths during cleanup.
+Checks are observations, not a lock on external programs or configuration edits:
+operators must not launch jobs or repoint services at retired paths during cleanup.
 
 The private `<installation-root>/.cleanup-transaction.json` records intent before
 each mutation. Exit 0 means success (or preview), 2 means applied cleanup completed
@@ -261,11 +324,30 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
   pairing is separate from this existing-installation upgrade path.
   Explicit Mac registration can bind an existing immutable root and LaunchAgent;
   future installs preserve that layout and service identity. The command does not
-  restart the independent Claude service, adopt source/Docker layouts, prune
-  releases, or automate downgrade rollback.
+  restart the independent Claude service, automatically adopt source/Docker
+  layouts, or automate downgrade rollback. Recorded managed generations use the
+  retention procedure above.
   Direct role installers use the same per-installation `.update.lock` before
   reading rollback state or changing services. They validate the inherited file
   descriptor from a managed update; an environment marker cannot bypass the lock.
+- `linux_service.py` / `wrapper_exec.py` — Linux Supervisor adapter for the same
+  Wrapper installer/update transaction. Explicitly bind the root, Unix control
+  config, program/file, user, HOME and external environment/device files. Require
+  root-owned non-replaceable code/config paths. Never infer arbitrary launchers:
+  first adoption requires `--adopt-supervisor` and operator-reconciled environment
+  selectors. Only replace/reload that program; preserve other sections and the
+  independent Claude service. Preflight supports older Supervisor RPC responses
+  (including 4.2.1/4.2.4) without the directory/uid fields added in 4.2.5. Always
+  require the native `reloadConfig` comparison against active groups to report
+  no changes for the bound program; a reread does not apply those changes.
+  A failed fresh installation removes its newly
+  loaded Supervisor group after stopping it and removing the new definition;
+  previously configured programs remain registered during rollback.
+  Snapshot selectors, Relay preflight, readiness and
+  retention use that same binding. See the complete
+  [Supervisor installation/adoption procedure](../docs/installation_en.md#linux-supervisor-installation-and-adoption).
+  Partial process visibility defers retention; it is not permission to delete
+  container releases. Container recreation/persistence remains runtime-owned.
 - `build_release.py` / `release_manifest.py` — reproducible role-bundle builder
   and fail-closed manifest validator. Relay artifacts contain `web/dist` and
   `requirements-relay.lock`; Wrapper artifacts contain no Web tree and use
@@ -280,7 +362,8 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
 - `install-wrapper.sh` — first-install/upgrade entry for published macOS and
   Linux Wrapper bundles. It builds the immutable release before pairing and
   activation, stores device authority outside the release, atomically switches
-  `current`, installs a per-user LaunchAgent or root-managed systemd unit, and
+  `current`, installs a per-user LaunchAgent, root-managed systemd unit or
+  explicitly selected Supervisor program, and
   restores the previous release/service definition on failure. The installer
   requires and explicitly selects the service user's daily
   `~/.local/bin/claude`; it never silently falls back to the SDK-bundled CLI.
@@ -288,6 +371,16 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
   process-bound result from Wrapper startup. Codex is optional: missing or
   incompatible CLI/account connections produce a separate warning instead of
   rolling back an otherwise healthy Claude/Wrapper installation.
+  An existing Linux immutable system-service installation can explicitly migrate
+  with `--adopt-root /absolute/legacy/root --user USER`. `adopt_wrapper.py` checks
+  its actual user, command, ownership, environment layout and absence of drop-ins
+  before activation. The standard `/opt/cc-remote-wrapper` destination must not
+  already be installed. The old root is preserved; external credentials and
+  service policy survive both migration and subsequent upgrades. A failure restores
+  the old service and state rather than registering an incomplete destination.
+  Unsupported layouts require explicit reconciliation, not a first-install
+  overwrite. Root privileges are required; a narrowly authorized custom activation
+  helper is not permission to bypass the system installer or its ownership checks.
 - `prepare_wrapper_stage.py` — unprivileged preflight for an existing manual
   immutable-Wrapper topology. It reuses an active venv only when the dependency
   lock and Python pin are identical; otherwise it builds a platform-local venv

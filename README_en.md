@@ -243,10 +243,29 @@ below or configure a restricted LAN/Tailscale entry point.
 
 ## Install and upgrade
 
-Release installations that include the management CLI support
-`cc-remote update --check` and `cc-remote update`; see
-[subsequent updates](docs/installation_en.md#subsequent-updates) for the initial
-upgrade from v4.0.0, role selection and coordinated protocol upgrades.
+Release installers register the `cc-remote` management command automatically.
+Update from an independent terminal or SSH connection:
+
+```bash
+cc-remote update --check   # Check versions only
+cc-remote update           # Install the latest stable Release; no latest argument needed
+```
+
+Each device checks its paired VPS first, updating Relay + Web when necessary.
+An already-current compatible Relay is skipped. Use
+`cc-remote update --relay-ssh operator@relay-host` to bind an existing SSH admin
+entry for the first remote server upgrade. Update other devices individually.
+Installation uses prebuilt artifacts; it does not run CI, pytest or a frontend
+build on users' machines. The Electron application is updated separately.
+
+Current source adds automatic retention: after acceptance, keep the active
+version, one complete previous rollback set and all live runtime dependencies;
+remove proven older generations. Linux Wrappers can also use an existing Supervisor
+with the same updater, preserving their root, account and HOME; see
+[Supervisor installation/adoption](docs/installation_en.md#linux-supervisor-installation-and-adoption).
+**v4.0.9 does not include automatic cleanup, Linux legacy migration or Supervisor support**; these require a bundle containing the
+new changes. See [subsequent updates](docs/installation_en.md#subsequent-updates)
+for command locations, older installations, roles and coordinated protocol upgrades.
 
 | Scenario | Guide |
 |---|---|

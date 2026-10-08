@@ -25,7 +25,7 @@ repository, install Node, or paste tokens into service definitions.
 |---|---|---|---|
 | Relay | Ubuntu 22.04+ / Debian 12+ | x86_64, arm64 | systemd + Caddy |
 | Wrapper | macOS | Intel, Apple Silicon | per-user LaunchAgent |
-| Wrapper | glibc Linux with systemd (Ubuntu 22.04+ / Debian 12+ recommended) | x86_64, arm64 | systemd under a chosen ordinary user |
+| Wrapper | glibc Linux with systemd or an existing Supervisor (Ubuntu 22.04+ / Debian 12+ recommended) | x86_64, arm64 | systemd / Supervisor under the chosen user |
 
 ### 1) Download and verify the bootstrap
 
@@ -161,14 +161,31 @@ the new Wrapper installer perform the same check and accept `--relay-ssh` and
 
 The command verifies SHA-256, archive paths, platform and version before calling
 the existing immutable installer with its state snapshot and failed-activation
-rollback. Account, pairing and external configuration remain intact. Previous
-releases are retained; no re-pairing occurs. The same version is a no-op, concurrent
-updates are locked out, and failed activations are not retried automatically.
+rollback. Account, pairing and external configuration remain intact; no re-pairing
+occurs. The same version does not restart services, concurrent updates are locked
+out, and failed activations are not retried automatically. Prebuilt Web assets
+and locked dependencies are used; users do not run CI, pytest or Node builds.
+Update the Electron application separately.
 An activated Wrapper upgrade prints the Codex connection result described above;
-`--check` and same-version updates do not configure or probe Codex.
+`--check` does not configure or run local acceptance checks.
 The independent Claude service is never restarted. Finish in-process Claude,
 BTW and queued work before updating. SDK/service-protocol changes stop the command
 and require the [Claude service migration procedure](claude-session-service.md).
+
+Current-source installers record the previous code, service configuration and
+private-state snapshot before switching. After acceptance, retain the active
+release and one complete previous rollback set. `deploy/cleanup.py` retires only
+recorded, proven older generations. References from the independent Claude
+service, Codex daemons, process working directories, open files and retained
+symlinks keep older artifacts protected; cleanup never restarts tasks. Unknown
+provenance, insufficient visibility, failed checks or unresolved transactions
+defer deletion with a warning, without undoing a committed upgrade. Running
+the same-version `cc-remote update` retries safe cleanup after fresh health and
+native Codex configuration checks; `--check` never cleans up.
+Records live in `.release-generations.json`, `rollback-config/` and `rollback-data/`
+under the installation root. Unknown historical backups are never inferred by name.
+**v4.0.9 retains old releases without automatic cleanup**. The new policy requires
+a bundle containing this change, even when an older updater starts the upgrade.
 
 A wire-protocol change stops by default. Arrange a maintenance window on every
 machine, pin the same `--version`, and add `--allow-protocol-change` in the order
@@ -178,12 +195,91 @@ device list and conversation show incompatible device/server versions. Reload
 Web/PWA clients afterwards.
 
 v4.0.0 and earlier do not install this command. Upgrade once using the procedure
-below to a release that includes it. Source and Docker installs keep their own
-upgrade procedure. Existing immutable Mac layouts can be explicitly registered
+below to a release that includes it. Unregistered source trees and image rebuilds
+are not automatically adopted. Existing Supervisor-managed Linux Wrappers can
+join the same updater using the procedure below. Immutable Mac layouts can be explicitly registered
 with `deploy/install_cli.py --root ... --destination ~/.local/bin/cc-remote
 --role wrapper --user ... --service-label ...` after verifying the root and
 LaunchAgent match. Future updates preserve that root, label and environment.
 Unregistered custom layouts are never automatically adopted.
+
+#### Migrate an older Linux installation
+
+Copying source or manually switching `current` does not register the updater.
+Current source provides an explicit migration entry point. Obtain a Release
+installer containing it (v4.0.9 does not), then run as the installation
+administrator from an independent terminal:
+
+```bash
+./install.sh wrapper --user youruser --adopt-root /absolute/legacy/installation
+```
+
+The installer validates the existing `cc-remote-wrapper` systemd service's
+user, command, immutable root and environment layout, migrates the Wrapper to
+`/opt/cc-remote-wrapper/`, and registers `/usr/local/bin/cc-remote`. It preserves
+existing `/etc/cc-remote/` credentials, proxy/account settings and service policy.
+Do not supply a new pairing code. The independent Claude service is not restarted
+and native sessions are not copied. Custom commands, systemd drop-ins or ambiguous
+layouts are refused and need reconciliation under the deployment guide first.
+The original tree stays available for rollback/live dependencies; the migration
+does not prune it. Later standard updates clean only recorded artifacts inside
+the new root. Do not run the old deployment workflow concurrently with migration.
+
+#### Linux Supervisor installation and adoption
+
+Current source supports an existing Supervisor, including Linux containers without
+systemd. **v4.0.9 does not include this feature**: first install/adopt using a bundle
+containing it, then use the same `cc-remote update`. The installer does not install
+systemd, start supervisord, or rebuild a container image.
+Older interfaces, including Supervisor 4.2.1/4.2.4, retain the same preflight
+checks. Unapplied changes to the selected service must be reconciled first;
+the installer does not skip validation or automatically restart other services.
+
+Use an existing root-owned Supervisor with a local Unix control socket. Specify
+its actual configuration explicitly; do not rely on supervisorctl search paths.
+Prepare a root-owned 0600 external Wrapper environment file using
+`deploy/env.wrapper.example`. When replacing a custom launcher, reconcile its
+state/Work directories, cwd, account selection, proxies, `CLAUDE_BIN` and
+`CC_REMOTE_CLAUDE_SERVICE_SOCKET` first. Do not copy native login credentials.
+Values are literal: no shell evaluation or variable interpolation.
+
+```bash
+# Administrator, independent terminal; replace paths with the actual installation.
+./install.sh wrapper --user root --home /root \
+  --service-manager supervisor --install-root /srv/cc-remote \
+  --supervisor-config /etc/supervisor/supervisord.conf \
+  --service-file /etc/supervisor/conf.d/cc-remote.conf --service-name wrapper \
+  --env-file /etc/cc-remote/wrapper.env --device-file /root/.cc-remote/device.json \
+  --adopt-supervisor
+```
+
+`--adopt-supervisor` explicitly replaces an existing Wrapper command on the first
+adoption. It requires that named program and an immutable `current → releases/<old>`
+layout. If the program is in the main config, `--service-file` may equal
+`--supervisor-config`: only the selected program section changes; other sections
+remain intact. Verify the prepared environment matches the old launcher, especially
+private-state and Work paths. Arbitrary scripts are not executed or guessed at.
+For inherited variables previously cleared by the launcher, use, for example,
+`CC_REMOTE_SUPERVISOR_UNSET_ENV=ALL_PROXY,all_proxy,CLAUDE_CONFIG_DIR,CODEX_HOME`.
+Only account selectors, Python environment and proxy variables can be cleared;
+preserve existing account selection rather than changing it during adoption.
+
+For a fresh install, omit `--adopt-supervisor`, select an unused dedicated program
+file covered by the existing `[include] files=` pattern, and add `--relay ... --pair ...`.
+`--user` can name an existing non-root account; root must be requested explicitly.
+The trusted bootstrap reads external configuration, then switches to that account
+and HOME. Existing JSON pairing stays in place; an external `device.env` is also
+supported. Managed roots and startup configuration must be root-owned and protected
+from replacement by other users. Writable source trees are not adopted implicitly.
+
+This reuses checksum verification, installation locking, immutable activation,
+private-state snapshots and failure rollback. Only the selected Wrapper is
+stopped/started; no Supervisor daemon reload, restart-all or independent Claude
+service restart occurs. Acceptance registers `/usr/local/bin/cc-remote` and
+`installation.json`. Later updates reuse the bound directory, account, HOME,
+configuration and manager without extra flags. The retention policy above applies;
+incomplete process visibility in a container defers cleanup. Persistence across
+image rebuilds and starting Supervisor remain responsibilities of the runtime.
 
 Default roots are `~/Library/Application Support/cc-remote/` on Mac,
 `/opt/cc-remote-wrapper/` for Linux devices and `/opt/cc-remote/` on the VPS.

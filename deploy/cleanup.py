@@ -19,7 +19,7 @@ import time
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from deploy.install_lock import acquire_install_lock
+from deploy.install_lock import acquire_install_lock, verify_install_lock
 
 JOURNAL = ".cleanup-transaction.json"
 MAX_JSON = 1024 * 1024
@@ -76,9 +76,21 @@ def load_inventory(path: Path) -> dict:
     data, digest = read_json(path)
     required = {"schema", "installation_root", "current_release", "rollback_paths",
                 "cleanup_roots", "candidates", "transactions", "checks"}
-    if (data.keys() - required - {"protected_paths"} or required - data.keys()
+    if (data.keys() - required - {"protected_paths", "service_context"} or required - data.keys()
             or data["schema"] != 1):
         raise CleanupError("invalid cleanup inventory schema")
+    if "service_context" in data:
+        context = data["service_context"]
+        if (not isinstance(context, dict) or "home" not in context
+                or context.keys() - {"home", "linux_service"}):
+            raise CleanupError("invalid service discovery context")
+        if not absolute_path(context["home"]).is_dir():
+            raise CleanupError("service discovery HOME is unavailable")
+        if "linux_service" in context:
+            from deploy.linux_service import validate
+            validate(context["linux_service"])
+            if context["linux_service"]["home"] != context["home"]:
+                raise CleanupError("service discovery HOME differs from the service binding")
     for key in ["rollback_paths", "cleanup_roots", "candidates", "transactions", "checks"]:
         if not isinstance(data[key], list) or not 0 < len(data[key]) <= 128:
             raise CleanupError(f"{key} must be a nonempty bounded list")
@@ -299,6 +311,15 @@ def protections(plan: dict, paths: list[Path]) -> dict[Path, list[str]]:
         for candidate in paths:
             if overlaps(target, candidate):
                 found[candidate].append("symlink dependency of retained artifact")
+    if context := plan.get("service_context"):
+        from deploy.release_retention import service_dependencies
+        # Rediscover load paths, definitions, environment files and aliases, not
+        # just files from the initial inventory. Include both original and
+        # quarantined names. Abort on new dependencies so all intact artifacts
+        # can be restored together, including a newly needed runtime closure.
+        dependencies = service_dependencies(context, list(found))
+        if any(not any(overlaps(Path(p), kept) for kept in plan["protected"]) for p in dependencies):
+            raise CleanupError("service dependencies changed; regenerate the cleanup inventory")
     return {p: found[p] for p in paths}
 
 
@@ -342,12 +363,16 @@ def write_journal(path: Path, report: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def cleanup(inventory: Path, *, apply: bool = False) -> dict:
+def cleanup(inventory: Path, *, apply: bool = False, lock_descriptor: int | None = None) -> dict:
     plan = load_inventory(inventory)
     journal = plan["root"] / JOURNAL
     # Share the installer's lock. A dropped control connection cannot overlap a
     # second installer/cleanup; leftover journals are inspected, never replayed.
-    lock = acquire_install_lock(plan["root"])
+    if lock_descriptor is None:
+        lock = acquire_install_lock(plan["root"])
+    else:
+        verify_install_lock(plan["root"], lock_descriptor)
+        lock = os.dup(lock_descriptor)
     moved: list[tuple[Path, Path, dict]] = []
     report = {"schema": 1, "inventory_sha256": plan["digest"], "started_at": time.time(),
               "mode": "apply" if apply else "preview", "status": "preview",
@@ -401,6 +426,10 @@ def cleanup(inventory: Path, *, apply: bool = False) -> dict:
         report["status"] = "removing"
         write_journal(journal, report)
         for path, quarantine, row in moved:
+            # Complete the potentially long tree walk before the final live
+            # process/service dependency check, not between that check and rm.
+            for _ in artifact_entries(quarantine):
+                pass
             guarded = protections(plan, [path, quarantine])
             reasons = guarded[path] + guarded[quarantine]
             if reasons:
@@ -411,9 +440,6 @@ def cleanup(inventory: Path, *, apply: bool = False) -> dict:
             else:
                 if list(identity(quarantine)) != row["identity"]:
                     raise CleanupError("quarantined artifact changed identity")
-                # Recheck for mounts before a recursive, symlink-safe removal.
-                for _ in artifact_entries(quarantine):
-                    pass
                 parent = os.open(absolute_path(quarantine.parent.as_posix()),
                                  os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
                 try:

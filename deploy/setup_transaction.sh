@@ -191,12 +191,18 @@ cleanup() {
   local exit_status=$?
   if (( ! DEPLOY_READY )); then
     rollback_deployment
+    # A restored current link alone does not prove Caddy, service and data
+    # recovery. Leave a failed managed activation prepared for inspection.
     if [ -n "$NEW_RELEASE_DIR" ]; then
-      if (( RELEASE_SWITCHED )); then
+      if (( RELEASE_SWITCHED || ${RETENTION_STARTED:-0} )) || [ -n "${RETENTION_GENERATION:-}" ]; then
         # A failed rollback may have left current pointing at the new release.
         # Keep that tree intact rather than turning the active symlink into a
         # dangling link; the operator can repair current and remove it later.
-        echo "ERROR: retaining staged release because release rollback failed" >&2
+        if (( RELEASE_SWITCHED )); then
+          echo "ERROR: retaining staged release because release rollback failed" >&2
+        else
+          echo "ERROR: retaining staged release for transaction inspection" >&2
+        fi
       else
         case "$NEW_RELEASE_DIR" in
           "$RELEASES_DIR"/release-*) rm -rf -- "$NEW_RELEASE_DIR" ;;

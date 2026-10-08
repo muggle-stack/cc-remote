@@ -9,9 +9,11 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import shlex
 import sqlite3
 import stat
 import subprocess
+import sys
 
 import pytest
 
@@ -665,7 +667,7 @@ false  # injected relay readiness failure after the complete release switch
         harness = harness.replace(
             "false  # injected relay readiness failure after the complete release switch",
             f'MANAGED_RELEASE={0 if activation == "source-success" else 1}\n'
-            'CLI_PATH="$APPDIR/cc-remote"\n'
+            'CLI_PATH="$APPDIR/cc-remote"\nRETENTION_GENERATION=""\n'
             'TARGET=remote.example.test\nPUBLIC_SCHEME=https\nINSECURE_HTTP=0\n'
             + setup_tail,
         )
@@ -718,6 +720,67 @@ false  # injected relay readiness failure after the complete release switch
     assert "previous relay passed /healthz" in result.stderr
     assert not caddy_backup.exists()
     assert not unit_backup.exists()
+
+
+@pytest.mark.parametrize('failure', ['backup-error', 'interrupted-copy'])
+def test_relay_retention_setup_failure_keeps_the_prepared_release(tmp_path, failure):
+    appdir = tmp_path.resolve() / 'app'
+    old = appdir / 'releases/release-old'
+    new = appdir / 'releases/release-new'
+    old.mkdir(parents=True)
+    (new / 'deploy').mkdir(parents=True)
+    (appdir / 'current').symlink_to(old)
+    (new / 'release-manifest.json').write_text(json.dumps({
+        'schema': 1, 'product_version': '4.0.9', 'protocol_version': 74,
+        'git_sha': 'a' * 40, 'role': 'relay', 'os': 'linux', 'arch': 'x86_64',
+        'python': '3.13.9', 'uv': '0.11.16',
+    }))
+    (appdir / 'relay.service').write_text('original service\n')
+    (appdir / '.env').write_text('PUBLIC_ORIGIN=https://relay.test\n')
+    # A genuine backup error after begin has persisted its prepared ledger.
+    (appdir / 'Caddyfile').symlink_to(appdir / '.env')
+    driver = new / 'deploy/release_retention.py'
+    driver.write_text(
+        'import os, runpy, shutil, signal\n'
+        + ('shutil.copyfileobj = lambda *a: os.kill(os.getpid(), signal.SIGTERM)\n'
+           if failure == 'interrupted-copy' else '')
+        + f'runpy.run_path({str(ROOT / "deploy/release_retention.py")!r}, run_name="__main__")\n'
+    )
+    python = new / '.venv/bin/python'
+    python.parent.mkdir(parents=True)
+    python.write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable) + ' "$@"\n')
+    python.chmod(0o755)
+    setup = (ROOT / 'deploy/setup-vps.sh').read_text()
+    initial_state = setup[setup.index('NEW_RELEASE_DIR=""'):setup.index('[ -r "$SOURCE_DIR/deploy/setup_transaction.sh"')]
+    stop = setup.index('echo "==> Caddy config')
+    begin = setup[setup.rindex('if (( MANAGED_RELEASE )); then', 0, stop):stop]
+    harness = r'''
+set -euo pipefail
+source "$1"
+APPDIR="$2"
+RELEASES_DIR="$APPDIR/releases"
+CURRENT_LINK="$APPDIR/current"
+''' + initial_state + r'''
+MANAGED_RELEASE=1
+NEW_RELEASE_DIR="$RELEASES_DIR/release-new"
+PREVIOUS_RELEASE="$RELEASES_DIR/release-old"
+RELAY_UNIT_FILE="$APPDIR/relay.service"
+CADDYFILE="$APPDIR/Caddyfile"
+ENV_FILE="$APPDIR/.env"
+trap cleanup EXIT
+''' + begin
+    result = subprocess.run(['bash', '-c', harness, 'retention-setup-test',
+                             str(ROOT / 'deploy/setup_transaction.sh'), str(appdir)],
+                            text=True, capture_output=True)
+    assert result.returncode != 0
+    ledger = json.loads((appdir / '.release-generations.json').read_text())
+    [row] = ledger['generations']
+    assert row['phase'] == ledger['phase'] == 'prepared'
+    assert row['release'] == str(new) and row['artifacts'] == {}
+    assert Path(row['backup']).is_dir()
+    assert new.is_dir() and (appdir / 'current').resolve() == old
+    assert (appdir / 'relay.service').read_text() == 'original service\n'
+    assert 'retaining staged release for transaction inspection' in result.stderr
 
 
 def test_failed_release_rollback_never_deletes_the_still_active_release(tmp_path):

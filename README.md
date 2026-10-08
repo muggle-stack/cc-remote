@@ -218,8 +218,23 @@ CLAUDE_BIN=
 
 ## 安装与升级
 
-包含管理命令的 Release 安装支持 `cc-remote update --check` 检查更新、
-`cc-remote update` 升级。v4.0.0 首次过渡、角色选择和协议协调升级见
+Release 安装器会自动安装 `cc-remote` 管理命令。后续在独立终端或 SSH 中一键更新：
+
+```bash
+cc-remote update --check   # 只检查版本
+cc-remote update           # 升级到最新稳定 Release，不需要加 latest
+```
+
+设备会先检查配对的 VPS：需要时先升级 Relay + Web，已是兼容的新版本则只更新本机。
+首次远程升级 VPS 可用 `cc-remote update --relay-ssh operator@relay-host` 绑定已有的
+SSH 管理入口。其他设备各自执行更新即可。安装使用预构建产物，不在用户机器跑 CI、
+pytest 或前端构建；Electron 应用本体单独更新。
+
+当前源码新增自动备份保留：升级验收通过后，保留当前版本、上一版完整回滚资料及仍在使用的
+运行依赖，清理可确认的更早版本。Linux Wrapper 也可通过已有 Supervisor 安装并接入同一更新器，
+保留实际目录、用户及 HOME；见 [Supervisor 安装与接管](docs/installation.md#linux-supervisor-安装与首次接管)。
+**v4.0.9 尚不含自动清理、Linux 旧布局迁移及 Supervisor 支持**；
+需使用包含这些改动的新安装包。命令位置、旧安装过渡、角色选择和协议协调升级见
 [后续更新](docs/installation.md#后续更新)。
 
 | 场景 | 文档 |
