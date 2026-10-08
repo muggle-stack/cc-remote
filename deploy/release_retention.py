@@ -536,8 +536,10 @@ def inventory(root: Path, data: dict, row: dict) -> dict | None:
     python = str(Path(row["release"]) / ".venv/bin/python")
     check = [python, "-B", str(Path(row["release"]) / "deploy/release_retention.py"),
              "verify", "--root", str(root), "--generation", row["id"]]
+    service_context = {key: row[key] for key in ("home", "linux_service") if key in row}
     return {"schema": 1, "installation_root": str(root), "current_release": row["release"],
             "rollback_paths": rollback, "protected_paths": sorted(protected),
+            "service_context": service_context,
             "cleanup_roots": [str(root / name) for name in ("releases", BACKUPS, "rollback-data")
                               if (root / name).is_dir()], "candidates": sorted(candidates),
             "transactions": [{"path": str(root / LEDGER), "field": "phase", "equals": "committed"}],

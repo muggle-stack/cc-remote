@@ -200,6 +200,148 @@ def test_three_upgrades_keep_current_and_complete_previous_recovery(fleet):
         assert not Path(row["backup"]).exists() and not Path(row["snapshot"]).exists()
 
 
+@pytest.mark.parametrize('when', ['inventory', 'preview', 'before-rename', 'quarantined', 'before-delete'])
+@pytest.mark.parametrize('kind', ['systemd', 'launchd', 'supervisor', 'environment', 'optional-environment'])
+def test_new_service_dependency_during_retirement_preserves_artifacts(fleet, tmp_path, monkeypatch, when, kind):
+    import plistlib
+    from deploy import linux_service
+
+    root, _, activate = fleet
+    old, _ = activate('first')
+    previous, _ = activate('second')
+    current, _ = activate('third')
+    units = tmp_path / 'units'
+    units.mkdir()
+    environment = tmp_path / 'external.env'
+    if kind in {'environment', 'optional-environment'}:
+        (units / 'dormant.service').write_text(f'[Service]\nEnvironmentFile=-{environment}\n')
+        if kind == 'environment':
+            environment.write_text('WORKER=/bin/true\n')
+    monkeypatch.setattr(retention, 'service_roots', lambda row: [units] if kind != 'supervisor' else [])
+    monkeypatch.setattr(retention, 'service_dependencies', SERVICE_DEPENDENCIES)
+    if kind == 'supervisor':
+        # Exercise the saved binding and a newly added include, outside systemd
+        # discovery, rather than pretending Supervisor is a systemd directory.
+        main = tmp_path / 'supervisord.conf'
+        main.write_text(f'[include]\nfiles={units}/late.conf\n')
+        profile = dict(manager='supervisor', name='wrapper', user='root', home=str(root),
+                       service_file=str(units / 'wrapper.conf'), env_file=str(environment),
+                       device_file=str(tmp_path / 'device.json'), supervisor_config=str(main))
+        data = retention.read_ledger(root)
+        data['generations'][-1]['linux_service'] = profile
+        cleanup.write_journal(root / retention.LEDGER, data)
+        monkeypatch.setattr(linux_service, 'trusted', lambda path: None)
+    injected = False
+
+    def add_reference():
+        nonlocal injected
+        assert not injected
+        injected = True
+        if kind == 'systemd':
+            (units / 'late.service').write_text(f'[Service]\nExecStart={old}/payload\n')
+        elif kind == 'launchd':
+            (units / 'late.plist').write_bytes(plistlib.dumps({'ProgramArguments': [str(old / 'payload')]}))
+        elif kind == 'supervisor':
+            (units / 'late.conf').write_text(f'[program:late]\ncommand={old}/payload\n')
+        else:
+            environment.write_text(f'WORKER={old}/payload\n')
+
+    if when == 'inventory':
+        original = retention.inventory
+
+        def inventory(*args):
+            result = original(*args)
+            add_reference()
+            return result
+
+        monkeypatch.setattr(retention, 'inventory', inventory)
+    elif when == 'preview':
+        original = cleanup.cleanup
+
+        def after_preview(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if not kwargs.get('apply'):
+                add_reference()
+            return result
+
+        monkeypatch.setattr(cleanup, 'cleanup', after_preview)
+    elif when == 'before-delete':
+        original = cleanup.artifact_entries
+
+        def entries(path):
+            yield from original(path)
+            if path.name.startswith('.cc-remote-retired-') and not injected:
+                add_reference()
+
+        monkeypatch.setattr(cleanup, 'artifact_entries', entries)
+    else:
+        checks = 0
+
+        def acceptance(plan):
+            nonlocal checks
+            checks += 1
+            if checks == (1 if when == 'before-rename' else 2):
+                add_reference()
+
+        monkeypatch.setattr(cleanup, 'run_checks', acceptance)
+    with pytest.raises(cleanup.CleanupError, match='service dependencies changed'):
+        prune(root)
+    assert injected and (old / 'payload').read_text() == 'installed bytes'
+    assert previous.is_dir() and current.is_dir()
+    assert not list(root.rglob('.cc-remote-retired-*'))
+    plan = json.loads((root / retention.INVENTORY).read_text())
+    assert plan['service_context']['home'] == str(root)
+    if kind == 'supervisor':
+        assert plan['service_context']['linux_service'] == profile
+    # No artifact (including old rollback snapshots) may be lost in these races.
+    assert all(Path(p).exists() for p in plan['candidates'])
+
+
+@pytest.mark.parametrize('failure', ['unreadable', 'new-load-path', 'retargeted-alias'])
+def test_service_rediscovery_after_quarantine_retains_runtime_closure(fleet, tmp_path, monkeypatch, failure):
+    root, _, activate = fleet
+    runtime, _ = activate('first')
+    worker, _ = activate('second')
+    (worker / 'runtime').symlink_to(runtime)
+    activate('third')
+    activate('fourth')
+    units = tmp_path / 'units'
+    units.mkdir()
+    extra = tmp_path / 'extra-units'
+    extra.mkdir()
+    executable = tmp_path / 'external-worker'
+    executable.write_text('external')
+    alias = tmp_path / 'alias'
+    alias.symlink_to(executable)
+    if failure == 'retargeted-alias':
+        (units / 'worker.service').write_text(f'[Service]\nExecStart={alias}\n')
+    checks = 0
+
+    def roots(row):
+        if checks >= 2 and failure == 'unreadable':
+            raise PermissionError('service discovery incomplete')
+        return [units, extra] if checks >= 2 else [units]
+
+    def acceptance(plan):
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            if failure == 'retargeted-alias':
+                alias.unlink()
+                alias.symlink_to(worker / 'payload')
+            else:
+                (extra / 'worker.service').write_text(f'[Service]\nExecStart={worker}/payload\n')
+
+    monkeypatch.setattr(retention, 'service_roots', roots)
+    monkeypatch.setattr(retention, 'service_dependencies', SERVICE_DEPENDENCIES)
+    monkeypatch.setattr(cleanup, 'run_checks', acceptance)
+    with pytest.raises((cleanup.CleanupError, OSError)):
+        prune(root)
+    assert runtime.is_dir() and worker.is_dir()
+    assert (worker / 'runtime').resolve(strict=True) == runtime
+    assert not list(root.rglob('.cc-remote-retired-*'))
+
+
 def test_first_preledger_release_becomes_eligible_only_after_next_success(fleet):
     root, _, activate = fleet
     first = root / "releases/pre-ledger"

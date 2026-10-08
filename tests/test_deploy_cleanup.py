@@ -57,6 +57,15 @@ def test_preview_never_moves_deletes_or_runs_acceptance(installation, monkeypatc
     assert not (root / module.JOURNAL).exists()
 
 
+@pytest.mark.parametrize('context', [None, {}, {'home': 'relative'}, {'home': '/', 'unknown': True}])
+def test_invalid_service_discovery_context_never_retires(installation, context):
+    _, _, _, old, inventory, _ = installation
+    update_inventory(installation, service_context=context)
+    with pytest.raises(module.CleanupError):
+        module.cleanup(inventory, apply=True)
+    assert (old / 'payload').read_text() == 'must not be lost'
+
+
 def test_success_retains_complete_rollback_and_checks_after_removal(installation, monkeypatch):
     root, current, previous, old, inventory, _ = installation
     observed = []

@@ -160,6 +160,11 @@ intermediate links owned by an old release. Those releases retain their runtime
 dependency closure. Broken/cyclic links, unreadable paths, bare executable names
 or ambiguous path expressions defer cleanup; discovery never executes a service
 or recursively crawls arbitrary external directories.
+The generated inventory also stores the service discovery context. Cleanup
+rediscovers load paths, definitions, environment files and aliases before each
+quarantine rename and permanent deletion, after any artifact tree walk. A newly
+referenced candidate or incomplete scan stops the transaction and restores all
+still-intact quarantined artifacts; regenerate the inventory before retrying.
 
 Failed/incomplete acceptance or insufficient process visibility retains files and
 warns without rolling back an already committed installation. A same-version
@@ -208,6 +213,7 @@ Inventory schema (replace the illustrative paths):
     "/opt/cc-remote/rollback-data/before-new"
   ],
   "protected_paths": [],
+  "service_context": {"home": "/home/cc-remote"},
   "cleanup_roots": ["/opt/cc-remote/releases"],
   "candidates": ["/opt/cc-remote/releases/release-old"],
   "transactions": [
@@ -227,6 +233,12 @@ candidates, symlink boundaries and mounts are rejected. Transaction expectations
 accept only completed states (`committed`, `complete`, `deployed_verified`,
 `ready`), and the records must remain unchanged throughout cleanup. Unknown
 layouts remain retained until their provenance is established.
+
+`service_context` enables repeated dormant-service discovery during cleanup.
+Use the actual service HOME and, for Supervisor, include the registered
+`linux_service` binding in that object. Managed installers always supply it;
+older manual inventories without this optional field retain their static
+`protected_paths` contract and must be refreshed/reviewed by the operator.
 
 `checks` are operator-reviewed **read-only** argv arrays (no shell interpolation),
 run before retirement, after quarantine, and after removal. They must cover the
@@ -257,8 +269,8 @@ Preview does not run acceptance commands or remove artifacts. Apply rescans live
 references immediately before each rename and permanent deletion. Candidates are
 temporarily renamed beside their original path; a failed quarantine check restores
 the intact directory. A new live reference defers deletion and restores that path.
-Checks are observations, not a lock on arbitrary external programs: operators must
-not launch jobs against retired paths during cleanup.
+Checks are observations, not a lock on external programs or configuration edits:
+operators must not launch jobs or repoint services at retired paths during cleanup.
 
 The private `<installation-root>/.cleanup-transaction.json` records intent before
 each mutation. Exit 0 means success (or preview), 2 means applied cleanup completed
