@@ -350,6 +350,90 @@ def test_dormant_service_and_environment_dependencies(tmp_path, monkeypatch):
         retention.service_dependencies({}, [old])
 
 
+@pytest.mark.parametrize('assignment', [
+    'EnvironmentFile={env}',
+    'EnvironmentFile = {env}',
+    '\tEnvironmentFile\t=\t{env}\t',
+    'EnvironmentFile = -{env}',
+    'EnvironmentFile = \\\n# ignored during continuation\n; also ignored\n  {env}',
+    'EnvironmentFile \\\n = {env}',
+    'EnvironmentFile = {env}\nEnvironmentFile =',
+    'EnvironmentFile = {env}\r\n',
+])
+def test_environment_assignments_keep_dormant_release(fleet, tmp_path, monkeypatch, assignment):
+    root, _, activate = fleet
+    old, _ = activate('first')
+    activate('second')
+    activate('third')
+    units = tmp_path / 'units'
+    dropin = units / 'dormant.service.d'
+    dropin.mkdir(parents=True)
+    (units / 'dormant.service').write_text('[Service]\nExecStart=/bin/true\n')
+    env = tmp_path / 'external.env'
+    env.write_text(f'CONFIG={old}/payload\n')
+    (dropin / 'override.conf').write_text('[Service]\n' + assignment.format(env=env) + '\n')
+    monkeypatch.setattr(retention, 'service_roots', lambda row: [units])
+    monkeypatch.setattr(retention, 'service_dependencies', SERVICE_DEPENDENCIES)
+    assert prune(root)['status'] == 'deferred'
+    assert old.is_dir() and (old / 'payload').read_text() == 'installed bytes'
+
+
+@pytest.mark.parametrize('continued', [False, True])
+def test_environment_path_with_spaces_is_one_filename(fleet, tmp_path, monkeypatch, continued):
+    root, _, activate = fleet
+    old, _ = activate('first')
+    activate('second')
+    activate('third')
+    units = tmp_path / 'units'
+    units.mkdir()
+    env = tmp_path / 'external settings.env'
+    env.write_text(f'CONFIG={old}/payload\n')
+    name = str(env).replace('external settings', 'external\\\nsettings') if continued else str(env)
+    (units / 'dormant.service').write_text(f'[Service]\nEnvironmentFile=-{name}\n')
+    monkeypatch.setattr(retention, 'service_roots', lambda row: [units])
+    monkeypatch.setattr(retention, 'service_dependencies', SERVICE_DEPENDENCIES)
+    assert prune(root)['status'] == 'deferred'
+    assert old.is_dir()
+
+
+@pytest.mark.parametrize('value', [
+    '-{env}\\x20suffix', '-"{env}"', "-'{env}'", '-{env}/%i', '-{env}/*',
+    '-{env}/$NAME', '-relative.env', '--{env}',
+])
+def test_unresolved_environment_assignment_never_deletes(fleet, tmp_path, monkeypatch, value):
+    root, _, activate = fleet
+    old, _ = activate('first')
+    activate('second')
+    activate('third')
+    units = tmp_path / 'units'
+    units.mkdir()
+    (units / 'dormant.service').write_text(
+        '[Service]\nEnvironmentFile = ' + value.format(env=tmp_path / 'external.env') + '\n')
+    monkeypatch.setattr(retention, 'service_roots', lambda row: [units])
+    monkeypatch.setattr(retention, 'service_dependencies', SERVICE_DEPENDENCIES)
+    with pytest.raises(ValueError, match='environment'):
+        prune(root)
+    assert old.is_dir()
+
+
+def test_optional_missing_environment_and_empty_assignment_allow_retirement(fleet, tmp_path, monkeypatch):
+    root, _, activate = fleet
+    old, _ = activate('first')
+    activate('second')
+    activate('third')
+    units = tmp_path / 'units'
+    units.mkdir()
+    (units / 'dormant.service').write_text(
+        '[Service]\nEnvironmentFile =\n'
+        f'EnvironmentFile = -{tmp_path}/missing.env\n'
+        '# EnvironmentFile = /comment/missing.env\n'
+        '; EnvironmentFile = /comment/missing.env\n')
+    monkeypatch.setattr(retention, 'service_roots', lambda row: [units])
+    monkeypatch.setattr(retention, 'service_dependencies', SERVICE_DEPENDENCIES)
+    assert prune(root)['status'] == 'complete'
+    assert not old.exists()
+
+
 @pytest.mark.parametrize('failure', ['none', 'wrong-protocol', 'offline', 'restarted', 'native-config'])
 def test_wrapper_acceptance_binds_service_owner_public_route_and_fresh_config(tmp_path, monkeypatch, failure):
     from types import SimpleNamespace

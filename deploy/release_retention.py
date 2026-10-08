@@ -291,6 +291,44 @@ def service_roots(row: dict) -> list[Path]:
     return list(dict.fromkeys(roots))
 
 
+def service_environment_files(raw: bytes) -> list[tuple[Path, bool]]:
+    """Find literal systemd EnvironmentFile paths without interpreting shell syntax.
+
+    Join logical lines before splitting assignments; systemd ignores whitespace
+    around '=' and skips full-line comments even during a continuation. Keep a
+    superset across sections, repeated assignments and resets: retaining an
+    overridden dependency is safer than guessing the effective drop-in order.
+    """
+    paths = []
+    parts = []
+    # The sentinel also flushes a continuation at EOF, as systemd does.
+    for physical in [*raw.splitlines(), b'']:
+        physical = physical.removeprefix(b'\xef\xbb\xbf')
+        if physical.lstrip().startswith((b'#', b';')):
+            continue
+        trailing_slashes = len(physical) - len(physical.rstrip(b'\\'))
+        if trailing_slashes % 2:
+            parts.append(physical[:-1] + b' ')
+            continue
+        parts.append(physical)
+        key, separator, value = b''.join(parts).partition(b'=')
+        parts.clear()
+        if not separator or key.strip() != b'EnvironmentFile':
+            continue
+        name = value.strip().decode('utf-8')
+        if not name:  # reset: do not discard dependencies already discovered
+            continue
+        optional = name.startswith('-')
+        name = name.removeprefix('-')
+        # EnvironmentFile takes one filename, including literal internal spaces,
+        # not a shell word list. Never erase escapes/quotes before validation or
+        # an optional path could silently turn into a different, missing file.
+        require(name.startswith('/') and not re.search(r'''[%$*?\[\\'"\x00-\x1f]''', name),
+                'dynamic or ambiguous service environment requires explicit retention inventory')
+        paths.append((Path(name), optional))
+    return paths
+
+
 def service_dependencies(row: dict, candidates: list[Path]) -> list[str]:
     """Read dormant service definitions and their literal environment files.
 
@@ -341,16 +379,10 @@ def service_dependencies(row: dict, candidates: list[Path]) -> list[str]:
 
     for path in files:
         raw = inspect(path)
-        for value in re.findall(rb"^\s*EnvironmentFile=(.+)$", raw, re.M):
-            for name in shlex.split(value.decode()):
-                optional = name.startswith("-")
-                name = name.lstrip("-")
-                require(name.startswith("/") and not re.search(r"[%$*?\[\\]", name),
-                        "dynamic service environment requires explicit retention inventory")
-                env = Path(name)
-                if optional and not env.exists() and not env.is_symlink():
-                    continue
-                inspect(env)
+        for env, optional in service_environment_files(raw):
+            if optional and not env.exists() and not env.is_symlink():
+                continue
+            inspect(env)
     return sorted(found)
 
 

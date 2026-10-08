@@ -150,6 +150,10 @@ Linux discovery reads the installed systemd system/global/user load paths and
 the actual `UnitPath` of running managers, including runtime and generated units.
 Missing tools, unreachable managers or unreadable directories defer cleanup;
 there is no fallback to a partial hard-coded directory list.
+Environment-file discovery handles spaced assignments and continued lines,
+preserves literal spaces in filenames, and retains dependencies even across
+overrides/resets. Unresolved specifiers, wildcards or ambiguous quoting/escapes
+defer cleanup instead of treating an optional file as absent.
 
 Failed/incomplete acceptance or insufficient process visibility retains files and
 warns without rolling back an already committed installation. A same-version
