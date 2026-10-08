@@ -164,8 +164,16 @@ overrides across definitions, drop-ins and environment files, following every
 matching executable alias. Missing discovery tools, unresolved executables,
 custom filesystem namespaces/inherited PATH, broken/cyclic links, unreadable
 paths or ambiguous expressions defer cleanup. Supervisor commands still require
-absolute paths. Discovery never executes a service or recursively crawls
-arbitrary external directories.
+absolute paths. An absolute interpreter is not proof of a literal payload:
+shell command strings, inline code, module lookup (including Python `-m`),
+relative scripts and known command launchers such as `env`/`nohup` defer cleanup.
+This guard also checks executable aliases and launchd `ProgramArguments`; it
+never substitutes the updater's PATH for a service manager's inherited PATH.
+Direct absolute script arguments remain literal dependencies, including the
+installer's isolated Python `wrapper_exec.py` command. Hosts with unresolved
+indirect commands need an explicitly reviewed retention inventory; a successful
+update can therefore retain more than one previous generation. Discovery never
+executes a service or recursively crawls arbitrary external directories.
 The generated inventory also stores the service discovery context. Cleanup
 rediscovers load paths, definitions, environment files and aliases before each
 quarantine rename and permanent deletion, after any artifact tree walk. A newly

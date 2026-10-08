@@ -608,6 +608,46 @@ def test_unrelated_service_alias_allows_retirement(fleet, tmp_path, monkeypatch)
     assert not old.exists() and alias.resolve(strict=True) == worker
 
 
+@pytest.mark.parametrize('kind', ['systemd', 'supervisor', 'launchd', 'launchd-program'])
+def test_indirect_service_command_never_deletes(fleet, tmp_path, monkeypatch, kind):
+    import plistlib
+    import subprocess
+
+    root, _, activate = fleet
+    old, _ = activate('first')
+    activate('second')
+    activate('third')
+    # This directory exists only in the service manager's environment. The
+    # updater cannot infer its PATH from its own environment or unit text.
+    inherited_bin = tmp_path / 'manager-bin'
+    inherited_bin.mkdir()
+    (old / 'payload').write_text('#!/bin/sh\nexit 0\n')
+    (old / 'payload').chmod(0o755)
+    (inherited_bin / 'worker').symlink_to(old / 'payload')
+    monkeypatch.setenv('PATH', '/usr/bin:/bin')
+    manager_env = {**os.environ, 'PATH': f'{inherited_bin}:/usr/bin:/bin'}
+    subprocess.run(['/bin/sh', '-c', 'worker'], env=manager_env, check=True)
+    units = tmp_path / 'units'
+    units.mkdir()
+    if kind.startswith('launchd'):
+        payload = {'ProgramArguments': ['/bin/sh', '-c', 'worker']}
+        if kind == 'launchd-program':
+            payload['Program'] = '/bin/sh'
+            payload['ProgramArguments'][0] = 'custom-argv-zero'
+        (units / 'worker.plist').write_bytes(plistlib.dumps(payload))
+    elif kind == 'supervisor':
+        (units / 'worker.conf').write_text('[program:worker]\ncommand=/bin/sh -c worker\n')
+    else:
+        (units / 'worker.service').write_text('[Service]\nExecStart=/bin/sh -c worker\n')
+    monkeypatch.setattr(retention, 'service_roots', lambda row: [units])
+    monkeypatch.setattr(retention, 'service_dependencies', SERVICE_DEPENDENCIES)
+    with pytest.raises(ValueError, match='indirect service command'):
+        prune(root)
+    assert old.is_dir() and (inherited_bin / 'worker').resolve(strict=True).exists()
+    assert not list(root.rglob('.cc-remote-retired-*'))
+    subprocess.run(['/bin/sh', '-c', 'worker'], env=manager_env, check=True)
+
+
 @pytest.fixture
 def executable_units(tmp_path, monkeypatch):
     units = tmp_path / 'units'
@@ -761,6 +801,96 @@ def test_unresolved_bare_executable_never_deletes(fleet, executable_units, monke
     with pytest.raises((ValueError, OSError)):
         prune(root)
     assert old.is_dir()
+
+
+@pytest.mark.parametrize('command', [
+    '/bin/sh -c worker', '/bin/bash -lc worker', '-@/bin/sh custom-name -c worker',
+    '/usr/bin/env worker', '/usr/bin/env -S "sh -c worker"',
+    '/usr/bin/nohup worker', '/usr/bin/nice -n 5 worker', '/usr/bin/timeout 10 worker',
+    '/usr/bin/busybox sh -c worker', '/usr/bin/python3.13 -c worker',
+    '/usr/bin/python3 -I -m worker', '/usr/bin/node --eval worker',
+    '/usr/bin/perl -e worker', '/usr/bin/ruby -e worker',
+    '/bin/bash worker', '/bin/sh', '/usr/bin/python3 -',
+    'shell-alias -c worker', '{alias} -c worker',
+])
+def test_interpreter_and_launcher_indirection_defers_retirement(
+    fleet, executable_units, tmp_path, command,
+):
+    root, _, activate = fleet
+    old, _ = activate('first')
+    activate('second')
+    activate('third')
+    units, paths, _ = executable_units
+    shell = tmp_path / 'sh'
+    shell.write_text('must never execute the service command')
+    shell.chmod(0o755)
+    alias = paths[0] / 'shell-alias'
+    alias.symlink_to(shell)
+    (units / 'worker.service').write_text(
+        '[Service]\nExecStart=' + command.format(alias=alias) + '\n')
+    with pytest.raises(ValueError, match='indirect service command'):
+        prune(root)
+    assert old.is_dir()
+
+
+@pytest.mark.parametrize('command', [
+    '/bin/sh {script}', '/bin/bash -- {script}',
+    '/usr/bin/python3 -I -B {script}', '/usr/bin/node {script}',
+    '/bin/true -c worker',
+])
+def test_literal_service_payloads_still_allow_retirement(
+    fleet, executable_units, tmp_path, command,
+):
+    root, _, activate = fleet
+    old, _ = activate('first')
+    activate('second')
+    activate('third')
+    units, _, _ = executable_units
+    script = tmp_path / 'worker-script'
+    script.write_text('must never execute this script')
+    (units / 'worker.service').write_text(
+        '[Service]\nExecStart=' + command.format(script=script) + '\n')
+    assert prune(root)['status'] == 'complete'
+    assert not old.exists() and script.exists()
+
+
+def test_direct_interpreter_script_alias_keeps_release(fleet, executable_units, tmp_path):
+    root, _, activate = fleet
+    old, _ = activate('first')
+    activate('second')
+    activate('third')
+    units, _, _ = executable_units
+    script = tmp_path / 'worker-script'
+    script.symlink_to(old / 'payload')
+    (units / 'worker.service').write_text(f'[Service]\nExecStart=/usr/bin/python3 -I -B {script}\n')
+    assert prune(root)['status'] == 'deferred'
+    assert old.exists() and script.resolve(strict=True).exists()
+
+
+def test_late_interpreter_indirection_restores_quarantined_artifacts(
+    fleet, executable_units, monkeypatch,
+):
+    root, _, activate = fleet
+    activate('first')
+    activate('second')
+    activate('third')
+    units, _, _ = executable_units
+    service = units / 'worker.service'
+    service.write_text('[Service]\nExecStart=/bin/true\n')
+    checks = 0
+
+    def acceptance(plan):
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            service.write_text('[Service]\nExecStart=/bin/sh -c worker\n')
+
+    monkeypatch.setattr(cleanup, 'run_checks', acceptance)
+    with pytest.raises(ValueError, match='indirect service command'):
+        prune(root)
+    plan = json.loads((root / retention.INVENTORY).read_text())
+    assert checks == 2 and all(Path(p).exists() for p in plan['candidates'])
+    assert not list(root.rglob('.cc-remote-retired-*'))
 
 
 def test_dormant_alias_preserves_transitive_release_dependencies(fleet, tmp_path, monkeypatch):
