@@ -2,6 +2,22 @@
 
 [中文](CHANGELOG_zh.md)
 
+## v4.0.10
+
+Add managed Linux migration, Supervisor installation/adoption and verified upgrade
+backup retention. Wire protocol v74 is unchanged. See the bilingual
+[release notes](docs/releases/v4.0.10.md).
+
+- Register the CLI and actual service binding while preserving native login,
+  pairing, external configuration and the independent Claude service.
+- Support older Supervisor interfaces and remove newly registered groups when a
+  fresh installation rolls back; preserve prepared Relay releases on backup failure.
+- Retain the active release, one previous recovery set and referenced dependencies;
+  clean only recorded generations after acceptance and revalidate before deletion.
+- Discover dormant services, environment files and executable aliases. Unresolved
+  indirect commands or incomplete visibility defer deletion and retain older files.
+- Document one-command updates and explicit adoption for older custom installations.
+
 ## v4.0.9
 
 Improve mobile sidebar gestures and preserve session-list momentum after opening.

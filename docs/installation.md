@@ -28,11 +28,11 @@ Web，Wrapper 包只含本机控制端；两者都自带 `uv`，安装时创建�
 ### 1）下载并校验引导脚本
 
 在 GitHub Release 页面确认版本与 release attestation，再在待安装机器下载同一版本的
-`install.sh` 和 `SHA256SUMS`。下例使用 `4.0.9`；请先确认对应版本已发布，或替换为已选定的已发布 tag
+`install.sh` 和 `SHA256SUMS`。下例使用 `4.0.10`；请先确认对应版本已发布，或替换为已选定的已发布 tag
 （变量中不带开头的 `v`）。该路径不会自动安装尚未发布的开发分支：
 
 ```bash
-export CC_REMOTE_VERSION=4.0.9
+export CC_REMOTE_VERSION=4.0.10
 release_base="https://github.com/muggle-stack/cc-remote/releases/download/v${CC_REMOTE_VERSION}"
 curl -fLO "$release_base/install.sh"
 curl -fLO "$release_base/SHA256SUMS"
@@ -147,15 +147,16 @@ cc-remote update --relay-ssh operator@relay-host
 升级前先等待进程内 Claude、BTW 和排队消息处理结束；SDK 或独立服务协议变化时，
 命令会停止并要求按 [Claude 服务指南](claude-session-service.md) 完成迁移。
 
-当前源码的安装器会在切换前记录旧版代码、服务配置和私有状态快照；新版本通过验收后，
+v4.0.10 起，安装器会在切换前记录旧版代码、服务配置和私有状态快照；新版本通过验收后，
 保留当前版本及上一版完整回滚资料，通过 `deploy/cleanup.py` 清理有记录的更早版本。
 独立 Claude 服务、Codex daemon、进程工作目录、打开文件或保留版本的符号链接仍引用的
 旧文件会继续保留，不为清理重启任务。来源不明、权限不足、验收失败或事务未完成时保留
 文件并告警；清理失败不会撤销已完成的升级。再次执行同版本 `cc-remote update` 会在
 重新验活、读取原生 Codex 配置后重试安全清理，`--check` 始终不清理。
 记录位于安装根目录的 `.release-generations.json`、`rollback-config/` 和 `rollback-data/`。
-原有未知备份不会按文件名猜测后删除。**v4.0.9 仍保留旧版本、不自动清理**；新规则随包含
-此改动的安装包生效，即使升级是由旧版更新命令发起的。
+原有未知备份不会按文件名猜测后删除。**v4.0.10 开始提供自动清理**，即使升级由旧版更新命令发起也会使用新规则。
+服务通过 shell 命令、Python 模块等间接启动而无法确定依赖时，会保留更多旧版本；
+需按部署文档人工核对清理清单。v4.0.9 及更早版本仍不自动清理。
 
 通信协议变化时命令默认停止。先安排所有机器的维护窗口，按部署文档顺序使用
 `--version` 固定同一版并附加 `--allow-protocol-change`；这只表示已安排协调升级，
@@ -171,8 +172,8 @@ v4.0.0 及更早版本尚未安装这个命令，需先按下面的方式升级�
 
 #### Linux 旧安装迁入更新器
 
-仅复制源码或手工切换 `current` 不会自动安装更新命令。当前源码提供显式迁移入口；
-需要下载包含此功能的 Release 安装器（v4.0.9 不支持），由管理员在独立终端执行：
+仅复制源码或手工切换 `current` 不会自动安装更新命令。v4.0.10 提供显式迁移入口；
+需要下载 v4.0.10 或更新版本的 Release 安装器，由管理员在独立终端执行：
 
 ```bash
 ./install.sh wrapper --user youruser --adopt-root /absolute/legacy/installation
@@ -187,8 +188,8 @@ Claude 服务，不复制原生会话。自定义命令、额外 systemd drop-in
 
 #### Linux Supervisor 安装与首次接管
 
-当前源码支持已有 Supervisor 管理的 Wrapper，包括没有 systemd 的 Linux 容器。
-**v4.0.9 不包含此功能**；必须先使用包含该改动的安装包完成一次安装/接管，之后直接
+v4.0.10 支持已有 Supervisor 管理的 Wrapper，包括没有 systemd 的 Linux 容器。
+必须先使用 v4.0.10 或更新版本的安装包完成一次安装/接管，之后直接
 执行 `cc-remote update`。无需安装 systemd，也不负责启动 Supervisor 守护进程或重建镜像。
 兼容 Supervisor 4.2.1/4.2.4 的旧接口，仍会校验目标服务的实际配置；若磁盘配置有尚未
 应用的变更，安装器会要求先核对，不会跳过检查或自动重启其他服务。

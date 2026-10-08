@@ -137,7 +137,7 @@ and any deferred paths. Allocated bytes are not a measurement of free-space gain
 into another backup directory or Trash
 does not reclaim disk space or satisfy this policy.
 
-Current-source **managed Release installers** apply this policy automatically
+**Managed Release installers from v4.0.10** apply this policy automatically
 after activation and registration. `release_retention.py` records the exact
 artifact identities in `.release-generations.json`, captures the previous service
 and external configuration in `rollback-config/`, and binds the matching private
@@ -190,10 +190,11 @@ deletion and still require the reviewed agent inventory below. Configuration
 backup `files.json` records each original destination, absence, owner and mode;
 keep it with that generation for administrator-controlled recovery.
 
-**Published v4.0.9 does not include automatic retention or Linux legacy migration.**
-These take effect with an installer bundle containing the new code, including
-upgrades initiated by older management CLIs. Source/manual deployments continue
-to use reviewed cleanup inventories and their existing activation transactions.
+**v4.0.10 introduces automatic retention and Linux legacy migration.**
+These take effect through its installer bundle, including upgrades initiated by
+older management CLIs. v4.0.9 and earlier do not provide these features.
+Source/manual deployments continue to use reviewed cleanup inventories and their
+existing activation transactions.
 
 #### Repository cleanup command
 

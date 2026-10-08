@@ -30,13 +30,13 @@ repository, install Node, or paste tokens into service definitions.
 ### 1) Download and verify the bootstrap
 
 Confirm the version and release attestation on GitHub, then download
-`install.sh` and `SHA256SUMS` from that same release. The example uses `4.0.9`;
+`install.sh` and `SHA256SUMS` from that same release. The example uses `4.0.10`;
 first confirm that it is published, or replace it with the published tag you
 selected (without the leading `v`). This
 does not select an unpublished development-branch build:
 
 ```bash
-export CC_REMOTE_VERSION=4.0.9
+export CC_REMOTE_VERSION=4.0.10
 release_base="https://github.com/muggle-stack/cc-remote/releases/download/v${CC_REMOTE_VERSION}"
 curl -fLO "$release_base/install.sh"
 curl -fLO "$release_base/SHA256SUMS"
@@ -172,7 +172,7 @@ The independent Claude service is never restarted. Finish in-process Claude,
 BTW and queued work before updating. SDK/service-protocol changes stop the command
 and require the [Claude service migration procedure](claude-session-service.md).
 
-Current-source installers record the previous code, service configuration and
+Starting with v4.0.10, installers record the previous code, service configuration and
 private-state snapshot before switching. After acceptance, retain the active
 release and one complete previous rollback set. `deploy/cleanup.py` retires only
 recorded, proven older generations. References from the independent Claude
@@ -184,8 +184,10 @@ the same-version `cc-remote update` retries safe cleanup after fresh health and
 native Codex configuration checks; `--check` never cleans up.
 Records live in `.release-generations.json`, `rollback-config/` and `rollback-data/`
 under the installation root. Unknown historical backups are never inferred by name.
-**v4.0.9 retains old releases without automatic cleanup**. The new policy requires
-a bundle containing this change, even when an older updater starts the upgrade.
+**Automatic retention ships in v4.0.10**, including upgrades started by an older
+updater. Unresolved indirect service commands, such as shell strings or Python
+module invocations, retain additional generations and require an explicitly
+reviewed cleanup inventory. v4.0.9 and earlier do not clean up automatically.
 
 A wire-protocol change stops by default. Arrange a maintenance window on every
 machine, pin the same `--version`, and add `--allow-protocol-change` in the order
@@ -206,8 +208,8 @@ Unregistered custom layouts are never automatically adopted.
 #### Migrate an older Linux installation
 
 Copying source or manually switching `current` does not register the updater.
-Current source provides an explicit migration entry point. Obtain a Release
-installer containing it (v4.0.9 does not), then run as the installation
+v4.0.10 provides an explicit migration entry point. Obtain a v4.0.10 or newer
+Release installer, then run as the installation
 administrator from an independent terminal:
 
 ```bash
@@ -227,10 +229,10 @@ the new root. Do not run the old deployment workflow concurrently with migration
 
 #### Linux Supervisor installation and adoption
 
-Current source supports an existing Supervisor, including Linux containers without
-systemd. **v4.0.9 does not include this feature**: first install/adopt using a bundle
-containing it, then use the same `cc-remote update`. The installer does not install
-systemd, start supervisord, or rebuild a container image.
+v4.0.10 supports an existing Supervisor, including Linux containers without
+systemd. First install/adopt using a v4.0.10 or newer bundle, then use the same
+`cc-remote update`. The installer does not install systemd, start supervisord,
+or rebuild a container image.
 Older interfaces, including Supervisor 4.2.1/4.2.4, retain the same preflight
 checks. Unapplied changes to the selected service must be reconciled first;
 the installer does not skip validation or automatically restart other services.

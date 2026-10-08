@@ -4,7 +4,7 @@
 
 Self-hosted · Multiple sessions and devices · Live tool activity · Code / Work · Web / PWA / TUI
 
-**Product version: v4.0.9** · Wire protocol v74
+**Product version: v4.0.10** · Wire protocol v74
 
 [中文](README.md) · [Engine comparison](#engines-and-features) · [Quick start](#quick-start) ·
 [Terminal workspace](#terminal-workspace) · [Install and upgrade](#install-and-upgrade) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)
@@ -258,14 +258,15 @@ entry for the first remote server upgrade. Update other devices individually.
 Installation uses prebuilt artifacts; it does not run CI, pytest or a frontend
 build on users' machines. The Electron application is updated separately.
 
-Current source adds automatic retention: after acceptance, keep the active
+v4.0.10 adds automatic retention: after acceptance, keep the active
 version, one complete previous rollback set and all live runtime dependencies;
 remove proven older generations. Linux Wrappers can also use an existing Supervisor
 with the same updater, preserving their root, account and HOME; see
 [Supervisor installation/adoption](docs/installation_en.md#linux-supervisor-installation-and-adoption).
-**v4.0.9 does not include automatic cleanup, Linux legacy migration or Supervisor support**; these require a bundle containing the
-new changes. See [subsequent updates](docs/installation_en.md#subsequent-updates)
-for command locations, older installations, roles and coordinated protocol upgrades.
+These features ship in **v4.0.10**, including when an older updater downloads the
+new installer. Unresolved dependencies defer cleanup and preserve older files.
+See [subsequent updates](docs/installation_en.md#subsequent-updates) for command
+locations, older installations, roles and coordinated protocol upgrades.
 
 | Scenario | Guide |
 |---|---|

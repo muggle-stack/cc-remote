@@ -64,9 +64,9 @@ not final acceptance. Report retained/deferred paths and removed allocated bytes
 do not equate those bytes with actual free-space gain. No daemon or active task
 may be stopped solely to make an artifact deletable. Managed Release installers
 containing `release_retention.py` now generate an inventory from their own
-activation ledger and call `cleanup.py` after acceptance; published v4.0.9 does
-not contain that behavior. Inspect their retention result rather than duplicating
-it with another script. Unknown/source/manual backups still need the explicit
+activation ledger and call `cleanup.py` after acceptance starting with v4.0.10;
+v4.0.9 and earlier do not contain that behavior. Inspect their retention result
+rather than duplicating it with another script. Unknown/source/manual backups still need the explicit
 reviewed inventory. A deferred cleanup does not authorize deleting its files.
 
 ## Codex CLI sharing is an acceptance check
