@@ -350,6 +350,140 @@ def test_dormant_service_and_environment_dependencies(tmp_path, monkeypatch):
         retention.service_dependencies({}, [old])
 
 
+@pytest.mark.parametrize('kind', [
+    'executable', 'relative-chain', 'directory', 'argument', 'environment',
+    'environment-file', 'intermediate-owner', 'plist', 'plist-spaces', 'supervisor',
+])
+def test_dormant_service_alias_keeps_release(fleet, tmp_path, monkeypatch, kind):
+    import plistlib
+
+    root, _, activate = fleet
+    old, _ = activate('first')
+    activate('second')
+    activate('third')
+    units = tmp_path / 'units'
+    units.mkdir()
+    alias = tmp_path / 'stable-worker'
+    alias.symlink_to(old / 'payload')
+    service = units / 'dormant.service'
+    text = f'[Service]\nExecStart={alias}\n'
+    if kind == 'relative-chain':
+        next_alias = tmp_path / 'second-alias'
+        next_alias.symlink_to(alias.name)
+        text = f'[Service]\nExecStart=-@{next_alias} worker\n'
+    elif kind == 'directory':
+        alias.unlink()
+        alias.symlink_to(old, target_is_directory=True)
+        text = f'[Service]\nExecStart={alias}/payload\nWorkingDirectory={alias}\n'
+    elif kind == 'argument':
+        text = f'[Service]\nExecStart=/bin/true --config={alias}\n'
+    elif kind == 'environment':
+        env = tmp_path / 'external.env'
+        env.write_text(f'WORKER="{alias}"\n')
+        text = f'[Service]\nEnvironmentFile={env}\n'
+    elif kind == 'environment-file':
+        text = f'[Service]\nEnvironmentFile={alias}\n'
+    elif kind == 'intermediate-owner':
+        external = tmp_path / 'external-worker'
+        external.write_text('worker')
+        (old / 'payload').unlink()
+        (old / 'payload').symlink_to(external)
+    elif kind in {'plist', 'plist-spaces'}:
+        if kind == 'plist-spaces':
+            directory = tmp_path / 'Application Support'
+            directory.mkdir()
+            alias = directory / 'worker'
+            alias.symlink_to(old / 'payload')
+        service = units / 'dormant.plist'
+        service.write_bytes(plistlib.dumps({'ProgramArguments': [str(alias), '--serve']}))
+    elif kind == 'supervisor':
+        service = units / 'worker.conf'
+        text = f'[program:worker]\ncommand={alias} --serve\n'
+    if kind not in {'plist', 'plist-spaces'}:
+        service.write_text(text)
+    monkeypatch.setattr(retention, 'service_roots', lambda row: [units])
+    monkeypatch.setattr(retention, 'service_dependencies', SERVICE_DEPENDENCIES)
+    assert prune(root)['status'] == 'deferred'
+    assert old.is_dir()
+    assert alias.resolve(strict=True).exists()
+
+
+@pytest.mark.parametrize('failure', ['broken', 'cycle', 'permission', 'expansion', 'escaped', 'bare-command'])
+def test_unresolved_service_alias_never_deletes(fleet, tmp_path, monkeypatch, failure):
+    root, _, activate = fleet
+    old, _ = activate('first')
+    activate('second')
+    activate('third')
+    units = tmp_path / 'units'
+    units.mkdir()
+    alias = tmp_path / 'worker'
+    alias.symlink_to(old / 'payload')
+    command = str(alias)
+    if failure == 'broken':
+        alias.unlink()
+        alias.symlink_to(tmp_path / 'missing')
+    elif failure == 'cycle':
+        alias.unlink()
+        alias.symlink_to(alias.name)
+    elif failure == 'permission':
+        original = Path.lstat
+
+        def unreadable(path, *args, **kwargs):
+            if path == alias:
+                raise PermissionError('cannot inspect service alias')
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, 'lstat', unreadable)
+    elif failure == 'expansion':
+        command = str(alias.parent / '${WORKER}')
+    elif failure == 'escaped':
+        command = str(alias).replace('worker', r'wor\x6ber')
+    else:
+        command = 'worker'
+    (units / 'dormant.service').write_text(f'[Service]\nExecStart={command}\n')
+    monkeypatch.setattr(retention, 'service_roots', lambda row: [units])
+    monkeypatch.setattr(retention, 'service_dependencies', SERVICE_DEPENDENCIES)
+    with pytest.raises((ValueError, OSError, RuntimeError)):
+        prune(root)
+    assert old.is_dir()
+
+
+def test_unrelated_service_alias_allows_retirement(fleet, tmp_path, monkeypatch):
+    root, _, activate = fleet
+    old, _ = activate('first')
+    activate('second')
+    activate('third')
+    units = tmp_path / 'units'
+    units.mkdir()
+    worker = tmp_path / 'external-worker'
+    worker.write_text('worker')
+    alias = tmp_path / 'stable-worker'
+    alias.symlink_to(worker)
+    (units / 'dormant.service').write_text(f'[Service]\nExecStart={alias}\n')
+    monkeypatch.setattr(retention, 'service_roots', lambda row: [units])
+    monkeypatch.setattr(retention, 'service_dependencies', SERVICE_DEPENDENCIES)
+    assert prune(root)['status'] == 'complete'
+    assert not old.exists() and alias.resolve(strict=True) == worker
+
+
+def test_dormant_alias_preserves_transitive_release_dependencies(fleet, tmp_path, monkeypatch):
+    root, _, activate = fleet
+    runtime, _ = activate('first')
+    worker, _ = activate('second')
+    (worker / 'runtime').symlink_to(runtime, target_is_directory=True)
+    activate('third')
+    activate('fourth')
+    units = tmp_path / 'units'
+    units.mkdir()
+    alias = tmp_path / 'worker'
+    alias.symlink_to(worker / 'payload')
+    (units / 'dormant.service').write_text(f'[Service]\nExecStart={alias}\n')
+    monkeypatch.setattr(retention, 'service_roots', lambda row: [units])
+    monkeypatch.setattr(retention, 'service_dependencies', SERVICE_DEPENDENCIES)
+    assert prune(root)['status'] == 'deferred'
+    assert worker.is_dir() and runtime.is_dir()
+
+
 @pytest.mark.parametrize('assignment', [
     'EnvironmentFile={env}',
     'EnvironmentFile = {env}',

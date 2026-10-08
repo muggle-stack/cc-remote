@@ -154,6 +154,12 @@ Environment-file discovery handles spaced assignments and continued lines,
 preserves literal spaces in filenames, and retains dependencies even across
 overrides/resets. Unresolved specifiers, wildcards or ambiguous quoting/escapes
 defer cleanup instead of treating an optional file as absent.
+Literal paths in service definitions, launchd plists and external environment
+files are resolved component by component, including multi-hop aliases and
+intermediate links owned by an old release. Those releases retain their runtime
+dependency closure. Broken/cyclic links, unreadable paths, bare executable names
+or ambiguous path expressions defer cleanup; discovery never executes a service
+or recursively crawls arbitrary external directories.
 
 Failed/incomplete acceptance or insufficient process visibility retains files and
 warns without rolling back an already committed installation. A same-version

@@ -6,6 +6,7 @@ Deletion belongs to cleanup.py; unknown legacy trees are never inferred by age.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import json
 import os
 from pathlib import Path
@@ -291,15 +292,9 @@ def service_roots(row: dict) -> list[Path]:
     return list(dict.fromkeys(roots))
 
 
-def service_environment_files(raw: bytes) -> list[tuple[Path, bool]]:
-    """Find literal systemd EnvironmentFile paths without interpreting shell syntax.
-
-    Join logical lines before splitting assignments; systemd ignores whitespace
-    around '=' and skips full-line comments even during a continuation. Keep a
-    superset across sections, repeated assignments and resets: retaining an
-    overridden dependency is safer than guessing the effective drop-in order.
-    """
-    paths = []
+def service_lines(raw: bytes) -> list[bytes]:
+    """Join systemd logical lines, preserving literal path whitespace."""
+    lines = []
     parts = []
     # The sentinel also flushes a continuation at EOF, as systemd does.
     for physical in [*raw.splitlines(), b'']:
@@ -311,8 +306,20 @@ def service_environment_files(raw: bytes) -> list[tuple[Path, bool]]:
             parts.append(physical[:-1] + b' ')
             continue
         parts.append(physical)
-        key, separator, value = b''.join(parts).partition(b'=')
+        lines.append(b''.join(parts))
         parts.clear()
+    return lines
+
+
+def service_environment_files(raw: bytes) -> list[tuple[Path, bool]]:
+    """Find literal systemd EnvironmentFile paths without interpreting shell syntax.
+
+    Keep a superset across sections, repeated assignments and resets: retaining
+    an overridden dependency is safer than guessing the effective drop-in order.
+    """
+    paths = []
+    for line in service_lines(raw):
+        key, separator, value = line.partition(b'=')
         if not separator or key.strip() != b'EnvironmentFile':
             continue
         name = value.strip().decode('utf-8')
@@ -327,6 +334,73 @@ def service_environment_files(raw: bytes) -> list[tuple[Path, bool]]:
                 'dynamic or ambiguous service environment requires explicit retention inventory')
         paths.append((Path(name), optional))
     return paths
+
+
+def service_literal_paths(value: str, *, atomic: bool = False) -> set[Path]:
+    """Extract only literal paths; ambiguous shell/expansion syntax defers cleanup.
+
+    Also inspect the complete scalar for path-valued settings with unquoted
+    spaces. Tokenizing it alone could mistake an existing prefix for the path.
+    """
+    if '/' not in value and not atomic:
+        return set()
+    require(not re.search(r'[\\%$`*?{}\x00-\x1f]', value),
+            'nonliteral service paths require explicit retention inventory')
+    if atomic:
+        require(value.startswith('/'), 'relative service paths require explicit retention inventory')
+        return {Path(value)}
+    paths = set()
+    scalar = value.strip().removeprefix('-')
+    if scalar.startswith('/'):
+        paths.add(Path(scalar))
+    for word in shlex.split(value):
+        # Assignments and command options can carry a path as their value.
+        if '=' in word and not word.startswith('/'):
+            word = word.partition('=')[2]
+        if re.match(r'^[A-Za-z][A-Za-z0-9+.-]*://', word):
+            continue
+        if '/' not in word:
+            continue
+        name = word.lstrip('-@:+!')  # systemd executable prefixes
+        require(name.startswith('/') and not re.search(r'[;:,|<>\[\]]', name),
+                'ambiguous service paths require explicit retention inventory')
+        paths.add(Path(name))
+    return paths
+
+
+def service_path_dependencies(path: Path, candidates: list[Path]) -> set[str]:
+    """Follow literal path components without losing intermediate symlink owners.
+
+    A link inside an old release is a dependency even if its ultimate target is
+    outside the release. Missing ordinary paths may be future output files;
+    broken links, cycles and inaccessible components are incomplete visibility.
+    """
+    require(path.is_absolute(), 'service dependency path must be absolute')
+    pending = deque(path.parts[1:])
+    current = Path('/')
+    links = 0
+    found = set()
+    while pending:
+        part = pending.popleft()
+        if part == '..':
+            current = current.parent
+            continue
+        current /= part
+        found.update(str(candidate) for candidate in candidates if current.is_relative_to(candidate))
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            break
+        if stat.S_ISLNK(info.st_mode):
+            links += 1
+            require(links <= 64, 'service dependency symlink chain is cyclic or exceeds limit')
+            # Validate the link itself, not a possibly not-yet-created output
+            # suffix below it. Keep walking components to retain every owner.
+            current.resolve(strict=True)
+            target = Path(os.readlink(current))
+            current = Path('/') if target.is_absolute() else current.parent
+            pending.extendleft(reversed(target.parts[1:] if target.is_absolute() else target.parts))
+    return found
 
 
 def service_dependencies(row: dict, candidates: list[Path]) -> list[str]:
@@ -359,9 +433,33 @@ def service_dependencies(row: dict, candidates: list[Path]) -> list[str]:
         files.update(config_files(Path(profile['supervisor_config'])))
         files.update(Path(profile[key]) for key in ('env_file', 'device_file') if Path(profile[key]).exists())
     total = 0
+    paths_seen = set()
+
+    def protect(path: Path) -> None:
+        if path not in paths_seen:
+            paths_seen.add(path)
+            require(len(paths_seen) <= 8192, 'service path discovery exceeds bound')
+            found.update(service_path_dependencies(path, candidates))
+
+    def inspect_value(value: str, *, atomic: bool = False) -> None:
+        for path in service_literal_paths(value, atomic=atomic):
+            protect(path)
+
+    def inspect_plist(value, key: str = '') -> None:
+        if isinstance(value, dict):
+            for child_key, child in value.items():
+                inspect_plist(child, child_key)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                inspect_plist(child, 'Program' if key == 'ProgramArguments' and index == 0 else '')
+        elif isinstance(value, str):
+            inspect_value(value, atomic=key in {
+                'Program', 'WorkingDirectory', 'RootDirectory', 'StandardOutPath', 'StandardErrorPath',
+            })
 
     def inspect(path: Path) -> bytes:
         nonlocal total
+        protect(path)
         target = path.resolve(strict=True)
         if str(target) == "/dev/null":  # masked systemd unit
             return b""
@@ -371,7 +469,19 @@ def service_dependencies(row: dict, candidates: list[Path]) -> list[str]:
                 and total <= 32 * 1024 * 1024, "service dependency scan incomplete or oversized")
         raw = path.read_bytes()
         if path.suffix == ".plist":
-            raw = json.dumps(plistlib.loads(raw), default=str).encode()
+            value = plistlib.loads(raw)
+            inspect_plist(value)
+            raw = json.dumps(value, default=str).encode()
+        else:
+            for line in service_lines(raw):
+                key, separator, value = line.partition(b'=')
+                if key.strip() == b'EnvironmentFile':
+                    continue  # exact single-filename handling below
+                if (key.strip().startswith(b'Exec') or key.strip() == b'command') and value.strip():
+                    words = shlex.split(value.decode('utf-8'))
+                    require(bool(words) and words[0].lstrip('-@:+!').startswith('/'),
+                            'nonliteral service executable requires explicit retention inventory')
+                inspect_value((value if separator else line).decode('utf-8'))
         for candidate in candidates:
             if str(candidate).encode() in raw or target.is_relative_to(candidate):
                 found.add(str(candidate))
