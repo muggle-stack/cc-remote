@@ -146,6 +146,10 @@ all deletion to `cleanup.py`, inheriting the installation lock. Fresh acceptance
 checks public Relay/Web identity, stable service identity, Wrapper connectivity,
 snapshot integrity and live Codex configuration as the service user. Process,
 symlink and dormant service/configuration dependencies override retention limits.
+Linux discovery reads the installed systemd system/global/user load paths and
+the actual `UnitPath` of running managers, including runtime and generated units.
+Missing tools, unreachable managers or unreadable directories defer cleanup;
+there is no fallback to a partial hard-coded directory list.
 
 Failed/incomplete acceptance or insufficient process visibility retains files and
 warns without rolling back an already committed installation. A same-version

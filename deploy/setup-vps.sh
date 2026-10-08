@@ -45,6 +45,7 @@ CADDY_TEMPLATE=""
 MANAGED_RELEASE=0
 CLI_PATH=/usr/local/bin/cc-remote
 RETENTION_GENERATION=""
+RETENTION_STARTED=0
 
 [ -r "$SOURCE_DIR/deploy/setup_transaction.sh" ] || {
   echo "ERROR: $SOURCE_DIR/deploy/setup_transaction.sh is missing" >&2
@@ -339,6 +340,9 @@ chown -R root:ccremote "$RUNTIMES_DIR"
 harden_release_permissions "$RUNTIMES_DIR"
 
 if (( MANAGED_RELEASE )); then
+  # begin journals the prepared transaction before copying configuration. Its
+  # stdout may be empty on failure/interruption; keep the release either way.
+  RETENTION_STARTED=1
   RETENTION_GENERATION="$(
     "$NEW_RELEASE_DIR/.venv/bin/python" "$NEW_RELEASE_DIR/deploy/release_retention.py" begin \
       --root "$APPDIR" --release "$NEW_RELEASE_DIR" --previous "$PREVIOUS_RELEASE" \

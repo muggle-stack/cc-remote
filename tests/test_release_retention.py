@@ -10,6 +10,132 @@ import pytest
 from deploy import cleanup, release_retention as retention
 from deploy.install_lock import acquire_install_lock
 
+SERVICE_DEPENDENCIES = retention.service_dependencies
+
+
+@pytest.fixture
+def systemd_paths(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    filesystem = tmp_path.resolve() / 'systemd'
+    home = filesystem / 'home/operator'
+    home.mkdir(parents=True)
+    account = SimpleNamespace(pw_dir=str(home), pw_uid=1000, pw_name='operator')
+    paths = {
+        'system': [filesystem / p for p in (
+            'run/systemd/system', 'run/systemd/generator.early',
+            'run/systemd/generator', 'run/systemd/generator.late',
+            'etc/systemd/system.control', 'run/systemd/transient')],
+        'global': [filesystem / p for p in (
+            'etc/systemd/user', 'usr/lib/systemd/user', 'usr/local/lib/systemd/user')],
+        'user': [home / '.config/systemd/user', home / '.local/share/systemd/user',
+                 filesystem / 'run/user/1000/systemd/user'],
+        'live-system': [filesystem / 'custom-system-units'],
+        'live-user': [filesystem / 'custom-user-units'],
+    }
+    monkeypatch.setattr(retention.sys, 'platform', 'linux')
+    monkeypatch.setattr(retention, 'os', SimpleNamespace(**{**vars(os), 'geteuid': lambda: 0}))
+    monkeypatch.setattr(retention.pwd, 'getpwall', lambda: [account])
+    calls = []
+
+    def command(argv):
+        calls.append(argv)
+        if 'unit-paths' in argv:
+            scope = next(s for s in ('system', 'global', 'user') if '--' + s in argv)
+            if scope == 'user':
+                assert 'HOME=' + str(home) in argv
+                assert 'XDG_RUNTIME_DIR=/run/user/1000' in argv
+            return '\n'.join(map(str, paths[scope])) + '\n'
+        if 'list-units' in argv:
+            return 'user@1000.service loaded active running User Manager for UID 1000\n'
+        if '--user' in argv:
+            assert argv[:3] == ['runuser', '-u', 'operator']
+            return ' '.join(map(str, paths['live-user'])) + '\n'
+        return ' '.join(map(str, paths['live-system'])) + '\n'
+
+    monkeypatch.setattr(retention, 'command', command)
+    return home, paths, calls
+
+
+@pytest.mark.parametrize('scope,index', [
+    ('system', 0), ('system', 1), ('system', 2), ('system', 3),
+    ('system', 4), ('system', 5), ('global', 0), ('global', 1),
+    ('global', 2), ('user', 1), ('user', 2), ('live-system', 0), ('live-user', 0),
+])
+def test_dormant_units_in_all_load_paths_protect_old_releases(
+    fleet, systemd_paths, monkeypatch, scope, index,
+):
+    root, _, activate = fleet
+    home, paths, _ = systemd_paths
+    old, _ = activate('first')
+    activate('second')
+    activate('third')
+    units = paths[scope][index]
+    units.mkdir(parents=True, exist_ok=True)
+    (units / 'dormant.service').write_text(f'[Service]\nExecStart={old}/payload\n')
+    monkeypatch.setattr(retention, 'service_dependencies', SERVICE_DEPENDENCIES)
+    report = prune(root)
+    assert report['status'] == 'deferred'
+    assert old.is_dir()
+    assert all(p in retention.service_roots({'home': str(home)}) for group in paths.values() for p in group)
+
+
+@pytest.mark.parametrize('failure', ['unavailable', 'empty', 'relative', 'global-unavailable',
+                                     'unknown-user', 'user-manager-unavailable'])
+def test_incomplete_unit_path_discovery_never_deletes(fleet, systemd_paths, monkeypatch, failure):
+    root, _, activate = fleet
+    old, _ = activate('first')
+    activate('second')
+    activate('third')
+
+    discover = retention.command
+
+    def incomplete(argv):
+        if failure == 'unavailable':
+            raise OSError('unit path discovery unavailable')
+        if failure == 'global-unavailable' and '--global' in argv:
+            raise OSError('global unit path discovery unavailable')
+        if failure == 'unknown-user' and 'list-units' in argv:
+            return 'user@2000.service loaded active running User Manager for UID 2000\n'
+        if failure == 'user-manager-unavailable' and '--user' in argv and 'show' in argv:
+            raise ValueError('user manager not reachable')
+        if failure in {'empty', 'relative'}:
+            return '' if failure == 'empty' else 'relative/unit/path\n'
+        return discover(argv)
+
+    monkeypatch.setattr(retention, 'command', incomplete)
+    monkeypatch.setattr(retention, 'service_dependencies', SERVICE_DEPENDENCIES)
+    with pytest.raises((ValueError, OSError)):
+        prune(root)
+    assert old.is_dir()
+
+
+@pytest.mark.parametrize('failure', ['permission', 'dangling-directory'])
+def test_unreadable_unit_directory_never_deletes(fleet, systemd_paths, monkeypatch, failure):
+    root, _, activate = fleet
+    old, _ = activate('first')
+    activate('second')
+    activate('third')
+    _, paths, _ = systemd_paths
+    directory = paths['global'][0]
+    directory.parent.mkdir(parents=True)
+    if failure == 'permission':
+        directory.mkdir()
+        original = Path.stat
+
+        def unreadable(path, *args, **kwargs):
+            if path == directory:
+                raise PermissionError('cannot inspect unit directory')
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, 'stat', unreadable)
+    else:
+        directory.symlink_to(directory.with_name('missing'))
+    monkeypatch.setattr(retention, 'service_dependencies', SERVICE_DEPENDENCIES)
+    with pytest.raises((ValueError, OSError)):
+        prune(root)
+    assert old.is_dir()
+
 
 @pytest.fixture
 def fleet(tmp_path, monkeypatch):

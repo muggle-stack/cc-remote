@@ -230,16 +230,65 @@ def abort(root: Path, identity: str) -> None:
     retirement.write_journal(root / LEDGER, data)
 
 
+def unit_paths(argv: list[str], *, lines: bool = False) -> list[Path]:
+    raw = command(argv)
+    require(len(raw) <= 65536, "systemd unit path discovery exceeds bound")
+    values = raw.splitlines() if lines else shlex.split(raw)
+    require(0 < len(values) <= 256, "systemd unit path discovery is incomplete")
+    require(all(value.startswith('/') and not re.search(r'[\\\x00-\x1f]', value) for value in values),
+            "systemd unit paths must be literal absolute paths")
+    return [Path(value) for value in values]
+
+
 def service_roots(row: dict) -> list[Path]:
     home = Path(row["home"])
-    roots = ([home / "Library/LaunchAgents", Path("/Library/LaunchAgents"),
-              Path("/Library/LaunchDaemons")] if sys.platform == "darwin" else
-             [Path("/etc/systemd/system"), Path("/usr/lib/systemd/system"),
-              Path("/usr/local/lib/systemd/system"), home / ".config/systemd/user"])
-    if sys.platform != "darwin" and os.geteuid() == 0:
-        roots.extend(Path(account.pw_dir) / ".config/systemd/user" for account in pwd.getpwall()
-                     if account.pw_dir.startswith("/") and Path(account.pw_dir).is_dir())
-    return roots
+    if sys.platform == "darwin":
+        return [home / "Library/LaunchAgents", Path("/Library/LaunchAgents"), Path("/Library/LaunchDaemons")]
+    require(os.geteuid() == 0, "Linux service discovery requires visibility of every service user")
+    # systemd-analyze includes the distribution's complete default load paths,
+    # including generated/transient/control units and global user directories.
+    # It does not query managers: also include their actual UnitPath overrides.
+    # See systemd-analyze(1), "unit-paths". Failure is not an empty inventory.
+    clean_env = ['env', '-i', 'PATH=/usr/sbin:/usr/bin:/sbin:/bin']
+    roots = []
+    for scope in ('system', 'global'):
+        roots.extend(unit_paths([*clean_env, 'systemd-analyze', '--' + scope, 'unit-paths'], lines=True))
+    roots.extend(unit_paths([*clean_env, 'systemctl', '--system', 'show', '-p', 'UnitPath', '--value']))
+    active = command([*clean_env, 'systemctl', '--system', 'list-units', '--all', '--plain', '--no-legend',
+                      '--no-pager', '--state=active,activating,reloading,deactivating', 'user@*.service'])
+    require(len(active) <= 65536, "user manager discovery exceeds bound")
+    active_users = set()
+    for line in active.splitlines():
+        match = re.fullmatch(r'user@(\d+)\.service\s+.+', line.strip())
+        require(match is not None, "user manager discovery is incomplete")
+        active_users.add(int(match[1]))
+    accounts = pwd.getpwall()
+    require(len(accounts) <= 1024, "service user discovery exceeds bound")
+    for account in accounts:
+        require(account.pw_dir.startswith('/'), "service user has an unknown HOME")
+        user_home = Path(account.pw_dir)
+        try:
+            is_directory = stat.S_ISDIR(user_home.stat().st_mode)
+        except FileNotFoundError:
+            is_directory = False
+        require(is_directory or account.pw_uid not in active_users, "active user manager HOME is unavailable")
+        if not is_directory:
+            continue
+        runtime = f'/run/user/{account.pw_uid}'
+        environment = [*clean_env, f'HOME={user_home}', f'XDG_RUNTIME_DIR={runtime}']
+        roots.extend(unit_paths([*environment, 'systemd-analyze', '--user', 'unit-paths'], lines=True))
+        if account.pw_uid in active_users:
+            roots.extend(unit_paths([
+                'runuser', '-u', account.pw_name, '--', *environment,
+                f'DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus',
+                'systemctl', '--user', 'show', '-p', 'UnitPath', '--value',
+            ]))
+            active_users.remove(account.pw_uid)
+    require(not active_users, "an active user manager has no discoverable service account")
+    # A bound service can deliberately use a different HOME from passwd.
+    roots.extend([home / '.config/systemd/user', home / '.config/systemd/user.control',
+                  home / '.local/share/systemd/user'])
+    return list(dict.fromkeys(roots))
 
 
 def service_dependencies(row: dict, candidates: list[Path]) -> list[str]:
@@ -255,8 +304,12 @@ def service_dependencies(row: dict, candidates: list[Path]) -> list[str]:
         raise error
 
     for directory in set(service_roots(row)):
-        if not directory.exists():
+        try:
+            info = directory.stat()
+        except FileNotFoundError:
+            require(not directory.is_symlink(), "dangling service directory requires explicit inspection")
             continue
+        require(stat.S_ISDIR(info.st_mode), "service search path is not a directory")
         for parent, directories, names in os.walk(directory, onerror=walk_error):
             require(not any((Path(parent) / name).is_symlink() for name in directories),
                     "symlinked service directory requires explicit retention inventory")

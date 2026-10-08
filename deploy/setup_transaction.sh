@@ -194,7 +194,7 @@ cleanup() {
     # A restored current link alone does not prove Caddy, service and data
     # recovery. Leave a failed managed activation prepared for inspection.
     if [ -n "$NEW_RELEASE_DIR" ]; then
-      if (( RELEASE_SWITCHED )) || [ -n "${RETENTION_GENERATION:-}" ]; then
+      if (( RELEASE_SWITCHED || ${RETENTION_STARTED:-0} )) || [ -n "${RETENTION_GENERATION:-}" ]; then
         # A failed rollback may have left current pointing at the new release.
         # Keep that tree intact rather than turning the active symlink into a
         # dangling link; the operator can repair current and remove it later.
