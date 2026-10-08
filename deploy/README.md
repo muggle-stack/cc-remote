@@ -310,7 +310,10 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
   root-owned non-replaceable code/config paths. Never infer arbitrary launchers:
   first adoption requires `--adopt-supervisor` and operator-reconciled environment
   selectors. Only replace/reload that program; preserve other sections and the
-  independent Claude service. Snapshot selectors, Relay preflight, readiness and
+  independent Claude service. A failed fresh installation removes its newly
+  loaded Supervisor group after stopping it and removing the new definition;
+  previously configured programs remain registered during rollback.
+  Snapshot selectors, Relay preflight, readiness and
   retention use that same binding. See the complete
   [Supervisor installation/adoption procedure](../docs/installation_en.md#linux-supervisor-installation-and-adoption).
   Partial process visibility defers retention; it is not permission to delete

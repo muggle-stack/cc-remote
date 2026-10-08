@@ -166,6 +166,31 @@ def stop(profile: dict) -> None:
         require(exc.faultCode in {10, 70}, 'Supervisor could not stop the bound program')
 
 
+def remove(profile: dict) -> None:
+    """Forget only a stopped, no-longer-configured group after fresh rollback."""
+    require(supervisor_program(profile, optional=True) is None,
+            'refusing to remove a configured Supervisor program')
+    server = rpc(profile)
+    name = profile['name']
+    added, changed, removed = server.reloadConfig()[0]
+    require(name not in added and name not in changed,
+            'Supervisor program reappeared during rollback')
+    try:
+        info = server.getProcessInfo(name)
+    except xmlrpc.client.Fault as exc:
+        require(exc.faultCode == 10, 'Supervisor could not inspect the rolled-back program')
+        return  # already absent, including a failure before registration
+    require(name in removed and not info['pid'] and info['statename'] in {'STOPPED', 'EXITED', 'FATAL'},
+            'stop the removed Wrapper before forgetting its Supervisor group')
+    server.removeProcessGroup(name)
+    try:
+        server.getProcessInfo(name)
+    except xmlrpc.client.Fault as exc:
+        require(exc.faultCode == 10, 'Supervisor could not verify rolled-back group removal')
+        return
+    raise ValueError('rolled-back Supervisor group is still loaded')
+
+
 def start(profile: dict) -> None:
     server = rpc(profile)
     added, changed, removed = server.reloadConfig()[0]
@@ -386,7 +411,7 @@ def verify_health(root: Path, profile: dict) -> None:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['preflight', 'state', 'stop', 'start', 'render', 'snapshot', 'probe-state', 'health', 'restore'])
+    parser.add_argument('action', choices=['preflight', 'state', 'stop', 'remove', 'start', 'render', 'snapshot', 'probe-state', 'health', 'restore'])
     parser.add_argument('--profile', type=Path, required=True)
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--destination', type=Path)
@@ -403,6 +428,8 @@ def main(argv=None) -> int:
             verify_health(args.root, profile)
         elif args.action == 'stop':
             stop(profile)
+        elif args.action == 'remove':
+            remove(profile)
         elif args.action == 'start':
             start(profile)
         elif args.action == 'restore':

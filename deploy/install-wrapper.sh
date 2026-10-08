@@ -374,7 +374,12 @@ restart_after_rollback() {
       done
       return 1
     else
-      linux_service stop
+      linux_service stop || return 1
+      if [ "$service_had_file" -eq 0 ] && [ ! -e "$service_file" ]; then
+        # Fresh rollback removed the definition; stop alone leaves a stale
+        # group loaded in Supervisor. Forget only this transaction's group.
+        linux_service remove || return 1
+      fi
     fi
   else
     systemctl daemon-reload >/dev/null 2>&1 || return 1

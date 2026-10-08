@@ -116,6 +116,74 @@ def test_stop_does_not_hide_arbitrary_supervisor_failures(binding, monkeypatch, 
             service.stop(profile)
 
 
+@pytest.fixture
+def fresh_binding(binding):
+    root, profile = binding
+    main = Path(profile['supervisor_config'])
+    main.write_text(main.read_text().split('[program:wrapper]')[0]
+                    + f'[include]\nfiles={root}/fresh.conf\n')
+    return root, {**profile, 'service_file': str(root / 'fresh.conf')}
+
+
+@pytest.mark.parametrize('loaded', [False, True])
+def test_remove_fresh_group_is_scoped_and_idempotent(fresh_binding, monkeypatch, loaded):
+    _, profile = fresh_binding
+    groups = {'wrapper', 'claude-service'} if loaded else {'claude-service'}
+    calls = []
+
+    def info(name):
+        if name not in groups:
+            raise xmlrpc.client.Fault(10, 'BAD_NAME')
+        return {'statename': 'STOPPED', 'pid': 0}
+
+    def remove(name):
+        calls.append(name)
+        groups.remove(name)
+
+    server = SimpleNamespace(
+        reloadConfig=lambda: [[['unrelated-added'], ['claude-service'], list(groups)]],
+        getProcessInfo=info, removeProcessGroup=remove,
+    )
+    monkeypatch.setattr(service, 'rpc', lambda _: server)
+    service.remove(profile)
+    service.remove(profile)
+    assert groups == {'claude-service'}
+    assert calls == (['wrapper'] if loaded else [])
+
+
+@pytest.mark.parametrize('failure', ['configured', 'running', 'reappeared', 'unreported',
+                                     'reload', 'inspect', 'remove', 'still-loaded'])
+def test_remove_fresh_group_refuses_incomplete_rollback(fresh_binding, monkeypatch, failure):
+    _, profile = fresh_binding
+    if failure == 'configured':
+        Path(profile['service_file']).write_text('[program:wrapper]\ncommand=/bin/true\n')
+    calls = []
+
+    def reload_config():
+        if failure == 'reload':
+            raise xmlrpc.client.Fault(92, 'CANT_REREAD')
+        return [[[], ['wrapper'] if failure == 'reappeared' else [],
+                 [] if failure == 'unreported' else ['wrapper']]]
+
+    def info(name):
+        assert name == 'wrapper'
+        if failure == 'inspect':
+            raise xmlrpc.client.Fault(1, 'UNKNOWN_METHOD')
+        return {'statename': 'RUNNING' if failure == 'running' else 'STOPPED',
+                'pid': 123 if failure == 'running' else 0}
+
+    def remove(name):
+        calls.append(name)
+        if failure == 'remove':
+            raise xmlrpc.client.Fault(91, 'STILL_RUNNING')
+
+    monkeypatch.setattr(service, 'rpc', lambda _: SimpleNamespace(
+        reloadConfig=reload_config, getProcessInfo=info, removeProcessGroup=remove))
+    with pytest.raises((ValueError, xmlrpc.client.Fault)):
+        service.remove(profile)
+    assert calls == (['wrapper'] if failure in {'remove', 'still-loaded'} else [])
+
+
 def test_unix_transport_preserves_authentication():
     transport = service.UnixTransport('/run/fixture.sock')
     connection = transport.make_connection('fixture:password@localhost')

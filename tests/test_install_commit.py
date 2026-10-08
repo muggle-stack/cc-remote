@@ -14,6 +14,82 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize('prior', ['absent', 'stopped', 'running'])
+@pytest.mark.parametrize('remove_fails', [False, True])
+def test_supervisor_rollback_restores_registration(tmp_path, prior, remove_fails):
+    root = tmp_path / 'managed'
+    target = root / 'releases/new'
+    previous = root / 'releases/old'
+    (target / '.venv/bin').mkdir(parents=True)
+    (target / '.venv/bin/python').symlink_to(sys.executable)
+    (target / 'deploy').mkdir()
+    shutil.copyfile(ROOT / 'deploy/atomic_symlink.py', target / 'deploy/atomic_symlink.py')
+    current = root / 'current'
+    current.symlink_to(target)
+    service_file = tmp_path / 'wrapper.conf'
+    service_file.write_text('new wrapper definition')
+    backup = tmp_path / 'wrapper.backup'
+    if prior != 'absent':
+        previous.mkdir()
+        backup.write_text('old wrapper definition')
+    loaded = tmp_path / 'loaded-wrapper'
+    loaded.write_text('new group')
+    native = tmp_path / 'independent-service'
+    native.write_text('unchanged native process')
+    calls = tmp_path / 'calls'
+    settings = {
+        'system': 'linux', 'service_manager': 'supervisor', 'appdir': str(root),
+        'target': str(target), 'adopt_root': '', 'current': str(current),
+        'previous': str(previous) if prior != 'absent' else '',
+        'service_file': str(service_file), 'service_label': 'wrapper',
+        'service_had_file': '0' if prior == 'absent' else '1',
+        'service_backup': str(backup) if prior != 'absent' else '', 'service_changed': '1',
+        'service_stopped': '0', 'service_was_running': '1' if prior == 'running' else '0',
+        'stage': '', 'device_backup': '', 'device_changed': '0', 'unit_verify_dir': '',
+        'rollback_snapshot': '', 'snapshot_created': '0', 'switched': '1',
+        'activation_committed': '0', 'retention_generation': '',
+        'test_loaded': str(loaded), 'test_calls': str(calls),
+        'test_remove_fails': '1' if remove_fails else '0',
+    }
+    source = (ROOT / 'deploy/install-wrapper.sh').read_text()
+    helpers = source[source.index('restart_after_rollback() {'):]
+    helpers = helpers.split('if [ -e "$service_file" ]; then', 1)[0]
+    harness = 'set -euo pipefail\n' + '\n'.join(
+        f'{key}={shlex.quote(value)}' for key, value in settings.items()
+    ) + '\n' + helpers + r'''
+linux_service() {
+  echo "$1" >> "$test_calls"
+  case "$1" in
+    restore) cp "$3" "$service_file" ;;
+    stop) return 0 ;;
+    remove)
+      [ ! -e "$service_file" ] || return 1
+      [ "$test_remove_fails" -eq 0 ] || return 1
+      rm "$test_loaded" ;;
+    start|state) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+exit 42
+'''
+    result = subprocess.run(['bash', '-c', harness], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 42, result.stderr
+    operations = calls.read_text().splitlines()
+    if prior == 'absent':
+        assert not current.exists() and not current.is_symlink()
+        assert not service_file.exists()
+        assert loaded.exists() == remove_fails
+        assert operations == ['stop', 'remove']
+        assert ('manual data recovery' in result.stderr) == remove_fails
+    else:
+        assert current.resolve() == previous
+        assert service_file.read_text() == 'old wrapper definition'
+        assert loaded.exists()
+        assert operations == (['restore', 'start', 'state'] if prior == 'running' else ['restore', 'stop'])
+        assert 'code and wrapper data were restored' in result.stderr
+    assert native.read_text() == 'unchanged native process'
+
+
 @pytest.mark.parametrize("previous_install", [False, True])
 @pytest.mark.parametrize("phase", ["interrupt-readiness", "success", "fail-output", "retention-failure"])
 def test_wrapper_registration_matches_the_activation_commit(tmp_path, previous_install, phase):
