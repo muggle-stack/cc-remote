@@ -608,6 +608,161 @@ def test_unrelated_service_alias_allows_retirement(fleet, tmp_path, monkeypatch)
     assert not old.exists() and alias.resolve(strict=True) == worker
 
 
+@pytest.fixture
+def executable_units(tmp_path, monkeypatch):
+    units = tmp_path / 'units'
+    units.mkdir()
+    paths = [tmp_path / 'local-bin', tmp_path / 'bin']
+    for directory in paths:
+        directory.mkdir()
+    calls = []
+
+    def discover(argv):
+        calls.append(argv)
+        assert argv == ['env', '-i', 'PATH=/usr/sbin:/usr/bin:/sbin:/bin',
+                        'systemd-path', 'search-binaries-default']
+        return ':'.join(map(str, paths)) + '\n'
+
+    monkeypatch.setattr(retention, 'command', discover)
+    monkeypatch.setattr(retention, 'service_roots', lambda row: [units])
+    monkeypatch.setattr(retention, 'service_dependencies', SERVICE_DEPENDENCIES)
+    return units, paths, calls
+
+
+@pytest.mark.parametrize('directive,prefix', [
+    ('ExecStart', ''), ('ExecStartPre', '-'), ('ExecStartPost', '+'),
+    ('ExecCondition', ':'), ('ExecReload', '@'), ('ExecStop', '!'), ('ExecStopPost', '-@'),
+])
+def test_systemd_bare_executable_allows_retirement(
+    fleet, executable_units, tmp_path, monkeypatch, directive, prefix,
+):
+    root, _, activate = fleet
+    old, _ = activate('first')
+    activate('second')
+    activate('third')
+    units, paths, calls = executable_units
+    binary = paths[-1] / 'systemd-tmpfiles'
+    binary.write_text('must never execute the discovered service')
+    binary.chmod(0o755)
+    ambient = tmp_path / 'updater-bin'
+    ambient.mkdir()
+    (ambient / binary.name).symlink_to(old / 'payload')
+    monkeypatch.setenv('PATH', str(ambient))
+    (units / 'tmpfiles.service').write_text(
+        f'[Service]\n{directive} = {prefix}{binary.name} --create --remove --boot\n')
+    assert prune(root)['status'] == 'complete'
+    assert not old.exists() and binary.exists()
+    assert len(calls) > 1, 'each destructive boundary rediscovers the native search path'
+
+
+@pytest.mark.parametrize('lookup', ['default', 'drop-in', 'environment', 'environment-file'])
+def test_systemd_bare_executable_alias_keeps_release(fleet, executable_units, tmp_path, lookup):
+    root, _, activate = fleet
+    old, _ = activate('first')
+    activate('second')
+    activate('third')
+    (old / 'payload').chmod(0o755)
+    units, paths, _ = executable_units
+    custom = tmp_path / 'custom-bin'
+    custom.mkdir()
+    directory = paths[0] if lookup == 'default' else custom
+    (directory / 'worker').symlink_to(old / 'payload')
+    # A second match must not hide an alias used under a different service
+    # user, search-path override, or effective drop-in precedence.
+    (paths[-1] / 'worker').write_text('unrelated binary')
+    (paths[-1] / 'worker').chmod(0o755)
+    config = '[Service]\nExecStart=-@worker worker --serve\n'
+    if lookup == 'drop-in':
+        drop_in = units / 'worker.service.d'
+        drop_in.mkdir()
+        (drop_in / 'path.conf').write_text(f'[Service]\nExecSearchPath={custom}:{paths[-1]}\n')
+    elif lookup == 'environment':
+        config += f'Environment="PATH={custom}:{paths[-1]}"\n'
+    elif lookup == 'environment-file':
+        env = tmp_path / 'worker.env'
+        env.write_text(f'PATH="{custom}:{paths[-1]}"\n')
+        config += f'EnvironmentFile = {env}\n'
+    (units / 'worker.service').write_text(config)
+    assert prune(root)['status'] == 'deferred'
+    assert old.is_dir() and (directory / 'worker').resolve(strict=True).exists()
+
+
+@pytest.mark.parametrize('change', ['alias', 'search-path'])
+def test_bare_executable_rediscovery_restores_quarantined_artifacts(
+    fleet, executable_units, tmp_path, monkeypatch, change,
+):
+    root, _, activate = fleet
+    old, _ = activate('first')
+    activate('second')
+    activate('third')
+    units, paths, _ = executable_units
+    worker = paths[-1] / 'worker'
+    worker.write_text('unrelated binary')
+    worker.chmod(0o755)
+    (units / 'worker.service').write_text('[Service]\nExecStart=worker\n')
+    checks = 0
+
+    def acceptance(plan):
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            directory = paths[0]
+            if change == 'search-path':
+                directory = tmp_path / 'new-systemd-bin'
+                directory.mkdir()
+                paths.insert(0, directory)
+            (directory / 'worker').symlink_to(old / 'payload')
+
+    monkeypatch.setattr(cleanup, 'run_checks', acceptance)
+    with pytest.raises((cleanup.CleanupError, OSError)):
+        prune(root)
+    plan = json.loads((root / retention.INVENTORY).read_text())
+    assert checks == 2 and all(Path(p).exists() for p in plan['candidates'])
+    assert not list(root.rglob('.cc-remote-retired-*'))
+
+
+@pytest.mark.parametrize('failure', [
+    'discovery', 'empty-path', 'relative-path', 'missing', 'non-executable', 'broken',
+    'custom-root', 'inherited-path', 'relative-command', 'shell-prefix', 'supervisor',
+])
+def test_unresolved_bare_executable_never_deletes(fleet, executable_units, monkeypatch, failure):
+    root, _, activate = fleet
+    old, _ = activate('first')
+    activate('second')
+    activate('third')
+    units, paths, _ = executable_units
+    worker = paths[0] / 'worker'
+    worker.write_text('binary')
+    worker.chmod(0o755)
+    config = '[Service]\nExecStart=worker\n'
+    if failure == 'discovery':
+        def unavailable(argv):
+            raise OSError('systemd-path unavailable')
+        monkeypatch.setattr(retention, 'command', unavailable)
+    elif failure in {'empty-path', 'relative-path'}:
+        monkeypatch.setattr(retention, 'command', lambda argv: '' if failure == 'empty-path' else 'relative/bin')
+    elif failure in {'missing', 'broken'}:
+        worker.unlink()
+        if failure == 'broken':
+            worker.symlink_to(old / 'missing')
+    elif failure == 'non-executable':
+        worker.chmod(0o644)
+    elif failure == 'custom-root':
+        config += f'RootDirectory={paths[0]}\n'
+    elif failure == 'inherited-path':
+        config += 'PassEnvironment=PATH\n'
+    elif failure == 'relative-command':
+        config = '[Service]\nExecStart=bin/worker\n'
+    elif failure == 'shell-prefix':
+        config = '[Service]\nExecStart=|worker\n'
+    elif failure == 'supervisor':
+        config = '[program:worker]\ncommand=worker\n'
+    (units / 'worker.service').write_text(config)
+    with pytest.raises((ValueError, OSError)):
+        prune(root)
+    assert old.is_dir()
+
+
 def test_dormant_alias_preserves_transitive_release_dependencies(fleet, tmp_path, monkeypatch):
     root, _, activate = fleet
     runtime, _ = activate('first')

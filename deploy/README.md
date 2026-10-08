@@ -157,9 +157,15 @@ defer cleanup instead of treating an optional file as absent.
 Literal paths in service definitions, launchd plists and external environment
 files are resolved component by component, including multi-hop aliases and
 intermediate links owned by an old release. Those releases retain their runtime
-dependency closure. Broken/cyclic links, unreadable paths, bare executable names
-or ambiguous path expressions defer cleanup; discovery never executes a service
-or recursively crawls arbitrary external directories.
+dependency closure. Bare systemd `Exec*` filenames are resolved using the installed
+systemd's `systemd-path search-binaries-default`, never the updater's shell PATH.
+Discovery also retains a superset of literal `ExecSearchPath` and service `PATH`
+overrides across definitions, drop-ins and environment files, following every
+matching executable alias. Missing discovery tools, unresolved executables,
+custom filesystem namespaces/inherited PATH, broken/cyclic links, unreadable
+paths or ambiguous expressions defer cleanup. Supervisor commands still require
+absolute paths. Discovery never executes a service or recursively crawls
+arbitrary external directories.
 The generated inventory also stores the service discovery context. Cleanup
 rediscovers load paths, definitions, environment files and aliases before each
 quarantine rename and permanent deletion, after any artifact tree walk. A newly

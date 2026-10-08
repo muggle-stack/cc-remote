@@ -368,6 +368,26 @@ def service_literal_paths(value: str, *, atomic: bool = False) -> set[Path]:
     return paths
 
 
+def executable_search_paths(value: str) -> list[Path]:
+    """Validate a literal systemd search path without using the caller's PATH."""
+    require(len(value) <= 65536, 'service executable search path exceeds bound')
+    names = value.strip().split(':')
+    require(0 < len(names) <= 256, 'service executable search path is incomplete')
+    paths = []
+    for name in names:
+        paths.extend(service_literal_paths(name, atomic=True))
+    return paths
+
+
+def systemd_executable_paths() -> list[Path]:
+    # systemd.service(5): bare Exec* filenames use the installed systemd's
+    # compile-time search path, which is not necessarily the updater's PATH.
+    return executable_search_paths(command([
+        'env', '-i', 'PATH=/usr/sbin:/usr/bin:/sbin:/bin',
+        'systemd-path', 'search-binaries-default',
+    ]))
+
+
 def service_path_dependencies(path: Path, candidates: list[Path]) -> set[str]:
     """Follow literal path components without losing intermediate symlink owners.
 
@@ -434,6 +454,15 @@ def service_dependencies(row: dict, candidates: list[Path]) -> list[str]:
         files.update(Path(profile[key]) for key in ('env_file', 'device_file') if Path(profile[key]).exists())
     total = 0
     paths_seen = set()
+    executable_names = set()
+    search_paths = set()
+    custom_namespace = False
+
+    def search_path(value: str) -> None:
+        search_paths.update(executable_search_paths(value))
+        require(len(search_paths) <= 256, 'service executable search path exceeds bound')
+        for directory in search_paths:
+            protect(directory)
 
     def protect(path: Path) -> None:
         if path not in paths_seen:
@@ -458,7 +487,7 @@ def service_dependencies(row: dict, candidates: list[Path]) -> list[str]:
             })
 
     def inspect(path: Path) -> bytes:
-        nonlocal total
+        nonlocal total, custom_namespace
         protect(path)
         target = path.resolve(strict=True)
         if str(target) == "/dev/null":  # masked systemd unit
@@ -475,12 +504,41 @@ def service_dependencies(row: dict, candidates: list[Path]) -> list[str]:
         else:
             for line in service_lines(raw):
                 key, separator, value = line.partition(b'=')
+                key = key.strip()
+                text = value.strip().decode('utf-8')
                 if key.strip() == b'EnvironmentFile':
                     continue  # exact single-filename handling below
-                if (key.strip().startswith(b'Exec') or key.strip() == b'command') and value.strip():
-                    words = shlex.split(value.decode('utf-8'))
-                    require(bool(words) and words[0].lstrip('-@:+!').startswith('/'),
-                            'nonliteral service executable requires explicit retention inventory')
+                if key in {b'RootDirectory', b'RootImage', b'BindPaths', b'BindReadOnlyPaths',
+                           b'TemporaryFileSystem'} and text:
+                    custom_namespace = True
+                if key == b'PassEnvironment' and 'PATH' in shlex.split(text):
+                    custom_namespace = True
+                if key == b'ExecSearchPath':
+                    if text:  # keep a superset across resets and drop-ins
+                        search_path(text)
+                    continue
+                if key == b'PATH':  # external EnvironmentFile
+                    words = shlex.split(text)
+                    require(len(words) == 1, 'ambiguous service PATH requires explicit retention inventory')
+                    search_path(words[0])
+                    continue
+                if key == b'Environment':
+                    for assignment in shlex.split(text):
+                        if assignment.startswith('PATH='):
+                            search_path(assignment.removeprefix('PATH='))
+                        else:
+                            inspect_value(assignment)
+                    continue
+                if key in {b'ExecCondition', b'ExecStartPre', b'ExecStart', b'ExecStartPost',
+                           b'ExecReload', b'ExecStop', b'ExecStopPost', b'command'} and text:
+                    words = shlex.split(text)
+                    require(bool(words), 'service executable is missing')
+                    executable = words[0].lstrip('-@:+!')
+                    if not executable.startswith('/'):
+                        require(key != b'command' and re.fullmatch(r'[A-Za-z0-9_+.-]+', executable)
+                                and executable not in {'.', '..'} and '\\' not in text,
+                                'nonliteral service executable requires explicit retention inventory')
+                        executable_names.add(executable)
                 inspect_value((value if separator else line).decode('utf-8'))
         for candidate in candidates:
             if str(candidate).encode() in raw or target.is_relative_to(candidate):
@@ -493,6 +551,26 @@ def service_dependencies(row: dict, candidates: list[Path]) -> list[str]:
             if optional and not env.exists() and not env.is_symlink():
                 continue
             inspect(env)
+    if executable_names:
+        require(not custom_namespace,
+                'custom service executable namespace requires explicit retention inventory')
+        # Include all literal overrides from definitions, drop-ins and external
+        # environment files. Keeping a superset avoids guessing unit precedence
+        # or access permissions for dormant service users. Recomputed on every
+        # cleanup revalidation, including aliases in an earlier search directory.
+        search_paths.update(systemd_executable_paths())
+        require(len(search_paths) <= 256, 'service executable search path exceeds bound')
+        for name in executable_names:
+            resolved = False
+            for directory in search_paths:
+                executable = directory / name
+                protect(executable)
+                try:
+                    info = executable.stat()
+                except FileNotFoundError:
+                    continue
+                resolved |= stat.S_ISREG(info.st_mode) and bool(info.st_mode & 0o111)
+            require(resolved, 'unresolved service executable requires explicit retention inventory')
     return sorted(found)
 
 
