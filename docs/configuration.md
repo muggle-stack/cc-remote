@@ -133,6 +133,7 @@ hook 和 Wrapper 应使用相同的 `CC_REMOTE_STATE_DIR`；日志默认为
 | `PUBLIC_ORIGIN` | 空 | 浏览器允许连接 WS 的精确来源，如 `https://remote.example.com`；**必须设**，非 loopback 必须 HTTPS（除非开了 `ALLOW_INSECURE_HTTP`）。 |
 | `ALLOW_PRIVATE_ORIGINS` | `0` | 设为 `1` 后，在保留 `PUBLIC_ORIGIN` 的同时，允许浏览器通过 `RELAY_PORT` 上的私网/loopback 字面 IP 直连：`127/8`、`10/8`、`172.16/12`、`192.168/16`、Tailscale `100.64/10`、IPv6 loopback/ULA。Origin 的协议/主机/端口还必须与实际请求目标完全一致；主机名、公网 IP 和其他端口仍拒绝。内网 HTTP 不加密，且通常不能安装 PWA。 |
 | `ALLOW_INSECURE_HTTP` | `0` | 逃生开关：设为 `1` 允许 `PUBLIC_ORIGIN` / `RELAY_URL` 在非 loopback 时仍用明文 `http://`/`ws://`（例如直接暴露一个没有 TLS 终端的公网 IP）。默认关闭；开启后登录口令、会话 cookie 和全部流量都走明文，链路上任何人都能窃取或劫持会话，务必优先使用 TLS。 |
+| `FORWARDED_ALLOW_IPS` | 空 | 额外信任哪些对端可以携带 `X-Forwarded-Proto` / `X-Forwarded-For`，逗号分隔的 IP 或 CIDR，会追加在内置的 `127.0.0.1,::1` 之后。仅用于反向代理与 relay 不在同一个 loopback 的情形（Tailscale、LAN、Docker 网桥网关）：此时 uvicorn 默认忽略代理头，relay 会把请求算成 `http:80`，而浏览器的 Origin 是 `https:443`，于是页面和 `/api/*` 正常、只有 WebSocket 全部 403。填写的地址必须**只属于你自己的反向代理**：被信任的对端可以自称任意客户端 IP、声明任意协议，所以 relay 自身不能被这些地址之外的人直接访问，也不要填 `*`、`0.0.0.0/0` 或 `::/0`（会在启动时拒绝）。非法 IP/CIDR 同样在启动时拒绝，而不是静默不匹配。 |
 | `WRAPPER_TOKEN` | 占位值 | 单机器/兼容模式下的 wrapper Bearer token；未设置 `WRAPPER_TOKENS_JSON` 时必须配置。 |
 | `WRAPPER_TOKENS_JSON` | 空 | 可选机器绑定 token：`{"laptop":"…","server":"…"}`；设置后替代 relay 的通配 `WRAPPER_TOKEN`。 |
 | `WEB_STATIC_DIR` | 空 | 指向 `web/dist` 则同源托管网页；留空则只做 API/WS。 |
