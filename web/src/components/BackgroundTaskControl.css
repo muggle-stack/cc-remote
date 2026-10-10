@@ -16,6 +16,7 @@
   animation:background-task-breathe 2s ease-in-out infinite;
 }
 @keyframes background-task-breathe { 50% { opacity:.45; } }
+.background-task-indicator.attention { animation:none; background:var(--danger); }
 .background-task-popover {
   position:fixed; z-index:78; display:flex; flex-direction:column; box-sizing:border-box;
   border:1px solid var(--border-strong); border-radius:20px; color:var(--text);

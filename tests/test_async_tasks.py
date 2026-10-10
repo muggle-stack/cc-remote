@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -37,7 +38,8 @@ def start(store, *, sid=None, code="print('done')", request_id=None, **kwargs):
 
 
 @asynccontextmanager
-async def daemon(store, *, delivery="ok", reject_exec=False, thread_state="idle", thread_path=None):
+async def daemon(store, *, delivery="ok", reject_exec=False, thread_state="idle", thread_path=None,
+                 turn_status="completed"):
     root = store.home / "app-server-control"
     root.mkdir(exist_ok=True)
     socket = root / "app-server-control.sock"
@@ -47,6 +49,7 @@ async def daemon(store, *, delivery="ok", reject_exec=False, thread_state="idle"
         if actual != socket:
             socket.symlink_to(actual)
         calls, receipts, commands = [], [], []
+        outcomes = SimpleNamespace(status=turn_status, pages=None, reject=False, reads=[])
 
         async def handle(ws):
             jobs = set()
@@ -88,6 +91,14 @@ async def daemon(store, *, delivery="ok", reject_exec=False, thread_state="idle"
                                              "path": thread_path}}
                     elif method == "thread/resume":
                         result = {"thread": {"id": p["threadId"]}}
+                    elif method == "thread/turns/list":
+                        outcomes.reads.append(p)
+                        if outcomes.reject:
+                            await ws.send(json.dumps({"id": msg["id"], "error": {"code": -32601}}))
+                            continue
+                        result = (outcomes.pages[p.get("cursor")] if outcomes.pages is not None else
+                                  {"data": [{"id": "native-turn", "status": outcomes.status}],
+                                   "nextCursor": None})
                     elif method == "command/exec":
                         job = asyncio.create_task(run_command(msg))
                         jobs.add(job)
@@ -132,7 +143,8 @@ async def daemon(store, *, delivery="ok", reject_exec=False, thread_state="idle"
             actual.chmod(0o600)
             tasks.task_rpc.connect = connect
             try:
-                yield SimpleNamespace(calls=calls, receipts=receipts, commands=commands, connect=connect)
+                yield SimpleNamespace(calls=calls, receipts=receipts, commands=commands, connect=connect,
+                                      outcomes=outcomes)
             finally:
                 tasks.task_rpc.connect = original
                 socket.unlink(missing_ok=True)
@@ -309,6 +321,114 @@ def test_completion_ack_loss_is_not_replayed(store, mode, expected):
             await tasks.deliver(store, store.get(key))
             assert len(native.receipts) == 1
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("outcome,expected", [
+    ("completed", "delivered"), ("failed", "failed"), ("interrupted", "failed"),
+])
+def test_callback_acceptance_is_not_success_and_outcome_survives_recovery(store, outcome, expected):
+    sid, key = start(store)
+    store.update(key, state="completed", output=b"result survives provider rejection")
+
+    async def run():
+        async with daemon(store, turn_status="inProgress") as native:
+            await tasks.deliver(store, store.get(key))
+            accepted = public_task(store.get(key))
+            assert accepted["notification"] == "accepted"
+            assert accepted["notification_turn_id"] == "native-turn"
+            with pytest.raises(ValueError, match="cannot be recalled"):
+                store.cancel(key, sid)
+            await tasks.check_delivery(store, store.get(key))
+            assert store.get(key)["delivery"] == "accepted"
+            assert store.get(key)["next_attempt"] > tasks.time.time()
+            # A new worker must read the accepted turn, never resend the result.
+            reopened = TaskStore(store.home)
+            reopened.recover()
+            native.outcomes.status = outcome
+            reopened.update(key, next_attempt=0)
+            await asyncio.wait_for(tasks.run_worker(reopened), 5)
+            receipt = public_task(reopened.get(key), output=True)
+            assert receipt["state"] == "completed"
+            assert receipt["notification"] == expected
+            assert receipt["output"] == "result survives provider rejection"
+            assert bool(receipt["notification_error"]) == (expected == "failed")
+            assert len(native.receipts) == 1 and not native.commands
+            assert native.calls.count("thread/resume") == 0
+            assert all(p["threadId"] == sid and p["itemsView"] == "notLoaded"
+                       for p in native.outcomes.reads)
+    asyncio.run(run())
+
+
+def test_callback_checks_exact_turn_across_pages_not_latest_success(store):
+    _, key = start(store)
+    store.update(key, state="completed")
+
+    async def run():
+        async with daemon(store) as native:
+            await tasks.deliver(store, store.get(key))
+            native.outcomes.pages = {
+                None: {"data": [{"id": "newer-unrelated", "status": "completed"}], "nextCursor": "older"},
+                "older": {"data": [{"id": "native-turn", "status": "failed"}], "nextCursor": None},
+            }
+            await tasks.process_task(store, key)
+            assert store.get(key)["delivery"] == "failed"
+            assert [p["cursor"] for p in native.outcomes.reads] == [None, "older"]
+            assert len(native.receipts) == 1
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("missing", ["history", "rpc", "socket", "malformed"])
+def test_unconfirmed_callback_is_retained_with_bounded_tracking(store, missing):
+    _, key = start(store)
+    store.update(key, state="completed", output=b"keep me")
+
+    async def run():
+        async with daemon(store) as native:
+            await tasks.deliver(store, store.get(key))
+            if missing == "socket":
+                return
+            if missing == "rpc":
+                native.outcomes.reject = True
+            elif missing == "malformed":
+                native.outcomes.status = {"unexpected": "completed"}
+            else:
+                # A repeating cursor must be bounded, not an infinite read loop.
+                native.outcomes.pages = {
+                    None: {"data": [{"id": "other", "status": "completed"}], "nextCursor": "same"},
+                    "same": {"data": [], "nextCursor": "same"},
+                }
+            await tasks.process_task(store, key)
+            assert store.get(key)["delivery"] == "accepted"
+            assert len(native.outcomes.reads) <= 2
+            assert len(native.receipts) == 1
+        # Recover with no server at all: no successful outcome may be invented.
+
+    asyncio.run(run())
+    store.recover()
+    assert store.has_pending()
+    asyncio.run(tasks.process_task(store, key))
+    assert store.get(key)["delivery"] == "accepted"
+    store.update(key, delivery_accepted_at=tasks.time.time() - tasks.DELIVERY_TRACK_SECONDS - 1)
+    asyncio.run(tasks.process_task(store, key))
+    assert store.get(key)["delivery"] == "unknown"
+    assert store.get(key)["output"] == b"keep me"
+    assert not store.has_pending()
+
+
+def test_callback_tracking_migrates_old_store_concurrently_without_reinterpreting_receipts(store):
+    from concurrent.futures import ThreadPoolExecutor
+    sid, key = start(store)
+    store.update(key, state="completed", delivery="delivered", output=b"legacy receipt")
+    with sqlite3.connect(store.path) as db:
+        db.execute("ALTER TABLE tasks DROP COLUMN delivery_turn_id")
+        db.execute("ALTER TABLE tasks DROP COLUMN delivery_accepted_at")
+    assert store.activity_snapshot() == [], "read-only wrapper must support the old schema"
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        rows = list(pool.map(lambda _: TaskStore(store.home).get(key, sid), range(4)))
+    for row in rows:
+        assert row["delivery"] == "delivered" and row["delivery_turn_id"] is None
+        assert row["delivery_accepted_at"] is None and row["output"] == b"legacy receipt"
+    assert not store.has_pending()
 
 
 def test_pre_submission_disconnect_retains_pending_without_executing(store):

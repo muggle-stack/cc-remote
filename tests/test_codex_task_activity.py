@@ -53,6 +53,42 @@ def test_unreadable_task_state_is_not_an_empty_snapshot(tmp_path):
     assert store.path.read_bytes() == b"corrupt"
 
 
+@pytest.mark.parametrize("delivery,expected_status,summary", [
+    ("accepted", "pending", "等待处理完成"),
+    ("failed", "failed", "未能处理通知"),
+    ("rejected", "failed", "未能处理通知"),
+    ("unknown", "failed", "处理结果未确认"),
+])
+def test_callback_outcomes_remain_visible_without_exposing_output(tmp_path, delivery, expected_status, summary):
+    sid = str(uuid4())
+    store, key = task(tmp_path, sid)
+    store.update(key, state="completed", delivery=delivery,
+                 output=b"PRIVATE_RESULT", delivery_error="PRIVATE_PROVIDER_ERROR")
+    item = read_task_activity(tmp_path)[sid][0]
+    assert item.status == expected_status and summary in item.summary
+    assert "PRIVATE" not in item.model_dump_json()
+    assert store.get(key)["state"] == "completed", "callback failure is not command failure"
+
+
+@pytest.mark.asyncio
+async def test_retained_warnings_do_not_hide_active_tasks_at_snapshot_limit(tmp_path, monkeypatch):
+    from cc_remote.protocol import MAX_BACKGROUND_PROCESS_ITEMS
+    sid = str(uuid4())
+    for _ in range(MAX_BACKGROUND_PROCESS_ITEMS):
+        store, key = task(tmp_path, sid)
+        store.update(key, state="completed", delivery="failed")
+    _, active = task(tmp_path, sid, "New active task")
+    machine, transport = _mk_machine()
+    ctx = _mk_ctx(sid, sid)
+    ctx.engine = "codex"
+    machine.sessions[sid] = ctx
+    monkeypatch.setattr(machine, "_codex_profile_for_ctx", lambda _: SimpleNamespace(home=tmp_path))
+    await machine._refresh_codex_background_processes()
+    frames = [frame for frame in transport.sent if frame.type == "background_process_sync"]
+    assert len(frames) == 1 and len(frames[0].items) == MAX_BACKGROUND_PROCESS_ITEMS
+    assert any(item.item_id == f"async-task:{active}" for item in frames[0].items)
+
+
 def test_task_activity_rejects_symlink_state(tmp_path):
     home = tmp_path / "home"
     home.mkdir()

@@ -70,6 +70,33 @@ class NativeTasks:
             raise Rejected("Original thread identity was not confirmed")
         return thread
 
+    async def turn_status(self, sid, turn_id):
+        """Read the exact callback turn without loading items or resuming it.
+
+        A later successful turn is not evidence for this receipt. Bound both
+        pages and the caller's total read time; missing history stays unknown.
+        """
+        await self.thread(sid)
+        cursor = None
+        seen = set()
+        for _ in range(8):
+            result = await self.rpc("thread/turns/list", {
+                "threadId": sid, "cursor": cursor, "limit": 50,
+                "sortDirection": "desc", "itemsView": "notLoaded",
+            })
+            rows = result.get("data")
+            if not isinstance(rows, list):
+                raise ValueError("Invalid native turn page")
+            for turn in rows:
+                if isinstance(turn, dict) and turn.get("id") == turn_id:
+                    status = turn.get("status")
+                    return status if isinstance(status, str) else None
+            cursor = result.get("nextCursor")
+            if not isinstance(cursor, str) or not cursor or cursor in seen:
+                break
+            seen.add(cursor)
+        return None
+
     async def close(self):
         self.reader.cancel()
         with suppress(asyncio.CancelledError, Exception):

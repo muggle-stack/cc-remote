@@ -24,6 +24,7 @@ from cc_remote.wrapper.child_env import sanitized_child_env
 
 POLL_SECONDS = 0.25
 RETRY_SECONDS = 30
+DELIVERY_TRACK_SECONDS = 86400
 
 
 class CancelledBeforeExecution(Exception):
@@ -157,6 +158,7 @@ async def deliver(store, task):
     receipt = public_task(task, output=True)
     receipt.pop("notification")
     receipt.pop("notification_error")
+    receipt.pop("notification_turn_id")
     try:
         async with task_rpc.connect(store.home) as native:
             thread = await native.thread(task["sid"])
@@ -178,9 +180,15 @@ async def deliver(store, task):
                 "toolOutput": {"namespace": "cc_remote_tasks", "name": "task_result",
                                "output": json.dumps(receipt, ensure_ascii=False)},
             }, before_send=lambda: store.begin_delivery(task_id))
-            if not isinstance(result, dict) or not isinstance(result.get("turn", {}).get("id"), str):
+            turn = result.get("turn") if isinstance(result, dict) else None
+            if (not isinstance(turn, dict) or not isinstance(turn.get("id"), str)
+                    or not turn["id"] or len(turn["id"]) > 512):
                 raise ValueError("Missing native acceptance receipt")
-            store.update(task_id, delivery="delivered", delivery_error=None)
+            # Acceptance can precede a provider error. Persist the exact turn
+            # before reading its outcome; reconnects must never resend it.
+            store.update(task_id, delivery="accepted", delivery_error=None,
+                         delivery_turn_id=turn["id"], delivery_accepted_at=time.time(),
+                         next_attempt=0)
     except task_rpc.Rejected:
         store.update(task_id, delivery="rejected", delivery_error="Official daemon rejected completion delivery")
     except Exception:
@@ -193,11 +201,39 @@ async def deliver(store, task):
                          delivery_error="Shared daemon unavailable; completion retained for retry")
 
 
+async def check_delivery(store, task):
+    if task["delivery"] != "accepted":
+        return
+    task_id = task["id"]
+    status = None
+    try:
+        # Do not hold a command slot for the model's full turn. A short read is
+        # retried later, independently of execution and without engine mutation.
+        async with asyncio.timeout(5):
+            async with task_rpc.connect(store.home) as native:
+                status = await native.turn_status(task["sid"], task["delivery_turn_id"])
+    except Exception:
+        pass
+    if status == "completed":
+        store.update(task_id, delivery="delivered", delivery_error=None)
+    elif status in {"failed", "interrupted"}:
+        store.update(task_id, delivery="failed", delivery_error=(
+            f"Codex callback turn {status}; result retained in task_result; not resent"))
+    elif time.time() >= (task["delivery_accepted_at"] or 0) + DELIVERY_TRACK_SECONDS:
+        store.update(task_id, delivery="unknown", delivery_error=(
+            "Callback outcome could not be confirmed within 24 hours; result retained; not resent"))
+    else:
+        store.update(task_id, next_attempt=time.time() + RETRY_SECONDS,
+                     delivery_error=None if status == "inProgress" else
+                     "Callback accepted; waiting to confirm its outcome; not resent")
+
+
 async def process_task(store, task_id):
     task = store.get(task_id)
     if task["state"] == "queued":
         await execute(store, task)
     await deliver(store, store.get(task_id))
+    await check_delivery(store, store.get(task_id))
 
 
 async def run_worker(store):
@@ -238,7 +274,8 @@ def make_server(store):
     descriptions = {
         "task_start": "Start a generic command in the background using the official account daemon's configured "
                       "permissions (not the current thread's temporary overrides). Return immediately. Completion "
-                      "automatically returns to this Codex thread as tool output. Reuse request_id only when "
+                      "is sent to this Codex thread as tool output; task_status separately tracks callback "
+                      "acceptance and its turn outcome. On callback failure, inspect task_result. Reuse request_id only when "
                       "retrying the SAME submission. argv is executed directly; invoke a shell explicitly if needed. "
                       "Exit code zero reports process completion, not semantic task success.",
         "task_status": "Read this thread's task state and notification status. Omit task_id to list recent tasks.",

@@ -26,6 +26,8 @@ function subscribeMobile(listener: () => void) {
 const isMobile = () => window.matchMedia(MOBILE_QUERY).matches;
 
 function taskStatus(process: ProcessBlock, now: number): string {
+  if (process.status === "failed" || process.status === "interrupted"
+      || process.status === "declined") return "需要查看";
   const status = process.status === "pending" ? "等待中"
     : process.status === "unknown" ? "状态待确认" : "运行中";
   if (!process.startedTs) return status;
@@ -120,6 +122,9 @@ function ActiveBackgroundTasks(props: Props) {
   const mobile = useSyncExternalStore(subscribeMobile, isMobile, () => false);
   const anchor = useRef<HTMLButtonElement>(null);
   const id = useId();
+  const needsAttention = props.processes.filter(process =>
+    process.status === "failed" || process.status === "interrupted"
+      || process.status === "declined").length;
   const showPreview = preview && !open && !mobile;
   const close = useCallback((restoreFocus = false) => {
     setOpen(false);
@@ -139,14 +144,16 @@ function ActiveBackgroundTasks(props: Props) {
   };
   return <>
     <button ref={anchor} type="button" className="background-task-trigger"
-      aria-label={`后台任务，${props.processes.length} 项进行中`}
+      aria-label={needsAttention
+        ? `后台任务，${props.processes.length} 项，${needsAttention} 项需要查看`
+        : `后台任务，${props.processes.length} 项进行中`}
       aria-expanded={open} aria-haspopup="dialog" aria-controls={open ? id : undefined}
       aria-describedby={showPreview ? `${id}-preview` : undefined}
       onPointerEnter={event => { if (event.pointerType === "mouse") setPreview(true); }}
       onPointerLeave={() => setPreview(false)}
       onBlur={() => setPreview(false)}
       onClick={() => { setPreview(false); setOpen(value => !value); }}>
-      <span className="background-task-indicator" aria-hidden="true" />
+      <span className={`background-task-indicator${needsAttention ? " attention" : ""}`} aria-hidden="true" />
       <span>后台任务 · {props.processes.length}</span>
       <Icon name="chev" size={13} />
     </button>

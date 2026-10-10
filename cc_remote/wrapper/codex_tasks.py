@@ -28,11 +28,19 @@ def read_task_activity(home: Path) -> dict[str, list[BackgroundProcessItem]]:
         if state not in TERMINAL | {"queued", "running"}:
             raise ValueError("Unknown async task state")
         terminal = state in TERMINAL
+        delivery = row["delivery"]
+        status = "running" if state == "running" else "pending"
+        summary = (f"{TASK_LABELS[state]}，等待通知 Codex" if terminal
+                   else "等待执行" if state == "queued" else "后台执行中")
+        if terminal and delivery == "accepted":
+            summary = "Codex 已接收结果，等待处理完成"
+        elif terminal and delivery in {"failed", "rejected", "unknown"}:
+            status = "failed"
+            summary = ("Codex 处理结果未确认，任务结果已保留" if delivery == "unknown"
+                       else "Codex 未能处理通知，任务结果已保留")
         result.setdefault(sid, []).append(BackgroundProcessItem(
             item_id=f"async-task:{key}", kind="task",
-            title=row["title"], status="running" if state == "running" else "pending",
-            summary=(f"{TASK_LABELS[state]}，等待通知 Codex" if terminal
-                     else "等待执行" if state == "queued" else "后台执行中"),
+            title=row["title"], status=status, summary=summary,
             started_at=row["created"], updated_at=row["updated"],
         ))
     return result

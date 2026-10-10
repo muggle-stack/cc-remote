@@ -85,9 +85,20 @@ class TaskStore:
                 truncated INTEGER NOT NULL DEFAULT 0, exit_code INTEGER,
                 cancel_requested INTEGER NOT NULL DEFAULT 0,
                 delivery TEXT NOT NULL DEFAULT 'pending', error TEXT, delivery_error TEXT,
+                delivery_turn_id TEXT, delivery_accepted_at REAL,
                 next_attempt REAL NOT NULL DEFAULT 0,
                 created REAL NOT NULL, updated REAL NOT NULL,
                 UNIQUE(sid, request_id))""")
+            # Additive migration preserves receipts made by older workers. Take
+            # the write lock before rechecking: MCP and worker can open together.
+            columns = {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
+            if not {"delivery_turn_id", "delivery_accepted_at"} <= columns:
+                db.execute("BEGIN IMMEDIATE")
+                columns = {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
+                for name, kind in (("delivery_turn_id", "TEXT"), ("delivery_accepted_at", "REAL")):
+                    if name not in columns:
+                        db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {kind}")
+                db.commit()
             yield db
             db.commit()
         finally:
@@ -177,14 +188,22 @@ class TaskStore:
                 "SELECT id,sid,state,delivery,created,updated,"
                 "json_extract(spec,'$.title') AS title FROM tasks "
                 "WHERE cancel_requested=0 AND (state IN ('queued','running') "
-                "OR delivery IN ('pending','sending')) ORDER BY created LIMIT ?",
+                "OR delivery IN ('pending','sending','accepted','failed','unknown','rejected')) "
+                # The wire snapshot is smaller than the receipt store: retained
+                # warnings must not crowd new active tasks out of that snapshot.
+                "ORDER BY CASE WHEN state IN ('queued','running') "
+                "OR delivery IN ('pending','sending','accepted') THEN 0 ELSE 1 END, "
+                "created DESC LIMIT ?",
                 (MAX_RECORDS,),
             )]
         finally:
             db.close()
 
     def update(self, task_id, **fields):
-        if not fields or not fields.keys() <= {"state", "output", "truncated", "exit_code", "delivery", "error", "delivery_error", "next_attempt"}:
+        if not fields or not fields.keys() <= {
+            "state", "output", "truncated", "exit_code", "delivery", "error", "delivery_error",
+            "next_attempt", "delivery_turn_id", "delivery_accepted_at",
+        }:
             raise ValueError("Invalid task update")
         with self.db() as db:
             db.execute("UPDATE tasks SET " + ",".join(f"{k}=?" for k in fields)
@@ -196,7 +215,7 @@ class TaskStore:
             row = db.execute("SELECT * FROM tasks WHERE id=? AND sid=?", (task_id, sid)).fetchone()
             if row is None:
                 raise ValueError("Task not found in this account and session")
-            if row["delivery"] in {"sending", "unknown", "delivered"}:
+            if row["delivery"] in {"sending", "unknown", "accepted", "failed", "delivered"}:
                 raise ValueError("Completion may already be delivered; it cannot be recalled")
             db.execute("UPDATE tasks SET cancel_requested=1,delivery='suppressed',next_attempt=0,updated=? WHERE id=?",
                        (time.time(), task_id))
@@ -230,13 +249,13 @@ class TaskStore:
     def recoverable(self):
         with self.db() as db:
             return [row[0] for row in db.execute("SELECT id FROM tasks WHERE "
-                    "(state IN ('queued','running') OR delivery IN ('pending','sending')) "
+                    "(state IN ('queued','running') OR delivery IN ('pending','sending','accepted')) "
                     "AND next_attempt<=? ORDER BY created LIMIT ?", (time.time(), MAX_RECORDS))]
 
     def has_pending(self):
         with self.db() as db:
             return bool(db.execute("SELECT 1 FROM tasks WHERE state IN ('queued','running') "
-                                   "OR delivery IN ('pending','sending') LIMIT 1").fetchone())
+                                   "OR delivery IN ('pending','sending','accepted') LIMIT 1").fetchone())
 
 
 def public_task(task, *, output=False):
@@ -244,6 +263,7 @@ def public_task(task, *, output=False):
               "state": task["state"], "exit_code": task["exit_code"],
               "cancel_requested": bool(task["cancel_requested"]),
               "notification": task["delivery"], "error": task["error"],
+              "notification_turn_id": task.get("delivery_turn_id"),
               "notification_error": task["delivery_error"],
               "output_truncated": bool(task["truncated"])}
     if output:

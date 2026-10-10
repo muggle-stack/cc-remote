@@ -108,9 +108,11 @@ current level. Tasks from another account or thread do not appear here.
 When a native result arrives, its follow-up is labeled **Codex 收到后台消息，继续处理**.
 This source label also survives compact history restore; expanding the process
 shows the bounded result. Several receipts consumed together share one label.
-Acknowledged or cancelled tasks leave the active panel. Notification failures
-remain inspectable through `task_status` / `task_result`; the panel is an active
-work indicator, not a complete task archive.
+Tasks leave the panel after the callback turn completes successfully or a pending
+notification is cancelled. Accepted callbacks stay visible while processing;
+failed, rejected or unconfirmed callbacks show a retained-result warning. Their
+command output remains available through `task_result`. The panel is not a
+complete archive of successfully delivered tasks.
 
 Disconnected delivery is retried every 30 seconds **only before submission**.
 A safely identified, active on-disk thread may be resumed on the same daemon
@@ -118,8 +120,27 @@ without configuration overrides; archived/deleted or unverifiable threads are
 not revived. If transmission might have succeeded but its acknowledgment was
 lost, notification state becomes `unknown` and is not automatically resent.
 Inspect `task_result` and the conversation in that case. Native rejection is
-recorded as `rejected`, not success. `delivered` means app-server accepted the
-result; it does not claim Codex has finished processing it.
+recorded as `rejected`, not success.
+
+An initial receipt records `accepted` plus `notification_turn_id`, not success.
+The worker checks that exact thread and turn through read-only, paginated
+`thread/turns/list` calls with `itemsView="notLoaded"`; it does not fetch items,
+resume a thread or send another message to check progress. Checks run every 30
+seconds, including after worker recovery, and do not occupy a command slot for
+the model's whole turn. Only that turn's `completed` status records `delivered`.
+A `failed` or `interrupted` turn records notification `failed`, independently of
+the command's own success. Completion means the callback turn ended normally,
+not that the model semantically understood the result. If no outcome can be
+confirmed within 24 hours, the receipt becomes `unknown` and remains retained.
+Neither accepted nor failed/unconfirmed callbacks are automatically resent.
+Older `delivered` records without a turn ID retain their original meaning
+(acceptance only); upgrading does not invent an outcome for them.
+
+Some strict Responses providers reject the call-ID-less tool output generated
+by Codex 0.159.2. Such callbacks now report a failed turn instead of apparent
+delivery success. This feature does not normalize the upstream model request or
+make those providers compatible: inspect `task_result` for the retained output.
+Raw provider error messages are not copied into the public background panel.
 
 State is in `<CODEX_HOME>/cc-remote-async-tasks/` (private directory and SQLite
 file). Each task retains at most 64 KiB of combined output. At most eight commands
@@ -141,7 +162,10 @@ deployment procedure. Private task state is not part of release cleanup.
 
 `tests/test_async_tasks.py` exercises execution, failures, cancellation, bounded
 output, caller isolation, ambiguous delivery, recovery and MCP calls using a
-local fake app-server and trivial subprocesses. These tests spend no model tokens.
+local fake app-server and trivial subprocesses. Callback regressions cover
+acceptance followed by provider failure, exact-turn pagination, recovery without
+resubmission, unavailable history, bounded tracking and concurrent old-store
+migration. These tests spend no model tokens.
 They do not establish real App/CLI rendering or native end-to-end inference;
 those require a separate, explicitly scoped live acceptance run. The caller
 regression covers both `_meta.threadId` from the official 0.159.2 app-server's

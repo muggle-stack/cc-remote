@@ -109,6 +109,17 @@ try {
   send({ type: "background_process_sync", generation: "generation", items });
   assert.equal(state.runtimes[sid].backgroundProcesses.length, 1,
     "a fresh page restores ongoing work without replaying task-start tools");
+  send({ type: "background_process_sync", generation: "generation", items: [{
+    ...items[0], status: "failed", summary: "Codex 未能处理通知，任务结果已保留",
+  }] });
+  assert.equal(state.runtimes[sid].backgroundProcesses[0].status, "failed");
+  assert.equal(state.runtimes[sid].state, "idle");
+  const failedDock = renderToStaticMarkup(createElement(BackgroundTaskControl, {
+    processes: state.runtimes[sid].backgroundProcesses,
+  }));
+  assert.match(failedDock, /1 项需要查看/);
+  assert.match(failedDock, /background-task-indicator attention/);
+  assert.doesNotMatch(failedDock, /进行中/);
   console.log("Codex background tasks: activity, narrative order, replay and rendering passed");
 } finally {
   await harness.close();
