@@ -567,7 +567,13 @@ PY
   stage=""
 fi
 
-retention_profile_args=()
+# Keep base arguments in each array: Bash 3.2 treats empty arrays as unset with -u.
+retention_args=(
+  begin --root "$appdir" --release "$target" --previous "$previous" --role wrapper
+  --home "$target_home" --service "$service_label" --service-file "$service_file"
+  --config "$device_file" --config "$wrapper_env_file"
+  --config "$appdir/installation.json"
+)
 if [ "$system" = linux ] && [ "$service_manager" = supervisor ]; then
   linux_profile="$(mktemp "${TMPDIR:-/tmp}/cc-remote-linux-service.XXXXXX")"
   "$target/.venv/bin/python" - "$target" "$linux_profile" "$service_label" "$target_user" "$target_home" "$service_file" "$wrapper_env_file" "$device_file" "$supervisor_config" <<'PY_BIND'
@@ -580,20 +586,16 @@ keys = ['name', 'user', 'home', 'service_file', 'env_file', 'device_file', 'supe
 profile = validate(dict(manager='supervisor', **dict(zip(keys, sys.argv[3:]))))
 Path(sys.argv[2]).write_text(json.dumps(profile))
 PY_BIND
-  preflight_args=()
+  preflight_args=(preflight)
   if [ "$adopt_supervisor" -eq 1 ]; then preflight_args+=(--adopt); fi
   [ -f "$wrapper_env_file" ] || die "Supervisor requires a prepared --env-file (see installation guide)"
-  linux_service preflight "${preflight_args[@]}"
-  retention_profile_args=(--linux-service "$linux_profile")
+  linux_service "${preflight_args[@]}"
+  retention_args+=(--linux-service "$linux_profile")
 fi
 
 if [ "$previous" != "$target" ]; then
   retention_generation="$(
-    "$target/.venv/bin/python" "$target/deploy/release_retention.py" begin \
-      --root "$appdir" --release "$target" --previous "$previous" --role wrapper \
-      --home "$target_home" --service "$service_label" --service-file "$service_file" \
-      --config "$device_file" --config "$wrapper_env_file" \
-      --config "$appdir/installation.json" "${retention_profile_args[@]}"
+    "$target/.venv/bin/python" "$target/deploy/release_retention.py" "${retention_args[@]}"
   )"
 fi
 
