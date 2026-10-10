@@ -286,8 +286,9 @@ def test_native_timeout_wins_before_local_deadline_poll(store, monkeypatch, exit
             assert thread_id == sid
 
         async def rpc(self, method, params, *, timeout, before_send):
-            assert method == "command/exec" and params["timeoutMs"] == 999
+            assert method == "command/exec"
             before_send()
+            assert params["timeoutMs"] == 999
             now.wall += elapsed
             now.monotonic += elapsed
             if cancel:
@@ -306,6 +307,69 @@ def test_native_timeout_wins_before_local_deadline_poll(store, monkeypatch, exit
     assert result["exit_code"] == exit_code
     if cancel:
         assert result["delivery"] == "suppressed"
+
+
+@pytest.mark.parametrize("phase", ["connect", "thread", "schedule", "store"])
+@pytest.mark.parametrize("delay", [.25, 1.25])
+def test_execution_budget_is_rechecked_at_native_send(store, monkeypatch, phase, delay):
+    marker = store.home / "must-not-start-after-deadline"
+    sid, key = start(store, code=f"from pathlib import Path; Path({str(marker)!r}).touch()",
+                     timeout_seconds=1)
+    task = store.get(key)
+    task["created"] = 1000.0
+    clock = SimpleNamespace(wall=1000.0, monotonic=500.0)
+    monkeypatch.setattr(tasks, "time", SimpleNamespace(
+        time=lambda: clock.wall, monotonic=lambda: clock.monotonic))
+
+    def advance(at):
+        if phase == at:
+            clock.wall += delay
+            clock.monotonic += delay
+
+    begin = store.begin_execution
+
+    def delayed_begin(task_id):
+        result = begin(task_id)
+        advance("store")  # SQLite may wait for its write lock before returning.
+        return result
+
+    monkeypatch.setattr(store, "begin_execution", delayed_begin)
+
+    async def run():
+        async with daemon(store) as native:
+            @asynccontextmanager
+            async def delayed_connect(home, on_output):
+                async with native.connect(home, on_output) as client:
+                    advance("connect")  # Connection plus initialization budget.
+                    original_thread, original_rpc = client.thread, client.rpc
+
+                    async def thread(thread_id):
+                        result = await original_thread(thread_id)
+                        advance("thread")
+                        return result
+
+                    async def rpc(method, params, **kwargs):
+                        if method == "command/exec":
+                            advance("schedule")  # Between create_task and its first execution.
+                        return await original_rpc(method, params, **kwargs)
+
+                    client.thread, client.rpc = thread, rpc
+                    yield client
+
+            with monkeypatch.context() as patch:
+                patch.setattr(task_rpc, "connect", delayed_connect)
+                await tasks.execute(store, task)
+            result = store.get(key, sid)
+            if delay >= 1:
+                assert native.commands == [], "expired tasks must not reach command/exec"
+                assert not marker.exists(), "no side effects after pre-submission expiry"
+                assert result["state"] == "timed_out" and result["exit_code"] is None
+                assert result["delivery"] == "pending"
+            else:
+                assert len(native.commands) == 1 and marker.exists()
+                assert native.commands[0]["timeoutMs"] == 750
+                assert result["state"] == "completed"
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("mode,expected", [("lost", "unknown"), ("reject", "rejected")])

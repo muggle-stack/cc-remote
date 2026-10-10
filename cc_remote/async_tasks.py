@@ -31,6 +31,10 @@ class CancelledBeforeExecution(Exception):
     pass
 
 
+class ExpiredBeforeExecution(Exception):
+    pass
+
+
 def lock_worker(store):
     # Initialize / validate the private state directory before creating a lock.
     with store.db():
@@ -71,7 +75,6 @@ async def execute(store, task):
     if remaining <= 0:
         store.update(task_id, state="timed_out", error="Task deadline expired")
         return
-    timeout_ms = max(1, int(remaining * 1000))
     native_deadline = None
     output = bytearray(task["output"])
     truncated = bool(task["truncated"])
@@ -90,6 +93,14 @@ async def execute(store, task):
         nonlocal native_deadline
         if not store.begin_execution(task_id):
             raise CancelledBeforeExecution()
+        # Connection, initialization, thread validation, scheduling and the
+        # store write can all consume budget. This hook runs immediately before
+        # native.rpc serializes/sends the command, with no intervening await.
+        remaining_at_send = spec["timeout_seconds"] - (time.time() - task["created"])
+        if remaining_at_send <= 0:
+            raise ExpiredBeforeExecution()
+        timeout_ms = max(1, int(remaining_at_send * 1000))
+        command_params["timeoutMs"] = timeout_ms
         native_deadline = time.monotonic() + timeout_ms / 1000
 
     try:
@@ -99,11 +110,11 @@ async def execute(store, task):
             if store.get(task_id)["cancel_requested"]:
                 store.update(task_id, state="cancelled", delivery="suppressed")
                 return
-            command = asyncio.create_task(native.rpc("command/exec", {
+            command_params = {
                 "command": spec["argv"], "cwd": spec["cwd"], "processId": task_id,
-                "timeoutMs": timeout_ms,
                 "outputBytesCap": OUTPUT_BYTES // 2, "streamStdoutStderr": True,
-            }, timeout=remaining + 10,
+            }
+            command = asyncio.create_task(native.rpc("command/exec", command_params, timeout=remaining + 10,
                 before_send=before_send))
             reason = None
             try:
@@ -139,6 +150,11 @@ async def execute(store, task):
                     await command
     except CancelledBeforeExecution:
         store.update(task_id, state="cancelled", delivery="suppressed")
+    except ExpiredBeforeExecution:
+        if store.get(task_id)["cancel_requested"]:
+            store.update(task_id, state="cancelled", delivery="suppressed")
+        else:
+            store.update(task_id, state="timed_out", error="Task deadline expired before command submission")
     except task_rpc.Rejected:
         store.update(task_id, state="failed", error="Official daemon rejected command or thread access")
     except Exception:
