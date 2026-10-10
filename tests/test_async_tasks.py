@@ -253,6 +253,49 @@ def test_timeout_output_bound_and_explicit_rejection(store, monkeypatch):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("exit_code,elapsed,cancel,expected", [
+    (124, .9995, False, "timed_out"),
+    (124, .2, False, "failed"),
+    (7, .9995, False, "failed"),
+    (0, .9995, False, "completed"),
+    (124, .9995, True, "cancelled"),
+])
+def test_native_timeout_wins_before_local_deadline_poll(store, monkeypatch, exit_code, elapsed, cancel, expected):
+    sid, key = start(store, timeout_seconds=1)
+    task = store.get(key)
+    task["created"] = 1000.0
+    # Native timeoutMs rounds down to 999 ms; completion can arrive before
+    # the wrapper's full one-second deadline and its next poll.
+    now = SimpleNamespace(wall=1000.0001, monotonic=500.0)
+    monkeypatch.setattr(tasks, "time", SimpleNamespace(time=lambda: now.wall, monotonic=lambda: now.monotonic))
+
+    class Native:
+        async def thread(self, thread_id):
+            assert thread_id == sid
+
+        async def rpc(self, method, params, *, timeout, before_send):
+            assert method == "command/exec" and params["timeoutMs"] == 999
+            before_send()
+            now.wall += elapsed
+            now.monotonic += elapsed
+            if cancel:
+                store.cancel(key, sid)
+            return {"exitCode": exit_code, "stdout": "", "stderr": ""}
+
+    @asynccontextmanager
+    async def connect(home, on_output):
+        assert home == store.home
+        yield Native()
+
+    monkeypatch.setattr(task_rpc, "connect", connect)
+    asyncio.run(tasks.execute(store, task))
+    result = store.get(key)
+    assert result["state"] == expected
+    assert result["exit_code"] == exit_code
+    if cancel:
+        assert result["delivery"] == "suppressed"
+
+
 @pytest.mark.parametrize("mode,expected", [("lost", "unknown"), ("reject", "rejected")])
 def test_completion_ack_loss_is_not_replayed(store, mode, expected):
     _, key = start(store)

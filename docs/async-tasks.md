@@ -130,6 +130,9 @@ retained; hitting the cap rejects new tasks rather than deleting those records.
 Idempotency applies while the receipt is retained. Tasks have one shared worker
 lock per account rather than accumulating a lock file for every job.
 
+A native timeout (exit 124 at its deadline) is reported as `timed_out`; an early
+explicit exit 124 remains `failed`. Cancellation still suppresses its callback.
+
 The worker pins its executing release through its cwd. Deployment cleanup must
 continue respecting live cwd/open-file dependencies as required by the normal
 deployment procedure. Private task state is not part of release cleanup.

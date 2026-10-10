@@ -70,6 +70,8 @@ async def execute(store, task):
     if remaining <= 0:
         store.update(task_id, state="timed_out", error="Task deadline expired")
         return
+    timeout_ms = max(1, int(remaining * 1000))
+    native_deadline = None
     output = bytearray(task["output"])
     truncated = bool(task["truncated"])
 
@@ -84,8 +86,10 @@ async def execute(store, task):
         store.update(task_id, output=bytes(output), truncated=int(truncated))
 
     def before_send():
+        nonlocal native_deadline
         if not store.begin_execution(task_id):
             raise CancelledBeforeExecution()
+        native_deadline = time.monotonic() + timeout_ms / 1000
 
     try:
         async with task_rpc.connect(store.home, on_output) as native:
@@ -96,7 +100,7 @@ async def execute(store, task):
                 return
             command = asyncio.create_task(native.rpc("command/exec", {
                 "command": spec["argv"], "cwd": spec["cwd"], "processId": task_id,
-                "timeoutMs": max(1, int(remaining * 1000)),
+                "timeoutMs": timeout_ms,
                 "outputBytesCap": OUTPUT_BYTES // 2, "streamStdoutStderr": True,
             }, timeout=remaining + 10,
                 before_send=before_send))
@@ -121,6 +125,11 @@ async def execute(store, task):
                 current = store.get(task_id)
                 if current["cancel_requested"]:
                     reason = "cancelled"
+                elif code == 124 and native_deadline is not None and time.monotonic() >= native_deadline:
+                    # Native expiration uses 124 and can win the poll by the
+                    # sub-millisecond rounding in timeoutMs. An early explicit
+                    # exit(124) remains a failure, not a deadline expiration.
+                    reason = "timed_out"
                 store.update(task_id, state=reason or ("completed" if code == 0 else "failed"),
                              exit_code=code, output=bytes(output), truncated=int(truncated))
             finally:
