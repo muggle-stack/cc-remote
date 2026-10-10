@@ -14,6 +14,80 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize("shell", ["/bin/bash", "bash"], ids=["system-bash", "path-bash"])
+@pytest.mark.parametrize("backend", ["darwin", "systemd", "supervisor", "adopt-supervisor"])
+@pytest.mark.parametrize("installation", ["fresh", "upgrade", "same-release"])
+def test_wrapper_preflight_preserves_arguments_under_nounset(tmp_path, shell, backend, installation):
+    # Run the real post-staging block with inert service/retention helpers.
+    # /bin/bash exercises Apple's 3.2 on macOS, even when PATH selects Bash 5.
+    tmp_path = tmp_path.resolve()
+    root = tmp_path / ("managed installation [test]" if backend == "darwin" else "managed")
+    target = root / "releases/new"
+    (target / ".venv/bin").mkdir(parents=True)
+    (target / ".venv/bin/python").symlink_to(sys.executable)
+    (target / "deploy").mkdir()
+    shutil.copyfile(ROOT / "deploy/linux_service.py", target / "deploy/linux_service.py")
+    recorder = tmp_path / "record.py"
+    recorder.write_text(
+        "import json, os, sys\n"
+        "with open(os.environ['TEST_CALLS'], 'a') as output:\n"
+        "    output.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "if sys.argv[1] == 'begin': print('test-generation')\n"
+    )
+    shutil.copyfile(recorder, target / "deploy/release_retention.py")
+    calls = tmp_path / "calls.jsonl"
+    env_file = tmp_path / "wrapper.env"
+    env_file.touch()
+    previous = {"fresh": "", "upgrade": str(root / "releases/old"),
+                "same-release": str(target)}[installation]
+    supervisor = backend in {"supervisor", "adopt-supervisor"}
+    settings = {
+        "system": "darwin" if backend == "darwin" else "linux",
+        "service_manager": "supervisor" if supervisor else "systemd",
+        "appdir": str(root), "target": str(target), "previous": previous,
+        "target_home": str(tmp_path), "target_user": "fixture-user",
+        "service_label": "fixture-wrapper", "service_file": str(tmp_path / "wrapper.conf"),
+        "wrapper_env_file": str(env_file), "device_file": str(tmp_path / "device.json"),
+        "supervisor_config": str(tmp_path / "supervisord.conf"),
+        "adopt_supervisor": "1" if backend == "adopt-supervisor" else "0",
+        "linux_profile": "", "retention_generation": "",
+        "test_python": sys.executable, "test_recorder": str(recorder),
+    }
+    source = (ROOT / "deploy/install-wrapper.sh").read_text()
+    block = source.split('  stage=""\nfi\n', 1)[1].split('\nif [ -n "$pair_code" ]; then', 1)[0]
+    harness = "set -euo pipefail\n" + "\n".join(
+        f"{key}={shlex.quote(value)}" for key, value in settings.items()
+    ) + r'''
+linux_service() { "$test_python" "$test_recorder" "$@"; }
+die() { echo "$*" >&2; exit 1; }
+''' + block + '\nprintf "%s\\n" "$retention_generation"\n'
+    result = subprocess.run(
+        [shell, "-c", harness], capture_output=True, text=True, timeout=10,
+        env={**os.environ, "TEST_CALLS": str(calls), "TMPDIR": str(tmp_path)},
+    )
+    assert result.returncode == 0, result.stderr
+    recorded = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+    if supervisor:
+        assert recorded.pop(0) == (["preflight", "--adopt"] if backend == "adopt-supervisor"
+                                   else ["preflight"])
+    if installation == "same-release":
+        assert recorded == [] and not result.stdout.strip()
+        return
+    assert result.stdout.strip() == "test-generation"
+    expected = ["begin", "--root", str(root), "--release", str(target),
+                "--previous", previous, "--role", "wrapper", "--home", str(tmp_path),
+                "--service", "fixture-wrapper", "--service-file", settings["service_file"],
+                "--config", settings["device_file"], "--config", str(env_file),
+                "--config", str(root / "installation.json")]
+    assert len(recorded) == 1
+    if supervisor:
+        assert recorded[0][-2] == "--linux-service"
+        profile = Path(recorded[0][-1])
+        assert json.loads(profile.read_text())["manager"] == "supervisor"
+        expected.extend(["--linux-service", str(profile)])
+    assert recorded[0] == expected
+
+
 @pytest.mark.parametrize('prior', ['absent', 'stopped', 'running'])
 @pytest.mark.parametrize('remove_fails', [False, True])
 def test_supervisor_rollback_restores_registration(tmp_path, prior, remove_fails):

@@ -333,6 +333,42 @@ async function mockRightPanelRelay(
   return { commands, emit: (message: PanelRelayEvent) => emit(message) };
 }
 
+test("side chat scope restores long Claude history atomically at the bottom with a completion spark", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { visible: true, engine: "claude" });
+  const sid = "btw-layout-child";
+  const panel = page.locator(".btw-panel");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const syncs = relay.commands.filter(c => c.type === "sync_btw").length;
+    if (attempt) await page.reload();
+    else await page.goto("/");
+    await expect.poll(() => relay.commands.filter(c => c.type === "sync_btw").length).toBeGreaterThan(syncs);
+    await expect(panel.getByRole("textbox")).toBeEnabled();
+    relay.emit({ type: "replay_start", sid, generation: "layout-generation",
+      from_seq: 0, to_seq: 100, rebuild: true, truncated: false });
+    for (let i = 0; i < 20; i++) {
+      relay.emit({ type: "user_msg", sid, msg_id: `human-${i}`, prompt: `Question ${i}` });
+      relay.emit({ type: "delta", sid, message_id: `answer-${i}`, channel: "final",
+        text: `Answer ${i}\n\n` + "Long side conversation paragraph.\n\n".repeat(15) });
+      relay.emit({ type: "assistant_msg_end", sid, message_id: `answer-${i}`, channel: "final" });
+      relay.emit({ type: "turn_end", sid, turn_id: `answer-${i}`, checkpoint_id: `human-${i}`,
+        result: { subtype: "success", duration_ms: 1000, is_error: false } });
+      if (i % 5 === 0) {
+        await expect(panel.getByText("正在恢复侧边对话…")).toBeVisible();
+        await expect(panel.locator(".thread")).toHaveCount(0);
+      }
+    }
+    relay.emit({ type: "replay_end", sid, to_seq: 100, truncated: false });
+    relay.emit({ type: "state", sid, state: "idle" });
+    await expect(panel.getByText("正在恢复侧边对话…")).toHaveCount(0);
+    const thread = panel.locator(".thread");
+    await expect(thread).toBeVisible();
+    await expect.poll(() => thread.evaluate(el =>
+      el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThan(3);
+    await expect(panel.locator(".turn-done-mark")).toBeVisible();
+  }
+  expect(relay.commands.some(c => ["query", "steer", "open_btw"].includes(String(c.type)))).toBe(false);
+});
+
 for (const running of [false, true]) {
   test(`path-prefixed prompts send verbatim as ${running ? "steering" : "a new message"}`, async ({ page }) => {
     const relay = await mockRightPanelRelay(page, { retained: false });

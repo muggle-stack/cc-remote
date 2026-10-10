@@ -3,6 +3,8 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from cc_remote.protocol import (
     AssistantMsgEnd, Delta, Error, ProcessEvent, SyncBtw, ToolDelta, TurnBinding,
     TurnDiff, TurnEnd, TurnPlan, TurnResult,
@@ -55,6 +57,46 @@ def test_token_ring_eviction_does_not_cut_message_or_lose_user_boundary():
         "".join(str(i) + "," for i in range(100))]
     assert all(e.seq is None for e in restored)
     assert len(restored) == 7
+
+
+@pytest.mark.parametrize("identity", ["checkpoint", "binding", "live-owner"])
+def test_claude_terminal_replays_with_exact_owner_not_assistant_uuid(identity):
+    history = BtwHistory(10000, 100)
+    human = "native-user" if identity == "checkpoint" else "browser-input"
+    history.observe(UserMsg(msg_id=human, prompt="first question"))
+    if identity == "binding":
+        history.observe(TurnBinding(msg_id=human, turn_id="native-user"))
+    history.observe(Delta(message_id="assistant-reply", text="finished", channel="final"))
+    history.observe(AssistantMsgEnd(message_id="assistant-reply", channel="final"))
+    # A late terminal must still close its own input, never the newest one.
+    history.observe(UserMsg(msg_id="next-input", prompt="second question"))
+    terminal = TurnEnd(turn_id="assistant-reply", checkpoint_id="native-user",
+                       result=TurnResult(subtype="success", duration_ms=42, is_error=False))
+    if identity == "live-owner":
+        # Real BTW deliberately skips persistent browser/native alias binding.
+        terminal._changes_turn_id = human
+    history.observe(terminal)
+    history.observe(terminal.model_copy(deep=True))
+    frames = replay(history)
+    restored = [e for e in frames if isinstance(e, TurnEnd)]
+    assert len(restored) == 1
+    assert restored[0].turn_id == "assistant-reply"
+    assert restored[0].checkpoint_id == "native-user"
+    assert history.turns[human].end is not None
+    assert history.turns["next-input"].end is None
+    assert frames.index(restored[0]) < next(
+        i for i, e in enumerate(frames) if isinstance(e, UserMsg) and e.msg_id == "next-input")
+    assert history._bytes == sum(RingBuffer._size(e) for e in frames[1:-1])
+
+
+def test_unknown_claude_terminal_does_not_close_newest_btw_turn():
+    history = BtwHistory(10000, 100)
+    seed(history)
+    terminal = TurnEnd(turn_id="unknown-assistant", checkpoint_id="evicted-user",
+                       result=TurnResult(subtype="success", duration_ms=42, is_error=False))
+    terminal._changes_turn_id = "evicted-browser-input"
+    history.observe(terminal)
+    assert not any(isinstance(e, TurnEnd) for e in replay(history))
 
 
 def test_replay_budget_keeps_whole_items_and_their_exact_user():

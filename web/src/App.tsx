@@ -5928,7 +5928,7 @@ export default function App() {
             <Composer
           draftKey={focusedComposerDraftKey}
           draftStore={composerDraftsRef.current}
-          backgroundTasks={focusedEngine === "claude" && rt.backgroundProcesses.length > 0
+          backgroundTasks={rt.backgroundProcesses.length > 0
             ? <Suspense fallback={null}>
                 <BackgroundTaskControl key={focusedComposerDraftKey}
                   processes={rt.backgroundProcesses}

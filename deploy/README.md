@@ -626,6 +626,20 @@ build, home, endpoint and startup/connection errors. Do not assume all builds
 auto-attach simply because a daemon is running, or mask the difference by
 silently changing the user's shell alias.
 
+For accounts that already opted into the standard **asynchronous task MCP**,
+also follow [task MCP upgrade acceptance](../docs/async-tasks.md#refresh-after-an-upgrade).
+Run the newly installed `cc-remote tasks refresh --codex-home <account-home>
+--thread-id <existing-thread-id>` as that account's OS user. This explicitly
+updates only the enabled task server's release working directory and asks the
+official daemon to reload it. It never enables a missing/disabled server or
+restarts the daemon. Verify the existing thread's read-only `task_status` call;
+a global tool catalog or a successful reload response can still coexist with a
+stale thread MCP process. With no existing thread available, report refresh
+requested and thread acceptance pending. Automatic completion/UI acceptance is
+a separate, explicitly authorized real-task test. Retain old runtimes still used
+by other native processes. An optional MCP failure is distinct from core service
+health and must not be described as successful task-feature deployment.
+
 The inspected official CLI 0.154.0 automatically probes its account's default
 socket for ordinary launches. Additional launch configuration (for example
 `-c`, a config profile, strict config or a custom exec-server) can select an

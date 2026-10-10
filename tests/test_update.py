@@ -426,6 +426,24 @@ def linux_launcher(tmp_path):
     return ["bash", str(script)], env, releases
 
 
+def test_task_launcher_keeps_nonroot_identity_and_never_uses_relay(linux_launcher):
+    command, env, releases = linux_launcher
+    stubs = Path(env["PATH"].split(":")[0])
+    (stubs / "id").write_text("#!/bin/sh\necho 1000\n")
+    (stubs / "sudo").write_text("#!/bin/sh\necho UNEXPECTED_SUDO >&2\nexit 99\n")
+    (stubs / "sudo").chmod(0o755)
+    result = subprocess.run([*command, "tasks", "mcp", "--codex-home", "/account"],
+                            env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"role": "wrapper", "argv": ["tasks", "mcp", "--codex-home", "/account"]}
+    (releases["wrapper"] / ".venv/bin/python").unlink()
+    result = subprocess.run([*command, "tasks", "mcp", "--codex-home", "/account"],
+                            env=env, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert not result.stdout
+    assert "UNEXPECTED_SUDO" not in result.stderr
+
+
 @pytest.mark.parametrize("role", ["relay", "wrapper"])
 @pytest.mark.parametrize("option", ["--role", "--role=", "--ro", "--ro="])
 def test_launcher_selects_requested_runtime_before_loading_python(linux_launcher, role, option):

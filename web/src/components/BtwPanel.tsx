@@ -499,13 +499,21 @@ export function BtwPanel(p: Props) {
               <span className="thinking"><span/><span/><span/></span>
               {" "}正在打开侧边对话…
             </div>
+          : p.rt?.replaying || p.rt?.loading
+            ? <div className="btw-empty" role="status" aria-live="polite">
+                <span className="thinking"><span/><span/><span/></span>
+                {" "}正在恢复侧边对话…
+              </div>
           : turns.length === 0
             ? <div className="btw-empty">
                 {p.sid
                   ? "问一个基于当前会话的侧边问题 —— 回答不会写进主线。"
                   : "暂无侧边对话。点 + 新建一个基于当前会话上下文的对话。"}
               </div>
-            : <ChatView sid={p.sid ?? null} turns={turns}
+            // Mount only the complete replay. ChatView's layout effect then
+            // places its final tail before paint, instead of chasing every
+            // intermediate history item through the scrollport.
+            : <ChatView key={p.sid} sid={p.sid ?? null} turns={turns}
                 engine={p.engine}
                 turnUsage={p.rt?.turnUsage}
                 activeTurnId={activeTurnId}

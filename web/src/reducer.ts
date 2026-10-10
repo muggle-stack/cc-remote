@@ -1512,6 +1512,50 @@ function archiveLiveSpillBlocks(turn: Turn, spilled: Block[]): void {
 
 function ensureLiveBlockOrder(turn: Turn): void {
   const archive = turn.liveSpillBlocks ?? [];
+  const detail = turn.detailProjection?.blocks ?? [];
+  if (detail.length > 0) {
+    // An idle summary can retain observed work in detailProjection while its
+    // final loses liveOrder. Numbering only turn.blocks from zero then collides
+    // with that prefix; the next summary paints the answer before its tools.
+    // All three render slices must share one chronology before appending.
+    const identity = (block: Block): string => block.kind === "text"
+      ? `text:${block.message_id}` : block.kind === "tool"
+        ? `tool:${block.tool_use_id}` : `process:${block.item_id}`;
+    const all = [...detail, ...archive, ...turn.blocks];
+    const orderById = new Map<string, number>();
+    const idByOrder = new Map<number, string>();
+    let coherent = true;
+    let maximum = -1;
+    for (const block of all) {
+      const id = identity(block);
+      const order = block.liveOrder;
+      if (order == null || !Number.isFinite(order)) {
+        coherent = false;
+        continue;
+      }
+      if ((orderById.has(id) && orderById.get(id) !== order)
+          || (idByOrder.has(order) && idByOrder.get(order) !== id)) {
+        coherent = false;
+      }
+      orderById.set(id, order);
+      idByOrder.set(order, id);
+      maximum = Math.max(maximum, order);
+    }
+    if (!coherent) {
+      const preferCompleted = turn.done && !turn.detailRestorePending
+        && !turn.detailRestoreIncomplete;
+      const timeline = mergeDetailWithLiveTail(
+        mergeDetailWithLiveTail(detail, archive, preferCompleted),
+        turn.blocks, preferCompleted,
+      );
+      orderById.clear();
+      timeline.forEach((block, index) => orderById.set(identity(block), index));
+      for (const block of all) block.liveOrder = orderById.get(identity(block));
+      maximum = timeline.length - 1;
+    }
+    turn.nextLiveBlockOrder = Math.max(turn.nextLiveBlockOrder ?? 0, maximum + 1);
+    return;
+  }
   const allBlocks = [...archive, ...turn.blocks];
   if (allBlocks.every((block) => block.liveOrder != null)) return;
 
@@ -6511,7 +6555,8 @@ function reduceEvent(
         if (e.duration_ms != null) block.duration_ms = e.duration_ms;
         if (e.truncated != null) block.truncated = e.truncated;
         if (e.background != null) block.background = e.background;
-        if (block.background === true) {
+        if (block.background === true
+            || block.server === "cc_remote_tasks" && block.tool === "task_result") {
           block.startedTs ??= eventTimestampMs(e.ts);
           block.updatedTs = eventTimestampMs(e.ts) ?? block.updatedTs;
         }

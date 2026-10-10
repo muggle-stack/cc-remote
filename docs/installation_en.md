@@ -2,9 +2,11 @@
 
 [中文](installation.md) · [README](../README_en.md) · [Deployment contract](../deploy/README.md)
 
-Prefer a tested source snapshot for current features. Use a published artifact
-when selecting that tag and after checking its features and protocol; the latest
-published tag may lag the maintained source branch. This guide selects the installation path;
+**Use the latest stable Release for regular use and production deployments.**
+After installation, run `cc-remote update` to upgrade to the latest stable version;
+see [subsequent updates](#subsequent-updates). Use a tested source snapshot for
+development, debugging or testing unreleased features. Published artifacts follow
+their tag's features and protocol and may lag the source branch. This guide selects the installation path;
 [deploy/README.md](../deploy/README.md) remains authoritative for staging,
 activation, rollback and acceptance. Existing custom services retain their
 ownership, private configuration and installation layout.

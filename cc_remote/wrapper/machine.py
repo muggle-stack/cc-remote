@@ -1686,6 +1686,16 @@ def _apply_codex_process_witness(
                     native_segment)
         if process is None:
             continue
+        # Official summary pages omit tool output. Exact source anchors put the
+        # compact receipt before its own answer without fetching heavy detail.
+        blocks = turn.get("blocks", [])
+        for _offset, anchor, receipt in process.task_receipts:
+            if len(blocks) >= 32 or any(block.get("item_id") == receipt["item_id"] for block in blocks):
+                continue
+            position = next((index for index, block in enumerate(blocks)
+                             if block.get("message_id") == anchor), None) if anchor else len(blocks)
+            if position is not None:
+                blocks.insert(position, dict(receipt))
         if isinstance(visible_id, str):
             if process.file_change_offsets:
                 page.file_change_offsets_by_visible_id[visible_id] = process.file_change_offsets
@@ -2319,6 +2329,8 @@ class WrapperMachine:
         self._work_schedule_task: Optional[asyncio.Task] = None
         self._work_schedule_runs: set[asyncio.Task] = set()
         self._codex_watch_lock = asyncio.Lock()
+        self._codex_task_sync_lock = asyncio.Lock()
+        self._codex_task_read_errors: set[Path] = set()
         self._codex_probe_warned = False
         self._codex_tui_log_trackers = {
             profile.id: CodexTuiLogTracker(
@@ -6694,7 +6706,8 @@ class WrapperMachine:
         self, ctx: SessionContext,
     ) -> BackgroundProcessSync:
         items = sorted(
-            ctx.claude_background_processes.values(),
+            ((ctx.codex_background_processes or {}) if ctx.engine == "codex"
+             else ctx.claude_background_processes).values(),
             key=lambda item: (
                 item.started_at if item.started_at is not None else item.updated_at
                 if item.updated_at is not None else 0,
@@ -6708,6 +6721,46 @@ class WrapperMachine:
                 for item in items[:MAX_BACKGROUND_PROCESS_ITEMS]
             ],
         )
+
+    async def _refresh_codex_background_processes(
+        self, contexts: list[SessionContext] | None = None,
+    ) -> None:
+        """Project detached task state without querying or waking an engine."""
+        from cc_remote.wrapper.codex_tasks import read_task_activity
+
+        async with self._codex_task_sync_lock:
+            accounts: dict[Path, list[tuple[SessionContext, str]]] = {}
+            for ctx in list(self.sessions.values()) if contexts is None else contexts:
+                if (ctx.engine != "codex" or ctx.space != "code"
+                        or not ctx.session_id or not self._is_resident_context(ctx)):
+                    continue
+                profile = self._codex_profile_for_ctx(ctx)
+                accounts.setdefault(profile.home, []).append((ctx, ctx.session_id))
+            for home, residents in accounts.items():
+                try:
+                    activity = await asyncio.to_thread(read_task_activity, home)
+                except Exception as exc:
+                    # Failure is not an empty level; don't retire real tasks.
+                    if home not in self._codex_task_read_errors:
+                        log.warning("Codex background task snapshot unavailable",
+                                    error_type=type(exc).__name__)
+                        self._codex_task_read_errors.add(home)
+                    continue
+                self._codex_task_read_errors.discard(home)
+                for ctx, native_sid in residents:
+                    if (not self._is_resident_context(ctx) or ctx.session_id != native_sid
+                            or self._codex_profile_for_ctx(ctx).home != home):
+                        continue
+                    replacement = {item.item_id: item for item in
+                                   activity.get(native_sid, [])[:MAX_BACKGROUND_PROCESS_ITEMS]}
+                    if replacement == ctx.codex_background_processes:
+                        continue
+                    previous = ctx.codex_background_processes
+                    ctx.codex_background_processes = replacement
+                    # A first empty read has no live transition to broadcast.
+                    # Hello/focus still seed it after their ordered envelope.
+                    if previous is not None or replacement:
+                        await self._emit(ctx, self._background_process_sync(ctx))
 
     async def _publish_claude_background_processes(
         self, ctx: SessionContext,
@@ -12093,6 +12146,7 @@ class WrapperMachine:
         # sids it already knows and receives only seq > cursor from those rings.
         # This restores live tail loss without reviving the old all-session replay
         # flood. A concurrent turn may re-key sessions across the awaits below.
+        await self._refresh_codex_background_processes()
         supplied_cursors = getattr(cmd, "cursors", None)
         cursors = dict(supplied_cursors) if isinstance(supplied_cursors, dict) else {}
         supplied_generations = getattr(cmd, "generations", None)
@@ -12234,7 +12288,7 @@ class WrapperMachine:
                             "route_id": getattr(cmd, "route_id", None),
                         },
                     ))
-                if ctx.engine == "claude":
+                if ctx.engine == "claude" or ctx.codex_background_processes is not None:
                     # Background work is current state just like a pending
                     # question. An explicit empty replacement is required to
                     # clear stale browser state after a missed terminal edge.
@@ -14064,6 +14118,7 @@ class WrapperMachine:
                         self._watch_session(ctx.session_id)
                 await self._poll_watches_once()
                 await self._refresh_timed_tasks()
+                await self._refresh_codex_background_processes()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -20334,6 +20389,8 @@ class WrapperMachine:
         # spawn/resume a model session just to determine whether it is writable.
         await self._refresh_btw_availability(ctx)
 
+        await self._refresh_codex_background_processes([ctx])
+
         async def send(message) -> None:
             await self.transport.send(message.model_copy(
                 deep=True, update=route))
@@ -20367,7 +20424,7 @@ class WrapperMachine:
                     continue
                 await send(ask_state.event.model_copy(
                     deep=True, update={"seq": None}))
-            if ctx.engine == "claude":
+            if ctx.engine == "claude" or ctx.codex_background_processes is not None:
                 await send(self._background_process_sync(ctx).model_copy(
                     deep=True, update={"seq": None}))
 
@@ -27514,7 +27571,8 @@ class WrapperMachine:
             session_id=ctx.key or self.focused_sid or sid, cwd=ctx.cwd)
         await self._emit(ctx, focus)
         cached_responses = [snap, focus] if snap is not None else [focus]
-        if ctx.engine == "claude":
+        await self._refresh_codex_background_processes([ctx])
+        if ctx.engine == "claude" or ctx.codex_background_processes is not None:
             # This wrapper instance may have respawned the native Claude child
             # without changing its generation.  Re-seed the exact current level
             # on every focus so an empty replacement clears cards retained from

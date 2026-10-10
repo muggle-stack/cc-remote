@@ -6,14 +6,20 @@ Self-hosted · Multiple sessions and devices · Live tool activity · Code / Wor
 
 **Product version: v4.0.10** · Wire protocol v74
 
-[中文](README.md) · [Engine comparison](#engines-and-features) · [Quick start](#quick-start) ·
-[Terminal workspace](#terminal-workspace) · [Install and upgrade](#install-and-upgrade) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)
+[中文](README.md) · [Release install (recommended)](#install-and-upgrade) · [Engine comparison](#engines-and-features) · [Try from source](#quick-start) ·
+[Terminal workspace](#terminal-workspace) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)
 
 cc-remote brings your local agent's sessions, tool activity, files and controls to
 remote clients. Start a task on your computer, check progress from your phone,
 answer a question or steer the task, then return to the same conversation.
 Model authentication, provider configuration and tool execution remain with the
 local engine. cc-remote does not proxy model APIs.
+
+**We recommend the latest stable Release for regular use.** Follow the
+[Release installation guide](docs/installation_en.md#release-install) for your first setup,
+then run `cc-remote update` from an independent terminal or SSH connection to upgrade
+to the latest stable version. Installation and updates use prebuilt artifacts;
+you do not need to clone the repository, run CI or build the frontend.
 
 This README describes the current source tree. For a published package, read the
 documentation at its tag: the same product version does not guarantee the same
@@ -167,7 +173,9 @@ to its model service. The two connections are configured independently.
 
 ## Quick start
 
-First run Relay, Wrapper and the web client on the agent's machine. Source
+For regular use, start with [Release installation and one-command updates](#install-and-upgrade).
+The steps below are for source development and local evaluation: run Relay, Wrapper
+and the web client on the agent's machine. Source
 development/builds use **Python 3.13 and Node 24**, matching CI and [`.nvmrc`](.nvmrc).
 
 Prepare at least one working engine:
@@ -243,8 +251,11 @@ below or configure a restricted LAN/Tailscale entry point.
 
 ## Install and upgrade
 
-Release installers register the `cc-remote` management command automatically.
-Update from an independent terminal or SSH connection:
+**For your first deployment, use the [latest stable GitHub Release](https://github.com/muggle-stack/cc-remote/releases/latest).**
+Follow the [Release installation guide](docs/installation_en.md#release-install) to install
+Relay on your VPS and Wrapper on each device. Installers register the `cc-remote`
+management command automatically. Subsequent updates need no manual package download;
+run this from an independent terminal or SSH connection:
 
 ```bash
 cc-remote update --check   # Check versions only
@@ -270,8 +281,8 @@ locations, older installations, roles and coordinated protocol upgrades.
 
 | Scenario | Guide |
 |---|---|
-| Use current features (recommended) or a development branch | [Source deployment](docs/installation_en.md#source-install): use one tested snapshot |
-| Install a selected published version | [Release packages](docs/installation_en.md#release-install): confirm the tag includes the needed features; Linux Relay and macOS/glibc Linux Wrappers have x86_64 / arm64 packages |
+| Regular use and production deployments (recommended) | [Release packages](docs/installation_en.md#release-install): choose the latest stable version, then use `cc-remote update`; Linux Relay and macOS/glibc Linux Wrappers have x86_64 / arm64 packages |
+| Development, debugging or testing unreleased features | [Source deployment](docs/installation_en.md#source-install): use one tested snapshot |
 | Containers or an existing reverse proxy | [Deployment reference](deploy/README.md#container-deploy-docker-and-the-nginx-alternative) |
 
 The production Relay keeps immutable versions under `/opt/cc-remote/releases/`
@@ -334,6 +345,7 @@ policy is not a replacement for separate OS users, containers or virtual machine
 | [Remote Viewer](docs/remote-viewer.md) | Interactive static pages, Bridge/Isolated modes |
 | Codex App: [macOS](docs/codex-desktop-launcher.md) / [Linux](docs/codex-desktop-linux.md) | Optional App, daily CLI and Wrapper on one daemon |
 | [Codex App tools](docs/codex-app-tools.md) | Optional App-control MCP |
+| [Generic async task MCP](docs/async-tasks.md) | Run scripts/external agents in the background and return results to the originating Codex thread |
 | [Timed messages](docs/timed-messages.md) | Scheduled queue receipts, message tags and countdown UI |
 | [Terminal workspace](docs/tui.md) | TUI setup, connections, Vim controls, session tree, previews and terminal limits |
 | [Changelog](CHANGELOG.md) | Version changes and migrations |
