@@ -6,12 +6,16 @@
 
 **产品版本：v4.0.10** · Wire protocol v74
 
-[English](README_en.md) · [功能对照](#引擎与功能) · [快速开始](#快速开始) ·
-[终端工作台](#terminal-workspace) · [安装与升级](#安装与升级) · [文档](#文档) · [更新记录](CHANGELOG_zh.md)
+[English](README_en.md) · [Release 安装（推荐）](#安装与升级) · [功能对照](#引擎与功能) · [源码体验](#快速开始) ·
+[终端工作台](#terminal-workspace) · [文档](#文档) · [更新记录](CHANGELOG_zh.md)
 
 cc-remote 把本机 agent 的会话、工具过程、文件和运行控制带到远端。你可以在电脑上
 开始任务，用手机查看进度、回答询问、补充指令，再回到原来的会话继续工作。
 模型登录、供应商配置和工具执行仍由本机引擎负责；cc-remote 不代理模型 API。
+
+**推荐普通用户部署最新稳定 Release。** 按照 [Release 安装指南](docs/installation.md#release-install)
+完成首次安装后，即可在独立终端或 SSH 中执行 `cc-remote update`，一键更新到最新稳定版。
+安装和更新使用预构建产物，无需自行克隆源码、运行 CI 或构建前端。
 
 本文说明当前源码的能力。安装已发布包时，请阅读对应 tag 的文档；产品版本号相同，
 也不代表不同提交的功能和协议相同。
@@ -146,7 +150,8 @@ Wrapper 主动出站连接 Relay，设备不需要开放公网入站端口。Rel
 
 ## 快速开始
 
-先在 agent 所在机器本地运行 Relay、Wrapper 和网页。源码开发／构建使用
+普通用户请优先使用 [Release 安装与一键更新](#安装与升级)。以下步骤用于源码开发和本地体验，
+在 agent 所在机器本地运行 Relay、Wrapper 和网页。源码开发／构建使用
 **Python 3.13、Node 24**，与 CI 及 [`.nvmrc`](.nvmrc) 保持一致。
 
 至少准备一个可用引擎：
@@ -218,7 +223,9 @@ CLAUDE_BIN=
 
 ## 安装与升级
 
-Release 安装器会自动安装 `cc-remote` 管理命令。后续在独立终端或 SSH 中一键更新：
+**首次部署推荐使用 [GitHub 最新稳定 Release](https://github.com/muggle-stack/cc-remote/releases/latest)**，
+按 [Release 安装指南](docs/installation.md#release-install) 安装 VPS 的 Relay 和各设备的 Wrapper。
+安装器会自动安装 `cc-remote` 管理命令，后续无需重复手动下载安装包，在独立终端或 SSH 中一键更新：
 
 ```bash
 cc-remote update --check   # 只检查版本
@@ -239,8 +246,8 @@ v4.0.10 新增自动备份保留：升级验收通过后，保留当前版本、
 
 | 场景 | 文档 |
 |---|---|
-| 使用当前功能（推荐）、部署开发分支 | [源码部署](docs/installation.md#source-install)：使用同一份测试通过的快照 |
-| 安装指定已发布版本 | [Release 包安装](docs/installation.md#release-install)：先确认该 tag 包含需要的功能；Relay 为 Linux，Wrapper 支持 macOS 与 glibc Linux，均提供 x86_64 / arm64 包 |
+| 日常使用、生产部署（推荐） | [Release 包安装](docs/installation.md#release-install)：选择最新稳定版，后续使用 `cc-remote update`；Relay 为 Linux，Wrapper 支持 macOS 与 glibc Linux，均提供 x86_64 / arm64 包 |
+| 开发调试、验证尚未发布的功能 | [源码部署](docs/installation.md#source-install)：使用同一份测试通过的快照 |
 | 容器或现有反向代理 | [部署参考](deploy/README.md#container-deploy-docker-and-the-nginx-alternative) |
 
 生产 Relay 使用 `/opt/cc-remote/releases/` 中的不可变版本，通过
