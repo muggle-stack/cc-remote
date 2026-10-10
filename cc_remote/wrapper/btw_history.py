@@ -139,12 +139,24 @@ class BtwHistory:
                               if prefix + parent in self._owners), None)
             turn = self.turns.get(owner) if owner else next(reversed(self.turns.values()))
             explicit = event.msg_id if isinstance(event, Error) else getattr(event, "turn_id", None)
-            if explicit and owner is None:
-                matches = [row for row in self.turns.values()
-                           if explicit in {row.user.msg_id,
-                                           getattr(row.user, "turn_id", None),
-                                           row.binding.turn_id if row.binding else None}]
-                turn = matches[-1] if matches else None
+            identities = [explicit] if explicit else []
+            if isinstance(event, TurnEnd):
+                # Claude's turn_id is the final assistant UUID, not its owner.
+                # Live BTW does not persist native/browser aliases: the
+                # translator carries that exact owner privately instead.
+                identities = list(dict.fromkeys(identity for identity in (
+                    event._changes_turn_id, event.checkpoint_id, event.turn_id,
+                ) if identity))
+            if identities and owner is None:
+                turn = None
+                for identity in identities:
+                    matches = [row for row in self.turns.values()
+                               if identity in {row.user.msg_id,
+                                               getattr(row.user, "turn_id", None),
+                                               row.binding.turn_id if row.binding else None}]
+                    if matches:
+                        turn = matches[-1]
+                        break
             if turn is not None:
                 if isinstance(event, TurnEnd):
                     self._bytes -= RingBuffer._size(turn.end) if turn.end else 0

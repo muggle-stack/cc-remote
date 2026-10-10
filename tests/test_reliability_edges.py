@@ -364,10 +364,10 @@ def test_client_hello_reseeds_binding_before_tail_after_cursor_passed_owner():
         ))
 
         assert transport.sent[0].type == "btw_sync"
-        replay = transport.sent[1:8]
+        replay = transport.sent[1:9]
         assert [event.type for event in replay] == [
             "replay_start", "turn_binding", "assistant_msg_start", "delta",
-            "replay_end", "ask_user_sync", "session_control",
+            "replay_end", "ask_user_sync", "background_process_sync", "session_control",
         ]
         reseed = replay[1]
         assert reseed.msg_id == "item-51"

@@ -695,7 +695,7 @@ function isPayloadFreeUnfinishedCommandShell(block: Block): boolean {
 }
 
 export function ProcessTimeline({ blocks, done, active, outcome, problem, durationMs, startTs, doneTs, onOpenFile,
-  deferredCount = 0, detailLoading = false, detailError, onLoadDetail,
+  deferredCount = 0, detailPending = false, detailLoading = false, detailError, onLoadDetail,
   onRetryDetail,
   canLoadEarlier = false, canLoadNewer = false,
   onLoadEarlier, onLoadNewer,
@@ -717,6 +717,8 @@ export function ProcessTimeline({ blocks, done, active, outcome, problem, durati
   doneTs?: number;
   onOpenFile?: (path: string, line?: number) => void;
   deferredCount?: number;
+  /** A continuation shares its parent's detail request, but not its item count. */
+  detailPending?: boolean;
   detailLoading?: boolean;
   detailError?: string | null;
   onLoadDetail?: (automatic?: boolean) => boolean | void;
@@ -757,7 +759,7 @@ export function ProcessTimeline({ blocks, done, active, outcome, problem, durati
   // synthetic reasoning and successful hook plumbing so consecutive tool calls
   // collapse into one useful group.
   const projectedItems = presentableProcessBlocks(blocks, engine);
-  const needsAuthoritativeDetail = deferredCount > 0;
+  const needsAuthoritativeDetail = deferredCount > 0 || detailPending;
   // Summary History may include bounded lifecycle/tool shells so the header can
   // report that work exists, but their inputs and outputs are intentionally
   // absent. Hide only those payload-free command shells: a same-revision cache
@@ -858,7 +860,7 @@ export function ProcessTimeline({ blocks, done, active, outcome, problem, durati
     (count, block) => count + (block.kind === "tool" ? 1 : 0), 0);
   const countLabel = visibleDetailError && timelineItems.length === 0
     ? "加载失败"
-    : needsAuthoritativeDetail
+    : deferredCount > 0
     ? `${deferredCount} 项`
     : waitingForContent
       ? "等待响应"

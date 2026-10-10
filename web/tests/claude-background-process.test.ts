@@ -24,7 +24,7 @@ try {
     await harness.ssrLoadModule("/src/reducer.ts");
   const { ChatView } = await harness.ssrLoadModule(
     "/src/components/ChatView.tsx");
-  const { claudeContinuations } = await harness.ssrLoadModule("/src/claude-continuations.ts");
+  const { assistantContinuations: claudeContinuations } = await harness.ssrLoadModule("/src/assistant-continuations.ts");
   const event = (body: Record<string, unknown>): ServerEvent => ({
     v: PROTOCOL_VERSION,
     ts: 10,
@@ -411,6 +411,95 @@ try {
   summarySend({ type: "state", state: "idle", ts: 45 });
   assert.equal(summaryMarkup().split("Claude 继续处理").length - 1, 2);
   assert.match(summaryMarkup(), /CI passed\.[\s\S]*Claude 继续处理[\s\S]*Next task passed\./);
+
+  // The idle summary moves observed process into detailProjection and drops
+  // the final's liveOrder. A later continuation must share one order with that
+  // retained prefix, including when native transcript IDs replace stream IDs.
+  for (const nativeFinalId of ["followup-answer", "transcript-answer"]) {
+    const detailSid = `claude-retained-detail-${nativeFinalId}`;
+    let detailState = {
+      ...initialState, focusedSid: detailSid,
+      sessions: [{ session_id: detailSid, engine: "claude" }],
+      runtimes: { [detailSid]: createRuntime() },
+    };
+    const detailSend = (body: Record<string, unknown>) => {
+      detailState = reduce(detailState, { type: "event", event: event({
+        sid: detailSid, ...body,
+      }) });
+    };
+    const text = (id: string, channel: string, body: string, background = false) => {
+      const common = { turn_id: "detail-parent", message_id: id, background };
+      detailSend({ type: "assistant_msg_start", ...common, channel: "unknown" });
+      detailSend({ type: "delta", ...common, channel, text: body });
+      detailSend({ type: "assistant_msg_end", ...common, channel });
+    };
+    const tool = (id: string, name: string, background = false) => {
+      const common = { turn_id: "detail-parent", tool_use_id: id, background };
+      detailSend({ type: "tool_use", ...common,
+        message_id: `${id}-message`, tool: name, input: {} });
+      detailSend({ type: "tool_result", ...common, content: "ok", is_error: false });
+    };
+    const refresh = (continued = false) => detailSend({
+      type: "history", session_id: detailSid, revision: "retained-detail-r1",
+      detail: "summary", in_progress: false, has_more: true, events: [],
+      turns: [{ id: "detail-parent", prompt: "check CI", done: true,
+        processDetailState: "present", detailEventCount: 5,
+        blocks: [
+          { kind: "text", message_id: "parent-answer", channel: "final",
+            text: "Waiting for CI.", done: true },
+          ...(continued ? [{ kind: "text", message_id: nativeFinalId,
+            channel: "final", text: "The watcher was restarted.", done: true,
+            background: true }] : []),
+        ] }],
+    });
+    detailSend({ type: "user_msg", msg_id: "detail-parent", prompt: "check CI" });
+    tool("start-watcher", "Bash");
+    text("parent-answer", "final", "Waiting for CI.");
+    detailSend({ type: "turn_end", result: {
+      subtype: "success", duration_ms: 1000, is_error: false,
+    } });
+    refresh();
+    const beforeContinuation = detailState;
+    const retained = detailState.runtimes[detailSid].turns[0];
+    assert.equal(retained.blocks.length, 1);
+    assert.equal(retained.detailProjection?.blocks[0].tool_use_id, "start-watcher");
+    const retainedSnapshot = JSON.stringify(retained);
+
+    detailSend({ type: "state", state: "running", msg_id: "detail-parent",
+      continuation: true });
+    tool("read-result", "Read", true);
+    text("followup-thought", "thinking", "Inspect the result.", true);
+    text("followup-comment", "commentary", "Restart the watcher.", true);
+    tool("restart-watcher", "Bash", true);
+    text("followup-answer", "final", "The watcher was restarted.", true);
+    detailSend({ type: "state", state: "idle" });
+    refresh(true);
+
+    const turn = detailState.runtimes[detailSid].turns[0];
+    const markup = renderToStaticMarkup(createElement(ChatView, {
+      sid: detailSid, engine: "claude", turns: [turn],
+    }));
+    assert.equal(markup.split("Claude 继续处理").length - 1, 1,
+      "retained parent detail cannot split the follow-up answer from its four process items");
+    assert.match(markup,
+      /Waiting for CI\.[\s\S]*Claude 继续处理[\s\S]*4 项[\s\S]*The watcher was restarted\./);
+    assert.equal(markup.split("The watcher was restarted.").length - 1, 1);
+    assert.equal(turn.done, true);
+    assert.equal(detailState.runtimes[detailSid].liveOwner, null);
+    assert.equal(JSON.stringify(beforeContinuation.runtimes[detailSid].turns[0]),
+      retainedSnapshot, "ordering repair must not mutate the prior reducer state");
+
+    detailSend({ type: "state", state: "running", msg_id: "detail-parent",
+      continuation: true });
+    tool("next-task-result", "Read", true);
+    const nextMarkup = renderToStaticMarkup(createElement(ChatView, {
+      sid: detailSid, engine: "claude", turns: detailState.runtimes[detailSid].turns,
+    }));
+    assert.equal(nextMarkup.split("Claude 继续处理").length - 1, 2,
+      "a real later continuation remains distinct from the repaired response");
+    assert.match(nextMarkup,
+      /The watcher was restarted\.[\s\S]*Claude 继续处理/);
+  }
 } finally {
   await harness.close();
 }

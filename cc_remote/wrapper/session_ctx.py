@@ -206,6 +206,9 @@ class SessionContext:
     # edges enrich these snapshots without becoming reconnect authority.
     claude_background_processes: dict[str, BackgroundProcessItem] = field(
         default_factory=dict)
+    # Account-local async MCP activity is a separate read-only projection. It
+    # never owns native turn state or keeps the main model marked as running.
+    codex_background_processes: dict[str, BackgroundProcessItem] | None = None
     # Sanitized Bash command metadata survives ResultMessage translator swaps
     # so a later task_started edge can still expose the script in the dock.
     claude_item_commands: dict[str, str] = field(default_factory=dict)

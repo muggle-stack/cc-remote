@@ -4,6 +4,30 @@ const url = "/tests/history-browser.html?background-tasks=1";
 const trigger = (page: Page) => page.getByRole("button", { name: /后台任务，\d+ 项进行中/ });
 const dialog = (page: Page) => page.getByRole("dialog", { name: "后台任务", exact: true });
 
+test("Codex background tasks show an independent dock and a native continuation label", async ({ page }, testInfo) => {
+  await page.goto(url + "&engine=codex&theme=light");
+  await page.getByRole("button", { name: "回复结束", exact: true }).click();
+  await expect(page.locator(".runbar .seg")).toHaveCount(0);
+  await expect(trigger(page)).toHaveText("后台任务 · 1");
+  await trigger(page).click();
+  await expect(dialog(page)).toBeVisible();
+  await expect(dialog(page).getByText("检查构建进度和板载温度", { exact: true })).toBeVisible();
+  await expect(dialog(page).getByText(/运行中 · 2分/)).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("codex-background-tasks-open.png"), animations: "disabled" });
+  await page.getByRole("button", { name: "接收 Codex 回调", exact: true })
+    .evaluate(button => (button as HTMLButtonElement).click());
+  await expect(dialog(page)).toHaveCount(0);
+  await expect(trigger(page)).toHaveCount(0);
+  const followup = page.locator(".background-followup");
+  await expect(followup).toHaveCount(1);
+  await expect(followup).toContainText("Codex 收到后台消息，继续处理");
+  await expect(followup).toContainText("已收到构建结果，验证通过。");
+  await followup.locator(".turn-process-head").click();
+  await followup.getByText("检查构建进度和板载温度", { exact: true }).click();
+  await expect(followup).toContainText("Build passed");
+  await page.screenshot({ path: testInfo.outputPath("codex-background-callback.png"), animations: "disabled" });
+});
+
 test("background tasks keep the composer compact and open readable details", async ({ page }, testInfo) => {
   await page.goto(url);
   const chip = trigger(page);
@@ -53,6 +77,19 @@ test("background tasks keep the composer compact and open readable details", asy
   await page.keyboard.press("Escape");
   await expect(panel).toHaveCount(0);
   await expect(chip).toBeFocused();
+});
+
+test("Codex compact history loads receipt detail without duplicating its source label", async ({ page }) => {
+  await page.goto(url + "&engine=codex&compact=1");
+  await page.getByRole("button", { name: "回复结束", exact: true }).click();
+  await page.getByRole("button", { name: "接收 Codex 回调", exact: true }).click();
+  const followup = page.locator(".background-followup");
+  await expect(followup).toHaveCount(1);
+  await expect(followup.locator(".turn-process-count")).toHaveText("1 项");
+  await followup.locator(".turn-process-head").click();
+  await followup.getByText("检查构建进度和板载温度", { exact: true }).click();
+  await expect(followup).toContainText("Build passed");
+  await expect(page.locator(".background-followup-boundary")).toHaveCount(1);
 });
 
 test("background tasks follow native terminal events and empty snapshots", async ({ page }) => {

@@ -24,6 +24,7 @@ from pydantic import ValidationError
 from cc_remote.wrapper.codex_delegation import (
     normalize_codex_delegation_item, parse_codex_delegation,
 )
+from cc_remote.wrapper.codex_tasks import task_receipt_event
 
 from cc_remote.attachments import (
     ALLOWED_IMAGE_TYPES,
@@ -59,6 +60,7 @@ _PROCESS_ITEM_TYPES = {
     "plan", "reasoning", "collabAgentToolCall", "subAgentActivity",
     "contextCompaction", "imageView", "sleep", "imageGeneration",
     "enteredReviewMode", "exitedReviewMode",
+    "functionCallOutput",
 }
 _MAX_HISTORY_RECORD_CHARS = 16 * 1024 * 1024
 _MAX_FILE_CHANGE_ITEMS = 64
@@ -295,6 +297,8 @@ class CodexHistoryProcessWitness:
     # Only byte offsets, never patch bodies, live in the process/page LRU.
     file_change_offsets: tuple[int, ...] = ()
     file_changes_truncated: bool = False
+    # Offset, next native final-message id, compact receipt. No task output.
+    task_receipts: tuple[tuple[int, str | None, dict], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -401,6 +405,58 @@ class _HistoryProcessAccumulator:
     generated_images: bool = False
     file_change_offsets: set[int] = field(default_factory=set)
     file_changes_truncated: bool = False
+    task_receipts: dict[int, tuple[str | None, dict]] = field(default_factory=dict)
+    next_answer_id: str | None = None
+    next_answer_unknown: bool = False
+
+    def observe_task_receipt(self, offset: int, line: bytes) -> None:
+        # Read only bounded native envelopes. The following final-message id
+        # anchors a receipt between answers even when native summaries omit all
+        # tools. Never infer order from equal clocks or assistant prose.
+        header = line[:1024]
+        answer_hint = b'"message"' in header and b'"assistant"' in header
+        if b'"response_item"' not in header or not (b'"cc_remote_tasks"' in header or answer_hint):
+            return
+        if len(line) > _MAX_HISTORY_REVERSE_RECORD_BYTES:
+            self.next_answer_unknown |= answer_hint
+            return
+        try:
+            row = json.loads(line)
+        except (ValueError, TypeError):
+            self.next_answer_unknown |= answer_hint
+            return
+        if not isinstance(row, dict) or row.get("type") != "response_item":
+            return
+        payload = row.get("payload")
+        if not isinstance(payload, dict):
+            return
+        if payload.get("type") == "message" and payload.get("role") == "assistant":
+            if _assistant_channel(payload.get("phase")) != "commentary":
+                key = payload.get("id")
+                self.next_answer_id = key if isinstance(key, str) and _SAFE_WIRE_ID.fullmatch(key) else None
+                self.next_answer_unknown = self.next_answer_id is None
+            return
+        if (payload.get("type") != "function_call_output" or len(self.task_receipts) >= 16
+                or self.next_answer_unknown):
+            return
+        key = payload.get("id")
+        if not isinstance(key, str) or not _SAFE_WIRE_ID.fullmatch(key):
+            return
+        receipt = task_receipt_event(
+            payload, item_id=key, turn_id=None, detail_limit=0)
+        if receipt is None:
+            return
+        stamp = _history_record_timestamp(line)
+        block = {
+            "kind": "process", "item_id": receipt.item_id, "processKind": "task",
+            "phase": "end", "done": True, "status": receipt.status,
+            "server": receipt.server, "tool": receipt.tool,
+            "title": receipt.title, "summary": receipt.summary,
+        }
+        if stamp is not None:
+            block["startedTs"] = int(stamp * 1000)
+        self.present = True
+        self.task_receipts[offset] = (self.next_answer_id, block)
 
     def observe_file_change(self, offset: int, line: bytes) -> None:
         # Match the native envelope, not a type string inside arbitrary tool
@@ -442,6 +498,9 @@ class _HistoryProcessAccumulator:
         offsets = self.file_change_offsets.union(witness.file_change_offsets)
         self.file_changes_truncated |= witness.file_changes_truncated or len(offsets) > 512
         self.file_change_offsets = set(sorted(offsets)[:512])
+        self.task_receipts.update({offset: (anchor, block)
+                                   for offset, anchor, block in witness.task_receipts})
+        self.task_receipts = dict(sorted(self.task_receipts.items())[-16:])
         for stamp_ms in (witness.started_ms, witness.done_ms):
             if stamp_ms is not None:
                 self.observe(stamp_ms)
@@ -454,6 +513,9 @@ class _HistoryProcessAccumulator:
         self.generated_images = False
         self.file_change_offsets.clear()
         self.file_changes_truncated = False
+        self.task_receipts.clear()
+        self.next_answer_id = None
+        self.next_answer_unknown = False
         return witness
 
     def snapshot(self) -> CodexHistoryProcessWitness | None:
@@ -465,6 +527,8 @@ class _HistoryProcessAccumulator:
             generated_images=self.generated_images,
             file_change_offsets=tuple(sorted(self.file_change_offsets)),
             file_changes_truncated=self.file_changes_truncated,
+            task_receipts=tuple((offset, anchor, block) for offset, (anchor, block)
+                                in sorted(self.task_receipts.items())),
         )
 
 
@@ -1254,6 +1318,7 @@ def _history_boundary_records(
     ):
         if include_process:
             process.observe_file_change(offset, line)
+            process.observe_task_receipt(offset, line)
             if _history_generated_image_record(line):
                 process.observe(None)
                 process.generated_images = True
@@ -1633,6 +1698,10 @@ def codex_history_process_append(
             return None
     process = _HistoryProcessAccumulator()
     process.merge(previous.process_by_native_segment.get(segment))
+    if process.task_receipts:
+        # A formerly answer-less receipt may gain its exact following anchor.
+        # Rebuild this requested segment instead of retaining a stale end slot.
+        return None
     for offset, line in _reverse_jsonl_records(
         # Include the preceding newline so the reverse reader can emit the
         # first appended record rather than dropping it as a partial carry.
@@ -1648,6 +1717,10 @@ def codex_history_process_append(
             process.observe(None)
             process.generated_images = True
         process.observe_file_change(offset, line)
+        process.observe_task_receipt(offset, line)
+        if process.task_receipts:
+            # Narrative boundaries need the complete segment's message order.
+            return None
         visible, stamp = _history_visible_process_stamp(line)
         if visible:
             process.observe(stamp)
@@ -3186,6 +3259,10 @@ class CodexStreamTranslator:
         turn_id = _optional_wire_id(params.get("turnId"), "turn")
         phase = "end" if completed else "start"
         status = "succeeded" if completed else "running"
+        if item_type == "functionCallOutput":
+            return task_receipt_event(
+                item, item_id=iid, turn_id=turn_id,
+                detail_limit=self.tool_result_max)
         if item_type == "reasoning":
             summary = _reasoning_summary(item)
             if not summary:
@@ -4881,6 +4958,16 @@ def codex_translate_history(
                   and payload_type in {
                       "function_call_output", "custom_tool_call_output"}):
                 open_assistant_only_turn()
+                receipt = task_receipt_event(
+                    p,
+                    item_id=_history_id(p.get("id"), "task-receipt", line_no, raw_ts),
+                    turn_id=_history_optional_turn_id(active_turn_id or pending_turn_id),
+                    detail_limit=tool_result_max,
+                )
+                if receipt is not None:
+                    turn_visible = True
+                    append_event(receipt)
+                    continue
                 tool_id = _history_id(
                     p.get("call_id"), "tool", line_no, raw_ts)
                 tool_meta = history_tools.get(

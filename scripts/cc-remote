@@ -3,7 +3,7 @@
 set -euo pipefail
 managed_wrapper_root="/opt/cc-remote-wrapper"
 
-if [ "$(uname -s)" = Linux ] && [ "$(id -u)" -ne 0 ]; then
+if [ "$(uname -s)" = Linux ] && [ "$(id -u)" -ne 0 ] && [ "${1:-}" != tasks ]; then
   # Relay releases and installation metadata may only be readable by root.
   # Elevate this installed launcher, never a script downloaded from the network.
   # Preserve explicit download settings without putting proxy credentials into
@@ -37,7 +37,10 @@ case "$(uname -s)" in
         esac
       done
     fi
-    if [ "$role_requested" -eq 1 ]; then
+    if [ "${1:-}" = tasks ]; then
+      # MCP tasks belong to the calling account, never the root Relay account.
+      roots=("$managed_wrapper_root/current")
+    elif [ "$role_requested" -eq 1 ]; then
       [ "$role_value_next" -eq 0 ] || {
         echo "--role requires relay or wrapper." >&2; exit 2;
       }

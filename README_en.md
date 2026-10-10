@@ -334,6 +334,7 @@ policy is not a replacement for separate OS users, containers or virtual machine
 | [Remote Viewer](docs/remote-viewer.md) | Interactive static pages, Bridge/Isolated modes |
 | Codex App: [macOS](docs/codex-desktop-launcher.md) / [Linux](docs/codex-desktop-linux.md) | Optional App, daily CLI and Wrapper on one daemon |
 | [Codex App tools](docs/codex-app-tools.md) | Optional App-control MCP |
+| [Generic async task MCP](docs/async-tasks.md) | Run scripts/external agents in the background and return results to the originating Codex thread |
 | [Timed messages](docs/timed-messages.md) | Scheduled queue receipts, message tags and countdown UI |
 | [Terminal workspace](docs/tui.md) | TUI setup, connections, Vim controls, session tree, previews and terminal limits |
 | [Changelog](CHANGELOG.md) | Version changes and migrations |

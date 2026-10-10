@@ -289,6 +289,7 @@ Code 默认权限较宽；Work 的私有目录策略不能替代独立系统用�
 | [远程 Viewer](docs/remote-viewer.md) | 交互式静态页面、Bridge／Isolated 模式 |
 | Codex App 接入：[macOS](docs/codex-desktop-launcher.md)／[Linux](docs/codex-desktop-linux.md) | 可选桌面 App、日常 CLI 与 Wrapper 共用 daemon |
 | [Codex App 工具](docs/codex-app-tools.md) | 可选 App-control MCP |
+| [通用异步任务 MCP](docs/async-tasks.md) | 后台执行脚本／外部 agent，完成后通知原 Codex 会话 |
 | [定时消息 UI](docs/timed-messages.md) | 定时发送入口、消息标签、光圈与下次时间 |
 | [终端工作台](docs/tui_zh.md) | TUI 安装、连接、Vim 操作、会话树、文件预览与终端限制 |
 | [更新记录](CHANGELOG_zh.md) | 版本变化与迁移记录 |

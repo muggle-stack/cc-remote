@@ -34,7 +34,9 @@ const DIST = resolve(import.meta.dirname, "../dist");
 const MAX_ENTRY_BYTES = 537 * 1024;
 // Viewport portals for image/paste overlays keep mobile page layers stable.
 // They add <0.1 KiB, with no extra request/dependency; round the cap to a KiB.
-const MAX_INITIAL_BYTES = 939 * 1024;
+// Shared Claude/Codex continuation splitting and the existing task dock add
+// <1 KiB. No new dependency/request; keep entry and compressed-size caps fixed.
+const MAX_INITIAL_BYTES = 940 * 1024;
 // Cross-thread provenance, scoped navigation and receipts add <2 KiB gzip.
 // The history reader and link UI load on demand; other caps stay unchanged.
 const MAX_INITIAL_GZIP_BYTES = 282 * 1024;

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "vite";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import type { AppState, Turn } from "../src/reducer.ts";
 import type { ServerEvent } from "../src/protocol.ts";
 
@@ -8,7 +10,9 @@ const harness = await createServer({
   server: { middlewareMode: true, watch: null },
 });
 try {
-  const { initialState, reduce } = await harness.ssrLoadModule("/src/reducer.ts");
+  const { initialState, reduce, createRuntime } = await harness.ssrLoadModule("/src/reducer.ts");
+  const { BtwPanel } = await harness.ssrLoadModule("/src/components/BtwPanel.tsx");
+  const { ComposerDraftStore } = await harness.ssrLoadModule("/src/composer-drafts.ts");
   const sid = "btw-history";
   let state: AppState = initialState;
   const event = (body: Record<string, unknown>) => {
@@ -16,6 +20,13 @@ try {
       v: 72, ts: 1, sid, ...body,
     } as ServerEvent });
   };
+  const panel = () => renderToStaticMarkup(createElement(BtwPanel, {
+    sid, rt: state.runtimes[sid], engine: "claude", chats: [],
+    active: "btw", hasArtifact: false, catalog: {}, draftKey: sid,
+    draftStore: new ComposerDraftStore(), sendMode: "steer",
+    unconfirmedQueued: [], unconfirmedReplaceable: [],
+    queueCapacity: {}, replaceQueueCapacity: {},
+  }));
   event({ type: "btw_opened", request_id: "r", parent_sid: "main",
     btw_sid: sid, engine: "codex", created_at: 1, revision: 1 });
   const orphan: Turn = {
@@ -96,6 +107,40 @@ try {
   restore();
   assert.equal(state.runtimes[sid].turns.at(-1)?.id, "new-local",
     "a repeated snapshot must preserve a new input submitted during the earlier replay");
+
+  // Network-delayed reconstruction must never mount ChatView with a prefix.
+  // Its normal synchronous initial bottom positioning runs once on the final
+  // projection, including on refresh or a repeated same-session restore.
+  state = { ...state, runtimes: { ...state.runtimes, [sid]: createRuntime() } };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    event({ type: "replay_start", generation: "g", from_seq: 0, to_seq: 200,
+      truncated: false, rebuild: true });
+    for (let i = 0; i < 8; i++) {
+      event({ type: "user_msg", msg_id: `claude-user-${i}`, prompt: `question ${i}` });
+      event({ type: "delta", message_id: `claude-assistant-${i}`,
+        channel: "final", text: `restored reply ${i}` });
+      event({ type: "assistant_msg_end", message_id: `claude-assistant-${i}`, channel: "final" });
+      event({ type: "turn_end", turn_id: `claude-assistant-${i}`,
+        checkpoint_id: `claude-user-${i}`, result: {
+          subtype: "success", duration_ms: 1000, is_error: false,
+        } });
+      const restoring = panel();
+      assert.match(restoring, /正在恢复侧边对话/);
+      assert.doesNotMatch(restoring, /class="thread"|restored reply/,
+        "partial history must not be visible or scroll while replay is arriving");
+    }
+    event({ type: "replay_end", to_seq: 200, truncated: false });
+    const complete = panel();
+    assert.doesNotMatch(complete, /正在恢复侧边对话/);
+    assert.match(complete, /restored reply 7/);
+    assert.equal(complete.split('class="turn-done-mark"').length - 1, 1,
+      "restored Claude completion shows the final spark exactly once");
+  }
+  event({ type: "user_msg", msg_id: "live-after-restore", prompt: "continue live" });
+  event({ type: "state", state: "running", msg_id: "live-after-restore" });
+  event({ type: "delta", message_id: "live-answer", text: "stream visible immediately", channel: "final" });
+  assert.match(panel(), /stream visible immediately/,
+    "the replay barrier must not hold back ordinary live streaming");
 } finally {
   await harness.close();
 }

@@ -24,7 +24,7 @@ import type { Space } from "../protocol";
 import type { LoadTurnFilePage } from "../turn-file-pages";
 import { usageForTurn, type TurnUsageReadings } from "../turn-usage";
 import { MessageBlock } from "./MessageBlock";
-import { claudeContinuations, type ClaudeContinuation } from "../claude-continuations";
+import { assistantContinuations, type AssistantContinuation } from "../assistant-continuations";
 import { TimedMessageTag } from "./TimedMessageTag";
 import { Icon, ClaudeMark, ClaudeWorking, ClaudeSpark } from "../icons";
 import { canForkTurn } from "../session-worktree";
@@ -2722,10 +2722,7 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
                 || supplemental.questionOwners.get(block.message_id) === t.id);
             const generatedImages = generatedOutputImages(timelineBlocks);
             const modelNotices = modelFallbackNotices(timelineBlocks);
-            const narrative = engine === "claude"
-              ? claudeContinuations(timelineBlocks, finalBlocks)
-              : { original: timelineBlocks, answers: finalBlocks,
-                  continuations: [] as ClaudeContinuation[] };
+            const narrative = assistantContinuations(timelineBlocks, finalBlocks, engine);
             const lastContinuation = narrative.continuations.at(-1);
             const originalProcessItems = presentableProcessBlocks(
               narrative.original, engine);
@@ -2831,7 +2828,9 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
                 ? Math.max(1, t.detailEventCount ?? 0)
                 : t.detailEventCount ?? 0
               : 0;
-            const renderProcess = (segment?: ClaudeContinuation) => {
+            const renderProcess = (segment?: AssistantContinuation) => {
+              if (!segment && engine === "codex" && lastContinuation
+                  && originalProcessItems.length === 0) return null;
               // Deferred counts describe the whole native turn. A continuation
               // containing only an answer has no process disclosure of its own;
               // borrowing the parent's count creates an empty "1 item" row.
@@ -2857,6 +2856,7 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
                     && lastContinuation.startedTs != null
                     && t.doneTs > lastContinuation.startedTs ? undefined : t.doneTs}
                 deferredCount={segment ? 0 : deferredProcessCount}
+                detailPending={!!segment && engine === "codex" && deferredProcessCount > 0}
                 detailLoading={t.detailLoading}
                 detailError={processDetailError}
                 externalPlanItemId={externalPlanItemId}
@@ -2872,8 +2872,8 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
                       detailRetryDirection,
                       false)
                   : undefined}
-                canLoadEarlier={!segment && canReadOlderDetail}
-                canLoadNewer={!segment && canReadNewerDetail}
+                canLoadEarlier={(!segment || engine === "codex") && canReadOlderDetail}
+                canLoadNewer={(!segment || engine === "codex") && canReadNewerDetail}
                 onLoadEarlier={onLoadDetail && canReadOlderDetail
                   ? () => requestProcessDetail(
                       t.id, t.detailOldestCursor, "older")
@@ -3067,7 +3067,8 @@ export function ChatView({ sid, turnUsage, turns: incomingTurns, engine = "claud
                 {narrative.continuations.map((segment) => (
                   <div key={segment.id} className="background-followup">
                     <div className="background-followup-boundary">
-                      <span>Claude 继续处理</span>
+                      <span>{engine === "codex"
+                        ? "Codex 收到后台消息，继续处理" : "Claude 继续处理"}</span>
                       {segment.startedTs != null && <time>{formatTime(segment.startedTs)}</time>}
                     </div>
                     {renderProcess(segment)}
