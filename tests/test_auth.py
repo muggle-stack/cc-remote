@@ -989,7 +989,9 @@ def test_uvicorn_access_log_is_disabled(monkeypatch):
     assert called["args"] == (app,)
     assert called["kwargs"]["access_log"] is False
     assert called["kwargs"]["proxy_headers"] is True
-    assert called["kwargs"]["forwarded_allow_ips"] == "127.0.0.1,::1"
+    # Loopback by default; FORWARDED_ALLOW_IPS appends extra trusted proxies.
+    # Behavior is covered in tests/test_relay_forwarded_headers.py.
+    assert called["kwargs"]["forwarded_allow_ips"] == cfg.forwarded_allow_ips
     configured = called["kwargs"]["log_config"]
     expected = uvicorn_log_config()
     assert configured.keys() == expected.keys()
