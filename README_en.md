@@ -451,6 +451,7 @@ policy is not a replacement for separate OS users, containers or virtual machine
 | [Codex App tools](docs/codex-app-tools.md) | Optional App-control MCP |
 | [Generic async task MCP](docs/async-tasks.md) | Run scripts/external agents in the background and return results to the originating Codex thread |
 | [Cross-session messaging MCP](docs/session-messages.md) | Unified Claude/Codex delivery alongside native Codex App messages, source labels and receipts |
+| [Releasing a session to a local process](docs/local-control.md) | A local program asks the Wrapper to let go of an idle Claude session it keeps for a viewer |
 | [Timed messages](docs/timed-messages.md) | Scheduled queue receipts, message tags and countdown UI |
 | [Terminal workspace](docs/tui.md) | TUI setup, connections, Vim controls, session tree, previews and terminal limits |
 | [Changelog](CHANGELOG.md) | Version changes and migrations |

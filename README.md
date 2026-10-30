@@ -368,6 +368,7 @@ Code 默认权限较宽；Work 的私有目录策略不能替代独立系统用�
 | [Codex App 工具](docs/codex-app-tools.md) | 可选 App-control MCP |
 | [通用异步任务 MCP](docs/async-tasks.md) | 后台执行脚本／外部 agent，完成后通知原 Codex 会话 |
 | [跨会话消息 MCP](docs/session-messages.md) | Claude / Codex 统一投递入口，兼容 Codex App 原生消息来源与回执 |
+| [释放会话给本机进程](docs/local-control.md) | 本机程序请 Wrapper 放开浏览时保留的空闲 Claude 会话 |
 | [定时消息 UI](docs/timed-messages.md) | 定时发送入口、消息标签、光圈与下次时间 |
 | [终端工作台](docs/tui_zh.md) | TUI 安装、连接、Vim 操作、会话树、文件预览与终端限制 |
 | [更新记录](CHANGELOG_zh.md) | 版本变化与迁移记录 |
