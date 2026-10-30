@@ -101,6 +101,47 @@ test("artifact-svg retains native animation values, easing, timing and local ref
   expect(results.middle.filter).toBeCloseTo(0.5, 2);
 });
 
+test("artifact-svg preserves gradient and pattern transform animation timelines", async ({ page }) => {
+  const definitions = ["gradient", "pattern"].flatMap(kind =>
+    ["values", "from-to"].map(syntax => {
+      const id = `${kind}-${syntax}`;
+      const animation = `<animateTransform attributeName="${kind}Transform" type="rotate" ${syntax === "values" ? 'values="0;180"' : 'from="0" to="180"'} dur="2s" repeatCount="indefinite"/>`;
+      return kind === "gradient"
+        ? `<linearGradient id="${id}"><stop stop-color="red"/><stop offset="1" stop-color="blue"/>${animation}</linearGradient>`
+        : `<pattern id="${id}" width="20" height="20" patternUnits="userSpaceOnUse"><rect width="10" height="20" fill="green"/>${animation}</pattern>`;
+    })).join("");
+  const image = await open(page, svg(`<defs>${definitions}</defs>
+    <rect width="120" height="120" fill="url(#gradient-values)"/>
+    <rect x="120" width="120" height="120" fill="url(#gradient-from-to)"/>
+    <rect y="120" width="120" height="120" fill="url(#pattern-values)"/>
+    <rect x="120" y="120" width="120" height="120" fill="url(#pattern-from-to)"/>`));
+  const clean = await image.evaluate(node => (window as unknown as {
+    svgBlobs: Map<string, Blob>;
+  }).svgBlobs.get((node as HTMLImageElement).src)!.text());
+  const frames = await page.evaluate(source => {
+    const host = document.createElement("div");
+    host.innerHTML = source;
+    document.body.append(host);
+    const root = host.querySelector("svg")!;
+    root.pauseAnimations();
+    const sample = (time: number) => {
+      root.setCurrentTime(time);
+      return [...root.querySelectorAll<SVGLinearGradientElement | SVGPatternElement>("linearGradient,pattern")].map(element => {
+        const transforms = ("gradientTransform" in element
+          ? element.gradientTransform : element.patternTransform).animVal;
+        return transforms.numberOfItems ? transforms.getItem(0).angle : null;
+      });
+    };
+    const result = [sample(0.5), sample(1), sample(1.5)];
+    host.remove();
+    return result;
+  }, clean);
+  for (const [index, frame] of frames.entries()) {
+    expect(frame).toHaveLength(4);
+    for (const angle of frame) expect(angle).toBeCloseTo(45 * (index + 1), 2);
+  }
+});
+
 for (const mode of ["docked", "centered", "markdown"]) {
   test(`artifact-svg plays SMIL and CSS animations in the ${mode} image preview`, async ({ page }) => {
     const image = await open(page, svg(`
@@ -149,13 +190,14 @@ test("artifact-svg cannot animate unsafe attributes or external resources after 
     <rect width="10" height="10" onload="window.svgScriptRan=true"/>
     <animate id="good" href="#safe" attributeName="opacity" from="0.2" to="1" dur="2s" repeatCount="indefinite"/>
     <set id="mutate-animation" href="#good" attributeName="attributeName" to="href"/>
+    <animateTransform id="wrong-transform-target" href="#safe" attributeName="opacity" type="scale" values="1;2" dur="1s"/>
   `));
   const result = await image.evaluate(async node => {
     const text = await (window as unknown as {
       svgBlobs: Map<string, Blob>;
     }).svgBlobs.get((node as HTMLImageElement).src)!.text();
     const doc = new DOMParser().parseFromString(text, "image/svg+xml");
-    return { text, animations: [...doc.querySelectorAll("animate,set")].map(el => el.id), uses: doc.querySelectorAll("use").length };
+    return { text, animations: [...doc.querySelectorAll("animate,set,animateTransform")].map(el => el.id), uses: doc.querySelectorAll("use").length };
   });
   expect(result.animations).toEqual(["good"]);
   expect(result.uses).toBe(0);

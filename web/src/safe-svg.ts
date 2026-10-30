@@ -11,6 +11,9 @@ const ANIMATION_TAGS = new Set([
   "animate", "set", "animatecolor", "animatemotion", "animatetransform",
 ]);
 const ANIMATION_ATTRIBUTES = new Set(["from", "to", "calcmode"]);
+const TRANSFORM_ATTRIBUTES = new Set([
+  "transform", "gradientTransform", "patternTransform",
+]);
 // Only visual properties may change after sanitization. In particular, an
 // animation must never restore a URL, event handler, style or another
 // animation's attributeName after those have already been checked.
@@ -80,7 +83,7 @@ function sanitizeSvgReferencesAndAnimations(root: Element): void {
         || ANIMATION_TAGS.has(target.localName.toLowerCase())
         || ["style", "script", "mpath"].includes(target.localName)
         || (tag !== "animatemotion" && !ANIMATABLE_ATTRIBUTES.has(attribute))
-        || (tag === "animatetransform" && attribute !== "transform")
+        || (tag === "animatetransform" && !TRANSFORM_ATTRIBUTES.has(attribute))
         || badValue) {
       element.remove();
     }
