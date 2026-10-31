@@ -2,7 +2,7 @@
 # Download, verify, and run a role-specific cc-remote release installer.
 set -euo pipefail
 
-VERSION="${CC_REMOTE_VERSION:-5.3.6}"
+VERSION="${CC_REMOTE_VERSION:-5.3.7}"
 REPOSITORY="${CC_REMOTE_GITHUB_REPOSITORY:-muggle-stack/cc-remote}"
 BASE_URL="${CC_REMOTE_RELEASE_BASE_URL:-https://github.com/$REPOSITORY/releases/download/v$VERSION}"
 

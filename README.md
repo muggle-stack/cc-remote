@@ -4,7 +4,7 @@
 
 自托管 · 多会话 · 多设备 · 实时工具过程 · Code / Work · Web / PWA / TUI
 
-**产品版本：v5.3.6** · Wire protocol v85
+**产品版本：v5.3.7** · Wire protocol v85
 
 [English](README_en.md) · [Release 安装（推荐）](#安装与升级) · [功能对照](#引擎与功能) · [源码体验](#快速开始) ·
 [界面导览](#界面导览) · [终端工作台](#terminal-workspace) · [文档](#文档) · [更新记录](CHANGELOG_zh.md)
@@ -319,7 +319,7 @@ Codex 需核对每个账号的 CLI 与 Wrapper 共用官方 daemon；已安装�
 ### Web、PWA 与 Desktop
 
 Web / PWA 是正式发布的图形客户端，三种引擎共用同一套页面。既有的 macOS Desktop
-是实验性 Electron 壳，v5.3.6 Release 不包含新的 Desktop 安装包。修复后的旧壳从配置的
+是实验性 Electron 壳，v5.3.7 Release 不包含新的 Desktop 安装包。修复后的旧壳从配置的
 Relay 加载页面，避免内置旧页面导致“等待服务端完成部署”的循环；登录和原生集成保留。
 `cc-remote update` 更新 Relay、Web 和 Wrapper，不替换 Electron 本体。
 

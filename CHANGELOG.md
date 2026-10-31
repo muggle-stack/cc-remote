@@ -2,6 +2,16 @@
 
 [中文](CHANGELOG_zh.md)
 
+## v5.3.7
+
+Restore SVG animation previews, add explicit local handoff for idle Claude sessions, and include a verified HarmonyOS package with every release. Wire protocol v85 and Claude Agent SDK 0.2.174 are unchanged.
+
+- Preserve declarative SVG animations, local references, and gradient/pattern transforms while retaining the preview security boundary.
+- Let a local Claude process request release of an idle Remote session; confirm the native process has exited before granting handoff, and reject busy or unconfirmed releases.
+- Require every release to include the validated unsigned HarmonyOS HAP, native build metadata and mobile checksums. Reuse the existing native build only while its inputs remain unchanged.
+
+See the bilingual [release notes](docs/releases/v5.3.7.md).
+
 ## v5.3.6
 
 Make file previews easier to read and avoid accidental path tooltips. Wire protocol v85 and Claude Agent SDK 0.2.174 are unchanged.

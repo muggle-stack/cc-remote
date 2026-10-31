@@ -1,7 +1,7 @@
 # Legacy macOS Desktop compatibility
 
 Web/PWA are the released graphical clients. The existing `cc.remote.desktop`
-Electron prototype is a separately maintained macOS application; v5.3.6 Release
+Electron prototype is a separately maintained macOS application; v5.3.7 Release
 assets do not include a new Desktop installer. This document is about cc-remote
 Desktop, not the official Codex App.
 
