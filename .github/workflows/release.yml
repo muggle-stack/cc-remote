@@ -208,16 +208,31 @@ jobs:
         uses: actions/attest@v4
         with:
           subject-path: "dist/*"
+      # The HAP is a pinned local native build, not a build produced by this job.
+      # Keep its provenance/checksums separate from Actions-attested role bundles.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Prepare required HarmonyOS release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python -m deploy.prepare_harmony_release \
+            --output-dir dist \
+            --notes-file "$RUNNER_TEMP/harmony-release-notes.md"
       - name: Create draft, upload assets, and publish
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          notes_file="docs/releases/$RELEASE_TAG.md"
-          notes_args=(--generate-notes)
-          if [ -f "$notes_file" ]; then
-            notes_args=(--notes-file "$notes_file")
+          notes_file="$RUNNER_TEMP/cc-remote-release-notes.md"
+          if [ -f "docs/releases/$RELEASE_TAG.md" ]; then
+            cp "docs/releases/$RELEASE_TAG.md" "$notes_file"
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+              -f tag_name="$RELEASE_TAG" --jq .body > "$notes_file"
           fi
+          cat "$RUNNER_TEMP/harmony-release-notes.md" >> "$notes_file"
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             is_draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)"
             test "$is_draft" = true || {
@@ -229,7 +244,7 @@ jobs:
               --verify-tag \
               --draft \
               --title "cc-remote $RELEASE_TAG" \
-              "${notes_args[@]}"
+              --notes-file "$notes_file"
           fi
           gh release upload "$RELEASE_TAG" dist/* --clobber
-          gh release edit "$RELEASE_TAG" --draft=false --latest
+          gh release edit "$RELEASE_TAG" --notes-file "$notes_file" --draft=false --latest

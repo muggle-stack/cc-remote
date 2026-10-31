@@ -73,6 +73,22 @@ bundle name and signing identity for upgrades, incrementing `versionCode`.
 
 ## Updates and daily use
 
+Every new cc-remote GitHub Release includes an unsigned Harmony HAP, along with
+`MOBILE_BUILD_INFO.json` and `MOBILE_SHA256SUMS`. The filename follows the cc-remote
+release; the app's actual native version and original build source remain in the
+metadata. This does not make the HAP directly installable without your own signing
+profile.
+
+The release workflow reuses the verified build pinned in
+[`deploy/harmony-release.json`](../deploy/harmony-release.json). It checks the
+downloaded bytes, archive integrity, app identity and native source equality before
+publishing. A missing or invalid HAP fails the release instead of silently omitting
+it. Documentation and test-only changes may reuse the same app; changes to native
+code or build inputs require a new verified unsigned build and an updated pin.
+Preserve the original builder/SDK/source information when updating the pin. The
+locally compiled HAP and its mobile metadata are separate from the Actions-attested
+Relay/Wrapper bundles; republishing does not claim a new native build or device test.
+
 The installed app runs independently of DevEco Studio and the USB connection.
 After installation, exit the IDE and disconnect the phone. If the local HDC
 server remains running, stop it with
