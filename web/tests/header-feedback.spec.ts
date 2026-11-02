@@ -69,7 +69,36 @@ test("header feedback failure stays until acknowledged and identical later failu
   await page.getByRole("button", { name: "fail", exact: true }).click();
   await expect(feedback).toHaveText("操作未完成");
   await page.getByRole("button", { name: "other exception", exact: true }).click();
-  await expect(page.locator(".notice-stack")).toContainText("本轮仅支持对话回滚");
+  await expect(page.locator(".notice-stack")).toContainText("上下文压缩失败");
+});
+
+test("header feedback shows checkpoint limitations compactly and keeps acknowledged replays hidden", async ({ page }) => {
+  await page.clock.install();
+  const feedback = page.locator(".header-feedback");
+  await page.getByRole("button", { name: "checkpoint", exact: true }).click();
+  await page.clock.fastForward(60_000);
+  await expect(feedback).toHaveText("回滚受限");
+  await expect(page.locator(".notice-stack, .banner.show")).toHaveCount(0);
+  await expect(page.locator(".hstat-label")).toHaveText("idle");
+  await feedback.click();
+  const dialog = page.getByRole("dialog", { name: "状态详情" });
+  await expect(dialog).toContainText("本轮修改了 Git 暂存区或包含当前无法安全记录的文件；对话仍可正常回滚。");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(feedback).toHaveText("回滚受限");
+  await feedback.click();
+  await page.getByRole("button", { name: "知道了", exact: true }).click();
+  await expect(feedback).toHaveCount(0);
+  for (const name of ["offline", "reconnecting", "sync", "replay same checkpoint", "ready"])
+    await page.getByRole("button", { name, exact: true }).click();
+  await page.clock.fastForward(6_001);
+  await expect(feedback).toHaveCount(0);
+  await page.getByRole("button", { name: "session", exact: true }).click();
+  await page.getByRole("button", { name: "session", exact: true }).click();
+  await expect(feedback).toHaveCount(0);
+  await expect(page.locator(".notice-stack, .banner.show")).toHaveCount(0);
+  await page.getByRole("button", { name: "new checkpoint", exact: true }).click();
+  await expect(feedback).toHaveText("回滚受限");
 });
 
 test("header feedback remains scoped and exposes simultaneous feedback without losing it", async ({ page }) => {

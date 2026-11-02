@@ -3,6 +3,7 @@ import "./session-messages.test.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { mock } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
@@ -17712,18 +17713,73 @@ assert.equal(protocolReloads, 1,
   "an aligned newer deployment should refresh a stale bundle once");
 staleBundle.stop();
 
-let updateOffers = 0;
-const guardedUpdate = new RelayWs({
-  onEvent: () => {}, onConnState: () => {},
-  onReloadRequired: () => { updateOffers += 1; },
-});
-guardedUpdate.start();
-FakeWebSocket.instances.at(-1)?.onclose?.({ code: 4406 });
-await new Promise((resolve) => setTimeout(resolve, 0));
-assert.equal(updateOffers, 1, "protocol upgrades use the draft-protected update path");
-assert.equal(protocolReloads, 1, "the socket must not force-reload over unsent input");
-guardedUpdate.stop();
+async function assertDeferredUpdateRecovery() {
+  let updateOffers = 0;
+  const guardedUpdateStates: string[] = [];
+  const guardedUpdate = new RelayWs({
+    onEvent: () => {}, onConnState: state => { guardedUpdateStates.push(state); },
+    onReloadRequired: () => { updateOffers += 1; },
+  });
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  try {
+    const flushRecovery = () => new Promise<void>(resolve => setImmediate(resolve));
+    guardedUpdate.start();
+    const guardedSocketCount = FakeWebSocket.instances.length;
+    FakeWebSocket.instances.at(-1)?.onclose?.({ code: 4406 });
+    await flushRecovery();
+    assert.equal(updateOffers, 1, "protocol upgrades use the draft-protected update path");
+    assert.equal(protocolReloads, 1, "the socket must not force-reload over unsent input");
+    mock.timers.tick(130_000);
+    await flushRecovery();
+    assert.equal(guardedUpdateStates.at(-1), "reconnecting",
+      "deferring an update must not exhaust the ordinary deployment timeout");
+    assert.equal(updateOffers, 1, "unchanged protocols must not repeatedly offer the same update");
+    assert.equal(FakeWebSocket.instances.length, guardedSocketCount,
+      "an incompatible deployment must not trigger socket connection loops");
+    // A rollback can briefly leave Web and Relay split after the user has
+    // already spent several minutes working on a draft in the old page.
+    webProbeProtocol = PROTOCOL_VERSION;
+    mock.timers.tick(5_000);
+    await flushRecovery();
+    assert.equal(guardedUpdateStates.at(-1), "reconnecting");
+    assert.equal(FakeWebSocket.instances.length, guardedSocketCount);
+    relayProbeProtocol = PROTOCOL_VERSION;
+    mock.timers.tick(5_000);
+    await flushRecovery();
+    assert.equal(FakeWebSocket.instances.length, guardedSocketCount + 1,
+      "a compatible rollback must reconnect without refreshing or discarding the draft");
+    assert.equal(guardedUpdateStates.at(-1), "connecting");
+    assert.equal(protocolReloads, 1);
+    guardedUpdate.stop();
 
+    // A later protocol mismatch starts a fresh recovery, and stop() cancels
+    // its deferred probe rather than reviving a replaced device connection.
+    relayProbeProtocol = webProbeProtocol = PROTOCOL_VERSION + 1;
+    const stoppedUpdate = new RelayWs({
+      onEvent: () => {}, onConnState: () => {},
+      onReloadRequired: () => { updateOffers += 1; },
+    });
+    try {
+      stoppedUpdate.start();
+      const stoppedSocketCount = FakeWebSocket.instances.length;
+      FakeWebSocket.instances.at(-1)?.onclose?.({ code: 4406 });
+      await flushRecovery();
+      assert.equal(updateOffers, 2);
+      stoppedUpdate.stop();
+      relayProbeProtocol = webProbeProtocol = PROTOCOL_VERSION;
+      mock.timers.tick(130_000);
+      await flushRecovery();
+      assert.equal(FakeWebSocket.instances.length, stoppedSocketCount);
+      assert.equal(updateOffers, 2);
+    } finally { stoppedUpdate.stop(); }
+  } finally {
+    guardedUpdate.stop();
+    mock.timers.reset();
+  }
+  relayProbeProtocol = webProbeProtocol = PROTOCOL_VERSION + 1;
+  sessionValues.set("cc-remote:protocol-reload", String(PROTOCOL_VERSION + 1));
+}
+await assertDeferredUpdateRecovery();
 
 const repeatedMismatch = new RelayWs({
   onEvent: () => {},

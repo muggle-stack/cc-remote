@@ -34,6 +34,11 @@ export function HeaderFeedbackFixture() {
     severity: warning ? "warning" : "info", category: "runtime",
     title: warning ? "回滚部分完成" : "回滚完成", message: "对话：已恢复 · 代码：已恢复", detail,
   } as Notice });
+  const checkpoint = (id: string) => dispatch({ type: "event", event: {
+    v: PROTOCOL_VERSION, type: "notice", ts: 1, sid, notice_id: id,
+    severity: "warning", category: "runtime", title: "本轮代码回滚不可用",
+    message: "本轮修改了 Git 暂存区或包含当前无法安全记录的文件；对话仍可正常回滚。",
+  } as Notice });
   const controls = <div style={{ padding: 24, display: "flex", flexWrap: "wrap", gap: 12 }}>
     <button onClick={() => dispatch({ type: "event", event: { v: PROTOCOL_VERSION,
       type: "wrapper_disconnected", ts: 1 } })}>offline</button>
@@ -49,7 +54,13 @@ export function HeaderFeedbackFixture() {
     <button onClick={() => notice("rollback-2")}>new undo</button>
     <button onClick={() => dispatch({ type: "command_error", detail: "操作未完成，请稍后重试。" })}>fail</button>
     <button onClick={() => notice("rollback-warning", true, "文件未恢复：" + "/example/very-long-path".repeat(120))}>long failure</button>
-    <button onClick={() => notice("checkpoint-exception", true)}>other exception</button>
+    <button onClick={() => checkpoint("checkpoint-1")}>checkpoint</button>
+    <button onClick={() => checkpoint("checkpoint-1")}>replay same checkpoint</button>
+    <button onClick={() => checkpoint("checkpoint-2")}>new checkpoint</button>
+    <button onClick={() => dispatch({ type: "event", event: {
+      v: PROTOCOL_VERSION, type: "notice", ts: 1, sid, notice_id: "compact-exception",
+      severity: "warning", category: "runtime", title: "上下文压缩失败", message: "请稍后重试。",
+    } as Notice })}>other exception</button>
     <button onClick={() => setSid(value => value === "a" ? "b" : "a")}>session</button>
     <button onClick={() => setDevice(value => value === "test-device" ? "other-device" : "test-device")}>device</button>
     <button onClick={() => setSpace(value => value === "code" ? "work" : "code")}>space</button>

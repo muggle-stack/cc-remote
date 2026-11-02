@@ -524,6 +524,7 @@ export default function App() {
   const composerDraftsRef = useRef(new ComposerDraftStore());
   const btwDraftsRef = useRef(new ComposerDraftStore());
   const questionDraftsRef = useRef(new Map<string, QuestionDraft>());
+  const artifactDirtyRef = useRef(false);
   const [, bumpHistoryImageRevision] = useReducer((value: number) => value + 1, 0);
   const dismissBanner = useCallback((banner: string) => {
     dispatch({ type: "dismiss_banner", banner });
@@ -540,6 +541,7 @@ export default function App() {
   stateRef.current = state;
   const wsRef = useRef<RelayWs | null>(null);
   const webUpdate = useWebUpdate(authed, state.connState, () => {
+    if (artifactDirtyRef.current) return "Markdown 有未保存的修改，请先保存或放弃修改，再更新页面。";
     if (composerDraftsRef.current.hasDrafts || btwDraftsRef.current.hasDrafts
         || [...questionDraftsRef.current.values()].some(draft =>
           draft.text || draft.selected.length || draft.pages?.some(page => page.text || page.selected.length))) {
@@ -738,7 +740,6 @@ export default function App() {
   const notificationListRequestRef = useRef<string | null>(null);
   const notificationOriginRef = useRef<NotificationOrigin | null>(null);
   const pendingNotificationErrorRef = useRef<string | null>(null);
-  const artifactDirtyRef = useRef(false);
   const setArtifactDirty = useCallback((dirty: boolean) => {
     artifactDirtyRef.current = dirty;
   }, []);

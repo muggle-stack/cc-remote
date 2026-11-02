@@ -31,7 +31,7 @@ export function headerConnectionPhase(
 export function isHeaderNotice(notice: Notice): boolean {
   if (notice.notice_id.startsWith("rollback-")) return true;
   return notice.category === "runtime" && notice.severity === "warning"
-    && !/^(codex-notice-|schedule-|checkpoint-|compact-)/.test(notice.notice_id);
+    && !/^(codex-notice-|schedule-|compact-)/.test(notice.notice_id);
 }
 
 export interface HeaderFeedbackItem {
@@ -51,7 +51,7 @@ export function headerNoticeItem(notice: Notice, scope: string): HeaderFeedbackI
   const rollback = notice.notice_id.startsWith("rollback-");
   return {
     id: JSON.stringify([scope, notice.notice_id]), noticeId: notice.notice_id,
-    label: success ? "已撤销" : "操作未完成",
+    label: notice.notice_id.startsWith("checkpoint-") ? "回滚受限" : success ? "已撤销" : "操作未完成",
     tone: success ? "success" : "warning",
     message: rollback ? presented.message : cleanProductText(notice.message) || presented.message,
     detail: rollback ? presented.detail : notice.detail ? cleanProductText(notice.detail) : null,

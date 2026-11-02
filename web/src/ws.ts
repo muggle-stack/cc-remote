@@ -88,6 +88,7 @@ const MAX_REPLAY_SESSIONS = 128;
 const PROTOCOL_RELOAD_KEY = "cc-remote:protocol-reload";
 const PROTOCOL_RECOVERY_POLL_MS = 1000;
 const PROTOCOL_RECOVERY_TIMEOUT_MS = 120000;
+const PROTOCOL_DEFERRED_POLL_MS = 5000;
 let pageClientId: string | null = null;
 
 /** A page-lifetime connection identity. Durable BTW ownership is derived from
@@ -218,6 +219,7 @@ export class RelayWs {
   private protocolRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
   private protocolRecoveryStartedAt = 0;
   private protocolRecoveryGeneration = 0;
+  private protocolRecoveryNotified: number | null = null;
   private readonly cb: WsCallbacks;
   private readonly machineId: string;
   // Heartbeat: detect a HALF-OPEN link (dead TCP with no close event) and recover.
@@ -2242,21 +2244,27 @@ export class RelayWs {
     }
     if (action.kind === "reload") {
       if (this.cb.onReloadRequired) {
-        this.cancelProtocolRecovery();
-        this.cb.onReloadRequired();
-        return;
-      }
-      const reloadMarker = readProtocolReloadMarker();
-      if (reloadMarker !== undefined
-          && reloadMarker !== String(action.protocol)
-          && writeProtocolReloadMarker(action.protocol)) {
-        this.cancelProtocolRecovery();
-        window.location.reload();
-        return;
+        if (this.protocolRecoveryNotified !== action.protocol) {
+          this.protocolRecoveryNotified = action.protocol;
+          this.cb.onReloadRequired();
+        }
+      } else {
+        const reloadMarker = readProtocolReloadMarker();
+        if (reloadMarker !== undefined
+            && reloadMarker !== String(action.protocol)
+            && writeProtocolReloadMarker(action.protocol)) {
+          this.cancelProtocolRecovery();
+          window.location.reload();
+          return;
+        }
       }
     }
 
-    if (Date.now() - this.protocolRecoveryStartedAt
+    // Explicit updates can be deferred indefinitely to protect drafts. Keep
+    // checking at a lower rate so a server rollback can reconnect this bundle,
+    // including while the rollback temporarily leaves the two tiers split.
+    const deferred = this.protocolRecoveryNotified !== null;
+    if (!deferred && Date.now() - this.protocolRecoveryStartedAt
         >= PROTOCOL_RECOVERY_TIMEOUT_MS) {
       this.cancelProtocolRecovery();
       this.cb.onConnState(
@@ -2265,15 +2273,17 @@ export class RelayWs {
       );
       return;
     }
+    if (this.stopped || generation !== this.protocolRecoveryGeneration) return;
     this.protocolRecoveryTimer = setTimeout(() => {
       this.protocolRecoveryTimer = null;
       void this.probeProtocolRecovery(generation);
-    }, PROTOCOL_RECOVERY_POLL_MS);
+    }, deferred ? PROTOCOL_DEFERRED_POLL_MS : PROTOCOL_RECOVERY_POLL_MS);
   }
 
   private cancelProtocolRecovery(): void {
     this.protocolRecoveryGeneration += 1;
     this.protocolRecoveryStartedAt = 0;
+    this.protocolRecoveryNotified = null;
     if (this.protocolRecoveryTimer !== null) {
       clearTimeout(this.protocolRecoveryTimer);
       this.protocolRecoveryTimer = null;

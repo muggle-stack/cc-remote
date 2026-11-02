@@ -5043,6 +5043,72 @@ test("session message tool keeps its receipt in chronology while later work cont
   await page.screenshot({ path: info.outputPath("inline-send-tool.png") });
 });
 
+for (const duringProbe of [false, true]) {
+  test(`web update protects Markdown edited ${duringProbe ? "during" : "before"} its version check and retries after saving`, async ({ page }) => {
+    await page.setViewportSize({ width: 1568, height: 1000 });
+    const path = "/tmp/layout/overview.md";
+    const relay = await mockRightPanelRelay(page, { retained: false, seedTurns: [{
+      id: "document", prompt: "查看文档", done: true,
+      blocks: [{ kind: "text", message_id: "answer", text: `[技术方案](${path})`, done: true }],
+    }] });
+    const next = { build_id: "f".repeat(64), version: "5.3.7", protocol: PROTOCOL_VERSION };
+    let holdProbe = false;
+    let releaseProbe: (() => void) | undefined;
+    await page.route("**/cc-remote-build.json?*", async route => {
+      if (holdProbe) {
+        holdProbe = false;
+        await new Promise<void>(resolve => { releaseProbe = resolve; });
+      }
+      await route.fulfill({ json: next });
+    });
+    await page.route("**/healthz?*", route => route.fulfill({ json: next }));
+    let unloadDialogs = 0;
+    page.on("dialog", async dialog => { unloadDialogs++; await dialog.dismiss(); });
+    await page.goto("/");
+    await page.getByRole("button", { name: `在 Remote 中打开 ${path}`, exact: true }).click();
+    await expect.poll(() => relay.commands.some(c => c.type === "get_file_preview")).toBe(true);
+    const request = relay.commands.find(c => c.type === "get_file_preview")!;
+    relay.emit({ type: "file_preview", sid: "layout-parent", path, request_id: String(request.request_id),
+      format: "markdown", content: "# 技术方案", size: 16, mtime_ns: "1", revision: "a".repeat(64), writable: true });
+    const file = page.locator(".artifact-panel");
+    await file.getByRole("button", { name: "源码", exact: true }).click();
+    const editor = file.getByRole("textbox", { name: "Markdown 源码编辑器" });
+    const draft = "# 未保存的草稿\n\n更新时必须保留";
+    const status = page.getByRole("button", { name: "状态详情：有更新", exact: true });
+    const update = page.getByRole("button", { name: "更新页面", exact: true });
+    if (!duringProbe) await editor.fill(draft);
+    await status.click();
+    holdProbe = duringProbe;
+    await update.click();
+    if (duringProbe) {
+      await expect.poll(() => !!releaseProbe).toBe(true);
+      await page.keyboard.press("Escape");
+      await editor.fill(draft);
+      releaseProbe!();
+      await status.click();
+    }
+    await expect(page.getByRole("dialog", { name: "状态详情", exact: true }))
+      .toContainText("Markdown 有未保存的修改，请先保存或放弃修改，再更新页面。");
+    await expect(update).toBeEnabled();
+    await expect(editor).toHaveValue(draft);
+    expect(unloadDialogs, "protect edits before entering the browser's cancelable unload dialog").toBe(0);
+    await page.keyboard.press("Escape");
+    await file.getByRole("button", { name: "保存", exact: true }).click();
+    await expect.poll(() => relay.commands.some(c => c.type === "save_markdown")).toBe(true);
+    const save = relay.commands.find(c => c.type === "save_markdown")!;
+    expect(save.content).toBe(draft);
+    relay.emit({ type: "file_save_result", sid: "layout-parent", path, request_id: String(save.request_id),
+      status: "saved", size: 64, mtime_ns: "2", revision: "b".repeat(64) });
+    await expect(file.locator(".markdown-save-state")).toHaveText("已保存");
+    await status.click();
+    // The earlier refusal must not strand the hook's updating/pending state.
+    const navigation = page.waitForEvent("framenavigated", frame => frame === page.mainFrame());
+    await update.click();
+    await navigation;
+    expect(unloadDialogs).toBe(0);
+  });
+}
+
 for (const centered of [false, true]) {
   test(`right panel layout restores ${centered ? "centered" : "docked"} file preview across engines`, async ({ page }) => {
     await page.setViewportSize({ width: 1568, height: 1000 });
