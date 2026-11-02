@@ -9,6 +9,7 @@ import {
 } from "../header-feedback";
 
 interface Props {
+  update?: { id: string; version: string; message: string | null; updating: boolean; onReload: () => void };
   deviceScope: string;
   sessionScope: string;
   phase: ConnectionPhase | null;
@@ -35,7 +36,7 @@ function SuccessExpiry({ id, paused, onExpire }: {
 /** A presentation-only status slot; hiding it never changes engine/transport state. */
 export function HeaderFeedback({
   deviceScope, sessionScope, phase, banner, bannerRevision = 0, notices,
-  onDismissBanner, onDismissNotice,
+  onDismissBanner, onDismissNotice, update,
 }: Props) {
   const dialogId = useId();
   const trigger = useRef<HTMLButtonElement>(null);
@@ -54,6 +55,11 @@ export function HeaderFeedback({
   const scope = JSON.stringify([deviceScope, sessionScope]);
   const [position, setPosition] = useState({ top: 60, right: 12 });
   const connectionItem = connectionFeedbackItem(currentConnection);
+  const updateItem: HeaderFeedbackItem | null = update ? {
+    id: `web-update:${update.id}`, label: "有更新", tone: "info",
+    message: `新版 ${update.version} 已就绪，更新页面即可使用，无需退出登录。`,
+    detail: update.message ?? "更新会重新加载页面，设备上已开始的任务会继续运行。",
+  } : null;
   const items = notices.map(notice => headerNoticeItem(notice, scope));
   let commandItem = commandFeedback.find(item => item.deviceScope === deviceScope);
   if (banner && headerBannerKind(banner) === "failure") {
@@ -68,10 +74,11 @@ export function HeaderFeedback({
     }
   }
   if (commandItem?.sessionScope === sessionScope) items.push(commandItem);
+  if (updateItem) items.push(updateItem);
   const visible = items.filter(item => !dismissed.includes(item.id)).reverse();
   if (connectionItem) visible.push(connectionItem);
   const selected = visible.find(item => item.tone === "warning")
-    ?? connectionItem ?? visible[0];
+    ?? visible.find(item => item.tone === "info") ?? connectionItem ?? visible[0];
   const open = openFor === scope && !!selected;
 
   useEffect(() => { setOpenFor(null); }, [scope]);
@@ -154,8 +161,12 @@ export function HeaderFeedback({
             <h2>{item.label}</h2>
             <p>{item.message}</p>
             {item.detail && <p className="header-feedback-extra">{item.detail}</p>}
+            {item.id === updateItem?.id && <button type="button" className="header-feedback-dismiss"
+              disabled={update?.updating} onClick={update?.onReload}>
+              {update?.updating ? "检查中…" : "更新页面"}
+            </button>}
             <button type="button" className="header-feedback-dismiss" onClick={() => dismiss(item)}>
-              {item.id === connectionItem?.id && phase ? "收起提示" : "知道了"}
+              {item.id === updateItem?.id ? "稍后" : item.id === connectionItem?.id && phase ? "收起提示" : "知道了"}
             </button>
           </div>)}
         </section>

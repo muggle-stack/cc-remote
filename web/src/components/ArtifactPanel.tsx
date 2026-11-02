@@ -30,6 +30,7 @@ import { MermaidBlock } from "./MermaidBlock";
 import { PreviewAuthorizationPrompt } from "./PreviewAuthorizationPrompt";
 import { PanelResizer } from "./PanelResizer";
 import { PdfArtifactPreview } from "./PdfArtifactPreview";
+import { VideoArtifactPreview } from "./VideoArtifactPreview";
 import { AudioArtifactPreview } from "./AudioArtifactPreview";
 import { ZoomableImage } from "./ZoomableImage";
 import { previewImageDimension, rehypePreviewHtml } from "../markdown-preview-html";
@@ -325,7 +326,8 @@ function PreviewImage({ markdownPath, src, alt, title, width, height, asset, req
 
 export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
   onRefresh, onOpenFile, onLoadPreviewAsset, onAuthorizePreview,
-  onSaveMarkdown, onDirtyChange, theme, displayName }: {
+  onSaveMarkdown, onDirtyChange, theme, displayName, machineId }: {
+  machineId?: string | null;
   displayName?: string;
   artifact: Artifact;
   active: RightPanelView;
@@ -572,9 +574,9 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
   ]);
 
   const title = displayName || artifact.file.split("/").pop()
-    || (["md", "file", "html", "image", "pdf", "audio", "spreadsheet"].includes(artifact.kind) ? "文件预览" : "改动");
+    || (["md", "file", "html", "image", "pdf", "audio", "video", "spreadsheet"].includes(artifact.kind) ? "文件预览" : "改动");
   const mermaidFile = artifact.kind === "file" && /\.(?:mmd|mermaid)$/i.test(artifact.file);
-  const renderedArtifact = ["image", "pdf", "audio"].includes(artifact.kind)
+  const renderedArtifact = ["image", "pdf", "audio", "video"].includes(artifact.kind)
     || (artifact.kind === "html" && mode === "preview");
 
   return (
@@ -619,7 +621,7 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
           title="由 nono 本机沙箱临时转换，VPS 不保存文件">
           {artifact.convertedFrom.toUpperCase()} → PDF
         </span>}
-        {["md", "file", "html", "image", "pdf", "audio", "spreadsheet"].includes(artifact.kind) && <button className="iconbtn"
+        {["md", "file", "html", "image", "pdf", "audio", "video", "spreadsheet"].includes(artifact.kind) && <button className="iconbtn"
           onClick={() => onRefresh?.(artifact.file, artifact.line)}
           aria-label="刷新文件" title="重新读取文件"><Icon name="refresh" size={17} /></button>}
         <PanelExpandButton label={artifact.kind === "gitdiff" ? "改动" : "文件预览"} />
@@ -641,7 +643,7 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
             authorization={artifact.authorization}
             onDecision={onAuthorizePreview} />
         ) : loading ? (
-          <div className="diff-empty"><span className="thinking"><span/><span/><span/></span> {["md", "file", "html", "image", "pdf", "audio", "spreadsheet"].includes(artifact.kind) ? "正在读取文件…" : "正在读取 diff…"}</div>
+          <div className="diff-empty"><span className="thinking"><span/><span/><span/></span> {["md", "file", "html", "image", "pdf", "audio", "video", "spreadsheet"].includes(artifact.kind) ? "正在读取文件…" : "正在读取 diff…"}</div>
         ) : artifact.error ? (
           <div className="preview-error"><Icon name="read" size={18} />{artifact.error}</div>
         ) : artifact.kind === "gitdiff" ? (
@@ -702,6 +704,9 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
         ) : artifact.kind === "audio" ? (
           <AudioArtifactPreview key={artifactKey} data={artifact.data}
             mediaType={artifact.mediaType} title={title} size={artifact.size} />
+        ) : artifact.kind === "video" ? (
+          <VideoArtifactPreview machineId={machineId} mediaId={artifact.mediaId}
+            title={title} size={artifact.size} />
         ) : artifact.kind === "file" ? (
           <>
             {artifact.truncated && <div className="preview-truncated">文件共 {artifact.size?.toLocaleString()} 字节，仅预览前 512 KiB。</div>}

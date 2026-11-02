@@ -1156,7 +1156,7 @@ def test_html_preview_runner_has_a_narrow_isolated_policy(template):
 
 
 @pytest.mark.parametrize("template", ["Caddyfile", "Caddyfile.insecure"])
-def test_caddy_blob_policy_is_limited_to_image_and_audio_previews(template):
+def test_caddy_policy_limits_media_to_same_origin_and_local_blobs(template):
     source = (ROOT / "deploy" / template).read_text()
     match = re.search(r'Content-Security-Policy "([^"]+)"', source)
     assert match is not None
@@ -1166,7 +1166,7 @@ def test_caddy_blob_policy_is_limited_to_image_and_audio_previews(template):
         if (parts := directive.strip().split())
     }
     assert "blob:" in directives["img-src"]
-    assert directives["media-src"] == ["blob:"]
+    assert directives["media-src"] == ["'self'", "blob:"]
     assert all(
         "blob:" not in sources
         for name, sources in directives.items()

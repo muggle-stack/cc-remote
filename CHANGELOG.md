@@ -2,6 +2,15 @@
 
 [中文](CHANGELOG_zh.md)
 
+## Unreleased
+
+- Add authenticated MP4/M4V previews with byte-range playback (protocol v86).
+- Render remote pages before audio/video finishes loading, with bounded range streaming and seeking for supported MP4/M4A media.
+- Preserve up to three recently visited page previews across session and engine switches, and simplify the preview header and page picker.
+- Avoid creating preview entries from reasoning or unqualified HTML filenames, and keep Chinese sentence punctuation outside bare URL links.
+- Validate cached preview runner assets by content to avoid stale Harmony App previews.
+- Offer a guarded page update and invalidate outdated local history projections when a new Web build is available. Relay restarts continue to require signing in again.
+
 ## v5.3.7
 
 Restore SVG animation previews, add explicit local handoff for idle Claude sessions, and include a verified HarmonyOS package with every release. Wire protocol v85 and Claude Agent SDK 0.2.174 are unchanged.

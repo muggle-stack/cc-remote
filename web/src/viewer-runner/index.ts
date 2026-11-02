@@ -2,6 +2,7 @@ import { PROTOCOL_VERSION } from "../protocol";
 import { Compiler } from "./compiler";
 import { Resources, VIRTUAL_ORIGIN } from "./resources";
 import { installPreviewEscape } from "../preview-keyboard";
+import { installMedia } from "./media";
 
 const id = /^\/__cc_viewer\/bridge\/([a-f0-9]{32})$/.exec(location.pathname)?.[1];
 let opaque = false;
@@ -37,7 +38,7 @@ if (id && parent !== window && opaque) {
     const logicalBase = document.createElement("base"); logicalBase.href = base;
     document.head.prepend(logicalBase);
     window.fetch = resources.fetch;
-    void new Compiler(resources, new Set<string>(value.script_origins), base).document().then(async ({ doc, scripts, imports }) => {
+    void new Compiler(resources, new Set<string>(value.script_origins), base).document().then(async ({ doc, scripts, imports, media }) => {
       document.documentElement.lang = doc.documentElement.lang;
       document.documentElement.className = doc.documentElement.className;
       // Keep the base in place: removing/reinserting it momentarily restores
@@ -45,6 +46,11 @@ if (id && parent !== window && opaque) {
       for (const child of Array.from(document.head.childNodes)) if (child !== logicalBase) child.remove();
       document.head.append(...Array.from(doc.head.childNodes));
       document.body.replaceWith(doc.body);
+      // WebKit may keep the empty resource selection made in DOMParser's inert
+      // document, especially for nested <source>. Start selection only after
+      // the rewritten sources are attached to the real sandbox document.
+      document.querySelectorAll<HTMLMediaElement>("audio, video").forEach((media) => media.load());
+      resources.onClose(installMedia(resources, media, message => resources.send({ type: "media-error", message: message.slice(0, 400) })));
       const map = document.createElement("script"); map.type = "importmap"; map.textContent = JSON.stringify({ imports });
       document.head.append(map);
       // Navigation/form submission is outside the static-preview contract.

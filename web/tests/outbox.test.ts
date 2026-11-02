@@ -41,6 +41,27 @@ assert.equal(byteBounded.enqueue(
 assert.equal(byteBounded.size, 0);
 assert.equal(byteBounded.byteSize, 0);
 
+const updateReads = new CommandOutbox(8, 4096);
+const disposable = new Set(["list_sessions", "get_models"]);
+updateReads.enqueue({ type: "list_sessions" }, "client", "list");
+updateReads.enqueue({ type: "get_models" }, "client", "models");
+const retainedReadBytes = updateReads.byteSize;
+assert.equal(updateReads.hasPendingExcept(disposable), false);
+assert.equal(updateReads.size, 2, "ignoring a read for updates must retain its reconnect replay");
+assert.equal(updateReads.byteSize, retainedReadBytes);
+for (const [id, frame] of [
+  ["save", { type: "save_markdown", content: "edits" }],
+  ["query", { type: "query", prompt: "unsent" }],
+  ["future", { type: "get_future_command" }],
+  ["unknown", {}],
+] as const) {
+  updateReads.enqueue(frame, "client", id);
+  assert.equal(updateReads.hasPendingExcept(disposable), true,
+    "only explicit disposable reads may be excluded; new command names are protected");
+  updateReads.ack("client", id);
+  assert.equal(updateReads.hasPendingExcept(disposable), false);
+}
+
 const frameBounded = new CommandOutbox(10, 4096, 160);
 const smallFrame = frameBounded.enqueue(
   { v: 10, type: "query", prompt: "small", ts: 1 }, "client", "small");

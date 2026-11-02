@@ -61,3 +61,7 @@
   .header-feedback-label,.header-feedback-popover,
   .header-feedback.tone-progress .header-feedback-mark { animation:none; }
 }
+
+.header-feedback.tone-info { color:var(--accent); }
+.header-feedback-dismiss + .header-feedback-dismiss { margin-right:8px; }
+.header-feedback-dismiss:disabled { opacity:.6; cursor:wait; }

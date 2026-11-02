@@ -42,7 +42,7 @@ async def run_wrapper() -> None:
     machine = WrapperMachine(cfg, transport)
     viewers = asyncio.create_task(ViewerTransport(
         cfg.relay_url, cfg.wrapper_token, cfg.machine_id, registry_path(),
-        session_pages=machine.viewer_pages,
+        session_pages=machine.viewer_pages, media_previews=machine.media_previews,
         home_pages=HomePages(cfg.state_dir / "viewer-home-pages.json")).run())
     try:
         # The installer verifies Work schemas independently of optional Codex

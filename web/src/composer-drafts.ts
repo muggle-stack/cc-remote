@@ -55,6 +55,7 @@ export function composerDraftKey(
 export class ComposerDraftStore {
   private drafts = new Map<string, { draft: ComposerDraft; bytes: number }>();
   private retainedBytes = 0;
+  private imports = 0;
 
   get(key: string): ComposerDraft {
     const entry = this.drafts.get(key);
@@ -100,6 +101,19 @@ export class ComposerDraftStore {
     const draft = cloneDraft(entry.draft);
     this.delete(oldKey);
     this.set(newKey, draft);
+  }
+
+  beginImport(): () => void {
+    this.imports += 1;
+    let finished = false;
+    return () => {
+      if (!finished) this.imports -= 1;
+      finished = true;
+    };
+  }
+
+  get hasDrafts(): boolean {
+    return this.drafts.size > 0 || this.imports > 0;
   }
 
   clear(): void {

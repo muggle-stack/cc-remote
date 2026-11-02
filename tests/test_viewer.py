@@ -122,6 +122,29 @@ def test_file_descriptor_is_pinned_after_open(publication):
         assert b"fetch" in stream.read()
 
 
+@pytest.mark.parametrize("suffix,mime", [
+    ("mp3", "audio/mpeg"), ("m4a", "audio/mp4"), ("aac", "audio/aac"),
+    ("wav", "audio/wav"), ("ogg", "audio/ogg"), ("oga", "audio/ogg"),
+    ("opus", "audio/ogg"), ("flac", "audio/flac"), ("mp4", "video/mp4"),
+    ("m4v", "video/mp4"), ("webm", "video/webm"), ("ogv", "video/ogg"),
+])
+def test_media_resources_keep_publication_and_fd_boundaries(publication, suffix, mime):
+    site, _ = publication
+    root = Path(site.root)
+    path = root / f"viewer/media.{suffix}"
+    path.write_bytes(b"fixture media bytes")
+    stream, info, actual_mime = open_resource(site, f"/viewer/media.{suffix}")
+    with stream:
+        assert stream.read() == b"fixture media bytes" and actual_mime == mime
+        assert resource_headers(info, actual_mime, {"range": "bytes=0-6"})[0] == 206
+    (root / f"private.{suffix}").write_bytes(b"private media")
+    (root / f"viewer/link.{suffix}").symlink_to(root / f"private.{suffix}")
+    os.link(path, root / f"viewer/hard.{suffix}")
+    for candidate in [f"/private.{suffix}", f"/viewer/link.{suffix}", f"/viewer/hard.{suffix}"]:
+        with pytest.raises(OSError):
+            open_resource(site, candidate)
+
+
 def test_registry_edits_preserve_previous_snapshot_on_failure(publication):
     site, registry = publication
     with pytest.raises(RuntimeError), edit_sites(registry) as sites:
@@ -195,7 +218,7 @@ def test_viewer_opt_in_preserves_private_http_login(tmp_path):
 
 
 @asynccontextmanager
-async def live_viewer(tmp_path, publication, mode="isolated", home_pages=None):
+async def live_viewer(tmp_path, publication, mode="isolated", home_pages=None, media_previews=None):
     site, registry = publication
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
@@ -215,7 +238,7 @@ async def live_viewer(tmp_path, publication, mode="isolated", home_pages=None):
     pages = SessionPages(tmp_path / "session-pages.json", scope_context)
     app.state.viewer_page_store = pages.store
     transport = ViewerTransport(f"ws://127.0.0.1:{port}/ws", cfg.wrapper_token, "device", registry,
-                                session_pages=pages, home_pages=home_pages)
+                                session_pages=pages, home_pages=home_pages, media_previews=media_previews)
     wrapper = asyncio.create_task(transport.run())
     async def connected():
         while "device" not in app.state.viewers.peers:

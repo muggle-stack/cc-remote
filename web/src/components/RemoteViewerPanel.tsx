@@ -1,5 +1,5 @@
 import { PanelFrame, PanelExpandButton } from "./RightPanelPresentation";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Icon } from "../icons";
 import { isLocalViewerUrl, matchingViewer, type ViewerScope, type ViewerSelection, type ViewerSite } from "../remote-viewer";
 import { viewerRequest, ViewerRequestError } from "../viewer-request";
@@ -26,6 +26,7 @@ function BridgeFrame({ grant, title, onReady, onError }: {
   return <iframe ref={frame} title={title} referrerPolicy="no-referrer" sandbox="allow-scripts" />;
 }
 interface Props {
+  active?: boolean;
   scope: ViewerScope;
   selection: ViewerSelection | null;
   requestedUrl?: string;
@@ -34,9 +35,16 @@ interface Props {
   onClose: () => void;
 }
 
-export function RemoteViewerPanel({ scope, selection, requestedUrl, devices, onSelect, onClose }: Props) {
+export function RemoteViewerPanel({ active = true, scope, selection, requestedUrl, devices, onSelect, onClose }: Props) {
   const pageContext = useViewerPages();
   const [browseAll, setBrowseAll] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const pickerId = useId();
+  const picker = useRef<HTMLDivElement>(null);
+  const pickerTrigger = useRef<HTMLButtonElement>(null);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  useEffect(() => { if (!active) setPickerOpen(false); }, [active]);
   const [sites, setSites] = useState<ViewerSite[]>([]);
   const [enabled, setEnabled] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -78,6 +86,7 @@ export function RemoteViewerPanel({ scope, selection, requestedUrl, devices, onS
       const page = await associate.current({ machine_id: choice.machine_id, site_id: choice.id, entry: choice.entry });
       if (page && alive.current) {
         setBrowseAll(false);
+        setPickerOpen(false);
         select.current({ machine_id: page.machine_id, site_id: page.site_id, entry: page.entry });
       }
     } catch (reason) { if (alive.current) setError(reason instanceof Error ? reason.message : "无法关联页面。"); }
@@ -87,6 +96,43 @@ export function RemoteViewerPanel({ scope, selection, requestedUrl, devices, onS
   const originalUrl = requestedUrl && isLocalViewerUrl(requestedUrl) ? requestedUrl
     : selected?.references.find(isLocalViewerUrl) ?? null;
   const label = (id: string) => devices.find((device) => device.machine_id === id)?.label ?? id;
+  const heading = selected && !/^index(?:\.html?)?$/i.test(selected.label)
+    ? selected.label : "页面预览";
+
+  useEffect(() => {
+    if (!pickerOpen || !active) return;
+    const button = pickerTrigger.current;
+    const panel = picker.current;
+    panel?.focus({ preventScroll: true });
+    const onOutsideClick = (event: MouseEvent) => {
+      if (event.target instanceof Node && !panel?.contains(event.target) && !button?.contains(event.target))
+        setPickerOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing) return;
+      if (event.key === "Escape") {
+        event.preventDefault(); event.stopPropagation();
+        setPickerOpen(false);
+      } else if (event.key === "Tab") {
+        const controls = Array.from(panel?.querySelectorAll<HTMLElement>("button:not(:disabled), a[href]") ?? []);
+        const first = controls[0], last = controls.at(-1);
+        if (event.shiftKey && (document.activeElement === first || document.activeElement === panel)
+            || !event.shiftKey && (document.activeElement === last || document.activeElement === panel)) {
+          event.preventDefault();
+          (event.shiftKey ? last : first)?.focus();
+        }
+        event.stopPropagation();
+      }
+    };
+    document.addEventListener("click", onOutsideClick, true);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("click", onOutsideClick, true);
+      window.removeEventListener("keydown", onKey, true);
+      if (activeRef.current && (panel?.contains(document.activeElement) || document.activeElement === document.body))
+        button?.focus({ preventScroll: true });
+    };
+  }, [pickerOpen, active]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -133,6 +179,11 @@ export function RemoteViewerPanel({ scope, selection, requestedUrl, devices, onS
     migrating.current = true;
     void chooseRef.current(site);
   }, [selection, site, selected, pageContext]);
+
+  const refreshPages = pageContext?.refresh;
+  useEffect(() => {
+    if (selection?.entry && !selectedId) void refreshPages?.().catch(() => {});
+  }, [selectionMachineId, selectionSiteId, selection?.entry, selectedId, refreshPages]);
 
   useEffect(() => {
     // A catalog refresh must retire the old frame before its replacement can
@@ -236,6 +287,7 @@ export function RemoteViewerPanel({ scope, selection, requestedUrl, devices, onS
     scope.machineId, scope.sid, retry]);
 
   useEffect(() => {
+    if (!active) return;
     const escape = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing || event.key !== "Escape") return;
       if (document.querySelector('[role="dialog"], dialog[open]')) return;
@@ -243,7 +295,7 @@ export function RemoteViewerPanel({ scope, selection, requestedUrl, devices, onS
     };
     window.addEventListener("keydown", escape);
     return () => window.removeEventListener("keydown", escape);
-  }, []);
+  }, [active]);
 
   useEffect(() => {
     const resume = () => {
@@ -262,46 +314,23 @@ export function RemoteViewerPanel({ scope, selection, requestedUrl, devices, onS
   }, [grant]);
 
   const refresh = () => {
+    setPickerOpen(false);
     handledUrl.current = null;
     migrating.current = false;
     setLoading(true); setGrant(null); setError(null); setRetry((value) => value + 1);
     void pageContext?.refresh().catch(() => {});
   };
-  return <PanelFrame role="complementary" className="artifact-panel remote-viewer-panel" label="远程预览" data-lock-horizontal-swipe>
-    <PanelResizer ariaLabel="调整预览宽度" />
-    <header className="viewer-header">
-      <button className="iconbtn viewer-mobile-back" onClick={onClose} aria-label="返回对话"><Icon name="back" /></button>
-      <Icon name="globe" size={18} />
-      <div className="viewer-heading"><strong>{selected?.label ?? "远程预览"}</strong>
-        <small>{selected ? `本会话 · ${label(selected.machine_id)}` : "本会话的页面"}</small></div>
-      <button className="iconbtn" onClick={refresh} title="刷新预览" aria-label="刷新预览"><Icon name="refresh" size={18} /></button>
-      <PanelExpandButton label="远程预览" />
-      <button className="iconbtn viewer-desktop-close" onClick={onClose} aria-label="关闭预览"><Icon name="close" size={18} /></button>
-    </header>
-    {originalUrl && <div className="viewer-original">
-      <span title={originalUrl}>{originalUrl}</span>
-      <a href={originalUrl} target="_blank" rel="noopener noreferrer">打开原链接</a>
-    </div>}
-    {selected && <div className="viewer-location"><span>{selected.entry}</span>
-      <button onClick={() => { setGrant(null); onSelect(null); }}>切换预览</button></div>}
-    {grant && openedContent && selected?.content_revision && selected.content_revision !== openedContent
-      && <div className="viewer-update"><span>页面已更新，刷新后查看新版</span><button onClick={refresh}>刷新</button></div>}
-    <div className="viewer-stage">
-      {error && !grant ? <div className="viewer-empty" role="alert"><Icon name="globe" size={28} />
-        <p>{error}</p><button className="viewer-action" onClick={refresh}>重新连接</button></div>
-      : !enabled ? <div className="viewer-empty"><Icon name="globe" size={28} />
-        <b>尚未启用远程预览</b><p>在 Relay 开启预览，并保持资源设备的 Wrapper 在线。</p></div>
-      : loading || pageContext?.loading ? <div className="viewer-empty" role="status"><span className="spinner" /><p>正在查找预览…</p></div>
-      : !selection ? <div className="viewer-catalog">
+  const catalog = <div className="viewer-catalog">
         <div className="viewer-catalog-actions"><span>{browseAll
           ? (requestedUrl ? "选择生成该页面的设备与预览" : "已登记的预览") : "本会话"}</span>
           <button onClick={() => setBrowseAll((value) => !value)}>{browseAll ? "返回本会话" : "+ 关联已有预览"}</button></div>
         {pageContext?.error && <p role="alert">{pageContext.error}</p>}
         {!browseAll && related.map((page) => <div className="viewer-page-row" key={page.id}>
-          <button className="viewer-site" onClick={() => onSelect({ machine_id: page.machine_id, site_id: page.site_id, entry: page.entry })}>
+          <button className="viewer-site" aria-current={selected?.id === page.id ? "page" : undefined}
+            onClick={() => { setPickerOpen(false); onSelect({ machine_id: page.machine_id, site_id: page.site_id, entry: page.entry }); }}>
             <span className="viewer-site-icon"><Icon name="globe" /></span>
-            <span><b>{page.label}</b><small>{label(page.machine_id)} · {page.available ? page.entry : "暂不可用"}</small></span>
-            <Icon name="chevron-right" size={16} />
+            <span><b>{page.label}</b><small>{label(page.machine_id)} · {page.entry}{!page.available && " · 暂不可用"}</small></span>
+            <Icon name={selected?.id === page.id ? "check" : "chevron-right"} size={16} />
           </button>
           <button className="iconbtn" title="从本会话移除，不删除文件" aria-label={`移除关联 ${page.label}`}
             onClick={() => void pageContext?.remove(page.id).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "移除失败。"))}>
@@ -317,7 +346,38 @@ export function RemoteViewerPanel({ scope, selection, requestedUrl, devices, onS
           <b>{browseAll ? "暂无可关联的预览" : "本会话还没有页面"}</b>
           <p>{browseAll ? "在资源设备登记需要读取的范围，并保持 Wrapper 在线。"
             : "生成的本地页面会显示在这里，也可以关联已有预览。"}</p></div>}
-      </div>
+      </div>;
+  const originalLink = originalUrl && <div className="viewer-original">
+    <span title={originalUrl}>{originalUrl}</span>
+    <a href={originalUrl} target="_blank" rel="noopener noreferrer">打开原链接</a>
+  </div>;
+  return <PanelFrame role="complementary" className="artifact-panel remote-viewer-panel" label="远程预览" data-lock-horizontal-swipe>
+    <PanelResizer ariaLabel="调整预览宽度" />
+    {pickerOpen && <div className="viewer-picker-backdrop" aria-hidden="true" onClick={() => setPickerOpen(false)} />}
+    <header className="viewer-header">
+      <button className="iconbtn viewer-mobile-back" onClick={onClose} aria-label="返回对话"><Icon name="back" /></button>
+      {selection ? <button ref={pickerTrigger} type="button" className="viewer-heading" aria-label="切换预览"
+        aria-expanded={pickerOpen} aria-haspopup="dialog" aria-controls={pickerOpen ? pickerId : undefined}
+        onClick={() => { setBrowseAll(false); setPickerOpen(value => !value); }}>
+        <strong>{heading}</strong><Icon name="chev" size={14} />
+      </button> : <div className="viewer-heading"><strong>页面预览</strong></div>}
+      <button className="iconbtn" onClick={refresh} title="刷新预览" aria-label="刷新预览"><Icon name="refresh" size={18} /></button>
+      <PanelExpandButton label="远程预览" />
+      <button className="iconbtn viewer-desktop-close" onClick={onClose} aria-label="关闭预览"><Icon name="close" size={18} /></button>
+      {pickerOpen && <div id={pickerId} ref={picker} className="viewer-picker" role="dialog" aria-label="页面详情与切换" tabIndex={-1}>
+        {catalog}{originalLink}
+      </div>}
+    </header>
+    {!selection && originalLink}
+    {grant && openedContent && selected?.content_revision && selected.content_revision !== openedContent
+      && <div className="viewer-update"><span>页面已更新，刷新后查看新版</span><button onClick={refresh}>刷新</button></div>}
+    <div className="viewer-stage">
+      {error && !grant ? <div className="viewer-empty" role="alert"><Icon name="globe" size={28} />
+        <p>{error}</p><button className="viewer-action" onClick={refresh}>重新连接</button></div>
+      : !enabled ? <div className="viewer-empty"><Icon name="globe" size={28} />
+        <b>尚未启用远程预览</b><p>在 Relay 开启预览，并保持资源设备的 Wrapper 在线。</p></div>
+      : !grant && (loading || pageContext?.loading) ? <div className="viewer-empty" role="status"><span className="spinner" /><p>正在查找预览…</p></div>
+      : !selection ? catalog
       : !selected ? <div className="viewer-empty"><p>设备已离线，或该预览已移除。</p>
         <button className="viewer-action" onClick={() => onSelect(null)}>选择其他预览</button></div>
       : grant ? <>{grant.mode === "bridge"
@@ -334,7 +394,7 @@ export function RemoteViewerPanel({ scope, selection, requestedUrl, devices, onS
             sandbox="allow-scripts allow-same-origin" onLoad={() => setLoaded(true)} />}
         {error ? <div className="viewer-error-banner" role="alert"><span>{error}</span>
           <button className="viewer-action" onClick={refresh}>重新连接</button></div>
-        : !loaded && <div className="viewer-loading" role="status"><span className="spinner" />正在连接…</div>}</>
+        : !loaded && <div className="viewer-loading" role="status"><span className="spinner" />正在加载预览…</div>}</>
       : <div className="viewer-empty" role="status"><span className="spinner" /><p>正在连接设备…</p></div>}
     </div>
   </PanelFrame>;

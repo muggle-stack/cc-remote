@@ -71,6 +71,7 @@ export interface WsCallbacks {
   onEvent: (msg: ServerEvent, ownership?: EventOwnership) => void;
   onConnState: (s: ConnState, detail?: string) => void;
   onAuthFail?: () => void;
+  onReloadRequired?: () => void;
   onCommandError?: (detail: string) => void;
   onCommandCompleted?: (commandId: string) => void;
   onWrapperGenerationChanged?: () => void;
@@ -87,6 +88,18 @@ const MAX_REPLAY_SESSIONS = 128;
 const PROTOCOL_RELOAD_KEY = "cc-remote:protocol-reload";
 const PROTOCOL_RECOVERY_POLL_MS = 1000;
 const PROTOCOL_RECOVERY_TIMEOUT_MS = 120000;
+const PROTOCOL_DEFERRED_POLL_MS = 5000;
+// These reads can be repeated by a fresh page. Keep the allowlist explicit:
+// unknown/new commands and every mutation must still protect pending input.
+const UPDATE_DISPOSABLE_READS = new Set([
+  "list_sessions", "get_models", "get_work_dashboard", "get_work_artifacts",
+  "get_history", "get_turn_detail", "get_agent_detail", "get_history_image",
+  "get_engine_capabilities", "get_permission_profiles", "get_context",
+  "get_goal", "get_claude_plan", "get_status", "get_queued_query",
+  "get_session_artifacts", "get_session_artifact_preview", "get_file_preview",
+  "get_preview_asset", "get_turn_file_changes", "get_diff", "list_dir",
+  "browse_files", "read_dsh",
+]);
 let pageClientId: string | null = null;
 
 /** A page-lifetime connection identity. Durable BTW ownership is derived from
@@ -217,6 +230,8 @@ export class RelayWs {
   private protocolRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
   private protocolRecoveryStartedAt = 0;
   private protocolRecoveryGeneration = 0;
+  private protocolRecoveryNotified: number | null = null;
+  private protocolRejected = false;
   private readonly cb: WsCallbacks;
   private readonly machineId: string;
   // Heartbeat: detect a HALF-OPEN link (dead TCP with no close event) and recover.
@@ -303,6 +318,21 @@ export class RelayWs {
       ...this.outbox.pendingSessionIds(),
       ...this.queryAcceptance.pendingSessionIds(),
     ])];
+  }
+
+  get hasPendingCommands(): boolean {
+    return this.outbox.size > 0 || this.queryAcceptance.pendingSessionIds().length > 0;
+  }
+
+  get hasPendingUpdateCommands(): boolean {
+    // An incompatible relay cannot acknowledge even the catalog reads sent
+    // from onopen. They must not prevent the explicit update that repairs the
+    // connection. Retain all frames for replay if the server rolls back;
+    // query acceptance remains an independent barrier even after transport ACK.
+    return (!this.protocolRejected
+      ? this.outbox.size > 0
+      : this.outbox.hasPendingExcept(UPDATE_DISPOSABLE_READS))
+      || this.queryAcceptance.pendingSessionIds().length > 0;
   }
 
   pendingQueryFor(sid: string): string | null {
@@ -1819,6 +1849,7 @@ export class RelayWs {
           return;
         }
         compatibleFrameSeen = true;
+        this.protocolRejected = false;
         this.lastRecvAt = Date.now();  // any valid JSON frame proves the link is alive
         // A real frame proves that this bundle and the relay agree. Clear the
         // one-shot mismatch guard so a future deployment may refresh once too.
@@ -2188,6 +2219,7 @@ export class RelayWs {
       if (this.ws === ws) this.ws = null;
       this.stopHeartbeat();
       if (ev.code === 4406) {
+        this.protocolRejected = true;
         this.beginProtocolRecovery();
         return;
       }
@@ -2236,17 +2268,28 @@ export class RelayWs {
       return;
     }
     if (action.kind === "reload") {
-      const reloadMarker = readProtocolReloadMarker();
-      if (reloadMarker !== undefined
-          && reloadMarker !== String(action.protocol)
-          && writeProtocolReloadMarker(action.protocol)) {
-        this.cancelProtocolRecovery();
-        window.location.reload();
-        return;
+      if (this.cb.onReloadRequired) {
+        if (this.protocolRecoveryNotified !== action.protocol) {
+          this.protocolRecoveryNotified = action.protocol;
+          this.cb.onReloadRequired();
+        }
+      } else {
+        const reloadMarker = readProtocolReloadMarker();
+        if (reloadMarker !== undefined
+            && reloadMarker !== String(action.protocol)
+            && writeProtocolReloadMarker(action.protocol)) {
+          this.cancelProtocolRecovery();
+          window.location.reload();
+          return;
+        }
       }
     }
 
-    if (Date.now() - this.protocolRecoveryStartedAt
+    // Explicit updates can be deferred indefinitely to protect drafts. Keep
+    // checking at a lower rate so a server rollback can reconnect this bundle,
+    // including while the rollback temporarily leaves the two tiers split.
+    const deferred = this.protocolRecoveryNotified !== null;
+    if (!deferred && Date.now() - this.protocolRecoveryStartedAt
         >= PROTOCOL_RECOVERY_TIMEOUT_MS) {
       this.cancelProtocolRecovery();
       this.cb.onConnState(
@@ -2255,15 +2298,17 @@ export class RelayWs {
       );
       return;
     }
+    if (this.stopped || generation !== this.protocolRecoveryGeneration) return;
     this.protocolRecoveryTimer = setTimeout(() => {
       this.protocolRecoveryTimer = null;
       void this.probeProtocolRecovery(generation);
-    }, PROTOCOL_RECOVERY_POLL_MS);
+    }, deferred ? PROTOCOL_DEFERRED_POLL_MS : PROTOCOL_RECOVERY_POLL_MS);
   }
 
   private cancelProtocolRecovery(): void {
     this.protocolRecoveryGeneration += 1;
     this.protocolRecoveryStartedAt = 0;
+    this.protocolRecoveryNotified = null;
     if (this.protocolRecoveryTimer !== null) {
       clearTimeout(this.protocolRecoveryTimer);
       this.protocolRecoveryTimer = null;

@@ -257,6 +257,11 @@ assert.deepEqual(
   ["process", "text"],
   "a cache reload keeps compaction proof without resurrecting command rows",
 );
+const buildKey = cache.pageKey(scope, "page-heavy");
+(storage.records.get(buildKey) as HistoryPageCacheStoredRecord).buildId = "previous-build";
+assert.equal(await cache.getPage(scope, "page-heavy"), null,
+  "a valid cache schema from an older application build must be rebuilt");
+assert.equal((await cache.putPage(scope, heavyPage)).ok, true);
 const incompatibleV3Key = cache.pageKey(scope, "page-heavy");
 (storage.records.get(incompatibleV3Key) as { version: number }).version = 3;
 assert.equal(await cache.getPage(scope, "page-heavy"), null,

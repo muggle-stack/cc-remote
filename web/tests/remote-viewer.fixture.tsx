@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "../src/index.css";
 import "../src/App.css";
-import { RemoteViewerPanel } from "../src/components/RemoteViewerPanel";
+import { RetainedViewerPanels } from "../src/components/RetainedViewerPanels";
 import { readViewerSelections, viewerScopeKey, writeViewerSelections } from "../src/remote-viewer";
 import { useMobileViewport } from "../src/use-mobile-viewport";
 import { ViewerPagesProvider } from "../src/components/ViewerPagesProvider";
@@ -22,6 +22,8 @@ function RefreshPages() {
 export default function Fixture() {
   useMobileViewport();
   const [sid, setSid] = useState(() => new URLSearchParams(location.search).get("sid") ?? "session-a");
+  const [engine, setEngine] = useState("codex");
+  const [authenticated, setAuthenticated] = useState(true);
   const [showArtifact, setShowArtifact] = useState(false);
   const [homeArtifact, setHomeArtifact] = useState(false);
   const [streaming, setStreaming] = useState(false);
@@ -29,7 +31,7 @@ export default function Fixture() {
   const [expanded, setExpanded] = useState(false);
   const chatLayout = new URLSearchParams(location.search).has("chat-layout");
   const [values, setValues] = useState(() => readViewerSelections(sessionStorage));
-  const scope = { machineId: "render-device", sid, space: "code", engine: "codex" };
+  const scope = { machineId: "render-device", sid, space: "code", engine };
   const key = viewerScopeKey(scope);
   const open = useCallback((page: ViewerPage) => setValues((current) => ({ ...current, [key]: {
     machine_id: page.machine_id, site_id: page.site_id, entry: page.entry,
@@ -49,7 +51,10 @@ export default function Fixture() {
   return <ViewerPagesProvider scope={Object.hasOwn(values, key) || showArtifact ? scope : null} onOpen={open}>
     <div className={`shell${Object.hasOwn(values, key) ? " panel-open" : ""}`}>
     <main className="pane"><header className="c-head"><b>Code</b></header>
-      <div style={{ padding: "40px", display: "grid", gap: "20px" }}>
+      {/* Fixture-only controls must leave a usable chat viewport on phones. */}
+      <div style={chatLayout
+        ? { padding: "12px", display: "flex", flexWrap: "wrap", gap: "8px", maxHeight: "40vh", overflow: "auto", flexShrink: 0 }
+        : { padding: "40px", display: "grid", gap: "20px" }}>
         <p>结构已经生成，可以打开右侧预览查看。</p>
         <button onClick={() => setValues((current) => ({ ...current, [key]: null }))}>打开远程预览</button>
         <button onClick={() => setShowArtifact(true)}>显示页面产物</button>
@@ -59,6 +64,9 @@ export default function Fixture() {
         {showArtifact && !chatLayout && <><MessageBlock text={turn.blocks[0].kind === "text" ? turn.blocks[0].text : ""} done={!streaming} />
           <PagePreviewLinks sid={sid} turn={turn} /><RefreshPages /></>}
         <button onClick={() => setSid((value) => value === "session-a" ? "session-b" : "session-a")}>切换会话</button>
+        <button onClick={() => setEngine(value => value === "codex" ? "claude" : "codex")}>切换引擎</button>
+        <button onClick={() => setSid(value => value + "-next")}>下个会话</button>
+        <button onClick={() => setAuthenticated(false)}>退出测试</button>
         <button id="append-message" onClick={() => setMessages((value) => value + 1)}>更新对话 {messages}</button>
         <p data-testid="current-sid">{sid}</p>
       </div>
@@ -66,10 +74,10 @@ export default function Fixture() {
       </main>
     <RightPanelPresentation.Provider value={{ expanded, onExpand: () => setExpanded(true),
       onDock: () => setExpanded(false), onDismiss: () => setExpanded(false) }}>
-    {Object.hasOwn(values, key) && <RemoteViewerPanel key={key} scope={scope} selection={values[key]}
+    {authenticated && <RetainedViewerPanels machineId={scope.machineId} activeScope={Object.hasOwn(values, key) ? scope : null} selections={values}
       devices={[{ machine_id: "render-device", label: "开发设备" }]}
-      onSelect={(selection) => setValues((current) => ({ ...current, [key]: selection }))}
-      onClose={() => setValues((current) => { const next = { ...current }; delete next[key]; return next; })} />}
+      onSelect={(owner, selection) => setValues((current) => ({ ...current, [owner]: selection }))}
+      onClose={owner => setValues((current) => { const next = { ...current }; delete next[owner]; return next; })} />}
     </RightPanelPresentation.Provider>
   </div></ViewerPagesProvider>;
 }

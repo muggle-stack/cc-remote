@@ -30,6 +30,9 @@ CSS、静态图片／字体和 fetch 二进制资源。页面脚本在用户浏�
   Caddy 模板已包含这个精确例外；主站和原 HTML runner 的策略不放宽。
 - `web/dist/cc-remote-viewer-runner.js` 是独立构建的可信启动器，必须随同一份 Web
   构建发布。运行时解析器不进入聊天首屏包。runner／资源不能进 PWA shell 缓存。
+  固定文件名的启动器与主站 shell 使用文件内容摘要作为 ETag，必须向 Relay
+  重新校验；不能仅按文件大小或修改时间判断版本，发布包会统一文件时间。
+  启动器与主页面版本不一致时会立即提示刷新 cc-remote 页面。
 - 自定义 nginx／容器代理同样要保留原 Host、受信 transport 和两条 WebSocket
   路由；只代理 `/ws` 的精确 location 不够。不要给整个主站加 `unsafe-inline`。
 
@@ -79,6 +82,9 @@ CSS、静态图片／字体和 fetch 二进制资源。页面脚本在用户浏�
 Wrapper 按需核验并关联这一个页面。不会扫描整个家目录、不会自动把目录里的所有页面
 加到列表，也不需要每个项目点击允许。管理员可在 Wrapper 环境设为 `0` 后重启，
 恢复仅手动登记模式；原有登记不受影响。
+
+思考内容不生成页面入口。正文行内代码中只有 `index.html` 这样的文件名时，不猜测它的位置，也不自动生成
+入口；带目录的路径、明确的 Markdown 链接和成功的结构化文件写入仍可触发发现。
 
 - 文件必须位于资源设备的 OS 用户家目录下。相对路径和 `~/` 属于会话设备；跨设备
   产物应引用资源设备的绝对路径或其静态服务 URL，不能猜测 SSH 命令的当前目录。
@@ -195,8 +201,11 @@ Bridge 启动器负责通知父页面；Isolated 模式仅在浏览器导航到 
 单会话元数据不超过 48 KiB，整个状态文件最多 4 MiB / 512 个会话。
 
 面板打开状态另按设备、Work/Code、引擎、父会话隔离。刷新时只恢复所选页面的描述符，
-重新认证和创建预览实例；不持久化 Cookie 或访问凭据。切换会话卸载当前 frame，
-返回后重新建立预览，不能保证保留原页面内部相机/表单状态。关闭不会停止设备、
+重新认证和创建预览实例；不持久化 Cookie 或访问凭据。同一设备内切换会话、Work/Code
+或 Claude/Codex 时隐藏原 frame，最多保留最近访问的三个实例；返回时保留页面内部状态，
+不移动 iframe 的 DOM 节点或重新下载资源。隐藏面板不接收焦点或快捷键，授权仍按原会话续租。
+超过三个时释放最久未访问的实例。关闭、切换设备或退出登录释放实例；刷新预览重新认证。
+关闭不会停止设备、
 终止后台模型或删除文件。
 
 ## 4. 安全与资源边界
@@ -264,3 +273,48 @@ npm --prefix web run test:viewer
 上线前另行验证：真实 Viewer 的全部资源、移动网络访问、iPhone Safari/WebGL、
 大文件与聊天并行、断网重连、源文件更新、撤销后访问失败，以及不同设备的同名
 `localhost` 地址不串号。模拟器测试不代替物理手机和真实 DNS/TLS 验收。
+
+
+## Native video file previews (protocol v86)
+
+Explicitly opening an MP4/M4V file uses the existing file authorization boundary
+and returns only a short-lived opaque media ID in `FilePreview`. It is not a
+publication, does not appear in the page catalog, and cannot open a private URL.
+The main application renders a native `<video controls playsinline>` player;
+it reads `/api/media/{machine_id}/{media_id}` with the existing HttpOnly login
+cookie. IDs are locators, not credentials: every request requires an active
+login, device access and the descriptor's authenticated owner. No secret or
+filesystem path appears in the URL. Cross-origin browser requests are rejected.
+
+GET/HEAD and single HTTP byte ranges (including suffix ranges and 416) travel
+through the existing bounded, pull-driven `/ws/viewer` Wrapper channel. The
+Relay streams chunks without persisting or buffering the whole video. Seeking
+and closing cancel obsolete reads. Login/device revocation or Wrapper replacement
+ends active streams. Wrapper descriptors expire after one hour, are bounded in
+number, hold no idle FDs, and are removed on session deletion or identity change. Each open repeats
+the file permission checks; each chunk verifies descriptor validity and file
+identity. Modified files must be reopened. The initial limit is 256 MiB, matching
+the Viewer transport limit. Browser codec support still applies (H.264/AAC MP4 is
+recommended); unsupported media offers download rather than server transcoding.
+
+Static HTML previews also accept MP3/M4A/AAC/WAV/OGG/Opus/FLAC and
+MP4/M4V/WebM/OGV resources within their existing publication boundaries.
+Bridge renders the page and runs scripts without waiting for media downloads.
+For progressive MP4/M4V/M4A with browser-supported MSE codecs, MP4Box remuxes
+authorized 256 KiB ranges into MediaSource fragments inside the opaque frame.
+Metadata reads skip media payloads when the index is at the end of the file;
+each range validates the original ETag and length. Seeking cancels obsolete
+reads, and buffering stops roughly 15 seconds ahead of playback. Consumed native
+buffers are evicted; JavaScript data pending segmentation is limited to 16 MiB
+per player, metadata reads to 8 MiB, and declarative players to eight per frame.
+WebKit attaches MediaSource directly via `srcObject`, avoiding its rejection of
+opaque-origin MediaSource blob URLs. Other containers/codecs and browsers use
+the existing bounded blob fallback asynchronously; the shared 64 MiB blob budget
+still applies. Video posters remain ordinary bounded image assets.
+Isolated mode uses same-preview-origin HTTP resources and byte ranges.
+Playback codecs depend on the browser; no transcoding is performed.
+
+This native-media endpoint is separate from sandboxed HTML previews: Bridge
+pages retain opaque origins and their existing resource/credential restrictions.
+Main-page CSP adds only `'self'` to `media-src`; Bridge runner CSP is unchanged.
+Isolated previews allow media from their own preview origin, data and blob URLs.

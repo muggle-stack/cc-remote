@@ -1,12 +1,25 @@
 .remote-viewer-panel{padding:0;min-width:0;isolation:isolate}
-.viewer-header{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--border);flex:none;color:var(--dim)}
-.viewer-heading{display:flex;flex:1;min-width:0;flex-direction:column;gap:3px}
+.viewer-header{position:relative;z-index:6;display:flex;align-items:center;gap:4px;padding:8px 12px;border-bottom:1px solid var(--border);flex:none;color:var(--dim);background:var(--surface)}
+.viewer-heading{display:flex;flex:1;min-width:0;align-items:center;gap:7px;min-height:36px;padding:0 6px;border:0;background:transparent;color:var(--dim);text-align:left}
+button.viewer-heading{cursor:pointer;-webkit-tap-highlight-color:transparent}
 .viewer-heading strong{color:var(--text);font-size:14px;font-weight:var(--font-weight-600);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.viewer-heading small{font-size:11px;color:var(--dim)}
-.viewer-header .iconbtn{flex:none;border-radius:9px}
-.viewer-location{display:flex;align-items:center;gap:12px;padding:8px 16px;background:var(--raised);border-bottom:1px solid var(--border);font-size:11px;color:var(--dim)}
-.viewer-location span{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-family:var(--mono)}
-.viewer-location button{flex:none;border:0;background:transparent;color:var(--accent-ink);padding:4px;cursor:pointer}
+.viewer-heading>svg{flex:none;opacity:.65}
+.viewer-heading:hover>svg,.viewer-heading[aria-expanded="true"]>svg{opacity:1;color:var(--accent-ink)}
+.viewer-heading[aria-expanded="true"]>svg{transform:rotate(180deg)}
+.viewer-heading:focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-radius:8px}
+.viewer-header .iconbtn{flex:none;width:36px;height:36px;border-radius:9px}
+.viewer-picker-backdrop{position:absolute;inset:0;z-index:5;background:transparent}
+.viewer-picker{position:absolute;top:calc(100% + 6px);left:8px;right:8px;max-height:min(480px,calc(var(--app-height,100dvh) - 100px));overflow:auto;overscroll-behavior:contain;outline:none;border:1px solid var(--border);border-radius:14px;background:var(--surface);box-shadow:var(--shadow)}
+.viewer-picker .viewer-catalog{padding:8px}
+.viewer-picker .viewer-catalog-actions{padding:4px 6px;margin-bottom:6px}
+.viewer-picker .viewer-page-row{align-items:flex-start}
+.viewer-picker .viewer-site{margin:0;padding:10px 8px;border:0;border-radius:8px;background:transparent}
+.viewer-picker .viewer-site:hover,.viewer-picker .viewer-site[aria-current="page"]{background:var(--accent-weak)}
+.viewer-picker .viewer-site[aria-current="page"]>svg{color:var(--accent-ink)}
+.viewer-picker .viewer-site-icon{display:none}
+.viewer-picker .viewer-site small{white-space:normal;overflow-wrap:anywhere;line-height:1.5}
+.viewer-picker .viewer-page-row>.iconbtn{margin:4px 0 0}
+.viewer-picker .viewer-original{border-top:1px solid var(--border);border-bottom:0}
 .viewer-original{display:flex;align-items:center;gap:12px;padding:8px 16px;border-bottom:1px solid var(--border);font-size:11px;color:var(--dim)}
 .viewer-original span{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .viewer-original a{flex:none;color:var(--accent-ink);text-decoration:none;padding:4px;border-radius:4px}
@@ -33,8 +46,10 @@
   .remote-viewer-panel{top:var(--app-offset-top,0px);left:0;right:0;bottom:auto;width:100%;height:var(--app-height,100dvh);max-width:100%;border:0;border-radius:0;z-index:60;padding-bottom:env(safe-area-inset-bottom)}
   .viewer-mobile-back{display:grid}
   .viewer-desktop-close{display:none}
-  .viewer-header{padding:12px;padding-top:max(12px,env(safe-area-inset-top));gap:8px}
-  .viewer-location{padding-inline:14px}
+  .viewer-header{padding:6px 8px;padding-top:calc(6px + env(safe-area-inset-top));gap:2px}
+  .viewer-header .iconbtn{width:40px;height:40px}
+  .viewer-heading{min-height:40px}
+  .viewer-heading strong{font-size:15px}
 }
 .viewer-error-banner { position: absolute; inset: 12px 12px auto; display: flex; align-items: center; gap: 12px; padding: 12px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); color: var(--text); box-shadow: 0 3px 16px #0001; font-size: 13px; }
 .viewer-error-banner > span { flex: 1; }

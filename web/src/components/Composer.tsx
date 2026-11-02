@@ -409,6 +409,7 @@ export function Composer(p: Props) {
     if (importingRef.current) { flash("附件正在导入，请稍候"); return; }
     const targetDraftKey = draftKeyRef.current;
     importingRef.current = true;
+    const finishImport = p.draftStore.beginImport();
     setImporting(true);
     try {
       const [{ pickFiles }, imported] = await Promise.all([
@@ -439,6 +440,7 @@ export function Composer(p: Props) {
     } catch {
       flash("附件导入失败，请重新添加；已输入的文字会保留。", 10_000);
     } finally {
+      finishImport();
       importingRef.current = false;
       setImporting(false);
     }

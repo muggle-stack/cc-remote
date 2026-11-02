@@ -139,7 +139,8 @@ class ArtifactService:
             elif machine._ctx_for(sid) is not None and row["source"] != "upload":
                 # Keep the existing file authorization, editor and conversion behavior.
                 return await machine._handle_get_file_preview(GetFilePreview(
-                    sid=sid, path=path, request_id=cmd.request_id, client_id=cmd.client_id))
+                    sid=sid, path=path, request_id=cmd.request_id, client_id=cmd.client_id,
+                    owner_id=cmd.owner_id))
             else:
                 # Immutable upload copies are session-scoped and read-only. Cold
                 # Code file reads need no engine resume; Work keeps its cwd boundary.
@@ -148,10 +149,15 @@ class ArtifactService:
                     cap = await asyncio.to_thread(machine._preview_capability_store.inspect_path,
                         cmd.engine, cmd.space, sid, path, mode="read", source="user_approved")
                     caps[cap.path] = cap
-                async with machine._preview_conversion_limit:
-                    data = await asyncio.to_thread(machine._read_file_preview, cwd, path, caps)
+                if machine._preview_format(path) == "video":
+                    data = await asyncio.to_thread(machine._video_file_preview, cwd, path,
+                        cmd.engine, cmd.space, sid, cmd.owner_id, caps)
+                else:
+                    async with machine._preview_conversion_limit:
+                        data = await asyncio.to_thread(machine._read_file_preview, cwd, path, caps)
                 response = FilePreview(path=path, request_id=cmd.request_id, format=data["format"],
                     content=data.get("content", ""), media_type=data.get("media_type"),
+                    media_id=data.get("media_id"),
                     data=base64.b64encode(data["data"]).decode() if data.get("data") is not None else None,
                     size=data["size"], converted_from=data.get("converted_from"),
                     truncated=data.get("truncated", False), mtime_ns=str(data["mtime_ns"]),

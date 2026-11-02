@@ -50,7 +50,7 @@ try {
 
   const base = { type: "notice", v: 85, ts: 1, severity: "warning", category: "runtime",
     title: "操作需要处理", message: "稍后重试" } as Notice;
-  for (const prefix of ["codex-notice-", "schedule-", "checkpoint-", "compact-"]) {
+  for (const prefix of ["codex-notice-", "schedule-", "compact-"]) {
     assert.equal(isHeaderNotice({ ...base, notice_id: prefix + "1" }), false,
       "specialized exceptions must keep their existing top-level presentation");
   }
@@ -62,6 +62,15 @@ try {
   assert.equal(headerNoticeItem(rollback, "a").message, rollback.message);
   assert.notEqual(headerNoticeItem(rollback, "a").id, headerNoticeItem(rollback, "b").id);
   assert.equal(headerNoticeItem({ ...rollback, severity: "warning" }, "a").label, "操作未完成");
+  const checkpoint = { ...base, notice_id: "checkpoint-1", title: "本轮代码回滚不可用",
+    message: "本轮修改了 Git 暂存区或包含当前无法安全记录的文件；对话仍可正常回滚。" } as Notice;
+  assert.equal(isHeaderNotice(checkpoint), true, "file rollback limitations use the compact status entry");
+  const limited = headerNoticeItem(checkpoint, "a");
+  assert.equal(limited.label, "回滚受限");
+  assert.equal(limited.tone, "warning", "a limitation is not a successful undo receipt");
+  assert.equal(limited.message, checkpoint.message, "the popover preserves the reason and conversation rollback availability");
+  assert.equal(limited.noticeId, checkpoint.notice_id);
+  assert.notEqual(limited.id, headerNoticeItem(checkpoint, "b").id);
 
   let state = reduce(initialState, { type: "command_error", detail: "操作未完成，请稍后重试。" });
   const first = state.bannerRevision;

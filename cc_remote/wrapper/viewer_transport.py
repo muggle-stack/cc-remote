@@ -21,7 +21,7 @@ log = logger("cc_remote.wrapper.viewer")
 
 class ViewerTransport:
     def __init__(self, url: str, token: str, machine_id: str, registry: Path,
-                 session_pages=None, home_pages=None):
+                 session_pages=None, home_pages=None, media_previews=None):
         parts = urlsplit(url)
         self.url = urlunsplit((parts.scheme, parts.netloc, "/ws/viewer", "", ""))
         self.token = token
@@ -29,6 +29,7 @@ class ViewerTransport:
         self.registry = registry
         self.session_pages = session_pages
         self.home_pages = home_pages
+        self.media_previews = media_previews
 
     def resource_sites(self):
         manual = load_sites(self.registry)
@@ -39,7 +40,7 @@ class ViewerTransport:
         while True:
             try:
                 sites = await asyncio.to_thread(load_sites, self.registry)
-                if not sites and self.session_pages is None:
+                if not sites and self.session_pages is None and self.media_previews is None:
                     await asyncio.sleep(5)
                     continue
                 options = {"additional_headers": {"Authorization": f"Bearer {self.token}"},
@@ -131,10 +132,17 @@ class ViewerTransport:
             stream = None
             began = False
             try:
-                sites = await asyncio.to_thread(self.resource_sites)
-                site = sites.get(message.get("site_id"))
-                if site is None or message.get("revision") != site.revision:
-                    raise PermissionError("publication changed")
+                media = message.get("type") == "media_request"
+                if media:
+                    if self.media_previews is None:
+                        raise PermissionError("video unavailable")
+                    open_args = (self.media_previews.open, message.get("media_id"), message.get("owner_id"))
+                else:
+                    sites = await asyncio.to_thread(self.resource_sites)
+                    site = sites.get(message.get("site_id"))
+                    if site is None or message.get("revision") != site.revision:
+                        raise PermissionError("publication changed")
+                    open_args = (open_resource, site, message.get("path", ""))
                 if message.get("method") not in {"GET", "HEAD"}:
                     raise PermissionError("read only")
                 headers = message.get("headers", {})
@@ -143,8 +151,7 @@ class ViewerTransport:
                                or not isinstance(v, str) or len(v) > 256
                                for k, v in headers.items())):
                     raise ValueError("invalid headers")
-                opening = asyncio.create_task(asyncio.to_thread(
-                    open_resource, site, message.get("path", "")))
+                opening = asyncio.create_task(asyncio.to_thread(*open_args))
                 try:
                     stream, info, mime = await asyncio.shield(opening)
                 except asyncio.CancelledError:
@@ -166,9 +173,13 @@ class ViewerTransport:
                 while True:
                     await asyncio.wait_for(ready.get(), timeout=45)
                     # Removal / configuration change revokes even an ongoing download.
-                    current = (await asyncio.to_thread(self.resource_sites)).get(site.id)
-                    if current is None or current.revision != site.revision:
-                        raise PermissionError("publication revoked")
+                    if media:
+                        await asyncio.to_thread(self.media_previews.validate,
+                            message.get("media_id"), message.get("owner_id"), stream)
+                    else:
+                        current = (await asyncio.to_thread(self.resource_sites)).get(site.id)
+                        if current is None or current.revision != site.revision:
+                            raise PermissionError("publication revoked")
                     def read_chunk():
                         import os
                         now = os.fstat(stream.fileno())
@@ -196,6 +207,7 @@ class ViewerTransport:
         await send({"type": "hello", "v": PROTOCOL_VERSION,
                     "machine_id": self.machine_id,
                     "session_pages": self.session_pages is not None,
+                    "media_previews": self.media_previews is not None,
                     "sites": [site.public() for site in initial_sites.values()]})
         catalog_task = asyncio.create_task(catalog())
         try:
@@ -217,7 +229,7 @@ class ViewerTransport:
                     task = asyncio.create_task(metadata(message))
                     task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
                     metadata_tasks[request_id] = task
-                elif kind == "request":
+                elif kind in {"request", "media_request"}:
                     if request_id in tasks:
                         raise ValueError("duplicate Viewer request")
                     tasks = {key: task for key, task in tasks.items() if not task.done()}

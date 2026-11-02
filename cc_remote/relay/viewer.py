@@ -15,6 +15,8 @@ import secrets
 import time
 from urllib.parse import quote, urlsplit
 
+import anyio
+
 from fastapi import Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -149,6 +151,7 @@ class ViewerPeer:
         self.lock = asyncio.Lock()
         self.closed = False
         self.session_pages = False
+        self.media_previews = False
         self.metadata_pending: dict[str, asyncio.Future] = {}
 
     def publication(self, site_id: str):
@@ -196,6 +199,16 @@ class ViewerPeer:
             await asyncio.wait_for(self.ws.send_json(message), timeout=10)
 
     async def read(self, site: PublicSite, path: str, method: str, headers: dict):
+        return await self._read({"type": "request", "site_id": site.id,
+                                 "revision": site.revision, "path": path}, method, headers)
+
+    async def read_media(self, media_id: str, owner_id: str, method: str, headers: dict):
+        if not self.media_previews:
+            raise ViewerError(503, "video_unavailable")
+        return await self._read({"type": "media_request", "media_id": media_id,
+                                 "owner_id": owner_id}, method, headers)
+
+    async def _read(self, payload: dict, method: str, headers: dict):
         if self.closed:
             raise ViewerError(503, "device_offline")
         if self.waiting_reads >= MAX_REQUESTS * 8:
@@ -216,9 +229,8 @@ class ViewerPeer:
         pending = PendingRead(head=method == "HEAD")
         self.pending[request_id] = pending
         try:
-            await self.send({"type": "request", "request_id": request_id,
-                             "site_id": site.id, "revision": site.revision,
-                             "path": path, "method": method, "headers": headers})
+            await self.send({**payload, "request_id": request_id,
+                             "method": method, "headers": headers})
             status, response_headers = await asyncio.wait_for(pending.metadata, 15)
             return request_id, status, response_headers
         except BaseException:
@@ -258,7 +270,9 @@ class ViewerPeer:
             pending.metadata.cancel()
         try:
             if pending and not self.closed:
-                await self.send({"type": "cancel", "request_id": request_id})
+                # ASGI disconnect cancellation must still reach the source FD.
+                with anyio.CancelScope(shield=True):
+                    await self.send({"type": "cancel", "request_id": request_id})
         except Exception:
             pass
         finally:
@@ -454,6 +468,7 @@ class ViewerRelay:
                 raise ValueError("Viewer channel already connected or full")
             peer = ViewerPeer(ws, parse_catalog(hello.get("sites")))
             peer.session_pages = hello.get("session_pages") is True
+            peer.media_previews = hello.get("media_previews") is True
             self.peers[machine_id] = peer
             async def check_credential():
                 while True:
@@ -698,7 +713,8 @@ class ViewerRelay:
             "Content-Security-Policy": (
                 "default-src 'none'; script-src 'self' 'unsafe-inline' " + scripts + "; "
                 "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
-                "font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; "
+                "font-src 'self' data:; media-src 'self' data: blob:; "
+                "connect-src 'self'; worker-src 'self' blob:; "
                 "object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'none'; "
                 "sandbox allow-scripts allow-same-origin; frame-ancestors " + self.cfg.public_origin),
             "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",

@@ -17,12 +17,16 @@ export function viewerPageCandidates(turn: Turn): string[] {
         && paths.size < 32) paths.add(target.path);
   };
   for (const block of [...turn.blocks, ...(turn.liveSpillBlocks ?? []), ...(turn.detailProjection?.blocks ?? [])]) {
-    if (block.kind === "text" && block.delivery !== "async") {
+    if (block.kind === "text" && block.channel !== "thinking" && block.delivery !== "async") {
       if (!/\.htm|http:\/\//i.test(block.text)) continue;
       // Examples inside fenced source code are not deliverables.
       const text = block.text.replace(/^\s*(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\s*\1\s*$/gm, "");
       for (const match of text.matchAll(/(?<!!)\[[^\]\n]*\]\(\s*(?:<([^>\n]+)>|([^\s)]+))(?:\s+"[^"\n]*")?\s*\)/g)) add(match[1] ?? match[2]);
-      for (const match of text.matchAll(/(?<!`)`([^`\n]+)`(?!`)/g)) add(match[1]);
+      // A filename mentioned in prose has no reliable directory. Only explicit
+      // links, qualified paths and successful file writes are discovery hints.
+      for (const match of text.matchAll(/(?<!`)`([^`\n]+)`(?!`)/g)) {
+        if (match[1].includes("/")) add(match[1]);
+      }
       for (const match of text.matchAll(/http:\/\/[^\s<>"'`\])，。；！？]+/g)) add(match[0]);
       for (const match of text.matchAll(/visualize([^\n]+?)/g)) {
         try { const value = JSON.parse(match[1]); if (typeof value?.path === "string") add(value.path); } catch { /* ordinary text */ }

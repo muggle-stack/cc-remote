@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 85
+PROTOCOL_VERSION = 86
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -2657,21 +2657,23 @@ class FilePreview(_Base):
     """wrapper -> requesting client: bounded source or locally-rendered artifact.
 
     Binary previews are transported directly through the authenticated relay;
-    the relay never writes them to disk. Office files are converted by the
+    the relay never writes them to disk. Video carries only an owner-bound
+    media_id; authenticated HTTP Range reads use the separate Viewer channel. Office files are converted by the
     wrapper host and report their original extension in ``converted_from``.
     """
     type: Literal["file_preview"] = "file_preview"
     directory: bool = False
     path: PreviewPath
     request_id: WireId
-    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "spreadsheet"] = "text"
+    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "video", "spreadsheet"] = "text"
     content: PreviewContent = ""
     media_type: Optional[Literal[
         "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
-        "image/svg+xml", "application/pdf",
+        "image/svg+xml", "application/pdf", "video/mp4",
         "audio/wav", "audio/mpeg", "audio/mp4", "audio/aac", "audio/flac",
         "audio/ogg", "audio/webm",
     ]] = None
+    media_id: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{32}$")
     data: Optional[ArtifactPreviewData] = None
     converted_from: Optional[str] = Field(default=None, max_length=16)
     size: int = Field(default=0, ge=0)
@@ -2741,7 +2743,7 @@ class PreviewAuthorizationRequired(_Base):
     operation: Literal["file_preview", "preview_asset"]
     path: PreviewPath
     resolved_path: PreviewPath
-    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "spreadsheet"] = "text"
+    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "video", "spreadsheet"] = "text"
     preview_id: Optional[WireId] = None
 
 

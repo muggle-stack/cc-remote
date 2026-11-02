@@ -647,6 +647,24 @@ try {
     assert.ok(markup.includes(`href="${encodeURI(explicitUrl)}"`),
       "explicit Markdown and angle-autolink destinations are never rewritten");
   }
+  for (const done of [true, false]) {
+    for (const suffix of ["。", "，请打开。", "；备用地址稍后给出。", "）。"]) {
+      const markup = renderToStaticMarkup(createElement(MessageBlock, {
+        text: `请刷新页面再试：http://10.0.0.2:18790/film/${suffix}`, done,
+      }));
+      assert.match(markup, /href="http:\/\/10\.0\.0\.2:18790\/film\/"/);
+      assert.ok(markup.includes(`</a>${suffix}`), "Chinese sentence punctuation stays outside a bare URL");
+    }
+    for (const text of ["[页面](https://example.test/中文。)", "<https://example.test/中文。>"]) {
+      const markup = renderToStaticMarkup(createElement(MessageBlock, { text, done }));
+      assert.ok(markup.includes(`href="${encodeURI("https://example.test/中文。")}"`));
+    }
+    const markup = renderToStaticMarkup(createElement(MessageBlock, {
+      text: "https://example.test/中文/%E3%80%82。\n\n`https://example.test/例子。`", done,
+    }));
+    assert.ok(markup.includes(`href="https://example.test/${encodeURI("中文")}/%E3%80%82"`));
+    assert.ok(markup.includes("<code>https://example.test/例子。</code>"));
+  }
   const escapedUrl = renderToStaticMarkup(createElement(MessageBlock, {
     text: `\\**${boardUrl}**，原文`, done: true,
   }));
@@ -1682,6 +1700,28 @@ $$`,
   assert.equal(audioState.artifact?.data, undefined);
   assert.equal(reduce(audioState, { type: "event", event: audioReply }), audioState,
     "a late audio response cannot replace the newly selected file");
+
+  let videoState = reduce(initialState, {
+    type: "open_file_loading", file: "sample.mp4", sid: "video-session",
+    requestId: "video-1", kind: "file",
+  });
+  const videoReply = { ...audioReply, sid: "video-session", path: "sample.mp4",
+    request_id: "video-1", format: "video", media_type: "video/mp4", data: null,
+    media_id: "a".repeat(32), size: 17 * 1024 * 1024 } as ServerEvent;
+  videoState = reduce(videoState, { type: "event", event: videoReply });
+  assert.equal(videoState.artifact?.mediaId, "a".repeat(32));
+  const videoMarkup = renderToStaticMarkup(createElement(ArtifactPanel, {
+    artifact: videoState.artifact!, machineId: "device", active: "diff", hasBtw: false,
+    onTab: () => {}, onClose: () => {},
+  }));
+  assert.match(videoMarkup, /<video[^>]*controls[^>]*playsInline[^>]*preload="metadata"/);
+  assert.match(videoMarkup, /href="\/api\/media\/device\/a{32}\?download=1"/);
+  assert.doesNotMatch(videoMarkup, /auto[Pp]lay/);
+  videoState = reduce(videoState, { type: "open_file_loading", file: "next.mp4",
+    sid: "video-session", requestId: "video-2", kind: "file" });
+  assert.equal(videoState.artifact?.mediaId, undefined);
+  assert.equal(reduce(videoState, { type: "event", event: videoReply }), videoState,
+    "a stale video descriptor cannot replace the newly selected file");
 
   const sandbox = buildSandboxDocument("<h1>safe</h1>");
   assert.match(sandbox, /Content-Security-Policy/);

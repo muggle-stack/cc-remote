@@ -4,7 +4,7 @@
 
 Self-hosted · Multiple sessions and devices · Live tool activity · Code / Work · Web / PWA / TUI
 
-**Product version: v5.3.7** · Wire protocol v85
+**Product version: v5.3.7** · Wire protocol v86
 
 [中文](README.md) · [Release install (recommended)](#install-and-upgrade) · [Engine comparison](#engines-and-features) · [Try from source](#quick-start) ·
 [Interface tour](#interface-tour) · [Terminal workspace](#terminal-workspace) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)
@@ -541,6 +541,10 @@ web client for same-origin integration.
   again; device-local sessions remain. Moving Relay also requires migrating or
   recreating device authorization, Push and other control configuration, not just
   changing its address.
+- **Does an open page pick up a deployment?** The header offers a page update,
+  without signing out or a hard refresh. Unsent drafts, attachment imports and
+  unacknowledged commands block the update. The new build rebuilds old local
+  history projections automatically.
 - **Does phone access need an inbound port on my computer?** No. Wrapper connects
   outbound; the public entry point is on the Relay host.
 
