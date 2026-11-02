@@ -17717,7 +17717,15 @@ async function assertDeferredUpdateRecovery() {
   let updateOffers = 0;
   const guardedUpdateStates: string[] = [];
   const guardedUpdate = new RelayWs({
-    onEvent: () => {}, onConnState: state => { guardedUpdateStates.push(state); },
+    onEvent: () => {}, onConnState: state => {
+      guardedUpdateStates.push(state);
+      if (state === "connected") {
+        guardedUpdate.sendListSessions("codex", "code");
+        guardedUpdate.sendGetModels("codex");
+        guardedUpdate.sendGetWorkDashboard("codex");
+        guardedUpdate.sendGetWorkArtifacts("codex", "work-session");
+      }
+    },
     onReloadRequired: () => { updateOffers += 1; },
   });
   mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
@@ -17725,10 +17733,20 @@ async function assertDeferredUpdateRecovery() {
     const flushRecovery = () => new Promise<void>(resolve => setImmediate(resolve));
     guardedUpdate.start();
     const guardedSocketCount = FakeWebSocket.instances.length;
-    FakeWebSocket.instances.at(-1)?.onclose?.({ code: 4406 });
+    const initialSocket = FakeWebSocket.instances.at(-1)!;
+    initialSocket.onopen?.();
+    const catalogReads = initialSocket.sent.map(raw => JSON.parse(raw)).filter(frame => frame.cmd_id);
+    assert.equal(catalogReads.length, 4);
+    assert.equal(guardedUpdate.hasPendingUpdateCommands, true,
+      "ordinary connections retain the existing pending-command barrier");
+    initialSocket.onclose?.({ code: 4406 });
     await flushRecovery();
     assert.equal(updateOffers, 1, "protocol upgrades use the draft-protected update path");
     assert.equal(protocolReloads, 1, "the socket must not force-reload over unsent input");
+    assert.equal(guardedUpdate.hasPendingUpdateCommands, false,
+      "unacknowledged handshake reads must not deadlock the explicit update");
+    assert.equal(guardedUpdate.hasPendingCommands, true,
+      "the original outbox remains available if the server rolls back");
     mock.timers.tick(130_000);
     await flushRecovery();
     assert.equal(guardedUpdateStates.at(-1), "reconnecting",
@@ -17750,6 +17768,15 @@ async function assertDeferredUpdateRecovery() {
       "a compatible rollback must reconnect without refreshing or discarding the draft");
     assert.equal(guardedUpdateStates.at(-1), "connecting");
     assert.equal(protocolReloads, 1);
+    const recoveredSocket = FakeWebSocket.instances.at(-1)!;
+    recoveredSocket.onopen?.();
+    for (const read of catalogReads) {
+      assert.ok(recoveredSocket.sent.some(raw => JSON.parse(raw).cmd_id === read.cmd_id),
+        "rollback must replay each retained read with its original command identity");
+    }
+    recoveredSocket.receive({ type: "pong", n: 1 });
+    assert.equal(guardedUpdate.hasPendingUpdateCommands, true,
+      "a compatible frame restores ordinary command blocking");
     guardedUpdate.stop();
 
     // A later protocol mismatch starts a fresh recovery, and stop() cancels
@@ -17780,6 +17807,40 @@ async function assertDeferredUpdateRecovery() {
   sessionValues.set("cc-remote:protocol-reload", String(PROTOCOL_VERSION + 1));
 }
 await assertDeferredUpdateRecovery();
+
+async function assertProtocolUpdateProtectsMutations() {
+  for (const action of ["save", "query", "acked-query"] as const) {
+    const client = new RelayWs({
+      onEvent: () => {}, onReloadRequired: () => {},
+      onConnState: state => {
+        if (state !== "connected") return;
+        client.sendListSessions("codex");
+        client.sendGetModels("codex");
+      },
+    });
+    try {
+      client.start();
+      const socket = FakeWebSocket.instances.at(-1)!;
+      socket.onopen?.();
+      client.setFocusedSid("protected", "claude", "code");
+      if (action === "save") client.sendSaveMarkdown("/tmp/doc.md", "draft", 3, "1", "a".repeat(64));
+      else assert.equal(client.sendQuery("keep this prompt", "pending-message"), true);
+      if (action === "acked-query") {
+        const query = JSON.parse(socket.sent.at(-1)!);
+        socket.receive({ type: "command_ack", cmd_id: query.cmd_id, client_id: query.client_id });
+      }
+      socket.onclose?.({ code: 4406 });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(client.hasPendingUpdateCommands, true,
+        `${action} must still block updates when a protocol mismatch prevents confirmation`);
+      if (action !== "save") assert.equal(client.pendingQueryFor("protected"), "pending-message");
+    } finally { client.stop(); }
+  }
+}
+await assertProtocolUpdateProtectsMutations();
+// The ACK in the mutation scenario proves compatibility and clears this
+// marker. Seed the independent reload-loop scenario again.
+sessionValues.set("cc-remote:protocol-reload", String(PROTOCOL_VERSION + 1));
 
 const repeatedMismatch = new RelayWs({
   onEvent: () => {},

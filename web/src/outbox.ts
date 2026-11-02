@@ -265,6 +265,7 @@ export function planRecoveryReplay(
 
 interface PendingCommand {
   clientId: string;
+  type: string | null;
   raw: string;
   bytes: number;
 }
@@ -291,6 +292,13 @@ export class CommandOutbox {
     return this.pendingBytes;
   }
 
+  hasPendingExcept(types: ReadonlySet<string>): boolean {
+    for (const item of this.pending.values()) {
+      if (item.type === null || !types.has(item.type)) return true;
+    }
+    return false;
+  }
+
   enqueue(frame: OutboundFrame, clientId: string, cmdId: string): EnqueueResult {
     if (this.pending.has(cmdId)) {
       return { ok: false, reason: `duplicate command id: ${cmdId}` };
@@ -309,7 +317,9 @@ export class CommandOutbox {
     if (bytes > this.maxBytes || this.pendingBytes + bytes > this.maxBytes) {
       return { ok: false, reason: `command outbox full (${this.maxBytes} bytes)` };
     }
-    this.pending.set(cmdId, { clientId, raw, bytes });
+    this.pending.set(cmdId, {
+      clientId, type: typeof frame.type === "string" ? frame.type : null, raw, bytes,
+    });
     this.pendingBytes += bytes;
     return { ok: true, raw, cmdId };
   }

@@ -89,6 +89,17 @@ const PROTOCOL_RELOAD_KEY = "cc-remote:protocol-reload";
 const PROTOCOL_RECOVERY_POLL_MS = 1000;
 const PROTOCOL_RECOVERY_TIMEOUT_MS = 120000;
 const PROTOCOL_DEFERRED_POLL_MS = 5000;
+// These reads can be repeated by a fresh page. Keep the allowlist explicit:
+// unknown/new commands and every mutation must still protect pending input.
+const UPDATE_DISPOSABLE_READS = new Set([
+  "list_sessions", "get_models", "get_work_dashboard", "get_work_artifacts",
+  "get_history", "get_turn_detail", "get_agent_detail", "get_history_image",
+  "get_engine_capabilities", "get_permission_profiles", "get_context",
+  "get_goal", "get_claude_plan", "get_status", "get_queued_query",
+  "get_session_artifacts", "get_session_artifact_preview", "get_file_preview",
+  "get_preview_asset", "get_turn_file_changes", "get_diff", "list_dir",
+  "browse_files", "read_dsh",
+]);
 let pageClientId: string | null = null;
 
 /** A page-lifetime connection identity. Durable BTW ownership is derived from
@@ -220,6 +231,7 @@ export class RelayWs {
   private protocolRecoveryStartedAt = 0;
   private protocolRecoveryGeneration = 0;
   private protocolRecoveryNotified: number | null = null;
+  private protocolRejected = false;
   private readonly cb: WsCallbacks;
   private readonly machineId: string;
   // Heartbeat: detect a HALF-OPEN link (dead TCP with no close event) and recover.
@@ -310,6 +322,17 @@ export class RelayWs {
 
   get hasPendingCommands(): boolean {
     return this.outbox.size > 0 || this.queryAcceptance.pendingSessionIds().length > 0;
+  }
+
+  get hasPendingUpdateCommands(): boolean {
+    // An incompatible relay cannot acknowledge even the catalog reads sent
+    // from onopen. They must not prevent the explicit update that repairs the
+    // connection. Retain all frames for replay if the server rolls back;
+    // query acceptance remains an independent barrier even after transport ACK.
+    return (!this.protocolRejected
+      ? this.outbox.size > 0
+      : this.outbox.hasPendingExcept(UPDATE_DISPOSABLE_READS))
+      || this.queryAcceptance.pendingSessionIds().length > 0;
   }
 
   pendingQueryFor(sid: string): string | null {
@@ -1826,6 +1849,7 @@ export class RelayWs {
           return;
         }
         compatibleFrameSeen = true;
+        this.protocolRejected = false;
         this.lastRecvAt = Date.now();  // any valid JSON frame proves the link is alive
         // A real frame proves that this bundle and the relay agree. Clear the
         // one-shot mismatch guard so a future deployment may refresh once too.
@@ -2195,6 +2219,7 @@ export class RelayWs {
       if (this.ws === ws) this.ws = null;
       this.stopHeartbeat();
       if (ev.code === 4406) {
+        this.protocolRejected = true;
         this.beginProtocolRecovery();
         return;
       }

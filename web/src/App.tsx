@@ -547,7 +547,7 @@ export default function App() {
           draft.text || draft.selected.length || draft.pages?.some(page => page.text || page.selected.length))) {
       return "还有未发送的内容或正在导入的附件，请先发送或自行保存并清空，再更新页面。";
     }
-    if (wsRef.current?.hasPendingCommands) return "有操作正在等待确认，请稍后再更新。";
+    if (wsRef.current?.hasPendingUpdateCommands) return "有操作正在等待确认，请稍后再更新。";
     if (document.querySelector('dialog[open], [role="dialog"][aria-modal="true"]:not(.header-feedback-popover)')) {
       return "请先完成或关闭当前对话框，再更新页面。";
     }

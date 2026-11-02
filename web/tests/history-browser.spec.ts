@@ -5043,6 +5043,41 @@ test("session message tool keeps its receipt in chronology while later work cont
   await page.screenshot({ path: info.outputPath("inline-send-tool.png") });
 });
 
+for (const space of ["code", "work"] as const) {
+  test(`web update remains usable after an incompatible ${space} handshake leaves catalog reads unacknowledged`, async ({ page }) => {
+    await mockRightPanelRelay(page, { retained: false });
+    await page.addInitScript(space => localStorage.setItem("cc_remote_space", space), space);
+    const commands: Record<string, unknown>[] = [];
+    await page.routeWebSocket(/\/ws(?:\?|$)/, socket => {
+      socket.onMessage(raw => {
+        const command = JSON.parse(String(raw));
+        commands.push(command);
+        // App's connected callback sends these immediately after hello, before
+        // the browser can receive a protocol rejection. Never acknowledge them.
+        if (command.type === "get_models") {
+          socket.send(JSON.stringify({ v: PROTOCOL_VERSION + 1, ts: 1, type: "error",
+            code: "protocol", message: "first frame must be a client hello" }));
+          socket.close({ code: 4406, reason: "protocol version mismatch" });
+        }
+      });
+    });
+    const next = { build_id: "e".repeat(64), version: "5.3.8", protocol: PROTOCOL_VERSION + 1 };
+    await page.route("**/cc-remote-build.json?*", route => route.fulfill({ json: next }));
+    await page.route("**/healthz?*", route => route.fulfill({ json: next }));
+    await page.goto("/");
+    const status = page.getByRole("button", { name: "状态详情：有更新", exact: true });
+    await expect(status).toBeVisible();
+    await expect.poll(() => commands.some(c => c.type === "get_models")).toBe(true);
+    expect(commands.some(c => c.type === "list_sessions" && c.space === space)).toBe(true);
+    if (space === "work") expect(commands.some(c => c.type === "get_work_dashboard")).toBe(true);
+    await status.click();
+    const navigation = page.waitForEvent("framenavigated", frame => frame === page.mainFrame());
+    await page.getByRole("button", { name: "更新页面", exact: true }).click();
+    await navigation;
+    expect(commands.some(c => ["query", "new_session", "steer", "save_markdown"].includes(String(c.type)))).toBe(false);
+  });
+}
+
 for (const duringProbe of [false, true]) {
   test(`web update protects Markdown edited ${duringProbe ? "during" : "before"} its version check and retries after saving`, async ({ page }) => {
     await page.setViewportSize({ width: 1568, height: 1000 });
