@@ -71,6 +71,7 @@ export interface WsCallbacks {
   onEvent: (msg: ServerEvent, ownership?: EventOwnership) => void;
   onConnState: (s: ConnState, detail?: string) => void;
   onAuthFail?: () => void;
+  onReloadRequired?: () => void;
   onCommandError?: (detail: string) => void;
   onCommandCompleted?: (commandId: string) => void;
   onWrapperGenerationChanged?: () => void;
@@ -303,6 +304,10 @@ export class RelayWs {
       ...this.outbox.pendingSessionIds(),
       ...this.queryAcceptance.pendingSessionIds(),
     ])];
+  }
+
+  get hasPendingCommands(): boolean {
+    return this.outbox.size > 0 || this.queryAcceptance.pendingSessionIds().length > 0;
   }
 
   pendingQueryFor(sid: string): string | null {
@@ -2236,6 +2241,11 @@ export class RelayWs {
       return;
     }
     if (action.kind === "reload") {
+      if (this.cb.onReloadRequired) {
+        this.cancelProtocolRecovery();
+        this.cb.onReloadRequired();
+        return;
+      }
       const reloadMarker = readProtocolReloadMarker();
       if (reloadMarker !== undefined
           && reloadMarker !== String(action.protocol)

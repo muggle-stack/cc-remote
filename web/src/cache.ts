@@ -1,3 +1,4 @@
+import { WEB_BUILD } from "./web-build.ts";
 // IndexedDB cache: per-session turns + lastSeq.
 //
 // Opening the app restores history instantly from local storage and asks the
@@ -502,8 +503,8 @@ async function pruneCacheStore(d: IDBDatabase): Promise<void> {
     req.onsuccess = () => {
       const cur = req.result;
       if (!cur) return;
-      const value = cur.value as (CachedSession & { v?: number }) | undefined;
-      if (!value || value.v !== CACHE_VER
+      const value = cur.value as (CachedSession & { v?: number; buildId?: string }) | undefined;
+      if (!value || value.v !== CACHE_VER || value.buildId !== WEB_BUILD.build_id
           || hasOrphanedActiveCompactionProjection(value.turns)) {
         cur.delete();
         cur.continue();
@@ -574,9 +575,10 @@ export async function loadSession(sessionId: string): Promise<CachedSession | nu
       const tx = d.transaction(STORE, "readonly");
       const req = tx.objectStore(STORE).get(sessionId);
       req.onsuccess = () => {
-        const r = req.result as (CachedSession & { v?: number }) | undefined;
-        // Ignore stale caches from before the current shape (v must match).
-        if (invalidatedSessions.has(sessionId) || !r || r.v !== CACHE_VER
+        const r = req.result as (CachedSession & { v?: number; buildId?: string }) | undefined;
+        // Rebuild projections written by another application build, even
+        // when a rendering fix did not change the schema or wire protocol.
+        if (invalidatedSessions.has(sessionId) || !r || r.v !== CACHE_VER || r.buildId !== WEB_BUILD.build_id
             || typeof r.revision !== "string" || !r.revision
             || (r.control != null && !isSessionControl(r.control))
             || hasOrphanedActiveCompactionProjection(r.turns)) {
@@ -631,8 +633,8 @@ export async function loadAllReplayState(): Promise<{
           resolve({ cursors, generations, controls });
           return;
         }
-        const r = cur.value as (CachedSession & { v?: number }) | undefined;
-        if (r && r.v === CACHE_VER
+        const r = cur.value as (CachedSession & { v?: number; buildId?: string }) | undefined;
+        if (r && r.v === CACHE_VER && r.buildId === WEB_BUILD.build_id
             && typeof r.revision === "string" && r.revision
             && typeof r.lastSeq === "number"
             && !hasOrphanedActiveCompactionProjection(r.turns)
@@ -729,7 +731,7 @@ async function flush(): Promise<void> {
           continue;
         }
         store.put(
-          { v: CACHE_VER, turns, lastSeq: job.lastSeq,
+          { v: CACHE_VER, buildId: WEB_BUILD.build_id, turns, lastSeq: job.lastSeq,
             revision: job.revision, generation: job.generation,
             control: job.control,
             // If cache bounding dropped an older row, this projection no

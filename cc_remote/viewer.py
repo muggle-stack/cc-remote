@@ -33,10 +33,17 @@ EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".ico", ".avif",
     ".stl", ".glb", ".gltf", ".bin", ".obj", ".mtl",
     ".woff", ".woff2", ".ttf", ".otf", ".txt",
+    ".mp3", ".m4a", ".aac", ".wav", ".ogg", ".oga", ".opus", ".flac",
+    ".mp4", ".m4v", ".webm", ".ogv",
 }
 MIME_TYPES = {".js": "text/javascript", ".mjs": "text/javascript",
               ".stl": "model/stl", ".glb": "model/gltf-binary",
-              ".gltf": "model/gltf+json", ".wasm": "application/wasm"}
+              ".gltf": "model/gltf+json", ".wasm": "application/wasm",
+              ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".aac": "audio/aac",
+              ".wav": "audio/wav", ".ogg": "audio/ogg", ".oga": "audio/ogg",
+              ".opus": "audio/ogg", ".flac": "audio/flac",
+              ".mp4": "video/mp4", ".m4v": "video/mp4",
+              ".webm": "video/webm", ".ogv": "video/ogg"}
 
 
 def registry_path() -> Path:

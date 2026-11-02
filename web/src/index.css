@@ -2417,3 +2417,9 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .plan-approval-actions button.primary { background:var(--accent); color:var(--on-accent,#fff); }
 
 .plan-approval-footer { flex:none; padding:0 22px 12px; border-top:1px solid var(--border); }
+
+.artifact-video-stage{ display:flex; flex:1; min-width:0; min-height:0; width:100%; flex-direction:column; justify-content:center; gap:12px; padding:16px; overflow:auto; }
+.artifact-video-stage video{ display:block; width:100%; min-height:0; max-height:calc(100% - 48px); object-fit:contain; background:#000; border-radius:10px; }
+.artifact-video-footer{ display:flex; flex:none; justify-content:space-between; align-items:center; color:var(--dim); font-size:12px; }
+.artifact-video-footer a{ display:inline-flex; align-items:center; min-height:32px; color:var(--accent-ink); }
+.artifact-video-error{ flex:none; margin:0; color:var(--danger); font-size:13px; line-height:1.6; }

@@ -1,3 +1,4 @@
+import { useWebUpdate } from "./use-web-update";
 import { lazyDshApi } from "./lazy-dsh-api";
 import type { DshPanelSelection } from "./components/DshPanel";
 import {
@@ -306,8 +307,8 @@ const DirPicker = lazy(() => import("./components/DirPicker").then(
 const QueuedQueryDialog = lazy(() => import("./components/QueuedQueryDialog").then(
   ({ QueuedQueryDialog: Dialog }) => ({ default: Dialog }),
 ));
-const RemoteViewerPanel = lazy(() => import("./components/RemoteViewerPanel").then(
-  ({ RemoteViewerPanel: Panel }) => ({ default: Panel }),
+const RetainedViewerPanels = lazy(() => import("./components/RetainedViewerPanels").then(
+  ({ RetainedViewerPanels: Panels }) => ({ default: Panels }),
 ));
 const StatusSheet = lazy(() => import("./components/StatusSheet").then(
   ({ StatusSheet: Sheet }) => ({ default: Sheet }),
@@ -538,6 +539,18 @@ export default function App() {
   const stateRef = useRef(state);
   stateRef.current = state;
   const wsRef = useRef<RelayWs | null>(null);
+  const webUpdate = useWebUpdate(authed, state.connState, () => {
+    if (composerDraftsRef.current.hasDrafts || btwDraftsRef.current.hasDrafts
+        || [...questionDraftsRef.current.values()].some(draft =>
+          draft.text || draft.selected.length || draft.pages?.some(page => page.text || page.selected.length))) {
+      return "还有未发送的内容或正在导入的附件，请先发送或自行保存并清空，再更新页面。";
+    }
+    if (wsRef.current?.hasPendingCommands) return "有操作正在等待确认，请稍后再更新。";
+    if (document.querySelector('dialog[open], [role="dialog"][aria-modal="true"]:not(.header-feedback-popover)')) {
+      return "请先完成或关闭当前对话框，再更新页面。";
+    }
+    return null;
+  });
   const goalApiRef = useRef<GoalApi | null>(null);
   const getGoalApi = useCallback(async () => {
     const transport = wsRef.current;
@@ -999,8 +1012,8 @@ export default function App() {
     setViewerSelections((current) => setViewerSelection(current, viewerKey,
       { machine_id: page.machine_id, site_id: page.site_id, entry: page.entry }));
   }, [viewerKey, confirmArtifactDiscard]);
-  const selectViewer = (selection: ViewerSelection | null) => {
-    if (viewerKey) setViewerSelections((current) => setViewerSelection(current, viewerKey, selection));
+  const selectViewer = (key: string, selection: ViewerSelection | null) => {
+    setViewerSelections((current) => setViewerSelection(current, key, selection));
   };
   const filesShowing = fileBrowser?.sid === visibleParentSid
     && fileBrowser?.machineId === machineId && fileBrowser?.engine === engine
@@ -2379,6 +2392,7 @@ export default function App() {
       try { seeded = await import("./cache").then((m) => m.loadAllReplayState()); } catch { /* best-effort */ }
       if (cancelled) return;
       const ws = new RelayWs({
+        onReloadRequired: webUpdate.check,
         onEvent: (msg, ownership) => {
           if (!acceptsLifecycle()) return;
           rewind.onEventRef.current(msg);
@@ -4049,6 +4063,7 @@ export default function App() {
     acceptSkillCatalog,
     dshApi,
     authed,
+    webUpdate.check,
     clearForkFocusLease,
     clearHistoryDetailRequests,
     installBrowseHistoryPage,
@@ -6021,7 +6036,10 @@ export default function App() {
             </div>
             <div className="sub">{space === "work" ? "私有工作区 · " : ""}{focusedNativeSessionId ? `session ${shortSessionId(focusedEngine, focusedNativeSessionId)}` : "connected"}</div>
           </div>
-          <HeaderFeedback deviceScope={machineId} sessionScope={`${activeScopeKey}:${focusedSid ?? "new"}`}
+          <HeaderFeedback update={webUpdate.id ? {
+            id: webUpdate.id, version: webUpdate.version!, message: webUpdate.message,
+            updating: webUpdate.updating, onReload: webUpdate.reload,
+          } : undefined} deviceScope={machineId} sessionScope={`${activeScopeKey}:${focusedSid ?? "new"}`}
             phase={headerConnectionPhase(state.connState, state.wrapperOnline,
               rt.replaying || historyView.recovering, state.banner, state.wrapperConnection)}
             banner={state.banner} bannerRevision={state.bannerRevision}
@@ -6506,6 +6524,15 @@ export default function App() {
       <ArtifactReadingMemory.Provider value={artifactReadingMemory.entries}>
       <RightPanelPresentation.Provider value={{ expanded: panelExpanded, covered: btwExpanded, layer: 0, chat: false,
         onOpenChat: toggleCenteredBtw, onExpand: togglePanelExpanded, onDock: dockPanel, onDismiss: togglePanelExpanded }}>
+      {Object.keys(viewerSelections).length > 0 && <Suspense fallback={null}>
+        <RetainedViewerPanels machineId={machineId}
+          activeScope={visibleRightPanel === "viewer" && visibleParentSid ? { machineId, sid: visibleParentSid, space, engine } : null}
+          selections={viewerSelections} requested={viewerUrl} devices={remoteDevices} onSelect={selectViewer}
+          onClose={key => {
+            setViewerSelections(current => { const next = { ...current }; delete next[key]; return next; });
+            setViewerUrl(current => current?.key === key ? null : current);
+          }} />
+      </Suspense>}
       {visibleRightPanel === "dsh" && dshPanel && <Suspense fallback={null}>
         <DshPanel key={`${dshPanel.sid}:${dshPanel.selection.target ?? ""}:${dshPanel.selection.query ?? ""}`}
           onOpenAgent={(run, title) => { setDshPanel(null); openAgentDetail(run, title); }}
@@ -6546,7 +6573,7 @@ export default function App() {
                 if (!confirmArtifactDiscard()) return;
                 setSessionArtifacts({ ...owner, selected: null });
                 dispatch({ type: "clear_artifact" });
-              }} preview={{ artifact: state.artifact, theme,
+              }} preview={{ artifact: state.artifact, theme, machineId,
                 onRefresh: (path, line) => {
                   previewFileForSid(owner.sid, path, line, true);
                 },
@@ -6574,20 +6601,11 @@ export default function App() {
                 dispatch({ type: "clear_artifact" });
                 setFileBrowser({ ...fileBrowser, preview: false });
               }}
-              preview={{ artifact: state.artifact, theme,
+              preview={{ artifact: state.artifact, theme, machineId,
                 onRefresh: (path, line) => { previewFileForSid(fileBrowser.sid, path, line, true); },
                 onOpenFile: (path, line) => { previewFileForSid(fileBrowser.sid, path, line, true); },
                 onLoadPreviewAsset: loadPreviewAsset, onAuthorizePreview: authorizePreview,
                 onSaveMarkdown: saveMarkdown, onDirtyChange: setArtifactDirty, onClose: closeFiles }} />
-          </Suspense>;
-        }
-        if (visibleRightPanel === "viewer" && visibleParentSid && viewerKey) {
-          return <Suspense fallback={<div className="artifact-panel empty" role="status"><p>加载预览…</p></div>}>
-            <RemoteViewerPanel key={`${viewerKey}:${viewerUrl?.key === viewerKey ? viewerUrl.openId : ""}`}
-              scope={{ machineId, sid: visibleParentSid, space, engine }}
-              selection={viewerSelections[viewerKey] ?? null}
-              requestedUrl={viewerUrl?.key === viewerKey ? viewerUrl.href : undefined}
-              devices={remoteDevices} onSelect={selectViewer} onClose={closeViewer} />
           </Suspense>;
         }
         if (visibleRightPanel === "agent" && agentPanel) {
@@ -6608,7 +6626,7 @@ export default function App() {
             </div>
           }>
             <ArtifactPanel key={`${state.artifact.sid}:${state.artifact.file}:${state.artifact.requestId}`}
-              artifact={state.artifact} active="diff"
+              artifact={state.artifact} machineId={machineId} active="diff"
               hasBtw={!!activeBtwGroup}
               theme={theme}
               onTab={switchRight} onRefresh={previewArtifactFile}

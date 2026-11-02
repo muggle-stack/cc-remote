@@ -33,6 +33,19 @@ assert.deepEqual(viewerPageCandidates(pageTurn), ["/project/page demo/index.html
 assert.deepEqual(viewerPageCandidates({ ...pageTurn, blocks: [{ kind: "text", message_id: "links", done: true,
   text: "[查看模型](http://192.168.1.20:8773/) 和 http://192.168.1.20:8773/。GitHub: https://github.com/demo/index.html",
 }] }), ["http://192.168.1.20:8773/"]);
+assert.deepEqual(viewerPageCandidates({ ...pageTurn, blocks: [{
+  kind: "text", channel: "thinking", message_id: "plan", done: true,
+  text: "考虑用 `index.html`。[候选页面](/unrelated/index.html) http://127.0.0.1:8000/",
+}, {
+  kind: "text", channel: "final", message_id: "answer", done: true,
+  text: "目录里会有 `index.html`，实际页面在 `/project/public/film/index.html`。",
+}] }), ["/project/public/film/index.html"], "reasoning and bare prose filenames are not artifacts");
+assert.deepEqual(viewerPageCandidates({ ...pageTurn, blocks: [{
+  kind: "text", message_id: "answer", done: true, text: "[打开页面](index.html)",
+}, {
+  kind: "tool", tool: "Write", tool_use_id: "write", message_id: "write", input: { file_path: "created.html" },
+  done: true, result: { is_error: false, content: "ok" },
+}] }), ["index.html", "created.html"], "explicit relative links and successful writes retain cwd resolution");
 const viewerKey = viewerScopeKey(viewerScope);
 const viewerChoice = { machine_id: "resource-device", site_id: "robot" };
 assert.notEqual(viewerKey, viewerScopeKey({ ...viewerScope, machineId: "another-device" }));

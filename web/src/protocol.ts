@@ -513,13 +513,13 @@ export interface SessionArtifacts extends Base {
   next_before?: number | null; has_more: boolean; history_before?: string | null; history_more: boolean; error?: string | null;
 }
 export interface GetFilePreview extends Base { type: "get_file_preview"; path: string; request_id: string }
-export interface FilePreview extends Base { type: "file_preview"; directory?: boolean; path: string; request_id: string; format: "markdown" | "text" | "html" | "image" | "pdf" | "audio" | "spreadsheet"; content: string; media_type?: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "image/svg+xml" | "application/pdf" | "audio/wav" | "audio/mpeg" | "audio/mp4" | "audio/aac" | "audio/flac" | "audio/ogg" | "audio/webm" | null; data?: string | null; converted_from?: string | null; size: number; truncated: boolean; mtime_ns: string; revision?: string | null; writable?: boolean; error?: string | null }
+export interface FilePreview extends Base { type: "file_preview"; directory?: boolean; path: string; request_id: string; format: "markdown" | "text" | "html" | "image" | "pdf" | "audio" | "video" | "spreadsheet"; content: string; media_type?: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "image/svg+xml" | "application/pdf" | "audio/wav" | "audio/mpeg" | "audio/mp4" | "audio/aac" | "audio/flac" | "audio/ogg" | "audio/webm" | "video/mp4" | null; media_id?: string | null; data?: string | null; converted_from?: string | null; size: number; truncated: boolean; mtime_ns: string; revision?: string | null; writable?: boolean; error?: string | null }
 export interface SaveMarkdown extends Base { type: "save_markdown"; path: string; request_id: string; content: string; expected_size: number; expected_mtime_ns: string; expected_revision: string }
 export interface FileSaveResult extends Base { type: "file_save_result"; path: string; request_id: string; status: "saved" | "conflict" | "error"; size: number; mtime_ns: string; revision?: string | null; error?: string | null }
 export interface GetPreviewAsset extends Base { type: "get_preview_asset"; path: string; preview_id: string; request_id: string }
 export interface PreviewAsset extends Base { type: "preview_asset"; path: string; preview_id: string; request_id: string; media_type?: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/avif" | "image/svg+xml" | null; data?: string | null; error?: string | null }
 export type PreviewAuthorizationOperation = "file_preview" | "preview_asset";
-export interface PreviewAuthorizationRequired extends Base { type: "preview_authorization_required"; authorization_id: string; request_id: string; operation: PreviewAuthorizationOperation; path: string; resolved_path: string; format: "markdown" | "text" | "html" | "image" | "pdf" | "audio" | "spreadsheet"; preview_id?: string | null }
+export interface PreviewAuthorizationRequired extends Base { type: "preview_authorization_required"; authorization_id: string; request_id: string; operation: PreviewAuthorizationOperation; path: string; resolved_path: string; format: "markdown" | "text" | "html" | "image" | "pdf" | "audio" | "video" | "spreadsheet"; preview_id?: string | null }
 export interface AuthorizePreview extends Base { type: "authorize_preview"; authorization_id: string; request_id: string; decision: "allow" | "deny" }
 export interface PreviewAuthorizationResult extends Base { type: "preview_authorization_result"; authorization_id: string; request_id: string; operation?: PreviewAuthorizationOperation | null; path?: string | null; status: "granted" | "denied" | "expired" | "changed" | "error"; preview_id?: string | null; error?: string | null }
 // On-demand bulk history: fetched once when a session is opened (like a web
@@ -793,7 +793,7 @@ export type ServerEvent = SessionArtifacts | FilesListed | CodexContext
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnUsage | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 85;
+export const PROTOCOL_VERSION = 86;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

@@ -1,4 +1,4 @@
-import { PROTOCOL_VERSION } from "./protocol";
+import { PROTOCOL_VERSION } from "./protocol.ts";
 
 export interface BridgeGrant {
   id: string; runner: string; entry: string; script_origins: string[];
@@ -48,8 +48,12 @@ export class ViewerBridge {
     this.frame = frame; this.grant = grant; this.onReady = onReady; this.onError = onError;
     this.listener = (event) => {
       if (event.source !== frame.contentWindow || event.origin !== "null"
-          || event.data?.type !== "cc-viewer-bridge-ready" || event.data?.v !== PROTOCOL_VERSION
+          || event.data?.type !== "cc-viewer-bridge-ready"
           || event.data?.id !== grant.id || this.connected || this.disposed) return;
+      if (event.data.v !== PROTOCOL_VERSION) {
+        this.fail("预览组件版本不一致，请刷新 cc-remote 页面后重试。", false);
+        return;
+      }
       this.ready = true;
       this.connect();
     };
@@ -100,6 +104,11 @@ export class ViewerBridge {
     const msg = data as Record<string, unknown>;
     if (msg.nonce !== this.nonce) return;
     if (msg.type === "loaded") { this.pageLoaded = true; this.onReady(); return; }
+    // A codec/media failure need not disconnect the page or other resources.
+    if (msg.type === "media-error") {
+      this.onError(typeof msg.message === "string" ? msg.message.slice(0, 400) : "预览音视频加载失败。", false);
+      return;
+    }
     if (msg.type === "error") {
       this.fail(typeof msg.message === "string" ? msg.message.slice(0, 400) : "页面加载失败。", false);
       return;

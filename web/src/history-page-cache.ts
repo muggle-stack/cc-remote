@@ -1,3 +1,4 @@
+import { WEB_BUILD } from "./web-build.ts";
 import type { HistoryBrowsePage } from "./history-browse.ts";
 import type { Block, Turn } from "./domain/conversation.ts";
 import { mergeHistoryPageCopies } from "./history-merge.ts";
@@ -40,6 +41,7 @@ export interface HistoryPageCacheScope extends HistoryPageCacheSessionScope {
 
 export interface HistoryPageCacheStoredRecord {
   version: 1 | 2 | 3 | 4 | typeof RECORD_VERSION;
+  buildId: string;
   key: string;
   scopeKey: string;
   sessionKey: string;
@@ -241,6 +243,7 @@ function validRecord(
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Partial<HistoryPageCacheStoredRecord>;
   return record.version === RECORD_VERSION
+    && record.buildId === WEB_BUILD.build_id
     && record.key === expected.key
     && record.scopeKey === expected.scopeKey
     && record.sessionKey === expected.sessionKey
@@ -718,6 +721,7 @@ export class HistoryPageCache {
     const sessionKey = historyPageCacheSessionKey(scope);
     const base = {
       version: RECORD_VERSION as typeof RECORD_VERSION,
+      buildId: WEB_BUILD.build_id,
       key,
       scopeKey,
       sessionKey,

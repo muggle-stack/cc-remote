@@ -40,6 +40,7 @@ export class Resources {
   private codeBytes = 0;
   private blobReserved = 0;
   private versions = new Map<string, string>();
+  private cleanups = new Set<() => void>();
   private port: MessagePort;
   private nonce: string;
   private base: string;
@@ -50,6 +51,11 @@ export class Resources {
   }
 
   send(value: object) { this.port.postMessage({ ...value, nonce: this.nonce }); }
+
+  onClose(cleanup: () => void) {
+    if (this.closed) cleanup();
+    else this.cleanups.add(cleanup);
+  }
 
   url(value: string, base = this.base): URL {
     const url = new URL(value, base);
@@ -220,15 +226,20 @@ export class Resources {
   async verify() {
     // Revalidate the small code/asset graph, not all model files. A directory
     // isn't an atomic snapshot; detect observed edits rather than mixing them.
-    for (const [path, etag] of this.versions) {
-      const response = await this.fetch(new URL(path, VIRTUAL_ORIGIN), { method: "HEAD" });
-      if (!response.ok || response.headers.get("etag") !== etag)
-        throw new Error("预览文件在加载期间发生变化，请刷新。");
+    const versions = [...this.versions];
+    for (let i = 0; i < versions.length; i += 4) {
+      await Promise.all(versions.slice(i, i + 4).map(async ([path, etag]) => {
+        const response = await this.fetch(new URL(path, VIRTUAL_ORIGIN), { method: "HEAD" });
+        if (!response.ok || response.headers.get("etag") !== etag)
+          throw new Error("预览文件在加载期间发生变化，请刷新。");
+      }));
     }
   }
 
   close() {
     this.closed = true;
+    for (const cleanup of this.cleanups) cleanup();
+    this.cleanups.clear();
     for (const id of this.reads.keys()) this.fail(id, new Error("预览连接已断开，请重新连接。"));
   }
 

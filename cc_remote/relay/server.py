@@ -620,6 +620,12 @@ def create_app(
     )
     app.state.viewers = viewers
 
+    @app.api_route("/api/media/{machine_id}/{media_id}", methods=["GET", "HEAD"])
+    async def native_video(req: Request, machine_id: str, media_id: str):
+        from cc_remote.relay.media import media_response
+        return await media_response(req, viewers, machine_id, media_id,
+                                    lambda claims: _btw_owner_id(claims, cfg.session_secret))
+
     @app.middleware("http")
     async def static_shell_cache_policy(req: Request, call_next):
         """Never let a protocol upgrade reload into a stale application shell."""
@@ -1275,8 +1281,8 @@ def create_app(
 
     # Static web client. Mounted last so /api/login and /ws and /healthz win.
     if cfg.static_dir and os.path.isdir(cfg.static_dir):
-        from fastapi.staticfiles import StaticFiles
-        app.mount("/", StaticFiles(directory=cfg.static_dir, html=True), name="static")
+        from cc_remote.relay.static import WebStaticFiles
+        app.mount("/", WebStaticFiles(directory=cfg.static_dir, html=True), name="static")
         log.info("serving static web client", dir=cfg.static_dir)
 
     return app

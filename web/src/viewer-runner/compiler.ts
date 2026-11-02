@@ -2,6 +2,7 @@ import { parse as parseJS } from "acorn";
 import { generate, parse as parseCSS, walk as walkCSS, type CssNode } from "css-tree";
 import parseSrcset from "parse-srcset";
 import { Resources, VIRTUAL_ORIGIN } from "./resources";
+import type { MediaAsset } from "./media";
 
 interface Node { type: string; start: number; end: number; [key: string]: unknown }
 interface Module { id: string; url: string; source?: string; compiled?: string }
@@ -192,11 +193,13 @@ export class Compiler {
       }
       node.remove();
     }
-    // Iteration visits newly discovered dependencies too, without recursively
-    // awaiting a cycle. Stable import-map names allow cyclic ESM graphs.
-    for (const module of this.modules.values()) {
-      const source = module.source ?? await this.resources.text(module.url);
-      module.compiled = this.compileJS(source, module.url, true);
+    // Fetch each discovered frontier in bounded batches; compiling only after
+    // the reads preserves deterministic module identities and cyclic ESM.
+    for (;;) {
+      const batch = [...this.modules.values()].filter(module => module.compiled === undefined).slice(0, 4);
+      if (!batch.length) break;
+      const sources = await Promise.all(batch.map(module => module.source ?? this.resources.text(module.url)));
+      batch.forEach((module, index) => { module.compiled = this.compileJS(sources[index], module.url, true); });
     }
     const imports: Record<string, string> = Object.create(null);
     for (const module of this.modules.values()) imports[module.id] = this.resources.blob(module.compiled!, "text/javascript");
@@ -221,9 +224,23 @@ export class Compiler {
         node.setAttribute("style", css.slice(css.indexOf("{") + 1, -1));
       }));
     }
-    for (const node of doc.querySelectorAll("img[src],video[src],audio[src],source[src],video[poster],image[href]")) {
-      const attr = node.hasAttribute("poster") ? "poster" : node.hasAttribute("href") ? "href" : "src";
-      assets.push(this.resources.asset(node.getAttribute(attr)!, base).then((url) => { node.setAttribute(attr, url); }));
+    const media: MediaAsset[] = [];
+    for (const element of doc.querySelectorAll<HTMLMediaElement>("audio,video")) {
+      const sources = [...element.querySelectorAll<HTMLSourceElement>("source[src]")];
+      const source = sources.find(node => !node.type || element.canPlayType(node.type));
+      const src = element.getAttribute("src") ?? source?.getAttribute("src");
+      element.removeAttribute("src");
+      sources.forEach(node => node.removeAttribute("src"));
+      if (!src) continue;
+      if (src.startsWith("data:")) { element.src = src; continue; }
+      if (media.length >= 8) throw new Error("预览音视频数量超过上限。");
+      media.push({ element, url: this.resources.url(src, base).href });
+    }
+    for (const node of doc.querySelectorAll("img[src],source[src],video[poster],image[href]")) {
+      for (const attr of ["src", "poster", "href"]) {
+        if (node.hasAttribute(attr)) assets.push(this.resources.asset(node.getAttribute(attr)!, base)
+          .then((url) => { node.setAttribute(attr, url); }));
+      }
     }
     for (const node of doc.querySelectorAll("[srcset]")) {
       assets.push(Promise.all(parseSrcset(node.getAttribute("srcset")!).map(async (item) => {
@@ -233,6 +250,6 @@ export class Compiler {
     }
     await Promise.all(assets);
     await this.resources.verify();
-    return { doc, scripts, imports };
+    return { doc, scripts, imports, media };
   }
 }

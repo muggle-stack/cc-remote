@@ -63,7 +63,7 @@ from contextlib import AsyncExitStack, contextmanager
 from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from uuid import uuid4
-from typing import Literal, Optional
+from typing import BinaryIO, Literal, Optional
 
 from cc_remote.wrapper import codex_readiness
 from cc_remote.wrapper.artifact_service import ArtifactService
@@ -2307,6 +2307,8 @@ class WrapperMachine:
             Path(cfg.state_dir))
         self._preview_capability_mutation_lock = asyncio.Lock()
         from cc_remote.wrapper.viewer_pages import SessionPages
+        from cc_remote.wrapper.media_preview import MediaPreviews
+        self.media_previews = MediaPreviews()
         self.viewer_pages = SessionPages(
             Path(cfg.state_dir) / "viewer-pages.json", self._viewer_page_scope)
         self._preview_challenges: OrderedDict[
@@ -25260,6 +25262,7 @@ class WrapperMachine:
     async def _drop_preview_session(
         self, engine: str, session_id: str, *, delete_history: bool = True,
     ) -> None:
+        self.media_previews.drop(engine, session_id)
         if delete_history:
             try:
                 await asyncio.to_thread(self._artifacts.store.drop_session,
@@ -25294,6 +25297,7 @@ class WrapperMachine:
         old_key: str,
         session_id: str,
     ) -> None:
+        self.media_previews.drop(ctx.engine, old_key)
         try:
             await asyncio.to_thread(self._artifacts.store.move,
                                    self._artifacts.context_scope(ctx, old_key),
@@ -25606,6 +25610,28 @@ class WrapperMachine:
     async def _handle_get_session_artifact_preview(self, cmd):
         return await self._artifacts.preview(cmd)
 
+    def _video_file_preview(self, cwd, path, engine, space, sid, owner_id, caps=None):
+        from cc_remote.viewer import MAX_FILE_BYTES
+        from cc_remote.wrapper.media_preview import VIDEO_SUFFIXES
+
+        # Freeze the resolved file, while rechecking current external capabilities
+        # and its exact identity on every range request. A new engine is never started.
+        resolved = os.path.realpath(os.path.join(cwd, path))
+        def opener():
+            allowed = (caps if caps is not None else
+                       self._preview_capability_store.snapshot(engine, space, sid))
+            return self._open_session_file(
+                cwd, resolved, allowed_suffixes=VIDEO_SUFFIXES,
+                max_bytes=MAX_FILE_BYTES, allow_truncate=False, allowed_external_paths=allowed)
+        def authorize(info):
+            if not self._path_is_below(os.path.realpath(cwd), resolved):
+                allowed = (caps if caps is not None else
+                           self._preview_capability_store.snapshot(engine, space, sid))
+                capability = allowed.get(resolved)
+                if capability is None or not capability.matches(info):
+                    raise PermissionError("video permission revoked")
+        return self.media_previews.create(owner_id, engine, sid, opener, authorize)
+
     async def _handle_get_file_preview(self, cmd):
         sid = getattr(cmd, "sid", None)
         client_id = getattr(cmd, "client_id", None)
@@ -25652,7 +25678,11 @@ class WrapperMachine:
                     persist=not ctx.btw)
             suffix = os.path.splitext(requested_path)[1].lower()
             external_paths = self._preview_capabilities(ctx)
-            if suffix in self.OFFICE_PREVIEW_SUFFIXES:
+            if self._preview_format(requested_path) == "video":
+                preview = await asyncio.to_thread(
+                    self._video_file_preview, ctx.cwd, requested_path, ctx.engine, ctx.space,
+                    self._ctx_wire_sid(ctx), cmd.owner_id)
+            elif suffix in self.OFFICE_PREVIEW_SUFFIXES:
                 async with self._preview_conversion_limit:
                     preview = await asyncio.to_thread(
                         self._read_file_preview, ctx.cwd, requested_path,
@@ -25668,6 +25698,7 @@ class WrapperMachine:
                 format=preview["format"],
                 content=preview.get("content", ""),
                 media_type=preview.get("media_type"),
+                media_id=preview.get("media_id"),
                 data=(base64.b64encode(preview["data"]).decode("ascii")
                       if preview.get("data") is not None else None),
                 converted_from=preview.get("converted_from"),
@@ -25675,7 +25706,7 @@ class WrapperMachine:
                 truncated=preview.get("truncated", False),
                 mtime_ns=str(preview["mtime_ns"]),
                 revision=preview.get("revision"),
-                writable=(
+                writable=preview["format"] != "video" and (
                     inside_root
                     or (
                         external_capability is not None
@@ -26575,7 +26606,7 @@ class WrapperMachine:
             return None
 
     @staticmethod
-    def _read_session_file(
+    def _open_session_file(
         cwd: str,
         path: str,
         *,
@@ -26585,8 +26616,8 @@ class WrapperMachine:
         allowed_external_paths: Optional[
             dict[str, PreviewCapability]
         ] = None,
-    ) -> tuple[str, bytes, os.stat_result, bool]:
-        """Read a bounded regular file below cwd without following an escape.
+    ) -> tuple[str, BinaryIO, os.stat_result]:
+        """Open a bounded regular file below cwd without following an escape.
 
         ``realpath`` contains relative or tool-reported absolute paths inside
         the session root while rejecting symlinks that escape it. ``O_NONBLOCK``
@@ -26675,10 +26706,22 @@ class WrapperMachine:
             if not allow_truncate and file_stat.st_size > max_bytes:
                 raise ValueError(
                     f"预览文件超过 {max_bytes // (1024 * 1024)} MiB 限制")
-            with os.fdopen(fd, "rb", closefd=False) as handle:
-                data = handle.read(max_bytes + 1)
-        finally:
+            return display_path, os.fdopen(fd, "rb"), file_stat
+        except BaseException:
             os.close(fd)
+            raise
+
+    @staticmethod
+    def _read_session_file(
+        cwd: str, path: str, *, allowed_suffixes: Optional[frozenset[str]],
+        max_bytes: int, allow_truncate: bool,
+        allowed_external_paths: Optional[dict[str, PreviewCapability]] = None,
+    ) -> tuple[str, bytes, os.stat_result, bool]:
+        display_path, handle, file_stat = WrapperMachine._open_session_file(
+            cwd, path, allowed_suffixes=allowed_suffixes, max_bytes=max_bytes,
+            allow_truncate=allow_truncate, allowed_external_paths=allowed_external_paths)
+        with handle:
+            data = handle.read(max_bytes + 1)
 
         truncated = len(data) > max_bytes or file_stat.st_size > max_bytes
         if truncated and not allow_truncate:
@@ -27211,6 +27254,8 @@ class WrapperMachine:
     @classmethod
     def _preview_format(cls, path: str) -> str:
         suffix = os.path.splitext(path)[1].lower()
+        if suffix in {".mp4", ".m4v"}:
+            return "video"
         if suffix in cls.MARKDOWN_PREVIEW_SUFFIXES:
             return "markdown"
         if suffix in cls.HTML_PREVIEW_SUFFIXES:

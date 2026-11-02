@@ -1,4 +1,4 @@
-const CACHE = "cc-remote-shell-v4";
+const CACHE = "cc-remote-shell-v5";
 const SHELL = [
   "/", "/manifest.webmanifest", "/favicon.svg", "/apple-touch-icon.png",
   "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png",
@@ -30,12 +30,17 @@ self.addEventListener("fetch", (event) => {
       || url.pathname.startsWith("/__cc_viewer/")
       || url.pathname.startsWith("/ws/")
       || url.pathname === "/cc-remote-viewer-runner.js") return;
-  if (request.mode === "navigate") {
-    event.respondWith(fetch(request).then((response) => {
-      const copy = response.clone();
-      void caches.open(CACHE).then((cache) => cache.put("/", copy));
+  // Entry points and unversioned shell icons/manifests must revalidate online.
+  // Only content-addressed assets can safely use the cache-first path below.
+  if (request.mode === "navigate" || SHELL.includes(url.pathname)) {
+    event.respondWith(fetch(request, { cache: "no-cache" }).then((response) => {
+      if (response.ok) {
+        const copy = response.clone();
+        void caches.open(CACHE).then((cache) => cache.put(
+          request.mode === "navigate" ? "/" : request, copy));
+      }
       return response;
-    }).catch(() => caches.match("/").then((response) => response || Response.error())));
+    }).catch(() => caches.match(request.mode === "navigate" ? "/" : request).then((response) => response || Response.error())));
     return;
   }
   event.respondWith(caches.match(request).then((cached) => cached || fetch(request).then((response) => {

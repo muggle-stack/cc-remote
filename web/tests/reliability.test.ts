@@ -17712,6 +17712,19 @@ assert.equal(protocolReloads, 1,
   "an aligned newer deployment should refresh a stale bundle once");
 staleBundle.stop();
 
+let updateOffers = 0;
+const guardedUpdate = new RelayWs({
+  onEvent: () => {}, onConnState: () => {},
+  onReloadRequired: () => { updateOffers += 1; },
+});
+guardedUpdate.start();
+FakeWebSocket.instances.at(-1)?.onclose?.({ code: 4406 });
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(updateOffers, 1, "protocol upgrades use the draft-protected update path");
+assert.equal(protocolReloads, 1, "the socket must not force-reload over unsent input");
+guardedUpdate.stop();
+
+
 const repeatedMismatch = new RelayWs({
   onEvent: () => {},
   onConnState: () => {},

@@ -129,6 +129,7 @@ def test_wrapper_entrypoint_initializes_work_before_optional_codex_probe(monkeyp
 
     class FakeMachine:
         viewer_pages = None
+        media_previews = object()
         def __init__(self, _cfg, _transport) -> None:
             events.append("machine")
 
@@ -145,7 +146,7 @@ def test_wrapper_entrypoint_initializes_work_before_optional_codex_probe(monkeyp
 
     class FakeViewerTransport:
         def __init__(self, *_args, **_kwargs):
-            pass
+            assert _kwargs["media_previews"] is FakeMachine.media_previews
 
         async def run(self):
             events.append("viewer-start")

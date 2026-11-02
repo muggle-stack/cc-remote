@@ -4376,6 +4376,7 @@ test("remote Viewer registered link keeps an original-link fallback after a fail
   expect(catalogReads).toBe(1);
   await link.click();
   await expect(page.locator(".remote-viewer-panel [role=alert]")).toContainText("设备已离线");
+  await page.getByRole("button", { name: "切换预览", exact: true }).click();
   const fallback = page.getByRole("link", { name: "打开原链接", exact: true });
   await expect(fallback).toHaveAttribute("href", href);
   await expect(fallback).toHaveAttribute("rel", "noopener noreferrer");

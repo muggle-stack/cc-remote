@@ -4,7 +4,7 @@ import { cleanProductText, conversationNotices } from "./notice-presentation";
 
 export const HEADER_SUCCESS_TTL_MS = 6_000;
 export type ConnectionPhase = "connecting" | "reconnecting" | "disconnected" | "offline" | "syncing";
-export type FeedbackTone = "progress" | "warning" | "success";
+export type FeedbackTone = "progress" | "warning" | "success" | "info";
 
 /** Only these existing banners move into the header. Other errors stay visible. */
 export function headerBannerKind(banner?: string): "connection" | "failure" | null {

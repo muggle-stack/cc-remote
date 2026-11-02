@@ -110,7 +110,7 @@ attachment and optional App-control MCP tools are separate user choices.
   transport, never the caller's Origin. Uvicorn trusts forwarded transport
   metadata only from loopback Caddy. Never put tokens in URLs or protocol
   message bodies; logging redacts token/password fields.
-- **Protocol version gate**: current wire protocol v85 is declared by
+- **Protocol version gate**: current wire protocol v86 is declared by
   `PROTOCOL_VERSION` in both `protocol.py` and `web/src/protocol.ts`.
   `deserialize` hard-rejects a version mismatch, and
   `_Base` is `extra="forbid"`, so ANY protocol change must be deployed to all
@@ -124,7 +124,9 @@ attachment and optional App-control MCP tools are separate user choices.
 - **Remote Viewer serves static pages, not arbitrary LAN services**: read
   `docs/remote-viewer.md` before changing its resource or origin boundary. Keep
   Bridge pages in opaque HTTP-sandboxed frames (never `allow-same-origin`),
-  secrets out of URLs/JSON, and binary transfers on `/ws/viewer` (Wrapper) /
+  secrets out of URLs/JSON. Native video uses authenticated same-origin HTTP Range
+  at `/api/media` over the Wrapper binary channel; HTML Bridge stays sandboxed.
+  Keep page binary transfers on `/ws/viewer` (Wrapper) /
   `/ws/viewer-client` (browser Cookie + exact Origin), never on chat/replay.
   Optional Isolated mode uses per-preview origins and a `__Host-` main HTTPS
   cookie; default Bridge preserves the existing cookie. Home-page discovery is

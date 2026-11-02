@@ -8,11 +8,16 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import wave
 
 import uvicorn
 
 from cc_remote.config import RelayConfig
-from cc_remote.relay.server import _login_limiter, create_app
+from cc_remote.relay.server import _active_claims, _btw_owner_id, _login_limiter, create_app
+from fastapi import Request, HTTPException
+from cc_remote.wrapper.machine import WrapperMachine
+from cc_remote.wrapper.media_preview import MediaPreviews
+from cc_remote.viewer import MAX_FILE_BYTES
 from cc_remote.viewer import ViewerSite
 from cc_remote.viewer_home import HomePages
 from cc_remote.wrapper.viewer_transport import ViewerTransport
@@ -73,6 +78,22 @@ document.getElementById('rotate').onclick=()=>{
         sites = [site]
         static_server = None
         if "VIEWER_TEST_SOURCE" not in os.environ:
+            with wave.open(str(root / "viewer/narration.wav"), "wb") as sound:
+                sound.setnchannels(1)
+                sound.setsampwidth(2)
+                sound.setframerate(8000)
+                sound.writeframes(b"\0\0" * 8000 * 4)
+            shutil.copyfile(Path(__file__).parent / "fixtures/video-preview.mp4", root / "viewer/sample.mp4")
+            (root / "viewer/media.html").write_text('''<!doctype html><body>
+<h1>Media page ready</h1><script>window.mediaPageReady = true;</script>
+<audio id="sound" controls preload="auto"><source src="narration.wav" type="audio/wav"></audio>
+<video id="movie" controls playsinline preload="auto" src="sample.mp4" poster="../meshes/badge.svg"></video>
+<video id="source-movie" controls playsinline preload="auto"><source src="sample.mp4" type="video/mp4"></video>
+</body>''')
+            sites.append(site.model_copy(update={
+                "id": "media", "label": "音视频页面测试", "entry": "/viewer/media.html",
+                "paths": ["/viewer/media.html", "/viewer/narration.wav", "/viewer/sample.mp4", "/meshes/badge.svg"],
+            }))
             home_demo = root / "home-demo"
             home_demo.mkdir()
             (home_demo / ".git").mkdir()
@@ -140,11 +161,30 @@ document.getElementById('embedded-rotate').onclick=()=>{
             PageRef(machine_id="render-device", site_id=item.id, entry=item.entry, label=item.label)
             for item in sites], automatic=False)
         app = create_app(cfg)
+        media = MediaPreviews()
+        video = Path(os.environ.get("VIEWER_TEST_VIDEO", str(
+            Path(__file__).parent / "fixtures/video-preview.mp4"))).resolve()
+
+        @app.post("/api/test-video")
+        async def open_test_video(req: Request):
+            claims = await _active_claims(req, cfg, app.state.sessions)
+            if claims is None:
+                raise HTTPException(401)
+            def opener():
+                return WrapperMachine._open_session_file(str(video.parent), video.name,
+                    allowed_suffixes=frozenset({".mp4"}), max_bytes=MAX_FILE_BYTES,
+                    allow_truncate=False)
+            return await asyncio.to_thread(media.create,
+                _btw_owner_id(claims, cfg.session_secret), "claude", "video-session", opener)
+
+        # Test-only endpoint precedes the final static mount.
+        app.router.routes.insert(0, app.router.routes.pop())
         server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=4178,
                                                 log_level="error", access_log=False))
         task = asyncio.create_task(ViewerTransport(
             "ws://127.0.0.1:4178/ws", cfg.wrapper_token, "render-device", registry,
-            session_pages=pages, home_pages=HomePages(root / "automatic.json", home=root)).run())
+            session_pages=pages, home_pages=HomePages(root / "automatic.json", home=root),
+            media_previews=media).run())
         try:
             await server.serve()
         finally:

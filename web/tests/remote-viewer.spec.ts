@@ -25,6 +25,26 @@ test.beforeEach(async ({ page }) => {
   expect(status).toBe(200);
 });
 
+test("Bridge reports a stale runner immediately and reconnects with the current script", async ({ page }) => {
+  test.skip(process.env.VIEWER_TEST_MODE === "isolated", "Bridge runner version handshake.");
+  const runner = "**/cc-remote-viewer-runner.js";
+  await page.route(runner, route => route.fulfill({
+    contentType: "text/javascript",
+    body: `parent.postMessage({type:"cc-viewer-bridge-ready",v:${PROTOCOL_VERSION - 1},
+      id:location.pathname.split("/").pop()},"*");`,
+  }));
+  await page.getByRole("button", { name: "打开远程预览" }).click();
+  await page.getByRole("button", { name: /^机器人结构/ }).click();
+  await expect(page.locator(".viewer-error-banner")).toContainText(
+    "预览组件版本不一致，请刷新 cc-remote 页面后重试。", { timeout: 5000 });
+  await expect(page.locator(".viewer-stage iframe")).toHaveAttribute("sandbox", "allow-scripts");
+  await page.unroute(runner);
+  await page.getByRole("button", { name: "重新连接", exact: true }).click();
+  await expect(page.frameLocator(".viewer-stage iframe").locator("#status"))
+    .toContainText("模型已加载", { timeout: 30000 });
+  await expect(page.locator(".viewer-error-banner")).toHaveCount(0);
+});
+
 test("remote Viewer loads modules and binary models without exposing main cookies", async ({ page }) => {
   await page.getByRole("button", { name: "打开远程预览" }).click();
   await page.getByRole("button", { name: /^机器人结构/ }).click();
@@ -51,6 +71,187 @@ test("remote Viewer loads modules and binary models without exposing main cookie
   }, ORIGIN);
   expect(canFetchMain).toBe(false);
   await page.screenshot({ path: test.info().outputPath("viewer.png"), fullPage: true });
+});
+
+test("remote Viewer audio and video play and seek inside the publication", async ({ page }) => {
+  await page.getByRole("button", { name: "打开远程预览" }).click();
+  await page.getByRole("button", { name: /^音视频页面测试/ }).click();
+  const frame = page.frameLocator(".viewer-stage iframe");
+  for (const id of ["sound", "movie", "source-movie"]) {
+    const media = frame.locator(`#${id}`);
+    await media.scrollIntoViewIfNeeded();
+    await expect.poll(() => media.evaluate((el: HTMLMediaElement) => el.readyState), { timeout: 15000, message: `${id} loads` })
+      .toBeGreaterThanOrEqual(2);
+    await media.evaluate(async (el: HTMLMediaElement) => { el.muted = true; await el.play(); });
+    await expect.poll(() => media.evaluate((el: HTMLMediaElement) => el.currentTime)).toBeGreaterThan(0.1);
+    await media.evaluate((el: HTMLMediaElement) => { el.pause(); el.currentTime = el.duration / 2; });
+    expect(await media.evaluate((el: HTMLMediaElement) => el.currentTime / el.duration)).toBeCloseTo(0.5, 1);
+    await media.evaluate((el: HTMLMediaElement) => el.play());
+    await expect.poll(() => media.evaluate((el: HTMLMediaElement) => el.seeking), { message: `${id} seeks` }).toBe(false);
+    await expect.poll(() => media.evaluate((el: HTMLMediaElement) => el.currentTime - el.duration / 2)).toBeGreaterThan(0.1);
+    await media.evaluate((el: HTMLMediaElement) => el.pause());
+    expect(await media.evaluate((el: HTMLMediaElement) => el.error)).toBeNull();
+  }
+  if (process.env.VIEWER_TEST_MODE !== "isolated") {
+    expect(await frame.locator("#movie").evaluate((el: HTMLMediaElement) => !!el.srcObject || el.src.startsWith("blob:"))).toBe(true);
+    await expect(frame.locator("#movie")).toHaveAttribute("poster", /^blob:/);
+    await expect(frame.locator("#sound")).toHaveAttribute("src", /^blob:/);
+    await expect(page.locator(".viewer-stage iframe")).toHaveAttribute("sandbox", "allow-scripts");
+  }
+  await expect(page.locator(".viewer-error-banner")).toHaveCount(0);
+});
+
+test("page scripts render before media arrives, then media uses authorized byte ranges", async ({ page }) => {
+  test.skip(process.env.VIEWER_TEST_MODE === "isolated", "Bridge resource transport.");
+  const held: (() => void)[] = [];
+  const reads: { path: string; method: string; headers: Record<string, string> }[] = [];
+  let waiting = true;
+  await page.routeWebSocket(/\/ws\/viewer-client(?:\?|$)/, client => {
+    const server = client.connectToServer();
+    client.onMessage(message => {
+      const value = typeof message === "string" ? JSON.parse(message) : null;
+      if (value?.type === "read" && /\.(mp4|wav)$/.test(value.path)) {
+        reads.push(value);
+        if (waiting) { held.push(() => server.send(message)); return; }
+      }
+      server.send(message);
+    });
+  });
+  await page.reload(); // Install the socket interceptor before the app realm.
+  await page.getByRole("button", { name: "打开远程预览" }).click();
+  await page.getByRole("button", { name: /^音视频页面测试/ }).click();
+  const frame = page.frameLocator("iframe");
+  await expect(frame.getByRole("heading", { name: "Media page ready" })).toBeVisible();
+  await expect.poll(() => frame.locator("body").evaluate(() => (window as unknown as { mediaPageReady: boolean }).mediaPageReady)).toBe(true);
+  await expect(page.locator(".viewer-loading")).toHaveCount(0);
+  await expect.poll(() => held.length).toBeGreaterThan(0);
+  waiting = false;
+  held.forEach(release => release());
+  await expect.poll(() => frame.locator("#movie").evaluate((el: HTMLMediaElement) => el.readyState)).toBeGreaterThanOrEqual(2);
+  const movieReads = reads.filter(read => read.path.endsWith(".mp4") && read.method === "GET");
+  expect(movieReads.length).toBeGreaterThan(0);
+  expect(movieReads.every(read => /^bytes=\d+-\d+$/.test(read.headers.range))).toBe(true);
+  await expect(page.locator(".viewer-error-banner")).toHaveCount(0);
+});
+
+test("engine switches retain separate frames, playback and scroll; close and logout release leases", async ({ page }) => {
+  // Fixture controls stay outside the full-screen mobile panel, like an app's
+  // global navigation shortcut. Invoke those controls without closing it.
+  const control = (name: string) => page.getByRole("button", { name, exact: true })
+    .evaluate((button: HTMLButtonElement) => button.click());
+  await control("打开远程预览");
+  await page.getByRole("button", { name: /^音视频页面测试/ }).click();
+  const firstFrame = await page.locator("iframe").elementHandle();
+  const movie = page.frameLocator("iframe").locator("#movie");
+  await expect.poll(() => movie.evaluate((el: HTMLMediaElement) => el.readyState)).toBeGreaterThanOrEqual(2);
+  await movie.evaluate(async (el: HTMLMediaElement) => { el.muted = true; await el.play(); el.pause(); el.currentTime = 4; });
+  await expect.poll(() => movie.evaluate((el: HTMLMediaElement) => el.seeking)).toBe(false);
+  await page.frameLocator("iframe").locator("body").evaluate(() => {
+    document.body.style.height = "3000px"; window.scrollTo(0, 190);
+  });
+  const initialScroll = await page.frameLocator("iframe").locator("body").evaluate(() => scrollY);
+  const opened: string[] = [], revoked: string[] = [];
+  page.on("request", request => {
+    if (request.url().endsWith("/api/viewers/open")) opened.push(request.url());
+    if (request.method() === "DELETE" && request.url().includes("/api/viewers/")) revoked.push(request.url());
+  });
+  await control("切换引擎");
+  await expect(page.locator("iframe:visible")).toHaveCount(0);
+  await page.keyboard.press("Escape"); // Hidden panel must not own shortcuts.
+  expect(await firstFrame!.evaluate(node => node.isConnected)).toBe(true);
+  await control("打开远程预览");
+  await page.getByRole("button", { name: "+ 关联已有预览", exact: true }).click();
+  await page.getByRole("button", { name: /^机器人结构/ }).click();
+  const robot = page.frameLocator("iframe:visible");
+  await expect(robot.locator("#status")).toContainText("模型已加载");
+  await robot.getByRole("button", { name: "旋转模型" }).click();
+  const secondFrame = await page.locator("iframe:visible").elementHandle();
+  await control("切换引擎");
+  expect(await page.locator("iframe:visible").evaluate((node, old) => node === old, firstFrame)).toBe(true);
+  expect(await page.frameLocator("iframe:visible").locator("#movie").evaluate((el: HTMLMediaElement) => el.currentTime)).toBeCloseTo(4, 1);
+  expect(await page.frameLocator("iframe:visible").locator("body").evaluate(() => scrollY)).toBe(initialScroll);
+  await control("切换引擎");
+  expect(await page.locator("iframe:visible").evaluate((node, old) => node === old, secondFrame)).toBe(true);
+  await expect(page.frameLocator("iframe:visible").locator("#status")).toHaveText("已旋转 1 次");
+  expect(opened).toHaveLength(1);
+  expect(revoked).toHaveLength(0);
+  await page.locator(".remote-viewer-panel:visible").getByRole("button", { name: /^(关闭预览|返回对话)$/ }).filter({ visible: true }).click();
+  await expect.poll(() => revoked.length).toBe(1);
+  expect(await firstFrame!.evaluate(node => node.isConnected)).toBe(true);
+  await control("退出测试");
+  await expect(page.locator("iframe")).toHaveCount(0);
+  await expect.poll(() => revoked.length).toBe(2);
+});
+
+test("retained previews evict the oldest frame after three scopes", async ({ page }) => {
+  const control = (name: string) => page.getByRole("button", { name, exact: true })
+    .evaluate((button: HTMLButtonElement) => button.click());
+  const frames = [];
+  const revoked: string[] = [];
+  page.on("request", request => { if (request.method() === "DELETE") revoked.push(request.url()); });
+  for (let i = 0; i < 4; i++) {
+    if (i) await control("下个会话");
+    await control("打开远程预览");
+    if (i) await page.getByRole("button", { name: "+ 关联已有预览", exact: true }).click();
+    await page.getByRole("button", { name: /^机器人结构/ }).click();
+    await expect(page.frameLocator("iframe:visible").locator("#status")).toContainText("模型已加载");
+    frames.push(await page.locator("iframe:visible").elementHandle());
+  }
+  await expect(page.locator("iframe")).toHaveCount(3);
+  expect(await frames[0]!.evaluate(node => node.isConnected)).toBe(false);
+  for (const frame of frames.slice(1)) expect(await frame!.evaluate(node => node.isConnected)).toBe(true);
+  await expect.poll(() => revoked.length).toBe(1);
+});
+
+test("preview title opens a compact picker without restarting the running page", async ({ page }) => {
+  await page.getByRole("button", { name: "打开远程预览" }).click();
+  await page.getByRole("button", { name: /^音视频页面测试/ }).click();
+  const panel = page.locator(".remote-viewer-panel");
+  const frame = panel.frameLocator("iframe");
+  const movie = frame.locator("#movie");
+  await expect.poll(() => movie.evaluate((el: HTMLVideoElement) => el.readyState), { timeout: 15000 })
+    .toBeGreaterThanOrEqual(2);
+  await movie.evaluate(async (el: HTMLVideoElement) => { el.muted = true; el.loop = true; await el.play(); });
+  await expect.poll(() => movie.evaluate((el: HTMLVideoElement) => el.currentTime)).toBeGreaterThan(0.1);
+  const originalFrame = await panel.locator("iframe").elementHandle();
+  const grants: string[] = [];
+  page.on("request", request => { if (request.url().endsWith("/api/viewers/open")) grants.push(request.url()); });
+
+  const trigger = panel.getByRole("button", { name: "切换预览", exact: true });
+  const picker = panel.getByRole("dialog", { name: "页面详情与切换" });
+  await trigger.click();
+  await expect(picker).toBeVisible();
+  await expect(picker.locator('[aria-current="page"]')).toContainText("音视频页面测试");
+  await expect(picker.locator('[aria-current="page"]')).toContainText("开发设备 · /viewer/media.html");
+  await page.keyboard.press("Tab");
+  await expect(picker.getByRole("button").first()).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(picker).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  await expect(panel).toBeVisible();
+
+  await trigger.click();
+  await page.locator(".viewer-picker-backdrop").click({ position: { x: 20, y: (await panel.boundingBox())!.height - 20 } });
+  await expect(picker).toHaveCount(0);
+  if (page.viewportSize()!.width > 980) {
+    await trigger.click();
+    await page.locator(".pane p").first().click();
+    await expect(picker).toHaveCount(0);
+  }
+  // Selecting the current page only dismisses the picker; media keeps playing.
+  await trigger.click();
+  await picker.getByRole("button", { name: /^音视频页面测试/ }).click();
+  await expect(picker).toHaveCount(0);
+  expect(await originalFrame!.evaluate(node => node.isConnected)).toBe(true);
+  expect(await movie.evaluate((el: HTMLVideoElement) => el.paused)).toBe(false);
+  expect(grants).toEqual([]);
+
+  await trigger.click();
+  await picker.getByRole("button", { name: /^机器人结构/ }).click();
+  await expect(picker).toHaveCount(0);
+  await expect(frame.locator("#status")).toContainText("模型已加载", { timeout: 30000 });
+  await expect(trigger).toContainText("机器人结构");
+  expect(grants).toHaveLength(1);
 });
 
 test("remote Viewer expanded iframe keeps Tab and Escape within its panel", async ({ page }) => {
@@ -270,10 +471,13 @@ test("remote Viewer survives refresh, keeps session scope and closes without del
   expect(stored).not.toContain("origin");
   expect(stored).not.toContain("cookie");
   if (!isMobile) {
+    await page.frameLocator("iframe").getByRole("button", { name: "旋转模型" }).click();
+    const frame = await page.locator("iframe").elementHandle();
     await page.getByRole("button", { name: "切换会话", exact: true }).click();
     await expect(page.getByRole("complementary", { name: "远程预览" })).toHaveCount(0);
     await page.getByRole("button", { name: "切换会话", exact: true }).click();
-    await expect(page.frameLocator("iframe").locator("#status")).toContainText("模型已加载", { timeout: 30000 });
+    await expect(page.frameLocator("iframe").locator("#status")).toHaveText("已旋转 1 次");
+    expect(await page.locator("iframe").evaluate((node, old) => node === old, frame)).toBe(true);
   }
   await page.getByRole("button", { name: isMobile ? "返回对话" : "关闭预览", exact: true }).click();
   await expect(page.locator(".remote-viewer-panel")).toHaveCount(0);
@@ -295,9 +499,12 @@ test("remote Viewer uses one desktop side panel and fills the mobile viewport", 
     await expect(page.getByRole("button", { name: "返回对话", exact: true })).toBeVisible();
   } else {
     expect(box!.width).toBeLessThan(viewport.width * 0.6);
-    await page.getByRole("button", { name: "放大预览" }).click();
-    expect((await panel.boundingBox())!.width).toBeGreaterThan(viewport.width * 0.9);
-    await page.getByRole("button", { name: "还原大小" }).click();
+    await page.getByRole("button", { name: "居中展开远程预览" }).click();
+    const expanded = (await panel.boundingBox())!;
+    expect(expanded.width).toBeGreaterThan(box!.width);
+    expect(expanded.x + expanded.width / 2).toBeCloseTo(viewport.width / 2, 1);
+    await expect(panel).toHaveAttribute("aria-modal", "true");
+    await page.getByRole("button", { name: "收回右侧" }).click();
     expect((await panel.boundingBox())!.width).toBeLessThan(viewport.width * 0.6);
   }
 });
