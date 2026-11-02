@@ -2,7 +2,9 @@
 
 [中文](CHANGELOG_zh.md)
 
-## Unreleased
+## v5.3.8
+
+Improve remote media playback, retain page previews, and recover Web updates safely. Wire protocol v86 requires coordinated Relay, Wrapper and Web updates; Claude Agent SDK remains 0.2.174.
 
 - Add authenticated MP4/M4V previews with byte-range playback (protocol v86).
 - Render remote pages before audio/video finishes loading, with bounded range streaming and seeking for supported MP4/M4A media.
@@ -10,6 +12,10 @@
 - Avoid creating preview entries from reasoning or unqualified HTML filenames, and keep Chinese sentence punctuation outside bare URL links.
 - Validate cached preview runner assets by content to avoid stale Harmony App previews.
 - Offer a guarded page update and invalidate outdated local history projections when a new Web build is available. Relay restarts continue to require signing in again.
+- Show limited file rollback as compact header feedback with an expandable reason.
+- Keep page updates available after an incompatible handshake and restore connections after server rollback, while protecting unsaved edits and pending mutations.
+
+See the bilingual [release notes](docs/releases/v5.3.8.md).
 
 ## v5.3.7
 
