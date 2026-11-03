@@ -133,3 +133,26 @@ def test_darwin_registry_takes_precedence_over_argv(registry, monkeypatch, versi
         continue_bindings={}, continue_candidates={}, continue_resolver=None,
         config_dirs=None, native_session_ids=None, default_config_dir=str(root))
     assert result.complete and result.holders == {first: set(), second: {identity}}
+
+
+def test_linux_registry_accepts_proc_start_ticks(registry, monkeypatch):
+    _root, _proc, _path, first, second, _third, identity, write, scan = registry
+
+    def no_ps(_identity):
+        raise OSError("ps unavailable")
+
+    monkeypatch.setattr(claude_registry.sys, "platform", "linux")
+    monkeypatch.setattr(claude_registry, "_native_process_start", no_ps)
+    write(second, procStart=str(identity.start_ticks))
+    result = scan()
+    assert result.complete and result.holders == {first: set(), second: {identity}}
+    write(second, procStart=str(identity.start_ticks + 1))
+    assert not scan().complete
+
+
+def test_start_ticks_are_not_a_fingerprint_off_linux(registry, monkeypatch):
+    root, proc, _path, _first, second, _third, identity, write, _scan = registry
+    monkeypatch.setattr(claude_registry.sys, "platform", "darwin")
+    write(second, procStart=str(identity.start_ticks))
+    assert claude_registry.registered_session(
+        identity, str(root), proc_root=str(proc)) == (False, None)

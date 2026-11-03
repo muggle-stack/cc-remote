@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
 from uuid import UUID
 from typing import Collection
 
@@ -58,6 +59,15 @@ def _native_process_start(identity: ProcessIdentity) -> str:
     return result.stdout.strip()
 
 
+def _recorded_start_matches(identity: ProcessIdentity, recorded: object) -> bool:
+    # Claude on Linux records the /proc start ticks; elsewhere it records
+    # ``ps lstart`` text.
+    if sys.platform.startswith("linux") and recorded == str(identity.start_ticks):
+        return True
+    fingerprint = _native_process_start(identity)
+    return bool(fingerprint) and recorded == fingerprint
+
+
 def registered_session(
     identity: ProcessIdentity,
     config_root: str | None,
@@ -99,8 +109,7 @@ def registered_session(
             return False, None
         if process_owner_uid(identity.pid, proc_root=proc_root) != os.getuid():
             return False, None
-        fingerprint = _native_process_start(identity)
-        if not fingerprint or raw.get("procStart") != fingerprint:
+        if not _recorded_start_matches(identity, raw.get("procStart")):
             return False, None
         if process_identity(identity.pid, proc_root=proc_root) != identity:
             return False, None
