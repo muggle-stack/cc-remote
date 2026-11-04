@@ -2,14 +2,18 @@
 
 [中文](CHANGELOG_zh.md)
 
-## Unreleased
+## v5.3.9
 
-Wire protocol v87 requires coordinated Relay, Wrapper and Web updates.
+Improve Claude input, question notifications, media galleries and side-chat feedback. Wire protocol v87 requires coordinated Relay, Wrapper and Web updates; Claude Agent SDK remains 0.2.174.
 
 - Allow consecutive Claude steering inputs with independent acceptance tracking and exact native-echo reconciliation.
 - Send system notifications when a live Claude question needs an answer, with replay deduplication and no additional in-app popup.
 - Load media galleries on demand instead of rejecting pages with more than eight audio/video elements, while bounding active players and buffered data.
 - Keep read BTW completion reminders dismissed across session switches, and show background task details within the active side chat in both docked and centered layouts.
+- Accept Linux process start ticks in Claude's session registry so unrelated sessions are not incorrectly made read-only.
+- Preserve native `/goal` turn identities through history refreshes, and show provider errors as progress when Claude continues the same response. Rebuild derived Claude history caches without changing native transcripts.
+
+See the bilingual [release notes](docs/releases/v5.3.9.md).
 
 ## v5.3.8
 
