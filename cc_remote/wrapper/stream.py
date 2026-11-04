@@ -43,6 +43,7 @@ from cc_remote.protocol import (
 from cc_remote.wrapper.sanitize import bounded_text, bounded_tool_input
 from cc_remote.wrapper.claude_compaction import (
     compact_completion_events, compact_metadata, manual_compact_prompt,
+    native_command_prompt,
 )
 from cc_remote.wrapper.claude_model_fallback import FALLBACK_TOOL, model_fallback_event
 from cc_remote.wrapper.claude_rewind_history import REWIND_ANCHOR, rewind_anchor_row
@@ -3149,7 +3150,8 @@ def translate_history(
     but cannot move an already-settled answer's terminal clock. Rich
     assistant blocks retain the same thinking/commentary/final and semantic tool
     structure as the live stream. Non-conversational user turns (compact summaries,
-    slash-command envelopes other than /compact, local-command stdout) remain hidden.
+    slash-command envelopes other than /compact and /goal, local-command stdout)
+    remain hidden.
     """
     events: list = []
     turn_open = False
@@ -3379,8 +3381,9 @@ def translate_history(
                 close_turn("interrupted", False)
                 continue
             compact_prompt = manual_compact_prompt(content)
-            if compact_prompt is not None:
-                content = compact_prompt
+            command_prompt = compact_prompt or native_goal_prompt(content)
+            if command_prompt is not None:
+                content = command_prompt
             if isinstance(content, str):
                 internal_event = (internal_user_events or {}).get(source_uid)
                 if internal_event is not None:
@@ -4023,11 +4026,21 @@ def merge_subagent_history(events: list, subagent_events: list) -> list:
     return merged
 
 
+def native_goal_prompt(content: object) -> str | None:
+    """Recognize the native /goal command, which starts its own model turn.
+
+    The Wrapper publishes Remote goal commands as their own visible turn, and a
+    terminal /goal also begins a new response. History must keep that boundary,
+    or the goal's work extends the preceding prompt under a different identity.
+    """
+    return native_command_prompt(content, "/goal")
+
+
 def _is_meta_user_text(text: str) -> bool:
     """Skip non-conversational user turns that would just clutter the history:
     compact summaries, slash-command envelopes, and local-command stdout/stderr."""
     t = text.lstrip()
-    if manual_compact_prompt(t) is not None:
+    if manual_compact_prompt(t) is not None or native_goal_prompt(t) is not None:
         return False
     return (
         t.startswith("This session is being continued from a previous conversation")
