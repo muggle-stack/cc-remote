@@ -91,7 +91,8 @@ from cc_remote.wrapper.usage_limit import is_usage_limit_failure
 # v54 preserves the active rewind branch after native settings and new prompts.
 # v55 rebuilds Claude catalogs truncated behind pending image metadata leaves.
 # v56 makes native /goal a visible turn owning its live Remote identity.
-_SCHEMA_VERSION = 56
+# v57 demotes provider errors Claude Code continued past to progress text.
+_SCHEMA_VERSION = 57
 _FINGERPRINT_SAMPLE_BYTES = 64 * 1024
 _DEFAULT_MAX_ENTRIES = 128
 _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
@@ -1399,7 +1400,7 @@ class HistoryIndexStore:
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
             current = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if current in range(10, 56):
+            if current in range(10, 57):
                 # Source bytes are unchanged. Rebuild only derived Claude
                 # narrative; retain native indexes, binary assets and engines.
                 for table in ("history_pages", "history_turn_details"):
@@ -1583,7 +1584,7 @@ class HistoryIndexStore:
                 for table in ("history_pages", "history_turn_details"):
                     connection.execute(
                         f"DELETE FROM {table} WHERE engine='codex'")
-            elif current in range(21, 56):
+            elif current in range(21, 57):
                 # The independent projection invalidations above suffice.
                 pass
             elif current not in (0, _SCHEMA_VERSION):
