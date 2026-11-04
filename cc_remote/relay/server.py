@@ -585,7 +585,7 @@ def create_app(
             harmony_store = None
             log.warning("Harmony push disabled: check service-account configuration")
 
-    async def on_live_turn_end(machine_id: str, msg: object) -> None:
+    async def on_live_notification(machine_id: str, msg: object) -> None:
         result = getattr(msg, "result", None)
         raw_context = getattr(msg, "notification_context", None)
         context = (
@@ -597,13 +597,16 @@ def create_app(
             context["sid"] = getattr(msg, "sid", None)
         # One provider's outage must not prevent delivery through the other.
         await asyncio.gather(*(
-            dispatcher.notify_turn_end(
-                machine_id, outcome=_turn_push_outcome(result), context=context)
+            (dispatcher.notify_question(machine_id, context=context)
+             if getattr(msg, "type", None) == "ask_user"
+             else dispatcher.notify_turn_end(
+                 machine_id, outcome=_turn_push_outcome(result), context=context))
             for dispatcher in (push_dispatcher, harmony_dispatcher)
             if dispatcher is not None
         ), return_exceptions=True)
 
-    hub = RelayHub(cfg, on_live_turn_end=on_live_turn_end)
+    hub = RelayHub(cfg, on_live_turn_end=on_live_notification,
+                   on_live_ask_user=on_live_notification)
     login_slots = asyncio.Semaphore(cfg.login_inflight_cap)
     app.state.hub = hub
     app.state.sessions = sessions

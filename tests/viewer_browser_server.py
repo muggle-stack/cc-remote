@@ -94,6 +94,21 @@ document.getElementById('rotate').onclick=()=>{
                 "id": "media", "label": "音视频页面测试", "entry": "/viewer/media.html",
                 "paths": ["/viewer/media.html", "/viewer/narration.wav", "/viewer/sample.mp4", "/meshes/badge.svg"],
             }))
+            samples = root / "viewer/samples"
+            samples.mkdir()
+            for number in range(52):
+                shutil.copyfile(root / "viewer/narration.wav", samples / f"{number}.wav")
+            (samples / "index.html").write_text('''<!doctype html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>section{height:200px}audio{width:300px;max-width:100%}</style></head><body>
+<h1>52 audio samples</h1><script>window.mediaPageReady=true;</script>'''
+                + "".join(f'<section><p>Sample {number}</p><audio id="sample-{number}" '
+                          f'controls preload="none" src="{number}.wav"></audio></section>' for number in range(52))
+                + '</body></html>')
+            sites.append(site.model_copy(update={
+                "id": "samples", "label": "多音频试听测试", "entry": "/viewer/samples/index.html",
+                "paths": ["/viewer/samples/"],
+            }))
             home_demo = root / "home-demo"
             home_demo.mkdir()
             (home_demo / ".git").mkdir()

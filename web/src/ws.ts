@@ -770,31 +770,43 @@ export class RelayWs {
     });
   }
 
-  /** Append input to the active Codex turn. The reliable command and the
+  /** Append input to the active engine turn. The reliable command and the
    *  narrative acceptance latch are separate: an ACK alone must not clear the
    *  draft/runtime protection before the wrapper echoes the steered user row. */
   sendSteerTo(sid: string, prompt: string, msg_id: string,
               images?: QueryImg[], files?: QueryFile[]): boolean {
     if (!sid) return false;
-    if (this.queryAcceptance.pendingMessageId(sid)) return false;
+    const concurrent = this.engineBySession[sid] === "claude";
+    if (!this.queryAcceptance.canBeginSteer(sid, concurrent)) {
+      this.cb.onCommandError?.("引导仍在等待确认或已达到上限，请稍后再试。");
+      return false;
+    }
     const sentAt = nowTs();
     const obj: Record<string, unknown> = {
       v: PROTOCOL_VERSION, type: "steer", prompt, msg_id, sid, ts: sentAt,
     };
     if (images && images.length) obj.images = images;
     if (files && files.length) obj.files = files;
-    if (!this.send(obj)) return false;
     const historyHead = this.historyHeadBySession[sid];
     const baseline = historyHead ? {
       ...historyHead,
       liveSeq: Math.max(
         historyHead.liveSeq, this.lastSeqBySession[sid] ?? 0),
     } : null;
-    return this.queryAcceptance.begin(
+    const reserved = this.queryAcceptance.begin(
       sid, msg_id,
       queryAcceptanceDescriptor(msg_id, prompt, images, files),
-      baseline,
+      baseline, concurrent, new TextEncoder().encode(JSON.stringify(obj)).byteLength,
     );
+    if (!reserved) {
+      this.cb.onCommandError?.("待确认引导过多，请等待部分消息被接收后再发送。");
+      return false;
+    }
+    if (this.send(obj)) return true;
+    this.queryAcceptance.completeMessage(sid, msg_id, {
+      accepted: false, error: { code: "not_sent", message: "本次引导未发送。" },
+    });
+    return false;
   }
 
   sendInterrupt(): void {
@@ -1872,9 +1884,11 @@ export class RelayWs {
           this.knownBtwSids.clear();
           for (const session of msg.sessions) {
             this.knownBtwSids.add(session.btw_sid);
+            this.engineBySession[session.btw_sid] = session.engine;
           }
         } else if (msg.type === "btw_opened") {
           this.knownBtwSids.add(msg.btw_sid);
+          this.engineBySession[msg.btw_sid] = msg.engine;
         } else if (msg.type === "btw_closed") {
           this.knownBtwSids.delete(msg.btw_sid);
         } else if (msg.sid?.startsWith("btw-")
@@ -1894,6 +1908,10 @@ export class RelayWs {
           // acceptance/error is visible, then allow normal pruning again.
           this.cb.onOutboxChanged?.(this.pendingSessionIds());
         }
+        if (msg.type === "state" && msg.state === "idle" && msg.sid) {
+          this.queryAcceptance.settleUnknownSteers(msg.sid);
+          this.cb.onOutboxChanged?.(this.pendingSessionIds());
+        }
         if (msg.type === "history") {
           let acceptedFromHistory = false;
           for (const historyEvent of msg.events) {
@@ -1906,15 +1924,20 @@ export class RelayWs {
               sid: historyEvent.sid ?? msg.session_id,
             }) || acceptedFromHistory;
           }
-          const pending = this.queryAcceptance.pendingMessageId(msg.session_id);
-          if (pending && msg.turns?.some((turn) =>
-            turn.id === pending || turn.clientMsgId === pending)) {
-            acceptedFromHistory =
-              this.queryAcceptance.completeSession(msg.session_id)
-              || acceptedFromHistory;
+          for (const pending of this.queryAcceptance.pendingMessageIds(msg.session_id)) {
+            if (msg.turns?.some(turn => turn.id === pending || turn.clientMsgId === pending)) {
+              acceptedFromHistory = this.queryAcceptance.completeMessage(
+                msg.session_id, pending) || acceptedFromHistory;
+            }
           }
           acceptedFromHistory =
             this.queryAcceptance.acceptHistory(msg) || acceptedFromHistory;
+          if (!msg.before && msg.authoritative !== false && msg.in_progress === false
+              && msg.live_seq != null && msg.live_seq >= this.lastSeqFor(msg.session_id)
+              && msg.generation === this.generationFor(msg.session_id)) {
+            this.queryAcceptance.settleUnknownSteers(msg.session_id);
+            this.cb.onOutboxChanged?.(this.pendingSessionIds());
+          }
           const historyHead = queryAcceptanceHistoryHead(msg);
           if (historyHead) {
             const previous = this.historyHeadBySession[msg.session_id];

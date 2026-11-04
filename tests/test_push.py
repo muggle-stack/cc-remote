@@ -398,3 +398,34 @@ def test_inactive_login_subscription_is_pruned_before_delivery(tmp_path):
         assert await store.for_machine("nono") == []
 
     asyncio.run(run())
+
+
+def test_question_push_privacy_and_machine_scope(tmp_path):
+    async def run():
+        store = PushSubscriptionStore(str(tmp_path / "push.sqlite3"))
+        for device, mode in (("device", "generic"), ("device", "session"), ("other", "session")):
+            await store.upsert(PushSubscription(
+                subject="alice", machine_id=device,
+                endpoint=f"https://push.example/{device}/{mode}", p256dh="p" * 87, auth="a" * 22,
+                session_jti=f"{device}-{mode}-" + "j" * 24, expires_at=4_102_444_800,
+                notification_mode=mode))
+        sent = {}
+
+        async def sender(subscription, payload):
+            assert subscription.machine_id == "device"
+            sent[subscription.notification_mode] = json.loads(payload)
+            return 201
+
+        dispatcher = PushDispatcher(store, vapid_private_key="unused",
+                                    vapid_subject="mailto:admin@example.com", sender=sender)
+        await dispatcher.notify_question("device", context={
+            "sid": "session-id", "engine": "claude", "space": "code",
+            "display_name": "Session name", "question": "do not expose"})
+        assert sent["generic"]["body"] == "远程会话正在等待你的回答"
+        assert "route" not in sent["generic"]
+        assert "session-id" not in json.dumps(sent["generic"])
+        assert sent["session"]["body"] == "Claude 正在等待你的回答"
+        assert sent["session"]["route"]["session_id"] == "session-id"
+        assert "do not expose" not in json.dumps(sent)
+
+    asyncio.run(run())

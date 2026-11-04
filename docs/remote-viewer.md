@@ -306,11 +306,18 @@ Metadata reads skip media payloads when the index is at the end of the file;
 each range validates the original ETag and length. Seeking cancels obsolete
 reads, and buffering stops roughly 15 seconds ahead of playback. Consumed native
 buffers are evicted; JavaScript data pending segmentation is limited to 16 MiB
-per player, metadata reads to 8 MiB, and declarative players to eight per frame.
+per player and metadata reads to 8 MiB. A frame can register up to 256 declarative
+players, with at most eight resident players. Galleries using `preload="none"`
+load visible controls instead of fetching every sample; explicit `play()` also
+activates off-screen media. Paused players outside the viewport are retired as
+needed, preserving their playback position. Explicit playback can retire a
+paused visible player, but never interrupts an already playing/pending player.
 WebKit attaches MediaSource directly via `srcObject`, avoiding its rejection of
 opaque-origin MediaSource blob URLs. Other containers/codecs and browsers use
 the existing bounded blob fallback asynchronously; the shared 64 MiB blob budget
-still applies. Video posters remain ordinary bounded image assets.
+still applies. Retiring a player cancels its reads and releases its media blobs
+and cache budget; shared image/script assets are unaffected. Video posters remain
+ordinary bounded image assets.
 Isolated mode uses same-preview-origin HTTP resources and byte ranges.
 Playback codecs depend on the browser; no transcoding is performed.
 

@@ -247,9 +247,10 @@ export function HeaderMenu({
                     onClick={() => setPage("main")} aria-label="返回设置">
                     <Icon name="back" size={17} />
                   </button>
-                  <b>完成通知</b>
+                  <b>会话通知</b>
                 </header>
                 <p className="header-menu-help">
+                  会话完成、失败、中断或需要你回答时发送通知。
                   通用提醒不会把会话名称或编号发送给 Push 服务；会话提醒可从通知精确打开对应对话。
                 </p>
                 {notificationNative && <p className="header-menu-help">
@@ -271,7 +272,7 @@ export function HeaderMenu({
                         <small>{mode === "off"
                           ? "不发送系统通知"
                           : mode === "generic"
-                            ? "仅显示完成、失败或中断"
+                            ? "仅提醒任务状态或等待回答，不显示会话名称"
                             : "显示安全截断的会话名称，并支持精确跳转"}</small>
                       </span>
                     </button>

@@ -1,4 +1,56 @@
 import type { Block, Turn } from "./domain/conversation";
+import type { TurnEnd } from "./protocol";
+
+/** Unread receipts can be cleared, but an already delivered BTW terminal must
+ * stay remembered. SyncBtw rebuilds replay the same terminals without seq.
+ * Record even visible completions, before deciding whether to show a badge or
+ * notification; their later replay must not become a new unread completion.
+ */
+export class BtwCompletionTracker {
+  private readonly sessions = new Map<string, {
+    machineId: string;
+    completions: Set<string>;
+  }>();
+
+  take(machineId: string, sid: string,
+    event: Pick<TurnEnd, "turn_id" | "checkpoint_id" | "ts">,
+  ): boolean {
+    const sessionKey = JSON.stringify([machineId, sid]);
+    const session = this.sessions.get(sessionKey) ?? {
+      machineId, completions: new Set<string>(),
+    };
+    // Legacy terminals without native IDs still retain their original timestamp
+    // in presentation history. Transport seq cannot identify a rebuilt event.
+    const completionKey = event.turn_id || event.checkpoint_id
+      ? JSON.stringify([event.turn_id ?? null, event.checkpoint_id ?? null])
+      : JSON.stringify(["ts", event.ts]);
+    const fresh = !session.completions.has(completionKey);
+    session.completions.delete(completionKey);
+    session.completions.add(completionKey);
+    // Presentation history retains at most 64 turns per BTW. Leave headroom for
+    // live terminals and overlapping replays, while bounding long-lived tabs.
+    if (session.completions.size > 256) {
+      session.completions.delete(session.completions.values().next().value!);
+    }
+    this.sessions.delete(sessionKey);
+    this.sessions.set(sessionKey, session);
+    if (this.sessions.size > 128) {
+      this.sessions.delete(this.sessions.keys().next().value!);
+    }
+    return fresh;
+  }
+
+  forget(machineId: string, sid: string): void {
+    this.sessions.delete(JSON.stringify([machineId, sid]));
+  }
+
+  clear(machineId?: string): void {
+    if (machineId == null) this.sessions.clear();
+    else for (const [key, session] of this.sessions) {
+      if (session.machineId === machineId) this.sessions.delete(key);
+    }
+  }
+}
 
 export interface CompletionReceipt {
   main: boolean;

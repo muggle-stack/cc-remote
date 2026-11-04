@@ -122,3 +122,50 @@ test("parsed code has its own aggregate budget excluding inert model data", () =
   for (let i = 0; i < 4; i++) value.checkCode("x".repeat(2 * MiB), url);
   assert.throws(() => value.checkCode("x", url), /脚本\/样式超过 16 MiB 文本预算/);
 });
+
+
+test("retired media releases the shared blob budget without revoking page assets", async () => {
+  const value = resources(() => new Response(new Uint8Array(10 * MiB), {
+    headers: { "content-length": String(10 * MiB), etag: '"v1"' },
+  }));
+  const image = value.blob("page image", "text/plain");
+  for (let i = 0; i < 9; i++) {
+    const media = await value.mediaAsset(`${VIRTUAL_ORIGIN}/sample.wav`, new AbortController().signal);
+    assert.equal((await fetch(media.url)).status, 200);
+    media.release(); media.release();
+    await assert.rejects(fetch(media.url));
+  }
+  assert.equal(await (await fetch(image)).text(), "page image");
+  value.dispose();
+  await assert.rejects(fetch(image));
+});
+
+test("pending media reserves shared blob memory and cancellation releases the reservation", async () => {
+  const response = textResponse("");
+  response.headers.set("content-length", String(60 * MiB));
+  let complete!: (blob: Blob) => void;
+  response.blob = () => new Promise(resolve => { complete = resolve; });
+  const value = resources(() => response);
+  const controller = new AbortController();
+  const pending = value.mediaAsset(url, controller.signal);
+  const rejected = assert.rejects(pending, { name: "AbortError" });
+  await Promise.resolve();
+  assert.throws(() => value.blob(new Uint8Array(5 * MiB), "audio/wav"), /缓存预算/);
+  controller.abort(); complete(new Blob([]));
+  await rejected;
+  const media = value.blob(new Uint8Array(5 * MiB), "audio/wav");
+  assert.ok(media.startsWith("blob:"));
+  value.dispose();
+});
+
+test("a completed read cannot create a media URL after the frame closes", async () => {
+  const response = textResponse("");
+  let complete!: (blob: Blob) => void;
+  response.blob = () => new Promise(resolve => { complete = resolve; });
+  const value = resources(() => response);
+  const pending = value.mediaAsset(url, new AbortController().signal);
+  const rejected = assert.rejects(pending, /连接已断开/);
+  await Promise.resolve();
+  value.dispose(); complete(new Blob([]));
+  await rejected;
+});

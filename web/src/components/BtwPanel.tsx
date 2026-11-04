@@ -40,6 +40,7 @@ import {
   effortNameForDisplay, modelsFor, parseSlash, type Catalog,
 } from "../data";
 import { QueuedQueryChip } from "./QueuedQueryChip";
+import BackgroundTaskControl from "./BackgroundTaskControl";
 import type { InlineImageAsset } from "../inline-image-assets";
 import {
   composePastePrompt,
@@ -613,6 +614,13 @@ export function BtwPanel(p: Props) {
       <div className="btw-composer">
         {lockReason && <div className="btw-readonly-notice" role="status">{lockReason}</div>}
         {notice && <div className="btw-composer-notice">{notice}</div>}
+        {!!p.rt?.backgroundProcesses.length && (
+          <div className="runbar show">
+            <BackgroundTaskControl key={p.draftKey}
+              processes={p.rt.backgroundProcesses}
+              onOpenFile={p.onOpenFile} />
+          </div>
+        )}
         {(
           (p.rt?.queue.length ?? 0) > 0
           || !!p.rt?.pendingSend

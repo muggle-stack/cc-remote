@@ -3,11 +3,46 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import {
+  acknowledgeCompletion,
+  BtwCompletionTracker,
   completionNeedsHistoryRepair,
   idleTurnNeedsHistoryRepair,
+  markCompletionUnread,
   nextTerminalHistoryRepairAttempt,
   settleTerminalHistoryRepairAttempt,
 } from "../src/completion-badges.ts";
+
+const btwCompletions = new BtwCompletionTracker();
+const terminal = { turn_id: "answer-1", checkpoint_id: "question-1", ts: 100, seq: 20 };
+assert.equal(btwCompletions.take("machine-a", "btw-one", terminal), true);
+const unreadBtw = markCompletionUnread({}, "parent", "btw-one", "btw");
+assert.deepEqual(acknowledgeCompletion(unreadBtw, "parent", { btwSid: "btw-one" }), {});
+assert.equal(btwCompletions.take("machine-a", "btw-one", {
+  turn_id: terminal.turn_id, checkpoint_id: terminal.checkpoint_id, ts: terminal.ts,
+}), false, "reading a badge cannot make the same unsequenced history terminal new again");
+assert.equal(btwCompletions.take("machine-a", "btw-one", {
+  ...terminal, turn_id: "answer-2",
+}), true, "a distinct follow-up answer sharing its checkpoint still notifies");
+assert.equal(btwCompletions.take("machine-a", "btw-one", {
+  ...terminal, checkpoint_id: "question-2",
+}), true, "the exact completion identity includes its human turn");
+assert.equal(btwCompletions.take("machine-a", "btw-two", terminal), true,
+  "one side chat cannot consume a sibling's completion");
+assert.equal(btwCompletions.take("machine-b", "btw-one", terminal), true,
+  "completion identities remain device-scoped");
+assert.equal(btwCompletions.take("machine-a", "btw-legacy", { ts: 120 }), true);
+assert.equal(btwCompletions.take("machine-a", "btw-legacy", { ts: 120 }), false);
+assert.equal(btwCompletions.take("machine-a", "btw-legacy", { ts: 121 }), true);
+btwCompletions.forget("machine-a", "btw-one");
+assert.equal(btwCompletions.take("machine-a", "btw-one", terminal), true);
+assert.equal(btwCompletions.take("machine-a", "btw-two", terminal), false,
+  "closing one BTW preserves the read state of its siblings");
+btwCompletions.clear("machine-a");
+assert.equal(btwCompletions.take("machine-a", "btw-two", terminal), true);
+assert.equal(btwCompletions.take("machine-b", "btw-one", terminal), false,
+  "a wrapper generation reset cannot forget another device's read completions");
+btwCompletions.clear();
+assert.equal(btwCompletions.take("machine-b", "btw-one", terminal), true);
 
 assert.equal(completionNeedsHistoryRepair([], "native-terminal"), true,
   "a durable completion repairs an empty cold browser projection");

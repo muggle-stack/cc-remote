@@ -721,6 +721,161 @@ async function mockRightPanelRelay(
 }
 
 for (const engine of ["claude", "codex"] as const) {
+  test(`side chat scope shows ${engine} background tasks independently of the parent and siblings`, async ({ page, isMobile }, testInfo) => {
+    await page.setViewportSize(isMobile ? { width: 390, height: 844 } : { width: 1568, height: 900 });
+    const relay = await mockRightPanelRelay(page, { visible: true, engine });
+    const sid = "btw-layout-child";
+    const sibling = "btw-second-child";
+    const panel = page.locator(".btw-panel");
+    const trigger = panel.getByRole("button", { name: /^后台任务，/ });
+    const dialog = page.getByRole("dialog", { name: "后台任务", exact: true });
+    const expectPopoverInsideBtw = async () => {
+      if (isMobile) return;
+      await expect.poll(async () => {
+        const bounds = (await panel.boundingBox())!;
+        const popup = (await dialog.boundingBox())!;
+        const button = (await trigger.boundingBox())!;
+        return popup.x >= bounds.x && popup.x + popup.width <= bounds.x + bounds.width
+          && Math.abs(popup.x - button.x) < 2 && popup.y + popup.height < button.y;
+      }).toBe(true);
+    };
+    const tasks = (target: string, names: string[]) => relay.emit({
+      type: "background_process_sync", sid: target, generation: "layout-generation",
+      items: names.map((title, i) => ({ item_id: `${target}-${i}`, kind: i === 1 ? "agent" : "task",
+        status: "running", title, command: i === 0 ? "make side-check" : undefined,
+        progress: i === 1 ? "Reading side files" : undefined, started_at: Date.now() / 1000 - 120 })),
+    });
+    await page.goto("/");
+    await expect.poll(() => relay.commands.some(c => c.type === "sync_btw")).toBe(true);
+    relay.emit({ type: "btw_sync", generation: "layout-generation", revision: 2,
+      sessions: [sid, sibling].map(btw_sid => ({ btw_sid, parent_sid: "layout-parent",
+        engine, created_at: 1, state: "running" })) });
+    tasks("layout-parent", ["Parent task"]);
+    tasks(sid, ["Side build", "Side agent"]);
+    tasks(sibling, ["Sibling task"]);
+    await expect(trigger).toHaveText("后台任务 · 2");
+    await expect(page.locator(".pane .background-task-trigger")).toHaveText("后台任务 · 1");
+    await panel.locator("textarea").fill("Preserve side draft");
+    await trigger.click();
+    await expect(dialog).toContainText("Side build");
+    await expect(dialog).toContainText("Side agent");
+    await expectPopoverInsideBtw();
+    await expect(dialog).not.toContainText("Parent task");
+    await expect(dialog).not.toContainText("Sibling task");
+    await dialog.getByText("Side build", { exact: true }).click();
+    await expect(dialog).toContainText("$ make side-check");
+    await dialog.getByText("Side agent", { exact: true }).click();
+    await expect(dialog).toContainText("Reading side files");
+    await page.screenshot({ path: testInfo.outputPath(`${engine}-btw-background-tasks.png`) });
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(panel.locator("textarea")).toHaveValue("Preserve side draft");
+    await panel.getByRole("button", { name: "居中展开侧边对话", exact: true }).click();
+    await expect(panel).toHaveClass(/btw-expanded/);
+    await page.screenshot({ path: testInfo.outputPath(`${engine}-btw-centered.png`), animations: "disabled" });
+    await trigger.click();
+    await expect(dialog).toBeVisible();
+    await expectPopoverInsideBtw();
+    await page.screenshot({ path: testInfo.outputPath(`${engine}-btw-centered-tasks.png`), animations: "disabled" });
+    // The nested list owns dismissal even when BTW itself is a modal.
+    const outside = (await panel.locator(".btw-title").boundingBox())!;
+    await page.mouse.click(outside.x + outside.width / 2, outside.y + outside.height / 2);
+    await expect(dialog).toHaveCount(0);
+    await expect(panel).toHaveClass(/btw-expanded/);
+    await page.keyboard.press("Escape");
+    await expect(panel).not.toHaveClass(/btw-expanded/);
+    await panel.getByRole("tab", { name: "侧聊 2", exact: true }).click();
+    await expect(trigger).toHaveText("后台任务 · 1");
+    await expect(dialog).toHaveCount(0);
+    await trigger.click();
+    await expect(dialog).toContainText("Sibling task");
+    await expect(dialog).not.toContainText("Side build");
+    await page.keyboard.press("Escape");
+    await panel.getByRole("tab", { name: "侧聊 1", exact: true }).click();
+    await expect(trigger).toHaveText("后台任务 · 2");
+    // Finishing a reply does not finish its detached work.
+    relay.emit({ type: "turn_end", sid, turn_id: "side-answer",
+      result: { subtype: "success", duration_ms: 1000, is_error: false } });
+    relay.emit({ type: "state", sid, state: "idle" });
+    await expect(panel.locator(".btw-chat-tab-wrap.active .btw-chat-state")).toHaveClass(/idle/);
+    await expect(trigger).toHaveText("后台任务 · 2");
+    await trigger.click();
+    relay.emit({ type: "process", sid, item_id: `${sid}-0`, kind: "task",
+      phase: "end", status: "succeeded", title: "Side build", background: true });
+    await expect(trigger).toHaveText("后台任务 · 1");
+    await expect(dialog).not.toContainText("Side build");
+    tasks(sid, []);
+    await expect(trigger).toHaveCount(0);
+    await expect(dialog).toHaveCount(0);
+    await expect(page.locator(".pane .background-task-trigger")).toHaveText("后台任务 · 1");
+    expect(relay.commands.some(c => ["query", "steer", "open_btw", "close_btw"].includes(String(c.type)))).toBe(false);
+  });
+
+  test(`side chat scope keeps ${engine} BTW completion read when old history arrives after switching sessions`, async ({ page }) => {
+    await page.setViewportSize({ width: 1400, height: 900 });
+    const relay = await mockRightPanelRelay(page, { visible: true, engine, secondParent: true });
+    const sid = "btw-layout-child";
+    const panel = page.locator(".btw-panel");
+    const parent = page.locator(".scard").filter({ hasText: "Layout parent" });
+    const badge = parent.getByText("BTW 完成", { exact: true });
+    const selectSession = async (name: string) => {
+      const showSidebar = page.getByRole("button", { name: "显示会话侧栏", exact: true });
+      if (await showSidebar.getAttribute("aria-expanded") === "false") await showSidebar.click();
+      await page.getByText(name, { exact: true }).click();
+    };
+    await page.goto("/");
+    await expect.poll(() => relay.commands.some(c => c.type === "sync_btw")).toBe(true);
+    const terminal = (id: string, seq?: number) => relay.emit({
+      type: "turn_end", sid, turn_id: `answer-${id}`, checkpoint_id: `question-${id}`, seq,
+      result: { subtype: "success", duration_ms: 1000, is_error: false },
+    });
+    const waitForDelivery = async (id: string) => {
+      // A visible event on the same socket confirms all preceding hidden BTW
+      // events were processed before checking that their badge stayed absent.
+      relay.emit({ type: "delta", sid: "layout-other", message_id: `barrier-${id}`,
+        channel: "final", text: `Events delivered ${id}` });
+      await expect(page.getByText(`Events delivered ${id}`, { exact: true })).toBeVisible();
+    };
+    const replay = () => {
+      relay.emit({ type: "replay_start", sid, generation: "layout-generation",
+        from_seq: 0, to_seq: 100, rebuild: true, truncated: false });
+      for (const id of ["old", "latest"]) {
+        relay.emit({ type: "user_msg", sid, msg_id: `question-${id}`, prompt: `BTW question ${id}` });
+        relay.emit({ type: "delta", sid, message_id: `answer-${id}`, channel: "final", text: `BTW answer ${id}` });
+        terminal(id);
+      }
+      relay.emit({ type: "replay_end", sid, to_seq: 100, truncated: false });
+      relay.emit({ type: "state", sid, state: "idle" });
+    };
+    // Read the completed conversation, then reproduce a delayed SyncBtw reply
+    // arriving only after its parent is no longer the visible session.
+    replay();
+    await expect(panel.getByText("BTW answer latest", { exact: true })).toBeVisible();
+    await expect(badge).toHaveCount(0);
+    await selectSession("Second parent");
+    await expect(panel).toHaveCount(0);
+    replay();
+    await waitForDelivery("replayed");
+    await expect(badge).toHaveCount(0);
+    // Suppression must be exact: a new completion, including one first learned
+    // from reconnect history, still needs to notify its hidden parent.
+    terminal("missed-while-disconnected");
+    await expect(badge).toBeVisible();
+    await selectSession("Layout parent");
+    await expect(panel).toBeVisible();
+    await expect(badge).toHaveCount(0);
+    await selectSession("Second parent");
+    await expect(panel).toHaveCount(0);
+    terminal("missed-while-disconnected");
+    await waitForDelivery("repeated");
+    await expect(badge).toHaveCount(0);
+    terminal("new-live", 101);
+    await expect(badge).toBeVisible();
+    expect(relay.commands.some(c => ["query", "steer", "open_btw", "close_btw"].includes(String(c.type)))).toBe(false);
+  });
+}
+
+for (const engine of ["claude", "codex"] as const) {
   for (const pending of [false, true]) {
     test(`history prefetch ${engine} keeps the reading window stable and shares ${pending ? "pending" : "ready"} pages`, async ({ page, isMobile }) => {
       const turns = (start: number, count: number) => Array.from({ length: count }, (_, i) => ({

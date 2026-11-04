@@ -33,7 +33,7 @@ export class Resources {
   private reads = new Map<number, Read>();
   private closed = false;
   private blobs = new Map<string, Promise<string>>();
-  private urls: string[] = [];
+  private urls = new Map<string, number>();
   private blobBytes = 0;
   private textBytes = 0;
   private textReserved = 0;
@@ -185,12 +185,49 @@ export class Resources {
   }
 
   blob(data: BlobPart, type: string): string {
+    return this.createBlob(data, type, 0);
+  }
+
+  private createBlob(data: BlobPart, type: string, reservation: number): string {
     const blob = new Blob([data], { type });
-    if (this.blobBytes + blob.size > MAX_BLOBS) throw new Error("预览资源超过内存缓存预算。");
-    this.blobBytes += blob.size;
+    if (this.closed) throw new Error("预览连接已断开，请重新连接。");
+    if (this.blobBytes + this.blobReserved - reservation + blob.size > MAX_BLOBS)
+      throw new Error("预览资源超过内存缓存预算。");
     const url = URL.createObjectURL(blob);
-    this.urls.push(url);
+    this.blobBytes += blob.size;
+    this.urls.set(url, blob.size);
     return url;
+  }
+
+  private releaseBlob(url: string) {
+    const size = this.urls.get(url);
+    if (size === undefined) return;
+    this.urls.delete(url); this.blobBytes -= size;
+    URL.revokeObjectURL(url);
+  }
+
+  private async readAsset(url: string, signal?: AbortSignal): Promise<string> {
+    const response = await this.fetch(url, { signal });
+    const size = Number(response.headers.get("content-length"));
+    if (!response.ok || !response.headers.has("content-length") || !Number.isSafeInteger(size) || size < 0
+        || size > MAX_BLOBS - this.blobBytes - this.blobReserved) {
+      await response.body?.cancel(); throw new Error("预览资源无法读取或超过缓存预算。");
+    }
+    this.blobReserved += size;
+    try {
+      const body = await response.blob();
+      signal?.throwIfAborted();
+      if (body.size !== size) throw new Error("预览资源传输大小不一致。");
+      this.remember(url, response);
+      return this.createBlob(body, response.headers.get("content-type") ?? "application/octet-stream", size);
+    } finally { this.blobReserved -= size; }
+  }
+
+  // Media has a shorter lifetime than page images/scripts. A retired player
+  // must release its bytes as well as its URL, without revoking shared assets.
+  async mediaAsset(value: string, signal: AbortSignal): Promise<{ url: string; release: () => void }> {
+    const url = await this.readAsset(this.url(value).href, signal);
+    return { url, release: () => this.releaseBlob(url) };
   }
 
   asset(value: string, base: string): Promise<string> {
@@ -198,18 +235,7 @@ export class Resources {
     const url = this.url(value, base).href;
     let promise = this.blobs.get(url);
     if (!promise) {
-      promise = this.fetch(url).then(async (response) => {
-        const size = Number(response.headers.get("content-length"));
-        if (!response.ok || size > MAX_BLOBS - this.blobBytes - this.blobReserved) {
-          await response.body?.cancel(); throw new Error("预览资源无法读取或超过缓存预算。");
-        }
-        this.blobReserved += size;
-        try {
-          const body = await response.blob();
-          this.remember(url, response);
-          return this.blob(body, response.headers.get("content-type") ?? "application/octet-stream");
-        } finally { this.blobReserved -= size; }
-      });
+      promise = this.readAsset(url);
       this.blobs.set(url, promise);
     }
     return promise;
@@ -245,8 +271,8 @@ export class Resources {
 
   dispose() {
     this.close();
-    for (const url of this.urls) URL.revokeObjectURL(url);
-    this.urls = []; this.blobs.clear();
+    for (const url of this.urls.keys()) this.releaseBlob(url);
+    this.blobs.clear();
     this.port.close();
   }
 }

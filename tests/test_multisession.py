@@ -511,3 +511,27 @@ def test_lost_rekey_is_replayed_before_cursor_catchup():
         assert all(message.route_id == "route-1" for message in transport.sent)
 
     asyncio.run(run())
+
+
+def test_live_ask_has_notification_context_without_replay_or_question_content():
+    from cc_remote.protocol import AskUser
+
+    async def run():
+        machine, transport = _mk_machine()
+        ctx = _mk_ctx(key="ask-notify", session_id="ask-notify")
+        ctx.engine = "claude"
+        machine._remember_notification_title(ctx.key, "Question session")
+        ask = AskUser(ask_id="a", question="Private question", allow_text=True)
+        await machine._emit_locked(ctx, ask)
+        live = transport.sent[-1]
+        assert live.notification_context.engine == "claude"
+        assert live.notification_context.display_name == "Question session"
+        assert "Private question" not in live.notification_context.model_dump_json()
+        restored = deserialize(serialize(live))
+        assert restored.notification_context == live.notification_context
+        assert ask.notification_context is None
+        replay = next(frame for frame in ctx.buffer.replay_from(
+            0, cc_session_id=ctx.session_id, state="running") if isinstance(frame, AskUser))
+        assert replay.notification_context is None
+
+    asyncio.run(run())

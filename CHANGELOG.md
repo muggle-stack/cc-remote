@@ -2,6 +2,15 @@
 
 [中文](CHANGELOG_zh.md)
 
+## Unreleased
+
+Wire protocol v87 requires coordinated Relay, Wrapper and Web updates.
+
+- Allow consecutive Claude steering inputs with independent acceptance tracking and exact native-echo reconciliation.
+- Send system notifications when a live Claude question needs an answer, with replay deduplication and no additional in-app popup.
+- Load media galleries on demand instead of rejecting pages with more than eight audio/video elements, while bounding active players and buffered data.
+- Keep read BTW completion reminders dismissed across session switches, and show background task details within the active side chat in both docked and centered layouts.
+
 ## v5.3.8
 
 Improve remote media playback, retain page previews, and recover Web updates safely. Wire protocol v86 requires coordinated Relay, Wrapper and Web updates; Claude Agent SDK remains 0.2.174.

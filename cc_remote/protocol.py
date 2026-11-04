@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 86
+PROTOCOL_VERSION = 87
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -1187,10 +1187,10 @@ class TurnResult(BaseModel):
 
 
 class TurnNotificationContext(BaseModel):
-    """Realtime-only presentation metadata for completion notifications.
+    """Realtime-only presentation metadata for completion and question notifications.
 
-    The wrapper strips this field before buffering a TurnEnd, so reconnect and
-    history replay cannot create a second OS notification for an old turn.
+    The wrapper strips this field before buffering a TurnEnd or AskUser, so
+    reconnect and history replay cannot notify again for an old event.
     """
     model_config = ConfigDict(extra="forbid")
     engine: Engine
@@ -3085,6 +3085,8 @@ class AskUser(_Base, AskQuestion):
     """
 
     type: Literal["ask_user"] = "ask_user"
+    # Live-only, stripped before journal/ring storage and pending-question sync.
+    notification_context: Optional[TurnNotificationContext] = None
     ask_id: WireId
     questions: Optional[list[AskQuestion]] = Field(
         default=None, min_length=1, max_length=ASK_QUESTION_MAX_COUNT)

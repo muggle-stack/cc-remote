@@ -620,3 +620,29 @@ def test_client_close_is_bounded_and_survives_reader_cancellation(monkeypatch):
             await conn.send(Delta(message_id="m", text="two"))
 
     asyncio.run(run())
+
+
+def test_only_live_public_questions_trigger_question_push_hook():
+    from cc_remote.protocol import AskUser
+
+    async def run():
+        notified = []
+
+        async def on_question(machine_id, message):
+            notified.append((machine_id, message))
+
+        hub = RelayHub(SimpleNamespace(), on_live_ask_user=on_question)
+        ask = AskUser(ask_id="a", sid="s", question="Private question", allow_text=True)
+        await hub._on_wrapper_msg(ask, "device")
+        context = TurnNotificationContext(engine="claude", space="code")
+        await hub._on_wrapper_msg(ask.model_copy(update={
+            "notification_context": context, "to": "replay-client"}), "device")
+        await hub._on_wrapper_msg(ask.model_copy(update={
+            "notification_context": context, "owner_id": "private-owner"}), "device")
+        await asyncio.sleep(0)
+        assert notified == [], "replay and owner-private questions must not fan out to device subscriptions"
+        await hub._on_wrapper_msg(ask.model_copy(update={"notification_context": context}), "device")
+        await asyncio.sleep(0)
+        assert len(notified) == 1 and notified[0][0] == "device"
+
+    asyncio.run(run())

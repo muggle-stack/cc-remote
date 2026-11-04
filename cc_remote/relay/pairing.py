@@ -58,9 +58,11 @@ class RelayHub:
         cfg: RelayConfig,
         *,
         on_live_turn_end: WrapperEventHook | None = None,
+        on_live_ask_user: WrapperEventHook | None = None,
     ):
         self.cfg = cfg
         self._on_live_turn_end = on_live_turn_end
+        self._on_live_ask_user = on_live_ask_user
         self._event_tasks: set[asyncio.Task[None]] = set()
         # Preserve the original attributes as the default-machine fast path and
         # test/integration compatibility surface.
@@ -379,15 +381,16 @@ class RelayHub:
         else:
             await self._broadcast(msg, machine_id)
         # Replay is routed to one client via ``to`` and must never generate a
-        # second notification. Only a new live completion reaches this hook.
+        # second notification. Only a new live completion or question reaches it.
+        notification_hook = (self._on_live_turn_end if msg.type == "turn_end"
+                             else self._on_live_ask_user if msg.type == "ask_user" else None)
         if (
-            msg.type == "turn_end"
-            and not to
+            not to
             and not owner_id
             and getattr(msg, "notification_context", None) is not None
-            and self._on_live_turn_end is not None
+            and notification_hook is not None
         ):
-            task = asyncio.create_task(self._on_live_turn_end(machine_id, msg))
+            task = asyncio.create_task(notification_hook(machine_id, msg))
             self._event_tasks.add(task)
             task.add_done_callback(self._event_task_done)
 

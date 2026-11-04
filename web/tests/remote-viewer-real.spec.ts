@@ -3,7 +3,7 @@ import { test, expect } from "@playwright/test";
 // Opt-in, read-only acceptance against an operator-supplied source snapshot.
 // No private paths, original source, credentials or generated models in Git.
 test("real Three.js STL Viewer loads and retains interaction over Bridge", async ({ page }, info) => {
-  test.skip(!process.env.VIEWER_TEST_SOURCE || ["spine", "embedded"].includes(process.env.VIEWER_TEST_KIND ?? ""), "Supply a matching read-only source snapshot for acceptance.");
+  test.skip(!process.env.VIEWER_TEST_SOURCE || ["spine", "embedded", "media"].includes(process.env.VIEWER_TEST_KIND ?? ""), "Supply a matching read-only source snapshot for acceptance.");
   test.setTimeout(180000);
   const origin = process.env.VIEWER_TEST_ORIGIN ?? "http://127.0.0.1:4174";
   const failures: string[] = [];
@@ -164,4 +164,29 @@ test("real embedded Three.js Viewer loads model data and retains interaction", a
   console.info(`Embedded Viewer (${info.project.name}): ${JSON.stringify(metrics)}`);
   await info.attach("embedded-acceptance.json", { body: JSON.stringify(metrics), contentType: "application/json" });
   await page.screenshot({ path: info.outputPath("embedded-viewer.png"), fullPage: true });
+});
+
+test("real media gallery renders and plays the first and last sample", async ({ page }, info) => {
+  test.skip(!process.env.VIEWER_TEST_SOURCE || process.env.VIEWER_TEST_KIND !== "media", "Supply a read-only media gallery.");
+  test.setTimeout(90000);
+  const origin = process.env.VIEWER_TEST_ORIGIN ?? "http://127.0.0.1:4174";
+  await page.goto(`${origin}/tests/remote-viewer.html`);
+  expect(await page.evaluate(async () => (await fetch("/api/login", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password: "local-viewer-fixture-password" }),
+  })).status)).toBe(200);
+  await page.getByRole("button", { name: "打开远程预览" }).click();
+  await page.getByRole("button", { name: /^机器人结构/ }).click();
+  const frame = page.frameLocator(".viewer-stage iframe");
+  await expect(frame.locator("audio").first()).toBeVisible();
+  const count = await frame.locator("audio").count();
+  expect(count).toBeGreaterThan(8);
+  for (const sample of [frame.locator("audio").first(), frame.locator("audio").last()]) {
+    await sample.scrollIntoViewIfNeeded();
+    await sample.evaluate(async (el: HTMLMediaElement) => { el.muted = true; await el.play(); });
+    await expect.poll(() => sample.evaluate((el: HTMLMediaElement) => el.currentTime)).toBeGreaterThan(0.1);
+    await sample.evaluate((el: HTMLMediaElement) => el.pause());
+  }
+  await expect(page.locator(".viewer-error-banner")).toHaveCount(0);
+  await info.attach("media-acceptance.json", { body: JSON.stringify({ count }), contentType: "application/json" });
 });
