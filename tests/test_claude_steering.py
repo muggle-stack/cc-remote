@@ -950,3 +950,53 @@ async def test_service_cancelled_guide_replays_before_terminal():
         assert "__cc_steer_intermediate" not in terminal
         assert worker.terminal_seq == terminal["__cc_service_seq"]
         assert not worker.steers.pending
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persistent", [False, True])
+async def test_consecutive_steers_wait_for_each_exact_echo(persistent):
+    async with environment() as (service, attach):
+        client = await attach() if persistent else NativeClient()
+        worker = service.sessions[client.id] if persistent else None
+        native = worker.client if worker else client
+        sdk = SdkHandle(WrapperConfig(turn_reader_queue_cap=8))
+        sdk.client = client
+        sdk._start_message_pump()
+        sdk.next_turn_id = "root"
+        await sdk.query("start")
+
+        async def read():
+            return [message async for message in sdk.receive_response()]
+
+        reader = asyncio.create_task(read())
+        try:
+            await native.queue.put(user("root-native", "start"))
+            await until(lambda: sdk._managed_input_seen)
+            for uid in ("a", "b", "c"):
+                await sdk.steer("same prompt", native_id=uid, metadata={"id": "ui-" + uid})
+            assert list(sdk._steers.pending) == ["a", "b", "c"]
+            if worker:
+                assert list(worker.steers.pending) == ["a", "b", "c"]
+            for uid in ("a", "b", "c"):
+                await native.queue.put(result())  # An in-flight Result cannot retire unconsumed input.
+                await native.queue.put(user(uid, "same prompt"))
+                await until(lambda: uid not in sdk._steers.pending)
+                assert not reader.done()
+            await native.queue.put(result())
+            messages = await asyncio.wait_for(reader, 3)
+            echoes = [message._cc_steer["id"] for message in messages
+                      if getattr(message, "_cc_steer", None)]
+            assert echoes == ["ui-a", "ui-b", "ui-c"]
+            assert sum(isinstance(message, ResultMessage) for message in messages) == 1
+            assert native.interrupts == 0
+            if not worker:
+                assert native.consumers == 1
+                assert [row[0]["priority"] for row in native.inputs[1:]] == ["next"] * 3
+            await sdk.ack_service_message(messages[-1], turn_id="root")
+            if worker:
+                assert worker.turn is None
+        finally:
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
+            sdk.release_background_messages()
+            await sdk._stop_message_pump()

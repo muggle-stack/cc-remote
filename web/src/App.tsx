@@ -1,3 +1,5 @@
+import { QuestionNotificationGate, questionNotificationPresentation } from "./question-notification";
+import { canSubmitSteer } from "./pending-steers";
 import { useWebUpdate } from "./use-web-update";
 import { lazyDshApi } from "./lazy-dsh-api";
 import type { DshPanelSelection } from "./components/DshPanel";
@@ -236,6 +238,7 @@ const RollbackSheet = lazy(() => import("./components/RollbackSheet").then(m => 
 import {
   acknowledgeCompletion,
   acknowledgeMatchingCompletion,
+  BtwCompletionTracker,
   catalogCompletionProjection,
   completionAcknowledgementId,
   completionBadgeKind,
@@ -468,6 +471,7 @@ export default function App() {
   const [skillCatalogErrors, setSkillCatalogErrors] = useState<Record<string, boolean>>({});
   const [notificationMode, setNotificationMode] = useState<NotificationMode>(
     () => readNotificationMode(localStorage));
+  const questionNotificationsRef = useRef(new QuestionNotificationGate());
   const [pushBinding, setPushBinding] = useState<PushBindingSnapshot>({
     state: "off", target: null, bound: null,
   });
@@ -510,6 +514,7 @@ export default function App() {
   const [workArtifactsBySid, setWorkArtifactsBySid] = useState<Record<string, WorkArtifactInfo[]>>({});
   const [completionReceipts, setCompletionReceipts] = useState<CompletionReceipts>({});
   const completionReceiptsRef = useRef(completionReceipts);
+  const btwCompletionsRef = useRef(new BtwCompletionTracker());
   completionReceiptsRef.current = completionReceipts;
   const [newChatPermissionCatalog, setNewChatPermissionCatalog] = useState<{
     machineId: string;
@@ -2400,6 +2405,9 @@ export default function App() {
           if (turnFileRequestsRef.current.accept(msg)) return;
           if (goalApiRef.current?.accept(msg)) return;
           if (dshApi.accept(msg)) return;
+          const freshBtwCompletion = msg.type !== "turn_end"
+            || !msg.sid?.startsWith("btw-")
+            || btwCompletionsRef.current.take(machineId, msg.sid, msg);
           const settlesContextRequest = !!(
             (msg.type === "context_report"
                 || (msg.type === "error" && msg.code !== "wrapper_offline"))
@@ -2736,7 +2744,8 @@ export default function App() {
                 : current
             ));
           }
-          if (msg.type === "turn_end" && msg.sid && !msg.result.is_error) {
+          if (msg.type === "turn_end" && msg.sid && !msg.result.is_error
+              && freshBtwCompletion) {
             const current = stateRef.current;
             const btwOwner = Object.entries(current.btwByParentSid).find(
               ([, group]) => group.chats.some((chat) => chat.sid === msg.sid),
@@ -3227,6 +3236,7 @@ export default function App() {
                 .filter((chat) => !retained.has(chat.sid))
                 .map((chat) => [parentSid, chat] as const));
             for (const [, chat] of removed) {
+              btwCompletionsRef.current.forget(machineId, chat.sid);
               for (const draftSpace of ["code", "work"] as const) {
                 btwDraftsRef.current.delete(composerDraftKey(
                   machineId, draftSpace, chat.engine, `btw:${chat.sid}`,
@@ -3293,6 +3303,7 @@ export default function App() {
               sid: msg.btw_sid,
             });
           } else if (msg.type === "btw_closed") {
+            btwCompletionsRef.current.forget(machineId, msg.btw_sid);
             const group = stateRef.current.btwByParentSid[msg.parent_sid];
             const chat = group?.chats.find(
               (candidate) => candidate.sid === msg.btw_sid);
@@ -3684,7 +3695,30 @@ export default function App() {
           if (msg.type === "engine_capabilities") {
             acceptSkillCatalog(msg);
           }
+          if (msg.type === "ask_user" && questionNotificationsRef.current.take(machineId, msg, {
+            sid: stateRef.current.focusedSid, engine: engineRef.current,
+            space: spaceRef.current, hidden: document.hidden,
+          })) {
+            const mode = readNotificationMode(localStorage);
+            // System notifications have one owner: remote Push when bound,
+            // otherwise this live-page fallback. Never add an in-app toast.
+            const remoteWillNotify = !msg.to && !!pushCoordinatorRef.current?.isRemoteActive(machineId);
+            if (mode !== "off" && !remoteWillNotify && typeof Notification !== "undefined"
+                && Notification.permission === "granted") {
+              const notice = questionNotificationPresentation(msg, mode);
+              const route = notice.sessionId && notice.engine && notice.space ? {
+                machine_id: machineId, session_id: notice.sessionId,
+                engine: notice.engine, space: notice.space,
+              } : null;
+              void navigator.serviceWorker?.ready.then(registration => registration.showNotification(notice.title, {
+                body: notice.body, icon: "/icon-192.png", badge: "/favicon.svg",
+                tag: `question-${machineId}-${msg.sid}-${msg.ask_id}`,
+                data: { url: route ? encodeNotificationRoute(route) : "/", route },
+              })).catch(() => undefined);
+            }
+          }
           if (msg.type === "turn_end" && msg.sid && msg.notification_context
+              && freshBtwCompletion
               && document.hidden
               && typeof Notification !== "undefined"
               && Notification.permission === "granted") {
@@ -3975,6 +4009,7 @@ export default function App() {
           setWorkArtifactsOpen(false);
           setWorkArtifactsBySid({});
           setCompletionReceipts({});
+          btwCompletionsRef.current.clear();
           dispatch({ type: "reset" });
           setAuthed(false);
           void (async () => {
@@ -4011,6 +4046,7 @@ export default function App() {
           bumpInlineImageRevision();
           bumpHistoryImageRevision();
           setCompletionReceipts(discardBtwCompletionReceipts);
+          btwCompletionsRef.current.clear(machineId);
           btwDraftsRef.current.clear();
           questionDraftsRef.current.clear();
           setCenteredBtwScopes([]);
@@ -4896,13 +4932,15 @@ export default function App() {
     const ws = wsRef.current;
     if (!ws || !focusedSid || runtimeIsReadOnly(focusedSid)) return false;
     const runtime = stateRef.current.runtimes[focusedSid];
-    if (ws.pendingQueryFor(focusedSid) || runtime?.acceptancePending) {
+    if (!runtime || !canSubmitSteer(runtime, focusedEngine)) {
+      dispatch({ type: "command_error", detail: "引导仍在等待确认或已达到上限，请稍后再试。" });
       return false;
     }
     const msg_id = uuid();
     if (!ws.sendSteerTo(focusedSid, prompt, msg_id, images, files)) return false;
     dispatch({
       type: "steer_sent",
+      concurrent: focusedEngine === "claude",
       sid: focusedSid,
       prompt,
       msg_id,
@@ -5686,7 +5724,11 @@ export default function App() {
     const awaitingAcceptance = !!(
       ws.pendingQueryFor(sid) || runtime?.acceptancePending
     );
-    if (steer && awaitingAcceptance) return false;
+    const concurrent = activeBtwGroup?.chats.find(chat => chat.sid === sid)?.engine === "claude";
+    if (steer && (!runtime || !canSubmitSteer(runtime, concurrent ? "claude" : undefined))) {
+      dispatch({ type: "command_error", detail: "引导仍在等待确认或已达到上限，请稍后再试。" });
+      return false;
+    }
     const query = { prompt, images, files };
     if (!steer && (awaitingAcceptance || runtime?.queue.length || runtime?.pendingSend)) {
       const delivery = awaitingAcceptance
@@ -5710,7 +5752,7 @@ export default function App() {
       : ws.sendQueryTo(sid, prompt, msg_id, images, files);
     if (!accepted) return false;
     dispatch({
-      type: steer ? "steer_sent" : "query_sent", sid, ...query, msg_id, ts: Date.now(),
+      type: steer ? "steer_sent" : "query_sent", concurrent, sid, ...query, msg_id, ts: Date.now(),
     });
     return true;
   };
@@ -5816,6 +5858,7 @@ export default function App() {
       setForkWorktreeError(null);
       setBtwOpeningByParentSid({});
       setCompletionReceipts({});
+      btwCompletionsRef.current.clear();
       dispatch({ type: "reset" });
       setRestoringSurfaceScope(null);
       setAuthed(false);

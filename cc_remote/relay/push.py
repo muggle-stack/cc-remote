@@ -197,18 +197,20 @@ class PushSubscriptionStore:
 
 PushSender = Callable[[PushSubscription, str], Awaitable[int | None]]
 PushSessionCheck = Callable[[PushSubscription], Awaitable[bool]]
-PushOutcome = Literal["success", "failed", "interrupted"]
+PushOutcome = Literal["success", "failed", "interrupted", "question"]
 
 _PUSH_BODIES: dict[PushOutcome, str] = {
     "success": "远程会话已经完成",
     "failed": "远程会话执行失败",
     "interrupted": "远程会话已中断",
+    "question": "远程会话正在等待你的回答",
 }
 
 _SESSION_BODIES: dict[PushOutcome, str] = {
     "success": "{engine} 会话已经完成",
     "failed": "{engine} 会话执行失败",
     "interrupted": "{engine} 会话已中断",
+    "question": "{engine} 正在等待你的回答",
 }
 
 
@@ -325,7 +327,15 @@ class PushDispatcher:
 
         return await asyncio.to_thread(send)
 
-    async def notify_turn_end(
+    async def notify_turn_end(self, machine_id: str, *, outcome: PushOutcome,
+                              context: Mapping[str, object] | None = None) -> None:
+        await self._notify(machine_id, outcome=outcome, context=context)
+
+    async def notify_question(self, machine_id: str, *,
+                              context: Mapping[str, object] | None = None) -> None:
+        await self._notify(machine_id, outcome="question", context=context)
+
+    async def _notify(
         self,
         machine_id: str,
         *,
@@ -334,7 +344,7 @@ class PushDispatcher:
     ) -> None:
         # A fresh opaque tag prevents a later turn from replacing an earlier
         # notification without exposing machine/session ids in generic mode.
-        tag = f"cc-remote-turn-{secrets.token_hex(8)}"
+        tag = f"cc-remote-{'question' if outcome == 'question' else 'turn'}-{secrets.token_hex(8)}"
         subscriptions = await self.store.for_machine(machine_id)
         generic = _generic_payload(outcome, tag)
         session = _session_payload(machine_id, outcome, tag, context)

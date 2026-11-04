@@ -10806,6 +10806,8 @@ class WrapperMachine:
                     "Codex plan terminal could not be persisted",
                     session_id=msg.sid,
                 )
+        if isinstance(msg, AskUser):
+            msg.notification_context = None
         if isinstance(msg, TurnEnd):
             # The replayable object is deliberately notification-free. Only a
             # copy sent on this live call receives presentation metadata.
@@ -10830,7 +10832,8 @@ class WrapperMachine:
             msg.model_copy(update={
                 "notification_context": self._notification_context(ctx),
             })
-            if isinstance(msg, TurnEnd) and not (ctx.engine == "dsh" and msg.result.subtype == "steered")
+            if isinstance(msg, AskUser) or (isinstance(msg, TurnEnd)
+                and not (ctx.engine == "dsh" and msg.result.subtype == "steered"))
             else msg
         )
         await self.transport.send(live)

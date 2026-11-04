@@ -20328,6 +20328,45 @@ assert.equal(steerRelay.pendingQueryFor("steer-target"), null,
   "the exact TurnSteered echo is authoritative steer acceptance");
 steerRelay.stop();
 
+// Claude can queue native input without waiting for the first human UUID echo.
+async function testConcurrentSteerTransport() {
+const multiRelay = new RelayWs({ onEvent: () => {}, onConnState: () => {} });
+multiRelay.start();
+const multiSocket = FakeWebSocket.instances.at(-1)!;
+multiSocket.onopen?.();
+multiRelay.setSessionEngines([{ session_id: "multi-claude", engine: "claude", space: "code" }]);
+for (const id of ["first", "second", "third"]) {
+  assert.equal(multiRelay.sendSteerTo("multi-claude", "same prompt", id), true);
+}
+const multiFrames = multiSocket.sent.map(raw => JSON.parse(raw)).filter(frame => frame.type === "steer");
+assert.deepEqual(multiFrames.map(frame => frame.msg_id), ["first", "second", "third"]);
+const secondMultiReceipt = multiRelay.queryReceiptFor("multi-claude", "second")!;
+// ACK transfers ownership but does not stand in for Claude consuming the input.
+multiSocket.receive({ type: "command_ack", client_id: multiFrames[0].client_id, cmd_id: multiFrames[0].cmd_id });
+(multiRelay as unknown as { connect: () => void }).connect();
+const multiReconnect = FakeWebSocket.instances.at(-1)!;
+multiReconnect.onopen?.();
+assert.deepEqual(multiReconnect.sent.map(raw => JSON.parse(raw)).filter(frame => frame.type === "steer")
+  .map(frame => frame.msg_id), ["second", "third"], "only unacknowledged commands replay");
+multiReconnect.receive({ type: "error", sid: "multi-claude", msg_id: "second", code: "not_steerable", message: "cancelled" });
+assert.equal((await secondMultiReceipt).accepted, false);
+assert.equal(multiRelay.pendingQueryFor("multi-claude"), "first");
+multiReconnect.receive({ type: "turn_steered", sid: "multi-claude", msg_id: "first", turn_id: "native-first", prompt: "same prompt", seq: 1 });
+assert.equal(multiRelay.pendingQueryFor("multi-claude"), "third");
+multiReconnect.receive({ type: "history", session_id: "multi-claude", revision: "r", events: [], has_more: false,
+  turns: [{ id: "native-third", clientMsgId: "third", prompt: "same prompt", blocks: [], done: false }] });
+assert.equal(multiRelay.pendingQueryFor("multi-claude"), null);
+// BTW uses its own engine even while the focused main session is Codex.
+multiRelay.setFocusedSid("codex-main", "codex", "code");
+multiReconnect.receive({ type: "btw_opened", btw_sid: "btw-multi", parent_sid: "claude-parent",
+  request_id: "open", engine: "claude", revision: 1, created_at: 1 });
+assert.equal(multiRelay.sendSteerTo("btw-multi", "first", "btw-first"), true);
+assert.equal(multiRelay.sendSteerTo("btw-multi", "second", "btw-second"), true);
+multiRelay.stop();
+}
+await testConcurrentSteerTransport();
+
+
 // A materialized steer alias is exact acceptance even on a cold socket with no
 // frozen History baseline. The native rollout id remains distinct from the
 // browser command id by design.

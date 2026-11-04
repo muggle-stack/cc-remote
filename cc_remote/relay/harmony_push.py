@@ -194,17 +194,27 @@ class HarmonyPushDispatcher:
 
     async def notify_turn_end(self, machine_id: str, *, outcome: PushOutcome,
                               context: Mapping[str, object] | None = None) -> None:
+        await self._notify(machine_id, outcome=outcome, context=context)
+
+    async def notify_question(self, machine_id: str, *,
+                              context: Mapping[str, object] | None = None) -> None:
+        await self._notify(machine_id, outcome="question", context=context)
+
+    async def _notify(self, machine_id: str, *, outcome: PushOutcome,
+                      context: Mapping[str, object] | None = None) -> None:
         subs = await self.store.for_machine(machine_id)
         generic = _generic_payload(outcome, "")
         session = _session_payload(machine_id, outcome, "", context)
         results = await asyncio.gather(*(
             self._deliver(sub, session if sub.notification_mode == "session"
-                          and session else generic) for sub in subs), return_exceptions=True)
+                          and session else generic, foreground_show=outcome == "question")
+            for sub in subs), return_exceptions=True)
         if any(isinstance(r, Exception) for r in results):
             log.warning("Harmony push transport failed", failures=sum(
                 isinstance(r, Exception) for r in results))
 
-    async def _deliver(self, sub: HarmonySubscription, content: dict[str, object]) -> None:
+    async def _deliver(self, sub: HarmonySubscription, content: dict[str, object],
+                       *, foreground_show: bool = False) -> None:
         async with self._slots:
             if not await self.session_active(sub):
                 await self.store.remove_binding(sub)
@@ -223,7 +233,9 @@ class HarmonyPushDispatcher:
                     "category": self.category, "title": content["title"],
                     "body": content["body"], "clickAction": action,
                     "notifyId": secrets.randbelow(2**31 - 1) + 1,
-                    "foregroundShow": False,
+                    # Questions use the system notification in both foreground
+                    # and background; Web never duplicates it with a toast.
+                    "foregroundShow": foreground_show,
                 }},
                 "target": {"token": [sub.token]},
                 "pushOptions": {"testMessage": self.test_message, "ttl": 300},

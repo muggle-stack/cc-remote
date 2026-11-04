@@ -14,31 +14,159 @@ class UnsupportedMedia extends Error {}
  * them into MSE fragments. Other browser codecs retain bounded blob fallback.
  */
 export function installMedia(resources: Resources, assets: MediaAsset[], report: (message: string) => void): () => void {
-  const disposers: (() => void)[] = [];
-  for (const { element, url } of assets) {
-    let disposed = false;
-    const blobFallback = () => {
-      void resources.asset(url, url).then(src => {
-        if (disposed) return;
-        element.src = src; element.load();
-      }).catch(error => { if (!disposed) report(String(error)); });
-    };
-    const Source = window.MediaSource ?? (window as unknown as { ManagedMediaSource?: MediaSourceConstructor }).ManagedMediaSource;
-    let player: RangeMedia | undefined;
-    if (Source && /\.(?:mp4|m4v|m4a)$/i.test(new URL(url).pathname)) {
-      player = new RangeMedia(resources, element, url, Source, report, blobFallback);
-      player.open();
-    } else {
-      // Loading a large/unsupported codec must never hold up page scripts and
-      // first paint. Existing blob accounting still limits this fallback.
-      blobFallback();
-    }
-    disposers.push(() => {
-      disposed = true; player?.dispose();
-      element.pause(); element.srcObject = null; element.removeAttribute("src"); element.load();
-    });
+  const MAX_RESIDENT = 8;
+  const loadingAttribute = "data-cc-remote-media-loading";
+  const loadingStyle = document.createElement("style");
+  // Chromium's disabled native controls swallow even capturing pointer events.
+  // Until a source is ready, let the media element receive the first play tap.
+  loadingStyle.textContent = `[${loadingAttribute}]::-webkit-media-controls{pointer-events:none!important}`;
+  document.head.append(loadingStyle);
+  interface Entry {
+    element: HTMLMediaElement; visible: boolean; pendingPlay: boolean; used: number;
+    load?: Promise<void>; activate: (explicit: boolean) => Promise<void> | undefined;
+    retire: () => void; dispose: () => void;
   }
-  return () => disposers.forEach(dispose => dispose());
+  const entries = new Map<HTMLMediaElement, Entry>();
+  const resident = new Set<Entry>();
+  let closed = false, clock = 0;
+  const abort = () => new DOMException("Media load cancelled", "AbortError");
+  const prefetch = (entry: Entry) => { void entry.activate(false)?.catch(() => {}); };
+  const observer = new IntersectionObserver(changes => {
+    if (closed) return;
+    // Apply the whole visibility batch before selecting an eviction victim.
+    for (const change of changes) entries.get(change.target as HTMLMediaElement)!.visible = change.isIntersecting;
+    for (const entry of entries.values()) if (entry.visible) prefetch(entry);
+  });
+  for (const { element, url } of assets) {
+    element.setAttribute(loadingAttribute, "");
+    const play = element.play.bind(element), pause = element.pause.bind(element);
+    const ownPlay = Object.getOwnPropertyDescriptor(element, "play");
+    const ownPause = Object.getOwnPropertyDescriptor(element, "pause");
+    const preload = element.getAttribute("preload");
+    let position = 0, intent = 0, pendingPlays = 0;
+    let unload = () => {};
+    const entry: Entry = {
+      element, visible: false, pendingPlay: false, used: 0,
+      activate(explicit) {
+        if (closed) return Promise.reject(abort());
+        entry.used = ++clock;
+        if (entry.load) return entry.load;
+        if (resident.size >= MAX_RESIDENT) {
+          const victim = [...resident].filter(item => !item.pendingPlay && item.element.paused
+            && (explicit || !item.visible)).sort((a, b) => a.used - b.used)[0];
+          if (!victim) return explicit ? Promise.reject(new Error("请先暂停一个播放器后再播放。")) : undefined;
+          victim.retire();
+        }
+        resident.add(entry);
+        element.preload = "auto";
+        const request = new AbortController();
+        let player: RangeMedia | undefined;
+        let release = () => {};
+        entry.load = new Promise<void>((resolve, reject) => {
+          let ready = false;
+          const fail = (error: Error) => {
+            if (request.signal.aborted) return;
+            reject(error);
+            if (ready) { entry.retire(); report(error.message); }
+          };
+          const loaded = () => {
+            if (position > 0) element.currentTime = position;
+            element.removeAttribute(loadingAttribute);
+            ready = true;
+            resolve();
+          };
+          const cancelled = () => reject(abort());
+          const failed = () => fail(new Error("浏览器无法解码此预览媒体。"));
+          element.addEventListener("loadedmetadata", loaded, { once: true });
+          request.signal.addEventListener("abort", cancelled, { once: true });
+          unload = () => {
+            request.abort(); player?.dispose();
+            element.removeEventListener("loadedmetadata", loaded);
+            element.removeEventListener("error", failed);
+            pause(); element.srcObject = null; element.removeAttribute("src"); element.load();
+            release();
+          };
+          const blobFallback = () => {
+            void resources.mediaAsset(url, request.signal).then(asset => {
+              if (request.signal.aborted) { asset.release(); return; }
+              release = asset.release;
+              element.addEventListener("error", failed, { once: true });
+              element.src = asset.url; element.load();
+            }).catch(fail);
+          };
+          const Source = window.MediaSource ?? (window as unknown as { ManagedMediaSource?: MediaSourceConstructor }).ManagedMediaSource;
+          if (Source && /\.(?:mp4|m4v|m4a)$/i.test(new URL(url).pathname)) {
+            player = new RangeMedia(resources, element, url, Source, message => fail(new Error(message)), blobFallback);
+            player.open();
+          } else blobFallback();
+        });
+        void entry.load.catch(error => {
+          if (!request.signal.aborted && !closed) {
+            entry.retire(); report(error instanceof Error ? error.message : "预览音视频加载失败。");
+          }
+        });
+        return entry.load;
+      },
+      retire() {
+        if (!resident.delete(entry)) return;
+        if (element.readyState > 0) position = element.currentTime;
+        intent++; pendingPlays = 0; entry.pendingPlay = false;
+        unload(); unload = () => {}; entry.load = undefined;
+        element.setAttribute(loadingAttribute, "");
+      },
+      dispose() {
+        entry.retire();
+        element.removeAttribute(loadingAttribute);
+        if (preload === null) element.removeAttribute("preload"); else element.setAttribute("preload", preload);
+        element.removeEventListener("click", clicked, true);
+        element.removeEventListener("play", touched);
+        if (ownPlay) Object.defineProperty(element, "play", ownPlay); else delete (element as Partial<HTMLMediaElement>).play;
+        if (ownPause) Object.defineProperty(element, "pause", ownPause); else delete (element as Partial<HTMLMediaElement>).pause;
+      },
+    };
+    const touched = () => { entry.used = ++clock; };
+    element.play = async () => {
+      const token = intent;
+      pendingPlays++;
+      entry.pendingPlay = true;
+      try {
+        await entry.activate(true);
+        if (closed || token !== intent) throw abort();
+        return await play();
+      } finally {
+        if (token === intent) entry.pendingPlay = --pendingPlays > 0;
+      }
+    };
+    element.pause = () => { intent++; pendingPlays = 0; entry.pendingPlay = false; pause(); };
+    const clicked = (event: MouseEvent) => {
+      // Native controls cannot start a source-less lazy element. Honour the
+      // first tap even if it arrives before the visibility prefetch completes.
+      if (element.controls && !element.readyState && !event.defaultPrevented) {
+        event.preventDefault();
+        void element.play().catch(error => {
+          if (!closed && error?.name !== "AbortError" && error?.name !== "NotAllowedError") report(String(error));
+        });
+      }
+    };
+    element.addEventListener("click", clicked, true);
+    element.addEventListener("play", touched);
+    entries.set(element, entry);
+    observer.observe(element);
+  }
+  // Keep small existing pages' eager preload behaviour. preload=none galleries
+  // warm only visible controls so native buttons are usable without loading
+  // every sample. Explicit play() also loads off-screen/custom players.
+  for (const entry of entries.values()) {
+    if (entry.element.autoplay || entry.element.preload !== "none") {
+      if (resident.size >= MAX_RESIDENT) break;
+      prefetch(entry);
+    }
+  }
+  return () => {
+    closed = true; observer.disconnect();
+    for (const entry of entries.values()) entry.dispose();
+    loadingStyle.remove();
+  };
 }
 
 class RangeMedia {
@@ -274,7 +402,7 @@ class RangeMedia {
     this.element.removeEventListener("seeking", this.seek);
     this.element.removeEventListener("play", this.wake);
     this.element.removeEventListener("error", this.mediaError);
-    this.element.pause(); this.element.srcObject = null; this.element.removeAttribute("src"); this.element.load();
+    HTMLMediaElement.prototype.pause.call(this.element); this.element.srcObject = null; this.element.removeAttribute("src"); this.element.load();
     if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
   }
 }

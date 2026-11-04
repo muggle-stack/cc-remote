@@ -117,23 +117,26 @@ function visibleThreadShell(scope: HTMLElement | null): HTMLElement | null {
     return containingThread;
   }
 
-  const pane = scope?.closest<HTMLElement>(".pane")
+  const pane = scope?.closest<HTMLElement>(".btw-panel, .pane")
     ?? document.querySelector<HTMLElement>(".pane");
   const paneThread = pane?.querySelector<HTMLElement>(".thread-shell");
   if (paneThread && elementBounds(paneThread)) return paneThread;
+  // An empty side chat has no thread yet. Keep its controls within that panel
+  // instead of borrowing the main conversation's unrelated geometry.
+  if (pane?.matches(".btw-panel")) return null;
 
   return [...document.querySelectorAll<HTMLElement>(".thread-shell")]
     .find((element) => elementBounds(element) !== null) ?? null;
 }
 
 function fallbackChatBounds(scope: HTMLElement | null): Bounds | null {
-  const pane = scope?.closest<HTMLElement>(".pane")
+  const pane = scope?.closest<HTMLElement>(".btw-panel, .pane")
     ?? document.querySelector<HTMLElement>(".pane");
   if (!pane) return null;
   const paneBounds = elementBounds(pane);
   if (!paneBounds) return null;
-  const header = pane.querySelector<HTMLElement>(".c-head");
-  const composer = pane.querySelector<HTMLElement>(".composer");
+  const header = pane.querySelector<HTMLElement>(".btw-head, .c-head");
+  const composer = pane.querySelector<HTMLElement>(".btw-composer, .composer");
   const headerBounds = header ? elementBounds(header) : null;
   const composerBounds = composer ? elementBounds(composer) : null;
   return {
@@ -238,7 +241,7 @@ export function useChatDialogGeometry({
       attributes: true, attributeFilter: ["style"],
     });
     if (threadShell) resizeObserver?.observe(threadShell);
-    const pane = scope?.closest<HTMLElement>(".pane")
+    const pane = scope?.closest<HTMLElement>(".btw-panel, .pane")
       ?? document.querySelector<HTMLElement>(".pane");
     if (pane && pane !== threadShell) resizeObserver?.observe(pane);
 
@@ -278,9 +281,9 @@ export function useAnchoredPopoverGeometry({
     const anchor = anchorRef.current;
     const scope = anchor;
     const threadShell = visibleThreadShell(scope);
-    const pane = scope?.closest<HTMLElement>(".pane")
+    const pane = scope?.closest<HTMLElement>(".btw-panel, .pane")
       ?? document.querySelector<HTMLElement>(".pane");
-    const composer = pane?.querySelector<HTMLElement>(".composer") ?? null;
+    const composer = pane?.querySelector<HTMLElement>(".btw-composer, .composer") ?? null;
     const resizeObserver = typeof ResizeObserver === "undefined"
       ? null
       : new ResizeObserver(() => schedule());

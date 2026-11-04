@@ -1,3 +1,7 @@
+import {
+  acceptanceKindFor, canSubmitSteer, pendingAcceptanceIds,
+  type SteerAcceptanceKind,
+} from "./pending-steers";
 import type { DshState, DshPreset, DshPermissionOption, DshCommandResult } from "./protocol";
 import { isSyntheticReturnReceipt } from "./agent-returns";
 import { reduceWithRetainedArtifacts } from "./artifact-retention";
@@ -382,6 +386,9 @@ export interface SessionRuntime {
   // Browser query accepted into the reliable outbox but not yet confirmed by
   // its exact user echo / native turn binding / correlated terminal Error.
   acceptancePending: string | null;
+  // Additional Claude inputs keep independent receipts; the oldest pending
+  // input remains the generic retention/submission barrier above.
+  additionalSteerAcceptances?: Record<string, SteerAcceptanceKind>;
   acceptanceKind: "query" | "steer" | "steer_unknown" | null;
   acceptanceHistoryBaseline: QueryAcceptanceHistoryHead | null;
   // Private retry payload, released on exact acceptance. Turn history keeps
@@ -531,8 +538,8 @@ export function createRuntime(): SessionRuntime {
 export type Action =
   | { type: "reset" }
   | { type: "event"; event: ServerEvent; ownership?: EventOwnership }
-  | { type: "query_sent"; sid: string; prompt: string; msg_id: string; images?: QueryImg[]; files?: QueryFile[]; ts: number }
-  | { type: "steer_sent"; sid: string; prompt: string; msg_id: string; images?: QueryImg[]; files?: QueryFile[]; ts: number }
+  | { type: "query_sent"; concurrent?: boolean; sid: string; prompt: string; msg_id: string; images?: QueryImg[]; files?: QueryFile[]; ts: number }
+  | { type: "steer_sent"; concurrent?: boolean; sid: string; prompt: string; msg_id: string; images?: QueryImg[]; files?: QueryFile[]; ts: number }
   | { type: "conn"; connState: ConnState; detail?: string }
   | { type: "command_error"; detail: string }
   | { type: "dismiss_banner"; banner: string; revision?: number }
@@ -917,13 +924,11 @@ function reconcileBoundCompactionOrphan(
 function pendingOptimisticSteerIndex(
   runtime: SessionRuntime, turns: Turn[],
 ): number {
-  if ((runtime.acceptanceKind !== "steer"
-      && runtime.acceptanceKind !== "steer_unknown")
-      || !runtime.acceptancePending) return -1;
-  return turns.findIndex((turn) =>
-    turn.id === runtime.acceptancePending
-    && turn.clientMsgId === runtime.acceptancePending
-    && !turn.liveTaskId);
+  return turns.findIndex(turn => {
+    const kind = acceptanceKindFor(runtime, turn.id);
+    return (kind === "steer" || kind === "steer_unknown")
+      && turn.clientMsgId === turn.id && !turn.liveTaskId;
+  });
 }
 
 function preSteerTurn(
@@ -1854,9 +1859,16 @@ function finishOpenBlockList(
 const UNKNOWN_STEER_TERMINAL_ERROR =
   "任务已结束，但本次引导是否生效未得到确认。";
 
-function clearAcceptance(runtime: SessionRuntime): void {
-  runtime.acceptancePending = null;
-  runtime.acceptanceKind = null;
+function clearAcceptance(runtime: SessionRuntime, id = runtime.acceptancePending): void {
+  if (!id) return;
+  const additional = { ...runtime.additionalSteerAcceptances };
+  delete additional[id];
+  runtime.additionalSteerAcceptances = additional;
+  if (runtime.acceptancePending !== id) return;
+  const next = Object.keys(additional)[0];
+  runtime.acceptancePending = next ?? null;
+  runtime.acceptanceKind = next ? additional[next] : null;
+  delete additional[next];
   runtime.acceptanceHistoryBaseline = null;
   runtime.acceptanceQuery = null;
 }
@@ -1943,19 +1955,28 @@ function reconcileAcceptedSteerHistory(
   }
 }
 
+function reconcileAcceptedSteerEcho(
+  runtime: SessionRuntime, turns: Turn[], id: string, doneTs: number,
+): void {
+  const index = turns.findIndex(turn => turnHasIdentityAlias(turn, id));
+  if (index < 0) return;
+  const [accepted] = turns.splice(index, 1);
+  const pendingIndex = pendingOptimisticSteerIndex(runtime, turns);
+  turns.splice(pendingIndex < 0 ? turns.length : pendingIndex, 0, accepted);
+  // An exact user echo or binding can recover a lost TurnSteered frame.
+  // Retire its predecessor, leaving every unconsumed input untouched.
+  reconcileAcceptedSteerHistory(turns, id, doneTs);
+}
+
 function resolveUnknownPendingSteer(
   runtime: SessionRuntime, turns: Turn[], doneTs: number,
 ): void {
-  if (runtime.acceptanceKind !== "steer_unknown"
-      || !runtime.acceptancePending) return;
-  const pending = turns.find((turn) =>
-    turn.id === runtime.acceptancePending
-    && turn.clientMsgId === runtime.acceptancePending);
-  if (pending) {
-    finishTurnWithoutTerminal(
-      pending, doneTs, UNKNOWN_STEER_TERMINAL_ERROR);
+  for (const id of pendingAcceptanceIds(runtime)) {
+    if (acceptanceKindFor(runtime, id) !== "steer_unknown") continue;
+    const pending = turns.find(turn => turn.id === id && turn.clientMsgId === id);
+    if (pending) finishTurnWithoutTerminal(pending, doneTs, UNKNOWN_STEER_TERMINAL_ERROR);
+    clearAcceptance(runtime, id);
   }
-  clearAcceptance(runtime);
 }
 
 /** Reconcile an unfinished browser tail against a current authoritative History
@@ -1964,10 +1985,10 @@ function resolveUnknownPendingSteer(
  * timer and child blocks running forever. */
 function finishOpenTurnsFromIdleHistory(
   turns: Turn[], interrupted: boolean, doneTs: number,
-  preserveTurnId?: string | null,
+  preserveTurnIds: string[] = [],
 ): Turn[] {
   return turns.map((turn) => {
-    if (turn.done || turn.id === preserveTurnId) return turn;
+    if (turn.done || preserveTurnIds.includes(turn.id)) return turn;
     const next = { ...turn, blocks: turn.blocks.map((block) => ({ ...block })) };
     if (interrupted) finishTurnWithoutTerminal(next, doneTs, null);
     else finishTurnFromIdleHistory(next, doneTs);
@@ -2550,8 +2571,11 @@ function reduceCurrent(state: AppState, action: Action): AppState {
     case "steer_sent": {
       const current = state.runtimes[action.sid];
       if (!current || (current.acceptancePending
-          && current.acceptancePending !== action.msg_id)) return state;
-      const acceptanceHistoryBaseline = !current.historyInvalidated
+          && current.acceptancePending !== action.msg_id
+          && !(action.type === "steer_sent" && action.concurrent
+            && canSubmitSteer(current, "claude")))) return state;
+      const acceptanceHistoryBaseline = !(action.type === "steer_sent" && action.concurrent)
+          && !current.historyInvalidated
           && !isHistoryRecoveryPending(state.historyRecovery, action.sid)
           && current.historyRevision
           && current.historyBuildSeq > 0
@@ -2581,7 +2605,16 @@ function reduceCurrent(state: AppState, action: Action): AppState {
       const clearsStaleBinding = action.type === "query_sent"
         && !!submittedRuntime?.pendingLiveBinding
         && submittedRuntime.pendingLiveBinding.msgId !== action.msg_id;
-      if (submittedRuntime?.acceptancePending !== action.msg_id
+      if (action.type === "steer_sent" && action.concurrent
+          && current.acceptancePending && current.acceptancePending !== action.msg_id) {
+        runtimes = { ...runtimes, [action.sid]: {
+          ...submittedRuntime,
+          acceptanceHistoryBaseline: null,
+          additionalSteerAcceptances: {
+            ...submittedRuntime.additionalSteerAcceptances, [action.msg_id]: "steer",
+          },
+        } };
+      } else if (submittedRuntime?.acceptancePending !== action.msg_id
           || submittedRuntime?.acceptanceKind == null
           || clearsStaleBinding) {
         runtimes = {
@@ -3870,6 +3903,14 @@ function reduceEvent(
               source.acceptancePending ?? mergeTarget.acceptancePending,
             acceptanceKind: source.acceptancePending
               ? source.acceptanceKind : mergeTarget.acceptanceKind,
+            additionalSteerAcceptances: {
+              ...mergeTarget.additionalSteerAcceptances,
+              ...source.additionalSteerAcceptances,
+              ...(source.acceptancePending && mergeTarget.acceptancePending
+                && source.acceptancePending !== mergeTarget.acceptancePending
+                && mergeTarget.acceptanceKind !== "query" && mergeTarget.acceptanceKind
+                ? { [mergeTarget.acceptancePending]: mergeTarget.acceptanceKind } : {}),
+            },
             acceptanceHistoryBaseline: source.acceptancePending
               ? source.acceptanceHistoryBaseline
               : mergeTarget.acceptanceHistoryBaseline,
@@ -3877,6 +3918,9 @@ function reduceEvent(
               ? source.acceptanceQuery : mergeTarget.acceptanceQuery,
             notices: mergeNotices(mergeTarget.notices, source.notices),
           };
+          if (mergedRuntime.acceptancePending && mergedRuntime.additionalSteerAcceptances) {
+            delete mergedRuntime.additionalSteerAcceptances[mergedRuntime.acceptancePending];
+          }
           switchControlGeneration(mergedRuntime, mergedControlGeneration);
           if (mergedControl) applySessionControl(mergedRuntime, mergedControl);
           // TurnBinding can arrive on either sid before re-key. Reconcile it
@@ -4429,54 +4473,27 @@ function reduceEvent(
       // pagination was already routed out through the display-only path above.
       if (base.pendingHistoryRevision
           && e.revision !== base.pendingHistoryRevision) return state;
-      const pendingAcceptanceTurn = base.acceptancePending
-        ? base.turns.find((turn) =>
-            turnHasIdentityAlias(turn, base.acceptancePending))
-        : undefined;
-      const baselineAcceptedNativeTurnId = pendingAcceptanceTurn
-          && base.acceptanceHistoryBaseline
-        ? matchQueryAcceptanceHistory(
-          queryAcceptanceDescriptor(
-            pendingAcceptanceTurn.id,
-            pendingAcceptanceTurn.prompt,
-            pendingAcceptanceTurn.images,
-            pendingAcceptanceTurn.files,
-          ),
-          base.acceptanceHistoryBaseline,
-          e,
-        )
-        : null;
-      const acceptedHistoryTurn = base.acceptancePending
-        ? built.turns.find((turn) =>
-            turnHasIdentityAlias(turn, base.acceptancePending))
-        : undefined;
-      const acceptedNativeTurnId = acceptedHistoryTurn?.id
-        ?? baselineAcceptedNativeTurnId;
-      const acceptanceConfirmed = !!base.acceptancePending && (
-        !!acceptedNativeTurnId
-        || e.events.some((ev) => {
-          if (ev.type === "user_msg"
-              && ev.client_msg_id === base.acceptancePending) return true;
-          return (
-            ev.type === "user_msg" || ev.type === "turn_steered"
-              || ev.type === "turn_binding"
-              || (ev.type === "error" && ev.code !== "wrapper_offline")
-          ) && ev.msg_id === base.acceptancePending;
-        })
-      );
-      if (acceptedNativeTurnId && base.acceptancePending
-          && acceptedNativeTurnId !== base.acceptancePending) {
-        // The materialized transcript owns a native user id while live UI owns
-        // the browser msg_id. The frozen-head proof above is the missing
-        // TurnBinding: normalize only that exact newest row so normal history
-        // merging preserves the optimistic identity and never renders twice.
-        built.turns = built.turns.map((turn) => turn.id === acceptedNativeTurnId
-          ? {
-              ...turn,
-              id: base.acceptancePending!,
-              historyTurnId: acceptedNativeTurnId,
-            }
-          : turn);
+      const acceptedInputs = pendingAcceptanceIds(base).flatMap(id => {
+        const pending = base.turns.find(turn => turnHasIdentityAlias(turn, id));
+        const nativeId = built.turns.find(turn => turnHasIdentityAlias(turn, id))?.id
+          ?? (pending && id === base.acceptancePending && base.acceptanceHistoryBaseline
+            ? matchQueryAcceptanceHistory(queryAcceptanceDescriptor(
+              id, pending.prompt, pending.images, pending.files), base.acceptanceHistoryBaseline, e)
+            : null);
+        const confirmed = !!nativeId || e.events.some(ev => (
+          ev.type === "user_msg" && ev.client_msg_id === id
+        ) || ((ev.type === "user_msg" || ev.type === "turn_steered"
+          || ev.type === "turn_binding" || (ev.type === "error"
+            && ev.code !== "wrapper_offline" && ev.code !== "steer_outcome_unknown"))
+          && ev.msg_id === id));
+        return confirmed ? [{ id, nativeId, kind: acceptanceKindFor(base, id) }] : [];
+      });
+      for (const accepted of acceptedInputs) {
+        if (!accepted.nativeId || accepted.nativeId === accepted.id) continue;
+        // Normalize only an exact native/client identity (or the single-query
+        // frozen-head proof). Identical steer prompts remain distinct rows.
+        built.turns = built.turns.map(turn => turn.id === accepted.nativeId
+          ? { ...turn, id: accepted.id, historyTurnId: accepted.nativeId! } : turn);
       }
       const racedLiveEvent = e.live_seq != null
         && base.lastLiveSeq > e.live_seq;
@@ -4506,12 +4523,8 @@ function reduceEvent(
       // Session lists and first History can race on reconnect; an unknown
       // engine must retain its projection until explicit ownership exists.
       const settledClaudeHistory = settledHistory && isClaudeHistory;
-      const resolveUnknownSteerFromIdle = settledHistory
-        && base.acceptanceKind === "steer_unknown"
-        && !!base.acceptancePending
-        && !acceptanceConfirmed;
       const acceptanceRuntime = { ...base };
-      if (acceptanceConfirmed) clearAcceptance(acceptanceRuntime);
+      for (const accepted of acceptedInputs) clearAcceptance(acceptanceRuntime, accepted.id);
       const aliasRevisionChanged = base.historyRevision !== e.revision
         && !base.historyInvalidated && !e.reset
         && e.generation != null && base.historyGeneration === e.generation
@@ -4581,7 +4594,7 @@ function reduceEvent(
           // snapshot may precede the transcript flush; only its newest
           // unfinished row can be the active unflushed tail.
           ? unfinished.filter((turn) =>
-              turn.id === base.acceptancePending
+              pendingAcceptanceIds(base).includes(turn.id)
               || historyContainsTurn(built.turns, turn)
               || (turn === pendingBound[0] && !pendingBound[1])
               || (e.in_progress === true && turn === newestUnfinished))
@@ -4602,15 +4615,17 @@ function reduceEvent(
           activeOwnerId: base.liveOwner?.turnId ?? null,
           reconcileReplayOrphans: true,
         }, settledCodexHistory);
-        if (acceptanceConfirmed && base.acceptancePending
-            && (base.acceptanceKind === "steer"
-              || base.acceptanceKind === "steer_unknown")
-            && acceptedNativeTurnId) {
-          reconcileAcceptedSteerHistory(
-            turns,
-            base.acceptancePending,
-            e.ts ? Math.round(e.ts * 1000) : Date.now(),
-          );
+        // Pending inputs always follow consumed input. Source timestamps can
+        // otherwise place a later optimistic row before an earlier native echo.
+        const pendingIds = new Set(pendingAcceptanceIds(acceptanceRuntime));
+        turns = [...turns.filter(turn => !pendingIds.has(turn.id)),
+          ...turns.filter(turn => pendingIds.has(turn.id))];
+        for (const turn of turns) {
+          const accepted = acceptedInputs.find(input => input.id === turn.id);
+          if (accepted?.nativeId && (accepted.kind === "steer" || accepted.kind === "steer_unknown")) {
+            reconcileAcceptedSteerHistory(turns, accepted.id,
+              e.ts ? Math.round(e.ts * 1000) : Date.now());
+          }
         }
         // A current first page which explicitly reports idle is the recovery
         // boundary for a lost TurnEnd. Do not close a merely optimistic local
@@ -4622,11 +4637,8 @@ function reduceEvent(
           turns = finishOpenTurnsFromIdleHistory(
             turns, wasInterrupting,
             doneTs,
-            acceptanceConfirmed ? null : base.acceptancePending);
-          if (resolveUnknownSteerFromIdle) {
-            resolveUnknownPendingSteer(
-              acceptanceRuntime, turns, doneTs);
-          }
+            pendingAcceptanceIds(acceptanceRuntime));
+          resolveUnknownPendingSteer(acceptanceRuntime, turns, doneTs);
         }
       }
       if (e.detail === "summary" && !base.historyInvalidated
@@ -4734,16 +4746,16 @@ function reduceEvent(
         // after reconnect. Feed that exact native/client pair through the same
         // strict binding path as a live TurnBinding; the helper still requires
         // one unfinished authoritative head and rejects alias ambiguity.
-        const binding = acceptanceConfirmed && base.acceptancePending
-            && acceptedNativeTurnId
+        const acceptedHead = acceptedInputs.find(input => input.nativeId === e.newest_id);
+        const binding = acceptedHead?.nativeId
             && !e.external && !base.external
             && e.generation != null
             && e.generation === (preControlBase.pendingHistoryGeneration
               ?? preControlBase.controlGeneration
               ?? preControlBase.historyGeneration)
           ? {
-              msgId: base.acceptancePending,
-              turnId: acceptedNativeTurnId,
+              msgId: acceptedHead.id,
+              turnId: acceptedHead.nativeId,
               seq: e.live_seq,
               generation: e.generation,
             }
@@ -5041,6 +5053,7 @@ function reduceEvent(
               ? (e.takeover_pending ? base.takeoverMessage : null)
               : base.takeoverMessage,
             acceptancePending: acceptanceRuntime.acceptancePending,
+            additionalSteerAcceptances: acceptanceRuntime.additionalSteerAcceptances,
             acceptanceKind: acceptanceRuntime.acceptanceKind,
             acceptanceQuery: acceptanceRuntime.acceptanceQuery,
             acceptanceHistoryBaseline:
@@ -5542,9 +5555,9 @@ function reduceEvent(
               delete candidate.terminalSource;
             }
           }
-          if (rt.acceptanceKind === "steer_unknown") {
+          if (pendingAcceptanceIds(rt).some(id => acceptanceKindFor(rt, id) === "steer_unknown")) {
             for (const candidate of turns) {
-              if (candidate.id === rt.acceptancePending) continue;
+              if (acceptanceKindFor(rt, candidate.id)) continue;
               finishTurnWithoutTerminal(candidate, doneTs);
             }
           }
@@ -5941,6 +5954,13 @@ function reduceEvent(
             e.generation,
           )
         : undefined;
+      const pendingRuntime = state.runtimes[replaySid ?? ""];
+      const submittedTurns = pendingRuntime ? cloneTurns(pendingRuntime.turns.filter(turn =>
+        turn.id === submittedTurn?.id
+        || (turn.clientMsgId === turn.id && !!acceptanceKindFor(pendingRuntime, turn.id)))) : [];
+      if (submittedTurn && !submittedTurns.some(turn => turn.id === submittedTurn.id)) {
+        submittedTurns.push(submittedTurn);
+      }
       let historyRecovery = state.historyRecovery;
       if (needsAuthoritativeHistory && state.focusedSid === e.sid
           && !state.newChat && e.sid) {
@@ -5952,7 +5972,7 @@ function reduceEvent(
           null,
           submittedTurn?.id ?? null,
         );
-        if (submittedTurn && historyRecovery.turns) {
+        if (submittedTurns.length && historyRecovery.turns) {
           // A prior recovery projection may predate this Query. Reconcile the
           // exact browser id into that frozen readable copy as well as the live
           // runtime, otherwise switching away/back exposes either no question
@@ -5961,7 +5981,7 @@ function reduceEvent(
             ...historyRecovery,
             turns: mergeInitialHistory(
               historyRecovery.turns,
-              [submittedTurn],
+              submittedTurns,
               { preserveLiveTailOpen: true },
             ),
           };
@@ -5984,9 +6004,9 @@ function reduceEvent(
         rt.syncReady = false;
         rt.truncated = e.truncated;
         if (isSideChat && e.rebuild) {
-          const pending = [...rt.turns, ...(rt.btwReplayPending ?? [])].find((turn) =>
-            turn.id === rt.acceptancePending && !turnHasBoundEngineId(turn));
-          rt.btwReplayPending = pending ? [pending] : [];
+          rt.btwReplayPending = [...new Map([...rt.turns, ...(rt.btwReplayPending ?? [])]
+            .filter(turn => pendingAcceptanceIds(rt).includes(turn.id) && !turnHasBoundEngineId(turn))
+            .map(turn => [turn.id, turn])).values()];
           rt.turns = [];
           rt.liveOwner = null;
           rt.pendingLiveBinding = null;
@@ -6004,7 +6024,7 @@ function reduceEvent(
           // replay suffix cannot recreate a submitted user boundary which has
           // already fallen out of the ring. Keep its exact local/bound owner in
           // the live runtime so subsequent deltas and History share one row.
-          rt.turns = submittedTurn ? [submittedTurn] : [];
+          rt.turns = submittedTurns;
           if (submittedTurn && rt.pendingLiveBinding
               && turnHasIdentityAlias(
                 submittedTurn, rt.pendingLiveBinding.msgId)) {
@@ -6132,13 +6152,16 @@ function reduceEvent(
       if ((e.code === "not_steerable"
           || e.code === "steer_outcome_unknown") && e.msg_id) {
         const next = patch(state, e.sid, (rt) => {
-          if (rt.acceptancePending !== e.msg_id
-              || rt.acceptanceKind !== "steer") return;
+          const kind = acceptanceKindFor(rt, e.msg_id!);
+          if (kind !== "steer" && kind !== "steer_unknown") return;
           if (e.code === "steer_outcome_unknown") {
             // Transport loss after submission is not a rejection. Keep both
             // the reliable acceptance latch and the optimistic row until a
             // narrative echo or an authoritative terminal boundary resolves it.
-            rt.acceptanceKind = "steer_unknown";
+            if (rt.acceptancePending === e.msg_id) rt.acceptanceKind = "steer_unknown";
+            else rt.additionalSteerAcceptances = {
+              ...rt.additionalSteerAcceptances, [e.msg_id!]: "steer_unknown",
+            };
             return;
           }
           // A definitive rejection is a control failure, not the terminal state
@@ -6149,7 +6172,7 @@ function reduceEvent(
             && turn.clientMsgId === e.msg_id
             && !turn.liveTaskId
           ));
-          clearAcceptance(rt);
+          clearAcceptance(rt, e.msg_id);
         });
         return { ...next, ...commandBanner(state, presentCommandProblem(e)) };
       }
@@ -6233,9 +6256,7 @@ function reduceEvent(
       }
       return patch(state, e.sid, (rt) => {
         rt.loading = false; // never leave a spinner spinning behind an error
-        if (rt.acceptancePending === e.msg_id) {
-          clearAcceptance(rt);
-        }
+        clearAcceptance(rt, e.msg_id);
         markTurnAsLive(rt, e.msg_id!, boundCompletedTurns, e.seq);
         const turns = cloneTurns(rt.turns);
         const t = turns.find((turn) => turn.id === e.msg_id);
@@ -6268,13 +6289,17 @@ function reduceEvent(
             && acceptedIds.has(rt.pendingSend.msg_id)) rt.pendingSend = null;
         rt.failedDeferred = rt.failedDeferred.filter(
           (query) => !query.msg_id || !acceptedIds.has(query.msg_id));
-        if (rt.acceptancePending
-            && acceptedIds.has(rt.acceptancePending)) {
+        const acceptedInputs = pendingAcceptanceIds(rt).filter(id => acceptedIds.has(id));
+        const acceptedSteers = acceptedInputs.filter(id => {
+          const kind = acceptanceKindFor(rt, id);
+          return kind === "steer" || kind === "steer_unknown";
+        });
+        for (const acceptedId of acceptedInputs) {
           // Claude's native TurnBinding follows this exact user echo later.
           if (boundCompletedTurns && e.seq != null) {
-            rt.liveOwner = { turnId: rt.acceptancePending, seq: e.seq };
+            rt.liveOwner = { turnId: acceptedId, seq: e.seq };
           }
-          clearAcceptance(rt);
+          clearAcceptance(rt, acceptedId);
         }
         markTurnAsLive(rt, e.msg_id, boundCompletedTurns, e.seq);
         if (e.client_msg_id && e.client_msg_id !== e.msg_id) {
@@ -6322,6 +6347,9 @@ function reduceEvent(
             ts: stamp,
           });
         }
+        for (const id of acceptedSteers) {
+          reconcileAcceptedSteerEcho(rt, turns, id, stamp ?? Date.now());
+        }
         const binding = rt.pendingLiveBinding;
         const boundNativeTurnId = binding
           && acceptedIds.has(binding.msgId) ? binding.turnId : undefined;
@@ -6352,9 +6380,8 @@ function reduceEvent(
           : undefined;
         const stamp = eventTimestampMs(e.ts);
         const doneTs = stamp ?? Date.now();
-        const localAcceptance = rt.acceptancePending === e.msg_id
-          && (rt.acceptanceKind === "steer"
-            || rt.acceptanceKind === "steer_unknown");
+        const acceptanceKind = acceptanceKindFor(rt, e.msg_id);
+        const localAcceptance = acceptanceKind === "steer" || acceptanceKind === "steer_unknown";
         const optimisticIndex = pendingOptimisticSteerIndex(rt, turns);
         let existing = turns.find((turn) =>
           turnHasIdentityAlias(turn, e.msg_id));
@@ -6364,7 +6391,9 @@ function reduceEvent(
             // optimistic row waits for its echo. Keep every accepted segment
             // in source order and make the local segment the latest owner.
             turns.splice(turns.indexOf(existing), 1);
-            const previous = [...turns].reverse()
+            const nextPendingIndex = pendingOptimisticSteerIndex(rt, turns);
+            const insertAt = nextPendingIndex < 0 ? turns.length : nextPendingIndex;
+            const previous = [...turns.slice(0, insertAt)].reverse()
               .find((turn) => !turn.done);
             if (previous) {
               finishTurnAtSteerFence(previous, e.turn_id, doneTs);
@@ -6375,8 +6404,8 @@ function reduceEvent(
             existing.interrupted = undefined;
             existing.error = undefined;
             existing.progress = undefined;
-            turns.push(existing);
-            clearAcceptance(rt);
+            turns.splice(insertAt, 0, existing);
+            clearAcceptance(rt, e.msg_id);
           }
           // Reliable-command replay can deliver the correlated narrative frame
           // again after reconnect. Other duplicates only refresh metadata.
@@ -6433,7 +6462,7 @@ function reduceEvent(
         } else {
           turns.push(existing);
         }
-        if (localAcceptance) clearAcceptance(rt);
+        if (localAcceptance) clearAcceptance(rt, e.msg_id);
         if (boundCompletedTurns && typeof e.seq === "number") {
           rt.liveOwner = { turnId: existing.id, seq: e.seq };
         }
@@ -6895,10 +6924,12 @@ function reduceEvent(
       });
     case "turn_binding":
       return patch(state, e.sid, (rt) => {
-        if (rt.acceptancePending === e.msg_id) {
-          clearAcceptance(rt);
-        }
+        const acceptanceKind = acceptanceKindFor(rt, e.msg_id);
+        clearAcceptance(rt, e.msg_id);
         let turns = cloneTurns(rt.turns);
+        if (acceptanceKind === "steer" || acceptanceKind === "steer_unknown") {
+          reconcileAcceptedSteerEcho(rt, turns, e.msg_id, eventTimestampMs(e.ts) ?? Date.now());
+        }
         const seq = typeof e.seq === "number" ? e.seq : 0;
         if (e.autonomous) {
           let owner = turns.find(turn => turnHasIdentityAlias(turn, e.msg_id));
@@ -7023,10 +7054,8 @@ function reduceEvent(
         }
         if (!t) {
           const openTurns = turns.filter((turn) => !turn.done
-            && !(rt.acceptanceKind === "steer_unknown"
-              && turn.id === rt.acceptancePending
-              && turn.clientMsgId === rt.acceptancePending
-              && !turn.liveTaskId));
+            && !(acceptanceKindFor(rt, turn.id)
+              && turn.clientMsgId === turn.id && !turn.liveTaskId));
           // Claude and older producers may reveal the native id only at the
           // terminal boundary. Preserve that legacy path when there is exactly
           // one unclosed owner, while never closing an unrelated completed row.
@@ -7053,9 +7082,7 @@ function reduceEvent(
             delete t.terminalSource;
           }
           markTurnAsLive(rt, t.id, boundCompletedTurns, e.seq);
-          if (rt.acceptancePending === t.id) {
-            clearAcceptance(rt);
-          }
+          clearAcceptance(rt, t.id);
           t.done = true;
           t.durationMs = e.result.subtype === "steered"
               && e.result.duration_ms === 0

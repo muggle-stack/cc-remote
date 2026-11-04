@@ -233,7 +233,9 @@ export class Compiler {
       sources.forEach(node => node.removeAttribute("src"));
       if (!src) continue;
       if (src.startsWith("data:")) { element.src = src; continue; }
-      if (media.length >= 8) throw new Error("预览音视频数量超过上限。");
+      // Registration is cheap; the media scheduler bounds live decoders and
+      // buffers separately. Sample galleries commonly contain dozens of tags.
+      if (media.length >= 256) throw new Error("预览音视频标签超过 256 个上限。");
       media.push({ element, url: this.resources.url(src, base).href });
     }
     for (const node of doc.querySelectorAll("img[src],source[src],video[poster],image[href]")) {

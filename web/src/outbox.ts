@@ -5,6 +5,8 @@ import type {
   QueryImg,
 } from "./protocol.ts";
 
+import { MAX_PENDING_STEERS } from "./pending-steers.ts";
+
 export type OutboundFrame = Record<string, unknown>;
 
 export type EnqueueResult =
@@ -158,6 +160,9 @@ export function matchQueryAcceptanceHistory(
 }
 
 interface PendingQueryAcceptance {
+  kind: "query" | "steer" | "steer_unknown";
+  exactOnly: boolean;
+  bytes: number;
   descriptor: QueryAcceptanceDescriptor;
   baseline: QueryAcceptanceHistoryHead | null;
   receipt?: Promise<QueryAcceptanceResult>;
@@ -172,37 +177,56 @@ interface PendingQueryAcceptance {
  * reconnects and is released only by correlated authoritative narrative proof.
  */
 export class QueryAcceptanceLatch {
-  private readonly bySession = new Map<string, PendingQueryAcceptance>();
+  private readonly bySession = new Map<string, Map<string, PendingQueryAcceptance>>();
+
+  canBeginSteer(sid: string, concurrent: boolean, bytes = 0): boolean {
+    if (concurrent && bytes + [...this.bySession.values()].reduce((total, entries) =>
+      total + [...entries.values()].reduce((size, entry) => size + entry.bytes, 0), 0) > 64 * 1024 * 1024) return false;
+    const entries = this.bySession.get(sid);
+    return !!sid && (!entries?.size || (concurrent
+      && entries.size < MAX_PENDING_STEERS
+      && [...entries.values()].every(entry => entry.kind === "steer")));
+  }
 
   begin(
     sid: string,
     messageId: string,
     descriptor = queryAcceptanceDescriptor(messageId, ""),
     baseline: QueryAcceptanceHistoryHead | null = null,
+    concurrentSteer = false,
+    bytes = 0,
   ): boolean {
-    if (!sid || !messageId || this.bySession.has(sid)) return false;
-    this.bySession.set(sid, {
+    if (!sid || !messageId || (concurrentSteer
+      ? !this.canBeginSteer(sid, true, bytes) : this.bySession.has(sid))) return false;
+    const entries = this.bySession.get(sid) ?? new Map<string, PendingQueryAcceptance>();
+    if (entries.has(messageId)) return false;
+    entries.set(messageId, {
+      kind: concurrentSteer ? "steer" : "query",
+      exactOnly: concurrentSteer,
+      bytes,
       descriptor: {
-        ...descriptor,
-        messageId,
+        ...descriptor, messageId,
         imageMediaTypes: [...descriptor.imageMediaTypes],
         fileNames: [...descriptor.fileNames],
       },
       baseline: baseline ? { ...baseline } : null,
     });
+    this.bySession.set(sid, entries);
     return true;
   }
 
-  pendingMessageId(sid: string): string | null {
-    return this.bySession.get(sid)?.descriptor.messageId ?? null;
+  pendingMessageIds(sid: string): string[] {
+    return [...(this.bySession.get(sid)?.keys() ?? [])];
   }
 
-  /** The same receipt survives reconnect and temporary-to-native re-keying.
-   * Unknown outcomes surface as errors; the runtime's steer_unknown barrier
-   * continues to block resubmission until native activity is reconciled. */
+  pendingMessageId(sid: string): string | null {
+    return this.pendingMessageIds(sid)[0] ?? null;
+  }
+
+  /** Receipts survive reconnect and re-key; every message resolves separately. */
   receiptFor(sid: string, messageId: string): Promise<QueryAcceptanceResult> | null {
-    const pending = this.bySession.get(sid);
-    if (!pending || pending.descriptor.messageId !== messageId) return null;
+    const pending = this.bySession.get(sid)?.get(messageId);
+    if (!pending) return null;
     return pending.receipt ??= new Promise((resolve) => { pending.finish = resolve; });
   }
 
@@ -214,33 +238,63 @@ export class QueryAcceptanceLatch {
     const messageId = event.client_msg_id ?? event.msg_id;
     if (!event.sid || !messageId) return false;
     if (event.type === "error" && event.code === "wrapper_offline") return false;
-    if (this.pendingMessageId(event.sid) !== messageId) return false;
-    return this.completeSession(event.sid, event.type === "error"
+    const pending = this.bySession.get(event.sid)?.get(messageId);
+    if (!pending) return false;
+    if (event.type === "error" && event.code === "steer_outcome_unknown"
+        && pending.exactOnly) {
+      pending.kind = "steer_unknown";
+      pending.finish?.({ accepted: false,
+        error: { code: event.code, message: event.message ?? "" } });
+      return true;
+    }
+    return this.completeMessage(event.sid, messageId, event.type === "error"
       ? { accepted: false, error: { code: event.code ?? "", message: event.message ?? "" } }
       : { accepted: true });
   }
 
   acceptHistory(history: History): boolean {
-    const pending = this.bySession.get(history.session_id);
-    if (!pending
-        || !matchQueryAcceptanceHistory(
-          pending.descriptor, pending.baseline, history)) return false;
-    return this.completeSession(history.session_id);
+    let changed = false;
+    for (const [id, pending] of this.bySession.get(history.session_id) ?? []) {
+      // Repeated steer text cannot prove which input Claude consumed. Its
+      // durable client/native UUID alias is required, even with one left.
+      if (pending.exactOnly || !matchQueryAcceptanceHistory(
+        pending.descriptor, pending.baseline, history)) continue;
+      changed = this.completeMessage(history.session_id, id) || changed;
+    }
+    return changed;
+  }
+
+  completeMessage(sid: string, id: string,
+    result: QueryAcceptanceResult = { accepted: true }): boolean {
+    const entries = this.bySession.get(sid);
+    const pending = entries?.get(id);
+    if (!pending) return false;
+    entries!.delete(id);
+    if (!entries!.size) this.bySession.delete(sid);
+    pending.finish?.(result);
+    return true;
   }
 
   completeSession(sid: string, result: QueryAcceptanceResult = { accepted: true }): boolean {
-    const pending = this.bySession.get(sid);
-    if (!pending) return false;
-    this.bySession.delete(sid);
-    pending.finish?.(result);
-    return true;
+    const id = this.pendingMessageId(sid);
+    return id ? this.completeMessage(sid, id, result) : false;
+  }
+
+  settleUnknownSteers(sid: string): void {
+    for (const [id, pending] of this.bySession.get(sid) ?? []) {
+      if (pending.kind === "steer_unknown") this.completeMessage(sid, id, {
+        accepted: false, error: { code: "steer_outcome_unknown",
+          message: "任务已结束，但本次引导是否生效未得到确认。" },
+      });
+    }
   }
 
   rekeySession(oldKey: string, sessionId: string): void {
     if (!oldKey || oldKey === sessionId) return;
     const pending = this.bySession.get(oldKey);
     if (!pending) return;
-    this.bySession.set(sessionId, pending);
+    const target = this.bySession.get(sessionId);
+    this.bySession.set(sessionId, new Map([...pending, ...(target ?? [])]));
     this.bySession.delete(oldKey);
   }
 }

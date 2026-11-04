@@ -595,7 +595,7 @@ export interface EngineCapabilityItem { kind: EngineCapabilityKind; id: string; 
 export interface EngineCapabilities extends Base { dsh_commands?: DshCommandInfo[]; type: "engine_capabilities"; engine: Engine; space: Space; request_id?: string | null; cwd: string; items: EngineCapabilityItem[]; errors?: string[]; notes?: string[]; skills_only: boolean; claude_profile_id?: string | null; codex_profile_id?: string | null }
 export interface AskOption { label: string; ds?: string }
 export interface AskQuestion { plan_document?: string | null; header?: string | null; question: string; options: AskOption[]; allow_text?: boolean; secret?: boolean; multi_select?: boolean }
-export interface AskUser extends Base, AskQuestion { type: "ask_user"; ask_id: string; questions?: AskQuestion[] | null }
+export interface AskUser extends Base, AskQuestion { type: "ask_user"; notification_context?: TurnNotificationContext | null; ask_id: string; questions?: AskQuestion[] | null }
 /** Authoritative Hello baseline: following AskUser frames are the complete
  * still-open set visible to this client for the same session. */
 export interface AskUserSync extends Base { type: "ask_user_sync" }
@@ -793,7 +793,7 @@ export type ServerEvent = SessionArtifacts | FilesListed | CodexContext
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnUsage | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 86;
+export const PROTOCOL_VERSION = 87;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

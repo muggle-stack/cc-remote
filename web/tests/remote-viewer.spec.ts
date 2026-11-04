@@ -101,6 +101,108 @@ test("remote Viewer audio and video play and seek inside the publication", async
   await expect(page.locator(".viewer-error-banner")).toHaveCount(0);
 });
 
+test("sample galleries load lazily, recycle paused players and retain native controls", async ({ page }) => {
+  test.skip(process.env.VIEWER_TEST_MODE === "isolated", "Bridge media scheduling.");
+  test.setTimeout(60000);
+  const reads: string[] = [];
+  await page.routeWebSocket(/\/ws\/viewer-client(?:\?|$)/, client => {
+    const server = client.connectToServer();
+    client.onMessage(message => {
+      const value = typeof message === "string" ? JSON.parse(message) : null;
+      if (value?.type === "read" && value.method === "GET" && value.path.endsWith(".wav")) reads.push(value.path);
+      server.send(message);
+    });
+  });
+  await page.reload();
+  await page.getByRole("button", { name: "打开远程预览" }).click();
+  await page.getByRole("button", { name: /^多音频试听测试/ }).click();
+  const frame = page.frameLocator("iframe");
+  await expect(frame.getByRole("heading", { name: "52 audio samples" })).toBeVisible();
+  await expect(frame.locator("audio")).toHaveCount(52);
+  const first = frame.locator("#sample-0");
+  await expect.poll(() => first.evaluate((el: HTMLMediaElement) => el.readyState)).toBeGreaterThanOrEqual(2);
+  expect(reads.length).toBeLessThanOrEqual(8);
+  expect(reads).not.toContain("/viewer/samples/51.wav");
+  // A real click on the native play control, not a synthetic play event.
+  await first.click({ position: { x: 20, y: 20 } });
+  await expect.poll(() => first.evaluate((el: HTMLMediaElement) => el.currentTime)).toBeGreaterThan(0.1);
+  await first.evaluate((el: HTMLMediaElement) => { el.pause(); el.currentTime = 1.5; });
+  for (let index = 8; index < 18; index++) {
+    const sample = frame.locator(`#sample-${index}`);
+    await sample.evaluate(async (el: HTMLMediaElement) => { el.muted = true; await el.play(); el.pause(); });
+    expect(await frame.locator("audio[src]").count()).toBeLessThanOrEqual(8);
+  }
+  await expect(first).not.toHaveAttribute("src");
+  await first.evaluate(async (el: HTMLMediaElement) => { el.muted = true; await el.play(); el.pause(); });
+  expect(await first.evaluate((el: HTMLMediaElement) => el.currentTime)).toBeCloseTo(1.5, 1);
+  const last = frame.locator("#sample-51");
+  await last.scrollIntoViewIfNeeded();
+  await expect.poll(() => last.evaluate((el: HTMLMediaElement) => el.readyState)).toBeGreaterThanOrEqual(2);
+  await last.click({ position: { x: 20, y: 20 } });
+  await expect.poll(() => last.evaluate((el: HTMLMediaElement) => el.currentTime)).toBeGreaterThan(0.1);
+  await expect(page.locator(".viewer-error-banner")).toHaveCount(0);
+});
+
+test("lazy media honours a first click while loading and a pause before loading finishes", async ({ page }) => {
+  test.skip(process.env.VIEWER_TEST_MODE === "isolated", "Bridge media scheduling.");
+  const held = new Map<string, () => void>();
+  let waiting = true;
+  await page.routeWebSocket(/\/ws\/viewer-client(?:\?|$)/, client => {
+    const server = client.connectToServer();
+    client.onMessage(message => {
+      const value = typeof message === "string" ? JSON.parse(message) : null;
+      if (waiting && value?.type === "read" && value.path.endsWith(".wav")) {
+        held.set(value.path, () => server.send(message)); return;
+      }
+      server.send(message);
+    });
+  });
+  await page.reload();
+  await page.getByRole("button", { name: "打开远程预览" }).click();
+  await page.getByRole("button", { name: /^多音频试听测试/ }).click();
+  const frame = page.frameLocator("iframe");
+  const first = frame.locator("#sample-0");
+  await expect.poll(() => held.has("/viewer/samples/0.wav")).toBe(true);
+  await first.click({ position: { x: 20, y: 20 } });
+  waiting = false;
+  held.forEach(release => release()); held.clear();
+  await expect.poll(() => first.evaluate((el: HTMLMediaElement) => el.currentTime)).toBeGreaterThan(0.1);
+  await first.evaluate((el: HTMLMediaElement) => el.pause());
+
+  waiting = true;
+  const last = frame.locator("#sample-50");
+  await last.evaluate((el: HTMLMediaElement) => {
+    el.muted = true;
+    void el.play().then(() => el.dataset.result = "played", error => el.dataset.result = error.name);
+    el.pause();
+  });
+  await expect.poll(() => held.has("/viewer/samples/50.wav")).toBe(true);
+  waiting = false;
+  held.forEach(release => release());
+  await expect(last).toHaveAttribute("data-result", "AbortError");
+  expect(await last.evaluate((el: HTMLMediaElement) => el.paused)).toBe(true);
+  await expect(page.locator(".viewer-error-banner")).toHaveCount(0);
+});
+
+test("the media residency limit never interrupts playing samples", async ({ page }) => {
+  test.skip(process.env.VIEWER_TEST_MODE === "isolated", "Bridge media scheduling.");
+  await page.getByRole("button", { name: "打开远程预览" }).click();
+  await page.getByRole("button", { name: /^多音频试听测试/ }).click();
+  const frame = page.frameLocator("iframe");
+  for (let index = 12; index < 20; index++) {
+    await frame.locator(`#sample-${index}`).evaluate(async (el: HTMLMediaElement) => {
+      el.muted = true; el.loop = true; await el.play();
+    });
+  }
+  const result = await frame.locator("#sample-40").evaluate(async (el: HTMLMediaElement) => {
+    try { await el.play(); return "unexpected playback"; } catch (error) { return String(error); }
+  });
+  expect(result).toContain("请先暂停一个播放器");
+  expect(await frame.locator("audio").evaluateAll(elements => elements.filter(el => !(el as HTMLMediaElement).paused).length)).toBe(8);
+  await expect(frame.getByRole("heading", { name: "52 audio samples" })).toBeVisible();
+  await expect(page.locator(".viewer-error-banner")).toHaveCount(0);
+});
+
 test("page scripts render before media arrives, then media uses authorized byte ranges", async ({ page }) => {
   test.skip(process.env.VIEWER_TEST_MODE === "isolated", "Bridge resource transport.");
   const held: (() => void)[] = [];
