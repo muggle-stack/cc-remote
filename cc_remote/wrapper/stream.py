@@ -43,6 +43,7 @@ from cc_remote.protocol import (
 from cc_remote.wrapper.sanitize import bounded_text, bounded_tool_input
 from cc_remote.wrapper.claude_compaction import (
     compact_completion_events, compact_metadata, manual_compact_prompt,
+    native_command_prompt,
 )
 from cc_remote.wrapper.claude_model_fallback import FALLBACK_TOOL, model_fallback_event
 from cc_remote.wrapper.claude_rewind_history import REWIND_ANCHOR, rewind_anchor_row
@@ -728,6 +729,10 @@ class StreamTranslator:
         # existing UI block without repeating its content.
         self._ambiguous_final_mid: str | None = None
         self._has_final_text = False
+        # Claude Code can continue its own loop after a mid-response provider
+        # error. Its synthetic "API Error:" row becomes the final answer only
+        # when no later main-assistant message precedes the Result.
+        self._api_error_final_mid: str | None = None
         # Claude can emit several AssistantMessage records in one user turn.
         # fork_session(up_to_message_id=...) accepts the transcript UUID, not the
         # API message_id, so retain the last valid one until ResultMessage.
@@ -746,6 +751,7 @@ class StreamTranslator:
         self._usage_rebound = True
         self.turn_id = turn_id
         self._ambiguous_final_mid = None
+        self._api_error_final_mid = None
         self._has_final_text = False
         self._last_assistant_uuid = None
         self._last_user_uuid = None
@@ -1189,6 +1195,16 @@ class StreamTranslator:
             msg.stop_reason,
             has_client_tool or (has_server_tool and not has_text),
             msg.parent_tool_use_id)
+        api_error = (
+            not msg.parent_tool_use_id and msg.model == "<synthetic>"
+            and len(blocks) == 1 and isinstance(blocks[0], TextBlock)
+            and blocks[0].text.lstrip().startswith(_SYNTHETIC_API_ERROR_PREFIX)
+        )
+        if api_error:
+            text_channel = "commentary"
+            self._ambiguous_final_mid = None
+        elif not msg.parent_tool_use_id:
+            self._api_error_final_mid = None
         ambiguous_candidate = (
             not self._has_final_text and not has_tool_activity
             and msg.stop_reason is None and has_visible_text
@@ -1238,9 +1254,12 @@ class StreamTranslator:
                 )
         candidate_mid = (
             self._message_ids.get("text") if ambiguous_candidate else None)
+        api_error_mid = self._message_ids.get("text") if api_error else None
         self._finish_message(events, text_channel, msg.uuid)
         if candidate_mid is not None:
             self._ambiguous_final_mid = candidate_mid
+        if api_error_mid is not None:
+            self._api_error_final_mid = api_error_mid
         return events
 
     def _feed_user(self, msg: UserMessage) -> list:
@@ -1662,6 +1681,12 @@ class StreamTranslator:
                 events.append(AssistantMsgEnd(
                     message_id=self._ambiguous_final_mid,
                     turn_id=self.turn_id, channel="final"))
+            if self._api_error_final_mid is not None:
+                # Nothing followed the provider error: it is the turn's
+                # visible terminal explanation, exactly as History renders it.
+                events.append(AssistantMsgEnd(
+                    message_id=self._api_error_final_mid,
+                    turn_id=self.turn_id, channel="final"))
             for tool_id in sorted({key[0] for key in self._tool_pending}):
                 events.extend(self._flush_tool_deltas(tool_id))
             missing_boundary = self.manual_compact and self.compact_boundary_id is None
@@ -1680,6 +1705,7 @@ class StreamTranslator:
             self._last_assistant_uuid = None
             self._last_user_uuid = None
             self._ambiguous_final_mid = None
+            self._api_error_final_mid = None
             self._has_final_text = False
             return events
         return []
@@ -3149,7 +3175,8 @@ def translate_history(
     but cannot move an already-settled answer's terminal clock. Rich
     assistant blocks retain the same thinking/commentary/final and semantic tool
     structure as the live stream. Non-conversational user turns (compact summaries,
-    slash-command envelopes other than /compact, local-command stdout) remain hidden.
+    slash-command envelopes other than /compact and /goal, local-command stdout)
+    remain hidden.
     """
     events: list = []
     turn_open = False
@@ -3167,6 +3194,9 @@ def translate_history(
     settled_answer_seen = False
     background_followup = False
     turn_failed = False
+    # (message id, first event index, failure state before it) for a synthetic
+    # provider error that Claude Code may still continue past in this response.
+    recoverable_api_error: tuple[str, int, bool] | None = None
     compact_requested = False
     # Older wrappers could bind a replacement query's browser id to Claude's
     # late ``[Request interrupted by user]`` record.  The marker terminates the
@@ -3276,7 +3306,7 @@ def translate_history(
         nonlocal turn_open, last_assistant_uuid, current_turn_id, history_plan_id
         nonlocal ambiguous_final_mid, ambiguous_final_start
         nonlocal turn_start_ts, settled_answer_seen, turn_failed
-        nonlocal background_followup
+        nonlocal background_followup, recoverable_api_error
         nonlocal compact_requested
         if turn_open:
             # SessionMessage rows can omit stop_reason. Live must conservatively
@@ -3324,6 +3354,7 @@ def translate_history(
             settled_answer_seen = False
             background_followup = False
             turn_failed = False
+            recoverable_api_error = None
             compact_requested = False
 
     for message_index, m in enumerate(messages):
@@ -3379,8 +3410,9 @@ def translate_history(
                 close_turn("interrupted", False)
                 continue
             compact_prompt = manual_compact_prompt(content)
-            if compact_prompt is not None:
-                content = compact_prompt
+            command_prompt = compact_prompt or native_goal_prompt(content)
+            if command_prompt is not None:
+                content = command_prompt
             if isinstance(content, str):
                 internal_event = (internal_user_events or {}).get(source_uid)
                 if internal_event is not None:
@@ -3560,7 +3592,25 @@ def translate_history(
                 continue
             pending_interrupted_alias = None
             synthetic_api_error = _is_synthetic_api_error(msg)
+            if (recoverable_api_error is not None and not background_followup
+                    and getattr(m, "parent_tool_use_id", None) is None):
+                # Claude Code resumed the same response after a mid-response
+                # provider error. That row is a progress note, not the answer,
+                # and it no longer proves the turn failed. A task-notification
+                # restart is a background follow-up and keeps the failure.
+                error_mid, error_start, failed_before = recoverable_api_error
+                for event in events[error_start:]:
+                    if (isinstance(event, (
+                            AssistantMsgStart, Delta, AssistantMsgEnd))
+                            and event.message_id == error_mid
+                            and event.channel == "final"):
+                        event.channel = "commentary"
+                turn_failed = failed_before
+                recoverable_api_error = None
             if synthetic_api_error:
+                if (not background_followup
+                        and getattr(m, "parent_tool_use_id", None) is None):
+                    recoverable_api_error = (message_uid, len(events), turn_failed)
                 turn_failed = True
             if _CLAUDE_MESSAGE_UUID.fullmatch(source_uid):
                 last_assistant_uuid = source_uid
@@ -4023,11 +4073,21 @@ def merge_subagent_history(events: list, subagent_events: list) -> list:
     return merged
 
 
+def native_goal_prompt(content: object) -> str | None:
+    """Recognize the native /goal command, which starts its own model turn.
+
+    The Wrapper publishes Remote goal commands as their own visible turn, and a
+    terminal /goal also begins a new response. History must keep that boundary,
+    or the goal's work extends the preceding prompt under a different identity.
+    """
+    return native_command_prompt(content, "/goal")
+
+
 def _is_meta_user_text(text: str) -> bool:
     """Skip non-conversational user turns that would just clutter the history:
     compact summaries, slash-command envelopes, and local-command stdout/stderr."""
     t = text.lstrip()
-    if manual_compact_prompt(t) is not None:
+    if manual_compact_prompt(t) is not None or native_goal_prompt(t) is not None:
         return False
     return (
         t.startswith("This session is being continued from a previous conversation")

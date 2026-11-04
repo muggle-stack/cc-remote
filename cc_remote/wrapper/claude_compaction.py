@@ -12,6 +12,11 @@ from cc_remote.protocol import (
 
 def manual_compact_prompt(content: object) -> str | None:
     """Recognize only the native /compact command, never other slash commands."""
+    return native_command_prompt(content, "/compact")
+
+
+def native_command_prompt(content: object, command: str) -> str | None:
+    """Return ``command`` plus its arguments for exactly that native envelope."""
     if isinstance(content, list):
         if any((block.get("type") != "text" if isinstance(block, dict)
                 else not isinstance(getattr(block, "text", None), str)) for block in content):
@@ -25,15 +30,15 @@ def manual_compact_prompt(content: object) -> str | None:
     if not isinstance(content, str):
         return None
     text = content.strip()
-    if text == "/compact":
+    if text == command:
         return text
     if not text.startswith(("<command-name>", "<command-message>")):
         return None
     name = re.search(r"<command-name>(.*?)</command-name>", text, re.S)
-    if name is None or name[1].strip() != "/compact":
+    if name is None or name[1].strip() != command:
         return None
     args = re.search(r"<command-args>(.*?)</command-args>", text, re.S)
-    return "/compact" + (" " + args[1].strip() if args and args[1].strip() else "")
+    return command + (" " + args[1].strip() if args and args[1].strip() else "")
 
 
 def compact_completion_events(boundary_id: str, turn_id: str | None) -> list:
