@@ -50,8 +50,8 @@ assert.equal(sessionMenuCapabilities(archivedCodex).migrate, false);
 assert.equal(sessionMenuCapabilities({
   ...codex, space: "work",
 }).migrate, false);
-assert.equal(canDeleteSidebarSession("codex", "code", false), false,
-  "active Codex Code sessions must be archived before deletion is offered");
+assert.equal(canDeleteSidebarSession("codex", "code", false), true,
+  "idle unarchived Codex Code sessions support native direct deletion");
 assert.equal(canDeleteSidebarSession("codex", "code", true), true,
   "archived Codex Code sessions remain deletable");
 assert.equal(canDeleteSidebarSession("claude", "code", false), true,

@@ -19765,6 +19765,23 @@ assertCommandListOwnership(
     "mutation-claude", "claude", "code"),
   "delete_session", "claude",
 );
+function verifyDirectoryCommandOwnership() {
+  assert.ok(listOwnershipSocket);
+  assertCommandListOwnership(
+    () => listOwnershipRelay.sendRunDirectoryAction("confirmed-plan", "codex"),
+    "run_directory_action", "codex",
+  );
+  // App state also carries a device guard; it is not part of the wire scope.
+  const scope = { engine: "codex" as const, action: "delete" as const,
+    cwd: "/repo/project", profile_id: "stack", machineId: "internal-ui-device" };
+  listOwnershipRelay.sendPrepareDirectoryAction(scope);
+  const frame = JSON.parse(listOwnershipSocket.sent.at(-1)!);
+  assert.equal(frame.type, "prepare_directory_action");
+  assert.equal(frame.profile_id, "stack");
+  assert.equal(frame.cwd, scope.cwd);
+  assert.equal("machineId" in frame, false);
+}
+verifyDirectoryCommandOwnership();
 assertCommandListOwnership(
   () => listOwnershipRelay.sendDeleteWorkSession(
     "mutation-work", "claude"),

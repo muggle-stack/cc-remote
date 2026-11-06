@@ -1205,7 +1205,8 @@ export function Composer(p: Props) {
               <div className="ctx-pop auto-compact-pop" role="dialog" aria-label="Codex 上下文上限">
                 <Suspense fallback={<p>加载设置…</p>}><CodexContextControl
                   key={`${p.codexContext?.max_context_tokens}:${p.codexContext?.pending}`}
-                  state={p.codexContext ?? null} onChange={(value) => p.onSetCodexContext?.(value) ?? false} /></Suspense>
+                  state={p.codexContext ?? null} report={exactContextReport}
+                  onChange={(value) => p.onSetCodexContext?.(value) ?? false} /></Suspense>
               </div>
             )}
           </div>

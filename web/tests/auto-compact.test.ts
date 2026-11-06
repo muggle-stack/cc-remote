@@ -11,10 +11,47 @@ import {
   validAutoCompactThreshold,
 } from "../src/auto-compact.ts";
 import { clientSlashesFor } from "../src/data.ts";
-import { PROTOCOL_VERSION, type ServerEvent } from "../src/protocol.ts";
+import { PROTOCOL_VERSION, type ServerEvent, type CodexContext, type ContextReport } from "../src/protocol.ts";
+import { codexContextPresentation } from "../src/codex-context.ts";
 import { RelayWs } from "../src/ws.ts";
 import { historyContainsTurn, mergeInitialHistory } from "../src/history-merge.ts";
 import type { Turn } from "../src/domain/conversation.ts";
+
+function checkCodexRuntimePresentation() {
+  const setting: CodexContext = { v: PROTOCOL_VERSION, ts: 1, type: "codex_context", sid: "stack@one",
+    model: "gpt-6-astra", max_context_tokens: 400000, applied_max_context_tokens: null,
+    applied_threshold_tokens: null, model_max_tokens: 872000, limit_tokens: 828400,
+    context_window_tokens: 421053, pending: true, mutable: true, error: null };
+  const native: ContextReport = { v: PROTOCOL_VERSION, ts: 2, type: "context_report", sid: setting.sid,
+    model: setting.model, total_tokens: 371048, max_tokens: 400000, percentage: 92.762,
+    auto_compact_threshold_tokens: 378947, source: "native_estimate", categories: [] };
+  const before = JSON.stringify(setting);
+  assert.deepEqual(codexContextPresentation(setting, native), {
+    capacity: 400000, threshold: 378947, matchesSaved: true,
+    status: "原生上限 400,000，与已保存设置一致",
+  });
+  assert.equal(JSON.stringify(setting), before, "runtime evidence cannot mutate the native configuration receipt");
+  const lower = codexContextPresentation({ ...setting, max_context_tokens: 300000 }, native);
+  assert.equal(lower.capacity, 400000);
+  assert.equal(lower.matchesSaved, false);
+  assert.equal(lower.status, "已保存上限 300,000，等待生效");
+  for (const invalid of [null, { ...native, source: "recent_turn" as const },
+    { ...native, available: false }, { ...native, model: "other-model" },
+    { ...native, sid: "primary@one" }, { ...native, max_tokens: 0 }]) {
+    const presentation = codexContextPresentation(setting, invalid);
+    assert.equal(presentation.capacity, null);
+    assert.equal(presentation.matchesSaved, false);
+    assert.equal(presentation.status, "已保存上限 400,000，待原生运行数据确认");
+  }
+  assert.equal(codexContextPresentation({ ...setting, max_context_tokens: null }, native).status,
+    "已保存上限 默认值，待原生运行数据确认", "a matching number cannot prove default inheritance");
+  assert.equal(codexContextPresentation({ ...setting, pending: false }, native).status, null);
+  const older = { ...setting, applied_max_context_tokens: 300000, applied_threshold_tokens: 284211 };
+  assert.equal(codexContextPresentation(older, { ...native, auto_compact_threshold_tokens: null }).threshold, null,
+    "do not label a different window's old threshold as the runtime threshold");
+  assert.equal(codexContextPresentation(older, null).capacity, 300000);
+}
+checkCodexRuntimePresentation();
 
 // Claude writes the native /compact user UUID after the boundary, while the
 // live command can finish without echoing that UUID. Both projections still

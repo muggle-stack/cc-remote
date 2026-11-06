@@ -14,6 +14,8 @@ ACTION_CLASSES = (
     p.DeleteSession,
     p.RenameSession,
     p.ArchiveSession,
+    p.PrepareDirectoryAction,
+    p.RunDirectoryAction,
     p.PinSession,
     p.ForkSession,
     p.ForkSessionWorktree,
@@ -89,7 +91,7 @@ HIDDEN = set(p._Command.model_fields) | {"type", "request_id"}
 
 
 def is_read(name: str) -> bool:
-    return name.startswith(("get_", "list_")) or name in {"browse_files", "read_dsh", "download_dsh"}
+    return name.startswith(("get_", "list_")) or name in {"browse_files", "read_dsh", "download_dsh", "prepare_directory_action"}
 
 
 def defaults(

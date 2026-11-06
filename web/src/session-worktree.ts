@@ -98,10 +98,10 @@ export function sessionMenuCapabilities(session: SessionInfo): SessionMenuCapabi
 
 export function canDeleteSidebarSession(
   engine: Engine,
-  space: Space,
-  archived: boolean,
+  _space: Space,
+  _archived: boolean,
 ): boolean {
-  return space === "work" || engine !== "codex" || archived;
+  return engine !== "dsh";
 }
 
 export function isWorktreeForkBlockedByState(state?: State | null): boolean {

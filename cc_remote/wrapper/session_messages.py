@@ -403,6 +403,11 @@ class SessionMessages:
         try:
             if self.closing:
                 return  # Durable queued item belongs to the next Wrapper.
+            directory_actions = getattr(machine, "_directory_actions", None)
+            if directory_actions is not None and cmd.sid in directory_actions.mutating:
+                self._resolve_waiter(cmd.msg_id)
+                self.retry_after[target] = asyncio.get_running_loop().time() + 5
+                return
             current = await self.catalog()
             if target not in current:
                 self._settle(cmd.msg_id, "rejected", "Target is no longer an eligible Code session")

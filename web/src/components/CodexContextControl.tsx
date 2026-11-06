@@ -1,14 +1,16 @@
 import { useState } from "react";
-import type { CodexContext } from "../protocol";
-import { parseContextCapacity } from "../codex-context";
+import type { CodexContext, ContextReport } from "../protocol";
+import { codexContextPresentation, parseContextCapacity } from "../codex-context";
 import { CODEX_CONTEXT_USAGE_NOTE } from "./ContextPopover";
 
-export default function CodexContextControl({ state, onChange }: {
+export default function CodexContextControl({ state, report, onChange }: {
   state: CodexContext | null; onChange: (value: number | null) => boolean;
+  report?: ContextReport | null;
 }) {
   const [input, setInput] = useState(state?.max_context_tokens?.toString() ?? "");
   const [error, setError] = useState<string | null>(null);
   const limit = state?.limit_tokens;
+  const context = codexContextPresentation(state, report);
   const submit = (maxTokens: number | null) => {
     if (!onChange(maxTokens)) setError("设置暂未发送，请检查连接后重试");
     else setError(null);
@@ -37,13 +39,11 @@ export default function CodexContextControl({ state, onChange }: {
       <button className="codex-context-default" disabled={!state.mutable}
         onClick={() => { setInput(""); submit(null); }}>恢复 Codex 默认值</button>
       <p role="status">
-        {state.pending
-          ? `已保存上限 ${state.max_context_tokens?.toLocaleString() ?? "默认值"}，待确认生效`
-          : `设定上限：${state.max_context_tokens?.toLocaleString() ?? "Codex 默认值"}`}
+        {context.status ?? `设定上限：${state.max_context_tokens?.toLocaleString() ?? "Codex 默认值"}`}
         <br />
-        当前生效上限：{state.applied_max_context_tokens?.toLocaleString() ?? "待确认"}
+        当前生效上限：{context.capacity?.toLocaleString() ?? "待确认"}
         <br />
-        当前生效阈值：{state.applied_threshold_tokens?.toLocaleString()
+        当前生效阈值：{context.threshold?.toLocaleString()
           ?? (state.max_context_tokens == null ? "Codex 默认值" : "待确认")}
       </p>
       <p>{CODEX_CONTEXT_USAGE_NOTE}</p>

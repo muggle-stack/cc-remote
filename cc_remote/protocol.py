@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 89
+PROTOCOL_VERSION = 90
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -1467,6 +1467,48 @@ class DeleteSession(_Command):
     session_id: WireId
     engine: Engine
     space: Space = "code"
+
+
+class PrepareDirectoryAction(_Command):
+    """Build a bounded, account-scoped confirmation snapshot for Code only."""
+    type: Literal["prepare_directory_action"] = "prepare_directory_action"
+    engine: Literal["claude", "codex"]
+    cwd: str = Field(min_length=1, max_length=4096)
+    profile_id: Optional[WireId] = None  # None means all configured accounts.
+    action: Literal["archive", "delete"]
+
+
+class RunDirectoryAction(_Command):
+    type: Literal["run_directory_action"] = "run_directory_action"
+    plan_id: WireId
+
+
+class DirectoryActionPlan(_Base):
+    type: Literal["directory_action_plan"] = "directory_action_plan"
+    request_id: WireId
+    plan_id: WireId
+    engine: Literal["claude", "codex"]
+    cwd: str = Field(min_length=1, max_length=4096)
+    action: Literal["archive", "delete"]
+    profiles: list[str] = Field(max_length=32)
+    total: int = Field(ge=0, le=1000)
+    eligible: int = Field(ge=0, le=1000)
+    archived: int = Field(ge=0, le=1000)
+    skipped: int = Field(ge=0, le=1000)
+    expires_at: float
+
+
+class DirectoryActionProgress(_Base):
+    type: Literal["directory_action_progress"] = "directory_action_progress"
+    request_id: WireId
+    plan_id: WireId
+    engine: Literal["claude", "codex"]
+    total: int = Field(ge=0, le=1000)
+    succeeded: int = Field(default=0, ge=0, le=1000)
+    skipped: int = Field(default=0, ge=0, le=1000)
+    failed: int = Field(default=0, ge=0, le=1000)
+    done: bool = False
+    errors: list[str] = Field(default_factory=list, max_length=5)
 
 
 class GetRewindPreview(_Command):
@@ -3237,6 +3279,7 @@ class CompletionState(_Base):
 
 
 AnyMessage = Union[
+    PrepareDirectoryAction, RunDirectoryAction, DirectoryActionPlan, DirectoryActionProgress,
     GetRewindPreview, RewindPreview,
     ReorderQueuedQueries,
     GetSessionArtifacts, GetSessionArtifactPreview, SessionArtifacts,
@@ -3272,6 +3315,10 @@ DOWNSTREAM_TYPES = frozenset({
 })
 
 _TYPE_MAP: dict[str, type[BaseModel]] = {
+    "prepare_directory_action": PrepareDirectoryAction,
+    "run_directory_action": RunDirectoryAction,
+    "directory_action_plan": DirectoryActionPlan,
+    "directory_action_progress": DirectoryActionProgress,
     "get_session_artifacts": GetSessionArtifacts,
     "get_session_artifact_preview": GetSessionArtifactPreview,
     "session_artifacts": SessionArtifacts,

@@ -72,6 +72,8 @@ COMMAND_HANDLER_NAMES = MappingProxyType({
     "pin_session": "_handle_pin_session",
     "delete_work_session": "_handle_delete_work_session",
     "delete_session": "_handle_delete_session",
+    "prepare_directory_action": "_handle_prepare_directory_action",
+    "run_directory_action": "_handle_run_directory_action",
     "rollback_session": "_handle_rollback_session",
     "get_rewind_preview": "_handle_get_rewind_preview",
     "compact_session": "_handle_compact_session",

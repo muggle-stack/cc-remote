@@ -1772,6 +1772,52 @@ test("session workspace context ring refreshes applied capacity and distinguishe
   expect(relay.commands.some((c) => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
 });
 
+test("session workspace reconciles pending 400k with native runtime in both context surfaces", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { retained: false });
+  await page.goto("/");
+  await expect(page.locator(".scard.active .scard-title")).toHaveText("Layout parent");
+  const state: PanelRelayEvent<Extract<ServerEvent, { type: "codex_context" }>> = {
+    type: "codex_context", sid: "layout-parent", model: "gpt-6-astra", max_context_tokens: 400000,
+    applied_max_context_tokens: null, applied_threshold_tokens: null, model_max_tokens: 872000,
+    context_window_tokens: 421053, limit_tokens: 828400, pending: true, mutable: true, error: null,
+  };
+  const report: PanelRelayEvent<Extract<ServerEvent, { type: "context_report" }>> = {
+    type: "context_report", sid: "layout-parent", total_tokens: 371048, max_tokens: 400000,
+    percentage: 92.762, model: state.model, categories: [], auto_compact_threshold_tokens: 378947,
+    source: "recent_turn",
+  };
+  relay.emit(state);
+  relay.emit(report);
+  const ring = page.getByRole("button", { name: "上下文占用", exact: true });
+  await ring.click();
+  const popover = page.getByRole("dialog", { name: "上下文占用", exact: true });
+  await expect(popover).toContainText("待原生运行数据确认");
+  relay.emit({ ...report, source: "native_estimate" });
+  await expect(popover).toContainText("371,048 / 400,000 (93%)");
+  await expect(popover).toContainText("原生上限 400,000，与已保存设置一致");
+  await expect(popover).not.toContainText("等待生效");
+  await popover.getByRole("button", { name: "设置上下文上限" }).click();
+  const editor = page.getByRole("dialog", { name: "Codex 上下文上限", exact: true });
+  await expect(editor.getByRole("status")).toContainText("与已保存设置一致");
+  await expect(editor).toContainText("当前生效上限：400,000");
+  await expect(editor).toContainText("当前生效阈值：378,947");
+  // Periodic readings must not overwrite an unsent draft or reload the thread.
+  await editor.getByLabel("上下文上限（tokens）").fill("350k");
+  relay.emit({ ...report, source: "native_estimate", total_tokens: 372000, percentage: 93 });
+  await expect(editor.getByLabel("上下文上限（tokens）")).toHaveValue("350k");
+  relay.emit({ ...state, max_context_tokens: 300000, context_window_tokens: 315790 });
+  await expect(editor.getByRole("status")).toContainText("已保存上限 300,000，等待生效");
+  await expect(editor.getByRole("status")).toContainText("当前生效上限：400,000");
+  // A real application failure must remain visible even if the latest runtime
+  // happens to match a saved preference. Lack of a receipt is not that error.
+  relay.emit({ ...state, error: "connection lost" });
+  await expect(editor.getByRole("alert")).toContainText("connection lost");
+  await expect(editor.getByRole("status")).toContainText("与已保存设置一致");
+  relay.emit({ ...state, max_context_tokens: null, context_window_tokens: null });
+  await expect(editor.getByRole("status")).toContainText("默认值，待原生运行数据确认");
+  expect(relay.commands.some(c => ["query", "steer", "new_session", "set_codex_context", "reconnect"].includes(String(c.type)))).toBe(false);
+});
+
 test("session workspace distinguishes 300k capacity from native usage and compaction", async ({ page }, testInfo) => {
   const relay = await mockRightPanelRelay(page, { retained: false });
   await page.goto("/");
@@ -14070,6 +14116,114 @@ test("profile dots stay outside session highlights without shifting titles", asy
   await expect(page.getByRole("group", { name: "会话操作" })).toContainText("Codex 账号：nyx · Stack");
 });
 
+test("directory action menu dismisses outside and switches cleanly to session actions", async ({ page, isMobile }) => {
+  await page.goto("/tests/history-browser.html?profile-sidebar=code&theme=dark");
+  const activate = (locator: Locator, position?: { x: number; y: number }) =>
+    isMobile ? locator.tap({ position }) : locator.click({ position });
+  const trigger = page.getByRole("button", { name: "cc-remote 目录操作", exact: true });
+  const menu = page.locator(".card-menu");
+  const work = page.getByRole("tab", { name: "Work", exact: true });
+  await activate(trigger);
+  await expect(menu).toHaveCount(1);
+  await activate(menu.locator(".card-menu-account"));
+  await expect(menu).toBeVisible();
+  await activate(page.locator(".s-head"), { x: 4, y: 4 });
+  await expect(menu).toHaveCount(0);
+  await activate(trigger);
+  // Dismissal consumes the click instead of activating the surface underneath.
+  await activate(work);
+  await expect(menu).toHaveCount(0);
+  await expect(work).toHaveAttribute("aria-selected", "false");
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  await activate(trigger);
+  await activate(trigger);
+  await expect(menu).toHaveCount(0);
+  const card = page.locator(".scard.active");
+  await activate(trigger);
+  await activate(card.getByRole("button", { name: "更多操作" }));
+  await expect(menu).toHaveCount(1);
+  await expect(menu.getByRole("button", { name: "重命名", exact: true })).toBeVisible();
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  // The session popup covers this directory trigger; use keyboard activation.
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+  await expect(menu).toHaveCount(1);
+  await expect(card.getByRole("button", { name: "更多操作" })).toHaveAttribute("aria-expanded", "false");
+  await expect(menu.getByRole("button", { name: "新建会话", exact: true })).toBeVisible();
+  const other = page.locator(".scard").filter({ hasText: "cc-remote 派生" });
+  // Tap the exposed left edge; the menu can cover the title's center on phones.
+  await activate(other.locator(".scard-title"), { x: 4, y: 4 });
+  await expect(menu).toHaveCount(0);
+  await expect(other).not.toHaveClass(/active/);
+  await activate(other.locator(".scard-title"));
+  await expect(other).toHaveClass(/active/);
+});
+
+test("directory actions keep new-session account scope and confirm archived plus active deletion", async ({ page }, info) => {
+  await page.goto("/tests/history-browser.html?profile-sidebar=code&theme=dark");
+  const trigger = page.getByRole("button", { name: "cc-remote 目录操作", exact: true });
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+  const menu = page.locator(".card-menu");
+  await expect(menu.getByRole("button", { name: "新建会话", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(trigger).toBeFocused();
+  await page.getByRole("button", { name: /default.*Main/ }).click();
+  await trigger.click();
+  await menu.getByRole("button", { name: "新建会话", exact: true }).click();
+  await expect(page.getByTestId("new-work-profile")).toHaveText("primary");
+  expect(await page.evaluate(() => document.body.dataset.newDirectory)).toBe("/repo/cc-remote");
+  await page.getByRole("button", { name: "全部", exact: true }).click();
+  await trigger.click();
+  await menu.getByRole("button", { name: "删除目录会话…", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "永久删除此目录的会话？" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "删除会话", exact: true })).toBeDisabled();
+  expect(await page.evaluate(() => JSON.parse(document.body.dataset.directoryPrepare!))).toEqual({
+    cwd: "/repo/cc-remote", engine: "codex", action: "delete",
+  });
+  const response = async (value: object) => page.evaluate(value => window.dispatchEvent(new CustomEvent("directory-response", { detail: value })), value);
+  const plan = { type: "directory_action_plan", request_id: "prepare-1", plan_id: "plan-1", engine: "codex",
+    cwd: "/repo/cc-remote", action: "delete", profiles: ["Main", "Stack"], total: 12, eligible: 10,
+    archived: 3, skipped: 2, expires_at: Date.now() / 1000 + 120 };
+  await response({ ...plan, cwd: "/other" });
+  await expect(dialog).not.toContainText("10 个");
+  await response(plan);
+  await expect(dialog).toContainText("未归档 7 个 · 已归档 3 个");
+  await expect(dialog).toContainText("Test Mac · Main、Stack");
+  await expect(dialog).toContainText("项目目录和文件保留");
+  await page.screenshot({ path: info.outputPath("directory-delete-confirm.png") });
+  await dialog.getByRole("button", { name: "删除 10 个会话", exact: true }).click();
+  expect(await page.evaluate(() => document.body.dataset.directoryRun)).toBe("plan-1");
+  expect(await page.evaluate(() => document.body.dataset.directoryReads)).toBe("1");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeVisible();
+  await response({ type: "directory_action_progress", request_id: "run-1", plan_id: "plan-1", engine: "codex",
+    total: 10, succeeded: 8, skipped: 1, failed: 1, done: true, errors: ["一个会话未完成，请核查。"] });
+  const result = page.getByRole("dialog", { name: "删除结果" });
+  await expect(result).toContainText("8 个成功 · 3 个保留 · 1 个未完成");
+  await result.getByRole("button", { name: "完成", exact: true }).click();
+  await expect(result).not.toBeVisible();
+});
+
+test("directory actions expire without sending a mutation and allow a fresh confirmation", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?profile-sidebar=code");
+  await page.getByRole("button", { name: "cc-remote 目录操作", exact: true }).click();
+  await page.locator(".card-menu").getByRole("button", { name: "归档目录会话…", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "归档此目录的会话？" });
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent("directory-response", { detail: {
+    type: "directory_action_plan", request_id: "prepare-1", plan_id: "expired", engine: "codex", cwd: "/repo/cc-remote",
+    action: "archive", profiles: ["Main"], total: 1, eligible: 1, archived: 0, skipped: 0, expires_at: 1,
+  } })));
+  await dialog.getByRole("button", { name: "归档 1 个会话", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("清单已过期");
+  expect(await page.evaluate(() => document.body.dataset.directoryRun)).toBeUndefined();
+  await dialog.getByRole("button", { name: "重新读取" }).click();
+  expect(await page.evaluate(() => document.body.dataset.directoryReads)).toBe("2");
+  await dialog.getByRole("button", { name: "取消", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+});
+
 test("profile session card manual unread survives refresh until explicit opening", async ({ page }) => {
   await page.goto("/tests/history-browser.html?profile-sidebar=code");
   const active = page.locator(".scard").filter({ hasText: "看看当前仓库" });
@@ -14525,7 +14679,7 @@ test("session action menu keeps keyboard navigation and closes when its card scr
   const menu = page.locator(".card-menu");
   await expect(menu.getByRole("button", { name: "重命名" })).toBeFocused();
   await page.keyboard.press("End");
-  await expect(menu.getByRole("button", { name: "归档", exact: true })).toBeFocused();
+  await expect(menu.getByRole("button", { name: "删除会话", exact: true })).toBeFocused();
   await page.keyboard.press("Home");
   await expect(menu.getByRole("button", { name: "重命名" })).toBeFocused();
   await page.keyboard.press("Escape");

@@ -65,8 +65,8 @@ class DeleteDialog(Overlay):
             )
             if self.archive:
                 yield Label(
-                    "Codex must first archive its conversation tree.\n"
-                    "Delete is sent only after archive confirmation.",
+                    "Codex deletes this conversation and its child-agent records.\n"
+                    "Project files are kept; active work must finish first.",
                     markup=False,
                 )
             yield PickerList("No — keep session", "Yes — close side chat"

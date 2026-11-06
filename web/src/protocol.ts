@@ -391,6 +391,21 @@ export interface ArchiveSession extends Base { type: "archive_session"; session_
 export interface PinSession extends Base { type: "pin_session"; session_id: string; pinned: boolean; engine?: Engine; space?: Space }
 export interface DeleteWorkSession extends Base { type: "delete_work_session"; session_id: string; engine: Engine; space?: "work" }
 export interface DeleteSession extends Base { type: "delete_session"; session_id: string; engine: Engine; space?: Space }
+export interface DirectoryActionScope { engine: "claude" | "codex"; cwd: string; profile_id?: string | null; action: "archive" | "delete" }
+export interface PrepareDirectoryAction extends Base {
+  type: "prepare_directory_action"; engine: "claude" | "codex"; cwd: string;
+  profile_id?: string | null; action: "archive" | "delete";
+}
+export interface RunDirectoryAction extends Base { type: "run_directory_action"; plan_id: string }
+export interface DirectoryActionPlan extends Base {
+  type: "directory_action_plan"; request_id: string; plan_id: string;
+  engine: "claude" | "codex"; cwd: string; action: "archive" | "delete"; profiles: string[];
+  total: number; eligible: number; archived: number; skipped: number; expires_at: number;
+}
+export interface DirectoryActionProgress extends Base {
+  type: "directory_action_progress"; request_id: string; plan_id: string; engine: "claude" | "codex";
+  total: number; succeeded: number; skipped: number; failed: number; done: boolean; errors: string[];
+}
 export interface RollbackSession extends Base {
   type: "rollback_session";
   session_id: string;
@@ -785,6 +800,7 @@ export interface CodexContext extends Base {
 }
 
 export type ServerEvent = SessionArtifacts | FilesListed | CodexContext
+  | DirectoryActionPlan | DirectoryActionProgress
   | TurnFileChangesPage
   | Pong | CommandAck | ReplayStart | ReplayEnd | Snapshot | StateEvent | QueryQueueState | QueuedQueryDetail | QueuedQueryUpdated | Model | Effort | AutoCompact | Fast | CollaborationMode | BtwOpened | BtwSync | BtwClosed | Perm | PermissionProfiles | PermissionProfile | WebSearch | ContextReport | DiffReport | FilePreview | FileSaveResult | PreviewAsset | PreviewAuthorizationRequired | PreviewAuthorizationResult | History | TurnDetail | AgentDetail | HistoryImage | HistoryInvalidated | ArtifactInvalidated | Models | DshState | DshCommandResult | DshReadResult | DshDownloadChunk | EngineCapabilities | TakeoverState | SessionControl
   | AskUser | AskUserSync | AskUserClosed | ClaudePlanState | GoalState | CompletionState | StatusReport | RateLimitResetResult | Notice | RateLimitUpdate | RollbackResult | RewindPreview
@@ -794,7 +810,7 @@ export type ServerEvent = SessionArtifacts | FilesListed | CodexContext
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnUsage | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 89;
+export const PROTOCOL_VERSION = 90;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

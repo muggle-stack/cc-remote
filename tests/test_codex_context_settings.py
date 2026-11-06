@@ -309,7 +309,8 @@ async def test_unconfirmed_context_is_not_reloaded_at_each_turn_boundary(
     if reconnect_fails:
         assert event.error == "connection lost"
     else:
-        assert "尚未确认原生会话已应用" in event.error
+        assert event.error is None  # pending is a confirmation state, not a failed request.
+        assert "尚未确认原生会话已应用" in settings.error
     # An explicit save, including reselecting the same value, permits one retry.
     await settings.select(handle, capacity)
     await machine._apply_codex_context(ctx)

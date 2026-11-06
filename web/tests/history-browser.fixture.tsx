@@ -1,4 +1,6 @@
 import { MobileSidebarFixture } from "./fixtures/mobile-sidebar";
+import DirectoryActionSheet from "../src/components/DirectoryActionSheet";
+import type { DirectoryActionScope } from "../src/protocol";
 import { RightPanelPresentation } from "../src/right-panel-presentation";
 import { ImageGalleryFixture } from "./fixtures/image-gallery";
 import {
@@ -2252,6 +2254,14 @@ export function HistoryBrowserFixture() {
 }
 
 function ProfileSidebarFixture() {
+  const [directoryScope, setDirectoryScope] = useState<DirectoryActionScope | null>(null);
+  const directoryListener = useRef<((event: ServerEvent) => boolean) | null>(null);
+  const listenDirectory = useCallback((listener: ((event: ServerEvent) => boolean) | null) => { directoryListener.current = listener; }, []);
+  useEffect(() => {
+    const receive = (event: Event) => { directoryListener.current?.((event as CustomEvent<ServerEvent>).detail); };
+    window.addEventListener("directory-response", receive);
+    return () => window.removeEventListener("directory-response", receive);
+  }, []);
   const params = new URLSearchParams(window.location.search);
   const theme = params.get("theme") === "dark"
     ? "dark"
@@ -2328,7 +2338,8 @@ function ProfileSidebarFixture() {
         onSpaceChange={setSpace}
         onSelect={setActiveSessionId}
         onNew={(profileId) => setNewProfileId(profileId ?? "none")}
-        onNewInDir={noop}
+        onNewInDir={(cwd, profileId) => { setNewProfileId(profileId ?? "none"); document.body.dataset.newDirectory = cwd; }}
+        onDirectoryAction={(cwd, action, profileId) => setDirectoryScope({ cwd, action, profile_id: profileId, engine: "codex" })}
         onClose={noop}
         onRename={noop}
         onArchive={noop}
@@ -2337,6 +2348,14 @@ function ProfileSidebarFixture() {
         onForkWorktree={noop}
         onMigrate={noop}
       />
+      {directoryScope && <DirectoryActionSheet scope={directoryScope} machineLabel="Test Mac"
+        listen={listenDirectory} onClose={() => setDirectoryScope(null)}
+        prepare={scope => {
+          document.body.dataset.directoryPrepare = JSON.stringify(scope);
+          document.body.dataset.directoryReads = String(Number(document.body.dataset.directoryReads ?? 0) + 1);
+          return `prepare-${document.body.dataset.directoryReads}`;
+        }}
+        run={planId => { document.body.dataset.directoryRun = planId; return "run-1"; }} />}
     </>
   );
 }

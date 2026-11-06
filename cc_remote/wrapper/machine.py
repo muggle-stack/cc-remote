@@ -349,6 +349,7 @@ from cc_remote.wrapper.codex_detail_pages import (
 )
 from cc_remote.wrapper.btw_history import BtwHistory
 from cc_remote.wrapper.codex_sessions import (
+    catalog_index_only, codex_catalog_read_mode,
     CODEX_EXACT_CATALOG_MAX_IDS,
     list_codex_sessions, codex_exact_catalog_rows, codex_session_cwd,
     codex_rollout_path, codex_model, codex_effort, codex_session_settings,
@@ -361,6 +362,7 @@ from cc_remote.wrapper.codex_sessions import (
 from cc_remote.wrapper.rollout_io import (
     is_compressed_rollout, rollout_fstat, rollout_open, rollout_stat,
 )
+from cc_remote.wrapper.directory_actions import DirectoryActions, defer_session_lists
 from cc_remote.wrapper.codex_models import (
     MODEL_DEFAULT_EFFORT,
     clamp_effort,
@@ -2411,6 +2413,8 @@ class WrapperMachine:
         self._codex_session_list_refresh_task: Optional[asyncio.Task] = None
         self._codex_session_list_epoch = 0
         self._codex_session_list_refresh_epoch = -1
+        self._codex_session_list_refresh_index_only = False
+        self._directory_actions = DirectoryActions(self)
         self._codex_session_profile_errors: tuple[tuple[str, str], ...] = ()
         # Every subscribed handle on one shared daemon can observe the same CLI
         # thread creation. Deduplicate the content-free catalog hint before it
@@ -11946,11 +11950,12 @@ class WrapperMachine:
         creation = cmd.type == "new_session"
         if creation:
             target = None
-        serial = not urgent and not (
+        directory_action = cmd.type in {"prepare_directory_action", "run_directory_action"}
+        serial = not urgent and not directory_action and not (
             target and cmd.type in {"query", "steer", "get_context", "interrupt"})
         await self._command_scheduler.submit(
             cmd, target=target, serial=serial,
-            barrier=not target and not creation and not urgent,
+            barrier=not target and not creation and not urgent and not directory_action,
             urgent=urgent,
         )
 
@@ -12258,6 +12263,9 @@ class WrapperMachine:
             await self._send_command_ack(client_id, cmd_id)
 
     async def _handle(self, cmd) -> None:
+        rejected = await self._directory_actions.reject_conflict(cmd)
+        if rejected is not None:
+            return rejected
         rejected = await self._reject_nonowner_btw_command(cmd)
         if rejected is not None:
             return rejected
@@ -20733,7 +20741,7 @@ class WrapperMachine:
 
     async def _publish_codex_context(self, ctx):
         from cc_remote.protocol import CodexContext
-        from cc_remote.wrapper.codex_context_settings import model_context_bounds
+        from cc_remote.wrapper.codex_context_settings import model_context_bounds, UNCONFIRMED_CONTEXT_MESSAGE
 
         settings = getattr(ctx.sdk, "context_settings", None)
         if ctx.engine != "codex" or settings is None:
@@ -20750,7 +20758,10 @@ class WrapperMachine:
             context_window_tokens=settings.window,
             pending=settings.pending,
             mutable=ctx.space == "code" and not ctx.btw,
-            error=settings.error)
+            # Missing a configuration receipt is represented by pending, not
+            # an application failure. UI can independently observe matching
+            # native runtime values without encouraging another reload.
+            error=None if settings.pending and settings.error == UNCONFIRMED_CONTEXT_MESSAGE else settings.error)
         await self._emit(ctx, event)
         return event
 
@@ -27311,11 +27322,15 @@ class WrapperMachine:
         self, engine: str, space: str = "code",
     ) -> SessionListInvalidated:
         """Broadcast only a read hint; browsers own the correlated refresh."""
+        if defer_session_lists():
+            return None
         event = SessionListInvalidated(engine=engine, space=space)
         await self.transport.send(event)
         return event
 
     async def _handle_list_sessions(self, cmd) -> None:
+        if defer_session_lists():
+            return None
         engine = getattr(cmd, "engine", "claude")
         space = getattr(cmd, "space", "code")
         if engine == "codex":
@@ -27650,11 +27665,13 @@ class WrapperMachine:
         epoch = self._codex_session_list_epoch
         task = self._codex_session_list_refresh_task
         if (task is None or task.done()
-                or self._codex_session_list_refresh_epoch != epoch):
+                or self._codex_session_list_refresh_epoch != epoch
+                or (catalog_index_only() and not self._codex_session_list_refresh_index_only)):
             task = asyncio.create_task(
                 self._read_codex_profile_catalog())
             self._codex_session_list_refresh_task = task
             self._codex_session_list_refresh_epoch = epoch
+            self._codex_session_list_refresh_index_only = catalog_index_only()
         try:
             raw, profile_errors = await asyncio.shield(task)
         finally:
@@ -28493,6 +28510,8 @@ class WrapperMachine:
 
     async def _list_codex_sessions(self, cmd) -> None:
         """Paint cached rows now, then reconcile a stale catalog in background."""
+        if defer_session_lists():
+            return None
         cached = self._codex_session_list_cache
         cached_event = None
         if cached is not None:
@@ -28506,7 +28525,12 @@ class WrapperMachine:
             if time.monotonic() - cached[0] <= 1.0:
                 return cached_event
         try:
-            raw = await self._refresh_codex_session_catalog()
+            # The mutation has already committed to the authoritative native
+            # index. Its response must not wait for a complete JSONL repair in
+            # every account. Ordinary ListSessions still reconciles old/native
+            # CLI files, preserving discovery outside cc-remote.
+            with codex_catalog_read_mode(index_only=getattr(cmd, "type", "list_sessions") != "list_sessions"):
+                raw = await self._refresh_codex_session_catalog()
         except Exception as e:
             if cached_event is not None:
                 log.warning("stale Codex session catalog refresh failed",
@@ -29952,6 +29976,12 @@ class WrapperMachine:
             name=f"codex-archive-reconcile-{cmd_id}",
         )
 
+    async def _handle_prepare_directory_action(self, cmd):
+        return await self._directory_actions.prepare(cmd)
+
+    async def _handle_run_directory_action(self, cmd):
+        return await self._directory_actions.run(cmd)
+
     async def _handle_archive_session(self, cmd) -> None:
         sid = self._resolve_session_alias(cmd.session_id) or cmd.session_id
         is_codex = await self._is_codex_session(sid)
@@ -30029,6 +30059,7 @@ class WrapperMachine:
                         [sid],
                         False,
                     )
+                    self._invalidate_codex_session_catalog()
                     log.info(
                         "codex session archive toggled",
                         session_id=sid,
@@ -31035,12 +31066,10 @@ class WrapperMachine:
             if action == "删除":
                 if sdk.daemon_mode != "auto":
                     raise RuntimeError(
-                        "archived deletion requires shared control"
+                        "deletion requires shared control"
                     )
-                # An archived thread must never be resumed merely to delete it:
-                # resume can move its rollout back to the active store before
-                # thread/delete validates the archive lifecycle. Use only the
-                # unbound shared owner and fail closed if it is unavailable.
+                # Delete either active or archived storage through the native
+                # owner, without resuming a session or changing archive state.
                 await sdk.connect(cwd=target_cwd, control_only=True)
             elif sdk.daemon_mode == "auto":
                 try:
@@ -32784,20 +32813,13 @@ class WrapperMachine:
                     "无法确认 Codex 会话归档状态，未执行删除",
                 )
             catalog_rollout_path, catalog_archived = rollout_record
-            if not catalog_archived:
-                return await self._send_code_delete_error(
-                    cmd,
-                    sid,
-                    ERR_BUSY,
-                    "请先归档 Codex 会话，确认归档完成后再删除",
-                )
             if not self._codex_catalog_rollout_is_profile_local(
                 profile,
                 catalog_rollout_path,
-                archived=True,
+                archived=catalog_archived,
             ):
                 log.error(
-                    "Codex archived rollout escaped CODEX_HOME",
+                    "Codex rollout escaped CODEX_HOME",
                     profile_id=profile.id,
                     session_id=native_sid,
                 )
@@ -32805,7 +32827,7 @@ class WrapperMachine:
                     cmd,
                     sid,
                     ERR_INTERNAL,
-                    "Codex CODEX_HOME 迁移不完整：已归档会话目录仍指向"
+                    "Codex CODEX_HOME 迁移不完整：会话目录仍指向"
                     "账号目录外；未执行删除",
                 )
         ctx = self._ctx_for(sid)

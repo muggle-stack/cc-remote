@@ -56,10 +56,10 @@ def _discard(path: str) -> None:
         Path(entry[1]).unlink(missing_ok=True)
 
 
-def _decoded_path(path: str) -> str:
+def _decoded_path(path: str, *, follow_symlinks=True) -> str:
     """Called under _lock; returned path must be opened before releasing it."""
     global _directory
-    before = os.stat(path)
+    before = os.stat(path, follow_symlinks=follow_symlinks)
     if not stat.S_ISREG(before.st_mode):
         raise OSError("Codex rollout is not a regular file")
     identity = _identity(before)
@@ -73,7 +73,7 @@ def _decoded_path(path: str) -> str:
     fd, target = tempfile.mkstemp(dir=_directory.name, suffix=".jsonl")
     try:
         size = 0
-        with os.fdopen(fd, "wb") as output, open(path, "rb") as raw:
+        with os.fdopen(fd, "wb") as output, _native_open(path, "rb", follow_symlinks=follow_symlinks) as raw:
             if _identity(os.fstat(raw.fileno())) != identity:
                 raise OSError("Codex rollout changed before decompression")
             with zstd.ZstdFile(raw, "rb", options=_OPTIONS) as source:
@@ -83,7 +83,7 @@ def _decoded_path(path: str) -> str:
                         raise OSError("Decoded Codex rollout exceeds the read limit")
                     output.write(chunk)
             if (_identity(os.fstat(raw.fileno())) != identity
-                    or _identity(os.stat(path)) != identity):
+                    or _identity(os.stat(path, follow_symlinks=follow_symlinks)) != identity):
                 raise OSError("Codex rollout changed during decompression")
         _cache[path] = (identity, target, size)
         # One large entry may exceed the soft cache budget, but never the hard
@@ -101,16 +101,23 @@ def _decoded_path(path: str) -> str:
         raise
 
 
-def rollout_open(path, mode="rb", **kwargs):
+def _native_open(path, mode, *, follow_symlinks=True, **kwargs):
+    if not follow_symlinks:
+        kwargs["opener"] = lambda name, flags: os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK)
+    return open(path, mode, **kwargs)
+
+
+def rollout_open(path, mode="rb", *, follow_symlinks=True, **kwargs):
     """Open a seekable read view; never open a native rollout for writing."""
     if mode not in {"r", "rt", "rb"}:
         raise ValueError("Rollout views are read-only")
     if not is_compressed_rollout(path):
-        return open(path, mode, **kwargs)
+        return _native_open(path, mode, follow_symlinks=follow_symlinks, **kwargs)
     with _lock:
-        native = os.path.realpath(path)
-        decoded = _decoded_path(native)
-        info = os.stat(native)
+        native = os.path.realpath(path) if follow_symlinks else os.path.abspath(path)
+        decoded = (_decoded_path(native) if follow_symlinks
+                   else _decoded_path(native, follow_symlinks=False))
+        info = os.stat(native, follow_symlinks=follow_symlinks)
         identity, _, size = _cache[native]
         if _identity(info) != identity:
             raise OSError("Codex rollout changed before opening read view")

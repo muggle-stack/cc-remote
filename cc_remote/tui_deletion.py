@@ -1,10 +1,9 @@
-"""Confirmed native deletion, including Codex Code's archive prerequisite."""
+"""Direct native deletion, confirmed by the exact command's catalog and ACK."""
 
 import asyncio
 from dataclasses import dataclass
 import uuid
 
-from cc_remote.protocol import ArchiveSession
 from cc_remote.tui import _safe_remote_text
 
 
@@ -38,13 +37,8 @@ class SessionDeletion:
         ):
             self.client.notice = "Session scope changed; reopen the session tree"
             return False
-        archive = (command.engine == "codex" and command.space == "code"
-                   and row.get("tag") != "archived")
-        self.tasks[sid] = asyncio.create_task(self.run(command, archive))
-        self.client.notice = (
-            "Archiving before deletion…" if archive
-            else "Delete requested; waiting for server confirmation"
-        )
+        self.tasks[sid] = asyncio.create_task(self.run(command))
+        self.client.notice = "Delete requested; waiting for server confirmation"
         return True
 
     async def wait_for(self, command):
@@ -62,16 +56,10 @@ class SessionDeletion:
             if not receipt.future.done():
                 receipt.future.cancel()
 
-    async def run(self, command, archive):
+    async def run(self, command):
         sid = command.session_id
-        stage = "Archive" if archive else "Deletion"
+        stage = "Deletion"
         try:
-            if archive:
-                await self.wait_for(ArchiveSession(
-                    session_id=sid, engine=command.engine,
-                    space=command.space, archived=True,
-                ))
-            stage = "Deletion"
             self.client.notice = "Deleting; waiting for server confirmation…"
             await self.wait_for(command)
             # Only the correlated successful deletion may retire a local tab.
@@ -121,10 +109,7 @@ class SessionDeletion:
                 return  # An unavailable catalog cannot prove absence.
             row = next((row for row in event.get("sessions", [])
                         if row.get("session_id") == command.session_id), None)
-            receipt.confirmed = (
-                row is not None and row.get("tag") == "archived"
-                if command.type == "archive_session" else row is None
-            )
+            receipt.confirmed = row is None
         # An ACK means handled, not successful. Errors and the exact catalog
         # reply precede it; neither an unrelated list nor ACK alone is proof.
         if receipt.acked and receipt.confirmed:

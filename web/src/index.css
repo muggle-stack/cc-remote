@@ -1035,6 +1035,7 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
   .agent-detail-panel{ top:var(--app-offset-top,0px); left:0; right:0; bottom:auto; width:100%; height:var(--app-height,100dvh); border-width:1px 0 0; border-radius:0; animation:panel-in-m .24s var(--ease); }
   .artifact-head{ gap:7px; padding-inline:10px; }
   .artifact-path{ display:none; }
+  .artifact-panel > .artifact-head > .artifact-title{ flex:1 1 0; }
   .preview-modes{ margin-left:auto; }
   .artifact-body{ padding:13px 14px; }
   .artifact-body.rendered-artifact-body{ padding:0; }
@@ -2112,6 +2113,7 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .sgroup-add{ flex:none; width:26px; height:26px; display:flex; align-items:center; justify-content:center; color:var(--dim); border-radius:50%; opacity:.85; transition:opacity .14s, background .14s, color .14s; }
 .sgroup-add:hover{ opacity:1; color:var(--accent-text,var(--accent)); background:var(--accent-weak); }
 .sgroup-add svg{ width:14px; height:14px; }
+.directory-menu-divider{height:1px;background:var(--border);margin:4px 6px}
 
 /* NEW CHAT welcome page (centered composer a la Claude app / Codex) */
 .newchat{ flex:1; display:flex; align-items:center; justify-content:center; padding:24px 20px; overflow-y:auto; }

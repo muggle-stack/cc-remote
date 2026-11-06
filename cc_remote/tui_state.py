@@ -20,6 +20,8 @@ MAX_BLOCK_CHARS = 64 * 1024
 MAX_BLOCKS = 160
 TRUNCATED = "\n[Terminal display limit reached; inspect turn details.]"
 REPORT_TYPES = {
+    "directory_action_plan",
+    "directory_action_progress",
     "models",
     "engine_capabilities",
     "permission_profiles",

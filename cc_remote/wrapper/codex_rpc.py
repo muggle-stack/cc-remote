@@ -118,7 +118,7 @@ async def codex_rpc(
     # ContextVars propagate to child tasks. A speculative/background task must
     # never read another task's stdio or outlive its parent's connection.
     if (scope is not None and scope[0] is asyncio.current_task()
-            and method in {"thread/turns/list", "thread/items/list"}
+            and method in {"thread/turns/list", "thread/items/list", "thread/list"}
             and nofile_soft_limit is None):
         _owner, stack, readers = scope
         key = (codex_home, cwd)
