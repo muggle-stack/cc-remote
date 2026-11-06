@@ -4,6 +4,7 @@ import { webview } from '@kit.ArkWeb';
 import { util } from '@kit.ArkTS';
 import { PushBridge } from '../model/PushBridge';
 import { ExternalBrowser } from '../model/ExternalBrowser';
+import { Downloads } from '../model/Downloads';
 import { PushTarget } from '../model/PushRoute';
 import { httpsOrigin, navigationAction, newWindowAction, sameOrigin, serverOrigin } from '../model/UrlPolicy';
 
@@ -28,6 +29,7 @@ struct Index {
   private popupTimeout: number = 0;
   private popupNavigationPending: boolean = false;
   private externalBrowser: ExternalBrowser = new ExternalBrowser();
+  private downloads: Downloads | undefined = undefined;
   private store: preferences.Preferences | undefined = undefined;
   private shellScript: string = '';
   private settingsOpen: boolean = false;
@@ -47,6 +49,9 @@ struct Index {
       this.pushScript = new util.TextDecoder().decodeToString(
         context.resourceManager.getRawFileContentSync('push-bridge.js'));
       this.push = new PushBridge(context, this.store);
+      this.downloads = new Downloads(context, () => this.server, message => {
+        this.getUIContext().getPromptAction().showToast({ message: message });
+      });
       this.server = serverOrigin(this.store.getSync('server', '') as string);
       this.address = this.server;
       this.configuring = this.server === '';
@@ -57,6 +62,7 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    this.downloads?.cancel();
     this.push?.detach();
     this.cancelPendingPopup();
     webview.WebCookieManager.saveCookieAsync().catch(() => {});
@@ -96,6 +102,7 @@ struct Index {
     this.saving = true;
     try {
       if (this.server !== '' && this.server !== next) {
+        this.downloads?.cancel();
         this.closeBrowser();
         await this.push?.resetServer();
         this.pushTarget = '';
@@ -137,7 +144,7 @@ struct Index {
       }
       if (result.index === 2) this.getUIContext().getPromptAction().showDialog({
         title: 'cc-remote · 鸿蒙版',
-        message: '0.1.0-preview.5\n直接使用鸿蒙 ArkWeb。聊天与任务仍在你的设备上运行。',
+        message: '0.1.0-preview.6\n直接使用鸿蒙 ArkWeb。聊天与任务仍在你的设备上运行。',
         buttons: [{ text: '知道了', color: '#2962E8' }]
       });
     }).catch(() => {}).finally(() => { this.settingsOpen = false; });
@@ -217,6 +224,7 @@ struct Index {
   private attached(isChat: boolean): void {
     const controller = isChat ? this.chat : this.browser;
     controller.setCustomUserAgent(webview.WebviewController.getDefaultUserAgent() + ' cc-remote-harmony/0.1.0');
+    this.downloads?.attach(controller);
     if (!isChat && this.popupHandler) {
       const handler = this.popupHandler;
       this.popupHandler = undefined;

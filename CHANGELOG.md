@@ -4,7 +4,13 @@
 
 ## Unreleased
 
-- Preserve per-response process counts and native clocks in Claude history summaries, so fresh login, detail expansion and collapse keep the same original/continuation headers. Wire protocol v89 requires coordinated Relay, Wrapper and Web updates.
+- Add native HarmonyOS downloads for generated images/documents and authenticated media, with a system save picker and cancellation feedback. Native app preview.6 requires an in-place HAP update.
+- Dismiss directory menus on outside clicks/taps and keep mobile file-preview actions aligned to the right.
+- Reconcile the Codex context popover and settings panel with native runtime capacity, so a matching saved limit no longer says it is waiting to take effect. Keep configuration receipt uncertainty separate from real application errors.
+- Add confirmed Code directory archive/delete actions and move New Session into the directory menu. Codex deletion uses native `thread/delete` directly for active or archived threads; project files are retained. Wire protocol v90 requires coordinated Relay, Wrapper and Web updates.
+- Refresh Codex archive changes from the native index without repeated catalog repair, and read compressed child-agent lifecycles without resurrecting completed tasks during a cold scan.
+- Add zoom, fit-to-width and reset controls to HTML page previews, including trackpad/touch gestures, while retaining page state and the isolated preview boundary.
+- Preserve per-response process counts and native clocks in Claude history summaries, so fresh login, detail expansion and collapse keep the same original/continuation headers.
 - Add Code-equivalent permission controls to Work, including per-session persistence and side-chat inheritance.
 - Preserve Claude background tasks when sending another message after the foreground reply ends; task bookkeeping no longer triggers an unintended reconnect.
 - Keep Claude continuation tools before their final answer when a history refresh adds background-task return metadata, avoiding a duplicate empty continuation after switching sessions.
