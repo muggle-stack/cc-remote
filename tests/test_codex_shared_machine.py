@@ -2434,6 +2434,16 @@ def test_interrupt_racing_turn_start_recovery_reaches_reattached_turn():
 
 def test_completed_lost_start_retires_checkpoint_before_following_turn():
     async def go() -> None:
+        loop = asyncio.get_running_loop()
+        checkpoint_cleaned = asyncio.Event()
+
+        class ObservedCheckpoint(_RecordingCheckpoint):
+            def cleanup(self, *, force: bool = False) -> None:
+                super().cleanup(force=force)
+                # Cleanup runs in asyncio.to_thread; observe its completion
+                # instead of assuming a fixed number of event-loop yields.
+                loop.call_soon_threadsafe(checkpoint_cleaned.set)
+
         machine, transport = _mk_machine()
         ctx = _mk_ctx("sid", "sid")
         ctx.engine = "codex"
@@ -2442,7 +2452,7 @@ def test_completed_lost_start_retires_checkpoint_before_following_turn():
         ctx.sdk = sdk
         ctx.state = "running"
         ctx.active_msg_id = "browser-submit"
-        checkpoint = _RecordingCheckpoint()
+        checkpoint = ObservedCheckpoint()
         ctx.codex_checkpoint = checkpoint
         machine.sessions[ctx.key] = ctx
         machine._schedule_history_refresh = lambda *_args, **_kwargs: None
@@ -2450,10 +2460,7 @@ def test_completed_lost_start_retires_checkpoint_before_following_turn():
         turn = asyncio.create_task(
             machine._run_turn(ctx, "do one non-idempotent task"))
         ctx.turn_task = turn
-        for _ in range(100):
-            if ("cleanup", True) in checkpoint.calls:
-                break
-            await asyncio.sleep(0)
+        await asyncio.wait_for(checkpoint_cleaned.wait(), timeout=1.0)
 
         assert turn.done() is False
         assert ctx.state == "running"
