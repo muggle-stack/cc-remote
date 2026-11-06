@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build && npm run build:viewer-runner && node scripts/check-bundle-budget.mjs",
-    "build:viewer-runner": "vite build --config vite.viewer-runner.config.ts",
+    "build:viewer-runner": "vite build --config vite.viewer-runner.config.ts && vite build --config vite.viewer-runner.config.ts --mode zoom",
     "build:theme-preview": "vite build --config vite.theme-preview.config.ts",
     "lint": "oxlint",
     "test:compile": "tsc -p tsconfig.tests.json",

@@ -846,6 +846,29 @@ async def test_utf16_navigation_completes_over_real_http(tmp_path, publication, 
 
 
 @pytest.mark.asyncio
+async def test_isolated_zoom_asset_requires_live_authorized_grant(tmp_path, publication):
+    async with live_viewer(tmp_path, publication) as (client, app, cfg, site):
+        static = tmp_path / "static"
+        static.mkdir()
+        cfg.static_dir = str(static)
+        script = b"window.fixtureZoom = true;"
+        (static / "cc-remote-viewer-zoom.js").write_bytes(script)
+        grant = await create_grant(client, cfg)
+        url = grant["origin"] + "/__cc_viewer/zoom.js"
+        assert (await client.get(url)).status_code == 401
+        await activate_grant(client, cfg, grant)
+        response = await client.get(url)
+        assert response.content == script
+        assert response.headers["cache-control"] == "no-store"
+        assert response.headers["content-type"].startswith("text/javascript")
+        head = await client.head(url)
+        assert not head.content and int(head.headers["content-length"]) == len(script)
+        assert (await client.get(grant["origin"] + "/__cc_viewer/private.js")).status_code == 404
+        await client.delete(f'/api/viewers/{grant["id"]}', headers={"Origin": cfg.public_origin})
+        assert (await client.get(url)).status_code == 410
+
+
+@pytest.mark.asyncio
 async def test_real_resource_channel_multifile_range_cache_and_close(tmp_path, publication):
     async with live_viewer(tmp_path, publication) as (client, app, cfg, site):
         catalog = await client.get("/api/viewers")
