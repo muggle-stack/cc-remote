@@ -850,6 +850,13 @@ function installCachedDetailRestore(
       || summary.detailProjection
       || statedProcessDetailState(summary) === "none") return summary;
   const source = cached.detailProjection?.blocks ?? cached.blocks;
+  // Claude continuation answers are also process boundaries. Removing every
+  // answer from a cached ordered projection groups all later thinking/tools
+  // into its first continuation. Reuse only exact, currently authoritative
+  // summary answers in those slots; never revive cached answer payloads.
+  const responseAnswers = summary.responseProcesses?.some(row => row.background)
+    ? new Map(summary.blocks.filter(isFinalTextBlock).map(block => [block.message_id, block]))
+    : new Map<string, TextBlock>();
   // A session-wide running bit is not turn ownership. The next task may have
   // started before its UserMsg/TurnBinding while a same-revision cache row from
   // the completed predecessor is still arriving. Preserve a cached open Plan
@@ -859,8 +866,12 @@ function installCachedDetailRestore(
       && exactTurnAliases(summary).has(activeOwnerId)
       && exactTurnAliases(cached).has(activeOwnerId));
   const blocks = repairCachedAgentClassification(
-    source.filter((block) => !isFinalTextBlock(block)
-      && !isSyntheticReturnReceipt(block)),
+    source.flatMap((block): Block[] => {
+      if (isSyntheticReturnReceipt(block)) return [];
+      if (!isFinalTextBlock(block)) return [block];
+      const answer = responseAnswers.get(block.message_id);
+      return answer ? [{ ...answer }] : [];
+    }),
   ).map((block) => cloneSettledCachedDetailBlock(
     block, summary, preserveOpenPlans));
   if (blocks.length === 0) return summary;

@@ -27,7 +27,7 @@ import type { SessionMessageNavigation } from "../session-messages";
 import type { LoadTurnFilePage } from "../turn-file-pages";
 import { usageForTurn, type TurnUsageReadings } from "../turn-usage";
 import { MessageBlock } from "./MessageBlock";
-import { assistantContinuations, continuationTerminalOwner, type AssistantContinuation } from "../assistant-continuations";
+import { assistantContinuations, ContinuationRenderKeys, continuationTerminalOwner, type AssistantContinuation } from "../assistant-continuations";
 import { returnRunId, returnedAgents } from "../agent-returns";
 import { TimedMessageTag } from "./TimedMessageTag";
 import { Icon, ClaudeMark, EngineWorking, EngineDone } from "../icons";
@@ -508,6 +508,7 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
   // page can hand back to the live runtime without requiring a second scroll.
   const manualLatestIntentRef = useRef<string | null>(null);
   const turnKeySnapshotRef = useRef<TurnKeySnapshot | null>(null);
+  const continuationRenderKeysRef = useRef(new ContinuationRenderKeys());
   const turnImagePreviewCacheRef = useRef(new TurnImagePreviewCache());
   // `historyViewRevision` is kept as a compatibility scope for the
   // non-destructive recovery path. Deep-history browsing supplies an explicit
@@ -650,6 +651,7 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
     scrollScope,
   );
   turnKeySnapshotRef.current = turnKeySnapshot;
+  continuationRenderKeysRef.current.update(scrollScope, turns);
   const [activeHistoryGeneration, setActiveHistoryGeneration] = useState<number | null>(null);
   const [measurementBoundary, setMeasurementBoundary] =
     useState<RetainedMeasurementBoundary | null>(null);
@@ -870,7 +872,12 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
         && !controller.isFollowing()
         && !historyAnchorRef.current.current() && !detailAnchorRef.current
         && !textSelectionRef.current && !scrollCoordinatorRef.current.isInteractionLocked()
-        && touchYRef.current === null && !touchMomentumActiveRef.current
+        && touchYRef.current === null
+        // A terminal collapse can arrive during the touchend idle lease.
+        // Its layout delta is independent of native momentum; retaining that
+        // delta avoids capturing the already-collapsed position on scroll.
+        && (!touchMomentumActiveRef.current || reading.expandedProcesses.some(
+          process => process.dataset.processAutoCollapsed === "true"))
         && !scrollbarDragIntentRef.current) {
       delta = readingPositionDelta(el, reading);
     }
@@ -2951,6 +2958,7 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
             const generatedImages = generatedOutputImages(timelineBlocks);
             const modelNotices = modelFallbackNotices(timelineBlocks);
             const narrative = assistantContinuations(timelineBlocks, finalBlocks, engine, t.responseProcesses);
+            continuationRenderKeysRef.current.apply(t.id, narrative.continuations);
             const renderAgentReturn = (receipt: ProcessBlock) => {
               const runId = returnRunId(receipt);
               return runId && onOpenAgent ? <button key={receipt.item_id} type="button" className="agent-return-link"

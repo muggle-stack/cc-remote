@@ -203,10 +203,10 @@ test("turn regressions keyboard scrolling leaves the live tail and resumes at bo
   await expect(control).toHaveCSS("outline-width", "2px");
 });
 
-for (const visible of ["thinking and answer", "only answer", "process header and answer", "long answer", "background answer"]) {
+for (const visible of ["thinking and answer", "only answer", "process header and answer", "long answer", "background answer", "touch-release answer"]) {
   test(`turn regressions completion preserves the reading paragraph with ${visible} visible`, async ({ page, isMobile }, testInfo) => {
     const options = visible === "process header and answer" ? "&short-process=1"
-      : visible === "background answer" ? "&background=1&long-answer=1"
+      : visible === "background answer" || visible === "touch-release answer" ? "&background=1&long-answer=1"
       : visible === "long answer" ? "&long-answer=1" : "";
     await page.goto(`/tests/history-browser.html?completion-reading=1${options}`);
     const viewport = page.locator(".thread");
@@ -233,7 +233,7 @@ for (const visible of ["thinking and answer", "only answer", "process header and
     await page.getByTestId("append-answer").evaluate(node => (node as HTMLButtonElement).click());
     await expect.poll(offset).toBeCloseTo(before, 0);
     const readingNode = await paragraph.elementHandle();
-    const frames = await paragraph.evaluate(node => new Promise<number[]>((resolve) => {
+    const frames = await paragraph.evaluate((node, duringTouchRelease) => new Promise<number[]>((resolve) => {
       const viewport = node.closest(".thread")!;
       const samples: number[] = [];
       const sample = () => {
@@ -243,9 +243,22 @@ for (const visible of ["thinking and answer", "only answer", "process header and
         // so a jump to bottom followed by a correction cannot pass this test.
         else requestAnimationFrame(() => setTimeout(sample, 0));
       };
+      if (duringTouchRelease) {
+        // Complete in the same task as touchend, before the idle lease can
+        // expire. A slow runner must not accidentally omit this race.
+        const touch = { identifier: 1, clientX: 160, clientY: 220, target: viewport };
+        for (const type of ["touchstart", "touchend"]) {
+          const event = new Event(type, { bubbles: true, cancelable: true });
+          Object.defineProperties(event, {
+            touches: { value: type === "touchend" ? [] : [touch] },
+            changedTouches: { value: [touch] },
+          });
+          viewport.dispatchEvent(event);
+        }
+      }
       document.querySelector<HTMLButtonElement>('[data-testid="complete-answer"]')!.click();
       requestAnimationFrame(() => setTimeout(sample, 0));
-    }));
+    }), visible === "touch-release answer");
     await expect(page.locator(".process-reasoning-body")).toHaveCount(0);
     await waitForScrollIdle(page);
     const after = await offset();
@@ -15578,8 +15591,8 @@ test("Claude fresh query waits for live output without flashing a history detail
   expect(relay.commands.filter(c => c.type === "get_turn_detail")).toEqual([]);
 });
 
-for (const firstHeader of [0, 3]) {
-test(`Claude cold history keeps response headers through expand collapse and reload (${firstHeader})`, async ({ page }) => {
+for (const firstHeader of [0, 1, 2, 3, 4]) {
+test(`turn regressions Claude cold history keeps response headers through expand collapse and reload (${firstHeader})`, async ({ page }) => {
   const fixture = JSON.parse(readFileSync("tests/fixtures/claude-responses.json", "utf8"));
   const sid = "response-history";
   const relay = await mockRightPanelRelay(page, { engine: "claude", parentSid: sid,
@@ -15592,6 +15605,8 @@ test(`Claude cold history keeps response headers through expand collapse and rel
   await expect(heads).toHaveCount(5);
   const cold = ["已处理8s2项", ...Array(4).fill("已处理10s2项")];
   await expect.poll(headerText).toEqual(cold);
+  const answerNodes = await turn.locator(".assistant-answer-segment").elementHandles();
+  expect(answerNodes).toHaveLength(5);
   expect(relay.commands.filter(c => c.type === "get_turn_detail")).toHaveLength(0);
   // This is a fresh browser context: no persisted detail can hide the cold
   // summary problem. Expanding the original header requests the parent's detail.
@@ -15600,7 +15615,11 @@ test(`Claude cold history keeps response headers through expand collapse and rel
   relay.emit({ type: "turn_detail", sid, session_id: sid, turn_id: fixture.summary.id,
     revision: "layout-history", authoritative: true, has_more: false, has_newer: false,
     events: fixture.events.map((event: Record<string, unknown>) => ({ v: PROTOCOL_VERSION, ...event })) });
-  await expect(turn.getByText(firstHeader === 0 ? "Inspect the original job" : "Inspect result 2", { exact: true })).toBeVisible();
+  await expect(turn.getByText(firstHeader === 0 ? "Inspect the original job" : `Inspect result ${firstHeader - 1}`, { exact: true })).toBeVisible();
+  for (let index = 0; index < 5; index += 1) {
+    await expect(heads.nth(index)).toHaveAttribute("aria-expanded", String(index === firstHeader));
+    expect(await answerNodes[index].evaluate(node => node.isConnected)).toBe(true);
+  }
   await expect.poll(headerText).toEqual(cold);
   await heads.nth(firstHeader).click();
   await expect(heads.nth(firstHeader)).toHaveAttribute("aria-expanded", "false");
@@ -15608,6 +15627,14 @@ test(`Claude cold history keeps response headers through expand collapse and rel
   await heads.nth(1).click();
   await expect(turn.getByText("Inspect result 0", { exact: true })).toBeVisible();
   await expect(heads.nth(1)).toHaveAttribute("aria-expanded", "true");
+  relay.emit({ type: "history", sid, session_id: sid,
+    revision: "layout-history", generation: "layout-generation", detail: "summary",
+    in_progress: false, has_more: false, events: [],
+    turns: [{ ...fixture.summary, prompt: "Check the background results (refreshed)" }] });
+  await expect(turn.getByText("Check the background results (refreshed)", { exact: true })).toBeVisible();
+  await expect(heads.nth(1)).toHaveAttribute("aria-expanded", "true");
+  await expect(turn.getByText("Inspect result 0", { exact: true })).toBeVisible();
+  for (const answer of answerNodes) expect(await answer.evaluate(node => node.isConnected)).toBe(true);
   await heads.nth(1).click();
   await expect.poll(headerText).toEqual(cold);
   expect(relay.commands.filter(c => c.type === "get_turn_detail")).toHaveLength(1);

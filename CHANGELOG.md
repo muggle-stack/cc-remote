@@ -4,6 +4,7 @@
 
 ## Unreleased
 
+- Keep a background continuation expanded when cold history detail arrives, retain response boundaries when restoring cached process, and preserve reading position when completion coincides with touch release.
 - Preserve the reading paragraph when Claude confirms message IDs, completes an answer, or refreshes background continuation summaries; keep live-tail following separate from reading-position recovery.
 - Retain queued Claude prompts and attachments when background work blocks a required reconnect; resume once safe without repeating rejected turns or blocking failed-child recovery.
 - Add native HarmonyOS downloads for generated images/documents and authenticated media, with a system save picker and cancellation feedback. Native app preview.6 requires an in-place HAP update.

@@ -25,7 +25,7 @@ try {
     await harness.ssrLoadModule("/src/reducer.ts");
   const { ChatView } = await harness.ssrLoadModule(
     "/src/components/ChatView.tsx");
-  const { assistantContinuations: claudeContinuations } = await harness.ssrLoadModule("/src/assistant-continuations.ts");
+  const { assistantContinuations: claudeContinuations, ContinuationRenderKeys } = await harness.ssrLoadModule("/src/assistant-continuations.ts");
   const { mergeInitialHistory, mergeAuthoritativeTurnDetail, restoreCachedTurnDetails,
     mergeDetailWithLiveTail } =
     await harness.ssrLoadModule("/src/history-merge.ts");
@@ -55,7 +55,22 @@ try {
   }));
   const headers = (markup: string) => [...markup.matchAll(/<button[^>]*class="turn-process-head"[^>]*>[\s\S]*?<\/button>/g)]
     .map(match => match[0].replace(/<[^>]*>/g, "").replace(/\s/g, ""));
+  const responseKeys = new ContinuationRenderKeys();
+  const presentationKeys = () => {
+    const turns = responseState.runtimes[responseSid].turns;
+    responseKeys.update("response-history", turns);
+    const turn = turns[0];
+    const blocks = mergeDetailWithLiveTail(
+      mergeDetailWithLiveTail(turn.detailProjection?.blocks ?? [], turn.liveSpillBlocks ?? [], true),
+      turn.blocks, true);
+    const answers = turn.blocks.filter((block: Block) => block.kind === "text" && block.channel === "final");
+    const narrative = claudeContinuations(blocks, answers, "claude", turn.responseProcesses);
+    responseKeys.apply(turn.id, narrative.continuations);
+    return narrative.continuations.map((segment: { renderKey: string }) => segment.renderKey);
+  };
   responseRefresh();
+  const coldKeys = presentationKeys();
+  assert.equal(new Set(coldKeys).size, 4);
   const coldHeaders = headers(responseMarkup());
   assert.deepEqual(coldHeaders, ["已处理8s2项", ...Array(4).fill("已处理10s2项")]);
   assert.equal(responseState.runtimes[responseSid].turns[0].detailLoaded, false);
@@ -64,11 +79,20 @@ try {
     events: responseFixture.events.map((body: Record<string, unknown>) => event(body)) });
   assert.deepEqual(headers(responseMarkup()), coldHeaders,
     "loading detail must not replace the original header with continuation headers");
+  assert.deepEqual(presentationKeys(), coldKeys,
+    "cold summary and loaded process detail retain every continuation's presentation identity");
   responseRefresh();
+  assert.deepEqual(presentationKeys(), coldKeys,
+    "a later summary refresh keeps detail disclosures and answer DOM mounted");
   assert.deepEqual(headers(responseMarkup()), coldHeaders,
     "a summary refresh after loading detail keeps all five exact clocks/counts");
   const coldCached = boundCachedTurns(responseState.runtimes[responseSid].turns);
   assert.deepEqual(coldCached[0].responseProcesses, responseFixture.summary.responseProcesses);
+  const cachedProjection = restoreCachedTurnDetails(
+    [structuredClone(responseFixture.summary)], coldCached, "idle");
+  assert.deepEqual(headers(renderToStaticMarkup(createElement(ChatView, {
+    sid: responseSid, engine: "claude", turns: cachedProjection, onLoadDetail: () => true,
+  }))), coldHeaders, "restoring cached detail must retain each response boundary and item count");
 
   const sid = "claude-background-sync";
   let state = {
