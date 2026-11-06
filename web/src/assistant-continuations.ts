@@ -5,6 +5,8 @@ import { isReturnReceipt, isSyntheticReturnReceipt, returnedAgents, hasParentCon
 
 export interface AssistantContinuation {
   id: string;
+  /** Presentation identity survives native UUID binding and summary decoration. */
+  renderKey: string;
   blocks: Block[];
   answers: TextBlock[];
   returns: ProcessBlock[];
@@ -76,6 +78,8 @@ export function assistantContinuations(blocks: Block[], answers: TextBlock[], en
       current = {
         id: block.kind === "text" ? block.message_id
           : block.kind === "tool" ? block.tool_use_id : block.item_id,
+        renderKey: block.kind === "text" ? `text:${block.stream_message_id ?? block.message_id}`
+          : block.kind === "tool" ? `tool:${block.tool_use_id}` : `process:${block.item_id}`,
         blocks: [], answers: [], returns: [], startedTs: block.startedTs,
       };
       continuations.push(current);

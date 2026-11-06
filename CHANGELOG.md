@@ -4,6 +4,7 @@
 
 ## Unreleased
 
+- Preserve the reading paragraph when Claude confirms message IDs, completes an answer, or refreshes background continuation summaries; keep live-tail following separate from reading-position recovery.
 - Retain queued Claude prompts and attachments when background work blocks a required reconnect; resume once safe without repeating rejected turns or blocking failed-child recovery.
 - Add native HarmonyOS downloads for generated images/documents and authenticated media, with a system save picker and cancellation feedback. Native app preview.6 requires an in-place HAP update.
 - Dismiss directory menus on outside clicks/taps and keep mobile file-preview actions aligned to the right.

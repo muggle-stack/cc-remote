@@ -203,9 +203,12 @@ test("turn regressions keyboard scrolling leaves the live tail and resumes at bo
   await expect(control).toHaveCSS("outline-width", "2px");
 });
 
-for (const visible of ["thinking and answer", "only answer", "process header and answer"]) {
+for (const visible of ["thinking and answer", "only answer", "process header and answer", "long answer", "background answer"]) {
   test(`turn regressions completion preserves the reading paragraph with ${visible} visible`, async ({ page, isMobile }, testInfo) => {
-    await page.goto(`/tests/history-browser.html?completion-reading=1${visible === "process header and answer" ? "&short-process=1" : ""}`);
+    const options = visible === "process header and answer" ? "&short-process=1"
+      : visible === "background answer" ? "&background=1&long-answer=1"
+      : visible === "long answer" ? "&long-answer=1" : "";
+    await page.goto(`/tests/history-browser.html?completion-reading=1${options}`);
     const viewport = page.locator(".thread");
     const paragraph = page.getByText("Answer paragraph 0. This is the explanation the user is reading.", { exact: true });
     await expect(page.locator(".process-reasoning-body")).toBeVisible();
@@ -229,6 +232,7 @@ for (const visible of ["thinking and answer", "only answer", "process header and
     // Incoming events must not transfer focus or manufacture a user gesture.
     await page.getByTestId("append-answer").evaluate(node => (node as HTMLButtonElement).click());
     await expect.poll(offset).toBeCloseTo(before, 0);
+    const readingNode = await paragraph.elementHandle();
     const frames = await paragraph.evaluate(node => new Promise<number[]>((resolve) => {
       const viewport = node.closest(".thread")!;
       const samples: number[] = [];
@@ -249,6 +253,15 @@ for (const visible of ["thinking and answer", "only answer", "process header and
     await testInfo.attach("reading-position", { body: JSON.stringify({ before, after, distance, frames }), contentType: "application/json" });
     expect(Math.max(...frames.map(value => Math.abs(value - before)))).toBeLessThan(3);
     expect(Math.abs(after - before)).toBeLessThan(3);
+    expect(await readingNode!.evaluate(node => node.isConnected)).toBe(true);
+    await expect(page.locator('.assistant-answer-segment[data-message-id="native-answer"]')).toHaveCount(1);
+    // Late summary metadata can rename a continuation's native process owner.
+    // It must not remount the reply, reset its disclosure, or resume following.
+    await page.getByTestId("refresh-answer").evaluate(node => (node as HTMLButtonElement).click());
+    await waitForScrollIdle(page);
+    expect(await readingNode!.evaluate(node => node.isConnected)).toBe(true);
+    expect(Math.abs(await offset() - before)).toBeLessThan(3);
+    await expect(page.locator(".process-reasoning-body")).toHaveCount(0);
     await expect(page.locator(".scroll-bottom-btn")).toBeVisible();
     // The retained paragraph is not a permanent scroll lock.
     if (!isMobile) {
@@ -275,6 +288,45 @@ test("turn regressions completion keeps a followed answer at the bottom", async 
   await waitForScrollIdle(page);
   expect(await distance()).toBeLessThan(3);
   await expect(page.locator(".scroll-bottom-btn")).toHaveCount(0);
+});
+
+test("turn regressions reading anchor survives message DOM replacement without confusing repeated prose", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?completion-reading=1");
+  const results = await page.evaluate(async () => {
+    const modulePath = "/src/reading-position.ts";
+    const { captureReadingPosition, readingPositionDelta } = await import(modulePath);
+    return ["same-message", "other-message", "other-turn", "duplicate-paragraph"].map(mode => {
+      const viewport = document.createElement("div");
+      viewport.style.cssText = "position:fixed;inset:0 auto auto 0;width:300px;height:160px;overflow:auto;overflow-anchor:none";
+      viewport.innerHTML = '<div data-turn-id="turn"><div style="height:300px"></div>'
+        + '<div class="assistant-answer-segment" data-message-id="stream"><div class="prose">'
+        + '<p style="height:400px;margin:0">The paragraph being read.</p></div></div>'
+        + '<div style="height:1000px"></div></div>';
+      document.body.append(viewport);
+      viewport.scrollTop = 350;
+      const original = viewport.querySelector<HTMLElement>("p")!;
+      const before = original.getBoundingClientRect().top;
+      const position = captureReadingPosition(viewport, "same-view");
+      const answer = viewport.querySelector<HTMLElement>(".assistant-answer-segment")!;
+      const replacement = answer.cloneNode(true) as HTMLElement;
+      replacement.dataset.messageId = "native";
+      if (mode !== "other-message") replacement.dataset.streamMessageId = "stream";
+      if (mode === "duplicate-paragraph") replacement.querySelector(".prose")!.append(original.cloneNode(true));
+      answer.replaceWith(replacement);
+      const turn = viewport.firstElementChild as HTMLElement;
+      if (mode === "other-turn") turn.dataset.turnId = "another-turn";
+      (turn.firstElementChild as HTMLElement).style.height = "240px";
+      // Layout correction must preserve native movement since capture.
+      viewport.scrollTop -= 25;
+      const delta = readingPositionDelta(viewport, position);
+      if (delta != null) viewport.scrollTop += delta;
+      const motion = replacement.querySelector("p")!.getBoundingClientRect().top - before;
+      viewport.remove();
+      return { mode, delta, motion };
+    });
+  });
+  expect(results[0]).toEqual({ mode: "same-message", delta: -60, motion: 25 });
+  for (const result of results.slice(1)) expect(result.delta).toBeNull();
 });
 
 test("turn regressions manual keyboard collapse retains the process header", async ({ page, isMobile }) => {

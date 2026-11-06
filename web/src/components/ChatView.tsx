@@ -3090,7 +3090,7 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
               const continuing = !!segment && segment === lastContinuation
                 && enclosingTaskActive && !terminalProblem;
               const disclosureKey = segment
-                ? `${processOpenKey}\u0000continuation:${segment.id}` : processOpenKey;
+                ? `${processOpenKey}\u0000continuation:${segment.renderKey}` : processOpenKey;
               const ownsTerminal = engine !== "claude" || segment === terminalContinuation;
               return (
               <ProcessTimeline blocks={segment?.blocks ?? narrative.original}
@@ -3169,7 +3169,8 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
               );
             };
             const renderAnswer = (block: TextBlock) => (
-              <div key={block.message_id} className="assistant-answer-segment">
+              <div key={block.stream_message_id ?? block.message_id} className="assistant-answer-segment"
+                data-message-id={block.message_id} data-stream-message-id={block.stream_message_id}>
                 {block.delivery === "async" && block.questions?.length
                   ? <Suspense fallback={<span className="async-question-hint">助手询问…</span>}>
                       <AsyncQuestionCard questions={block.questions}
@@ -3314,7 +3315,7 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
               <>
                 {narrative.answers.map(renderAnswer)}
                 {narrative.continuations.map((segment) => (
-                  <div key={segment.id} className="background-followup">
+                  <div key={segment.renderKey} className="background-followup">
                     <div className="background-followup-boundary">
                       {segment.returns.map(renderAgentReturn)}
                       <span>{engine === "codex" ? "Codex 收到后台消息，继续处理" : engine === "dsh" ? "DSH 继续处理" : "Claude 继续处理"}</span>
