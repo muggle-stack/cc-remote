@@ -4,6 +4,7 @@
 
 ## Unreleased
 
+- Retain queued Claude prompts and attachments when background work blocks a required reconnect; resume once safe without repeating rejected turns or blocking failed-child recovery.
 - Add native HarmonyOS downloads for generated images/documents and authenticated media, with a system save picker and cancellation feedback. Native app preview.6 requires an in-place HAP update.
 - Dismiss directory menus on outside clicks/taps and keep mobile file-preview actions aligned to the right.
 - Reconcile the Codex context popover and settings panel with native runtime capacity, so a matching saved limit no longer says it is waiting to take effect. Keep configuration receipt uncertainty separate from real application errors.

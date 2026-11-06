@@ -7121,6 +7121,19 @@ class WrapperMachine:
             )
         )
 
+    @classmethod
+    def _claude_queued_reconnect_blocked(cls, ctx: SessionContext) -> bool:
+        """A deferred send may wait for a reload, but never strand a dead child."""
+        return bool(
+            ctx.engine == "claude"
+            and not getattr(ctx.sdk, "is_claude_broker", False)
+            and (ctx.needs_reload or getattr(ctx.sdk, "effort", None)
+                 != getattr(ctx.sdk, "applied_effort", None))
+            and not any(getattr(ctx.sdk, flag, False) for flag in (
+                "message_pump_failed", "control_plane_failed", "service_restart_required"))
+            and cls._claude_has_background_work(ctx)
+        )
+
     async def _settle_claude_lifecycle_if_quiescent(
         self, ctx: SessionContext,
     ) -> bool:
@@ -11481,10 +11494,12 @@ class WrapperMachine:
                 autonomous_claude_followup = (
                     self._claude_autonomous_followup_pending(ctx)
                 )
+                background_reconnect = self._claude_queued_reconnect_blocked(ctx)
                 if (
                     active is not None
                     or ctx.state != "idle"
                     or autonomous_claude_followup
+                    or background_reconnect
                 ):
                     ctx.queued_query_wakeup.clear()
                     if active is not None:
@@ -11495,6 +11510,7 @@ class WrapperMachine:
                     if (
                         ctx.state == "idle"
                         and not self._claude_autonomous_followup_pending(ctx)
+                        and not self._claude_queued_reconnect_blocked(ctx)
                         and not any(
                             task is not None and not task.done()
                             for task in (
@@ -11502,8 +11518,19 @@ class WrapperMachine:
                         )
                     ):
                         ctx.queued_query_wakeup.set()
-                    await ctx.queued_query_wakeup.wait()
-                    retry_delay = 1.0
+                    if background_reconnect:
+                        # Native completion normally wakes us. A failed reader
+                        # or changed option can also release this guard without
+                        # a Result: recheck with bounded backoff, without starting
+                        # rejected turns or dropping the complete queued payload.
+                        try:
+                            await asyncio.wait_for(ctx.queued_query_wakeup.wait(), timeout=retry_delay)
+                            retry_delay = 1.0
+                        except asyncio.TimeoutError:
+                            retry_delay = min(retry_delay * 2, 30.0)
+                    else:
+                        await ctx.queued_query_wakeup.wait()
+                        retry_delay = 1.0
                     continue
 
                 command = None
@@ -11536,6 +11563,7 @@ class WrapperMachine:
                             ctx.state != "idle"
                             or active_now
                             or self._claude_autonomous_followup_pending(ctx)
+                            or self._claude_queued_reconnect_blocked(ctx)
                         ):
                             continue
                         async with ctx.queued_query_lock:
@@ -11561,10 +11589,9 @@ class WrapperMachine:
                     ):
                         launched = await launch_receipt
                         if not launched:
-                            # The final SDK boundary proved that an autonomous
-                            # turn won, and also proved this queued prompt was
-                            # never written. Keep the complete Query wrapper-
-                            # owned and retry only after that Result wakes us.
+                            # A reconnect/launch guard proved this prompt was
+                            # never written. Keep the complete Query owned here;
+                            # the loop rechecks background work before retrying.
                             async with ctx.emit_lock:
                                 async with ctx.queued_query_lock:
                                     if (
@@ -40598,14 +40625,16 @@ class WrapperMachine:
                 session_id=ctx.session_id,
                 reason=str(exc),
             )
-            await self._emit(ctx, Error(
-                code=ERR_BUSY,
-                message=(
-                    "会话需要重载，但后台任务仍在运行。本次消息未发送，"
-                    "后台任务已保留；请等待任务完成后重试。"
-                ),
-                msg_id=ctx.active_msg_id,
-            ))
+            settle_launch(False)
+            if launch_receipt is None:
+                await self._emit(ctx, Error(
+                    code=ERR_BUSY,
+                    message=(
+                        "会话需要重载，但后台任务仍在运行。本次消息未发送，"
+                        "后台任务已保留；请等待任务完成后重试。"
+                    ),
+                    msg_id=ctx.active_msg_id,
+                ))
             await self._set_idle_after_managed_turn(ctx)
         except ClaudeAutonomousFollowupPending:
             # The machine preflights were clean, but a post-Result task
@@ -41116,7 +41145,7 @@ class WrapperMachine:
         finally:
             # All other runner exits retain the historical queue semantics: the
             # attempt has entered a visible turn lifecycle and is removed rather
-            # than silently retried. Only the launch guard above can prove that
+            # than silently retried. Only the guards above can prove that
             # Claude never received the queued prompt.
             settle_launch(True)
             if not is_codex:
