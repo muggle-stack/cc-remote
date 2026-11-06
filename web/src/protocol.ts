@@ -532,7 +532,8 @@ export interface ConversationImageRef { image_id: string; media_type: QueryImg["
 export type ProcessDetailState = "none" | "present" | "unknown";
 export type TurnDetailReason = "process" | "prompt_truncated" | "answer_truncated" | "image_deferred";
 export interface SessionMessageReceipt { itemId: string; threadId: string; status: "sending" | "queued" | "sent" | "failed" }
-export interface ConversationTurn { continuation?: TurnContinuation | null; sessionMessages?: SessionMessageReceipt[] | null; id: string; sourceThreadId?: string | null; timedTask?: TimedMessage | null; clientMsgId?: string | null; prompt: string; blocks: unknown[]; done: boolean; forkPointId?: string | null; checkpointId?: string | null; interrupted?: boolean | null; error?: string | null; images?: QueryImg[] | null; imageRefs?: ConversationImageRef[] | null; files?: QueryFile[] | null; ts?: number | null; doneTs?: number | null; durationMs?: number | null; processDetailState?: ProcessDetailState; detailReasons?: TurnDetailReason[]; processStartedTs?: number | null; processDoneTs?: number | null; detailEventCount: number; detailLoaded: boolean; fileChanges?: TurnChangeSummary | null }
+export interface ResponseProcessSummary { id: string; background: boolean; answerId?: string | null; itemCount: number; startedTs?: number | null; doneTs?: number | null }
+export interface ConversationTurn { responseProcesses?: ResponseProcessSummary[] | null; continuation?: TurnContinuation | null; sessionMessages?: SessionMessageReceipt[] | null; id: string; sourceThreadId?: string | null; timedTask?: TimedMessage | null; clientMsgId?: string | null; prompt: string; blocks: unknown[]; done: boolean; forkPointId?: string | null; checkpointId?: string | null; interrupted?: boolean | null; error?: string | null; images?: QueryImg[] | null; imageRefs?: ConversationImageRef[] | null; files?: QueryFile[] | null; ts?: number | null; doneTs?: number | null; durationMs?: number | null; processDetailState?: ProcessDetailState; detailReasons?: TurnDetailReason[]; processStartedTs?: number | null; processDoneTs?: number | null; detailEventCount: number; detailLoaded: boolean; fileChanges?: TurnChangeSummary | null }
 export interface CodexTerminalFence { turn_id: string; status: "completed" | "interrupted" | "failed"; duration_ms?: number | null; completed_at?: number | null }
 export interface History extends Base { type: "history"; session_id: string; revision: string; generation?: string | null; continuity_revision?: string | null; build_seq?: number; live_seq?: number | null; authoritative?: boolean; error?: string | null; events: ServerEvent[]; turns?: ConversationTurn[]; detail?: "summary" | "full"; has_more: boolean; oldest_id?: string | null; newest_id?: string | null; before?: string | null; control?: SessionControl | null; external?: boolean; takeover_pending?: boolean; in_progress?: boolean; compaction_continuation_turn_ids?: string[]; terminal_fences?: CodexTerminalFence[]; reset?: boolean }
 export interface GetTurnDetail extends Base { type: "get_turn_detail"; session_id: string; turn_id: string; client_id?: string | null; revision?: string | null; before?: string | null; limit?: number | null }
@@ -793,7 +794,7 @@ export type ServerEvent = SessionArtifacts | FilesListed | CodexContext
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnUsage | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 87;
+export const PROTOCOL_VERSION = 89;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

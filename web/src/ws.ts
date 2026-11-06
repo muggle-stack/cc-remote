@@ -1561,7 +1561,7 @@ export class RelayWs {
     if (engine === "codex" && collaborationMode) {
       obj.collaboration_mode = collaborationMode;
     }
-    if (permissionMode && (targetEngine === "codex" || space === "code")) {
+    if (permissionMode && targetEngine !== "dsh") {
       obj.permission_mode = permissionMode;
     }
     if (engine === "codex" && permissionProfile) {

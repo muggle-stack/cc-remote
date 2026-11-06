@@ -1,0 +1,155 @@
+{
+  "events": [
+    {"ts": 1, "type": "user_msg", "sid": "response-history", "msg_id": "human-response", "prompt": "Check the background results"},
+    {"ts": 2, "type": "assistant_msg_start", "sid": "response-history", "message_id": "initial-thinking", "channel": "thinking", "background": false},
+    {"ts": 2, "type": "delta", "sid": "response-history", "message_id": "initial-thinking", "channel": "thinking", "background": false, "text": "Inspect the original job"},
+    {"ts": 3, "type": "assistant_msg_end", "sid": "response-history", "message_id": "initial-thinking", "channel": "thinking", "background": false},
+    {"ts": 4, "type": "tool_use", "sid": "response-history", "tool_use_id": "initial-tool", "message_id": "initial-tool-message", "tool": "Bash", "input": {"command": "echo original"}},
+    {"ts": 6, "type": "tool_result", "sid": "response-history", "tool_use_id": "initial-tool", "content": "original complete", "is_error": false},
+    {"ts": 8, "type": "assistant_msg_start", "sid": "response-history", "message_id": "initial-answer", "channel": "final", "background": false},
+    {"ts": 8, "type": "delta", "sid": "response-history", "message_id": "initial-answer", "channel": "final", "background": false, "text": "Waiting for background jobs."},
+    {"ts": 10, "type": "assistant_msg_end", "sid": "response-history", "message_id": "initial-answer", "channel": "final", "background": false},
+    {"ts": 599, "type": "process", "sid": "response-history", "item_id": "return-job-0", "kind": "task", "phase": "end", "status": "succeeded", "title": "Job finished", "server": "cc_remote", "tool": "task_return", "background": true},
+    {"ts": 600, "type": "assistant_msg_start", "sid": "response-history", "message_id": "thinking-0", "channel": "thinking", "background": true},
+    {"ts": 600, "type": "delta", "sid": "response-history", "message_id": "thinking-0", "channel": "thinking", "background": true, "text": "Inspect result 0"},
+    {"ts": 601, "type": "assistant_msg_end", "sid": "response-history", "message_id": "thinking-0", "channel": "thinking", "background": true},
+    {"ts": 602, "type": "tool_use", "sid": "response-history", "tool_use_id": "tool-0", "message_id": "tool-message-0", "tool": "Bash", "input": {"command": "echo check-0"}, "background": true},
+    {"ts": 605, "type": "tool_result", "sid": "response-history", "tool_use_id": "tool-0", "content": "check 0 complete", "is_error": false, "background": true},
+    {"ts": 608, "type": "assistant_msg_start", "sid": "response-history", "message_id": "answer-0", "channel": "final", "background": true},
+    {"ts": 608, "type": "delta", "sid": "response-history", "message_id": "answer-0", "channel": "final", "background": true, "text": "Result 0 checked."},
+    {"ts": 610, "type": "assistant_msg_end", "sid": "response-history", "message_id": "answer-0", "channel": "final", "background": true},
+    {"ts": 1199, "type": "process", "sid": "response-history", "item_id": "return-job-1", "kind": "task", "phase": "end", "status": "succeeded", "title": "Job finished", "server": "cc_remote", "tool": "task_return", "background": true},
+    {"ts": 1200, "type": "assistant_msg_start", "sid": "response-history", "message_id": "thinking-1", "channel": "thinking", "background": true},
+    {"ts": 1200, "type": "delta", "sid": "response-history", "message_id": "thinking-1", "channel": "thinking", "background": true, "text": "Inspect result 1"},
+    {"ts": 1201, "type": "assistant_msg_end", "sid": "response-history", "message_id": "thinking-1", "channel": "thinking", "background": true},
+    {"ts": 1202, "type": "tool_use", "sid": "response-history", "tool_use_id": "tool-1", "message_id": "tool-message-1", "tool": "Bash", "input": {"command": "echo check-1"}, "background": true},
+    {"ts": 1205, "type": "tool_result", "sid": "response-history", "tool_use_id": "tool-1", "content": "check 1 complete", "is_error": false, "background": true},
+    {"ts": 1208, "type": "assistant_msg_start", "sid": "response-history", "message_id": "answer-1", "channel": "final", "background": true},
+    {"ts": 1208, "type": "delta", "sid": "response-history", "message_id": "answer-1", "channel": "final", "background": true, "text": "Result 1 checked."},
+    {"ts": 1210, "type": "assistant_msg_end", "sid": "response-history", "message_id": "answer-1", "channel": "final", "background": true},
+    {"ts": 1799, "type": "process", "sid": "response-history", "item_id": "return-job-2", "kind": "task", "phase": "end", "status": "succeeded", "title": "Job finished", "server": "cc_remote", "tool": "task_return", "background": true},
+    {"ts": 1800, "type": "assistant_msg_start", "sid": "response-history", "message_id": "thinking-2", "channel": "thinking", "background": true},
+    {"ts": 1800, "type": "delta", "sid": "response-history", "message_id": "thinking-2", "channel": "thinking", "background": true, "text": "Inspect result 2"},
+    {"ts": 1801, "type": "assistant_msg_end", "sid": "response-history", "message_id": "thinking-2", "channel": "thinking", "background": true},
+    {"ts": 1802, "type": "tool_use", "sid": "response-history", "tool_use_id": "tool-2", "message_id": "tool-message-2", "tool": "Bash", "input": {"command": "echo check-2"}, "background": true},
+    {"ts": 1805, "type": "tool_result", "sid": "response-history", "tool_use_id": "tool-2", "content": "check 2 complete", "is_error": false, "background": true},
+    {"ts": 1808, "type": "assistant_msg_start", "sid": "response-history", "message_id": "answer-2", "channel": "final", "background": true},
+    {"ts": 1808, "type": "delta", "sid": "response-history", "message_id": "answer-2", "channel": "final", "background": true, "text": "Result 2 checked."},
+    {"ts": 1810, "type": "assistant_msg_end", "sid": "response-history", "message_id": "answer-2", "channel": "final", "background": true},
+    {"ts": 2399, "type": "process", "sid": "response-history", "item_id": "return-job-3", "kind": "task", "phase": "end", "status": "succeeded", "title": "Job finished", "server": "cc_remote", "tool": "task_return", "background": true},
+    {"ts": 2400, "type": "assistant_msg_start", "sid": "response-history", "message_id": "thinking-3", "channel": "thinking", "background": true},
+    {"ts": 2400, "type": "delta", "sid": "response-history", "message_id": "thinking-3", "channel": "thinking", "background": true, "text": "Inspect result 3"},
+    {"ts": 2401, "type": "assistant_msg_end", "sid": "response-history", "message_id": "thinking-3", "channel": "thinking", "background": true},
+    {"ts": 2402, "type": "tool_use", "sid": "response-history", "tool_use_id": "tool-3", "message_id": "tool-message-3", "tool": "Bash", "input": {"command": "echo check-3"}, "background": true},
+    {"ts": 2405, "type": "tool_result", "sid": "response-history", "tool_use_id": "tool-3", "content": "check 3 complete", "is_error": false, "background": true},
+    {"ts": 2408, "type": "assistant_msg_start", "sid": "response-history", "message_id": "answer-3", "channel": "final", "background": true},
+    {"ts": 2408, "type": "delta", "sid": "response-history", "message_id": "answer-3", "channel": "final", "background": true, "text": "Result 3 checked."},
+    {"ts": 2410, "type": "assistant_msg_end", "sid": "response-history", "message_id": "answer-3", "channel": "final", "background": true},
+    {"ts": 2410, "type": "turn_end", "sid": "response-history", "result": {"subtype": "success", "duration_ms": 2422000, "is_error": false}, "turn_id": "answer-3"}
+  ],
+  "summary": {
+    "id": "human-response",
+    "prompt": "Check the background results",
+    "done": true,
+    "ts": 1000,
+    "doneTs": 2410000,
+    "durationMs": 2422000,
+    "processDetailState": "present",
+    "detailReasons": [
+      "process"
+    ],
+    "detailEventCount": 10,
+    "detailLoaded": false,
+    "blocks": [
+      {
+        "kind": "text",
+        "message_id": "initial-answer",
+        "text": "Waiting for background jobs.",
+        "channel": "final",
+        "done": true
+      },
+      {
+        "kind": "text",
+        "message_id": "answer-0",
+        "text": "Result 0 checked.",
+        "channel": "final",
+        "done": true,
+        "background": true,
+        "startedTs": 608000,
+        "doneTs": 610000
+      },
+      {
+        "kind": "text",
+        "message_id": "answer-1",
+        "text": "Result 1 checked.",
+        "channel": "final",
+        "done": true,
+        "background": true,
+        "startedTs": 1208000,
+        "doneTs": 1210000
+      },
+      {
+        "kind": "text",
+        "message_id": "answer-2",
+        "text": "Result 2 checked.",
+        "channel": "final",
+        "done": true,
+        "background": true,
+        "startedTs": 1808000,
+        "doneTs": 1810000
+      },
+      {
+        "kind": "text",
+        "message_id": "answer-3",
+        "text": "Result 3 checked.",
+        "channel": "final",
+        "done": true,
+        "background": true,
+        "startedTs": 2408000,
+        "doneTs": 2410000
+      }
+    ],
+    "responseProcesses": [
+      {
+        "id": "human-response",
+        "background": false,
+        "itemCount": 2,
+        "startedTs": 2000,
+        "doneTs": 10000,
+        "answerId": "initial-answer"
+      },
+      {
+        "id": "thinking-0",
+        "background": true,
+        "itemCount": 2,
+        "startedTs": 600000,
+        "doneTs": 610000,
+        "answerId": "answer-0"
+      },
+      {
+        "id": "thinking-1",
+        "background": true,
+        "itemCount": 2,
+        "startedTs": 1200000,
+        "doneTs": 1210000,
+        "answerId": "answer-1"
+      },
+      {
+        "id": "thinking-2",
+        "background": true,
+        "itemCount": 2,
+        "startedTs": 1800000,
+        "doneTs": 1810000,
+        "answerId": "answer-2"
+      },
+      {
+        "id": "thinking-3",
+        "background": true,
+        "itemCount": 2,
+        "startedTs": 2400000,
+        "doneTs": 2410000,
+        "answerId": "answer-3"
+      }
+    ]
+  }
+}

@@ -2,6 +2,14 @@
 
 [中文](CHANGELOG_zh.md)
 
+## Unreleased
+
+- Preserve per-response process counts and native clocks in Claude history summaries, so fresh login, detail expansion and collapse keep the same original/continuation headers. Wire protocol v89 requires coordinated Relay, Wrapper and Web updates.
+- Add Code-equivalent permission controls to Work, including per-session persistence and side-chat inheritance.
+- Preserve Claude background tasks when sending another message after the foreground reply ends; task bookkeeping no longer triggers an unintended reconnect.
+- Keep Claude continuation tools before their final answer when a history refresh adds background-task return metadata, avoiding a duplicate empty continuation after switching sessions.
+- Preserve native tool completion times when expanding Claude history, and reload evicted process detail instead of treating a return receipt as a complete detail page.
+
 ## v5.3.9
 
 Improve Claude input, question notifications, media galleries and side-chat feedback. Wire protocol v87 requires coordinated Relay, Wrapper and Web updates; Claude Agent SDK remains 0.2.174.

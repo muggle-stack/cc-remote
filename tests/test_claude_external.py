@@ -881,6 +881,133 @@ def test_only_an_active_wrapper_query_can_attribute_growth_as_own(tmp_path):
     asyncio.run(go())
 
 
+@pytest.mark.parametrize("source", ["cli", "holder", "replacement"])
+def test_background_tasks_do_not_hide_external_transcript_changes(tmp_path, source):
+    async def go():
+        machine, _ = _mk_machine()
+        path = tmp_path / "session.jsonl"
+        path.write_bytes(b"")
+        ctx = _mk_ctx("sid", "sid")
+        ctx.claude_active_tasks.add("still-running")
+        machine.sessions[ctx.key] = ctx
+        watch = _watch(path)
+        machine._watch[ctx.key] = watch
+        machine._push_mirrored_history = AsyncMock()
+        data = b'{"type":"assistant","entrypoint":"cli"}\n'
+        holders = set()
+        if source == "holder":
+            holders.add(ProcessIdentity(102, 1002))
+            data = b'{"type":"queue-operation","operation":"enqueue"}\n'
+        if source == "replacement":
+            replacement = tmp_path / "replacement.jsonl"
+            replacement.write_bytes(b'{"type":"cost-state"}\n')
+            replacement.replace(path)
+        else:
+            path.write_bytes(data)
+
+        await machine._poll_claude_watch(
+            ctx.key, watch, holders, 1000.0, ownership_scan_complete=True)
+
+        assert ctx.needs_reload
+        assert ctx.claude_active_tasks == {"still-running"}
+        assert machine._is_external(ctx.key) is (source == "holder")
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("reason", ["pending", "final-preflight", "effort", "during-read"])
+def test_next_query_does_not_reconnect_over_live_background_tasks(
+    tmp_path, monkeypatch, reason,
+):
+    async def go():
+        machine, transport = _mk_machine()
+        path = tmp_path / "session.jsonl"
+        path.write_bytes(b"")
+        ctx = _mk_ctx("sid", "sid")
+        ctx.state = "running"
+        ctx.active_msg_id = "next-human"
+        ctx.sdk = _ClaudeRunSdk()
+        if reason != "during-read":
+            ctx.claude_active_tasks.add("still-running")
+        ctx.needs_reload = reason in {"pending", "during-read"}
+        machine.sessions[ctx.key] = ctx
+        watch = _watch(path)
+        machine._watch[ctx.key] = watch
+        machine._push_mirrored_history = AsyncMock()
+
+        async def probe(_paths, _cwds):
+            return HolderScan({ctx.key: set()}, True)
+
+        monkeypatch.setattr(machine, "_probe_claude_holders", probe)
+        if reason == "final-preflight":
+            path.write_bytes(b'{"type":"assistant","entrypoint":"cli"}\n')
+        if reason == "effort":
+            ctx.sdk.effort = "high"
+        if reason == "during-read":
+            stage = machine._stage_claude_handoff_controls
+
+            async def stage_with_new_task(*args, **kwargs):
+                controls = await stage(*args, **kwargs)
+                ctx.claude_active_tasks.add("still-running")
+                return controls
+
+            monkeypatch.setattr(machine, "_stage_claude_handoff_controls", stage_with_new_task)
+
+        await machine._run_turn(ctx, "new question")
+
+        assert ctx.sdk.queries == ctx.sdk.reconnects == 0
+        assert ctx.claude_active_tasks == {"still-running"}
+        assert ctx.needs_reload is (reason != "effort")
+        assert ctx.state == "idle"
+        errors = [e for e in transport.sent if e.type == "error"]
+        assert len(errors) == 1 and errors[0].code == "busy"
+        assert errors[0].msg_id == "next-human"
+        assert not [e for e in transport.sent if e.type == "user"]
+
+        # A later explicit send can safely apply the still-pending reload or
+        # option once the task ends; the rejected prompt was never replayed.
+        ctx.claude_active_tasks.clear()
+        ctx.state = "running"
+        ctx.active_msg_id = "retry-human"
+        if reason == "during-read":
+            monkeypatch.setattr(machine, "_stage_claude_handoff_controls", stage)
+        await machine._run_turn(ctx, "retry question")
+        assert ctx.sdk.queries == ctx.sdk.reconnects == 1
+        assert not ctx.needs_reload
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("flag", [
+    "message_pump_failed", "control_plane_failed", "service_restart_required",
+])
+def test_stale_background_projection_does_not_block_failed_child_recovery(flag):
+    async def go():
+        machine, transport = _mk_machine()
+        ctx = _mk_ctx("sid", "sid")
+        ctx.state = "running"
+        ctx.active_msg_id = "retry-human"
+        ctx.needs_reload = True
+        ctx.claude_active_tasks.add("stale-task")
+        ctx.sdk = _ClaudeRunSdk()
+        setattr(ctx.sdk, flag, True)
+        reconnect = ctx.sdk.force_reconnect
+
+        async def recover(**kwargs):
+            await reconnect(**kwargs)
+            setattr(ctx.sdk, flag, False)
+
+        ctx.sdk.force_reconnect = recover
+        machine.sessions[ctx.key] = ctx
+        machine._prime_claude_ownership = AsyncMock(return_value=False)
+        await machine._run_turn(ctx, "new question")
+        assert ctx.sdk.reconnects == ctx.sdk.queries == 1
+        assert not ctx.needs_reload
+        assert not [e for e in transport.sent if e.type == "error"]
+
+    asyncio.run(go())
+
+
 def test_initial_claude_owner_scan_does_not_mirror_active_managed_turn(
     tmp_path,
 ):

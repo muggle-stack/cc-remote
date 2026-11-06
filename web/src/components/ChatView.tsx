@@ -2950,7 +2950,7 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
                 || supplemental.questionOwners.get(block.message_id) === t.id);
             const generatedImages = generatedOutputImages(timelineBlocks);
             const modelNotices = modelFallbackNotices(timelineBlocks);
-            const narrative = assistantContinuations(timelineBlocks, finalBlocks, engine);
+            const narrative = assistantContinuations(timelineBlocks, finalBlocks, engine, t.responseProcesses);
             const renderAgentReturn = (receipt: ProcessBlock) => {
               const runId = returnRunId(receipt);
               return runId && onOpenAgent ? <button key={receipt.item_id} type="button" className="agent-return-link"
@@ -3004,8 +3004,11 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
                       && (finalBlocks.length === 0 || t.done)))
                 ? "process"
                 : finalBlocks.length > 0 ? "answering" : "waiting";
+            const originalProcessSummary = engine === "claude"
+              ? t.responseProcesses?.find(row => !row.background) : undefined;
             const showProcessTimeline = originalProcessItems.length > 0
-              || processDetailState === "present";
+              || (originalProcessSummary ? originalProcessSummary.itemCount > 0
+                : processDetailState === "present");
             // Unknown native summaries don't prove that there is anything to
             // expand. Keep that uncertainty in the projection, not as a button
             // which disappears after an empty read. Real deferred content,
@@ -3075,9 +3078,15 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
               // Deferred counts describe the whole native turn. A continuation
               // containing only an answer has no process disclosure of its own;
               // borrowing the parent's count creates an empty "1 item" row.
-              if (segment && presentableProcessBlocks(segment.blocks, engine).length === 0) {
+              const processSummary = segment?.processSummary ?? (!segment ? originalProcessSummary : undefined);
+              const segmentProcessItems = presentableProcessBlocks(segment?.blocks ?? narrative.original, engine);
+              if (segment && segmentProcessItems.length === 0 && !processSummary?.itemCount) {
                 return null;
               }
+              const segmentDetailError = processDetailError ?? (
+                processSummary?.itemCount && t.detailLoaded && !t.detailLoading
+                  && !hasUnreadDetailPages && segmentProcessItems.length === 0
+                  ? "详细过程未完整返回，请重试" : undefined);
               const continuing = !!segment && segment === lastContinuation
                 && enclosingTaskActive && !terminalProblem;
               const disclosureKey = segment
@@ -3091,18 +3100,21 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
                 active={activePhase === "process" && (segment ? continuing : !lastContinuation)} engine={engine}
                 outcome={ownsTerminal ? t.error ? "failed" : t.interrupted ? "interrupted" : undefined : undefined}
                 problem={ownsTerminal ? t.error : undefined}
-                durationMs={segment || engine === "codex" || (lastContinuation
+                durationMs={processSummary || segment || engine === "codex" || (lastContinuation
                   && t.doneTs != null && lastContinuation.startedTs != null
                   && t.doneTs > lastContinuation.startedTs) ? undefined : t.durationMs}
-                startTs={segment?.startedTs ?? (engine === "codex" ? t.processStartedTs : t.ts)}
-                doneTs={segment ? segment.doneTs : engine === "codex" ? t.processDoneTs
+                startTs={processSummary?.startedTs ?? segment?.startedTs ?? (engine === "codex" ? t.processStartedTs : t.ts)}
+                doneTs={processSummary ? processSummary.doneTs ?? undefined : segment ? segment.doneTs : engine === "codex" ? t.processDoneTs
                   : lastContinuation && t.doneTs != null
                     && lastContinuation.startedTs != null
                     && t.doneTs > lastContinuation.startedTs ? undefined : t.doneTs}
-                deferredCount={segment ? 0 : deferredProcessCount}
+                totalCount={processSummary?.itemCount}
+                deferredCount={processSummary
+                  ? !t.detailLoaded || t.detailLoading ? processSummary.itemCount : 0
+                  : segment ? 0 : deferredProcessCount}
                 detailPending={!!segment && engine === "codex" && deferredProcessCount > 0}
                 detailLoading={t.detailLoading}
-                detailError={processDetailError}
+                detailError={segmentDetailError}
                 externalPlanItemId={externalPlanItemId}
                 onLoadDetail={onLoadDetail
                   ? (automatic) => automatic
@@ -3116,8 +3128,8 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
                       detailRetryDirection,
                       false)
                   : undefined}
-                canLoadEarlier={(!segment || engine === "codex") && canReadOlderDetail}
-                canLoadNewer={(!segment || engine === "codex") && canReadNewerDetail}
+                canLoadEarlier={(!segment || engine === "codex" || !!processSummary) && canReadOlderDetail}
+                canLoadNewer={(!segment || engine === "codex" || !!processSummary) && canReadNewerDetail}
                 onLoadEarlier={onLoadDetail && canReadOlderDetail
                   ? () => requestProcessDetail(
                       t.id, t.detailOldestCursor, "older")

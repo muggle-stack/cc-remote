@@ -3483,6 +3483,7 @@ def translate_history(
                         continue
                     bt = b.get("type")
                     if _claude_history_tool_result_block(b):
+                        result_event_start = len(events)
                         ambiguous_final_mid = None
                         ambiguous_final_start = None
                         tool_id = _history_id(
@@ -3541,6 +3542,15 @@ def translate_history(
                                 turn_id=current_turn_id, parent_id=tool_id,
                                 title="协作代理", background=True,
                             ))
+                        # User-role tool results are native transcript records
+                        # too. The protocol constructor's wall clock is the
+                        # history read time, not this tool's completion time.
+                        # Stamp both the result and its derived agent status,
+                        # as the assistant-role branch does for its events.
+                        result_ts = _ts(source_uid)
+                        if result_ts is not None:
+                            for event in events[result_event_start:]:
+                                event.ts = result_ts
                     elif bt == "text":
                         txt = b.get("text", "")
                         if txt and not _is_meta_user_text(txt) and not text_made:

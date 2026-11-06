@@ -471,8 +471,8 @@ class SdkHandle:
             # not use --bare here: it intentionally disables OAuth/keychain
             # auth, which would break subscription-backed Work sessions.
             extra_args["safe-mode"] = None
-        elif self.permission_mode != "bypassPermissions":
-            # A Code session restored while currently in a safer mode must still
+        if self.permission_mode != "bypassPermissions":
+            # A session restored while currently in a safer mode must still
             # retain Claude's native ability to cycle back to bypass later.
             extra_args["allow-dangerously-skip-permissions"] = None
         if (

@@ -1,5 +1,6 @@
 import type {
   AssistantChannel,
+  ResponseProcessSummary,
   ClaudePlan,
   AsyncQuestionSpec,
   ConversationImageRef,
@@ -174,6 +175,7 @@ export interface Turn {
   ts?: number;
   doneTs?: number;
   durationMs?: number;
+  responseProcesses?: ResponseProcessSummary[] | null;
   /** Exact visible-process evidence, or `unknown` when a bounded native
    * summary proves only that more detail exists. */
   processDetailState?: "none" | "present" | "unknown";

@@ -92,7 +92,7 @@ def _stub_migration_dependencies(monkeypatch, machine):
 
 
 def test_session_migration_protocol_roundtrips_as_control_frames():
-    assert PROTOCOL_VERSION == 87
+    assert PROTOCOL_VERSION == 89
     command = deserialize(serialize(_command("/tmp/new-cwd")))
     assert command.type == "migrate_session"
     assert command.session_id == "thread-1"

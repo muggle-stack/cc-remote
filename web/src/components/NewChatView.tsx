@@ -12,7 +12,7 @@ import { SpeedPicker } from "./SpeedPicker";
 import { newChatSpeed, normalizeSpeed, speedsFor } from "../codex-speed";
 import {
   clientSlashesFor, matchCommands, matchSkills, modelsFor, permsFor, routeComposerInput, skillToken, slashToken, dshPermissionLabel,
-  type Catalog, type Effort, type Model,
+  CODEX_PERMISSION_PROFILES, type Catalog, type Effort, type Model,
 } from "../data";
 import { attachmentBytes, snapshotAttachmentFiles } from "../img";
 import {
@@ -428,15 +428,9 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
     const queued = onSend(
       prompt, images.length ? images : undefined, files.length ? files : undefined,
       engine === "codex" ? mode : undefined,
-      engine === "codex"
-        ? (space === "work" ? "never" : permission ?? "never")
-        : space === "code" ? permission ?? undefined : undefined,
-      engine === "codex" && space === "code"
-        ? (permissionProfile ?? undefined)
-        : undefined,
-      engine === "codex" && space === "code"
-        ? (webSearch ?? undefined)
-        : undefined,
+      engine === "codex" ? permission ?? "never" : permission ?? undefined,
+      engine === "codex" ? permissionProfile ?? undefined : undefined,
+      engine === "codex" ? webSearch ?? undefined : undefined,
       engine === "codex" ? serviceTier : undefined, engine === "dsh" ? dshPermission || undefined : undefined);
     if (!queued) setCreating(false);
   };
@@ -654,7 +648,7 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
         setText(e.currentTarget.value);
       }}
       onKeyDown={(e) => {
-        if (e.key === "Tab" && e.shiftKey && space === "code") {
+        if (e.key === "Tab" && e.shiftKey) {
           e.preventDefault();
           if (engine === "codex") {
             updateExecutionControls({ collaborationMode: collaborationMode === "plan" ? "default" : "plan" });
@@ -704,7 +698,7 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
       <Icon name="shield" size={14} /><span>{dshPermission ? dshPermissionLabel(dshPermission,
         dshPermissions.find(p => p.value === dshPermission)?.name) : "默认权限"}</span>
     </button>
-  ) : engine === "codex" && space === "code" ? (
+  ) : engine === "codex" ? (
     <button type="button" className="newchat-access"
       onClick={() => {
         setPermissionsOpen(true);
@@ -713,15 +707,15 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
       disabled={creating || importing}
       title={`执行环境：${permissionProfileLabel(permissionProfile) ?? "默认"}；审批：${permissionMode ?? "never"}；网页搜索：${webSearch ?? "默认"}`}>
       <Icon name="shield" size={14} />
-      <span>{permissionProfileLabel(permissionProfile) ?? "默认环境"}</span>
+      <span>{permissionProfileLabel(permissionProfile) ?? (space === "work" ? "Work 私有工作区" : "默认环境")}</span>
     </button>
-  ) : space === "code" ? (
+  ) : (
     <button type="button" className="newchat-access" title="选择权限模式"
       onClick={() => setPermissionsOpen(true)} disabled={creating || importing}>
       <Icon name={permsFor(engine).find(mode => mode.id === permissionMode)?.ic ?? "shield"} size={14} />
-      <span>{permsFor(engine).find(mode => mode.id === permissionMode)?.short ?? "默认权限"}</span>
+      <span>{permsFor(engine).find(mode => mode.id === permissionMode)?.short ?? (space === "work" ? "Accept Edits" : "默认权限")}</span>
     </button>
-  ) : null;
+  );
 
   return (
     <div className={"newchat " + (space === "work" ? "work-newchat" : "code-newchat")}>
@@ -941,8 +935,11 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
           else updateExecutionControls({ permissionMode: null });
           setPermissionsOpen(false);
         } : undefined}
-        currentPermissionProfile={permissionProfile}
-        permissionProfiles={permissionProfiles}
+        currentPermissionProfile={permissionProfile ?? (space === "work" ? "cc_remote_work" : null)}
+        permissionProfiles={space === "work" ? [
+          { id: "cc_remote_work", allowed: true },
+          ...(permissionProfiles ?? CODEX_PERMISSION_PROFILES).filter(profile => profile.id !== "cc_remote_work"),
+        ] : permissionProfiles}
         onPickPermissionProfile={(profile) => updateExecutionControls({
           permissionProfile: profile,
         })}

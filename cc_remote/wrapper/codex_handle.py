@@ -1732,9 +1732,8 @@ class CodexHandle:
         self._configured_default_effort_generation: Optional[int] = None
         self._configured_default_effort_read_at: Optional[float] = None
         self._configured_default_effort_known = False
-        # Work is governed by its per-process named permission profile. It must
-        # never fall back to interactive escalation outside that profile, even
-        # when a resumed native thread persisted a Code-time approval policy.
+        # Work starts with a private profile and no approval prompts. Explicit
+        # per-session choices use the same native controls as Code.
         self.approval: str = (
             "never" if self.work_mode else (
                 codex_approval() if self.codex_home is None
@@ -2356,6 +2355,7 @@ class CodexHandle:
                 )
                 self._work_config = _work_thread_config(
                     skills_response, config_response)
+                self._work_config["web_search"] = self.web_search_override or "cached"
                 self._remember_configured_default_effort(config_response)
 
             if fork and resume_id:
@@ -2438,7 +2438,8 @@ class CodexHandle:
                         "developerInstructions": WORK_DEVELOPER_INSTRUCTIONS,
                         "personality": "none",
                         "config": self._work_config,
-                        "permissions": "cc_remote_work",
+                        "approvalPolicy": self.approval_policy,
+                        "permissions": self.permission_profile or "cc_remote_work",
                     })
                 else:
                     code_config = _code_thread_config(
@@ -2529,20 +2530,15 @@ class CodexHandle:
                     # Some generations echo config-derived defaults even when
                     # resume overrides were accepted. Keep the next turn pinned
                     # to the controls carried across the generation boundary.
-                    if self.work_mode:
-                        self.approval = "never"
-                        self.permission_profile = "cc_remote_work"
+                    if isinstance(preserved_approval, str):
+                        self.approval = preserved_approval
                     else:
-                        if isinstance(preserved_approval, str):
-                            self.approval = preserved_approval
-                        else:
-                            granular = _copy_granular_approval(
-                                preserved_approval)
-                            if granular is not None:
-                                self.approval_policy = granular
-                                self._approval = "on-request"
-                        if preserve_permission_profile:
-                            self.permission_profile = preserved_profile
+                        granular = _copy_granular_approval(preserved_approval)
+                        if granular is not None:
+                            self.approval_policy = granular
+                            self._approval = "on-request"
+                    if preserve_permission_profile:
+                        self.permission_profile = preserved_profile
             if not resume_id:
                 # thread/start cannot carry effort or collaborationMode in 0.144.1.
                 # Persist both before the new-session command can return, so even a
@@ -4636,8 +4632,6 @@ class CodexHandle:
         # Existing machine/tests assign this projection directly. Keep the raw
         # policy in lockstep for named policies; granular snapshots set _approval
         # directly so turn/start can preserve their full official object.
-        if self.work_mode:
-            value = "never"
         self._approval = value
         self.approval_policy: Any = value
 
@@ -4739,11 +4733,7 @@ class CodexHandle:
                 self._display_effort_retry_at = None
 
         approval = settings.get("approvalPolicy")
-        if self.work_mode:
-            # A resume response may carry the thread's previous Code policy.
-            # Work's filesystem profile is non-escalating by construction.
-            self.approval = "never"
-        elif isinstance(approval, str) and approval in {
+        if isinstance(approval, str) and approval in {
             "untrusted",
             "on-request",
             "never",
@@ -4776,9 +4766,7 @@ class CodexHandle:
             else "active_permission_profile"
         )
         active_profile = settings.get(active_key)
-        if self.work_mode:
-            self.permission_profile = "cc_remote_work"
-        elif isinstance(active_profile, dict):
+        if isinstance(active_profile, dict):
             profile_id = active_profile.get("id")
             if isinstance(profile_id, str) and 0 < len(profile_id) <= 256:
                 self.permission_profile = profile_id
@@ -4940,10 +4928,6 @@ class CodexHandle:
         # Codex "mode" = approval policy (untrusted | on-request | never).
         if mode not in ("untrusted", "on-request", "never"):
             raise ValueError(f"unsupported codex approval policy: {mode}")
-        if self.work_mode and mode != "never":
-            raise ValueError(
-                "Codex Work approval is fixed to never; its named permission "
-                "profile controls access")
         authoritative = await self._update_thread_settings(
             approvalPolicy=mode, wait_for_notification=True)
         if not authoritative:
@@ -4962,9 +4946,6 @@ class CodexHandle:
         if (not isinstance(profile, str) or not profile
                 or len(profile) > 256):
             raise ValueError("Codex permission profile must be non-empty")
-        if self.work_mode:
-            raise ValueError(
-                "Codex Work permission profile is fixed to cc_remote_work")
         scope = (self.thread_id, self._cwd, self._generation)
         catalog = await self.list_permission_profiles()
         if scope != (self.thread_id, self._cwd, self._generation):
@@ -4991,11 +4972,9 @@ class CodexHandle:
         )
 
     async def set_web_search(self, mode: str) -> None:
-        """Apply Code search mode by resuming the same thread with config."""
+        """Apply search mode by resuming the same thread with its config."""
         if mode not in {"cached", "live"}:
             raise ValueError(f"unsupported Codex web search mode: {mode}")
-        if self.work_mode:
-            raise ValueError("Codex Work web search is fixed to cached")
         if not self.thread_id:
             raise RuntimeError("connect() first")
         if self.turn_active or self.turn_start_pending:

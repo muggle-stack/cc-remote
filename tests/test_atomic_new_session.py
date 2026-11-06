@@ -165,8 +165,8 @@ def test_new_session_claude_permissions_are_engine_and_space_scoped(mode):
     assert deserialize(serialize(command)) == command
     with pytest.raises(ValidationError, match="selected engine"):
         NewSession(engine="codex", permission_mode=mode)
-    with pytest.raises(ValidationError, match="fixed by the wrapper"):
-        NewSession(engine="claude", space="work", permission_mode=mode)
+    work = NewSession(engine="claude", space="work", permission_mode=mode)
+    assert deserialize(serialize(work)) == work
 
 
 @pytest.mark.parametrize("mode", ["never", "on-request", "untrusted"])

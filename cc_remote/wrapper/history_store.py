@@ -37,6 +37,7 @@ from cc_remote.attachments import (
 )
 from cc_remote.protocol import ConversationTurn
 from cc_remote.wrapper.usage_limit import is_usage_limit_failure
+from cc_remote.wrapper.history_responses import response_process_summaries
 
 
 # v17 also discards Codex pages whose legacy rollout user rows were materialized
@@ -92,7 +93,9 @@ from cc_remote.wrapper.usage_limit import is_usage_limit_failure
 # v55 rebuilds Claude catalogs truncated behind pending image metadata leaves.
 # v56 makes native /goal a visible turn owning its live Remote identity.
 # v57 demotes provider errors Claude Code continued past to progress text.
-_SCHEMA_VERSION = 57
+# v58 restores native tool-result clocks instead of history-read timestamps.
+# v59 supplies per-response process headers before lazy detail is opened.
+_SCHEMA_VERSION = 59
 _FINGERPRINT_SAMPLE_BYTES = 64 * 1024
 _DEFAULT_MAX_ENTRIES = 128
 _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
@@ -1314,6 +1317,9 @@ def materialize_history_turns(
             "processStartedTs": process_started_ms,
             "processDoneTs": process_done_ms,
             "error": error,
+            "responseProcesses": response_process_summaries(group, turn_id, {
+                b["message_id"] for b in blocks if b.get("kind") == "text"
+            }),
         }
         turn.update({key: value for key, value in optional.items() if value is not None})
         if interrupted:
@@ -1400,7 +1406,10 @@ class HistoryIndexStore:
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
             current = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if current in range(10, 57):
+            if current == 58:
+                # Only the lightweight headers changed; retain source detail.
+                connection.execute("DELETE FROM history_pages WHERE engine='claude'")
+            if current in range(10, 58):
                 # Source bytes are unchanged. Rebuild only derived Claude
                 # narrative; retain native indexes, binary assets and engines.
                 for table in ("history_pages", "history_turn_details"):
@@ -1584,7 +1593,7 @@ class HistoryIndexStore:
                 for table in ("history_pages", "history_turn_details"):
                     connection.execute(
                         f"DELETE FROM {table} WHERE engine='codex'")
-            elif current in range(21, 57):
+            elif current in range(21, 59):
                 # The independent projection invalidations above suffice.
                 pass
             elif current not in (0, _SCHEMA_VERSION):

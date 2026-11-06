@@ -15371,3 +15371,43 @@ test("Claude fresh query waits for live output without flashing a history detail
   await expect(turn.locator(".turn-detail-entry")).toHaveCount(0);
   expect(relay.commands.filter(c => c.type === "get_turn_detail")).toEqual([]);
 });
+
+for (const firstHeader of [0, 3]) {
+test(`Claude cold history keeps response headers through expand collapse and reload (${firstHeader})`, async ({ page }) => {
+  const fixture = JSON.parse(readFileSync("tests/fixtures/claude-responses.json", "utf8"));
+  const sid = "response-history";
+  const relay = await mockRightPanelRelay(page, { engine: "claude", parentSid: sid,
+    retained: false, seedTurns: [fixture.summary] });
+  await page.setViewportSize({ width: 1200, height: 1000 });
+  await page.goto("/");
+  const turn = page.locator('[data-turn-id="human-response"]');
+  const heads = turn.locator(".turn-process-head");
+  const headerText = async () => (await heads.allTextContents()).map(text => text.replace(/\s/g, ""));
+  await expect(heads).toHaveCount(5);
+  const cold = ["已处理8s2项", ...Array(4).fill("已处理10s2项")];
+  await expect.poll(headerText).toEqual(cold);
+  expect(relay.commands.filter(c => c.type === "get_turn_detail")).toHaveLength(0);
+  // This is a fresh browser context: no persisted detail can hide the cold
+  // summary problem. Expanding the original header requests the parent's detail.
+  await heads.nth(firstHeader).click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "get_turn_detail").length).toBe(1);
+  relay.emit({ type: "turn_detail", sid, session_id: sid, turn_id: fixture.summary.id,
+    revision: "layout-history", authoritative: true, has_more: false, has_newer: false,
+    events: fixture.events.map((event: Record<string, unknown>) => ({ v: PROTOCOL_VERSION, ...event })) });
+  await expect(turn.getByText(firstHeader === 0 ? "Inspect the original job" : "Inspect result 2", { exact: true })).toBeVisible();
+  await expect.poll(headerText).toEqual(cold);
+  await heads.nth(firstHeader).click();
+  await expect(heads.nth(firstHeader)).toHaveAttribute("aria-expanded", "false");
+  await expect.poll(headerText).toEqual(cold);
+  await heads.nth(1).click();
+  await expect(turn.getByText("Inspect result 0", { exact: true })).toBeVisible();
+  await expect(heads.nth(1)).toHaveAttribute("aria-expanded", "true");
+  await heads.nth(1).click();
+  await expect.poll(headerText).toEqual(cold);
+  expect(relay.commands.filter(c => c.type === "get_turn_detail")).toHaveLength(1);
+  await page.reload();
+  await expect(heads).toHaveCount(5);
+  await expect.poll(headerText).toEqual(cold);
+  expect(relay.commands.some(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toBe(false);
+});
+}

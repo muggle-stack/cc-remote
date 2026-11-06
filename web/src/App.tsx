@@ -5199,15 +5199,9 @@ export default function App() {
       space === "work" ? null : cwd, engine, model, effort,
       { prompt, msg_id, images, files },
       engine === "codex" ? collaborationMode : undefined,
-      engine === "codex"
-        ? (space === "work" ? "never" : permissionMode)
-        : space === "code" ? permissionMode : undefined,
-      engine === "codex" && space === "code"
-        ? permissionProfile
-        : undefined,
-      engine === "codex" && space === "code"
-        ? webSearch
-        : undefined,
+      permissionMode,
+      engine === "codex" ? permissionProfile : undefined,
+      engine === "codex" ? webSearch : undefined,
       engine === "codex" ? serviceTier : undefined,
       space, space === "work" ? activeWorkProjectId : undefined,
       engine === "codex" ? newChatCodexProfileId : undefined,

@@ -1503,6 +1503,10 @@ class _SpawnFailure(Exception):
         self.message = message
 
 
+class _ClaudeBackgroundReconnectBlocked(RuntimeError):
+    """A new prompt must not tear down a child that still owns background work."""
+
+
 class _UnsupportedCodexModel(ValueError):
     """An explicit model is absent from the selected account's catalog."""
 
@@ -7918,29 +7922,17 @@ class WrapperMachine:
                 applied_mode, applied_threshold = auto_mode, auto_threshold
             if self._claude_controls is not None:
                 try:
-                    if ctx.space == "work":
-                        await asyncio.to_thread(
-                            self._claude_controls.update_auto_compact,
-                            session_id,
-                            mode=auto_mode,
-                            threshold_tokens=auto_threshold,
-                            applied_mode=applied_mode,
-                            applied_threshold_tokens=applied_threshold,
-                            preserve_other_controls=False,
-                        )
-                    else:
-                        await asyncio.to_thread(
-                            self._claude_controls.update,
-                            session_id,
-                            model=model,
-                            effort=effort,
-                            permission_mode=permission_mode,
-                            auto_compact_mode=auto_mode,
-                            auto_compact_threshold_tokens=auto_threshold,
-                            applied_auto_compact_mode=applied_mode,
-                            applied_auto_compact_threshold_tokens=(
-                                applied_threshold),
-                        )
+                    await asyncio.to_thread(
+                        self._claude_controls.update,
+                        session_id,
+                        model=model if ctx.space == "code" else None,
+                        effort=effort if ctx.space == "code" else None,
+                        permission_mode=permission_mode,
+                        auto_compact_mode=auto_mode,
+                        auto_compact_threshold_tokens=auto_threshold,
+                        applied_auto_compact_mode=applied_mode,
+                        applied_auto_compact_threshold_tokens=applied_threshold,
+                    )
                 except Exception as exc:
                     # A live runtime control change already succeeded. Do not
                     # roll it back because its private durability cache is
@@ -8021,7 +8013,7 @@ class WrapperMachine:
     async def _persist_codex_session_controls(
         self, ctx: SessionContext,
     ) -> None:
-        if (ctx.engine != "codex" or ctx.space != "code"
+        if (ctx.engine != "codex"
                 or not ctx.session_id or self._codex_controls is None):
             return
         try:
@@ -12879,8 +12871,14 @@ class WrapperMachine:
         ctx = self._ctx_by_sid(sid)
         if ctx is None:
             return False                       # not resident => we cannot have written it
+        # A human Result ends the foreground response, not the native child.
+        # Its live tasks still append queue-operation records before their
+        # notification reaches the SDK reader. Treat that window as owned work
+        # too; explicit foreign provenance/holders still win in the watcher.
         return bool(ctx.engine == "claude" and (
-            ctx.claude_write_active or self._claude_autonomous_followup_pending(ctx)))
+            ctx.claude_write_active
+            or self._claude_has_background_work(ctx)
+            or self._claude_autonomous_followup_pending(ctx)))
 
     async def _terminate_external_claude_holders(
         self,
@@ -21012,12 +21010,12 @@ class WrapperMachine:
             setattr(ctx.sdk, "display_effort", effort)
         await self._publish_codex_model_effort(ctx)
         approval = settings.get("approval_policy")
-        if (ctx.space != "work" and approval in CODEX_PERMISSION_MODES
+        if (approval in CODEX_PERMISSION_MODES
                 and ctx.sdk.approval != approval):
             ctx.sdk.approval = approval
             ctx.announced_perm = approval
             await self._emit(ctx, Perm(mode=approval))
-        if ctx.space != "work" and "permission_profile" in settings:
+        if "permission_profile" in settings:
             permission_profile = settings.get("permission_profile")
             if permission_profile is None or (
                     isinstance(permission_profile, str)
@@ -21380,13 +21378,6 @@ class WrapperMachine:
             ctx, action="切换权限模式")
         if control_error is not None:
             return control_error
-        if ctx.space == "work" and ctx.engine == "codex" and cmd.mode != "never":
-            error = Error(
-                code=ERR_AUTH,
-                message="Codex Work 权限由隔离工作区固定管理，不能升级为交互授权",
-            )
-            await self._emit(ctx, error)
-            return error
         allowed = (CODEX_PERMISSION_MODES if ctx.engine == "codex"
                    else CLAUDE_PERMISSION_MODES)
         if cmd.mode not in allowed:
@@ -21519,13 +21510,6 @@ class WrapperMachine:
             error = Error(
                 code=ERR_INTERNAL,
                 message="只有 Codex 会话支持执行环境配置。",
-            )
-            await self._emit(ctx, error)
-            return error
-        if ctx.space == "work":
-            error = Error(
-                code=ERR_AUTH,
-                message="Codex Work 的执行环境由隔离工作区固定管理，不能切换。",
             )
             await self._emit(ctx, error)
             return error
@@ -21747,10 +21731,10 @@ class WrapperMachine:
             ctx, action="切换网页搜索")
         if control_error is not None:
             return control_error
-        if ctx.engine != "codex" or ctx.space != "code":
+        if ctx.engine != "codex":
             error = Error(
                 code=ERR_AUTH,
-                message="只有 Codex Code 会话支持切换网页搜索。",
+                message="只有 Codex 会话支持切换网页搜索。",
             )
             await self._emit(ctx, error)
             return error
@@ -37157,7 +37141,7 @@ class WrapperMachine:
             wire_resume_id = resume_id
         saved_codex_controls = CodexControls()
         saved_claude_controls: ClaudeControls | None = None
-        if resume_id and engine == "codex" and space == "code":
+        if resume_id and engine == "codex":
             saved_codex_controls = await self._load_codex_session_controls(
                 wire_resume_id)
 
@@ -37226,7 +37210,7 @@ class WrapperMachine:
             )
             return None
 
-        if saved_codex_controls.cwd_override is not None:
+        if space == "code" and saved_codex_controls.cwd_override is not None:
             try:
                 saved_codex_controls = (
                     await self._reconcile_codex_cwd_override(
@@ -37469,6 +37453,8 @@ class WrapperMachine:
             nonlocal codex_profile_catalog
             nonlocal codex_profile_catalog_loaded
             nonlocal codex_profile_catalog_error
+            if space == "work" and profile_id == "cc_remote_work":
+                return True  # defined by this Work app-server's launch config
             if not codex_profile_catalog_loaded:
                 codex_profile_catalog_loaded = True
                 try:
@@ -37489,7 +37475,7 @@ class WrapperMachine:
                 for profile in codex_profile_catalog
             )
 
-        if (engine == "codex" and space == "code"
+        if (engine == "codex"
                 and isinstance(permission_profile, str)
                 and permission_profile):
             try:
@@ -37544,8 +37530,8 @@ class WrapperMachine:
                 # Omit effort unless this command explicitly selects it. Claude
                 # resolves the current model's user default, including menu-only
                 # /effort changes which never wrote an assistant transcript row.
-                permission_mode = (
-                    permission_mode or saved_controls.permission_mode)
+            permission_mode = (
+                permission_mode or saved_controls.permission_mode)
             if auto_compact_mode is None:
                 auto_compact_mode = saved_controls.auto_compact_mode
                 auto_compact_threshold_tokens = (
@@ -37666,9 +37652,8 @@ class WrapperMachine:
                     launch_auto_compact[1])
         if space == "work":
             if engine == "codex":
-                # The named Work permission profile grants autonomous access only
-                # inside this registered cwd. Never allow approval escalation to
-                # turn an outside-profile denial into broader host access.
+                # Work starts private; explicit per-session controls below may
+                # select another native profile or approval policy.
                 sdk.approval = "never"
             else:
                 assert work_record is not None
@@ -37680,8 +37665,8 @@ class WrapperMachine:
                         claude_profile),
                 )
                 sdk.permission_mode = "acceptEdits"
-        elif (engine == "claude"
-              and permission_mode in CLAUDE_PERMISSION_MODES):
+        if (engine == "claude"
+                and permission_mode in CLAUDE_PERMISSION_MODES):
             sdk.permission_mode = permission_mode
         # Pre-select effort at spawn (before connect): cc reads it via _options at
         # connect so --effort is baked into the first turn (no respawn); codex uses
@@ -37691,19 +37676,18 @@ class WrapperMachine:
         # sees the first turn as already-applied (cc's connect re-syncs it anyway;
         # this is what keeps codex from a spurious first-turn reconnect).
         if engine == "codex":
-            preserve_codex_controls = False
-            preserve_codex_permission_profile = False
+            preserve_codex_controls = space == "work"
+            preserve_codex_permission_profile = space == "work"
             if collaboration_mode in CODEX_COLLABORATION_MODES:
                 sdk.collaboration_mode = collaboration_mode
-            if (space != "work" and permission_mode in CODEX_PERMISSION_MODES):
+            if permission_mode in CODEX_PERMISSION_MODES:
                 sdk.approval = permission_mode
                 preserve_codex_controls = True
-            if (space != "work" and isinstance(permission_profile, str)
-                    and permission_profile):
+            if isinstance(permission_profile, str) and permission_profile:
                 sdk.permission_profile = permission_profile
                 preserve_codex_controls = True
                 preserve_codex_permission_profile = True
-            if space != "work" and web_search in CODEX_WEB_SEARCH_MODES:
+            if web_search in CODEX_WEB_SEARCH_MODES:
                 sdk.web_search_override = web_search
                 sdk.web_search = web_search
             if service_tier is not None:
@@ -37728,12 +37712,12 @@ class WrapperMachine:
                         controls.context_max_tokens, controls.context_window_tokens,
                         controls.context_settings_set)
                 restored_control_profile = False
-                if (space != "work" and permission_mode is None
+                if (permission_mode is None
                         and controls.approval_policy
                         in CODEX_PERMISSION_MODES):
                     sdk.approval = controls.approval_policy
                     preserve_codex_controls = True
-                if (space != "work" and permission_profile is None
+                if (permission_profile is None
                         and controls.permission_profile):
                     try:
                         restored_control_profile = (
@@ -37757,7 +37741,7 @@ class WrapperMachine:
                             session_id=resume_id,
                             permission_profile=controls.permission_profile,
                         )
-                if space != "work" and web_search is None:
+                if web_search is None:
                     if controls.web_search in CODEX_WEB_SEARCH_MODES:
                         sdk.web_search_override = controls.web_search
                         sdk.web_search = controls.web_search
@@ -38190,13 +38174,7 @@ class WrapperMachine:
                     return None
             self._invalidate_codex_session_catalog()
 
-        if space == "work" and engine == "codex":
-            # thread/resume may restore the Code-time policy recorded in the
-            # native rollout. Work always reasserts its non-escalating profile.
-            ctx.sdk.approval = "never"
-            ctx.sdk.permission_profile = "cc_remote_work"
-
-        if engine == "codex" and space == "code":
+        if engine == "codex":
             await self._persist_codex_session_controls(ctx)
 
         if engine == "codex" and space == "code":
@@ -38498,7 +38476,8 @@ class WrapperMachine:
                 )
                 raise _BtwSpawnFailure(
                     ERR_INTERNAL, "Work 隔离策略无法建立，请稍后重试。") from exc
-            sdk.permission_mode = "acceptEdits"
+            sdk.permission_mode = getattr(
+                parent.sdk, "permission_mode", "acceptEdits")
         elif engine != "codex":
             sdk.permission_mode = getattr(
                 parent.sdk, "permission_mode", "bypassPermissions")
@@ -38555,18 +38534,11 @@ class WrapperMachine:
         if engine != "codex":
             self._configure_claude_sdk_callbacks(ctx, ctx.sdk)
         else:
-            if parent_space == "work":
-                ctx.sdk.approval = "never"
-                ctx.sdk.permission_profile = "cc_remote_work"
-                ctx.sdk.web_search_override = None
-                ctx.sdk.web_search = "cached"
-            else:
-                ctx.sdk.approval = parent.sdk.approval
-                ctx.sdk.approval_policy = parent.sdk.approval_policy
-                ctx.sdk.permission_profile = parent.sdk.permission_profile
-                ctx.sdk.web_search_override = (
-                    parent.sdk.web_search_override)
-                ctx.sdk.web_search = parent.sdk.web_search
+            ctx.sdk.approval = parent.sdk.approval
+            ctx.sdk.approval_policy = parent.sdk.approval_policy
+            ctx.sdk.permission_profile = parent.sdk.permission_profile
+            ctx.sdk.web_search_override = parent.sdk.web_search_override
+            ctx.sdk.web_search = parent.sdk.web_search
             ctx.sdk.approval_callback = (
                 lambda method, params: self._on_codex_approval(
                     ctx, method, params))
@@ -38639,12 +38611,6 @@ class WrapperMachine:
                                 space=catalog_space,
                                 error_type=type(exc).__name__,
                             )
-                if parent_space == "work":
-                    # A fork response may echo settings persisted by a former
-                    # Code incarnation. Work's private process remains
-                    # authoritative.
-                    ctx.sdk.approval = "never"
-                    ctx.sdk.permission_profile = "cc_remote_work"
                 await self._resolve_codex_session_effort(
                     ctx, preferred=BTW_DEFAULT_EFFORT)
             await self._stamp_codex_daemon_epoch(ctx)
@@ -39944,14 +39910,32 @@ class WrapperMachine:
 
         async def reconnect_claude(reason: str) -> None:
             """Reconnect without hiding transcript changes during the await."""
+            external_change = reason.startswith("external transcript change")
+
+            def protect_background_work() -> None:
+                # Failed-reader/control-plane recovery has its own lifecycle:
+                # its stale task projection cannot veto repairing a dead child.
+                if ((external_change or reason == "effort change")
+                        and not any(getattr(ctx.sdk, flag, False) for flag in (
+                            "message_pump_failed", "control_plane_failed",
+                            "service_restart_required"))
+                        and self._claude_has_background_work(ctx)):
+                    # A real external edit still needs a reload, but an ordinary
+                    # send is not consent to stop accepted background tasks.
+                    # Restore the bit that callers clear before this helper.
+                    if external_change:
+                        ctx.needs_reload = True
+                    raise _ClaudeBackgroundReconnectBlocked(reason)
+
+            protect_background_work()
             check_delivery = getattr(ctx.sdk, "check_service_delivery", None)
             if (check_delivery is not None
                     and not getattr(ctx.sdk, "service_restart_required", False)):
                 check_delivery()
-            external_change = reason.startswith("external transcript change")
             if external_change:
                 self._invalidate_claude_context_usage(ctx)
                 await self._stage_claude_handoff_controls(ctx)
+            protect_background_work()
             resume_id, fork = self._claude_reconnect_identity(ctx)
             fork_option = {"fork": True} if fork else {}
             await ctx.sdk.force_reconnect(
@@ -40586,6 +40570,21 @@ class WrapperMachine:
             if codex_overflow_repair_turn_id is not None:
                 await self._repair_codex_projection_after_overflow(
                     ctx, codex_overflow_repair_turn_id)
+        except _ClaudeBackgroundReconnectBlocked as exc:
+            log.info(
+                "deferred Claude pre-query reconnect for background work",
+                session_id=ctx.session_id,
+                reason=str(exc),
+            )
+            await self._emit(ctx, Error(
+                code=ERR_BUSY,
+                message=(
+                    "会话需要重载，但后台任务仍在运行。本次消息未发送，"
+                    "后台任务已保留；请等待任务完成后重试。"
+                ),
+                msg_id=ctx.active_msg_id,
+            ))
+            await self._set_idle_after_managed_turn(ctx)
         except ClaudeAutonomousFollowupPending:
             # The machine preflights were clean, but a post-Result task
             # notification reached the sole SDK reader before the actual write.

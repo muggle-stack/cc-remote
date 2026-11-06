@@ -1,3 +1,4 @@
+import type { ResponseProcessSummary } from "./protocol";
 import type { Block, ProcessBlock, TextBlock, Turn } from "./domain/conversation";
 import { finalTextBlocks } from "./process-blocks";
 import { isReturnReceipt, isSyntheticReturnReceipt, returnedAgents, hasParentContinuation, returnAnchorIds } from "./agent-returns.ts";
@@ -9,6 +10,7 @@ export interface AssistantContinuation {
   returns: ProcessBlock[];
   startedTs?: number;
   doneTs?: number;
+  processSummary?: ResponseProcessSummary;
 }
 
 /** Attribute the enclosing terminal to one response, not every continuation.
@@ -33,7 +35,8 @@ export function continuationTerminalOwner(
 
 /** Native receipt order for Codex, background main-agent output for Claude.
  * Source order and native message IDs keep live, replay and detail identical. */
-export function assistantContinuations(blocks: Block[], answers: TextBlock[], engine: "claude" | "codex" | "dsh" = "claude") {
+export function assistantContinuations(blocks: Block[], answers: TextBlock[], engine: "claude" | "codex" | "dsh" = "claude",
+  responseProcesses?: ResponseProcessSummary[] | null) {
   const original: Block[] = [];
   const continuations: AssistantContinuation[] = [];
   const codex = engine === "codex";
@@ -111,6 +114,17 @@ export function assistantContinuations(blocks: Block[], answers: TextBlock[], en
     if (!isReturnReceipt(receipt) || receipt.kind !== "process" || !receipt.returnAnchorId) continue;
     const segment = anchoredSegments.get(receipt.returnAnchorId);
     if (segment) segment.returns = returnedAgents([...segment.returns, receipt]);
+  }
+  if (engine === "claude" && responseProcesses) {
+    for (const segment of continuations) {
+      const summary = responseProcesses.find(row => row.background && (
+        row.id === segment.id || segment.answers.some(answer => answer.message_id === row.answerId)));
+      if (!summary) continue;
+      segment.processSummary = summary;
+      segment.id = summary.id;
+      segment.startedTs = summary.startedTs ?? segment.startedTs;
+      segment.doneTs = summary.doneTs ?? segment.doneTs;
+    }
   }
   return {
     original,

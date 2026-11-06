@@ -1269,10 +1269,10 @@ assert.equal(codexWorkSlashes.includes("fast"), true,
 for (const slash of ["model", "goal", "btw", "preview", "context", "clear"]) {
   assert.equal(claudeWorkSlashes.includes(slash), true, `Work must retain /${slash}`);
 }
-assert.equal(claudeWorkSlashes.includes("permissions"), false,
-  "Work permissions are fixed by its private workspace and must not be presented as editable");
-assert.equal(isKnownCodeOnlySlash("permissions", "claude"), true);
-assert.equal(isKnownCodeOnlySlash("permissions", "codex"), true);
+assert.equal(claudeWorkSlashes.includes("permissions"), true,
+  "Work exposes the same native permission controls as Code");
+assert.equal(isKnownCodeOnlySlash("permissions", "claude"), false);
+assert.equal(isKnownCodeOnlySlash("permissions", "codex"), false);
 for (const slash of ["plan", "code-review", "security-review", "verify", "simplify", "run", "init", "diff"]) {
   assert.equal(claudeWorkSlashes.includes(slash), false, `Work must hide Code /${slash}`);
   assert.equal(isKnownCodeOnlySlash(slash, "claude"), true);
@@ -10870,6 +10870,14 @@ try {
   assert.match(multiProfileNewChatMarkup, /class="newchat-context"/);
   assert.match(multiProfileNewChatMarkup, /aria-label="选择 Codex 账号"/);
   assert.match(multiProfileNewChatMarkup, />nyx · Stack</);
+  assert.match(multiProfileWorkMarkup, /class="newchat-access"/);
+  assert.match(multiProfileWorkMarkup, />Work 私有工作区</);
+  const claudeWorkMarkup = renderToStaticMarkup(createElement(NewChatView, {
+    cwd: "~", engine: "claude", space: "work",
+    controlScopeKey: "machine-a:work:claude", onPickCwd: () => {}, onSend: () => true,
+  }));
+  assert.match(claudeWorkMarkup, /title="选择权限模式"/);
+  assert.match(claudeWorkMarkup, />Accept Edits</);
   assert.match(multiProfileWorkMarkup, /aria-label="选择 Codex 账号"/);
   assert.match(multiProfileWorkMarkup, />nyx · Stack</);
   assert.match(multiProfileWorkMarkup, /会话列表暂不可用/,
@@ -18328,9 +18336,17 @@ for (const permission of ["default", "acceptEdits", "plan", "auto", "bypassPermi
   assert.equal(firstClaudeFrame.permission_mode, permission);
 }
 relay.sendNewSession(null, "claude", null, null,
-  { prompt: "Work keeps its isolated permissions", msg_id: "work-claude-permission" },
+  { prompt: "Work uses selected permissions", msg_id: "work-claude-permission" },
   undefined, "bypassPermissions", undefined, undefined, undefined, "work");
-assert.equal("permission_mode" in JSON.parse(socket.sent.at(-1) ?? "{}"), false);
+assert.equal(JSON.parse(socket.sent.at(-1) ?? "{}").permission_mode, "bypassPermissions");
+relay.sendNewSession(null, "codex", null, null,
+  { prompt: "Work uses selected execution settings", msg_id: "work-codex-permission" },
+  "default", "on-request", ":danger-full-access", "live", undefined, "work");
+const workExecutionFrame = JSON.parse(socket.sent.at(-1) ?? "{}");
+assert.equal(workExecutionFrame.permission_mode, "on-request");
+assert.equal(workExecutionFrame.permission_profile, ":danger-full-access");
+assert.equal(workExecutionFrame.web_search, "live");
+assert.equal("cwd" in workExecutionFrame, false, "Work keeps its assigned directory");
 
 
 relay.sendGetModels("claude", "/tmp/project");
@@ -18559,10 +18575,6 @@ assert.match(newChatSource, /<PendingImageAttachments/,
   "new-chat attachments must share the interactive image preview");
 assert.match(newChatSource, /executionControls\.scopeKey === controlScopeKey/,
   "new-chat execution controls must be scoped before the first switched render");
-assert.match(newChatSource, /space === "work" \? "never" : permission \?\? "never"/,
-  "Codex Work must request its authoritative non-escalating approval policy");
-assert.match(appSource, /space === "work" \? "never" : permissionMode/,
-  "the atomic new-session wire must retain the authoritative Work policy");
 const composerSource = readFileSync(
   resolve(process.cwd(), "src/components/Composer.tsx"), "utf8");
 assert.match(composerSource,

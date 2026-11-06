@@ -61,6 +61,7 @@ export const COMMANDS: Command[] = [
 // by the composer instead of leaking through.
 export const WORK_COMMANDS: Command[] = [
   { g: "设置" },
+  { slash: "permissions", name: "权限配置", ds: "选择本次工作的权限模式与执行环境", ic: "shield" },
   { slash: "model", name: "切换模型", ds: "选择本次工作的模型与思考强度", ic: "cpu" },
   { g: "扩展" },
   { slash: "extensions", name: "扩展目录", ds: "只读查看当前 Work 可用扩展", ic: "spark" },
@@ -151,6 +152,10 @@ export interface PermissionProfileChoice extends PermissionProfileInfo {
 const CODEX_PROFILE_LOOKS: Record<string, {
   name: string; short: string; ds: string; ic: string; danger?: boolean;
 }> = {
+  "cc_remote_work": {
+    name: "Work 私有工作区", short: "Work 私有工作区",
+    ds: "默认 · 仅工作目录可写，网络受限", ic: "lock",
+  },
   ":read-only": {
     name: "Read Only", short: "Read Only",
     ds: "只读文件；适合审查和分析", ic: "lock",
