@@ -211,8 +211,9 @@ def test_daemon_command_refuses_unsafe_working_directory(monkeypatch, home):
     ("remote", False, True), ("local", True, True), ("default", True, True),
     ("other", True, False), ("local", False, False), ("ambiguous", True, False),
 ])
+@pytest.mark.parametrize("record_name", ["app-server.pid", "daemon.pid"])
 def test_linux_managed_daemon_nofile_is_applied_to_exact_pid(
-        monkeypatch, tmp_path, listener, allow_local, accepted):
+        monkeypatch, tmp_path, listener, allow_local, accepted, record_name):
     proc_root = tmp_path / "proc"
     proc = proc_root / "4321"
     proc.mkdir(parents=True)
@@ -235,7 +236,7 @@ def test_linux_managed_daemon_nofile_is_applied_to_exact_pid(
     )
     daemon_root = tmp_path / "codex-home" / "app-server-daemon"
     daemon_root.mkdir(parents=True)
-    (daemon_root / "app-server.pid").write_text('{"pid":4321}')
+    (daemon_root / record_name).write_text('{"pid":4321}')
     calls: list[tuple] = []
     limit = [1024, 524288]
 
@@ -265,11 +266,12 @@ def test_linux_managed_daemon_nofile_is_applied_to_exact_pid(
     assert calls[-1][2] is None
 
 
+@pytest.mark.parametrize("record_name", ["app-server.pid", "daemon.pid"])
 def test_managed_daemon_identity_uses_same_user_pid_and_start_token(
-        monkeypatch, tmp_path):
+        monkeypatch, tmp_path, record_name):
     daemon_root = tmp_path / "app-server-daemon"
     daemon_root.mkdir()
-    (daemon_root / "app-server.pid").write_text(
+    (daemon_root / record_name).write_text(
         '{"pid":4321}', encoding="utf-8")
     identity = ProcessIdentity(4321, 987654)
     monkeypatch.setattr(
@@ -286,6 +288,24 @@ def test_managed_daemon_identity_uses_same_user_pid_and_start_token(
         lambda _pid: os.getuid() + 1,
     )
     assert daemon_module._managed_daemon_process_identity(tmp_path) is None
+
+
+@pytest.mark.parametrize("current_record", ["valid", "invalid", "symlink"])
+def test_new_daemon_record_never_falls_back_to_retired_pid(
+        monkeypatch, tmp_path, current_record):
+    root = tmp_path / "app-server-daemon"
+    root.mkdir()
+    legacy = root / "app-server.pid"
+    legacy.write_text('{"pid":4321}')
+    current = root / "daemon.pid"
+    if current_record == "symlink":
+        current.symlink_to(legacy)
+    else:
+        current.write_text('{"pid":5432}' if current_record == "valid" else '{}')
+    monkeypatch.setattr(daemon_module, "process_owner_uid", lambda _pid: os.getuid())
+    monkeypatch.setattr(daemon_module, "process_identity", lambda pid: ProcessIdentity(pid, 999))
+    expected = ProcessIdentity(5432, 999) if current_record == "valid" else None
+    assert daemon_module._managed_daemon_process_identity(tmp_path) == expected
 
 
 @pytest.fixture(params=[False, True], ids=["socket", "native-alias"])

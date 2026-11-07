@@ -560,6 +560,10 @@
 .async-question-dialog::backdrop { background: rgb(18 28 48 / .2); }
 :root[data-theme="dark"] .async-question-dialog::backdrop { background: rgb(0 0 0 / .5); }
 .async-question-dialog > form { display: flex; flex-direction: column; min-height: 0; width: 100%; }
+.question-markdown-paragraph { display: block; }
+.question-markdown-paragraph + .question-markdown-paragraph { margin-top: .4em; }
+.async-question-dialog code { overflow-wrap: anywhere; }
+.async-question-dialog a { color: var(--accent); text-decoration: underline; }
 .async-question-heading { display: flex; align-items: center; gap: 10px; padding: 20px 24px 14px; flex: none; }
 .async-question-heading > span:first-child { display: flex; align-items: center; gap: 10px; color: var(--dim); font-size: 14px; outline: none; }
 .async-question-answered { color: var(--dim); font-size: 11px; margin-left: auto; }

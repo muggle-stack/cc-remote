@@ -22,6 +22,7 @@ from typing import Any, Iterable, Optional
 from cc_remote.wrapper.rollout_io import rollout_first_line, rollout_open, rollout_size
 from cc_remote.log import logger
 from cc_remote.wrapper.codex_rpc import codex_rpc, codex_history_rpc_scope
+from cc_remote.wrapper.codex_organization import PINNED_SECTION_ID, native_pinned, native_read_state
 
 
 def _load_tomllib():
@@ -146,7 +147,10 @@ async def _list_codex_sessions(
     ).strip()
     by_id: dict[str, dict[str, Any]] = {}
 
-    for archived in (False, True):
+    native_sections = False
+    for archived, section_id in ((False, None), (True, None), (False, PINNED_SECTION_ID)):
+        if section_id is not None and not native_sections:
+            continue
         cursor: Optional[str] = None
         seen_cursors: set[str] = set()
         accepted_ids: set[str] = set()
@@ -162,6 +166,8 @@ async def _list_codex_sessions(
             }
             if catalog_index_only():
                 params["useStateDbOnly"] = True
+            if section_id is not None:
+                params.update(sectionId=section_id, useStateDbOnly=True)
             if cursor:
                 params["cursor"] = cursor
             if provider:
@@ -181,6 +187,13 @@ async def _list_codex_sessions(
             for thread in page:
                 normalized = _normalize_thread(thread, archived=archived)
                 if normalized is not None:
+                    native_sections |= "native_pinned" in normalized
+                    read_states = response.get("readStates")
+                    read_state = native_read_state(
+                        read_states.get(normalized["session_id"])
+                        if isinstance(read_states, dict) else None)
+                    if read_state is not None:
+                        normalized["native_read_state"] = read_state
                     by_id[normalized["session_id"]] = normalized
                     accepted_ids.add(normalized["session_id"])
 
@@ -237,6 +250,8 @@ def _normalize_thread(thread: Any, *, archived: bool) -> Optional[dict[str, Any]
         "forked_from_id": forked_from,
         "status": status,
         "tag": "archived" if archived else None,
+        **({"native_pinned": native_pinned(thread)}
+           if native_pinned(thread) is not None else {}),
     }
 
 

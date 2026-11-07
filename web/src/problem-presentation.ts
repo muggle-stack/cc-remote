@@ -10,6 +10,13 @@ const CODEX_UPDATE_INTERRUPTION =
 const CODEX_CONNECTION_INTERRUPTION =
   "与 Codex 的连接中断，本轮未确认完成。请检查已有结果后继续。";
 const STOP_TIMEOUT_FAILURE = "停止确认超时，本轮未确认完成。";
+const CODEX_PROVIDER_MISMATCH =
+  "当前模型服务商与此会话保存的服务商不同，本次未发送。"
+  + "历史仍可查看；请切回原服务商继续，或使用分支功能在当前服务商下创建新会话。";
+const CODEX_METADATA_PROBLEMS = new Set([
+  "已读状态暂未确认，请重新打开会话确认。",
+  "Codex 置顶状态暂未确认，请刷新列表查看。",
+]);
 // Exact authored causes only; never expose an arbitrary upstream diagnostic.
 const STEER_REJECTION_MESSAGES = /^(?:该会话(?:未启动，无法引导当前任务|当前为只读状态，无法从 Remote 引导)|本次引导已取消。|Claude 当前无法接收引导，本次未发送；请稍后重试或排队。|Codex (?:(?:自动压缩|Review|当前阶段)不支持引导，或任务已经切换；本次未发送。|正在核对当前回合归属，本次引导未发送；请稍后重试。|当前回合不支持引导，请等待后重试。)|消息内容为空，请输入内容或添加附件。|附件不符合要求，请调整后重试。)$/;
 const CODEX_USAGE_LIMIT_FAILURE =
@@ -37,6 +44,7 @@ const SAFE_TURN_FAILURE_MESSAGES = new Set([
   CODEX_UPDATE_INTERRUPTION,
   CODEX_CONNECTION_INTERRUPTION,
   STOP_TIMEOUT_FAILURE,
+  CODEX_PROVIDER_MISMATCH,
   "上游模型因安全策略拒绝了本次请求（cyber_policy）。"
     + "这不是本地权限或网络错误；请核实并说明任务背景与授权范围，"
     + "若属误判请向服务提供方反馈。",
@@ -114,6 +122,9 @@ export function presentTurnProblem(error: Pick<ErrorMsg, "code" | "message">): s
 export function presentCommandProblem(
   error: Pick<ErrorMsg, "code" | "message">,
 ): string {
+  if ((error.code === "cc_crash" || error.code === "not_steerable")
+      && error.message === CODEX_PROVIDER_MISMATCH) return CODEX_PROVIDER_MISMATCH;
+  if (error.code === "busy" && CODEX_METADATA_PROBLEMS.has(error.message)) return error.message;
   switch (error.code) {
     case "drain_timeout":
       return STOP_TIMEOUT_FAILURE;

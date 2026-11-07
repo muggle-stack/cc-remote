@@ -24,6 +24,14 @@ from tests.test_codex_profiles import _machine as _profile_machine
 from tests.test_multisession import _mk_ctx, _mk_machine
 
 
+@pytest.fixture(autouse=True)
+def legacy_pin_control(monkeypatch):
+    # This module exercises legacy/local and ownership fallbacks. Native 0.167
+    # RPC choices are covered independently in test_codex_0167_adaptation.
+    monkeypatch.setattr(machine_module.WrapperMachine, "_set_native_codex_pin",
+                        AsyncMock(return_value=False))
+
+
 def test_pin_command_and_session_info_roundtrip():
     command = deserialize(serialize(PinSession(
         session_id="session-1", pinned=True, engine="codex", space="work")))

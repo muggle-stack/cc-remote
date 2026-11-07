@@ -46,6 +46,13 @@ assert.equal(btwCompletions.take("machine-b", "btw-one", terminal), true);
 
 assert.equal(completionNeedsHistoryRepair([], "native-terminal"), true,
   "a durable completion repairs an empty cold browser projection");
+assert.equal(completionNeedsHistoryRepair([], `codex-read-${"a".repeat(64)}`), false,
+  "a read revision or manual unread mark is not a terminal");
+assert.equal(completionNeedsHistoryRepair([], `codex-read-${"a".repeat(64)}:native-turn`), true);
+assert.equal(completionNeedsHistoryRepair([{
+  id: "row", forkPointId: "native-turn", done: true, doneTs: 123,
+}], `codex-read-${"a".repeat(64)}:native-turn`), false,
+"native unread results retain exact history-repair identity");
 assert.equal(completionNeedsHistoryRepair([{
   id: "browser-turn", forkPointId: "native-terminal",
   done: false, doneTs: undefined,

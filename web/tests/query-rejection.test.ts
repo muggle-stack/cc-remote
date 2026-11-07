@@ -10,6 +10,13 @@ const harness = await createServer({
 });
 
 try {
+  const { presentCommandProblem, presentTurnProblem } = await harness.ssrLoadModule("/src/problem-presentation.ts");
+  const providerMismatch = "当前模型服务商与此会话保存的服务商不同，本次未发送。"
+    + "历史仍可查看；请切回原服务商继续，或使用分支功能在当前服务商下创建新会话。";
+  assert.equal(presentCommandProblem({ code: "cc_crash", message: providerMismatch }), providerMismatch);
+  assert.equal(presentCommandProblem({ code: "not_steerable", message: providerMismatch }), providerMismatch);
+  assert.equal(presentTurnProblem({ code: "cc_crash", message: providerMismatch }), providerMismatch);
+  assert.ok(!presentCommandProblem({ code: "cc_crash", message: "modelProviderMismatch SECRET" }).includes("SECRET"));
   const { initialState, createRuntime, reduce } = await harness.ssrLoadModule("/src/reducer.ts");
   const { QueuedQueryChip } = await harness.ssrLoadModule("/src/components/QueuedQueryChip.tsx");
   const sid = "claude-session";

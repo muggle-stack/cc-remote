@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 from cc_remote import __version__
 from cc_remote.wrapper.history_metrics import history_timed
+from cc_remote.wrapper.codex_errors import model_provider_mismatch
 from cc_remote.wrapper.codex_runtime import (
     codex_env as _codex_env,
     resolve_codex_bin as _resolve_codex_bin,
@@ -35,10 +36,11 @@ def _child_env(bin_path: str, codex_home: Optional[str]) -> dict[str, str]:
 class CodexRpcRejected(RuntimeError):
     """The app-server returned an explicit JSON-RPC rejection."""
 
-    def __init__(self, message: str, *, code: int | None = None):
+    def __init__(self, message: str, *, code: int | None = None, data: Any = None):
         super().__init__(message)
         self.code = code
         self.message = message
+        self.model_provider_mismatch = model_provider_mismatch(code, data)
 
 
 class CodexRpcOutcomeUnknown(RuntimeError):
@@ -63,6 +65,7 @@ def _rpc_error(error: Any) -> CodexRpcRejected:
         return CodexRpcRejected(
             f"codex app-server error {code}: {message}",
             code=code,
+            data=error.get("data"),
         )
     return CodexRpcRejected(f"codex app-server error: {message}")
 

@@ -7825,7 +7825,14 @@ def test_collaboration_modes_are_codex_only_and_broadcast_after_apply():
     asyncio.run(run())
 
 
-def test_client_hello_seeds_codex_defaults_without_control_plane_probes():
+def test_client_hello_seeds_codex_defaults_without_control_plane_probes(monkeypatch):
+    # This fast-path test must not scan the operator's real task/agent catalog.
+    monkeypatch.setattr(
+        "cc_remote.wrapper.codex_tasks.read_task_activity", lambda _home: {})
+    monkeypatch.setattr(
+        "cc_remote.wrapper.codex_agent_activity.CodexAgentActivity.read",
+        lambda _reader, _home, _parents: {})
+
     async def run():
         machine, transport = _mk_machine()
         ctx = _control_ctx("codex", "codex")
@@ -8185,6 +8192,9 @@ def test_codex_rename_archive_and_unarchive_use_app_server_for_hot_and_cold_sess
 def test_codex_pin_is_wrapper_persistent_and_refreshes_sidebar():
     async def run():
         machine, transport = _mk_machine()
+        async def legacy_native_pin(_sid, _pinned):
+            return False
+        machine._set_native_codex_pin = legacy_native_pin
         machine.sessions = {"codex-id": _control_ctx("codex-id", "codex")}
         refreshed = []
 
