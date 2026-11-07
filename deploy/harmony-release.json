@@ -1,16 +1,16 @@
 {
   "schema": 1,
   "repository": "muggle-stack/cc-remote",
-  "release": "v4.0.29",
-  "asset": "cc-remote-harmony-v4.0.29-unsigned.hap",
-  "sha256": "24b96ee99cdde67726035b945234b227ec138991a23898027c790f12cc62ebe5",
-  "bytes": 63497,
+  "release": "v5.3.10",
+  "asset": "cc-remote-harmony-v5.3.10-unsigned.hap",
+  "sha256": "c534a1a8149390d074e318dc3c06145ba8d8d53b1c8f356050c2636cf40de79a",
+  "bytes": 71109,
   "harmony": {
     "build": "release",
     "signed": false,
     "bundle_name": "io.github.ccremote.client",
-    "version_name": "0.1.0-preview.5",
-    "version_code": 5,
+    "version_name": "0.1.0-preview.6",
+    "version_code": 6,
     "compatible_api": 14,
     "target_api": 20,
     "deveco_studio": "26.0.0.851",
@@ -21,10 +21,11 @@
   },
   "source": {
     "repository": "https://github.com/muggle-stack/cc-remote",
-    "tag": "v4.0.27",
-    "commit": "e9c8ff3414e845c07926c8f435b93aca09ca1815",
-    "input": "git archive of tracked android/ and harmony/ directories",
+    "commit": "99924ed988a7f86a68a9876d0b9dc95fbd37a1e0",
+    "input": "Tracked harmony/ native sources matching this commit; private local build and signing configuration excluded",
     "builder": "Maintainer local macOS build; not GitHub Actions attested",
-    "original_asset": "cc-remote-harmony-v4.0.27-unsigned.hap"
+    "original_asset": "cc-remote-harmony-v5.3.10-unsigned.hap",
+    "first_release": "v5.3.10",
+    "acceptance": "Release build tested on a physical phone: generated PNG and Markdown blob downloads, authenticated HTTP MP4 download, cancellation and retry, saved files opened in system viewers"
   }
 }

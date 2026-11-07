@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+## v5.3.10
+
+Stabilize Claude continuation history and reading position, add Work permissions and directory actions, and improve page previews and HarmonyOS downloads. Wire protocol v90 requires coordinated Relay, Wrapper and Web updates; Claude Agent SDK remains 0.2.174.
+
 - Keep a background continuation expanded when cold history detail arrives, retain response boundaries when restoring cached process, and preserve reading position when completion coincides with touch release.
 - Preserve the reading paragraph when Claude confirms message IDs, completes an answer, or refreshes background continuation summaries; keep live-tail following separate from reading-position recovery.
 - Retain queued Claude prompts and attachments when background work blocks a required reconnect; resume once safe without repeating rejected turns or blocking failed-child recovery.
@@ -18,6 +22,8 @@
 - Preserve Claude background tasks when sending another message after the foreground reply ends; task bookkeeping no longer triggers an unintended reconnect.
 - Keep Claude continuation tools before their final answer when a history refresh adds background-task return metadata, avoiding a duplicate empty continuation after switching sessions.
 - Preserve native tool completion times when expanding Claude history, and reload evicted process detail instead of treating a return receipt as a complete detail page.
+
+See the bilingual [release notes](docs/releases/v5.3.10.md).
 
 ## v5.3.9
 

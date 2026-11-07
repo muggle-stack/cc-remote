@@ -65,7 +65,7 @@ def test_republishes_exact_bytes_and_preserves_original_native_provenance(releas
     assert info["harmony"] == pin["harmony"]
     assert info["reuse"]["byte_for_byte"] is True
     assert info["reuse"]["release"] == "v9.9.9"
-    assert "0.1.0-preview.5" in notes and published.name in notes
+    assert pin["harmony"]["version_name"] in notes and published.name in notes
     assert "not GitHub Actions attested" in notes
     checksums = (output / "MOBILE_SHA256SUMS").read_text().splitlines()
     assert len(checksums) == 2

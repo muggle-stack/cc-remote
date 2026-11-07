@@ -109,7 +109,7 @@ def prepare(
         "\n\n### 鸿蒙 App / HarmonyOS app\n\n"
         f"本次附件包含 `{filename}`，原生版本为 "
         f"**{pin['harmony']['version_name']}**（versionCode {pin['harmony']['version_code']}）。"
-        "原生代码未变化，安装包按原始字节复用；已有对应版本无需重装。"
+        "本次发布沿用已验证的原生构建字节；已有该原生版本无需重装。"
         "HAP 未签名，需要使用自己的开发者及设备 Profile 签名后安装。"
         "构建来源和校验值见 `MOBILE_BUILD_INFO.json`、`MOBILE_SHA256SUMS`。\n\n"
         "The attached unsigned Harmony HAP reuses the verified native build byte-for-byte. "
