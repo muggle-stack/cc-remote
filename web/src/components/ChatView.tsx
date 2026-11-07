@@ -27,7 +27,7 @@ import type { SessionMessageNavigation } from "../session-messages";
 import type { LoadTurnFilePage } from "../turn-file-pages";
 import { usageForTurn, type TurnUsageReadings } from "../turn-usage";
 import { MessageBlock } from "./MessageBlock";
-import { assistantContinuations, continuationTerminalOwner, type AssistantContinuation } from "../assistant-continuations";
+import { assistantContinuations, ContinuationRenderKeys, continuationTerminalOwner, type AssistantContinuation } from "../assistant-continuations";
 import { returnRunId, returnedAgents } from "../agent-returns";
 import { TimedMessageTag } from "./TimedMessageTag";
 import { Icon, ClaudeMark, EngineWorking, EngineDone } from "../icons";
@@ -508,6 +508,7 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
   // page can hand back to the live runtime without requiring a second scroll.
   const manualLatestIntentRef = useRef<string | null>(null);
   const turnKeySnapshotRef = useRef<TurnKeySnapshot | null>(null);
+  const continuationRenderKeysRef = useRef(new ContinuationRenderKeys());
   const turnImagePreviewCacheRef = useRef(new TurnImagePreviewCache());
   // `historyViewRevision` is kept as a compatibility scope for the
   // non-destructive recovery path. Deep-history browsing supplies an explicit
@@ -650,6 +651,7 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
     scrollScope,
   );
   turnKeySnapshotRef.current = turnKeySnapshot;
+  continuationRenderKeysRef.current.update(scrollScope, turns);
   const [activeHistoryGeneration, setActiveHistoryGeneration] = useState<number | null>(null);
   const [measurementBoundary, setMeasurementBoundary] =
     useState<RetainedMeasurementBoundary | null>(null);
@@ -870,7 +872,12 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
         && !controller.isFollowing()
         && !historyAnchorRef.current.current() && !detailAnchorRef.current
         && !textSelectionRef.current && !scrollCoordinatorRef.current.isInteractionLocked()
-        && touchYRef.current === null && !touchMomentumActiveRef.current
+        && touchYRef.current === null
+        // A terminal collapse can arrive during the touchend idle lease.
+        // Its layout delta is independent of native momentum; retaining that
+        // delta avoids capturing the already-collapsed position on scroll.
+        && (!touchMomentumActiveRef.current || reading.expandedProcesses.some(
+          process => process.dataset.processAutoCollapsed === "true"))
         && !scrollbarDragIntentRef.current) {
       delta = readingPositionDelta(el, reading);
     }
@@ -2950,7 +2957,8 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
                 || supplemental.questionOwners.get(block.message_id) === t.id);
             const generatedImages = generatedOutputImages(timelineBlocks);
             const modelNotices = modelFallbackNotices(timelineBlocks);
-            const narrative = assistantContinuations(timelineBlocks, finalBlocks, engine);
+            const narrative = assistantContinuations(timelineBlocks, finalBlocks, engine, t.responseProcesses);
+            continuationRenderKeysRef.current.apply(t.id, narrative.continuations);
             const renderAgentReturn = (receipt: ProcessBlock) => {
               const runId = returnRunId(receipt);
               return runId && onOpenAgent ? <button key={receipt.item_id} type="button" className="agent-return-link"
@@ -3004,8 +3012,11 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
                       && (finalBlocks.length === 0 || t.done)))
                 ? "process"
                 : finalBlocks.length > 0 ? "answering" : "waiting";
+            const originalProcessSummary = engine === "claude"
+              ? t.responseProcesses?.find(row => !row.background) : undefined;
             const showProcessTimeline = originalProcessItems.length > 0
-              || processDetailState === "present";
+              || (originalProcessSummary ? originalProcessSummary.itemCount > 0
+                : processDetailState === "present");
             // Unknown native summaries don't prove that there is anything to
             // expand. Keep that uncertainty in the projection, not as a button
             // which disappears after an empty read. Real deferred content,
@@ -3075,13 +3086,19 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
               // Deferred counts describe the whole native turn. A continuation
               // containing only an answer has no process disclosure of its own;
               // borrowing the parent's count creates an empty "1 item" row.
-              if (segment && presentableProcessBlocks(segment.blocks, engine).length === 0) {
+              const processSummary = segment?.processSummary ?? (!segment ? originalProcessSummary : undefined);
+              const segmentProcessItems = presentableProcessBlocks(segment?.blocks ?? narrative.original, engine);
+              if (segment && segmentProcessItems.length === 0 && !processSummary?.itemCount) {
                 return null;
               }
+              const segmentDetailError = processDetailError ?? (
+                processSummary?.itemCount && t.detailLoaded && !t.detailLoading
+                  && !hasUnreadDetailPages && segmentProcessItems.length === 0
+                  ? "详细过程未完整返回，请重试" : undefined);
               const continuing = !!segment && segment === lastContinuation
                 && enclosingTaskActive && !terminalProblem;
               const disclosureKey = segment
-                ? `${processOpenKey}\u0000continuation:${segment.id}` : processOpenKey;
+                ? `${processOpenKey}\u0000continuation:${segment.renderKey}` : processOpenKey;
               const ownsTerminal = engine !== "claude" || segment === terminalContinuation;
               return (
               <ProcessTimeline blocks={segment?.blocks ?? narrative.original}
@@ -3091,18 +3108,21 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
                 active={activePhase === "process" && (segment ? continuing : !lastContinuation)} engine={engine}
                 outcome={ownsTerminal ? t.error ? "failed" : t.interrupted ? "interrupted" : undefined : undefined}
                 problem={ownsTerminal ? t.error : undefined}
-                durationMs={segment || engine === "codex" || (lastContinuation
+                durationMs={processSummary || segment || engine === "codex" || (lastContinuation
                   && t.doneTs != null && lastContinuation.startedTs != null
                   && t.doneTs > lastContinuation.startedTs) ? undefined : t.durationMs}
-                startTs={segment?.startedTs ?? (engine === "codex" ? t.processStartedTs : t.ts)}
-                doneTs={segment ? segment.doneTs : engine === "codex" ? t.processDoneTs
+                startTs={processSummary?.startedTs ?? segment?.startedTs ?? (engine === "codex" ? t.processStartedTs : t.ts)}
+                doneTs={processSummary ? processSummary.doneTs ?? undefined : segment ? segment.doneTs : engine === "codex" ? t.processDoneTs
                   : lastContinuation && t.doneTs != null
                     && lastContinuation.startedTs != null
                     && t.doneTs > lastContinuation.startedTs ? undefined : t.doneTs}
-                deferredCount={segment ? 0 : deferredProcessCount}
+                totalCount={processSummary?.itemCount}
+                deferredCount={processSummary
+                  ? !t.detailLoaded || t.detailLoading ? processSummary.itemCount : 0
+                  : segment ? 0 : deferredProcessCount}
                 detailPending={!!segment && engine === "codex" && deferredProcessCount > 0}
                 detailLoading={t.detailLoading}
-                detailError={processDetailError}
+                detailError={segmentDetailError}
                 externalPlanItemId={externalPlanItemId}
                 onLoadDetail={onLoadDetail
                   ? (automatic) => automatic
@@ -3116,8 +3136,8 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
                       detailRetryDirection,
                       false)
                   : undefined}
-                canLoadEarlier={(!segment || engine === "codex") && canReadOlderDetail}
-                canLoadNewer={(!segment || engine === "codex") && canReadNewerDetail}
+                canLoadEarlier={(!segment || engine === "codex" || !!processSummary) && canReadOlderDetail}
+                canLoadNewer={(!segment || engine === "codex" || !!processSummary) && canReadNewerDetail}
                 onLoadEarlier={onLoadDetail && canReadOlderDetail
                   ? () => requestProcessDetail(
                       t.id, t.detailOldestCursor, "older")
@@ -3157,7 +3177,8 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
               );
             };
             const renderAnswer = (block: TextBlock) => (
-              <div key={block.message_id} className="assistant-answer-segment">
+              <div key={block.stream_message_id ?? block.message_id} className="assistant-answer-segment"
+                data-message-id={block.message_id} data-stream-message-id={block.stream_message_id}>
                 {block.delivery === "async" && block.questions?.length
                   ? <Suspense fallback={<span className="async-question-hint">助手询问…</span>}>
                       <AsyncQuestionCard questions={block.questions}
@@ -3302,7 +3323,7 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
               <>
                 {narrative.answers.map(renderAnswer)}
                 {narrative.continuations.map((segment) => (
-                  <div key={segment.id} className="background-followup">
+                  <div key={segment.renderKey} className="background-followup">
                     <div className="background-followup-boundary">
                       {segment.returns.map(renderAgentReturn)}
                       <span>{engine === "codex" ? "Codex 收到后台消息，继续处理" : engine === "dsh" ? "DSH 继续处理" : "Claude 继续处理"}</span>

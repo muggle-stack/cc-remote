@@ -565,19 +565,20 @@ def _history_process(results):
 
 def test_history_scope_reuses_reader_but_not_accounts_or_mutations(monkeypatch):
     async def run():
-        processes = [_history_process([{'n': 1}, {'n': 2}]),
+        processes = [_history_process([{'n': 1}, {'n': 2}, {'data': []}]),
                      _history_process([{'n': 3}]), _history_process([{'n': 4}])]
         spawned = _history_rpc_factory(monkeypatch, processes)
         async with codex_rpc_module.codex_history_rpc_scope():
             assert await codex_rpc_module.codex_rpc('thread/turns/list', {}, codex_home='/a') == {'n': 1}
             async with codex_rpc_module.codex_history_rpc_scope():
                 assert await codex_rpc_module.codex_rpc('thread/items/list', {}, codex_home='/a') == {'n': 2}
+                assert await codex_rpc_module.codex_rpc('thread/list', {}, codex_home='/a') == {'data': []}
             assert len(spawned) == 1 and not processes[0].terminated
             await codex_rpc_module.codex_rpc('thread/turns/list', {}, codex_home='/b')
             await codex_rpc_module.codex_rpc('thread/name/set', {}, codex_home='/a')
             assert processes[2].terminated and not processes[1].terminated
         assert all(p.terminated and p.stdin.closed for p in processes)
-        assert [json.loads(row).get('id') for row in processes[0].stdin.writes] == [1, None, 2, 3]
+        assert [json.loads(row).get('id') for row in processes[0].stdin.writes] == [1, None, 2, 3, 4]
         assert [args['env']['PROFILE'] for _p, args in spawned] == ['/a', '/b', '/a']
     asyncio.run(run())
 

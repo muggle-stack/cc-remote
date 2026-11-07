@@ -46,18 +46,12 @@ async def tick():
 
 
 @pytest.mark.asyncio
-async def test_archive_proof_and_ack_then_delete_proof_retire_only_target():
+async def test_direct_delete_proof_and_ack_retire_only_target():
     c, cmd = setup()
     c.session_catalog_requests[c.scope] = "unrelated-list"
     assert await c.execute_action(cmd)
     await tick()
-    archive = sent(c, "archive_session")[0]
-    assert archive["session_id"] == "target" and archive["archived"]
-    listing(c, archive, archived=True)
-    await tick()
-    assert not sent(c, "delete_session")
-    ack(c, archive)
-    await tick()
+    assert not sent(c, "archive_session")
     deletion = sent(c, "delete_session")[0]
     assert deletion["session_id"] == "target"
     listing(c, deletion)
@@ -72,24 +66,24 @@ async def test_archive_proof_and_ack_then_delete_proof_retire_only_target():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bad", ["error", "ack-only", "wrong-client",
                                      "wrong-scope", "wrong-request", "active"])
-async def test_failed_or_unconfirmed_archive_never_sends_delete(bad):
+async def test_failed_or_unconfirmed_delete_never_removes_local_session(bad):
     c, cmd = setup()
     c.deletions.TIMEOUT = 0.03
     await c.execute_action(cmd)
     await tick()
-    archive = sent(c, "archive_session")[0]
+    deletion = sent(c, "delete_session")[0]
     if bad == "error":
-        c._handle(dict(type="error", request_id=archive["cmd_id"],
+        c._handle(dict(type="error", request_id=deletion["cmd_id"],
                        to=c.client_id, sid="target", message="Session busy"))
-        listing(c, archive, archived=True)
+        listing(c, deletion)
     elif bad != "ack-only":
         override = {"wrong-client": {"to": "foreign"},
                     "wrong-scope": {"space": "work"},
                     "wrong-request": {"request_id": "old"}}.get(bad, {})
-        listing(c, archive, archived=bad != "active", **override)
-    ack(c, archive)
+        listing(c, deletion, archived=False if bad == "active" else None, **override)
+    ack(c, deletion)
     await asyncio.sleep(0.06)
-    assert not sent(c, "delete_session")
+    assert len(sent(c, "delete_session")) <= 1 and not sent(c, "archive_session")
     assert "target" in c.buffers.ids
     assert "target" in c.workspace.catalog
     assert not c.deletions.pending and not c.deletions.tasks
@@ -146,17 +140,18 @@ async def test_work_rejection_finishes_waiter_without_timeout():
 
 
 @pytest.mark.asyncio
-async def test_exit_during_archive_does_not_schedule_delete_later():
+async def test_exit_during_deletion_does_not_repeat_native_delete():
     c, cmd = setup()
     await c.execute_action(cmd)
     await tick()
-    archive = sent(c, "archive_session")[0]
+    deletion = sent(c, "delete_session")[0]
     c.deletions.close()
     await tick()
-    listing(c, archive, archived=True)
-    ack(c, archive)
+    listing(c, deletion)
+    ack(c, deletion)
     await tick()
-    assert not sent(c, "delete_session") and not c.deletions.tasks
+    assert not sent(c, "archive_session") and not c.deletions.tasks
+    assert len(sent(c, "delete_session")) <= 1
 
 
 @pytest.mark.asyncio

@@ -1,20 +1,21 @@
 import { PanelFrame, PanelExpandButton } from "./RightPanelPresentation";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type RefObject } from "react";
 import { Icon } from "../icons";
 import { isLocalViewerUrl, matchingViewer, type ViewerScope, type ViewerSelection, type ViewerSite } from "../remote-viewer";
 import { viewerRequest, ViewerRequestError } from "../viewer-request";
 import { PanelResizer } from "./PanelResizer";
 import { ViewerBridge, type BridgeGrant } from "../viewer-bridge";
 import { useViewerPages } from "../viewer-pages-context";
+import { useViewerZoom } from "../use-viewer-zoom";
 import "./remote-viewer.css";
 
 type Grant = { id: string; entry: string; expires_at: number } & (
   { mode: "isolated"; origin: string } | ({ mode: "bridge" } & BridgeGrant));
 
-function BridgeFrame({ grant, title, onReady, onError }: {
+function BridgeFrame({ grant, title, onReady, onError, frame }: {
   grant: BridgeGrant; title: string; onReady: () => void; onError: (message: string, clear: boolean) => void;
+  frame: RefObject<HTMLIFrameElement | null>;
 }) {
-  const frame = useRef<HTMLIFrameElement>(null);
   const callbacks = useRef({ onReady, onError });
   callbacks.current = { onReady, onError };
   useEffect(() => {
@@ -22,7 +23,7 @@ function BridgeFrame({ grant, title, onReady, onError }: {
     const bridge = new ViewerBridge(frame.current, grant, () => callbacks.current.onReady(),
       (message, clear) => callbacks.current.onError(message, clear));
     return () => bridge.dispose();
-  }, [grant]);
+  }, [grant, frame]);
   return <iframe ref={frame} title={title} referrerPolicy="no-referrer" sandbox="allow-scripts" />;
 }
 interface Props {
@@ -38,13 +39,14 @@ interface Props {
 export function RemoteViewerPanel({ active = true, scope, selection, requestedUrl, devices, onSelect, onClose }: Props) {
   const pageContext = useViewerPages();
   const [browseAll, setBrowseAll] = useState(false);
-  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState<"pages" | "zoom" | null>(null);
   const pickerId = useId();
   const picker = useRef<HTMLDivElement>(null);
   const pickerTrigger = useRef<HTMLButtonElement>(null);
+  const zoomTrigger = useRef<HTMLButtonElement>(null);
   const activeRef = useRef(active);
   activeRef.current = active;
-  useEffect(() => { if (!active) setPickerOpen(false); }, [active]);
+  useEffect(() => { if (!active) setPickerOpen(null); }, [active]);
   const [sites, setSites] = useState<ViewerSite[]>([]);
   const [enabled, setEnabled] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -54,6 +56,7 @@ export function RemoteViewerPanel({ active = true, scope, selection, requestedUr
   const [loaded, setLoaded] = useState(false);
   const [retry, setRetry] = useState(0);
   const frame = useRef<HTMLIFrameElement>(null);
+  const zoom = useViewerZoom(frame, grant);
   const invalidate = useRef<(() => void) | null>(null);
   const close = useRef(onClose);
   close.current = onClose;
@@ -86,7 +89,7 @@ export function RemoteViewerPanel({ active = true, scope, selection, requestedUr
       const page = await associate.current({ machine_id: choice.machine_id, site_id: choice.id, entry: choice.entry });
       if (page && alive.current) {
         setBrowseAll(false);
-        setPickerOpen(false);
+        setPickerOpen(null);
         select.current({ machine_id: page.machine_id, site_id: page.site_id, entry: page.entry });
       }
     } catch (reason) { if (alive.current) setError(reason instanceof Error ? reason.message : "无法关联页面。"); }
@@ -101,18 +104,18 @@ export function RemoteViewerPanel({ active = true, scope, selection, requestedUr
 
   useEffect(() => {
     if (!pickerOpen || !active) return;
-    const button = pickerTrigger.current;
+    const button = pickerOpen === "zoom" ? zoomTrigger.current : pickerTrigger.current;
     const panel = picker.current;
     panel?.focus({ preventScroll: true });
     const onOutsideClick = (event: MouseEvent) => {
       if (event.target instanceof Node && !panel?.contains(event.target) && !button?.contains(event.target))
-        setPickerOpen(false);
+        setPickerOpen(null);
     };
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing) return;
       if (event.key === "Escape") {
         event.preventDefault(); event.stopPropagation();
-        setPickerOpen(false);
+        setPickerOpen(null);
       } else if (event.key === "Tab") {
         const controls = Array.from(panel?.querySelectorAll<HTMLElement>("button:not(:disabled), a[href]") ?? []);
         const first = controls[0], last = controls.at(-1);
@@ -314,7 +317,7 @@ export function RemoteViewerPanel({ active = true, scope, selection, requestedUr
   }, [grant]);
 
   const refresh = () => {
-    setPickerOpen(false);
+    setPickerOpen(null);
     handledUrl.current = null;
     migrating.current = false;
     setLoading(true); setGrant(null); setError(null); setRetry((value) => value + 1);
@@ -327,7 +330,7 @@ export function RemoteViewerPanel({ active = true, scope, selection, requestedUr
         {pageContext?.error && <p role="alert">{pageContext.error}</p>}
         {!browseAll && related.map((page) => <div className="viewer-page-row" key={page.id}>
           <button className="viewer-site" aria-current={selected?.id === page.id ? "page" : undefined}
-            onClick={() => { setPickerOpen(false); onSelect({ machine_id: page.machine_id, site_id: page.site_id, entry: page.entry }); }}>
+            onClick={() => { setPickerOpen(null); onSelect({ machine_id: page.machine_id, site_id: page.site_id, entry: page.entry }); }}>
             <span className="viewer-site-icon"><Icon name="globe" /></span>
             <span><b>{page.label}</b><small>{label(page.machine_id)} · {page.entry}{!page.available && " · 暂不可用"}</small></span>
             <Icon name={selected?.id === page.id ? "check" : "chevron-right"} size={16} />
@@ -353,19 +356,34 @@ export function RemoteViewerPanel({ active = true, scope, selection, requestedUr
   </div>;
   return <PanelFrame role="complementary" className="artifact-panel remote-viewer-panel" label="远程预览" data-lock-horizontal-swipe>
     <PanelResizer ariaLabel="调整预览宽度" />
-    {pickerOpen && <div className="viewer-picker-backdrop" aria-hidden="true" onClick={() => setPickerOpen(false)} />}
+    {pickerOpen && <div className="viewer-picker-backdrop" aria-hidden="true" onClick={() => setPickerOpen(null)} />}
     <header className="viewer-header">
       <button className="iconbtn viewer-mobile-back" onClick={onClose} aria-label="返回对话"><Icon name="back" /></button>
       {selection ? <button ref={pickerTrigger} type="button" className="viewer-heading" aria-label="切换预览"
-        aria-expanded={pickerOpen} aria-haspopup="dialog" aria-controls={pickerOpen ? pickerId : undefined}
-        onClick={() => { setBrowseAll(false); setPickerOpen(value => !value); }}>
+        aria-expanded={pickerOpen === "pages"} aria-haspopup="dialog" aria-controls={pickerOpen === "pages" ? pickerId : undefined}
+        onClick={() => { setBrowseAll(false); setPickerOpen(value => value === "pages" ? null : "pages"); }}>
         <strong>{heading}</strong><Icon name="chev" size={14} />
       </button> : <div className="viewer-heading"><strong>页面预览</strong></div>}
+      {grant && <button ref={zoomTrigger} className="viewer-zoom-trigger" disabled={!zoom.ready}
+        aria-label="页面缩放" title="页面缩放，也可双指缩放" aria-haspopup="dialog"
+        aria-expanded={pickerOpen === "zoom"} aria-controls={pickerOpen === "zoom" ? pickerId : undefined}
+        onClick={() => setPickerOpen(value => value === "zoom" ? null : "zoom")}>
+        {Math.round(zoom.scale * 100)}%
+      </button>}
       <button className="iconbtn" onClick={refresh} title="刷新预览" aria-label="刷新预览"><Icon name="refresh" size={18} /></button>
       <PanelExpandButton label="远程预览" />
       <button className="iconbtn viewer-desktop-close" onClick={onClose} aria-label="关闭预览"><Icon name="close" size={18} /></button>
-      {pickerOpen && <div id={pickerId} ref={picker} className="viewer-picker" role="dialog" aria-label="页面详情与切换" tabIndex={-1}>
-        {catalog}{originalLink}
+      {pickerOpen && <div id={pickerId} ref={picker} className={`viewer-picker${pickerOpen === "zoom" ? " viewer-zoom-picker" : ""}`}
+        role="dialog" aria-label={pickerOpen === "zoom" ? "调整页面缩放" : "页面详情与切换"} tabIndex={-1}>
+        {pickerOpen === "pages" ? <>{catalog}{originalLink}</> : <>
+          <div className="viewer-zoom-steps">
+            <button aria-label="缩小页面" disabled={zoom.scale <= 0.1} onClick={() => zoom.command("out")}>−</button>
+            <output aria-live="polite">{Math.round(zoom.scale * 100)}%</output>
+            <button aria-label="放大页面" disabled={zoom.scale >= 4} onClick={() => zoom.command("in")}>+</button>
+          </div>
+          <button aria-pressed={zoom.fit} onClick={() => { zoom.command("fit"); setPickerOpen(null); }}>适应宽度</button>
+          <button onClick={() => { zoom.command("reset"); setPickerOpen(null); }}>恢复 100%</button>
+        </>}
       </div>}
     </header>
     {!selection && originalLink}
@@ -381,7 +399,7 @@ export function RemoteViewerPanel({ active = true, scope, selection, requestedUr
       : !selected ? <div className="viewer-empty"><p>设备已离线，或该预览已移除。</p>
         <button className="viewer-action" onClick={() => onSelect(null)}>选择其他预览</button></div>
       : grant ? <>{grant.mode === "bridge"
-        ? <BridgeFrame key={grant.id} grant={grant} title={selected.label}
+        ? <BridgeFrame key={grant.id} grant={grant} frame={frame} title={selected.label}
             onReady={() => { if (activeGrant.current === grant) setLoaded(true); }}
             onError={(message, clear) => {
               // A retired frame must never invalidate its successor's grant.

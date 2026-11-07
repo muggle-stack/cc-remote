@@ -29,7 +29,8 @@ self.addEventListener("fetch", (event) => {
       || url.pathname === "/html-preview-runner.js"
       || url.pathname.startsWith("/__cc_viewer/")
       || url.pathname.startsWith("/ws/")
-      || url.pathname === "/cc-remote-viewer-runner.js") return;
+      || url.pathname === "/cc-remote-viewer-runner.js"
+      || url.pathname === "/cc-remote-viewer-zoom.js") return;
   // Entry points and unversioned shell icons/manifests must revalidate online.
   // Only content-addressed assets can safely use the cache-first path below.
   if (request.mode === "navigate" || SHELL.includes(url.pathname)) {

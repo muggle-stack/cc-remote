@@ -1,6 +1,7 @@
 """Native task inputs can share a terminal without blocking the next prompt."""
 
 import asyncio
+import json
 from unittest.mock import AsyncMock
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from cc_remote.config import WrapperConfig
 from cc_remote.wrapper.sdk import ClaudeBackgroundBoundary, ClaudeServiceReplayRequired, SdkHandle
 from tests.test_claude_autocompact import _machine_with_sdk
+from tests.test_claude_external import _watch
 from tests.test_claude_service import environment, released
 from tests.test_claude_steering import NativeClient, assistant, requesting, result, until, user
 
@@ -103,7 +105,7 @@ async def test_activity_before_human_echo_settles_and_accepts_next_prompt(replay
 @pytest.mark.parametrize("distinct_tasks", [False, True])
 @pytest.mark.parametrize("slow_callback", [False, True])
 async def test_batched_task_inputs_settle_and_background_job_does_not_block_next_prompt(
-    persistent, managed, distinct_tasks, slow_callback,
+    persistent, managed, distinct_tasks, slow_callback, tmp_path,
 ):
     async with environment() as (service, attach):
         client = await attach() if persistent else NativeClient()
@@ -175,6 +177,26 @@ async def test_batched_task_inputs_settle_and_background_job_does_not_block_next
             if worker:
                 assert worker.turn is None and worker.background_start is None
                 assert not worker.client.closed
+
+            # The native child can journal a different task's notification
+            # while the human response is idle and this child is still alive.
+            # These rows have no entrypoint; they must not schedule a reconnect
+            # that would stop the remaining task when the next prompt arrives.
+            path = tmp_path / "session.jsonl"
+            path.write_bytes(b"")
+            watch = _watch(path)
+            machine._watch[ctx.key] = watch
+            for operation in ("enqueue", "remove"):
+                with path.open("a") as stream:
+                    stream.write(json.dumps({
+                        "type": "queue-operation", "operation": operation,
+                        "sessionId": ctx.session_id,
+                        "content": "<task-notification>\n<task-id>other-task</task-id>\n"
+                                   "<status>completed</status>\n</task-notification>",
+                    }) + "\n")
+                await machine._poll_claude_watch(
+                    ctx.key, watch, set(), 1000.0, ownership_scan_complete=True)
+                assert not ctx.needs_reload
 
             # No interrupt, takeover or wait for the background child is needed.
             ctx.state = "running"

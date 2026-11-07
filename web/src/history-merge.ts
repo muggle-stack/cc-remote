@@ -69,6 +69,12 @@ function isPresentableProcessBlock(block: Block): boolean {
   );
 }
 
+function isLoadedDetailBlock(block: Block): boolean {
+  return !isFinalTextBlock(block)
+    && !isSyntheticReturnReceipt(block)
+    && !(block.kind === "process" && block.processKind === "plan");
+}
+
 function statedProcessDetailState(turn: Turn): ProcessDetailState {
   if (turn.processDetailState) return turn.processDetailState;
   return (turn.detailEventCount ?? 0) > 0 ? "unknown" : "none";
@@ -458,14 +464,20 @@ export function mergeDetailWithLiveTail(
   // one finite unique order, use that complete proof for the final render.
   // Any source-only block without liveOrder deliberately keeps the existing
   // detail-first behavior below.
-  const mergedOrders = merged.map((block) => block.liveOrder);
-  if (merged.length > 0
+  // Return receipts are summary-only attribution, not execution events. They
+  // can arrive without liveOrder after a completed response. Do not let that
+  // metadata invalidate an otherwise complete native chronology, or the
+  // summary's answer will render before the retained tools which produced it.
+  const nativeMerged = merged.filter(block => !isSyntheticReturnReceipt(block));
+  const withReceipts = (ordered: Block[]) => restoreReturnReceipts(ordered, merged);
+  const mergedOrders = nativeMerged.map((block) => block.liveOrder);
+  if (nativeMerged.length > 0
       && mergedOrders.every(
         (order): order is number => Number.isFinite(order),
       )
-      && new Set(mergedOrders).size === merged.length) {
-    return [...merged].sort(
-      (left, right) => left.liveOrder! - right.liveOrder!);
+      && new Set(mergedOrders).size === nativeMerged.length) {
+    return withReceipts([...nativeMerged].sort(
+      (left, right) => left.liveOrder! - right.liveOrder!));
   }
 
   // Official Codex full/summary views can omit command/tool items while the
@@ -475,16 +487,18 @@ export function mergeDetailWithLiveTail(
   // commentary. Keep the source payload merge above, but paint in the complete
   // live order. A genuine source superset (normal paged detail + live tail)
   // retains its source order and simply appends the new tail as before.
-  const liveIds = new Set(filteredLive.map(blockIdentity));
-  const liveOrders = filteredLive.map((block) => block.liveOrder);
-  if (filteredLive.length > 0
+  const nativeLive = filteredLive.filter(block => !isSyntheticReturnReceipt(block));
+  const nativeDetail = filteredDetail.filter(block => !isSyntheticReturnReceipt(block));
+  const liveIds = new Set(nativeLive.map(blockIdentity));
+  const liveOrders = nativeLive.map((block) => block.liveOrder);
+  if (nativeLive.length > 0
       && liveOrders.every((order): order is number => Number.isFinite(order))
-      && new Set(liveOrders).size === filteredLive.length
-      && liveIds.size === filteredLive.length
-      && new Set(filteredDetail.map(blockIdentity)).size === filteredDetail.length
-      && filteredDetail.every((block) => liveIds.has(blockIdentity(block)))) {
-    const byId = new Map(merged.map((block) => [blockIdentity(block), block]));
-    const ordered = [...filteredLive]
+      && new Set(liveOrders).size === nativeLive.length
+      && liveIds.size === nativeLive.length
+      && new Set(nativeDetail.map(blockIdentity)).size === nativeDetail.length
+      && nativeDetail.every((block) => liveIds.has(blockIdentity(block)))) {
+    const byId = new Map(nativeMerged.map((block) => [blockIdentity(block), block]));
+    const ordered = [...nativeLive]
       .sort((left, right) => left.liveOrder! - right.liveOrder!)
       .flatMap((block) => {
         const key = blockIdentity(block);
@@ -493,7 +507,7 @@ export function mergeDetailWithLiveTail(
         byId.delete(key);
         return [resolved];
       });
-    return [...ordered, ...byId.values()];
+    return withReceipts([...ordered, ...byId.values()]);
   }
   // A summary retains return links even when the selected detail window starts
   // after them. Reinsert only missing metadata before its shared native anchor;
@@ -836,6 +850,13 @@ function installCachedDetailRestore(
       || summary.detailProjection
       || statedProcessDetailState(summary) === "none") return summary;
   const source = cached.detailProjection?.blocks ?? cached.blocks;
+  // Claude continuation answers are also process boundaries. Removing every
+  // answer from a cached ordered projection groups all later thinking/tools
+  // into its first continuation. Reuse only exact, currently authoritative
+  // summary answers in those slots; never revive cached answer payloads.
+  const responseAnswers = summary.responseProcesses?.some(row => row.background)
+    ? new Map(summary.blocks.filter(isFinalTextBlock).map(block => [block.message_id, block]))
+    : new Map<string, TextBlock>();
   // A session-wide running bit is not turn ownership. The next task may have
   // started before its UserMsg/TurnBinding while a same-revision cache row from
   // the completed predecessor is still arriving. Preserve a cached open Plan
@@ -845,7 +866,12 @@ function installCachedDetailRestore(
       && exactTurnAliases(summary).has(activeOwnerId)
       && exactTurnAliases(cached).has(activeOwnerId));
   const blocks = repairCachedAgentClassification(
-    source.filter((block) => !isFinalTextBlock(block)),
+    source.flatMap((block): Block[] => {
+      if (isSyntheticReturnReceipt(block)) return [];
+      if (!isFinalTextBlock(block)) return [block];
+      const answer = responseAnswers.get(block.message_id);
+      return answer ? [{ ...answer }] : [];
+    }),
   ).map((block) => cloneSettledCachedDetailBlock(
     block, summary, preserveOpenPlans));
   if (blocks.length === 0) return summary;
@@ -948,6 +974,7 @@ export function restoreObservedLiveTurnDetails(
     const owned = ownsProcessBlock(itemOwners, summaryIndex);
     const blocks = source.filter((block) => owned(block)
         && !isFinalTextBlock(block)
+        && !isSyntheticReturnReceipt(block)
         && (block.kind !== "text" || block.text.length > 0))
       .map(cloneDetailBlock);
     if (blocks.length === 0) continue;
@@ -1116,10 +1143,12 @@ function mergeTurn(
   // composer-adjacent progress strip.  It therefore cannot prove that this
   // turn's heavyweight process projection is still resident: treating a lone
   // Plan as loaded detail leaves no inline process after that lift and hides
-  // the server-advertised collapsed "已处理" affordance.
-  const hasLoadedDetailPayload = blocks.some((block) =>
-    !isFinalTextBlock(block)
-    && (block as ProcessBlock).processKind !== "plan");
+  // the server-advertised collapsed "已处理" affordance. Synthetic return
+  // receipts are summary attribution and likewise prove no loaded detail.
+  const hasLoadedDetailPayload = blocks.some(isLoadedDetailBlock);
+  const hasDetailProjection = detailProjection && (
+    detailProjection.segments.length > 0
+    || detailProjection.blocks.some(isLoadedDetailBlock));
   // A completed background reply is still one ordered response. A lightweight
   // summary retains its final answer but omits the preceding tools/reasoning;
   // appending that retained live detail after the answer invents another empty
@@ -1128,25 +1157,31 @@ function mergeTurn(
   const detachedAnswer = history.blocks.some(block =>
     isFinalTextBlock(block) && block.background === true);
   if (preserveCompleteLiveOrder || detachedAnswer) {
-    const historyIds = history.blocks.map(blockIdentity);
-    const liveOrders = live.blocks.map((block) => block.liveOrder);
-    const liveIds = new Set(live.blocks.map(blockIdentity));
-    const mergedIds = blocks.map(blockIdentity);
+    // Summary-only return metadata cannot participate in, or invalidate, the
+    // native ordering proof. Reattach it around the resolved native anchors.
+    const source = history.blocks.filter(block => !isSyntheticReturnReceipt(block));
+    const observedBlocks = live.blocks.filter(block => !isSyntheticReturnReceipt(block));
+    const nativeBlocks = blocks.filter(block => !isSyntheticReturnReceipt(block));
+    const historyIds = source.map(blockIdentity);
+    const liveOrders = observedBlocks.map((block) => block.liveOrder);
+    const liveIds = new Set(observedBlocks.map(blockIdentity));
+    const mergedIds = nativeBlocks.map(blockIdentity);
     if (liveOrders.every((order): order is number => Number.isFinite(order))
-        && new Set(liveOrders).size === live.blocks.length
-        && liveIds.size === live.blocks.length
+        && new Set(liveOrders).size === observedBlocks.length
+        && liveIds.size === observedBlocks.length
         && new Set(historyIds).size === historyIds.length
         && new Set(mergedIds).size === mergedIds.length) {
-      const byId = new Map(blocks.map((block) => [blockIdentity(block), block]));
-      const observed = [...live.blocks]
+      const byId = new Map(nativeBlocks.map((block) => [blockIdentity(block), block]));
+      const observed = [...observedBlocks]
         .sort((left, right) => left.liveOrder! - right.liveOrder!);
-      const ordered = anchoredOrder(history.blocks, observed, blockIdentity);
+      const ordered = anchoredOrder(source, observed, blockIdentity);
       // Compatibility matching may replace ids. Reorder only an exact union;
       // never discard unmatched payload or infer anchors from matching text.
-      if (ordered.length === blocks.length
+      if (ordered.length === nativeBlocks.length
           && ordered.every(block => byId.has(blockIdentity(block)))) {
         blocks.splice(0, blocks.length,
-          ...ordered.map(block => byId.get(blockIdentity(block))!));
+          ...restoreReturnReceipts(
+            ordered.map(block => byId.get(blockIdentity(block))!), blocks));
       }
     }
   }
@@ -1162,6 +1197,7 @@ function mergeTurn(
     forkAvailable: history.forkAvailable ?? live.forkAvailable,
     checkpointId: history.checkpointId ?? live.checkpointId,
     continuation: history.continuation ?? live.continuation,
+    responseProcesses: history.responseProcesses ?? live.responseProcesses,
     prompt: history.prompt || live.prompt,
     blocks,
     // A transcript has no ResultMessage, so its EOF is represented by a
@@ -1208,7 +1244,7 @@ function mergeTurn(
     // projection or visible turn-detail payload to justify it. A standalone
     // Plan is intentionally not such payload because it renders outside the
     // turn timeline.
-    detailLoaded: !!(detailProjection
+    detailLoaded: !!(hasDetailProjection
       || (live.detailLoaded || history.detailLoaded)
         && (hasLoadedDetailPayload || !hasDeferredTurnDetail(history))),
     detailLoading: live.detailLoading ?? history.detailLoading,
@@ -1374,7 +1410,11 @@ export function mergeAuthoritativeTurnDetail(
     error: summary.error,
     progress: summary.progress,
     detailEventCount: summary.detailEventCount,
-    detailLoaded: detail.detailLoaded ?? true,
+    // A saved loaded bit is not a source page. After process eviction, a
+    // summary's return links (or an empty provisional projection) cannot
+    // override mergeTurn's missing-detail check on each subsequent refresh.
+    detailLoaded: statedProcessDetailState(merged) === "none"
+      ? detail.detailLoaded ?? true : merged.detailLoaded,
     detailLoading: false,
     detailError: undefined,
     detailRetryBefore: undefined,

@@ -1026,6 +1026,11 @@ export function Composer(p: Props) {
                     disabled={locked}>
                     <span>模型</span><b>{model?.name ?? "读取中"}</b>
                   </button>
+                  <button type="button" onClick={openPermissions}
+                    disabled={locked} aria-busy={p.permissionProfilePending || undefined}>
+                    <span>{p.engine === "codex" ? "权限与执行环境" : "权限模式"}</span>
+                    <b>{p.permissionProfilePending ? "切换中…" : modeLabel}</b>
+                  </button>
                   <button type="button" onClick={() => setSheetKind("efforts")}
                     disabled={locked}>
                     <span>思考强度</span><b>{effortName ?? "读取中"}</b>
@@ -1200,7 +1205,8 @@ export function Composer(p: Props) {
               <div className="ctx-pop auto-compact-pop" role="dialog" aria-label="Codex 上下文上限">
                 <Suspense fallback={<p>加载设置…</p>}><CodexContextControl
                   key={`${p.codexContext?.max_context_tokens}:${p.codexContext?.pending}`}
-                  state={p.codexContext ?? null} onChange={(value) => p.onSetCodexContext?.(value) ?? false} /></Suspense>
+                  state={p.codexContext ?? null} report={exactContextReport}
+                  onChange={(value) => p.onSetCodexContext?.(value) ?? false} /></Suspense>
               </div>
             )}
           </div>

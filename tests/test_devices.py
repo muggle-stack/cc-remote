@@ -130,7 +130,15 @@ def test_incompatible_device_is_visible_only_to_its_owner_and_clears_on_reconnec
         with client.websocket_connect("/ws", headers=headers) as wrapper:
             wrapper.send_text(serialize(Hello(role="wrapper", machine_id=machine_id)))
             _wait_for_device_online(client, machine_id)
-            legacy = client.get("/api/devices").json()["devices"][0]["compatibility"]
+            # The route is reserved before the asynchronous credential recheck;
+            # online alone does not acknowledge the new hello's version data.
+            deadline = time.monotonic() + 1
+            while True:
+                legacy = client.get("/api/devices").json()["devices"][0]["compatibility"]
+                if legacy["wrapper_protocol"] == PROTOCOL_VERSION:
+                    break
+                assert time.monotonic() < deadline, "legacy hello version did not arrive"
+                time.sleep(0.01)
             assert legacy["wrapper_version"] is None
             assert legacy["wrapper_protocol"] == PROTOCOL_VERSION
         deadline = time.monotonic() + 1

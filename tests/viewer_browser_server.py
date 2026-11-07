@@ -78,6 +78,25 @@ document.getElementById('rotate').onclick=()=>{
         sites = [site]
         static_server = None
         if "VIEWER_TEST_SOURCE" not in os.environ:
+            (root / "viewer/wide.html").write_text('''<!doctype html><html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{margin:0;font:20px system-ui}main{width:1400px;background:#eef3ff;min-height:2000px}
+header{display:flex;justify-content:space-between;padding:20px}button{padding:16px}
+input{width:400px}#owned{height:150px;touch-action:none}</style></head><body><main>
+<header><h1>宽页面缩放测试</h1><button id="counter">计数 0</button></header>
+<label>交互滑块<input id="range" type="range" min="0" max="100" value="50"></label><output id="value">50</output>
+<div id="owned">页面自己的手势区域</div><p style="margin-top:500px" id="anchor">阅读位置</p>
+</main><script>
+let count=0; document.getElementById('counter').onclick=e=>e.target.textContent='计数 '+(++count);
+document.getElementById('range').oninput=e=>document.getElementById('value').textContent=e.target.value;
+for(const type of ['wheel','touchstart','touchmove','gesturestart','gesturechange'])
+ document.getElementById('owned').addEventListener(type,e=>e.preventDefault(),{passive:false});
+</script></body></html>''')
+            sites.append(site.model_copy(update={
+                "id": "wide", "label": "宽页面缩放测试", "entry": "/viewer/wide.html",
+                "paths": ["/viewer/wide.html"],
+            }))
             with wave.open(str(root / "viewer/narration.wav"), "wb") as sound:
                 sound.setnchannels(1)
                 sound.setsampwidth(2)

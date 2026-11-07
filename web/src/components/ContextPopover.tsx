@@ -1,5 +1,6 @@
 import type { AutoCompact, CodexContext, ContextReport } from "../protocol";
 import { workContextMetrics } from "../work-context";
+import { codexContextPresentation } from "../codex-context";
 export const CODEX_CONTEXT_USAGE_NOTE =
   "进度按 Codex 原生上下文估算显示；后台刷新期间保留最近有效读数。";
 
@@ -20,6 +21,7 @@ export default function ContextPopover(p: Props) {
   const work = workMode && p.report ? workContextMetrics(p.report) : null;
   const recentCodex = p.codex && p.report?.source !== "native_estimate";
   const hasCapacity = !recentCodex && (p.report?.max_tokens ?? 0) > 0;
+  const codexContext = codexContextPresentation(p.codexContext, p.report);
   const usage = (tokens: number, percentage: number) => hasCapacity
     ? `${tokens.toLocaleString()} / ${p.report!.max_tokens.toLocaleString()} (${p.dsh && percentage > 0 && percentage < 1 ? "<1" : percentage.toFixed(0)}%)`
     : `${tokens.toLocaleString()} tokens`;
@@ -102,13 +104,11 @@ export default function ContextPopover(p: Props) {
       </div>}
       {p.codexContext && <>
         <div className="ctx-pop-row"><span>生效压缩阈值</span>
-          <span className="ctx-pop-nums">{(p.report?.source === "native_estimate"
-            ? p.report.auto_compact_threshold_tokens ?? p.codexContext.applied_threshold_tokens
-            : p.codexContext.applied_threshold_tokens)?.toLocaleString()
+          <span className="ctx-pop-nums">{codexContext.threshold?.toLocaleString()
             ?? (p.codexContext.max_context_tokens == null ? "Codex 默认值" : "待确认")}</span>
         </div>
-        {p.codexContext.pending && <div className="ctx-pop-status" role="status">
-          已保存上限 {p.codexContext.max_context_tokens?.toLocaleString() ?? "默认值"}，等待生效
+        {codexContext.status && <div className="ctx-pop-status" role="status">
+          {codexContext.status}
         </div>}
       </>}
       {p.onAutoCompact && <button className="context-settings-link" onClick={p.onAutoCompact}>设置上下文上限</button>}

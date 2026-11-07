@@ -1134,7 +1134,7 @@ def test_fresh_claude_spawn_inherits_native_defaults(
         assert _FakeClaudeClient.created[-1].model_calls == []
         assert _FakeClaudeClient.created[-1].options.model is None
         assert _FakeClaudeClient.created[-1].options.effort is None
-        expected_permission = "acceptEdits" if space == "work" else permission or "bypassPermissions"
+        expected_permission = permission or ("acceptEdits" if space == "work" else "bypassPermissions")
         assert _FakeClaudeClient.created[-1].options.permission_mode == expected_permission
         assert ctx.sdk.permission_mode == expected_permission
         await ctx.sdk.disconnect()
@@ -1489,9 +1489,11 @@ def test_claude_code_resume_prefers_native_model_to_saved_remote_choice(
     asyncio.run(go())
 
 
+@pytest.mark.parametrize("permission", [None, "plan", "bypassPermissions"])
 def test_claude_work_resume_never_applies_code_fresh_default(
     monkeypatch,
     tmp_path,
+    permission,
 ):
     session_id = "22222222-2222-4222-8222-222222222222"
 
@@ -1533,6 +1535,8 @@ def test_claude_work_resume_never_applies_code_fresh_default(
             raise AssertionError("Work resume must preserve its native model")
 
         machine._claude_new_session_defaults = forbidden_default
+        if permission:
+            machine._claude_controls.update(session_id, model=None, effort=None, permission_mode=permission)
         ctx = await machine._spawn(
             resume_id=session_id,
             engine="claude",
@@ -1541,6 +1545,9 @@ def test_claude_work_resume_never_applies_code_fresh_default(
         )
 
         assert ctx is not None
+        assert ctx.sdk.permission_mode == (permission or "acceptEdits")
+        await machine._persist_claude_session_controls(ctx)
+        assert machine._claude_controls.get(session_id).permission_mode == ctx.sdk.permission_mode
         assert _FakeClaudeClient.created[-1].model_calls == []
         assert _FakeClaudeClient.created[-1].options.model is None
         await ctx.sdk.disconnect()
@@ -1940,7 +1947,7 @@ def test_claude_work_btw_reuses_registered_policy_and_work_identity(monkeypatch)
         assert fork.space == "work"
         assert fork.work_id == record.work_id
         assert fork.sdk.work_mode is True
-        assert fork.sdk.permission_mode == "acceptEdits"
+        assert fork.sdk.permission_mode == "bypassPermissions"
         assert fork.sdk.work_settings_path.endswith(f"{record.work_id}.json")
         assert fork.sdk.connected == {
             "resume_id": "parent-work", "cwd": record.cwd, "fork": True,
@@ -2030,7 +2037,7 @@ def test_claude_profile_work_btw_keeps_config_and_policy_account(
         }
         assert observed_policy_roots == [str(company.resolve())]
         assert fork.claude_profile_id == "company"
-        assert fork.sdk.permission_mode == "acceptEdits"
+        assert fork.sdk.permission_mode == "bypassPermissions"
 
     asyncio.run(go())
 

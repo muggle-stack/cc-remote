@@ -13,6 +13,7 @@ from pathlib import Path
 # floor(raw context window * 9 / 10), independently of usable_context_window.
 _NATIVE_COMPACT_PERCENT = 90
 _COMPACT_TARGET_PERCENT = 95
+UNCONFIRMED_CONTEXT_MESSAGE = "设置已保存，但尚未确认原生会话已应用。可重新应用以重试。"
 
 
 @dataclass(frozen=True)
@@ -90,7 +91,7 @@ class NativeContextSettings:
         """Consume the automatic attempt without claiming native acceptance."""
         self.apply_attempted = True
         if self.pending:
-            self.error = "设置已保存，但尚未确认原生会话已应用。可重新应用以重试。"
+            self.error = UNCONFIRMED_CONTEXT_MESSAGE
 
     async def confirm_applied(self, handle) -> None:
         """Keep capacity from the accepted configuration separate from old usage.

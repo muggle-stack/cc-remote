@@ -2,8 +2,8 @@
   "app": {
     "bundleName": "io.github.ccremote.client",
     "vendor": "cc-remote",
-    "versionCode": 5,
-    "versionName": "0.1.0-preview.5",
+    "versionCode": 6,
+    "versionName": "0.1.0-preview.6",
     "icon": "$media:app_icon",
     "label": "$string:app_name"
   }

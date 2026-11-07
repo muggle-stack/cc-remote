@@ -15,12 +15,16 @@ The conversation UI stays web-based; it is not a rewrite of the UI in ArkUI.
   new windows. The chat remains mounted and retains its draft when returning.
   Same-origin new windows retain **返回聊天** and the app's login cookies.
 - System file selection through ArkWeb's default file-upload handling.
+- Downloads from the configured server, including generated images/files using
+  `blob:` URLs and authenticated HTTP media. ArkWeb keeps its existing login
+  context; after download, the system **Save to Files** picker selects a destination.
+  Images are saved as files, not automatically added to the photo library.
 - System-bar and keyboard avoidance; the page retains its existing sidebar
   gestures, rounding and fading. No additional native horizontal recognizer or
   Android-specific blur override is installed.
 - App background/foreground never reloads chat or submits a model message.
 
-Camera/microphone capture, download management, non-HTTPS external
+Camera/microphone capture, a persistent download manager, non-HTTPS external
 app links and browser-control MCP are outside this preview. Native completion
 notifications have a separate optional Push Kit integration described below. Persistent
 login remains subject to the Relay cookie's normal expiry. No cookie, model
@@ -117,6 +121,7 @@ Official references:
 - [Automatic signing](https://developer.huawei.com/consumer/cn/doc/doccenter-deveco-studio/ide-signing-auto)
 - [Signing requirements](https://developer.huawei.com/consumer/cn/develop-novice-guide/)
 - [ArkWeb file upload](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/web-file-upload)
+- [ArkWeb downloads](https://developer.huawei.com/consumer/en/doc/harmonyos-guides/web-download/)
 - [ArkWeb new windows](https://developer.huawei.com/consumer/cn/doc/doccenter-capabilities/web-open-in-new-window)
 - [System application redirection](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/deep-linking-startup)
 
@@ -125,13 +130,21 @@ Official references:
 With Node 24 selected and the existing `web/` development dependencies installed:
 
 ```bash
-node --test harmony/tests/url-policy.test.mjs harmony/tests/external-browser.test.mjs harmony/tests/push-route.test.mjs harmony/tests/push-bridge.test.mjs
+node --test harmony/tests/*.test.mjs
 node web/node_modules/@playwright/test/cli.js test -c harmony/playwright.config.mjs
 ```
 
 The policy tests execute the production TypeScript with a WHATWG URL substitute
 for ArkTS URL. Browser checks use the real Web settings menu and sidebar fixture.
 Neither substitutes for ArkTS compilation or a real-device ArkWeb test.
+
+The preview.6 download adaptation was compiled in release mode and installed as
+an in-place update on a physical phone. Generated PNG and Markdown blob downloads,
+authenticated HTTP MP4 downloads, cancellation and retry were checked. The files
+appeared in the system file manager with the expected sizes; the saved PNG opened
+and the saved MP4 played in the system viewer. The 30 native policy/lifecycle
+tests passed. Images currently save to Files; automatic photo-library insertion
+is not part of this check.
 
 The initial preview was compiled and signed with DevEco Studio 26.0.0, installed
 on a physical HarmonyOS 7 phone, and checked at first launch. The operator also
@@ -147,6 +160,12 @@ on the target phone, and check:
   compare the same session with Huawei Browser. Do not claim a measured frame
   rate without a device capture.
 - Keyboard resize, attachment selection/cancel/reselect, and file previews.
+- Save a generated image and document, cancel and retry the picker, and download
+  authenticated media. Check the actual saved bytes, not just a success toast.
+  The shell permits one download/save at a time, expires stalled transfers after
+  ten minutes, and cleans its private temporary file after success, cancellation
+  or failure. The system picker grants access to the selected destination; no
+  storage permission, global JS proxy, cookie export or native HTTP fetch is used.
 - Open external HTTPS links (regular navigation, target-blank and a user-created
   blank window assigned a destination later) in the system browser; return to the
   unchanged chat/draft. Automatic redirects must not launch another app. Check a

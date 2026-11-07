@@ -8,7 +8,6 @@ from __future__ import annotations
 from contextlib import closing
 from dataclasses import dataclass, field
 import json
-import os
 from pathlib import Path
 import sqlite3
 import stat
@@ -18,6 +17,7 @@ from cc_remote.protocol import BackgroundProcessItem, MAX_BACKGROUND_PROCESS_ITE
 from cc_remote.wrapper.codex_agents import _ID, _parent
 from cc_remote.wrapper.codex_external import parse_turn_markers
 from cc_remote.wrapper.codex_sessions import _state_db_path, MAX_META_RECORD_BYTES
+from cc_remote.wrapper.rollout_io import is_compressed_rollout, rollout_open, rollout_fstat
 
 _MAX_CHILDREN = 512  # Per resident parent, including completed native catalog rows.
 _MAX_RECORD = 16 * 1024 * 1024
@@ -83,6 +83,7 @@ class _Cursor:
     title: str = "协作代理"
     complete: bool = False
     anchor: bytes = b""
+    source_key: tuple = ()
 
 
 class CodexAgentActivity:
@@ -95,9 +96,16 @@ class CodexAgentActivity:
 
     def _read(self, home, sid, path, parent, budget):
         path = _local_path(home, path)
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(fd, "rb") as stream:
-            info = os.fstat(stream.fileno())
+        native = path.stat(follow_symlinks=False)
+        source_key = (str(path), parent, native.st_dev, native.st_ino,
+                      native.st_size, native.st_mtime_ns, native.st_ctime_ns)
+        cursor = self._cursors.get(sid)
+        # Completed archived descendants remain in the native catalog. Do not
+        # repeatedly decompress them when the bounded shared cache evicts them.
+        if cursor and cursor.complete and cursor.source_key == source_key:
+            return cursor
+        with rollout_open(path, "rb", follow_symlinks=False) as stream:
+            info = rollout_fstat(stream)
             if not stat.S_ISREG(info.st_mode):
                 raise ValueError("native agent rollout is not a file")
             head = stream.readline(MAX_META_RECORD_BYTES + 1)
@@ -111,7 +119,6 @@ class CodexAgentActivity:
                     or (parent is not None and _parent(meta) != parent)):
                 raise ValueError("native agent rollout identity mismatch")
             identity = (info.st_dev, info.st_ino)
-            cursor = self._cursors.get(sid)
             anchor_matches = True
             if cursor and cursor.anchor:
                 stream.seek(max(0, cursor.offset - len(cursor.anchor)))
@@ -156,11 +163,18 @@ class CodexAgentActivity:
             cursor.anchor = stream.read(min(256, cursor.offset))
             cursor.mtime_ns = info.st_mtime_ns
             cursor.complete = cursor.offset == info.st_size
-            after = os.fstat(stream.fileno())
+            after = rollout_fstat(stream)
+            if is_compressed_rollout(path):
+                current = path.stat(follow_symlinks=False)
+                if source_key != (str(path), parent, current.st_dev, current.st_ino,
+                                  current.st_size, current.st_mtime_ns, current.st_ctime_ns):
+                    self._cursors.pop(sid, None)
+                    raise ValueError("compressed native agent rollout changed during read")
             if after.st_size < info.st_size or (
                     after.st_size == info.st_size and after.st_mtime_ns != info.st_mtime_ns):
                 self._cursors.pop(sid, None)
                 raise ValueError("native agent rollout changed during read")
+            cursor.source_key = source_key
         return cursor
 
     def read(self, home: Path, parents: set[str]) -> dict[str, list[BackgroundProcessItem]]:
@@ -188,10 +202,12 @@ class CodexAgentActivity:
             old = self._previous.get(parent, {}).get(run_id)
             status, title = "unknown", old.title if old else "协作代理"
             child_read = False
+            scan_pending = False
             try:
                 cursor = self._read(home, sid, path, parent, budget)
                 child_read = True
                 title = cursor.title
+                scan_pending = not cursor.complete
                 if cursor.complete:
                     if cursor.boundary:
                         status = cursor.status
@@ -203,6 +219,7 @@ class CodexAgentActivity:
                         if parent_path:
                             keep.add(parent)
                             ancestor = self._read(home, parent, parent_path, None, budget)
+                            scan_pending = not ancestor.complete
                             if ancestor.complete and cursor.turn_id not in ancestor.turns:
                                 status = cursor.status
             except (OSError, ValueError, TypeError, RecursionError) as exc:
@@ -214,6 +231,11 @@ class CodexAgentActivity:
                     # Previously observed activity still remains unknown below.
                     continue
             if status == "terminal":
+                continue
+            if scan_pending and old is None:
+                # A budget-limited cold scan is not evidence of a new task.
+                # Retain already-observed activity as unknown, but do not flash
+                # months-old archived children before their terminals are read.
                 continue
             result[parent][run_id] = BackgroundProcessItem(
                 item_id=run_id, kind="agent", status=status, title=title,

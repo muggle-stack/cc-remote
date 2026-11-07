@@ -4,6 +4,14 @@ interface ReadingBlock {
   node: HTMLElement;
   /** Block top in scroll-content coordinates. */
   top: number;
+  answer?: AnswerReadingAnchor;
+}
+
+interface AnswerReadingAnchor {
+  turnId: string;
+  messageIds: string[];
+  tag: string;
+  text: string;
 }
 
 export interface ReadingPosition extends ReadingBlock {
@@ -16,6 +24,34 @@ export interface ReadingPosition extends ReadingBlock {
 // The outer media node survives pending -> ready. Anchoring its source <pre>
 // loses the reading position when Mermaid replaces that node with an SVG.
 const READING_BLOCKS = ".prose :is(p,li,pre,table,h1,h2,h3,h4,h5,h6),.mermaid-block,.generated-output,.message-image-frame,.user-bubble,.turn-process-head";
+
+const readingText = (node: HTMLElement) => (node.textContent ?? "").trimStart().slice(0, 160);
+const messageIds = (answer: HTMLElement) =>
+  [answer.dataset.messageId, answer.dataset.streamMessageId].filter((id): id is string => !!id);
+
+function captureAnswerAnchor(node: HTMLElement): AnswerReadingAnchor | undefined {
+  const answer = node.closest<HTMLElement>(".assistant-answer-segment");
+  const turnId = answer?.closest<HTMLElement>("[data-turn-id]")?.dataset.turnId;
+  const text = readingText(node);
+  if (!answer || !turnId || !text) return;
+  return { turnId, messageIds: messageIds(answer), tag: node.tagName, text };
+}
+
+/** A Markdown/tree replacement can detach every stored DOM node. Resolve only
+ * inside the same native/stream message and turn, never by similar prose in
+ * another answer. Ambiguous repeated paragraphs deliberately do not match. */
+function resolveAnswerAnchor(viewport: HTMLElement, anchor?: AnswerReadingAnchor): HTMLElement | undefined {
+  if (!anchor) return;
+  const turn = [...viewport.querySelectorAll<HTMLElement>("[data-turn-id]")]
+    .find(node => node.dataset.turnId === anchor.turnId);
+  if (!turn) return;
+  const answers = [...turn.querySelectorAll<HTMLElement>(".assistant-answer-segment")]
+    .filter(node => messageIds(node).some(id => anchor.messageIds.includes(id)));
+  if (answers.length !== 1) return;
+  const candidates = [...answers[0].querySelectorAll<HTMLElement>(READING_BLOCKS)]
+    .filter(node => node.tagName === anchor.tag && readingText(node) === anchor.text);
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
 
 export function captureReadingPosition(viewport: HTMLElement, scope: string): ReadingPosition | null {
   const top = viewport.getBoundingClientRect().top;
@@ -36,7 +72,7 @@ export function captureReadingPosition(viewport: HTMLElement, scope: string): Re
     if (rect.height <= 0) continue;
     if (rect.top >= bottom) break;
     if (rect.bottom > top) visible.push({
-      node, top: rect.top - top + viewport.scrollTop,
+      node, top: rect.top - top + viewport.scrollTop, answer: captureAnswerAnchor(node),
     });
   }
   const primary = visible[0]
@@ -57,10 +93,11 @@ export function readingPositionDelta(
 ): number | null {
   const viewportTop = viewport.getBoundingClientRect().top;
   const retained = [position, ...position.fallbacks].flatMap(block => {
-    if (!viewport.contains(block.node)) return [];
-    const rect = block.node.getBoundingClientRect();
+    const node = viewport.contains(block.node) ? block.node : resolveAnswerAnchor(viewport, block.answer);
+    if (!node) return [];
+    const rect = node.getBoundingClientRect();
     if (!rect.height) return [];
-    return [{ node: block.node, previousTop: block.top,
+    return [{ node, previousTop: block.top, answer: captureAnswerAnchor(node),
       top: rect.top - viewportTop + viewport.scrollTop }];
   });
   const collapsed = position.expandedProcesses.some(process =>
@@ -77,7 +114,8 @@ export function readingPositionDelta(
   const delta = primary.top - primary.previousTop;
   position.node = primary.node;
   position.top = primary.top;
-  position.fallbacks = retained.filter(block => block !== primary).map(({ node, top }) => ({ node, top }));
+  position.answer = primary.answer;
+  position.fallbacks = retained.filter(block => block !== primary).map(({ node, top, answer }) => ({ node, top, answer }));
   return delta;
 }
 

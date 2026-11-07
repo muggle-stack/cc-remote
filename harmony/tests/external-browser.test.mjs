@@ -149,6 +149,18 @@ test('user-created blank popup hands off its resolved URL and returns to chat', 
   assert.equal(state.page.pushAttached, true);
 });
 
+test('both attached WebViews register downloads before resolving a popup', () => {
+  const state = shell();
+  const attached = [];
+  state.page.downloads = { attach: controller => attached.push(controller) };
+  state.page.attached(true);
+  const settled = state.popup(state.page.server + '/preview');
+  state.page.attached(false);
+  assert.deepEqual(attached, [state.page.chat, state.page.browser]);
+  assert.deepEqual(settled, [state.page.browser]);
+  assert.deepEqual(state.page.chat.loaded, []);
+});
+
 test('same-origin popup stays internal and a cancelled attachment always settles its handler', () => {
   const state = shell(() => { throw new Error('must not launch'); });
   assert.deepEqual(state.popup('https://github.com', false), [null]);

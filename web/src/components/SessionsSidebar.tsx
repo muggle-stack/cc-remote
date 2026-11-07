@@ -50,7 +50,8 @@ interface Props {
   activeSessionId: string | null;
   onSelect: (id: string) => void | boolean;
   onNew: (profileId?: string) => void;
-  onNewInDir: (cwd: string) => void;
+  onNewInDir: (cwd: string, profileId?: string) => void;
+  onDirectoryAction?: (cwd: string, action: "archive" | "delete", profileId?: string) => void;
   onClose: () => void;
   onOpenChange?: (open: boolean) => void;
   onRename: (id: string, title: string) => void;
@@ -88,13 +89,15 @@ export function SessionsSidebar({ open, engine, space, sessionLayout = "compact"
   codexProfiles = [], defaultCodexProfileId,
   onSpaceChange, sessions, liveStates,
   completionBadges, activeSessionId, onSelect, onNew, onNewInDir, onClose, onOpenChange,
-  onRename, onArchive, onPin, onDelete, onForkWorktree, onMigrate }: Props) {
+  onRename, onArchive, onPin, onDelete, onForkWorktree, onMigrate, onDirectoryAction }: Props) {
   const sidebarRef = useMobileSidebar(open, onOpenChange);
   const comfortable = sessionLayout === "comfortable";
   const manualUnread = useManualUnread();
   const [q, setQ] = useState("");
   const [menuCardId, setMenuCardId] = useState<string | null>(null);
   const menuAnchor = useRef<HTMLButtonElement>(null);
+  const directoryAnchor = useRef<HTMLButtonElement>(null);
+  const [menuDirectory, setMenuDirectory] = useState<string | null>(null);
   const [lifting, setLifting] = useState(false);
   const [renaming, setRenaming] = useState<{ id: string; value: string } | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -204,13 +207,14 @@ export function SessionsSidebar({ open, engine, space, sessionLayout = "compact"
     onDelete(s.session_id);
     setMenuCardId(null); setLifting(false);
   };
-  const closeMenu = useCallback(() => { setMenuCardId(null); setLifting(false); }, []);
+  const closeMenu = useCallback(() => { setMenuCardId(null); setMenuDirectory(null); setLifting(false); }, []);
 
   // reset menu/lift state when the sidebar closes (so it doesn't linger into the next open)
   useEffect(() => {
-    if (!open) { cancelPress(); setMenuCardId(null); setLifting(false); }
+    if (!open) { cancelPress(); setMenuCardId(null); setMenuDirectory(null); setLifting(false); }
     return cancelPress;
   }, [open, cancelPress]);
+  useEffect(() => { setMenuDirectory(null); }, [profileScopeKey, profileFilter]);
 
   useEffect(() => {
     if (!showProfileManagement
@@ -232,13 +236,13 @@ export function SessionsSidebar({ open, engine, space, sessionLayout = "compact"
   // Dismiss the topmost surface before an outside click can select a session,
   // activate a header/footer action, or close the mobile drawer underneath it.
   useEffect(() => {
-    if (menuCardId === null) return;
+    if (menuCardId === null && menuDirectory === null) return;
     const onDocClick = (e: MouseEvent) => {
       const t = e.target as Element | null;
-      if (t && (t.closest?.(".card-menu") || t.closest?.(".scard-act"))) return;  // click inside menu / on ⋯
+      if (t?.closest?.(".card-menu, .scard-act, .sgroup-add")) return;  // click inside menu / on ⋯
       // Let the card consume the compatibility click from releasing the hold.
       // A fresh touch clears this marker before its subsequent click.
-      if (longPressSession.current === menuCardId && e.detail !== 0
+      if (menuCardId !== null && longPressSession.current === menuCardId && e.detail !== 0
           && t?.closest?.(".scard.lifting")) return;
       e.preventDefault();
       e.stopPropagation();
@@ -246,7 +250,7 @@ export function SessionsSidebar({ open, engine, space, sessionLayout = "compact"
     };
     document.addEventListener("click", onDocClick, true);
     return () => document.removeEventListener("click", onDocClick, true);
-  }, [menuCardId, closeMenu]);
+  }, [menuCardId, menuDirectory, closeMenu]);
 
   // long-press (500ms hold, no >10px move) => lift the card + dim the rest + show actions.
   // Browser scroll/zoom ownership can cancel a touch before a >10px move
@@ -261,6 +265,7 @@ export function SessionsSidebar({ open, engine, space, sessionLayout = "compact"
     pressTimer.current = window.setTimeout(() => {
       cancelPress();
       longPressSession.current = s.session_id;
+      setMenuDirectory(null);
       setMenuCardId(s.session_id);
       setLifting(true);
       if (navigator.vibrate) navigator.vibrate(15);
@@ -390,7 +395,7 @@ export function SessionsSidebar({ open, engine, space, sessionLayout = "compact"
         <div className="scard-actions">
           <button ref={isMenu ? menuAnchor : undefined} className="scard-act" aria-label="更多操作"
             aria-expanded={isMenu}
-            onClick={(e) => { e.stopPropagation(); setMenuCardId(isMenu ? null : s.session_id); setLifting(false); }}>
+            onClick={(e) => { e.stopPropagation(); setMenuDirectory(null); setMenuCardId(isMenu ? null : s.session_id); setLifting(false); }}>
             <Icon name="dots" size={15} />
           </button>
         </div>
@@ -472,11 +477,31 @@ export function SessionsSidebar({ open, engine, space, sessionLayout = "compact"
             <span className="count">{items.length}</span>
           </button>
           {canAdd && (
-            <button className="sgroup-add" title={`在 ${title} 新建会话`} aria-label="在此目录新建会话"
-              onClick={(e) => { e.stopPropagation(); onNewInDir(key); }}>
-              <Icon name="plus" size={14} />
+            <button className="sgroup-add" title={`${title} 目录操作`} aria-label={`${title} 目录操作`}
+              aria-expanded={menuDirectory === key} aria-haspopup="menu"
+              onClick={(event) => {
+                event.stopPropagation(); directoryAnchor.current = event.currentTarget;
+                setMenuCardId(null); setLifting(false);
+                setMenuDirectory(current => current === key ? null : key);
+              }}>
+              <Icon name="dots" size={16} />
             </button>
           )}
+          {menuDirectory === key && <SessionCardMenu anchor={directoryAnchor} onClose={closeMenu}>
+            <div className="card-menu-account"><span>{profileFilter === "all" ? "全部账号" : accountProfiles.find(profile => profile.id === profileFilter)?.label ?? profileFilter}</span></div>
+            <button onClick={() => { closeMenu(); onNewInDir(key, profileFilter === "all" ? undefined : profileFilter); }}>
+              <Icon name="plus" size={15} />新建会话
+            </button>
+            {engine !== "dsh" && onDirectoryAction && <>
+              <div className="directory-menu-divider" />
+              <button onClick={() => { closeMenu(); onDirectoryAction(key, "archive", profileFilter === "all" ? undefined : profileFilter); }}>
+                <Icon name="archive" size={15} />归档目录会话…
+              </button>
+              <button className="danger" onClick={() => { closeMenu(); onDirectoryAction(key, "delete", profileFilter === "all" ? undefined : profileFilter); }}>
+                <Icon name="trash" size={15} />删除目录会话…
+              </button>
+            </>}
+          </SessionCardMenu>}
           {showDirectoryPath && <span className="sgroup-path-tip" role="tooltip">{key}</span>}
         </div>
         {!isCollapsed && <div className="sgroup-items">

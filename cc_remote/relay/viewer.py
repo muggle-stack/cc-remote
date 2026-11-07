@@ -10,6 +10,7 @@ import asyncio
 from dataclasses import dataclass, field
 import hashlib
 import json
+from pathlib import Path
 import re
 import secrets
 import time
@@ -43,7 +44,7 @@ if(window!==parent)window.addEventListener('keydown',event=>{
   if(event.key==='Escape'&&!event.isComposing&&event.keyCode!==229)
     setTimeout(()=>{if(!event.defaultPrevented)parent.postMessage({type:'cc-remote-preview-escape'},'*');},0);
 });
-</script>"""
+</script><script src="/__cc_viewer/zoom.js"></script>"""
 
 
 def effective_viewer_mode(cfg) -> str:
@@ -649,6 +650,19 @@ class ViewerRelay:
             raise ViewerError(401, "preview_not_authorized")
         if path == PREFIX + "ready":
             return JSONResponse({"ok": True})
+        if path == PREFIX + "zoom.js":
+            # Fixed application asset, never a publication path. Keep the same
+            # grant/cookie/device checks as other isolated resources.
+            asset = Path(self.cfg.static_dir) / "cc-remote-viewer-zoom.js"
+            try:
+                async with await anyio.open_file(asset, "rb") as stream:
+                    script = await stream.read(64 * 1024 + 1)
+            except OSError:
+                raise ViewerError(503, "preview_controls_unavailable") from None
+            if len(script) > 64 * 1024:
+                raise ViewerError(503, "preview_controls_unavailable")
+            return Response(b"" if req.method == "HEAD" else script,
+                            media_type="text/javascript", headers={"content-length": str(len(script))})
         if path.startswith(PREFIX):
             raise ViewerError(404, "not_found")
         # Validate the original encoded path here and at the wrapper: a single

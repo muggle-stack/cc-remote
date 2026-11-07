@@ -93,3 +93,44 @@ test("main composer gives command and skill completion priority over Tab queuein
   await input.press("Tab");
   await expect(page.getByTestId("events")).toHaveText(JSON.stringify([{ kind: "queue", prompt: "$review" }]));
 });
+
+for (const engine of ["claude", "codex"] as const) {
+  test(`${engine} Work permission selection uses native state and keeps the draft`, async ({ page }) => {
+    await page.goto(`${url}?engine=${engine}&work=1`);
+    await page.locator("textarea").fill("keep this draft");
+    await page.getByText("工作设置", { exact: true }).click();
+    await page.getByRole("button", { name: engine === "codex" ? /权限与执行环境/ : /权限模式/ }).click();
+    const choice = engine === "codex" ? "Full Access" : "Bypass Permissions";
+    await page.getByRole("dialog").getByRole("button", { name: new RegExp(`^${choice}`) }).click();
+    if (engine === "codex") await page.keyboard.press("Escape");
+    await expect(page.locator(".work-settings-pop")).toContainText(choice);
+    await expect(page.locator("textarea")).toHaveValue("keep this draft");
+    await page.getByText("工作设置", { exact: true }).click();
+    await page.getByRole("button", { name: engine === "codex" ? /权限与执行环境/ : /权限模式/ }).click();
+    const reset = engine === "codex" ? "Work 私有工作区" : "Accept Edits";
+    await page.getByRole("dialog").getByRole("button", { name: new RegExp(`^${reset}`) }).click();
+    if (engine === "codex") await page.keyboard.press("Escape");
+    await expect(page.locator(".work-settings-pop")).toContainText(reset);
+  });
+
+  test(`${engine} Work permission choice is included in the first submission`, async ({ page }) => {
+    await page.goto(`${url}?engine=${engine}&work=1&new=1`);
+    await page.locator(".newchat-access").click();
+    const choice = engine === "codex" ? "Full Access" : "Bypass Permissions";
+    await page.getByRole("dialog").getByRole("button", { name: new RegExp(`^${choice}`) }).click();
+    if (engine === "codex") await page.keyboard.press("Escape");
+    await page.locator("textarea").fill("first task");
+    await page.getByRole("button", { name: "开始", exact: true }).click();
+    await expect(page.getByTestId("events")).toContainText(engine === "codex" ? ":danger-full-access" : "bypassPermissions");
+    await expect(page.getByTestId("events")).toContainText("first task");
+  });
+}
+
+test("Work permission selection waits for native confirmation", async ({ page }) => {
+  await page.goto(`${url}?engine=claude&work=1&reject-control=1`);
+  await page.getByText("工作设置", { exact: true }).click();
+  await page.getByRole("button", { name: /权限模式/ }).click();
+  await page.getByRole("dialog").getByRole("button", { name: /^Bypass Permissions/ }).click();
+  await expect(page.getByTestId("events")).toContainText("bypassPermissions");
+  await expect(page.locator(".work-settings-pop")).toContainText("Accept Edits");
+});

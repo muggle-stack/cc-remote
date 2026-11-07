@@ -665,7 +665,7 @@ def create_app(
             return response
         response = await call_next(req)
         path = req.url.path
-        if path in {"/", "/index.html", "/sw.js", "/cc-remote-build.json", "/cc-remote-viewer-runner.js"}:
+        if path in {"/", "/index.html", "/sw.js", "/cc-remote-build.json", "/cc-remote-viewer-runner.js", "/cc-remote-viewer-zoom.js"}:
             response.headers["Cache-Control"] = "no-cache, must-revalidate"
         elif (
             path.startswith("/assets/")

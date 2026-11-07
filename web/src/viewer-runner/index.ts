@@ -3,6 +3,7 @@ import { Compiler } from "./compiler";
 import { Resources, VIRTUAL_ORIGIN } from "./resources";
 import { installPreviewEscape } from "../preview-keyboard";
 import { installMedia } from "./media";
+import { installViewerZoom } from "../viewer-zoom";
 
 const id = /^\/__cc_viewer\/bridge\/([a-f0-9]{32})$/.exec(location.pathname)?.[1];
 let opaque = false;
@@ -75,6 +76,7 @@ if (id && parent !== window && opaque) {
       }
       document.dispatchEvent(new Event("DOMContentLoaded", { bubbles: true }));
       window.dispatchEvent(new Event("load"));
+      installViewerZoom();
       resources.send({ type: "loaded" });
     }).catch((error: unknown) => report(error instanceof Error ? error.message : "预览加载失败。"));
   };

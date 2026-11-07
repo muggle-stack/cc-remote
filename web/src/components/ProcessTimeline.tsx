@@ -708,7 +708,7 @@ function isPayloadFreeUnfinishedCommandShell(block: Block): boolean {
 }
 
 export function ProcessTimeline({ blocks, done, active, outcome, problem, durationMs, startTs, doneTs, onOpenFile,
-  deferredCount = 0, detailPending = false, detailLoading = false, detailError, onLoadDetail,
+  totalCount, deferredCount = 0, detailPending = false, detailLoading = false, detailError, onLoadDetail,
   onRetryDetail,
   canLoadEarlier = false, canLoadNewer = false,
   onLoadEarlier, onLoadNewer,
@@ -730,6 +730,7 @@ export function ProcessTimeline({ blocks, done, active, outcome, problem, durati
   startTs?: number;
   doneTs?: number;
   onOpenFile?: (path: string, line?: number) => void;
+  totalCount?: number;
   deferredCount?: number;
   /** A continuation shares its parent's detail request, but not its item count. */
   detailPending?: boolean;
@@ -876,6 +877,8 @@ export function ProcessTimeline({ blocks, done, active, outcome, problem, durati
     (count, block) => count + (block.kind === "tool" ? 1 : 0), 0);
   const countLabel = visibleDetailError && timelineItems.length === 0
     ? "加载失败"
+    : totalCount != null && totalCount > 0
+    ? `${Math.max(totalCount, timelineItems.length)} 项`
     : deferredCount > 0
     ? `${deferredCount} 项`
     : waitingForContent

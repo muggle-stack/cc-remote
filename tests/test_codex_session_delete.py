@@ -261,7 +261,7 @@ def _prepare(machine, monkeypatch, *, external: bool = False):
         })
 
 
-def test_active_codex_thread_must_be_archived_before_delete(monkeypatch):
+def test_unarchived_idle_codex_thread_can_be_deleted_directly(monkeypatch):
     async def run():
         machine, _ = _mk_machine()
         handle = _DeleteHandle()
@@ -279,11 +279,9 @@ def test_active_codex_thread_must_be_archived_before_delete(monkeypatch):
 
         result = await machine._handle_delete_session(_delete_command())
 
-        assert isinstance(result, Error)
-        assert result.code == ERR_BUSY
-        assert "先归档" in result.message
-        assert handle.calls == []
-        assert machine.sessions[ctx.key] is ctx
+        assert not isinstance(result, Error)
+        assert ("delete", "codex-thread") in handle.calls
+        assert ctx.key not in machine.sessions
 
     asyncio.run(run())
 

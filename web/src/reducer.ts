@@ -5209,6 +5209,8 @@ function reduceEvent(
     case "dsh_read_result":
     case "dsh_download_chunk":
     case "files_listed":
+    case "directory_action_plan":
+    case "directory_action_progress":
     case "session_artifacts":
     case "agent_detail":
       // Agent detail is a requester-correlated side panel projection. App owns

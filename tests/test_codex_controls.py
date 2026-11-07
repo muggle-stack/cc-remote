@@ -138,6 +138,10 @@ def test_codex_work_btw_uses_private_profile_bound_runtime(
         parent.space = "work"
         parent.work_id = record.work_id
         parent.codex_profile_id = "secondary"
+        parent.sdk = SimpleNamespace(
+            approval="on-request", approval_policy="on-request",
+            permission_profile=":workspace", web_search_override="live",
+            web_search="live")
         machine.sessions[parent.key] = parent
 
         fork = await machine._spawn_btw(
@@ -154,10 +158,10 @@ def test_codex_work_btw_uses_private_profile_bound_runtime(
         assert fork.space == "work"
         assert fork.work_id == record.work_id
         assert fork.codex_profile_id == "secondary"
-        assert handle.approval == handle.approval_policy == "never"
-        assert handle.permission_profile == "cc_remote_work"
-        assert handle.web_search_override is None
-        assert handle.web_search == "cached"
+        assert handle.approval == handle.approval_policy == "on-request"
+        assert handle.permission_profile == ":workspace"
+        assert handle.web_search_override == "live"
+        assert handle.web_search == "live"
         assert handle.effort == handle.applied_effort == "xhigh"
         assert handle.display_effort == "xhigh"
 
@@ -4115,8 +4119,10 @@ def test_codex_web_search_reconnects_same_thread_with_validated_override():
 
         work = CodexHandle(_Cfg(), cwd="/tmp/work", work_mode=True)
         work.thread_id = "work-thread"
-        with pytest.raises(ValueError, match="fixed"):
-            await work.set_web_search("live")
+        work.force_reconnect = reconnect
+        await work.set_web_search("live")
+        assert work.web_search_override == work.web_search == "live"
+        assert reconnects[-1] == ("work-thread", "/tmp/work", "web search changed")
 
     asyncio.run(run())
 
@@ -4461,6 +4467,7 @@ def test_codex_resume_adopts_native_settings_unless_controls_are_preserved(
                 "personality": "none",
                 "config": _expected_work_config(),
                 "permissions": "cc_remote_work",
+                "approvalPolicy": "never",
             })
         else:
             code_config = codex_handle_module._code_thread_config(
@@ -4479,7 +4486,7 @@ def test_codex_resume_adopts_native_settings_unless_controls_are_preserved(
         assert (handle.model, handle.effort, handle.approval,
                 handle.permission_profile, handle.service_tier) == (
             "persisted-model", "ultra",
-            "never" if work_mode or preserve_controls else "on-request",
+            "never" if preserve_controls else "on-request",
             (
                 "cc_remote_work" if work_mode
                 else ":danger-full-access"
@@ -4777,7 +4784,7 @@ def test_codex_fresh_thread_persists_all_first_turn_settings_before_return(
 
         expected_start = {
             "cwd": "/tmp",
-            "approvalPolicy": "never" if work_mode else "on-request",
+            "approvalPolicy": "on-request",
             "serviceTier": "fast",
             "model": "first-model",
             "permissions": (
@@ -4834,7 +4841,7 @@ def test_codex_fresh_thread_persists_all_first_turn_settings_before_return(
                 handle.permission_profile, handle.collaboration_mode,
                 handle.service_tier) == (
             "first-model", "ultra",
-            "never" if work_mode else "on-request",
+            "on-request",
             "cc_remote_work" if work_mode else ":danger-full-access",
             "plan", "priority")
         await handle.disconnect()
@@ -7439,7 +7446,7 @@ def test_permission_modes_are_engine_strict_and_broadcast_after_apply():
     asyncio.run(run())
 
 
-def test_codex_work_permission_cannot_escalate_outside_its_profile():
+def test_codex_work_permission_uses_native_approval_controls():
     async def run():
         machine, transport = _mk_machine()
         work = _control_ctx("codex-work", "codex")
@@ -7448,13 +7455,13 @@ def test_codex_work_permission_cannot_escalate_outside_its_profile():
 
         await machine._handle_set_perm(SimpleNamespace(
             sid="codex-work", mode="on-request"))
-        assert work.sdk.permission_calls == []
-        assert transport.sent[-1].type == "error"
-        assert transport.sent[-1].code == "auth"
+        assert work.sdk.permission_calls == ["on-request"]
+        assert transport.sent[-1].type == "perm"
+        assert transport.sent[-1].mode == "on-request"
 
         await machine._handle_set_perm(SimpleNamespace(
             sid="codex-work", mode="never"))
-        assert work.sdk.permission_calls == ["never"]
+        assert work.sdk.permission_calls == ["on-request", "never"]
         assert transport.sent[-1].type == "perm"
         assert transport.sent[-1].mode == "never"
 
@@ -7510,12 +7517,12 @@ def test_permission_profiles_are_codex_only_and_broadcast_after_apply():
         work = _control_ctx("codex-work", "codex")
         work.space = "work"
         machine.sessions["codex-work"] = work
-        rejected = await machine._handle_set_permission_profile(
+        applied = await machine._handle_set_permission_profile(
             SetPermissionProfile(
                 sid="codex-work", profile=":danger-full-access"))
-        assert isinstance(rejected, Error)
-        assert rejected.code == "auth"
-        assert work.sdk.permission_profile_calls == []
+        assert isinstance(applied, PermissionProfile)
+        assert applied.profile == ":danger-full-access"
+        assert work.sdk.permission_profile_calls == [":danger-full-access"]
 
     asyncio.run(run())
 
@@ -7666,7 +7673,7 @@ def test_new_session_permission_profile_catalog_is_cwd_scoped(
     asyncio.run(run())
 
 
-def test_web_search_is_codex_code_only_idle_and_broadcast_after_reconnect():
+def test_web_search_is_codex_only_idle_and_broadcast_after_reconnect():
     async def run():
         machine, transport = _mk_machine()
         codex = _control_ctx("codex", "codex")
@@ -7690,11 +7697,11 @@ def test_web_search_is_codex_code_only_idle_and_broadcast_after_reconnect():
 
         codex.state = "idle"
         codex.space = "work"
-        rejected = await machine._handle_set_web_search(
+        applied = await machine._handle_set_web_search(
             SetWebSearch(sid="codex", mode="cached"))
-        assert isinstance(rejected, Error)
-        assert rejected.code == "auth"
-        assert transport.sent[-1] is rejected
+        assert isinstance(applied, WebSearch)
+        assert applied.mode == "cached"
+        assert transport.sent[-1] is applied
 
     asyncio.run(run())
 

@@ -31,20 +31,10 @@ async def select_target(app, pilot):
                           if n.data[1] == "demo-tests"))
 
 
-async def confirm_archive(client, pilot):
+async def assert_direct_delete(client, pilot):
     await pilot.pause()
-    commands = sent(client, "archive_session")
-    assert len(commands) == 1 and not sent(client, "delete_session")
-    command = commands[0]
-    client._handle(dict(
-        type="session_list", engine="codex", space="code",
-        to=client.client_id, request_id=command["cmd_id"],
-        sessions=[dict(client.workspace.catalog["demo-tests"], tag="archived")],
-    ))
-    assert not sent(client, "delete_session")
-    client._handle(dict(type="command_ack", client_id=client.client_id,
-                        to=client.client_id, cmd_id=command["cmd_id"]))
-    await pilot.pause()
+    assert not sent(client, "archive_session")
+    assert len(sent(client, "delete_session")) == 1
 
 
 @pytest.mark.asyncio
@@ -94,7 +84,7 @@ async def test_confirmed_and_direct_delete_only_target_highlight(keys):
     async with app.run_test() as pilot:
         await select_target(app, pilot)
         await pilot.press(*keys)
-        await confirm_archive(app.client, pilot)
+        await assert_direct_delete(app.client, pilot)
         commands = sent(app.client, "delete_session")
         assert len(commands) == 1
         command = commands[0]
@@ -129,7 +119,7 @@ async def test_delete_dialog_pins_identity_and_revalidates_scope(change):
         await pilot.pause()
         commands = sent(app.client, "delete_session")
         if change == "cursor":
-            await confirm_archive(app.client, pilot)
+            await assert_direct_delete(app.client, pilot)
             commands = sent(app.client, "delete_session")
             assert len(commands) == 1
             assert commands[0]["session_id"] == "demo-tests"
@@ -167,7 +157,7 @@ async def test_tree_mutations_and_confirmation_are_rebindable():
         assert isinstance(app.screen, DeleteDialog)
         assert not sent(app.client, "delete_session")
         await pilot.press("b", "x", "v")
-        await confirm_archive(app.client, pilot)
+        await assert_direct_delete(app.client, pilot)
         assert len(sent(app.client, "delete_session")) == 1
 
 

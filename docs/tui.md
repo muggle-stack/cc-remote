@@ -469,7 +469,8 @@ Use j/k or arrows, Enter to open a field, i to edit, Esc for Normal and Enter to
 save text. Existing settings apply when a value is selected with Enter, without
 a JSON confirmation page. The displayed value follows the server response.
 In a new-session form, select the final “Create session” row and press Enter.
-Work keeps its wrapper-owned cwd/safe policy.
+Work keeps its wrapper-owned cwd and starts with a private permission policy.
+The Web permission panel can change the session’s native approval mode and execution profile.
 Model catalogs are engine/account scoped; permission catalogs are also cwd
 scoped and never offer disallowed profiles. Switching cwd clears old choices.
 

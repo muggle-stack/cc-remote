@@ -6,7 +6,8 @@ per-turn settings.
 """
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, contextmanager
+from contextvars import ContextVar
 import glob
 from importlib import import_module
 import json
@@ -20,7 +21,7 @@ from typing import Any, Iterable, Optional
 
 from cc_remote.wrapper.rollout_io import rollout_first_line, rollout_open, rollout_size
 from cc_remote.log import logger
-from cc_remote.wrapper.codex_rpc import codex_rpc
+from cc_remote.wrapper.codex_rpc import codex_rpc, codex_history_rpc_scope
 
 
 def _load_tomllib():
@@ -99,7 +100,34 @@ def _session_roots(
     return os.path.join(home, "sessions"), os.path.join(home, "archived_sessions")
 
 
+_catalog_index_only = ContextVar("codex_catalog_index_only", default=False)
+
+
+def catalog_index_only() -> bool:
+    return _catalog_index_only.get()
+
+
+@contextmanager
+def codex_catalog_read_mode(*, index_only: bool):
+    """Mutations refresh native indexed state without repairing every rollout."""
+    token = _catalog_index_only.set(index_only)
+    try:
+        yield
+    finally:
+        _catalog_index_only.reset(token)
+
+
 async def list_codex_sessions(
+    limit: int = 60,
+    *,
+    codex_home: str | os.PathLike[str] | None = None,
+) -> list[dict[str, Any]]:
+    # One bounded read-only transport for all pages and both archive states.
+    async with codex_history_rpc_scope():
+        return await _list_codex_sessions(limit, codex_home=codex_home)
+
+
+async def _list_codex_sessions(
     limit: int = 60,
     *,
     codex_home: str | os.PathLike[str] | None = None,
@@ -132,6 +160,8 @@ async def list_codex_sessions(
                 "sortDirection": "desc",
                 "archived": archived,
             }
+            if catalog_index_only():
+                params["useStateDbOnly"] = True
             if cursor:
                 params["cursor"] = cursor
             if provider:
@@ -208,6 +238,42 @@ def _normalize_thread(thread: Any, *, archived: bool) -> Optional[dict[str, Any]
         "status": status,
         "tag": "archived" if archived else None,
     }
+
+
+async def list_codex_directory_sessions(cwd: str, *, codex_home=None, limit=1000) -> list[dict]:
+    """Complete native directory inventory, never the capped sidebar page."""
+    provider = codex_current_provider(codex_home=codex_home).strip()
+    result = {}
+    async with codex_history_rpc_scope():
+        for archived in (False, True):
+            cursor = None
+            cursors = set()
+            while True:
+                params = {"cwd": cwd, "archived": archived, "limit": 100,
+                          "useStateDbOnly": True, "sortKey": "updated_at", "sortDirection": "desc"}
+                if provider:
+                    params["modelProviders"] = [provider]
+                if cursor:
+                    params["cursor"] = cursor
+                response = await codex_rpc("thread/list", params, codex_home=codex_home)
+                if not isinstance(response, dict) or not isinstance(response.get("data"), list):
+                    raise RuntimeError("Codex directory inventory is unavailable")
+                for thread in response["data"]:
+                    if isinstance(thread, dict) and thread.get("ephemeral") is True:
+                        continue
+                    row = _normalize_thread(thread, archived=archived)
+                    if row is None or row.get("cwd") != cwd:
+                        raise RuntimeError("Codex directory inventory changed scope")
+                    result[row["session_id"]] = row
+                if len(result) > limit:
+                    raise ValueError("目录会话过多，请按账号分别操作。")
+                cursor = response.get("nextCursor")
+                if not cursor:
+                    break
+                if not isinstance(cursor, str) or cursor in cursors or len(cursors) >= 100:
+                    raise RuntimeError("Codex directory inventory did not finish")
+                cursors.add(cursor)
+    return list(result.values())
 
 
 def codex_thread_catalog_row(thread: Any) -> Optional[dict[str, Any]]:

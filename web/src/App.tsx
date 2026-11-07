@@ -9,7 +9,8 @@ import {
 } from "./harmony-push";
 import { RightPanelPresentation, rekeyPanelScope } from "./right-panel-presentation";
 import { ArtifactReadingMemory, type ArtifactReadingState } from "./artifact-reading-state";
-import type { DshCommandInfo, FilePreview } from "./protocol";
+import type { DshCommandInfo, FilePreview, DirectoryActionScope, ServerEvent } from "./protocol";
+const DirectoryActionSheet = lazy(() => import("./components/DirectoryActionSheet"));
 import { resolveRelatedSession, relatedSessionTitle } from "./session-messages";
 import {
   lazy,
@@ -428,6 +429,11 @@ export default function App() {
     artifactsListenerRef.current = listener;
   }, []);
   const filesListenerRef = useRef<((message: FilesListed) => void) | null>(null);
+  const [directoryScope, setDirectoryScope] = useState<(DirectoryActionScope & { machineId: string }) | null>(null);
+  const directoryListenerRef = useRef<((message: ServerEvent) => boolean) | null>(null);
+  const listenDirectory = useCallback((listener: ((message: ServerEvent) => boolean) | null) => {
+    directoryListenerRef.current = listener;
+  }, []);
   const listenFiles = useCallback((listener: ((message: FilesListed) => void) | null) => {
     filesListenerRef.current = listener;
   }, []);
@@ -477,6 +483,7 @@ export default function App() {
   });
   const [machineId, setMachineId] = useState(
     () => localStorage.getItem(MACHINE_KEY) || "default");
+  useEffect(() => { setDirectoryScope(null); }, [machineId, engine, space]);
   const artifactReadingMemory = useMemo(() => ({
     machineId, entries: new Map<string, ArtifactReadingState>(),
   }), [machineId]);
@@ -2401,6 +2408,7 @@ export default function App() {
         onReloadRequired: webUpdate.check,
         onEvent: (msg, ownership) => {
           if (!acceptsLifecycle()) return;
+          if (directoryListenerRef.current?.(msg)) return;
           rewind.onEventRef.current(msg);
           if (turnFileRequestsRef.current.accept(msg)) return;
           if (goalApiRef.current?.accept(msg)) return;
@@ -5199,15 +5207,9 @@ export default function App() {
       space === "work" ? null : cwd, engine, model, effort,
       { prompt, msg_id, images, files },
       engine === "codex" ? collaborationMode : undefined,
-      engine === "codex"
-        ? (space === "work" ? "never" : permissionMode)
-        : space === "code" ? permissionMode : undefined,
-      engine === "codex" && space === "code"
-        ? permissionProfile
-        : undefined,
-      engine === "codex" && space === "code"
-        ? webSearch
-        : undefined,
+      permissionMode,
+      engine === "codex" ? permissionProfile : undefined,
+      engine === "codex" ? webSearch : undefined,
       engine === "codex" ? serviceTier : undefined,
       space, space === "work" ? activeWorkProjectId : undefined,
       engine === "codex" ? newChatCodexProfileId : undefined,
@@ -5986,7 +5988,11 @@ export default function App() {
           return true;
         }}
         onNew={(profileId) => { if (!confirmArtifactDiscard()) return; clearForkFocusLease(false); cancelPendingNotificationTarget(); pendingCreateRef.current = null; setCreateError(null); setStatusOpenSid(null); setNewChatAutoFocus(true); setRestoringSurfaceScope(null); wsRef.current?.setFocusedSid(null); dispatch({ type: "enter_new_chat", cwd: "~", cwdSource: "default", claudeProfileId: engine === "claude" ? profileId ?? newChatClaudeProfileId : null, codexProfileId: engine === "codex" ? profileId ?? newChatCodexProfileId : null }); if (isMobile()) setSidebarOpen(false); }}
-        onNewInDir={(cwd) => { if (!confirmArtifactDiscard()) return; clearForkFocusLease(false); cancelPendingNotificationTarget(); pendingCreateRef.current = null; setCreateError(null); setStatusOpenSid(null); setNewChatAutoFocus(true); setRestoringSurfaceScope(null); wsRef.current?.setFocusedSid(null); dispatch({ type: "enter_new_chat", cwd, cwdSource: "explicit", claudeProfileId: newChatClaudeProfileId, codexProfileId: newChatCodexProfileId }); if (isMobile()) setSidebarOpen(false); }}
+        onNewInDir={(cwd, profileId) => { if (!confirmArtifactDiscard()) return; clearForkFocusLease(false); cancelPendingNotificationTarget(); pendingCreateRef.current = null; setCreateError(null); setStatusOpenSid(null); setNewChatAutoFocus(true); setRestoringSurfaceScope(null); wsRef.current?.setFocusedSid(null); dispatch({ type: "enter_new_chat", cwd, cwdSource: "explicit", claudeProfileId: engine === "claude" ? profileId ?? newChatClaudeProfileId : null, codexProfileId: engine === "codex" ? profileId ?? newChatCodexProfileId : null }); if (isMobile()) setSidebarOpen(false); }}
+        onDirectoryAction={(cwd, action, profileId) => {
+          if (engine === "dsh") return;
+          setDirectoryScope({ cwd, action, profile_id: profileId, engine, machineId });
+        }}
         onClose={() => setSidebarOpen(false)}
         onRename={(id, title) => wsRef.current?.sendRenameSession(id, title, engine, space)}
         onArchive={(id, archived) => { wsRef.current?.sendArchiveSession(id, archived, engine, space); }}
@@ -6031,6 +6037,13 @@ export default function App() {
         onForkWorktree={openForkWorktree}
         onMigrate={openSessionMigration}
       /></Suspense>}</SidebarState>
+      {directoryScope && directoryScope.machineId === machineId && directoryScope.engine === engine && space === "code" && <Suspense fallback={null}>
+        <DirectoryActionSheet key={`${directoryScope.machineId}:${directoryScope.engine}:${directoryScope.cwd}:${directoryScope.profile_id}:${directoryScope.action}`}
+          scope={directoryScope} machineLabel={activeDevice?.label ?? machineId} listen={listenDirectory}
+          prepare={scope => wsRef.current?.sendPrepareDirectoryAction(scope) ?? null}
+          run={(planId, targetEngine) => wsRef.current?.sendRunDirectoryAction(planId, targetEngine) ?? null}
+          onClose={() => setDirectoryScope(null)} />
+      </Suspense>}
       {rewind.view && focusedEngine === "claude" && space === "code" && <Suspense fallback={null}>
         <RollbackSheet key={`${focusedComposerDraftKey}:${rewind.view.target?.checkpointId ?? "picker"}`}
           {...rewind.view} choices={rewindChoices(historyView.turns)} disabledReason={rewindDisabledReason}

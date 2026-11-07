@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 87
+PROTOCOL_VERSION = 90
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -1392,7 +1392,7 @@ class NewSession(_Command):
     collaboration_mode: Optional[CollaborationModeName] = None  # Codex only; first turn included
     permission_mode: Optional[PermissionMode] = None  # Engine-specific; applied before connect
     permission_profile: Optional[PermissionProfileId] = None  # Codex only
-    web_search: Optional[WebSearchMode] = None  # Codex Code only
+    web_search: Optional[WebSearchMode] = None  # Codex only
     service_tier: Optional[str] = Field(
         default=None, min_length=1, max_length=64,
         pattern=r"^[a-z][a-z0-9_-]*$")  # Codex only, native catalog validated
@@ -1431,8 +1431,6 @@ class NewSession(_Command):
             if ((self.permission_mode in codex_modes)
                     != (self.engine == "codex")):
                 raise ValueError("permission_mode does not match the selected engine")
-            if self.engine == "claude" and self.space == "work":
-                raise ValueError("Claude Work permission_mode is fixed by the wrapper")
         if self.claude_profile_id is not None and self.engine != "claude":
             raise ValueError(
                 "claude_profile_id only supported for Claude sessions")
@@ -1450,8 +1448,6 @@ class NewSession(_Command):
                     "auto_compact_threshold_tokens is only valid for custom autocompact")
         if self.space == "work" and self.cwd is not None:
             raise ValueError("Work session cwd is assigned by the wrapper")
-        if self.space == "work" and self.web_search is not None:
-            raise ValueError("Work web_search is fixed by the wrapper")
         if self.space == "code" and self.project_id is not None:
             raise ValueError("project_id is only supported for Work sessions")
         return self
@@ -1471,6 +1467,48 @@ class DeleteSession(_Command):
     session_id: WireId
     engine: Engine
     space: Space = "code"
+
+
+class PrepareDirectoryAction(_Command):
+    """Build a bounded, account-scoped confirmation snapshot for Code only."""
+    type: Literal["prepare_directory_action"] = "prepare_directory_action"
+    engine: Literal["claude", "codex"]
+    cwd: str = Field(min_length=1, max_length=4096)
+    profile_id: Optional[WireId] = None  # None means all configured accounts.
+    action: Literal["archive", "delete"]
+
+
+class RunDirectoryAction(_Command):
+    type: Literal["run_directory_action"] = "run_directory_action"
+    plan_id: WireId
+
+
+class DirectoryActionPlan(_Base):
+    type: Literal["directory_action_plan"] = "directory_action_plan"
+    request_id: WireId
+    plan_id: WireId
+    engine: Literal["claude", "codex"]
+    cwd: str = Field(min_length=1, max_length=4096)
+    action: Literal["archive", "delete"]
+    profiles: list[str] = Field(max_length=32)
+    total: int = Field(ge=0, le=1000)
+    eligible: int = Field(ge=0, le=1000)
+    archived: int = Field(ge=0, le=1000)
+    skipped: int = Field(ge=0, le=1000)
+    expires_at: float
+
+
+class DirectoryActionProgress(_Base):
+    type: Literal["directory_action_progress"] = "directory_action_progress"
+    request_id: WireId
+    plan_id: WireId
+    engine: Literal["claude", "codex"]
+    total: int = Field(ge=0, le=1000)
+    succeeded: int = Field(default=0, ge=0, le=1000)
+    skipped: int = Field(default=0, ge=0, le=1000)
+    failed: int = Field(default=0, ge=0, le=1000)
+    done: bool = False
+    errors: list[str] = Field(default_factory=list, max_length=5)
 
 
 class GetRewindPreview(_Command):
@@ -2795,6 +2833,17 @@ class SessionMessageReceipt(BaseModel):
     status: Literal["sending", "queued", "sent", "failed"]
 
 
+class ResponseProcessSummary(BaseModel):
+    """Source-bound process header; its payload remains in GetTurnDetail."""
+    model_config = ConfigDict(extra="forbid")
+    id: WireId
+    background: bool
+    answerId: Optional[WireId] = None
+    itemCount: int = Field(ge=0)
+    startedTs: Optional[int] = Field(default=None, ge=0)
+    doneTs: Optional[int] = Field(default=None, ge=0)
+
+
 class ConversationTurn(BaseModel):
     """Canonical lightweight turn rendered without replaying raw events."""
     model_config = ConfigDict(extra="forbid")
@@ -2833,6 +2882,7 @@ class ConversationTurn(BaseModel):
     processDoneTs: Optional[int] = Field(default=None, ge=0)
     detailEventCount: int = Field(default=0, ge=0)
     detailLoaded: bool = False
+    responseProcesses: Optional[list[ResponseProcessSummary]] = Field(default=None, max_length=33)
     fileChanges: Optional[TurnChangeSummary] = None
 
 
@@ -3229,6 +3279,7 @@ class CompletionState(_Base):
 
 
 AnyMessage = Union[
+    PrepareDirectoryAction, RunDirectoryAction, DirectoryActionPlan, DirectoryActionProgress,
     GetRewindPreview, RewindPreview,
     ReorderQueuedQueries,
     GetSessionArtifacts, GetSessionArtifactPreview, SessionArtifacts,
@@ -3264,6 +3315,10 @@ DOWNSTREAM_TYPES = frozenset({
 })
 
 _TYPE_MAP: dict[str, type[BaseModel]] = {
+    "prepare_directory_action": PrepareDirectoryAction,
+    "run_directory_action": RunDirectoryAction,
+    "directory_action_plan": DirectoryActionPlan,
+    "directory_action_progress": DirectoryActionProgress,
     "get_session_artifacts": GetSessionArtifacts,
     "get_session_artifact_preview": GetSessionArtifactPreview,
     "session_artifacts": SessionArtifacts,

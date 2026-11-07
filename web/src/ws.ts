@@ -98,7 +98,7 @@ const UPDATE_DISPOSABLE_READS = new Set([
   "get_goal", "get_claude_plan", "get_status", "get_queued_query",
   "get_session_artifacts", "get_session_artifact_preview", "get_file_preview",
   "get_preview_asset", "get_turn_file_changes", "get_diff", "list_dir",
-  "browse_files", "read_dsh",
+  "browse_files", "read_dsh", "prepare_directory_action",
 ]);
 let pageClientId: string | null = null;
 
@@ -1561,7 +1561,7 @@ export class RelayWs {
     if (engine === "codex" && collaborationMode) {
       obj.collaboration_mode = collaborationMode;
     }
-    if (permissionMode && (targetEngine === "codex" || space === "code")) {
+    if (permissionMode && targetEngine !== "dsh") {
       obj.permission_mode = permissionMode;
     }
     if (engine === "codex" && permissionProfile) {
@@ -1633,6 +1633,16 @@ export class RelayWs {
       v: PROTOCOL_VERSION, type: "delete_session", session_id: sessionId,
       engine, space, ts: nowTs(),
     }, engine, space) !== null;
+  }
+
+  sendPrepareDirectoryAction(scope: import("./protocol").DirectoryActionScope): string | null {
+    return this.sendTracked({ v: PROTOCOL_VERSION, type: "prepare_directory_action", ts: nowTs(),
+      engine: scope.engine, cwd: scope.cwd, profile_id: scope.profile_id, action: scope.action });
+  }
+
+  sendRunDirectoryAction(planId: string, engine: "claude" | "codex"): string | null {
+    return this.sendListRefreshingCommand({ v: PROTOCOL_VERSION, type: "run_directory_action",
+      ts: nowTs(), plan_id: planId }, engine, "code");
   }
 
   sendRollbackSession(sessionId: string, engine: "claude" | "codex" | "dsh",

@@ -198,7 +198,7 @@ hook 和 Wrapper 应使用相同的 `CC_REMOTE_STATE_DIR`；日志默认为
 
 > **cc-remote 会让远端的人在你机器上跑任意命令。请当成「给别人一个你机器的 shell」来对待。**
 
-- Code 会话仍是远程开发控制面：Claude 默认使用 `permissionMode: bypassPermissions`；Codex 默认审批策略是 `never`，并可在 app-server 对当前 cwd 允许的 named permission profile 中选择执行环境。审批策略不会扩大 profile 的边界，Full Access 则会显著扩大能力。**能登录且能进入 Code 的人，仍应等同于拿到了这台机器的远程 agent/shell 权限。** Work 会话使用固定的 `cc_remote_work` profile、独立私有根目录且不开放外部目录，但这只是缩小默认能力面，不替代操作系统级的独立用户、容器或虚拟机隔离。
+- Code 会话仍是远程开发控制面：Claude 默认使用 `permissionMode: bypassPermissions`；Codex 默认审批策略是 `never`，并可在 app-server 对当前 cwd 允许的 named permission profile 中选择执行环境。审批策略不会扩大 profile 的边界，Full Access 则会显著扩大能力。**能登录且能进入 Code 的人，仍应等同于拿到了这台机器的远程 agent/shell 权限。** Work 默认使用 `cc_remote_work` profile 和独立私有根目录；用户可在权限面板选择其他原生审批方式或执行环境（包括 Full Access）。Claude Work 默认 Accept Edits，也可切换原生权限模式；沙箱外命令重试遵循当前审批模式，但这只是缩小默认能力面，不替代操作系统级的独立用户、容器或虚拟机隔离。
 - `LOGIN_PASSWORD` / `LOGIN_USERS_JSON`、`WRAPPER_TOKEN` / `WRAPPER_TOKENS_JSON` 和 `SESSION_SECRET` 是认证边界：用强随机值、别提交 git、别贴到聊天里、定期轮换。仓库 `.env` 只适合本机开发；Linux 生产 Wrapper 使用 root-only `/etc/cc-remote/wrapper.env`；macOS 使用安装器管理的 release 外私有配置。systemd 模板会禁止服务及模型子进程读取这个源文件和遗留仓库 `.env`；Linux wrapper 还会关闭 dumpability，避免子进程从 `/proc/<pid>/environ` 或进程内存取回已经捕获的 token。
 - 公网必须上 TLS（`wss://`，本仓库用 Caddy 自动签证书）。只有明确需要临时使用公网 IPv4 + 明文 HTTP/WS 时才设 `ALLOW_INSECURE_HTTP=1`；开启后登录口令、cookie、wrapper token 和全部会话流量都不加密，应尽快切回 TLS。`ALLOW_PRIVATE_ORIGINS=1` 只为同端口私网字面 IP 增加与实际请求目标一致的直连入口，不会放宽公网域名校验；Cookie 的 `Secure` 属性按受信请求传输判断，不读取调用者提供的 Origin。但使用内网 HTTP 时，登录口令、cookie 和会话内容在该网络中仍是明文。
 - 建议：给中继加 IP 白名单 / 只在需要时开、给登录加失败限速（已内置每 IP 每分钟 5 次）。

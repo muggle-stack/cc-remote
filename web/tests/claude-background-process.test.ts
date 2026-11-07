@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer } from "vite";
@@ -24,14 +25,74 @@ try {
     await harness.ssrLoadModule("/src/reducer.ts");
   const { ChatView } = await harness.ssrLoadModule(
     "/src/components/ChatView.tsx");
-  const { assistantContinuations: claudeContinuations } = await harness.ssrLoadModule("/src/assistant-continuations.ts");
-  const { mergeInitialHistory, mergeAuthoritativeTurnDetail, restoreCachedTurnDetails } =
+  const { assistantContinuations: claudeContinuations, ContinuationRenderKeys } = await harness.ssrLoadModule("/src/assistant-continuations.ts");
+  const { mergeInitialHistory, mergeAuthoritativeTurnDetail, restoreCachedTurnDetails,
+    mergeDetailWithLiveTail } =
     await harness.ssrLoadModule("/src/history-merge.ts");
+  const { boundCachedTurns } = await harness.ssrLoadModule("/src/cache.ts");
   const event = (body: Record<string, unknown>): ServerEvent => ({
     v: PROTOCOL_VERSION,
     ts: 10,
     ...body,
   } as ServerEvent);
+
+  // A fresh login has no cached detail. Headers must already be segmented,
+  // and opening/collapsing any one of them cannot change the other headers.
+  const responseFixture = JSON.parse(readFileSync("tests/fixtures/claude-responses.json", "utf8"));
+  const responseSid = "response-history";
+  let responseState = { ...initialState, focusedSid: responseSid,
+    sessions: [{ session_id: responseSid, engine: "claude" }],
+    runtimes: { [responseSid]: createRuntime() } };
+  const responseSend = (body: Record<string, unknown>) => {
+    responseState = reduce(responseState, { type: "event", event: event({ sid: responseSid, ...body }) });
+  };
+  const responseRefresh = () => responseSend({ type: "history", session_id: responseSid,
+    revision: "responses-r1", detail: "summary", in_progress: false,
+    has_more: false, events: [], turns: [responseFixture.summary] });
+  const responseMarkup = () => renderToStaticMarkup(createElement(ChatView, {
+    sid: responseSid, engine: "claude", turns: responseState.runtimes[responseSid].turns,
+    onLoadDetail: () => true,
+  }));
+  const headers = (markup: string) => [...markup.matchAll(/<button[^>]*class="turn-process-head"[^>]*>[\s\S]*?<\/button>/g)]
+    .map(match => match[0].replace(/<[^>]*>/g, "").replace(/\s/g, ""));
+  const responseKeys = new ContinuationRenderKeys();
+  const presentationKeys = () => {
+    const turns = responseState.runtimes[responseSid].turns;
+    responseKeys.update("response-history", turns);
+    const turn = turns[0];
+    const blocks = mergeDetailWithLiveTail(
+      mergeDetailWithLiveTail(turn.detailProjection?.blocks ?? [], turn.liveSpillBlocks ?? [], true),
+      turn.blocks, true);
+    const answers = turn.blocks.filter((block: Block) => block.kind === "text" && block.channel === "final");
+    const narrative = claudeContinuations(blocks, answers, "claude", turn.responseProcesses);
+    responseKeys.apply(turn.id, narrative.continuations);
+    return narrative.continuations.map((segment: { renderKey: string }) => segment.renderKey);
+  };
+  responseRefresh();
+  const coldKeys = presentationKeys();
+  assert.equal(new Set(coldKeys).size, 4);
+  const coldHeaders = headers(responseMarkup());
+  assert.deepEqual(coldHeaders, ["已处理8s2项", ...Array(4).fill("已处理10s2项")]);
+  assert.equal(responseState.runtimes[responseSid].turns[0].detailLoaded, false);
+  responseSend({ type: "turn_detail", session_id: responseSid, turn_id: responseFixture.summary.id,
+    revision: "responses-r1", authoritative: true, has_more: false, has_newer: false,
+    events: responseFixture.events.map((body: Record<string, unknown>) => event(body)) });
+  assert.deepEqual(headers(responseMarkup()), coldHeaders,
+    "loading detail must not replace the original header with continuation headers");
+  assert.deepEqual(presentationKeys(), coldKeys,
+    "cold summary and loaded process detail retain every continuation's presentation identity");
+  responseRefresh();
+  assert.deepEqual(presentationKeys(), coldKeys,
+    "a later summary refresh keeps detail disclosures and answer DOM mounted");
+  assert.deepEqual(headers(responseMarkup()), coldHeaders,
+    "a summary refresh after loading detail keeps all five exact clocks/counts");
+  const coldCached = boundCachedTurns(responseState.runtimes[responseSid].turns);
+  assert.deepEqual(coldCached[0].responseProcesses, responseFixture.summary.responseProcesses);
+  const cachedProjection = restoreCachedTurnDetails(
+    [structuredClone(responseFixture.summary)], coldCached, "idle");
+  assert.deepEqual(headers(renderToStaticMarkup(createElement(ChatView, {
+    sid: responseSid, engine: "claude", turns: cachedProjection, onLoadDetail: () => true,
+  }))), coldHeaders, "restoring cached detail must retain each response boundary and item count");
 
   const sid = "claude-background-sync";
   let state = {
@@ -704,11 +765,117 @@ try {
       "an unproven ordering never discards retained process or answer payloads");
   }
 
+  // A summary-only return link is not loaded tool/reasoning detail. Evicted
+  // cached detail can retain its old loaded bit, but expanding must fetch it
+  // again instead of displaying an empty process with a permanent retry error.
+  for (const returnKind of ["task", "agent"]) for (const returnCount of [1, 4]) {
+    const summary: Turn = {
+      id: "evicted-return-detail", prompt: "check job", done: true,
+      processDetailState: "present", detailEventCount: returnCount * 2, detailLoaded: false,
+      blocks: [
+        { kind: "text", message_id: "initial-answer", channel: "final",
+          text: "Waiting.", done: true },
+        ...Array.from({ length: returnCount }, (_, index) => [
+          { kind: "process", item_id: `return-job-${index}`, processKind: returnKind,
+            phase: "end", status: "succeeded", done: true, title: "Job returned",
+            server: "cc_remote", tool: `${returnKind}_return` },
+          { kind: "text", message_id: `continued-answer-${index}`, channel: "final",
+            text: `Verified ${index}.`, background: true, done: true },
+        ]).flat(),
+      ] as Block[],
+    };
+    const merged = mergeInitialHistory([summary], [{ ...summary, detailLoaded: true }])[0];
+    assert.equal(merged.detailLoaded, false,
+      "return attribution cannot prevent reloading evicted heavyweight detail");
+    assert.equal(merged.detailEventCount, returnCount * 2);
+    const markup = renderToStaticMarkup(createElement(ChatView, {
+      sid: "evicted-return-detail", engine: "claude", turns: [merged],
+      onLoadDetail: () => true,
+    }));
+    assert.doesNotMatch(markup, /加载失败|详细过程未完整返回/);
+    assert.match(markup, /Waiting\.[\s\S]*Verified 0\./);
+
+    for (const projectionKind of ["missing", "empty", "receipts"]) {
+      const sid = `evicted-${returnKind}-${returnCount}-${projectionKind}`;
+      let expandedState = { ...initialState, focusedSid: sid,
+        sessions: [{ session_id: sid, engine: "claude" }],
+        runtimes: { [sid]: { ...createRuntime(), historyRevision: "returns-r1",
+          liveDetailTurnIds: [summary.id], hydratedCacheTurnIds: [summary.id],
+          turns: [{ ...summary, detailLoaded: true,
+            detailProjection: projectionKind === "missing" ? undefined : {
+              segments: [], blocks: projectionKind === "empty" ? []
+                : summary.blocks.filter(block => block.kind === "process"),
+              capped: false, hasMore: false, oldestCursor: null,
+              hasNewer: false, newerCursor: null,
+            } }],
+        } },
+      };
+      const send = (body: Record<string, unknown>) => {
+        expandedState = reduce(expandedState, { type: "event", event: event({ sid, ...body }) });
+      };
+      const refresh = () => send({ type: "history", session_id: sid,
+        revision: "returns-r1", detail: "summary", in_progress: false,
+        has_more: true, events: [], turns: [summary] });
+      for (let repeat = 0; repeat < 3; repeat++) {
+        refresh();
+        const current = expandedState.runtimes[sid].turns[0];
+        assert.equal(current.detailLoaded, false,
+          "repeated summaries must keep missing process reloadable after multiple returns");
+        assert.equal(current.blocks.filter((b: Block) => b.kind === "text").length, returnCount + 1);
+      }
+      const events: ServerEvent[] = [];
+      const push = (ts: number, body: Record<string, unknown>) => events.push(event({ sid, ts, ...body }));
+      const text = (ts: number, id: string, channel: string, body: string, background = false) => {
+        const common = { message_id: id, channel, background };
+        push(ts, { type: "assistant_msg_start", ...common });
+        push(ts, { type: "delta", ...common, text: body });
+        push(ts, { type: "assistant_msg_end", ...common });
+      };
+      push(1, { type: "user_msg", msg_id: summary.id, prompt: summary.prompt });
+      text(2, "initial-answer", "final", "Waiting.");
+      for (let index = 0; index < returnCount; index++) {
+        const ts = 100 * (index + 1);
+        text(ts, `thought-${index}`, "thinking", `Check ${index}.`, true);
+        push(ts + 1, { type: "tool_use", tool_use_id: `check-${index}`,
+          tool: "Bash", input: { command: "check" }, background: true });
+        push(ts + 2, { type: "tool_result", tool_use_id: `check-${index}`,
+          content: "ok", is_error: false, background: true });
+        text(ts + 3, `continued-answer-${index}`, "final", `Verified ${index}.`, true);
+      }
+      push(returnCount * 100 + 3, { type: "turn_end", result: {
+        subtype: "success", duration_ms: 3000, is_error: false,
+      } });
+      send({ type: "turn_detail", session_id: sid, turn_id: summary.id,
+        revision: "returns-r1", events, has_more: false, has_newer: false });
+      for (let repeat = 0; repeat < 3; repeat++) {
+        const current = expandedState.runtimes[sid].turns[0];
+        assert.equal(current.detailLoaded, true);
+        const blocks = mergeDetailWithLiveTail(current.detailProjection.blocks, current.blocks, true);
+        const segments = claudeContinuations(blocks,
+          current.blocks.filter((b: Block) => b.kind === "text"), "claude").continuations;
+        assert.equal(segments.length, returnCount);
+        segments.forEach((segment: { blocks: Block[]; answers: Block[]; startedTs: number; doneTs: number }, index: number) => {
+          assert.equal(segment.blocks.filter(b => b.kind === "tool").length, 1);
+          assert.equal(segment.blocks.filter(b => b.kind === "text" && b.channel === "thinking").length, 1);
+          assert.deepEqual(segment.answers.map(b => b.kind === "text" && b.message_id), [`continued-answer-${index}`]);
+          assert.equal(segment.doneTs - segment.startedTs, 3000);
+        });
+        refresh();
+      }
+    }
+  }
+
   // The idle summary moves observed process into detailProjection and drops
   // the final's liveOrder. A later continuation must share one order with that
   // retained prefix, including when native transcript IDs replace stream IDs.
-  for (const nativeFinalId of ["followup-answer", "transcript-answer"]) {
-    const detailSid = `claude-retained-detail-${nativeFinalId}`;
+  // Native summaries also introduce return metadata which never streamed and
+  // has no liveOrder; it must not split the tools from their final answer.
+  const returnScenarios = ["none", "task", "agent"].flatMap(returnKind =>
+    [false, true].flatMap(staleRefresh =>
+      ["followup-answer", "transcript-answer"].map(nativeFinalId =>
+        ({ returnKind, staleRefresh, nativeFinalId }))));
+  for (const { returnKind, staleRefresh, nativeFinalId } of returnScenarios) {
+    const detailSid = `claude-retained-detail-${returnKind}-${staleRefresh}-${nativeFinalId}`;
     let detailState = {
       ...initialState, focusedSid: detailSid,
       sessions: [{ session_id: detailSid, engine: "claude" }],
@@ -739,6 +906,13 @@ try {
         blocks: [
           { kind: "text", message_id: "parent-answer", channel: "final",
             text: "Waiting for CI.", done: true },
+          ...(continued && returnKind !== "none" ? [{
+            kind: "process", item_id: "return-watcher",
+            processKind: returnKind, phase: "end", status: "succeeded", done: true,
+            server: "cc_remote", tool: `${returnKind}_return`, title: "Watcher finished",
+            input: { agent_run_id: returnKind === "agent" ? "watcher-agent" : null },
+            background: true,
+          }] : []),
           ...(continued ? [{ kind: "text", message_id: nativeFinalId,
             channel: "final", text: "The watcher was restarted.", done: true,
             background: true }] : []),
@@ -765,6 +939,8 @@ try {
     tool("restart-watcher", "Bash", true);
     text("followup-answer", "final", "The watcher was restarted.", true);
     detailSend({ type: "state", state: "idle" });
+    // Focus can return the old indexed summary, then a refreshed source page.
+    if (staleRefresh) refresh();
     refresh(true);
 
     const turn = detailState.runtimes[detailSid].turns[0];
@@ -780,6 +956,30 @@ try {
     assert.equal(detailState.runtimes[detailSid].liveOwner, null);
     assert.equal(JSON.stringify(beforeContinuation.runtimes[detailSid].turns[0]),
       retainedSnapshot, "ordering repair must not mutate the prior reducer state");
+    for (let repeat = 0; repeat < 3; repeat += 1) {
+      refresh(true);
+      const repeated = detailState.runtimes[detailSid].turns[0];
+      const repeatedMarkup = renderToStaticMarkup(createElement(ChatView, {
+        sid: detailSid, engine: "claude", turns: [repeated],
+        onOpenAgent: () => {},
+      }));
+      assert.equal(repeatedMarkup.split("Claude 继续处理").length - 1, 1,
+        "repeated summary refresh cannot make return metadata break the native timeline again");
+      assert.match(repeatedMarkup, /Claude 继续处理[\s\S]*4 项[\s\S]*The watcher was restarted\./);
+      if (returnKind !== "none") assert.equal(repeated.blocks.filter((block: Block) =>
+        block.kind === "process" && block.item_id === "return-watcher").length, 1,
+      "the ordering repair retains one copy of the return receipt");
+      if (returnKind === "agent") assert.equal(repeatedMarkup.split("代理返回 · Watcher finished").length - 1, 1,
+        "the child return link remains attached to its actual continuation");
+    }
+    const cachedTurns = JSON.parse(JSON.stringify(boundCachedTurns(
+      detailState.runtimes[detailSid].turns)));
+    const cachedFollowupMarkup = renderToStaticMarkup(createElement(ChatView, {
+      sid: detailSid, engine: "claude", turns: cachedTurns,
+    }));
+    assert.equal(cachedFollowupMarkup.split("Claude 继续处理").length - 1, 1,
+      "cache serialization preserves one complete process-and-answer continuation");
+    assert.match(cachedFollowupMarkup, /Claude 继续处理[\s\S]*4 项[\s\S]*The watcher was restarted\./);
 
     detailSend({ type: "state", state: "running", msg_id: "detail-parent",
       continuation: true });

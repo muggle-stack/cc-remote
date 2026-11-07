@@ -36,6 +36,55 @@ def append(path, *rows):
             stream.write(json.dumps({"type": typ, "payload": payload}) + "\n")
 
 
+def compress_catalog(home, sid, path):
+    from cc_remote.wrapper.rollout_io import zstd
+    target = home / "archived_sessions" / f"{sid}.jsonl.zst"
+    target.parent.mkdir(exist_ok=True)
+    target.write_bytes(zstd.compress(path.read_bytes()))
+    path.unlink()
+    with sqlite3.connect(home / "state_5.sqlite") as db:
+        db.execute("UPDATE threads SET rollout_path=? WHERE id=?", (str(target), sid))
+    return target
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("compressed_parent", [False, True])
+def test_compressed_completed_agents_do_not_reappear_in_background_dock(tmp_path, monkeypatch, legacy, compressed_parent):
+    from cc_remote.wrapper import codex_agent_activity as module
+    parent = catalog(tmp_path, "parent", rows=[task("copied"), terminal("copied")])
+    if compressed_parent:
+        compress_catalog(tmp_path, "parent", parent)
+    reader = CodexAgentActivity()
+    for index in range(11):
+        sid = f"child-{index}"
+        rows = [task("copied"), terminal("copied")]
+        if not legacy:
+            rows.append(boundary(sid))
+        rows.extend([task(sid), terminal(sid)])
+        path = catalog(tmp_path, sid, "parent", rows=rows)
+        compress_catalog(tmp_path, sid, path)
+    assert reader.read(tmp_path, {"parent"})["parent"] == []
+    # Eleven descendants exceed the shared decoded-file cache. Unchanged
+    # completed records must not be decompressed every background refresh.
+    monkeypatch.setattr(module, "rollout_open", lambda *a, **k: pytest.fail("unchanged rollout reread"))
+    assert reader.read(tmp_path, {"parent"})["parent"] == []
+
+
+def test_compressed_agent_still_running_and_later_replacement(tmp_path):
+    from cc_remote.wrapper.rollout_io import zstd
+    catalog(tmp_path, "parent")
+    child = catalog(tmp_path, "child", "parent", rows=[boundary("child"), task("own")])
+    source = child.read_bytes()
+    compressed = compress_catalog(tmp_path, "child", child)
+    reader = CodexAgentActivity()
+    assert reader.read(tmp_path, {"parent"})["parent"][0].status == "running"
+    ending = json.dumps({"type": "event_msg", "payload": terminal("own")[1]}).encode() + b"\n"
+    compressed.write_bytes(zstd.compress(source + ending))
+    assert reader.read(tmp_path, {"parent"})["parent"] == []
+    compressed.write_bytes(b"invalid compressed record")
+    assert reader.read(tmp_path, {"parent"})["parent"][0].status == "unknown"
+
+
 @pytest.mark.parametrize("completion_kind", ["task_complete", "task_completed"])
 def test_native_lifecycle_ignores_inherited_turn_and_unrelated_terminals(tmp_path, completion_kind):
     catalog(tmp_path, "parent", rows=[task("parent-turn")])
@@ -163,13 +212,30 @@ def test_incremental_budget_and_rewrite_do_not_reuse_old_terminal(tmp_path, monk
     monkeypatch.setattr(module, "_READ_BUDGET", 1)
     reader = CodexAgentActivity()
     for _ in range(4):
-        assert reader.read(tmp_path, {"parent"})["parent"][0].status == "unknown"
+        assert reader.read(tmp_path, {"parent"})["parent"] == []
     assert reader.read(tmp_path, {"parent"})["parent"] == []
     # Replace in place with the same native identity, now a new live task.
     child = catalog(tmp_path, "child", "parent", rows=[boundary("child"), task("new")])
-    assert reader.read(tmp_path, {"parent"})["parent"][0].status == "unknown"
+    assert reader.read(tmp_path, {"parent"})["parent"] == []
     assert reader.read(tmp_path, {"parent"})["parent"][0].status == "running"
     assert reader._cursors["child"].offset == child.stat().st_size
+    append(child, task("later"), terminal("later"))
+    assert reader.read(tmp_path, {"parent"})["parent"][0].status == "unknown"
+    assert reader.read(tmp_path, {"parent"})["parent"] == []
+
+
+def test_cold_legacy_scan_never_introduces_old_tasks_while_parent_is_paged(tmp_path, monkeypatch):
+    from cc_remote.wrapper import codex_agent_activity as module
+    catalog(tmp_path, "parent", rows=[task(f"parent-{i}") for i in range(12)])
+    for index in range(11):
+        sid = f"child-{index}"
+        path = catalog(tmp_path, sid, "parent", rows=[task(sid), terminal(sid)])
+        compress_catalog(tmp_path, sid, path)
+    monkeypatch.setattr(module, "_READ_BUDGET", 200)
+    reader = CodexAgentActivity()
+    for _ in range(30):
+        assert reader.read(tmp_path, {"parent"})["parent"] == []
+    assert all(cursor.complete for cursor in reader._cursors.values())
 
 
 def test_no_catalog_has_no_filesystem_side_effects(tmp_path):

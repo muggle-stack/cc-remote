@@ -269,6 +269,7 @@ class WorkspaceClient(Tui):
                 if command["type"] in {
                     "rename_session", "delete_session", "delete_work_session",
                     "archive_session", "pin_session",
+                    "run_directory_action",
                 }:
                     row = self.workspace.catalog.get(
                         command.get("session_id"), {}

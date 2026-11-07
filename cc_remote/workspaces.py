@@ -1323,7 +1323,9 @@ class WorkRegistry:
             "sandbox": {
                 "enabled": True,
                 "autoAllowBashIfSandboxed": True,
-                "allowUnsandboxedCommands": False,
+                # Native approval/Auto/Bypass rules govern explicit unsandboxed
+                # retries, as in Code. The initial sandbox stays private.
+                "allowUnsandboxedCommands": True,
                 "failIfUnavailable": True,
                 "filesystem": {
                     "denyRead": ["~/"],

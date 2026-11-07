@@ -203,9 +203,12 @@ test("turn regressions keyboard scrolling leaves the live tail and resumes at bo
   await expect(control).toHaveCSS("outline-width", "2px");
 });
 
-for (const visible of ["thinking and answer", "only answer", "process header and answer"]) {
+for (const visible of ["thinking and answer", "only answer", "process header and answer", "long answer", "background answer", "touch-release answer"]) {
   test(`turn regressions completion preserves the reading paragraph with ${visible} visible`, async ({ page, isMobile }, testInfo) => {
-    await page.goto(`/tests/history-browser.html?completion-reading=1${visible === "process header and answer" ? "&short-process=1" : ""}`);
+    const options = visible === "process header and answer" ? "&short-process=1"
+      : visible === "background answer" || visible === "touch-release answer" ? "&background=1&long-answer=1"
+      : visible === "long answer" ? "&long-answer=1" : "";
+    await page.goto(`/tests/history-browser.html?completion-reading=1${options}`);
     const viewport = page.locator(".thread");
     const paragraph = page.getByText("Answer paragraph 0. This is the explanation the user is reading.", { exact: true });
     await expect(page.locator(".process-reasoning-body")).toBeVisible();
@@ -229,7 +232,8 @@ for (const visible of ["thinking and answer", "only answer", "process header and
     // Incoming events must not transfer focus or manufacture a user gesture.
     await page.getByTestId("append-answer").evaluate(node => (node as HTMLButtonElement).click());
     await expect.poll(offset).toBeCloseTo(before, 0);
-    const frames = await paragraph.evaluate(node => new Promise<number[]>((resolve) => {
+    const readingNode = await paragraph.elementHandle();
+    const frames = await paragraph.evaluate((node, duringTouchRelease) => new Promise<number[]>((resolve) => {
       const viewport = node.closest(".thread")!;
       const samples: number[] = [];
       const sample = () => {
@@ -239,9 +243,22 @@ for (const visible of ["thinking and answer", "only answer", "process header and
         // so a jump to bottom followed by a correction cannot pass this test.
         else requestAnimationFrame(() => setTimeout(sample, 0));
       };
+      if (duringTouchRelease) {
+        // Complete in the same task as touchend, before the idle lease can
+        // expire. A slow runner must not accidentally omit this race.
+        const touch = { identifier: 1, clientX: 160, clientY: 220, target: viewport };
+        for (const type of ["touchstart", "touchend"]) {
+          const event = new Event(type, { bubbles: true, cancelable: true });
+          Object.defineProperties(event, {
+            touches: { value: type === "touchend" ? [] : [touch] },
+            changedTouches: { value: [touch] },
+          });
+          viewport.dispatchEvent(event);
+        }
+      }
       document.querySelector<HTMLButtonElement>('[data-testid="complete-answer"]')!.click();
       requestAnimationFrame(() => setTimeout(sample, 0));
-    }));
+    }), visible === "touch-release answer");
     await expect(page.locator(".process-reasoning-body")).toHaveCount(0);
     await waitForScrollIdle(page);
     const after = await offset();
@@ -249,6 +266,15 @@ for (const visible of ["thinking and answer", "only answer", "process header and
     await testInfo.attach("reading-position", { body: JSON.stringify({ before, after, distance, frames }), contentType: "application/json" });
     expect(Math.max(...frames.map(value => Math.abs(value - before)))).toBeLessThan(3);
     expect(Math.abs(after - before)).toBeLessThan(3);
+    expect(await readingNode!.evaluate(node => node.isConnected)).toBe(true);
+    await expect(page.locator('.assistant-answer-segment[data-message-id="native-answer"]')).toHaveCount(1);
+    // Late summary metadata can rename a continuation's native process owner.
+    // It must not remount the reply, reset its disclosure, or resume following.
+    await page.getByTestId("refresh-answer").evaluate(node => (node as HTMLButtonElement).click());
+    await waitForScrollIdle(page);
+    expect(await readingNode!.evaluate(node => node.isConnected)).toBe(true);
+    expect(Math.abs(await offset() - before)).toBeLessThan(3);
+    await expect(page.locator(".process-reasoning-body")).toHaveCount(0);
     await expect(page.locator(".scroll-bottom-btn")).toBeVisible();
     // The retained paragraph is not a permanent scroll lock.
     if (!isMobile) {
@@ -275,6 +301,45 @@ test("turn regressions completion keeps a followed answer at the bottom", async 
   await waitForScrollIdle(page);
   expect(await distance()).toBeLessThan(3);
   await expect(page.locator(".scroll-bottom-btn")).toHaveCount(0);
+});
+
+test("turn regressions reading anchor survives message DOM replacement without confusing repeated prose", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?completion-reading=1");
+  const results = await page.evaluate(async () => {
+    const modulePath = "/src/reading-position.ts";
+    const { captureReadingPosition, readingPositionDelta } = await import(modulePath);
+    return ["same-message", "other-message", "other-turn", "duplicate-paragraph"].map(mode => {
+      const viewport = document.createElement("div");
+      viewport.style.cssText = "position:fixed;inset:0 auto auto 0;width:300px;height:160px;overflow:auto;overflow-anchor:none";
+      viewport.innerHTML = '<div data-turn-id="turn"><div style="height:300px"></div>'
+        + '<div class="assistant-answer-segment" data-message-id="stream"><div class="prose">'
+        + '<p style="height:400px;margin:0">The paragraph being read.</p></div></div>'
+        + '<div style="height:1000px"></div></div>';
+      document.body.append(viewport);
+      viewport.scrollTop = 350;
+      const original = viewport.querySelector<HTMLElement>("p")!;
+      const before = original.getBoundingClientRect().top;
+      const position = captureReadingPosition(viewport, "same-view");
+      const answer = viewport.querySelector<HTMLElement>(".assistant-answer-segment")!;
+      const replacement = answer.cloneNode(true) as HTMLElement;
+      replacement.dataset.messageId = "native";
+      if (mode !== "other-message") replacement.dataset.streamMessageId = "stream";
+      if (mode === "duplicate-paragraph") replacement.querySelector(".prose")!.append(original.cloneNode(true));
+      answer.replaceWith(replacement);
+      const turn = viewport.firstElementChild as HTMLElement;
+      if (mode === "other-turn") turn.dataset.turnId = "another-turn";
+      (turn.firstElementChild as HTMLElement).style.height = "240px";
+      // Layout correction must preserve native movement since capture.
+      viewport.scrollTop -= 25;
+      const delta = readingPositionDelta(viewport, position);
+      if (delta != null) viewport.scrollTop += delta;
+      const motion = replacement.querySelector("p")!.getBoundingClientRect().top - before;
+      viewport.remove();
+      return { mode, delta, motion };
+    });
+  });
+  expect(results[0]).toEqual({ mode: "same-message", delta: -60, motion: 25 });
+  for (const result of results.slice(1)) expect(result.delta).toBeNull();
 });
 
 test("turn regressions manual keyboard collapse retains the process header", async ({ page, isMobile }) => {
@@ -1770,6 +1835,52 @@ test("session workspace context ring refreshes applied capacity and distinguishe
   await expect(popover).not.toContainText("等待生效");
   await page.screenshot({ path: testInfo.outputPath("applied-context-capacity.png") });
   expect(relay.commands.some((c) => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
+});
+
+test("session workspace reconciles pending 400k with native runtime in both context surfaces", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { retained: false });
+  await page.goto("/");
+  await expect(page.locator(".scard.active .scard-title")).toHaveText("Layout parent");
+  const state: PanelRelayEvent<Extract<ServerEvent, { type: "codex_context" }>> = {
+    type: "codex_context", sid: "layout-parent", model: "gpt-6-astra", max_context_tokens: 400000,
+    applied_max_context_tokens: null, applied_threshold_tokens: null, model_max_tokens: 872000,
+    context_window_tokens: 421053, limit_tokens: 828400, pending: true, mutable: true, error: null,
+  };
+  const report: PanelRelayEvent<Extract<ServerEvent, { type: "context_report" }>> = {
+    type: "context_report", sid: "layout-parent", total_tokens: 371048, max_tokens: 400000,
+    percentage: 92.762, model: state.model, categories: [], auto_compact_threshold_tokens: 378947,
+    source: "recent_turn",
+  };
+  relay.emit(state);
+  relay.emit(report);
+  const ring = page.getByRole("button", { name: "上下文占用", exact: true });
+  await ring.click();
+  const popover = page.getByRole("dialog", { name: "上下文占用", exact: true });
+  await expect(popover).toContainText("待原生运行数据确认");
+  relay.emit({ ...report, source: "native_estimate" });
+  await expect(popover).toContainText("371,048 / 400,000 (93%)");
+  await expect(popover).toContainText("原生上限 400,000，与已保存设置一致");
+  await expect(popover).not.toContainText("等待生效");
+  await popover.getByRole("button", { name: "设置上下文上限" }).click();
+  const editor = page.getByRole("dialog", { name: "Codex 上下文上限", exact: true });
+  await expect(editor.getByRole("status")).toContainText("与已保存设置一致");
+  await expect(editor).toContainText("当前生效上限：400,000");
+  await expect(editor).toContainText("当前生效阈值：378,947");
+  // Periodic readings must not overwrite an unsent draft or reload the thread.
+  await editor.getByLabel("上下文上限（tokens）").fill("350k");
+  relay.emit({ ...report, source: "native_estimate", total_tokens: 372000, percentage: 93 });
+  await expect(editor.getByLabel("上下文上限（tokens）")).toHaveValue("350k");
+  relay.emit({ ...state, max_context_tokens: 300000, context_window_tokens: 315790 });
+  await expect(editor.getByRole("status")).toContainText("已保存上限 300,000，等待生效");
+  await expect(editor.getByRole("status")).toContainText("当前生效上限：400,000");
+  // A real application failure must remain visible even if the latest runtime
+  // happens to match a saved preference. Lack of a receipt is not that error.
+  relay.emit({ ...state, error: "connection lost" });
+  await expect(editor.getByRole("alert")).toContainText("connection lost");
+  await expect(editor.getByRole("status")).toContainText("与已保存设置一致");
+  relay.emit({ ...state, max_context_tokens: null, context_window_tokens: null });
+  await expect(editor.getByRole("status")).toContainText("默认值，待原生运行数据确认");
+  expect(relay.commands.some(c => ["query", "steer", "new_session", "set_codex_context", "reconnect"].includes(String(c.type)))).toBe(false);
 });
 
 test("session workspace distinguishes 300k capacity from native usage and compaction", async ({ page }, testInfo) => {
@@ -14070,6 +14181,114 @@ test("profile dots stay outside session highlights without shifting titles", asy
   await expect(page.getByRole("group", { name: "会话操作" })).toContainText("Codex 账号：nyx · Stack");
 });
 
+test("directory action menu dismisses outside and switches cleanly to session actions", async ({ page, isMobile }) => {
+  await page.goto("/tests/history-browser.html?profile-sidebar=code&theme=dark");
+  const activate = (locator: Locator, position?: { x: number; y: number }) =>
+    isMobile ? locator.tap({ position }) : locator.click({ position });
+  const trigger = page.getByRole("button", { name: "cc-remote 目录操作", exact: true });
+  const menu = page.locator(".card-menu");
+  const work = page.getByRole("tab", { name: "Work", exact: true });
+  await activate(trigger);
+  await expect(menu).toHaveCount(1);
+  await activate(menu.locator(".card-menu-account"));
+  await expect(menu).toBeVisible();
+  await activate(page.locator(".s-head"), { x: 4, y: 4 });
+  await expect(menu).toHaveCount(0);
+  await activate(trigger);
+  // Dismissal consumes the click instead of activating the surface underneath.
+  await activate(work);
+  await expect(menu).toHaveCount(0);
+  await expect(work).toHaveAttribute("aria-selected", "false");
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  await activate(trigger);
+  await activate(trigger);
+  await expect(menu).toHaveCount(0);
+  const card = page.locator(".scard.active");
+  await activate(trigger);
+  await activate(card.getByRole("button", { name: "更多操作" }));
+  await expect(menu).toHaveCount(1);
+  await expect(menu.getByRole("button", { name: "重命名", exact: true })).toBeVisible();
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  // The session popup covers this directory trigger; use keyboard activation.
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+  await expect(menu).toHaveCount(1);
+  await expect(card.getByRole("button", { name: "更多操作" })).toHaveAttribute("aria-expanded", "false");
+  await expect(menu.getByRole("button", { name: "新建会话", exact: true })).toBeVisible();
+  const other = page.locator(".scard").filter({ hasText: "cc-remote 派生" });
+  // Tap the exposed left edge; the menu can cover the title's center on phones.
+  await activate(other.locator(".scard-title"), { x: 4, y: 4 });
+  await expect(menu).toHaveCount(0);
+  await expect(other).not.toHaveClass(/active/);
+  await activate(other.locator(".scard-title"));
+  await expect(other).toHaveClass(/active/);
+});
+
+test("directory actions keep new-session account scope and confirm archived plus active deletion", async ({ page }, info) => {
+  await page.goto("/tests/history-browser.html?profile-sidebar=code&theme=dark");
+  const trigger = page.getByRole("button", { name: "cc-remote 目录操作", exact: true });
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+  const menu = page.locator(".card-menu");
+  await expect(menu.getByRole("button", { name: "新建会话", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(trigger).toBeFocused();
+  await page.getByRole("button", { name: /default.*Main/ }).click();
+  await trigger.click();
+  await menu.getByRole("button", { name: "新建会话", exact: true }).click();
+  await expect(page.getByTestId("new-work-profile")).toHaveText("primary");
+  expect(await page.evaluate(() => document.body.dataset.newDirectory)).toBe("/repo/cc-remote");
+  await page.getByRole("button", { name: "全部", exact: true }).click();
+  await trigger.click();
+  await menu.getByRole("button", { name: "删除目录会话…", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "永久删除此目录的会话？" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "删除会话", exact: true })).toBeDisabled();
+  expect(await page.evaluate(() => JSON.parse(document.body.dataset.directoryPrepare!))).toEqual({
+    cwd: "/repo/cc-remote", engine: "codex", action: "delete",
+  });
+  const response = async (value: object) => page.evaluate(value => window.dispatchEvent(new CustomEvent("directory-response", { detail: value })), value);
+  const plan = { type: "directory_action_plan", request_id: "prepare-1", plan_id: "plan-1", engine: "codex",
+    cwd: "/repo/cc-remote", action: "delete", profiles: ["Main", "Stack"], total: 12, eligible: 10,
+    archived: 3, skipped: 2, expires_at: Date.now() / 1000 + 120 };
+  await response({ ...plan, cwd: "/other" });
+  await expect(dialog).not.toContainText("10 个");
+  await response(plan);
+  await expect(dialog).toContainText("未归档 7 个 · 已归档 3 个");
+  await expect(dialog).toContainText("Test Mac · Main、Stack");
+  await expect(dialog).toContainText("项目目录和文件保留");
+  await page.screenshot({ path: info.outputPath("directory-delete-confirm.png") });
+  await dialog.getByRole("button", { name: "删除 10 个会话", exact: true }).click();
+  expect(await page.evaluate(() => document.body.dataset.directoryRun)).toBe("plan-1");
+  expect(await page.evaluate(() => document.body.dataset.directoryReads)).toBe("1");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeVisible();
+  await response({ type: "directory_action_progress", request_id: "run-1", plan_id: "plan-1", engine: "codex",
+    total: 10, succeeded: 8, skipped: 1, failed: 1, done: true, errors: ["一个会话未完成，请核查。"] });
+  const result = page.getByRole("dialog", { name: "删除结果" });
+  await expect(result).toContainText("8 个成功 · 3 个保留 · 1 个未完成");
+  await result.getByRole("button", { name: "完成", exact: true }).click();
+  await expect(result).not.toBeVisible();
+});
+
+test("directory actions expire without sending a mutation and allow a fresh confirmation", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?profile-sidebar=code");
+  await page.getByRole("button", { name: "cc-remote 目录操作", exact: true }).click();
+  await page.locator(".card-menu").getByRole("button", { name: "归档目录会话…", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "归档此目录的会话？" });
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent("directory-response", { detail: {
+    type: "directory_action_plan", request_id: "prepare-1", plan_id: "expired", engine: "codex", cwd: "/repo/cc-remote",
+    action: "archive", profiles: ["Main"], total: 1, eligible: 1, archived: 0, skipped: 0, expires_at: 1,
+  } })));
+  await dialog.getByRole("button", { name: "归档 1 个会话", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("清单已过期");
+  expect(await page.evaluate(() => document.body.dataset.directoryRun)).toBeUndefined();
+  await dialog.getByRole("button", { name: "重新读取" }).click();
+  expect(await page.evaluate(() => document.body.dataset.directoryReads)).toBe("2");
+  await dialog.getByRole("button", { name: "取消", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+});
+
 test("profile session card manual unread survives refresh until explicit opening", async ({ page }) => {
   await page.goto("/tests/history-browser.html?profile-sidebar=code");
   const active = page.locator(".scard").filter({ hasText: "看看当前仓库" });
@@ -14525,7 +14744,7 @@ test("session action menu keeps keyboard navigation and closes when its card scr
   const menu = page.locator(".card-menu");
   await expect(menu.getByRole("button", { name: "重命名" })).toBeFocused();
   await page.keyboard.press("End");
-  await expect(menu.getByRole("button", { name: "归档", exact: true })).toBeFocused();
+  await expect(menu.getByRole("button", { name: "删除会话", exact: true })).toBeFocused();
   await page.keyboard.press("Home");
   await expect(menu.getByRole("button", { name: "重命名" })).toBeFocused();
   await page.keyboard.press("Escape");
@@ -15371,3 +15590,57 @@ test("Claude fresh query waits for live output without flashing a history detail
   await expect(turn.locator(".turn-detail-entry")).toHaveCount(0);
   expect(relay.commands.filter(c => c.type === "get_turn_detail")).toEqual([]);
 });
+
+for (const firstHeader of [0, 1, 2, 3, 4]) {
+test(`turn regressions Claude cold history keeps response headers through expand collapse and reload (${firstHeader})`, async ({ page }) => {
+  const fixture = JSON.parse(readFileSync("tests/fixtures/claude-responses.json", "utf8"));
+  const sid = "response-history";
+  const relay = await mockRightPanelRelay(page, { engine: "claude", parentSid: sid,
+    retained: false, seedTurns: [fixture.summary] });
+  await page.setViewportSize({ width: 1200, height: 1000 });
+  await page.goto("/");
+  const turn = page.locator('[data-turn-id="human-response"]');
+  const heads = turn.locator(".turn-process-head");
+  const headerText = async () => (await heads.allTextContents()).map(text => text.replace(/\s/g, ""));
+  await expect(heads).toHaveCount(5);
+  const cold = ["已处理8s2项", ...Array(4).fill("已处理10s2项")];
+  await expect.poll(headerText).toEqual(cold);
+  const answerNodes = await turn.locator(".assistant-answer-segment").elementHandles();
+  expect(answerNodes).toHaveLength(5);
+  expect(relay.commands.filter(c => c.type === "get_turn_detail")).toHaveLength(0);
+  // This is a fresh browser context: no persisted detail can hide the cold
+  // summary problem. Expanding the original header requests the parent's detail.
+  await heads.nth(firstHeader).click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "get_turn_detail").length).toBe(1);
+  relay.emit({ type: "turn_detail", sid, session_id: sid, turn_id: fixture.summary.id,
+    revision: "layout-history", authoritative: true, has_more: false, has_newer: false,
+    events: fixture.events.map((event: Record<string, unknown>) => ({ v: PROTOCOL_VERSION, ...event })) });
+  await expect(turn.getByText(firstHeader === 0 ? "Inspect the original job" : `Inspect result ${firstHeader - 1}`, { exact: true })).toBeVisible();
+  for (let index = 0; index < 5; index += 1) {
+    await expect(heads.nth(index)).toHaveAttribute("aria-expanded", String(index === firstHeader));
+    expect(await answerNodes[index].evaluate(node => node.isConnected)).toBe(true);
+  }
+  await expect.poll(headerText).toEqual(cold);
+  await heads.nth(firstHeader).click();
+  await expect(heads.nth(firstHeader)).toHaveAttribute("aria-expanded", "false");
+  await expect.poll(headerText).toEqual(cold);
+  await heads.nth(1).click();
+  await expect(turn.getByText("Inspect result 0", { exact: true })).toBeVisible();
+  await expect(heads.nth(1)).toHaveAttribute("aria-expanded", "true");
+  relay.emit({ type: "history", sid, session_id: sid,
+    revision: "layout-history", generation: "layout-generation", detail: "summary",
+    in_progress: false, has_more: false, events: [],
+    turns: [{ ...fixture.summary, prompt: "Check the background results (refreshed)" }] });
+  await expect(turn.getByText("Check the background results (refreshed)", { exact: true })).toBeVisible();
+  await expect(heads.nth(1)).toHaveAttribute("aria-expanded", "true");
+  await expect(turn.getByText("Inspect result 0", { exact: true })).toBeVisible();
+  for (const answer of answerNodes) expect(await answer.evaluate(node => node.isConnected)).toBe(true);
+  await heads.nth(1).click();
+  await expect.poll(headerText).toEqual(cold);
+  expect(relay.commands.filter(c => c.type === "get_turn_detail")).toHaveLength(1);
+  await page.reload();
+  await expect(heads).toHaveCount(5);
+  await expect.poll(headerText).toEqual(cold);
+  expect(relay.commands.some(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toBe(false);
+});
+}
