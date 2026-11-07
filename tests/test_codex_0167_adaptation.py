@@ -13,7 +13,8 @@ from cc_remote.wrapper.codex_rpc import CodexRpcOutcomeUnknown, CodexRpcRejected
 from cc_remote.wrapper.codex_sessions import _normalize_thread
 from cc_remote.wrapper.session_presentation import SessionPresentationStore
 from tests.test_codex_controls import _Cfg, _dispatch_request
-from tests.test_codex_profiles import _machine
+from tests.test_codex_profiles import _context, _machine
+from tests.test_presentation_sync import _success
 
 
 NETWORK = {"applyNetworkPolicyAmendment": {"network_policy_amendment": {
@@ -245,14 +246,16 @@ def test_provider_mismatch_never_bootstraps_a_replacement_thread(tmp_path, monke
     asyncio.run(run())
 
 
-def test_native_pin_outage_cannot_report_successful_unpin(tmp_path):
+@pytest.mark.parametrize("cached", [False, True])
+def test_native_pin_outage_cannot_report_successful_unpin(tmp_path, cached):
     async def run():
         machine, transport = _machine(tmp_path)
         sid = "stack@t"
         machine._session_pins.set_pinned("codex", sid, True)
-        machine._codex_session_list_cache = (time.monotonic(), [{
-            "session_id": sid, "native_pinned": True,
-        }], ())
+        if cached:
+            machine._codex_session_list_cache = (time.monotonic(), [{
+                "session_id": sid, "native_pinned": True,
+            }], ())
         machine._set_native_codex_pin = AsyncMock(side_effect=CodexRpcOutcomeUnknown())
         await machine._handle_pin_session(PinSession(session_id=sid, engine="codex", pinned=False))
         assert sid in machine._session_pins.ids("codex")
@@ -271,4 +274,157 @@ def test_stale_cold_native_ack_returns_new_receipt_without_writing(tmp_path):
         assert result.type == "completion_state"
         assert result.completion_id == "codex-read-new" and result.unread
         machine._codex_rpc_for_wire.assert_not_called()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("resident", [False, True])
+@pytest.mark.parametrize("first_unread", ["live-turn", "earlier-turn"])
+def test_live_completion_ack_updates_native_state_before_catalog_refresh(tmp_path, resident, first_unread):
+    async def run():
+        machine, transport = _machine(tmp_path)
+        sid = "stack@thread"
+        ctx = _context(sid, "thread", "stack")
+        machine.sessions[sid] = ctx
+        state = {"revision": "live-revision", "firstUnread": {"type": "turn", "turnId": first_unread}}
+        calls = []
+
+        async def rpc(profile, method, params, **kwargs):
+            nonlocal state
+            calls.append((profile.id, method, params))
+            assert profile.id == "stack" and params["threadId"] == "thread"
+            if method == "thread/read":
+                return {"thread": {"id": "thread"}, "readState": state}
+            if method == "thread/turns/list":
+                assert params["limit"] == 1 and params["itemsView"] == "summary"
+                return {"data": [{"id": "live-turn", "status": "completed"}]}
+            assert method == "thread/readState/update"
+            assert params["expectedRevision"] == "live-revision"
+            assert params["operation"] == {"type": "read"}
+            state = {"revision": "read-revision", "firstUnread": None}
+            return {"readState": state}
+
+        machine._codex_rpc_for_profile = rpc
+        await machine._emit(ctx, _success("live-turn"))
+        assert transport.sent[-1].completion_id == "live-turn"
+        if not resident:
+            machine.sessions.clear()
+        event = await machine._handle_acknowledge_completion(AcknowledgeCompletion(
+            sid=sid, completion_id="live-turn"))
+        assert event.type == "completion_state" and not event.unread
+        assert [method for _, method, _ in calls] == [
+            "thread/read", "thread/turns/list", "thread/readState/update"]
+        machine._session_presentation.sync_codex_read_states({
+            sid: (read_receipt_id(state), state["firstUnread"] is not None)})
+        assert not machine._session_presentation.get("codex", sid).completion_unread
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("race", [
+    "newer-turn", "manual-unread", "in-progress", "newer-local",
+    "newer-during-write", "conflict", "timeout",
+])
+def test_live_read_ack_cannot_clear_unseen_activity(tmp_path, race):
+    async def run():
+        machine, _ = _machine(tmp_path)
+        sid = "stack@thread"
+        machine._session_presentation.mark_completion("codex", sid, "seen-turn")
+        calls = []
+
+        async def rpc(_profile, method, params, **kwargs):
+            calls.append(method)
+            if method == "thread/read":
+                # The earliest unread turn alone cannot prove which result is newest.
+                position = {"type": "threadStart"} if race == "manual-unread" else {
+                    "type": "turn", "turnId": "seen-turn"}
+                return {"thread": {"id": "thread"}, "readState": {
+                    "revision": "observed", "firstUnread": position}}
+            if method == "thread/turns/list":
+                if race == "newer-local":
+                    machine._session_presentation.mark_completion("codex", sid, "new-turn")
+                return {"data": [{"id": "new-turn" if race == "newer-turn" else "seen-turn",
+                                  "status": "inProgress" if race == "in-progress" else "completed"}]}
+            assert method == "thread/readState/update" and params["expectedRevision"] == "observed"
+            if race == "newer-during-write":
+                machine._session_presentation.mark_completion("codex", sid, "new-turn")
+                return {"readState": {"revision": "read", "firstUnread": None}}
+            if race == "conflict":
+                raise CodexRpcRejected("revision changed", code=-32600)
+            if race == "timeout":
+                raise CodexRpcOutcomeUnknown()
+            raise AssertionError("unseen activity must not be acknowledged")
+
+        machine._codex_rpc_for_profile = rpc
+        await machine._handle_acknowledge_completion(AcknowledgeCompletion(
+            sid=sid, completion_id="seen-turn"))
+        assert machine._session_presentation.get("codex", sid).completion_unread
+        assert calls.count("thread/readState/update") == int(race in {"newer-during-write", "conflict", "timeout"})
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("resident", [False, True])
+def test_work_completion_stays_local_without_reading_code_metadata(tmp_path, resident):
+    async def run():
+        machine, _ = _machine(tmp_path)
+        record = machine._work.for_engine("codex").create_session(codex_profile_id="stack")
+        machine._work.for_engine("codex").bind_session(record.work_id, "thread", codex_profile_id="stack")
+        sid = "stack@thread"
+        if resident:
+            ctx = _context(sid, "thread", "stack")
+            ctx.space = "work"
+            ctx.work_id = record.work_id
+            machine.sessions[sid] = ctx
+        machine._session_presentation.mark_completion("codex", sid, "work-turn")
+        machine._codex_rpc_for_wire = AsyncMock(side_effect=AssertionError("Code metadata must not be read"))
+        event = await machine._handle_acknowledge_completion(AcknowledgeCompletion(
+            sid=sid, completion_id="work-turn"))
+        assert event.type == "completion_state" and not event.unread
+        machine._codex_rpc_for_wire.assert_not_called()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("metadata", ["missing", "unsupported", "unavailable", "malformed"])
+def test_live_read_local_fallback_requires_legacy_contract(tmp_path, metadata):
+    async def run():
+        machine, _ = _machine(tmp_path)
+        sid = "stack@thread"
+        machine._session_presentation.mark_completion("codex", sid, "turn")
+        response = {"thread": {"id": "thread"}}
+        if metadata in {"unavailable", "malformed"}:
+            response["readState"] = None if metadata == "unavailable" else {"revision": 42}
+        machine._codex_rpc_for_wire = AsyncMock(return_value=response)
+        if metadata == "unsupported":
+            machine._codex_rpc_for_wire.side_effect = CodexRpcRejected("unsupported method", code=-32601)
+        event = await machine._handle_acknowledge_completion(AcknowledgeCompletion(sid=sid, completion_id="turn"))
+        if metadata in {"missing", "unsupported"}:
+            assert event.type == "completion_state" and not event.unread
+        else:
+            assert event.type == "error" and machine._session_presentation.get("codex", sid).completion_unread
+        assert machine._codex_rpc_for_wire.await_count == 1
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("catalog", [None, False, True])
+def test_legacy_and_native_unpin_uses_authoritative_state(tmp_path, catalog):
+    async def run():
+        machine, _ = _machine(tmp_path)
+        sid = "stack@thread"
+        machine._session_pins.set_pinned("codex", sid, True)
+        if catalog is not None:
+            machine._codex_session_list_cache = (time.monotonic(), [{
+                "session_id": sid, "native_pinned": catalog}], ())
+        machine._list_codex_sessions = AsyncMock()
+        calls = []
+
+        async def rpc(profile, method, params, **kwargs):
+            calls.append(method)
+            assert profile.id == "stack" and params["threadId"] == "thread"
+            if method == "thread/read":
+                return {"thread": {"id": "thread", "section": {"id": PINNED_SECTION_ID}}}
+            assert method == "thread/section/move" and params["sectionId"] is None
+            return {}
+
+        machine._codex_rpc_for_profile = rpc
+        await machine._handle_pin_session(PinSession(session_id=sid, engine="codex", pinned=False))
+        assert calls == ["thread/read", "thread/section/move"]
+        assert sid not in machine._session_pins.ids("codex")
     asyncio.run(run())

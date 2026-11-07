@@ -24933,8 +24933,10 @@ class WrapperMachine:
                 )
                 await self._emit_to_sid(sid, error)
                 return error
-            if engine == "codex" and cmd.completion_id.startswith(READ_RECEIPT_PREFIX):
-                return await self._acknowledge_codex_read_state(cmd, session_id, ctx)
+            if engine == "codex" and (ctx is None or ctx.space == "code"):
+                event = await self._acknowledge_codex_read_state(cmd, session_id, ctx)
+                if event is not None:
+                    return event
             snapshot = await asyncio.to_thread(
                 self._session_presentation.acknowledge_completion,
                 engine,
@@ -24969,10 +24971,12 @@ class WrapperMachine:
             return error
 
     async def _acknowledge_codex_read_state(self, cmd, sid, ctx):
-        """Acknowledge only the opaque revision represented by the seen row.
+        """Acknowledge a seen catalog revision or exact live terminal.
 
-        Reading current metadata is not permission to mark a newer result read.
-        A revision mismatch is never retried using the replacement revision.
+        Live receipts contain a turn id, not a native read revision. Bind that
+        id to the newest completed turn before using the observed revision.
+        Return None only for Work or an explicitly unsupported legacy contract.
+        Conflicts never retry with a replacement revision.
         """
         try:
             observed = self._session_presentation.get("codex", sid)
@@ -24983,15 +24987,57 @@ class WrapperMachine:
                 else:
                     await self._emit_to_sid(sid, event)
                 return event
-            _profile, native_sid = self._codex_target(sid)
-            response = await self._codex_rpc_for_wire(
-                sid, "thread/read", {"threadId": sid, "includeTurns": False})
+            profile, native_sid = self._codex_target(sid)
+            if ctx is None:
+                work_record = await asyncio.to_thread(
+                    self._work.for_engine("codex").get_by_session,
+                    native_sid, codex_profile_id=profile.id)
+                if work_record is not None:
+                    return None
+            native_receipt = cmd.completion_id.startswith(READ_RECEIPT_PREFIX)
+            try:
+                response = await self._codex_rpc_for_wire(
+                    sid, "thread/read", {"threadId": sid, "includeTurns": False})
+            except CodexRpcRejected as exc:
+                if not native_receipt and exc.code == -32601:
+                    return None
+                raise
             thread = response.get("thread") if isinstance(response, dict) else None
             if not isinstance(thread, dict) or thread.get("id") != native_sid:
                 raise ValueError("read receipt belongs to another thread")
+            if not native_receipt and "readState" not in response:
+                return None  # Older servers never exposed native read receipts.
             state = native_read_state(response.get("readState"))
-            if state is None or read_receipt_id(state) != cmd.completion_id:
-                raise ValueError("seen native read revision changed")
+            if state is None:
+                raise ValueError("native read state unavailable")
+            if native_receipt:
+                if read_receipt_id(state) != cmd.completion_id:
+                    raise ValueError("seen native read revision changed")
+            else:
+                position = state["firstUnread"]
+                if position is not None and position["type"] == "threadStart":
+                    raise ValueError("live completion cannot clear an explicit unread mark")
+                # firstUnread is the earliest unread result. It can still name
+                # this receipt even after a newer result has arrived, so read
+                # the bounded latest-turn page instead of trusting that field.
+                page = await self._codex_rpc_for_wire(sid, "thread/turns/list", {
+                    "threadId": sid, "limit": 1,
+                    "sortDirection": "desc", "itemsView": "summary",
+                })
+                turns = page.get("data") if isinstance(page, dict) else None
+                latest = turns[0] if isinstance(turns, list) and len(turns) == 1 else None
+                if (not isinstance(latest, dict) or latest.get("id") != cmd.completion_id
+                        or latest.get("status") != "completed"):
+                    raise ValueError("seen live terminal is no longer the latest result")
+            current = self._session_presentation.get("codex", sid)
+            if (current.completion_revision != observed.completion_revision
+                    or current.completion_id != observed.completion_id):
+                event = self._completion_state(current)
+                if ctx is not None:
+                    await self._emit(ctx, event)
+                else:
+                    await self._emit_to_sid(sid, event)
+                return event
             self._invalidate_codex_session_catalog()
             if state["firstUnread"] is not None:
                 result = await self._codex_rpc_for_wire(sid, "thread/readState/update", {
@@ -30467,13 +30513,7 @@ class WrapperMachine:
             return error, listing
         try:
             native_pin = False
-            cached = self._codex_session_list_cache
-            native_row = next((row for row in cached[1] if row.get("session_id") == sid), None) if cached else None
-            legacy_unpin = (
-                not cmd.pinned and sid in self._session_pins.ids(engine)
-                and (native_row is None or native_row.get("native_pinned") is not True)
-            )
-            if is_codex and work_record is None and not legacy_unpin:
+            if is_codex and work_record is None:
                 native_pin = await self._set_native_codex_pin(sid, bool(cmd.pinned))
             await asyncio.to_thread(
                 self._session_pins.set_pinned, engine, sid,

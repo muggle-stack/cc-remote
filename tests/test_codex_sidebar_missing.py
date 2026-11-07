@@ -129,16 +129,21 @@ async def test_refresh_removes_deleted_rows_cache_and_pins_per_account(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_unpin_during_outage_keeps_cache_but_clears_pin(tmp_path, monkeypatch):
+async def test_legacy_unpin_during_catalog_outage_keeps_cache_but_clears_pin(tmp_path, monkeypatch):
     machine, transport = _machine(tmp_path)
     _catalog(tmp_path / "primary", [("thread", str(tmp_path / "primary" / "sessions" / "gone.jsonl"))])
     cached = [_row("primary", "thread")]
     machine._codex_session_list_cache = (time.monotonic(), cached, ())
     machine._session_pins.set_pinned("codex", "primary@thread", True)
+    # A failed catalog refresh alone cannot prove that native pins are absent.
+    # This local-only fallback requires an authoritative legacy metadata read.
+    machine._codex_rpc_for_wire = AsyncMock(return_value={"thread": {"id": "thread"}})
     monkeypatch.setattr(machine_module, "list_codex_sessions", AsyncMock(side_effect=RuntimeError("offline")))
     await machine._handle_pin_session(PinSession(
         session_id="primary@thread", engine="codex", pinned=False, client_id="a"))
     assert machine._session_pins.ids("codex") == set()
+    machine._codex_rpc_for_wire.assert_awaited_once_with(
+        "primary@thread", "thread/read", {"threadId": "primary@thread", "includeTurns": False})
     assert machine._codex_session_list_cache[1] == cached
     lists = [e for e in transport.sent if e.type == "session_list"]
     assert lists and all(not s.pinned for e in lists for s in e.sessions)

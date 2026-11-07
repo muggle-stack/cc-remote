@@ -24,11 +24,17 @@ Use the repository deployment workflow for the live upgrade.
   older native pins. Work and old servers retain local pins. Existing local pins
   remain visible until explicitly toggled; a successful native toggle retires
   that local preference. Unpinning a legacy local pin must not remove an unrelated
-  native custom section.
+  native custom section. Code unpin always consults native metadata, including
+  when the catalog cache is absent or still reports an older local-only pin.
 - `thread/list.readStates` drives the existing completion badge. Acknowledgement
   rechecks the exact revision represented by the row the browser saw, then sends
   it as `expectedRevision`. Conflicts and unknown outcomes are never retried with
-  a newer revision or replaced with a local successful acknowledgement. Native
+  a newer revision or replaced with a local successful acknowledgement. Live
+  terminal receipts also update native read state: a one-turn summary page must
+  prove that the seen result is still the newest completed turn. Explicit unread
+  marks and newer results are preserved. Work stays local; legacy servers may
+  fall back only when the read-state contract is absent or explicitly unsupported.
+  Native
   metadata notifications are account-scoped catalog hints; they
   cannot become chat events, turn terminals or focus changes. Delayed reads
   cannot overwrite newer completion receipts. The presentation-store disk schema
