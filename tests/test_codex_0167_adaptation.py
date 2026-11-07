@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from cc_remote.protocol import AcknowledgeCompletion, PinSession
+from cc_remote.protocol import AcknowledgeCompletion, ListSessions, PinSession
 from cc_remote.wrapper.codex_approvals import approval_choices, approval_prompt
 from cc_remote.wrapper.codex_handle import CodexAppServerError, CodexHandle
 from cc_remote.wrapper.codex_organization import PINNED_SECTION_ID, read_receipt_id
@@ -427,4 +427,73 @@ def test_legacy_and_native_unpin_uses_authoritative_state(tmp_path, catalog):
         await machine._handle_pin_session(PinSession(session_id=sid, engine="codex", pinned=False))
         assert calls == ["thread/read", "thread/section/move"]
         assert sid not in machine._session_pins.ids("codex")
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("local_state", ["read", "unread", "none"])
+@pytest.mark.parametrize("native_unread", [False, True])
+def test_catalog_refresh_preserves_work_receipts_and_syncs_code(tmp_path, local_state, native_unread):
+    async def run():
+        machine, _ = _machine(tmp_path)
+        store = machine._work.for_engine("codex")
+        record = store.create_session(codex_profile_id="stack")
+        store.bind_session(record.work_id, "shared-id", codex_profile_id="stack")
+        work_sid = "stack@shared-id"
+        if local_state != "none":
+            machine._session_presentation.mark_completion("codex", work_sid, "work-result")
+        machine._codex_rpc_for_wire = AsyncMock(side_effect=AssertionError("Work ack must remain local"))
+        if local_state == "read":
+            await machine._handle_acknowledge_completion(AcknowledgeCompletion(
+                sid=work_sid, completion_id="work-result"))
+        before = machine._session_presentation.get("codex", work_sid)
+        native_state = {"revision": "native", "firstUnread": (
+            {"type": "turn", "turnId": "native-result"} if native_unread else None)}
+        rows = [{
+            "session_id": f"{profile}@shared-id", "native_session_id": "shared-id",
+            "codex_profile_id": profile, "status": "idle",
+            "cwd": record.cwd if profile == "stack" else str(tmp_path),
+            "native_read_state": native_state,
+        } for profile in ("primary", "stack")]
+        machine._read_codex_profile_catalog = AsyncMock(return_value=(rows, ()))
+        for _ in range(2):
+            refreshed = await machine._refresh_codex_session_catalog()
+            assert len(refreshed) == 2  # Both spaces still need their catalog rows.
+            assert machine._session_presentation.get("codex", work_sid) == before
+            code = machine._session_presentation.get("codex", "primary@shared-id")
+            assert code.completion_id == read_receipt_id(native_state)
+            assert code.completion_unread is native_unread
+            listing = await machine._send_codex_session_list(
+                ListSessions(engine="codex", space="work"), refreshed)
+            assert len(listing.sessions) == 1
+            assert listing.sessions[0].completion_id == before.completion_id
+            assert listing.sessions[0].completion_unread == (
+                None if local_state == "none" else before.completion_unread)
+        machine._codex_rpc_for_wire.assert_not_called()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("profile_id", [None, "stack"])
+def test_pending_work_binding_is_not_imported_as_code_read_state(tmp_path, profile_id):
+    async def run():
+        machine, _ = _machine(tmp_path)
+        store = machine._work.for_engine("codex")
+        record = store.create_session(codex_profile_id=profile_id)
+        owner = profile_id or "primary"
+        state = {"revision": "unread", "firstUnread": {"type": "threadStart"}}
+        # A crash may leave the native thread durable before its Work binding.
+        # A sibling account using the same path must remain independent.
+        rows = [{
+            "session_id": f"{profile}@shared-id", "native_session_id": "shared-id",
+            "codex_profile_id": profile, "status": "idle", "cwd": record.cwd,
+            "native_read_state": state,
+        } for profile in ("primary", "stack")]
+        machine._read_codex_profile_catalog = AsyncMock(return_value=(rows, ()))
+        refreshed = await machine._refresh_codex_session_catalog()
+        assert machine._session_presentation.get("codex", f"{owner}@shared-id").completion_id is None
+        other = "stack" if owner == "primary" else "primary"
+        assert machine._session_presentation.get("codex", f"{other}@shared-id").completion_id == read_receipt_id(state)
+        await machine._send_codex_session_list(ListSessions(engine="codex", space="work"), refreshed)
+        assert store.get_by_session("shared-id", codex_profile_id=owner) is not None
+        await machine._refresh_codex_session_catalog()
+        assert machine._session_presentation.get("codex", f"{owner}@shared-id").completion_id is None
     asyncio.run(run())

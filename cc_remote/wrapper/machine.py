@@ -27885,9 +27885,28 @@ class WrapperMachine:
         if self._session_presentation is not None:
             # Only fresh, epoch-validated rows may update receipts. Cached
             # SessionList paints must never undo a later acknowledgement.
+            store = self._work.for_engine("codex")
+            # Work owns its local completion state. Read pending bindings first
+            # so a concurrent unbound -> bound transition is covered by either
+            # snapshot, including crash-recovery rows reconciled at list send.
+            unbound = await asyncio.to_thread(store.unbound_records_by_cwd)
+            work_records = await asyncio.to_thread(store.records_by_profile_session)
+            work_cwds = {
+                (record.codex_profile_id or self._codex_profiles.default.id, cwd)
+                for cwd, record in unbound.items()
+            }
+            if epoch != self._codex_session_list_epoch:
+                return await self._refresh_codex_session_catalog()
+            raw = self._filter_private_codex_btw_rows(raw)
             receipts = {}
             for row in raw:
-                if row.get("codex_profile_id") in failed_profile_ids:
+                profile_id = row.get("codex_profile_id")
+                native_sid = row.get("native_session_id") or row["session_id"]
+                cwd = row.get("cwd")
+                if (profile_id in failed_profile_ids
+                        or (profile_id, native_sid) in work_records
+                        or (isinstance(cwd, str) and cwd
+                            and (profile_id, os.path.realpath(cwd)) in work_cwds)):
                     continue
                 state = native_read_state(row.get("native_read_state"))
                 if state is not None:

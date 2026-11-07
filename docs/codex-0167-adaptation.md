@@ -34,8 +34,10 @@ Use the repository deployment workflow for the live upgrade.
   prove that the seen result is still the newest completed turn. Explicit unread
   marks and newer results are preserved. Work stays local; legacy servers may
   fall back only when the read-state contract is absent or explicitly unsupported.
-  Native
-  metadata notifications are account-scoped catalog hints; they
+  Catalog refresh excludes Work-owned native read receipts, including pending
+  Work bindings recovered by exact account/cwd; Code rows in other accounts
+  remain independent. Native metadata notifications are account-scoped catalog
+  hints; they
   cannot become chat events, turn terminals or focus changes. Delayed reads
   cannot overwrite newer completion receipts. The presentation-store disk schema
   and wire schema are unchanged.
