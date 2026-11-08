@@ -4,6 +4,18 @@
 
 ## Unreleased
 
+## v5.3.11
+
+Adapt to Codex app-server 0.167.0. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
+
+- Preserve native command/network approval decisions and show provider-mismatch recovery guidance.
+- Synchronize native Code pins and exact read receipts, including live completion acknowledgements and stale-cache unpins.
+- Keep Work completion state local across catalog refresh and pending-binding recovery, with account isolation.
+- Render safe question Markdown and recognize current daemon PID records and Desktop CLI paths. Tab still queues; predictions remain disabled.
+- Retain the verified HarmonyOS preview.6 HAP with each release.
+
+See the bilingual [release notes](docs/releases/v5.3.11.md).
+
 ## v5.3.10
 
 Stabilize Claude continuation history and reading position, add Work permissions and directory actions, and improve page previews and HarmonyOS downloads. Wire protocol v90 requires coordinated Relay, Wrapper and Web updates; Claude Agent SDK remains 0.2.174.
