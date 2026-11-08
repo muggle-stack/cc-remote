@@ -185,9 +185,11 @@ session files.
   turns are paged and oversized detail is explicitly marked as truncated.
 - Automation's overflow menu opens a centered confirmation for bulk cleanup.
   It reads the complete catalog, checks the observed eligible set again, then
-  uses native `schedule/deleteInactive`. Ongoing tasks and conversation history
-  remain intact. Cleanup is refused if the global operation would also remove
-  tasks associated with private side chats.
+  deletes only those confirmed identities with native `schedule/edit` revision
+  checks. Newly ended tasks and private side-chat tasks cannot enter the batch.
+  Ongoing tasks and conversation history remain intact. A conflict or uncertain
+  write stops the remaining batch, reports the confirmed deletion count, and
+  persists that result without automatically replaying partial cleanup.
 - Runtime settings expose only simple execution preferences from an allowlist
   of native namespaces. Writes use the observed native revision. Provider
   configuration and credential fields stay in DSH's native manager.

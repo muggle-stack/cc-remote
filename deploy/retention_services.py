@@ -85,7 +85,7 @@ def environment_files(path: Path, raw: bytes) -> list[tuple[Path, bool]]:
     return result
 
 
-def snapshot(context: dict, extra_files: list[str], candidates: list[Path] = ()) -> tuple[dict, set[Path], set[Path]]:
+def snapshot(context: dict, extra_files: list[str], candidates: list[Path] = ()) -> tuple[dict, set[Path], set[Path], dict[Path, bytes]]:
     roots = sorted(map(str, retention.service_roots(context)))
     files = retention.service_files(context)
     transient = {p for p in files if p.is_relative_to(TRANSIENT)}
@@ -94,7 +94,7 @@ def snapshot(context: dict, extra_files: list[str], candidates: list[Path] = ())
     # Inputs are observed, never deletion boundaries. Preserve their aliases in
     # the fingerprint instead of either rejecting or prematurely resolving them.
     pending = list(files - transient) + [Path(p) for p in extra_files]
-    records, references = {}, set()
+    records, references, inputs = {}, set(), {}
     size = 0
     while pending:
         path = pending.pop()
@@ -105,6 +105,7 @@ def snapshot(context: dict, extra_files: list[str], candidates: list[Path] = ())
         retention.require(len(records) < 8192 and size <= 32 * 1024 * 1024,
                           'service inventory exceeds limit')
         records[str(path)] = value
+        inputs[path] = raw
         references.update(paths)
         # A review must never erase direct references, including candidates that
         # only become eligible in a later deployment generation.
@@ -112,14 +113,14 @@ def snapshot(context: dict, extra_files: list[str], candidates: list[Path] = ())
         # Optional absence is also part of the snapshot. Creating that file
         # must invalidate a review rather than silently extending its scope.
         pending.extend(p for p, _ in environment_files(path, raw))
-    return {'roots': roots, 'files': records}, transient, references
+    return {'roots': roots, 'files': records}, transient, references, inputs
 
 
 def draft(root: Path, context: dict, *, protected_paths: list[str], extra_files: list[str], note: str) -> dict:
     root = cleanup.absolute_path(str(root))
     for path in [*protected_paths, *extra_files]:
         retention.require(Path(path).is_absolute(), 'review paths must be absolute')
-    observation, _, _ = snapshot(context, extra_files)
+    observation, _, _, _ = snapshot(context, extra_files)
     return {'schema': 1, 'status': 'draft', 'installation_root': str(root), 'home': context['home'],
             'protected_paths': protected_paths, 'extra_files': extra_files,
             'note': note, 'snapshot': observation}
@@ -156,10 +157,11 @@ def reviewed_dependencies(context: dict, candidates: list[Path]) -> list[str]:
         retention.require(isinstance(value.get(key), list) and len(value[key]) <= 128
                           and all(isinstance(p, str) and Path(p).is_absolute() for p in value[key]),
                           'invalid reviewed dependency paths')
-    observation, transient, references = snapshot(context, value['extra_files'], candidates)
+    observation, transient, references, inputs = snapshot(context, value['extra_files'], candidates)
     retention.require(observation == value.get('snapshot'),
                       'service configuration changed; inspect and renew the service review')
     found = referenced_candidates(references, candidates)
+    found.update(retention.inspect_service_files(set(inputs), candidates, reviewed_inputs=inputs))
     for dependency in value['protected_paths']:
         found.update(retention.service_path_dependencies(Path(dependency), candidates))
     # A scope groups already-running processes and has no dormant executable.

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import plistlib
 
 import pytest
 
@@ -53,6 +54,65 @@ def test_review_is_opt_in_and_does_not_silence_default_guard(site):
 def test_review_keeps_direct_references_even_when_candidate_was_not_declared(site):
     _, old, _, _, service, _, approve = site
     service.write_text(f'[Service]\nExecStart=/bin/sh -c "cat {old}/payload"\n')
+    assert retention.service_dependencies(approve(), [old]) == [str(old)]
+
+
+@pytest.mark.parametrize('setting', [
+    'ExecStart={alias}',
+    'ExecStart=/usr/bin/python3 -I {alias}',
+    'ExecStart={alias} --mode=$MODE',
+    'ExecStart=/bin/sh -c "$COMMAND" {alias}',
+    'WorkingDirectory={alias}',
+    'Environment=CONFIG={alias}',
+])
+def test_review_preserves_literal_dependency_aliases_without_explicit_protect(site, setting):
+    _, old, units, _, service, _, approve = site
+    alias = units.parent / 'external-worker'
+    alias.symlink_to(old / 'payload')
+    service.write_text('[Service]\n' + setting.format(alias=alias) + '\n')
+    assert retention.service_dependencies(approve(), [old]) == [str(old)]
+
+
+def test_review_rescans_literal_aliases_including_intermediate_release_owners(site):
+    _, old, units, _, service, _, approve = site
+    outside = units.parent / 'other-worker'
+    outside.write_text('outside runtime')
+    alias = units.parent / 'external-worker'
+    alias.symlink_to(outside)
+    service.write_text(f'[Service]\nExecStart={alias}\n')
+    context = approve()
+    assert retention.service_dependencies(context, [old]) == []
+    (old / 'indirect-worker').symlink_to(outside)
+    alias.unlink()
+    alias.symlink_to(old / 'indirect-worker')
+    assert retention.service_dependencies(context, [old]) == [str(old)]
+    outside.unlink()
+    with pytest.raises(OSError):
+        retention.service_dependencies(context, [old])
+
+
+def test_review_preserves_environment_and_bare_executable_search_dependencies(site, monkeypatch):
+    _, old, units, _, service, _, approve = site
+    search = units.parent / 'bin'
+    search.mkdir()
+    (search / 'worker').symlink_to(old / 'payload')
+    (old / 'payload').chmod(0o755)
+    env = units.parent / 'legacy.env'
+    env.write_text(f'PATH={search}:$OTHER_PATH\n')
+    service.write_text(f'[Service]\nExecStart=worker\nEnvironmentFile={env}\n')
+    monkeypatch.setattr(retention, 'systemd_executable_paths', lambda: [])
+    assert retention.service_dependencies(approve(), [old]) == [str(old)]
+
+
+def test_review_preserves_plist_program_and_argument_aliases(site):
+    _, old, units, _, service, _, approve = site
+    service.unlink()
+    alias = units.parent / 'worker-script'
+    alias.symlink_to(old / 'payload')
+    (units / 'worker.plist').write_bytes(plistlib.dumps({
+        'Label': 'worker', 'Program': '/usr/bin/python3',
+        'ProgramArguments': ['python3', '-I', str(alias)],
+    }))
     assert retention.service_dependencies(approve(), [old]) == [str(old)]
 
 

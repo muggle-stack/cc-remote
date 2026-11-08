@@ -54,19 +54,20 @@ async def test_cleanup_reads_full_catalog_rechecks_revision_and_never_replays_un
         calls.append(endpoint)
         if endpoint == "schedule/catalog":
             return rows
-        assert endpoint == "schedule/deleteInactive"
+        assert endpoint == "schedule/edit"
+        assert args == {"request": {"id": "0", "expectedUpdatedAt": "2", "action": "delete"}}
         raise DshError("lost", "未知", outcome_unknown=True)
     client.rpc = rpc
     plan = await machine._handle(ReadDsh(sid="dsh@root", kind="schedules", query="cleanup", cmd_id="plan"))
     assert plan.items[0].data["count"] == 140
     rows[0]["updatedAt"] = "2"
     refused = await machine._handle(command("schedule_cleanup", revision=plan.items[0].data["revision"]))
-    assert refused.status == "error" and "schedule/deleteInactive" not in calls
+    assert refused.status == "error" and "schedule/edit" not in calls
     plan = await machine._handle(ReadDsh(sid="dsh@root", kind="schedules", query="cleanup", cmd_id="plan2"))
     cmd = command("schedule_cleanup", revision=plan.items[0].data["revision"])
     assert (await machine._handle(cmd)).status == "unknown"
     assert (await machine._handle(cmd)).status == "unknown"
-    assert calls.count("schedule/deleteInactive") == 1 and not machine.sessions
+    assert calls.count("schedule/edit") == 1 and "schedule/deleteInactive" not in calls and not machine.sessions
     await runtime.close()
 
 
@@ -80,7 +81,7 @@ async def test_cleanup_cannot_remove_private_ended_tasks_through_global_api():
     client.rpc = rpc
     plan = await machine._handle(ReadDsh(sid="dsh@root", kind="schedules", query="cleanup", cmd_id="plan"))
     assert plan.items[0].data["count"] == 0
-    assert (await machine._handle(command("schedule_cleanup", revision=plan.items[0].data["revision"]))).status == "error"
+    assert (await machine._handle(command("schedule_cleanup", revision=plan.items[0].data["revision"]))).status == "success"
     await runtime.close()
 
 
@@ -94,6 +95,71 @@ async def test_cleanup_waits_for_an_ended_tasks_inflight_delivery():
     plan = await machine._handle(ReadDsh(sid="dsh@root", kind="schedules", query="cleanup", cmd_id="plan"))
     result = await machine._handle(command("schedule_cleanup", revision=plan.items[0].data["revision"]))
     assert result.status == "error" and "仍在投递" in result.text
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_only_deletes_confirmed_ids_when_more_visible_and_private_tasks_end():
+    machine, _, runtime, client = setup_runtime()
+    runtime.sidechats.rows["dsh@hidden"] = {"owner": "another", "parent": "dsh@root", "created": 1, "cut": 1}
+    rows = [{"id": str(i), "status": "ended", "updatedAt": "1", "target": {"kind": "session", "sessionId": "root"}} for i in range(140)]
+    requests = []
+    async def rpc(endpoint, args=None):
+        if endpoint == "schedule/catalog":
+            return rows
+        assert endpoint == "schedule/edit"
+        request = args["request"]
+        requests.append(request)
+        if len(requests) == 1:
+            # Both ended after the last catalog read, before its first mutation.
+            rows.extend({"id": sid, "status": "ended", "updatedAt": "2",
+                         "target": {"kind": "session", "sessionId": sid}} for sid in ("new", "hidden"))
+        row = next(row for row in rows if row["id"] == request["id"])
+        assert request == {"id": row["id"], "expectedUpdatedAt": row["updatedAt"], "action": "delete"}
+        rows.remove(row)
+        return {"id": row["id"], "deleted": True}
+    client.rpc = rpc
+    plan = await machine._handle(ReadDsh(sid="dsh@root", kind="schedules", query="cleanup", cmd_id="plan"))
+    assert plan.items[0].data["count"] == 140
+    result = await machine._handle(command("schedule_cleanup", revision=plan.items[0].data["revision"]))
+    assert result.status == "success" and "140" in result.text
+    assert [r["id"] for r in rows] == ["new", "hidden"]
+    assert len(requests) == 140 and not machine.sessions
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["conflict", "lost", "malformed"])
+async def test_cleanup_stops_on_partial_failure_and_replays_only_the_saved_result(failure):
+    machine, _, runtime, client = setup_runtime()
+    rows = [{"id": str(i), "status": "ended", "updatedAt": "1", "target": {"kind": "session", "sessionId": "root"}} for i in range(3)]
+    requests = []
+    async def rpc(endpoint, args=None):
+        if endpoint == "schedule/catalog":
+            return rows
+        assert endpoint == "schedule/edit"
+        request = args["request"]
+        requests.append(request)
+        if len(requests) == 1:
+            # Freeze all revisions before writes: a later row changed in flight.
+            rows[1]["updatedAt"] = "2"
+            rows.pop(0)
+            return {"id": "0", "deleted": True}
+        assert request == {"id": "1", "expectedUpdatedAt": "1", "action": "delete"}
+        if failure == "lost":
+            raise DshError("lost", "结果未知。", outcome_unknown=True)
+        return {"id": "1", "code": "schedule_conflict"} if failure == "conflict" else {"deleted": True}
+    client.rpc = rpc
+    plan = await machine._handle(ReadDsh(sid="dsh@root", kind="schedules", query="cleanup", cmd_id="plan"))
+    cmd = command("schedule_cleanup", revision=plan.items[0].data["revision"])
+    result = await machine._handle(cmd)
+    assert result.status == ("error" if failure == "conflict" else "unknown")
+    assert "已确认清理 1 个" in result.text and "后续任务未执行" in result.text
+    from cc_remote.wrapper.dsh_mutations import DshMutationJournal
+    runtime.mutations = DshMutationJournal(machine.cfg.state_dir)
+    replay = await machine._handle(cmd)
+    assert (replay.status, replay.text) == (result.status, result.text)
+    assert len(requests) == 2 and [r["id"] for r in rows] == ["1", "2"]
     await runtime.close()
 
 

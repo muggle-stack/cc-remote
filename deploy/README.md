@@ -217,6 +217,10 @@ dormant command, so their ordinary churn does not invalidate the review; their
 path references and all running processes remain protected. Declared runtime
 aliases are resolved again on every check. The review never suppresses direct
 candidate references, process/open-file checks, or retained dependency closure.
+Literal executable, script, working-directory, environment and search-path
+dependencies are also rediscovered through symlink chains on every check, even
+when an indirect command is covered by the review. They need no separate
+`--protect` declaration; that list covers dependencies hidden by indirection.
 
 Each retention attempt writes `.retention-status.json`, including its outcome,
 defer reason, protected dependencies, and untracked release count. Untracked

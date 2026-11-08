@@ -113,18 +113,33 @@ async def manage(runtime, body):
         allowed = [row for row in ended if visible(runtime, row)]
         if body.get("revision") != cleanup_revision(allowed):
             raise DshError("schedule_conflict", "已结束任务清单已变化，请重新读取后确认。")
-        if len(allowed) != len(ended):
-            # The native bulk operation is global. Never let a filtered private
-            # task disappear through an apparently scoped confirmation.
-            raise DshError("schedule_scope", "存在当前不可见的已结束任务，请逐项删除可见任务。")
         if not allowed:
             return "没有需要清理的已结束任务。"
-        if any(row.get("executionActive") for row in ended):
+        if any(row.get("executionActive") for row in allowed):
             raise DshError("schedule_busy", "部分已结束任务仍在投递，请等待投递完成后重新读取清单。")
-        value = await runtime.client.rpc("schedule/deleteInactive")
-        if not isinstance(value, dict) or type(value.get("deleted")) is not int or value["deleted"] < 0:
-            raise DshError("schedule_unknown", "清理结果未确认，请刷新核实；不会自动重试。", outcome_unknown=True)
-        return f"已清理 {value['deleted']} 个已结束任务；已有会话内容保留。"
+        # Freeze the confirmed identities/revisions before the first write.
+        # deleteInactive re-enumerates the global ended set inside the Host and
+        # could also remove a newly ended (including private) task. edit checks
+        # each observed revision in the same native transaction as its deletion.
+        confirmed = tuple((row["id"], row.get("updatedAt")) for row in allowed)
+        deleted = 0
+        for identity, revision in confirmed:
+            try:
+                value = await runtime.client.rpc("schedule/edit", {"request": {
+                    "id": identity, "expectedUpdatedAt": revision, "action": "delete"}})
+                if not isinstance(value, dict):
+                    raise DshError("schedule_unknown", "本项清理结果未确认。", outcome_unknown=True)
+                if value.get("code"):
+                    raise DshError("schedule_conflict", "本项任务已变化或未能删除。")
+                if value.get("id") != identity or value.get("deleted") is not True:
+                    raise DshError("schedule_unknown", "本项清理结果未确认。", outcome_unknown=True)
+            except DshError as exc:
+                # Persist the partial/unknown result through the existing whole
+                # command receipt. Never resume a partially applied batch on retry.
+                raise DshError(exc.code, f"已确认清理 {deleted} 个任务；{exc}后续任务未执行，请重新读取核实；不会自动重试。",
+                               outcome_unknown=exc.outcome_unknown) from None
+            deleted += 1
+        return f"已清理 {deleted} 个已结束任务；已有会话内容保留。"
     if action == "schedule_create":
         request = fields(body.get("request"), creating=True)
         request["target"] = await target(runtime, request.get("target"))
