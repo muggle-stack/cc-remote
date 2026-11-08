@@ -3,6 +3,7 @@ import { PanelFrame, PanelExpandButton } from "./RightPanelPresentation";
 import { PanelResizer } from "./PanelResizer";
 import { DshManagement } from "./DshManagement";
 import { DshSettings } from "./DshSettings";
+import { DshStats } from "./DshStats";
 import { DshToolsMenu } from "./DshToolsMenu";
 import { dshToolLabels as labels } from "../dsh-tool-labels";
 import type { DshApiClient } from "../dsh-api";
@@ -15,7 +16,7 @@ import "./DshTools.css";
 
 const DshTerminal = lazy(() => import("./DshTerminal"));
 
-export type DshPanelSelection = { kind: "subagents" | "jobs" | "deliverables" | "diagnostics" | "conversation" | "plugins" | "workflows" | "trajectory" | "schedules" | "settings" | "presets" | "bundles" | "terminals"; target?: string; query?: string };
+export type DshPanelSelection = { kind: "subagents" | "jobs" | "deliverables" | "diagnostics" | "conversation" | "plugins" | "workflows" | "trajectory" | "stats" | "schedules" | "settings" | "presets" | "bundles" | "terminals"; target?: string; query?: string };
 const states: Record<string, string> = { error: "运行异常", enabled: "已启用", disabled: "已停用", running: "运行中", inactive: "未运行", stopping: "停止中", completed: "已结束", killed: "已停止", failed: "失败", active: "正常", unknown: "未知", unavailable: "暂不可用", corrupt: "记录异常" };
 
 export default function DshPanel({ sid, selection, api, state, onClose, onOpenFile, onOpenSession, onOpenAgent, onCompose }: {
@@ -59,7 +60,7 @@ export default function DshPanel({ sid, selection, api, state, onClose, onOpenFi
   useEffect(() => {
     const abort = new AbortController(); readAbort.current = abort;
     setNext(null); setError(null);
-    if (tab === "jobs" || tab === "settings" || tab === "presets" || tab === "bundles" || tab === "schedules" || tab === "terminals") { setLoading(false); return; }
+    if (tab === "stats" || tab === "jobs" || tab === "settings" || tab === "presets" || tab === "bundles" || tab === "schedules" || tab === "terminals") { setLoading(false); return; }
     setLoading(true);
     api.read(sid, child ? "conversation" : tab === "conversation" ? "conversation" : tab,
       { target_sid: child?.sid ?? (parent !== sid ? parent : undefined), query: selection.query, signal: abort.signal })
@@ -135,7 +136,7 @@ export default function DshPanel({ sid, selection, api, state, onClose, onOpenFi
         <DshToolsMenu selected={tab} onSelect={kind => { setTab(kind); setChild(null); setParent(sid); setTrail([]); setNotice(""); }} />
         <PanelExpandButton label="DSH 会话工具" /><button className="iconbtn" aria-label="关闭会话工具" onClick={onClose}><Icon name="close" /></button>
       </header>
-      {tab === "terminals" ? <Suspense fallback={<p role="status">加载终端…</p>}><DshTerminal sid={sid} api={api} /></Suspense> : tab === "settings" ? <DshSettings sid={sid} api={api} /> : ["presets", "bundles", "schedules"].includes(tab) ? <DshManagement key={tab} sid={sid} kind={tab as "presets" | "bundles" | "schedules"} api={api} onCompose={onCompose} /> : <>
+      {tab === "stats" ? <DshStats key={sid} sid={sid} api={api} onTrajectory={() => setTab("trajectory")} /> : tab === "terminals" ? <Suspense fallback={<p role="status">加载终端…</p>}><DshTerminal sid={sid} api={api} /></Suspense> : tab === "settings" ? <DshSettings sid={sid} api={api} /> : ["presets", "bundles", "schedules"].includes(tab) ? <DshManagement key={`${tab}:${selection.query ?? ""}`} initialSearch={selection.query} sid={sid} kind={tab as "presets" | "bundles" | "schedules"} api={api} onCompose={onCompose} /> : <>
       <div className="dsh-panel-actions">
         {(child || trail.length > 0) && <button onClick={() => {
           if (child) { setChild(null); if (tab === "conversation") setTab("subagents"); }

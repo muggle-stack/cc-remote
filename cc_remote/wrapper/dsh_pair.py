@@ -49,14 +49,14 @@ async def pair(launch_url: str, path: Path) -> None:
         await client.draft_catalog(str(Path.cwd()))
         if (not isinstance(roster, dict) or not isinstance(roster.get("presets"), list)
                 or not isinstance(catalog, dict) or not isinstance(catalog.get("groups"), list)):
-            raise DshError("unsupported", "DSH 未提供 0.2.1-rc.2 的模型与 Preset 接口。")
+            raise DshError("unsupported", "DSH 未提供 0.2.2-rc.1 的模型与 Preset 接口。")
     finally:
         await client.close()
     save_connection(connection, path)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Pair cc-remote with local DSH 0.2.1-rc.2")
+    parser = argparse.ArgumentParser(description="Pair cc-remote with local DSH 0.2.2-rc.1")
     parser.add_argument("--file", type=Path, required=True, help="Private Wrapper connection file")
     args = parser.parse_args()
     try:

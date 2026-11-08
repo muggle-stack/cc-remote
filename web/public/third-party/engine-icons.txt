@@ -11,6 +11,13 @@ animation, not an extracted Anthropic animation asset. Its nine 90ms steps
 follow the classic spark reference shared in:
 https://github.com/anthropics/claude-code/issues/99139
 
+claude-working-alternating.svg combines that flower geometry with six geometric
+vector marks, avoiding platform-font and emoji substitution. It uses a 450ms
+entry contraction, then alternates a 2000ms six-mark round trip with an 810ms
+flower cycle. The original claude-working.svg still owns the completed mark's
+click replay. This combined working sequence is cc-remote's presentation,
+not an extracted Claude Desktop animation.
+
 Claude and its marks belong to Anthropic. Codex and its marks belong to OpenAI.
 These icons identify the selected third-party engine, not cc-remote itself.
 No affiliation or endorsement is implied. The MIT license below covers the

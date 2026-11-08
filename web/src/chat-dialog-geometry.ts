@@ -22,6 +22,7 @@ interface DialogGeometryOptions {
   scopeRef?: RefObject<HTMLElement | null>;
   gutter?: number;
   minimumHeight?: number;
+  viewport?: boolean;
 }
 
 interface AnchoredPopoverGeometryOptions {
@@ -180,6 +181,7 @@ export function useChatDialogGeometry({
   scopeRef,
   gutter = 16,
   minimumHeight = 96,
+  viewport = false,
 }: DialogGeometryOptions): ChatDialogGeometry | null {
   const [geometry, setGeometry] = useState<ChatDialogGeometry | null>(null);
 
@@ -199,8 +201,8 @@ export function useChatDialogGeometry({
     const place = () => {
       frame = null;
       const visual = visualBounds();
-      const chat = (threadShell && elementBounds(threadShell))
-        ?? fallbackChatBounds(scope);
+      const chat = viewport ? null : ((threadShell && elementBounds(threadShell))
+        ?? fallbackChatBounds(scope));
       let bounds = chat ? intersection(visual, chat) ?? visual : visual;
       // The modal owns input while open. Reserving the background composer
       // above a mobile keyboard can leave room for only the header and footer.
@@ -253,7 +255,7 @@ export function useChatDialogGeometry({
       viewportObserver.disconnect();
       resizeObserver?.disconnect();
     };
-  }, [gutter, maxHeight, maxWidth, minimumHeight, open, scopeRef]);
+  }, [gutter, maxHeight, maxWidth, minimumHeight, open, scopeRef, viewport]);
 
   return open ? geometry : null;
 }

@@ -11,7 +11,7 @@ import time
 from cc_remote.protocol import DshCommandResult, DshDownloadChunk, DshItem, DshReadResult
 from cc_remote.wrapper.dsh_client import DshError, TESTED_DSH_VERSION, native_session_id, wire_session_id
 from cc_remote.wrapper.dsh_stream import text_content
-from cc_remote.wrapper import dsh_management
+from cc_remote.wrapper import dsh_management, dsh_recommendations
 from cc_remote.wrapper.dsh_terminal import DshTerminals
 
 EXPORT_LIMIT = 128 * 1024 * 1024
@@ -24,6 +24,7 @@ class DshFeatures:
         self.terminals = DshTerminals(runtime)
         self.exports: dict[str, tuple[str, str, str, int, float]] = {}
         self.export_lock = asyncio.Lock()
+        self.sources_lock = asyncio.Lock()
         self.inflight = {}
         self.cleanup = None
         self.closed = False
@@ -43,6 +44,8 @@ class DshFeatures:
                 response.items, response.next_seq = await self.terminals.read(cmd)
             elif cmd.kind in dsh_management.READS:
                 response.items = await dsh_management.read(self.runtime, cmd, response)
+            elif cmd.kind == "plugins" and cmd.query == "recommendations":
+                response.items = await dsh_recommendations.read(self.runtime, cmd)
             elif cmd.kind == "plugins":
                 rows = await self.client.rpc("pluginManager/listPlugins")
                 response.items = [DshItem(id=row["entryId"], title=row["moduleName"],
@@ -113,12 +116,13 @@ class DshFeatures:
                 if parent != cmd.sid:
                     await self.descendant(cmd.sid, parent)
                 result = await self.client.list_subagents(parent)
-                response.items = [DshItem(id=row["id"], sid=wire_session_id(row["id"]),
+                response.items = [DshItem(id=row["id"], sid=wire_session_id(row["id"]) if row.get("mode") in {"one-shot", "continuable"} else None,
                     title=str(row.get("label") or row["id"])[:2048],
                     state=row.get("activity", row.get("reason", "unavailable")),
                     mode=row.get("mode") if row.get("mode") in {"one-shot", "continuable"} else None, has_children=bool(row.get("hasChildren")),
                     controllable=bool(result.get("parentAvailable")) and row.get("mode") == "continuable",
-                    detail="父会话未运行；当前仅可查看" if not result.get("parentAvailable") else "")
+                    detail="外部代理；结果返回父会话，不支持查看原生过程或追加消息。" if row.get("mode") not in {"one-shot", "continuable"}
+                        else "父会话未运行；当前仅可查看" if not result.get("parentAvailable") else "")
                     for row in result.get("entries", [])[:256]]
             elif cmd.kind in {"conversation", "deliverables"}:
                 target = cmd.target_sid or cmd.sid

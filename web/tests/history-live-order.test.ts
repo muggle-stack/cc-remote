@@ -1827,6 +1827,50 @@ try {
     "an empty session waits for new-generation History after wrapper restart",
   );
 
+  // A complete authoritative first page, followed by live output, is different
+  // from paint-only cache data. Archiving/refocusing refreshes just the newest
+  // page: it must not advertise older data above an already visible first turn.
+  for (const engine of ["dsh", "claude", "codex"] as const) {
+    const sid = `${engine}-archive-history-floor`;
+    const generation = `${engine}-archive-generation`;
+    const first = { id: "first", prompt: "First question", blocks: [], done: true };
+    const latest = { id: "later", prompt: "Later question", blocks: [], done: true };
+    const head = (turns: unknown[], has_more: boolean, build_seq: number) => event({
+      type: "history", sid, session_id: sid, revision: "floor-revision", generation,
+      detail: "summary", events: [], turns, has_more, oldest_id: turns === full ? "first" : "later",
+      in_progress: false, authoritative: true, build_seq, live_seq: 10,
+    });
+    const full = [first];
+    let floorState = reduce({ ...initialState, focusedSid: sid,
+      sessions: [{ session_id: sid, engine, space: "code" }],
+    }, { type: "event", event: head(full, false, 1) });
+    const emit = (body: Record<string, unknown>) => {
+      floorState = reduce(floorState, { type: "event", event: event({ sid, ...body }) });
+    };
+    emit({ type: "user_msg", msg_id: "later", prompt: "Later question", seq: 1 });
+    emit({ type: "turn_binding", msg_id: "later", turn_id: "later-native", seq: 2 });
+    emit({ type: "turn_end", turn_id: "later-native", seq: 3,
+      result: { subtype: "success", is_error: false, duration_ms: 1 } });
+    assert.equal(floorState.runtimes[sid].hasLoadedOlderHistory, false);
+    assert.equal(floorState.runtimes[sid].hasMore, false);
+    const liveState = floorState;
+    floorState = { ...floorState, sessions: [{ session_id: sid, engine, space: "code", tag: "archived" }] };
+    floorState = reduce(floorState, { type: "event", event: head([latest], true, 2) });
+    assert.deepEqual(floorState.runtimes[sid].turns.map((t: { id: string }) => t.id), ["first", "later"]);
+    assert.equal(floorState.runtimes[sid].hasMore, false, `${engine}: complete live history survives archive refresh`);
+    assert.equal(floorState.runtimes[sid].oldestId, "first");
+    for (const changed of [{ revision: "replacement-revision" }, { generation: "restarted-wrapper" }]) {
+      const reset = reduce(liveState, { type: "event", event: { ...head([latest], true, 2), ...changed } });
+      assert.equal(reset.runtimes[sid].hasMore, true, "a changed authority revokes the old history floor");
+    }
+    const cached = reduce({ ...initialState, focusedSid: sid }, {
+      type: "hydrate_cache", sid, revision: "floor-revision", generation,
+      historyAtStart: true, turns: [first, latest],
+    });
+    const validatedCache = reduce(cached, { type: "event", event: head([latest], true, 2) });
+    assert.equal(validatedCache.runtimes[sid].hasMore, true, "a persisted head flag alone cannot hide unseen older history");
+  }
+
   const staleCacheSid = "claude-empty-stale-cache-generation";
   let staleCacheState = {
     ...initialState,

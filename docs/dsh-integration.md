@@ -4,8 +4,8 @@
 
 DSH integration ships in cc-remote **v5.0.0**. Development started from
 `v4.0.29` (`fb60c7ef9348`) without merging the historical DSH branch.
-The implementation target is exactly `@deepseek-ai/dsh@0.2.1-rc.2`, upstream
-commit `687f282e8625c6b8d11ff58211a90524be2e4317`.
+The implementation target is exactly `@deepseek-ai/dsh@0.2.2-rc.1`, upstream
+commit `66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db`.
 
 DSH owns model credentials, Agent execution, plugins, native session storage,
 and native message admission. cc-remote owns device-scoped routing, its current
@@ -44,9 +44,13 @@ than emulated by writing native files.
 - `session/list` takes `_request`. `session/projections` returns an exact
   `asOfSeq` for current-format cold sessions, or `migration-required` hints.
   `session/page` can read through that exact cursor without creating an Agent.
-- `session/follow` can promote a prepared ordinary session after delivering its
-  initial snapshot (`SessionHistoryController.follow`). It is not a safe
-  substitute for cold history, regardless of the broad wording in the README.
+- `session/follow` is passive by default in 0.2.2; cc-remote does not set
+  `activate`. Cold history remains bounded projection/page I/O, and reading
+  a prepared session or subscribing to it must not create an Agent or model turn.
+- Control projection frames contain one atomic `changes: [{key, val}]` batch
+  at a native sequence, including null values. Attachment reads take the full
+  native image reference, retained privately from that exact session history;
+  browser-supplied attachment references are never accepted.
 - Session logs use the current V4 message contract. Projection-cache hints are
   not proof of live lifecycle or message ownership.
 - Models are provider/model pairs with native reasoning choices. Never limit
@@ -54,16 +58,16 @@ than emulated by writing native files.
 
 ## Official references
 
-- [Pinned release](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.1-rc.2)
-- [Connection](https://github.com/deepseek-ai/deepseek-harness/tree/dsh-v0.2.1-rc.2/packages/client/connection)
-- [Gateway](https://github.com/deepseek-ai/deepseek-harness/tree/dsh-v0.2.1-rc.2/packages/api/gateway)
-- [Session Controller](https://github.com/deepseek-ai/deepseek-harness/tree/dsh-v0.2.1-rc.2/packages/api/session-controller)
-- [Native Session](https://github.com/deepseek-ai/deepseek-harness/tree/dsh-v0.2.1-rc.2/packages/core/session)
-- [SDK protocol](https://github.com/deepseek-ai/deepseek-harness/tree/dsh-v0.2.1-rc.2/packages/sdk/protocol)
+- [Pinned release](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.2-rc.1)
+- [Connection](https://github.com/deepseek-ai/deepseek-harness/tree/dsh-v0.2.2-rc.1/packages/client/connection)
+- [Gateway](https://github.com/deepseek-ai/deepseek-harness/tree/dsh-v0.2.2-rc.1/packages/api/gateway)
+- [Session Controller](https://github.com/deepseek-ai/deepseek-harness/tree/dsh-v0.2.2-rc.1/packages/api/session-controller)
+- [Native Session](https://github.com/deepseek-ai/deepseek-harness/tree/dsh-v0.2.2-rc.1/packages/core/session)
+- [SDK protocol](https://github.com/deepseek-ai/deepseek-harness/tree/dsh-v0.2.2-rc.1/packages/sdk/protocol)
 
 ## Local setup
 
-Use Node 24 and an independently installed `@deepseek-ai/dsh@0.2.1-rc.2`.
+Use Node 24 and an independently installed `@deepseek-ai/dsh@0.2.2-rc.1`.
 Do not point migration experiments at an existing DSH home. DSH still owns its
 provider login, API endpoints, credentials, presets, and plugin configuration.
 
@@ -93,8 +97,9 @@ the public network. Re-pair if DSH rotates its native control credential.
 
 The metadata extension is required for this integration's command/Skill catalog,
 full-text match location, and declared deliverables. It adds authenticated,
-bounded read endpoints and a schedule-creation adapter to the native Host API.
-The adapter validates a single timing rule and never retries an uncertain write.
+bounded read endpoints using metadata/catalog contract 3. Native schedules
+use the official `schedule/create`, `schedule/edit`, and `schedule/run` APIs;
+the old private schedule-creation shim is removed.
 Session execution, native history, models,
 questions, approvals, goals, jobs, subagents, and plugin toggles use official
 DSH Remote APIs. The extension never performs model requests or mutates native
@@ -162,20 +167,62 @@ session files.
   presets, runtime settings, plugin packages and terminals. Workflow pages show
   recorded phases and child identities, and retain newer terminal outcomes when
   earlier pages load. They do not invent future phases or start missing agents.
-  Automation reads the global native catalog, edits/deletes the original owning
-  session's task, and shows recent delivery history. A form creates native tasks
-  for an explicitly selected session (once, interval, daily, weekly or cron);
-  conversational creation remains available. Preset creation stages a native
+  Automation reads the global native catalog and filters private side-chat
+  involvement. Tasks target an existing session, a new session reused after
+  its first execution, or a fresh session each time. New targets accept a project
+  directory; reserved session IDs are never treated as existing sessions.
+  Create/edit preserves native once/interval/daily/weekly/cron/RRULE timing.
+  Pause/resume/delete/edit use the observed `updatedAt` revision; conflicts
+  retain drafts. Run-now respects native admission and delivery floors. History
+  shows the actual delivered-to session, never claiming task completion.
+  Management mutations have durable intent receipts and never replay an unknown
+  write after disconnect or Wrapper recovery. Conversational creation remains available. Preset creation stages a native
   conversational request for the user to review and send.
+- Performance statistics use native turn/step records without activating an
+  agent. The existing tools panel shows wall/model/tool durations, weighted
+  cache hit rate, tokens, per-step rows and inner PTC calls. Overlapping tool
+  intervals are counted once; missing measurements remain unknown. Earlier
+  turns are paged and oversized detail is explicitly marked as truncated.
+- Automation's overflow menu opens a centered confirmation for bulk cleanup.
+  It reads the complete catalog, checks the observed eligible set again, then
+  deletes only those confirmed identities with native `schedule/edit` revision
+  checks. Newly ended tasks and private side-chat tasks cannot enter the batch.
+  Ongoing tasks and conversation history remain intact. A conflict or uncertain
+  write stops the remaining batch, reports the confirmed deletion count, and
+  persists that result without automatically replaying partial cleanup.
 - Runtime settings expose only simple execution preferences from an allowlist
   of native namespaces. Writes use the observed native revision. Provider
   configuration and credential fields stay in DSH's native manager.
 - Plugin inventory and enable/disable reflect native application receipts,
   including restart-required outcomes. Package install/remove uses the native
   package manager; a restart-required result never restarts DSH automatically.
-  The market tab explains that this DSH release has no official plugin market;
-  it does not request optional custom-market endpoints or imply a default source.
-  Local plugin search and management remain available.
+  The plugin-source tab reads only native configured indexes, without inventing
+  a default market. Updatable registry packages expose native compatible version
+  choices, with prerelease/deprecation labels. Updates verify native metadata
+  again, report failed/cancelled installation and restoration separately, and
+  retain restart-required/overridden outcomes. Native diagnostics and registry
+  credentials are not forwarded. Installation/update RPCs have a bounded ten
+  minute timeout and no automatic retry. Official bundles stay installation-owned.
+  Plugin sources can be added/removed with an observed-list revision, then
+  searched and installed through native market APIs. The optional native market
+  bundle must be enabled; no index URL is supplied by cc-remote. Installation
+  resolves the selected source, version and compatibility again on the device.
+  Rich Markdown details are loaded on expansion; raw HTML, local-resource links
+  and automatic image fetching are disabled. Source and registry secrets stay
+  local. Optional official-plugin recommendation cards use the native
+  action-card projection and exact originating turn. Enable and conversation
+  dismissal use native action receipts; reading or viewing a card cannot enable
+  a plugin. Generated personalized-page hosting is not part of this adapter.
+  External OAR subagents remain native-owned: their status and returned results
+  are shown, without inventing a DSH child history or follow-up controls.
+  Structured `ABORTED`/`ABORTED_BEFORE_DISPATCH` results render as cancelled.
+  Native scheduler reminder inputs remain visible with a task receipt in both
+  live and cold history; schedule-change notices stay hidden. Batched reminders
+  share their native input/answer boundary. Consumed `tool-jobs` notices retain
+  a compact source receipt, so autonomous replies show “DeepSeek 继续处理” after
+  reload without creating a human prompt or a false child-agent link.
+  Native `apply_patch` changes use the existing authoritative file-change pipeline;
+  cc-remote does not enable optional tools or alter native permissions.
   No DSH Work mode, quota estimate, worktree
   migration, rollback or session deletion is synthesized. Unsupported actions
   are unavailable instead of silently falling back to Claude/Codex.
@@ -195,9 +242,15 @@ session files.
   implementation and existing private associations remain intact for future
   integration; no existing session is deleted, archived or transferred by this
   change. Claude/Codex side chats remain available.
-- Wire protocol v83 must be activated across all tiers together. This branch
-  does not automatically upgrade, migrate, deploy, or restart any existing DSH
-  installation.
+- This adaptation uses existing protocol v90 envelopes. Stage DSH 0.2.2-rc.1
+  with this integration extension and Wrapper together. Pairing remains private,
+  and an incompatible native version is refused. Back up the native home before
+  activation; native persistence migration belongs to DSH. Installing this code
+  alone does not upgrade or restart an existing DSH process.
+- DSH 0.2.2 changes native defaults for read-before-write/external-modification
+  checks and private-network WebFetch access. Existing explicit operator policy
+  remains authoritative; cc-remote does not silently re-enable or disable those
+  native policies. Full worktree/PR review UI and DSH side chats remain out of scope.
 
 ## Verification
 
@@ -218,9 +271,14 @@ streaming, native question/approval/multi-question reconnect, steering, queue
 drain, interruption, file/image admission, Artifacts, jobs, delegated history,
 plugin toggles, exact-revision goals, Plan commands and archive/unarchive. It
 also reads management catalogs and completed child history and exercises native
-PTY creation, resize, input, output, detach retention and explicit close. Package
-installation and arbitrary provider settings are not exercised by the probe.
+PTY creation, resize, input, output, detach retention and explicit close. It also
+exercises all three schedule destinations, repeated delivery and native revision
+conflicts. A loopback npm fixture verifies real plugin installation, version
+selection, update, and restoration after a deliberately broken package. No
+provider credentials or arbitrary provider settings are used by the probe.
 It must be run explicitly; ordinary pytest never calls a live model.
+`--product-only` runs the statistics, bulk cleanup, market/detail/update and
+recommendation-card acceptance subset against the same isolated runtime.
 
 The DSH mark in `web/src/assets/dsh-mark.svg` derives from the pinned upstream
 `apps/web/public/favicon.svg`; it keeps the upstream geometry with a CSS mask

@@ -108,17 +108,20 @@ and extensions still depend on the native installation on the selected device.
 
 ### DSH session tools
 
-Open **More → DSH session tools** for subagents, background jobs, workflows, trajectory,
+Open **More → DSH session tools** for subagents, background jobs, workflows, trajectory, performance statistics,
 outputs, automation, runtime settings, plugins, presets, terminals and diagnostics.
 
 - **Modes:** choose Standard, PTC, Minimal or Cordis when starting a session. Available presets come from local DSH; the current mode appears beside `Code`.
 - **Agents and jobs:** inspect native activity and continue, steer or stop controllable agents. Older sessions may first need migration in the official client.
 - **Terminals:** use the device's interactive shell with scrollback, Ctrl+C, reconnect and close controls. Hiding the panel keeps the terminal alive; commands are executed directly by the user.
-- **Automation:** choose a target session, recurrence and time in a form, or create a schedule through conversation. Delivery records confirm delivery; inspect the target session for the task result.
+- **Automation:** choose a target session, recurrence and time in a form, or create a schedule through conversation. The overflow menu offers confirmed bulk cleanup of ended tasks while preserving conversation history. Delivery records confirm delivery; inspect the target session for the task result.
+- **Performance statistics:** inspect per-turn model/tool timings, cache hit rate and token details; unavailable measurements remain unknown.
 - **Settings and extensions:** save settings according to native application scopes and manage local plugins/bundles. Changes requiring restart remain pending until the next launch.
+- **Plugin market:** enable the native market bundle to add indexes, search, install and read plugin details. Installed packages support compatible version updates. Optional official-plugin cards support explicit enablement and conversation dismissal.
 
-**Current boundaries:** DSH supports Code only. Suitable session deletion and marketplace APIs
-are unavailable. Side-chat menus, shortcuts and `/btw` are disabled pending upstream support.
+**Current boundaries:** DSH supports Code only. Suitable session deletion APIs remain
+unavailable. The market uses locally configured DSH sources; cc-remote supplies no default index.
+Side-chat menus, shortcuts and `/btw` are disabled pending upstream support.
 Archiving hides sessions without reclaiming native history. DSH supports project Git diffs
 and archived native per-turn file snapshots. Released snapshots that were not saved are
 shown as unavailable; current Git state never substitutes for historical changes.
@@ -266,7 +269,7 @@ Prepare at least one working engine:
 - **Codex:** an authenticated official CLI. Shared control requires both
   `codex app-server daemon --help` and `codex app-server proxy --help`.
 
-- **DSH (optional):** Node 24 and `@deepseek-ai/dsh@0.2.1-rc.2`. Follow [DSH integration](docs/dsh-integration.md)
+- **DSH (optional):** Node 24 and `@deepseek-ai/dsh@0.2.2-rc.1`. Follow [DSH integration](docs/dsh-integration.md)
   to start the local API, load the metadata plugin and pair. Wrapper installation does not install or upgrade DSH automatically.
 
 ### 1. Install dependencies and build

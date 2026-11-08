@@ -2,10 +2,13 @@ import { EngineIcon, Icon } from "../icons";
 import type { DshItem } from "../protocol";
 
 import { bundlePresentation } from "../dsh-bundle-presentation";
+import type { ReactNode } from "react";
+import { useState } from "react";
 
-export function DshBundleRow({ item, busy, onToggle, onRemove, onInstall }: {
-  item: DshItem; busy: boolean; onToggle: () => void; onRemove: () => void; onInstall: () => void;
+export function DshBundleRow({ item, busy, onToggle, onRemove, onInstall, children, detail }: {
+  item: DshItem; busy: boolean; onToggle: () => void; onRemove: () => void; onInstall: () => void; children?: ReactNode; detail?: ReactNode;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const display = bundlePresentation(item);
   const core = item.data?.readOnlyReason === "management-required";
   const enabled = item.state === "enabled";
@@ -20,16 +23,19 @@ export function DshBundleRow({ item, busy, onToggle, onRemove, onInstall }: {
       {core && <span className="dsh-bundle-lock" title="核心组件不可停用或卸载"><Icon name="lock" size={16} /></span>}
     </div>
     {display.detail && <p className="dsh-bundle-description">{display.detail}</p>}
-    <details className="dsh-bundle-details"><summary>详情{item.state === "update-available" ? " · 有新版本" : ""}</summary>
+    <details className="dsh-bundle-details" onToggle={event => setExpanded(event.currentTarget.open)}><summary>详情{item.state === "update-available" ? " · 有新版本" : ""}</summary>
+      {expanded && detail}
       <p className="dsh-management-meta">{item.id}</p>
       {core && <p>随 DSH 更新，为保留管理功能不可停用或卸载。</p>}
-      {item.state === "update-available" && <p>已安装 {String(item.data?.installedVersion)}。当前 DSH 不支持运行中覆盖更新，请通过原生 CLI 更新。</p>}
+      {item.state === "update-available" && <p>已安装 {String(item.data?.installedVersion)}，可检查兼容版本。</p>}
+      {item.data?.updatable === false && !core && <p>此插件的版本由 DSH 安装配置管理。</p>}
       {item.data?.readOnlyReason === "unaddressable" && <p>原生运行时未提供此插件的管理入口。</p>}
       {item.detail !== display.detail && item.detail && <p>{item.detail}</p>}
       <div className="dsh-management-actions">
         {item.controllable && enabled && <button disabled={busy} onClick={onToggle}>停用</button>}
         {item.controllable && item.data?.removable === true && <button disabled={busy} onClick={onRemove}>卸载</button>}
       </div>
+      {children}
     </details>
   </>;
 }

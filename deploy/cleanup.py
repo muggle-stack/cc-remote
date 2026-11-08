@@ -69,7 +69,10 @@ def identity(path: Path) -> tuple[int, int]:
 
 
 def overlaps(first: Path, second: Path) -> bool:
-    return first == second or first.is_relative_to(second) or second.is_relative_to(first)
+    # Path.is_relative_to builds parent objects on supported Python versions.
+    # This hot loop runs for every open file and retained dependency rescan.
+    left, right = first.parts, second.parts
+    return left[:len(right)] == right or right[:len(left)] == left
 
 
 def load_inventory(path: Path) -> dict:
@@ -82,17 +85,21 @@ def load_inventory(path: Path) -> dict:
     if "service_context" in data:
         context = data["service_context"]
         if (not isinstance(context, dict) or "home" not in context
-                or context.keys() - {"home", "linux_service"}):
+                or context.keys() - {"home", "linux_service", "review"}):
             raise CleanupError("invalid service discovery context")
         if not absolute_path(context["home"]).is_dir():
             raise CleanupError("service discovery HOME is unavailable")
+        if "review" in context:
+            if absolute_path(context['review']) != absolute_path(data['installation_root']) / '.retention-services.json':
+                raise CleanupError('service review must belong to this installation')
         if "linux_service" in context:
             from deploy.linux_service import validate
             validate(context["linux_service"])
             if context["linux_service"]["home"] != context["home"]:
                 raise CleanupError("service discovery HOME differs from the service binding")
     for key in ["rollback_paths", "cleanup_roots", "candidates", "transactions", "checks"]:
-        if not isinstance(data[key], list) or not 0 < len(data[key]) <= 128:
+        limit = 1024 if key == 'candidates' else 128
+        if not isinstance(data[key], list) or not 0 < len(data[key]) <= limit:
             raise CleanupError(f"{key} must be a nonempty bounded list")
     root = absolute_path(data["installation_root"])
     if os.geteuid() != 0 and root.stat().st_uid != os.geteuid():
@@ -213,10 +220,13 @@ def process_references(candidates: list[Path]) -> dict[Path, list[str]]:
     if os.geteuid() != 0:
         argv.extend(["-a", "-u", str(os.geteuid())])
     found = {p: [] for p in candidates}
+    by_name = {str(path): path for path in candidates}
     for pid, descriptor, path in parse_lsof(scan_command(argv)):
-        for candidate in candidates:
-            if path == candidate or path.is_relative_to(candidate):
+        name = str(path)
+        while name:
+            if candidate := by_name.get(name):
                 found[candidate].append(f"pid {pid}: {descriptor}")
+            name = name.rpartition('/')[0] or ('/' if name != '/' else '')
     ps = scan_command(["ps", "-axo", "pid=,uid=,args="]).decode(errors="surrogateescape")
     for line in ps.splitlines():
         parts = line.strip().split(None, 2)

@@ -25,12 +25,12 @@ import type {
 import type { Space } from "../protocol";
 import type { SessionMessageNavigation } from "../session-messages";
 import type { LoadTurnFilePage } from "../turn-file-pages";
-import { usageForTurn, type TurnUsageReadings } from "../turn-usage";
 import { MessageBlock } from "./MessageBlock";
 import { assistantContinuations, ContinuationRenderKeys, continuationTerminalOwner, type AssistantContinuation } from "../assistant-continuations";
-import { returnRunId, returnedAgents } from "../agent-returns";
+import { isReturnReceipt, returnRunId, returnedAgents } from "../agent-returns";
 import { TimedMessageTag } from "./TimedMessageTag";
 import { Icon, ClaudeMark, EngineWorking, EngineDone } from "../icons";
+import { WorkingWord } from "./WorkingWord";
 import { canForkTurn } from "../session-worktree";
 import { sidebarDragIntent } from "../responsive-layout";
 import {
@@ -96,9 +96,11 @@ import { presentAsyncQuestionReplies } from "../async-question-presentation";
 import { bookmarkedReadingNode, captureReadingBookmark, captureReadingPosition, readingPositionDelta, type ReadingPosition } from "../reading-position";
 import type { ChatReadingState } from "../chat-reading-memory";
 import type { QueryAcceptanceResult } from "../outbox";
+import type { DshApiClient } from "../dsh-api";
+import { DshRecommendation } from "./DshRecommendations";
+import { recommendationTurn, useDshRecommendations } from "../dsh-recommendations";
 
 const SessionMessageLinks = lazy(() => import("./SessionMessageLinks"));
-const TurnUsageIndicator = lazy(() => import("./TurnUsageIndicator").then(m => ({ default: m.TurnUsageIndicator })));
 const DshProducedFiles = lazy(() => import("./DshProducedFiles"));
 const AsyncQuestionCard = lazy(() => import("./AsyncQuestionCard"));
 const AsyncQuestionHost = lazy(() => import("./AsyncQuestionDialog"));
@@ -324,7 +326,7 @@ export interface ChatViewHandle {
   prepareLayoutChange: () => void;
 }
 
-export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "claude", loading,
+export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", loading,
   hasMore: incomingHasMore,
   historyPagingReady = true,
   historyRevision = null, historyViewRevision = historyRevision,
@@ -341,7 +343,7 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
   onTextSelectionGuardChange,
   externalPlanProgress,
   onOpenAgent,
-  sessionLink, onOpenSession,
+  sessionLink, onOpenSession, dshApi, onDshPlugin,
   activeTurnId = null,
   ambiguousActiveTurnIds = [],
   initialReadingState, onReadingStateSave,
@@ -349,7 +351,8 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
   ref?: Ref<ChatViewHandle>;
   sessionLink?: SessionMessageNavigation["sessionLink"];
   onOpenSession?: (nativeId: string) => void;
-  turnUsage?: TurnUsageReadings;
+  dshApi?: DshApiClient;
+  onDshPlugin?: (name: string) => void;
   sid: string | null;
   turns: Turn[];
   initialReadingState?: ChatReadingState;
@@ -417,6 +420,7 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
    * Empty for idle/browse/missing-owner states, which must stay fail-closed. */
   ambiguousActiveTurnIds?: readonly string[];
 }) {
+  const recommendations = useDshRecommendations(engine === "dsh" ? dshApi : undefined, sid, incomingTurns);
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentSizerRef = useRef<HTMLDivElement>(null);
   const controllerRef = useRef<ScrollFollowController | null>(null);
@@ -2958,6 +2962,8 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
             const generatedImages = generatedOutputImages(timelineBlocks);
             const modelNotices = modelFallbackNotices(timelineBlocks);
             const narrative = assistantContinuations(timelineBlocks, finalBlocks, engine, t.responseProcesses);
+            const taskContinuation = engine === "dsh" && timelineBlocks.some(block =>
+              isReturnReceipt(block) && block.kind === "process" && block.processKind === "task");
             continuationRenderKeysRef.current.apply(t.id, narrative.continuations);
             const renderAgentReturn = (receipt: ProcessBlock) => {
               const runId = returnRunId(receipt);
@@ -2966,6 +2972,13 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
                 <span>代理返回 · {receipt.summary || receipt.title}</span><Icon name="chev" size={13} />
               </button> : null;
             };
+            const renderContinuationBoundary = (receipts: ProcessBlock[], startedTs?: number, standalone = false) => (
+              <div className={`background-followup-boundary${standalone ? " turn-continuation" : ""}`}>
+                {receipts.map(renderAgentReturn)}
+                <span>{engine === "codex" ? "Codex 收到后台消息，继续处理" : engine === "dsh" ? "DeepSeek 继续处理" : "Claude 继续处理"}</span>
+                {startedTs != null && <time>{formatTime(startedTs)}</time>}
+              </div>
+            );
             const lastContinuation = narrative.continuations.at(-1);
             const terminalContinuation = engine === "claude"
               ? continuationTerminalOwner(t, narrative.continuations) : undefined;
@@ -3232,12 +3245,8 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
                   turnNodeRefs.current.delete(t.id);
                 }
               }}>
-            {t.continuation && !t.prompt && (
-              <div className="turn-continuation">
-                {returnedAgents(timelineBlocks).map(renderAgentReturn)}
-                <span>收到子代理结果，继续处理</span>
-              </div>
-            )}
+            {(t.continuation || taskContinuation) && !t.prompt
+              && renderContinuationBoundary(returnedAgents(timelineBlocks), t.ts, true)}
             {(t.prompt || (t.images && t.images.length) || (t.imageRefs && t.imageRefs.length) || (t.files && t.files.length)) && (
               <div className="ubub-wrap">
                 {t.prompt && <div className="ubub">
@@ -3324,16 +3333,14 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
                 {narrative.answers.map(renderAnswer)}
                 {narrative.continuations.map((segment) => (
                   <div key={segment.renderKey} className="background-followup">
-                    <div className="background-followup-boundary">
-                      {segment.returns.map(renderAgentReturn)}
-                      <span>{engine === "codex" ? "Codex 收到后台消息，继续处理" : engine === "dsh" ? "DSH 继续处理" : "Claude 继续处理"}</span>
-                      {segment.startedTs != null && <time>{formatTime(segment.startedTs)}</time>}
-                    </div>
+                    {renderContinuationBoundary(segment.returns, segment.startedTs)}
                     {renderProcess(segment)}
                     {segment.answers.map(renderAnswer)}
                   </div>
                 ))}
                 {engine === "dsh" && onOpenFile && <Suspense fallback={null}><DshProducedFiles turn={t} onOpen={onOpenFile} /></Suspense>}
+                {engine === "dsh" && dshApi && sid && onDshPlugin && recommendations.items.filter(item => recommendationTurn(item, t)).map(item =>
+                  <DshRecommendation key={item.id} item={item} sid={sid} api={dshApi} onOpen={onDshPlugin} onRefresh={recommendations.refresh} />)}
                 {t.error && <TurnProblem message={t.error} continuing={activeTurnIndex > ti}
                   hasVisibleContent={showProcessTimeline || finalBlocks.length > 0 || generatedImages.length > 0} />}
                 {/* Final metadata already has a stable row. While running,
@@ -3389,10 +3396,8 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
               {showWorking && (
                 <div className="turn-working" role="status" aria-live="polite">
                   <EngineWorking engine={engine} size={24} />
-                  <span className="turn-working-tx">{workingLabel}</span>
-                  {usageForTurn(t, turnUsage) && <Suspense fallback={null}>
-                    <TurnUsageIndicator key={`${sid}:${t.id}`} usage={usageForTurn(t, turnUsage)} />
-                  </Suspense>}
+                  <span className="turn-working-tx">{t.progress ?? <WorkingWord
+                    scope={`${engine}:${processOpenKey}`} label={workingLabel} />}</span>
                   {!showCompletionFooter && <Suspense fallback={null}>
                     <PagePreviewLinks turn={t} sid={sid} />
                   </Suspense>}

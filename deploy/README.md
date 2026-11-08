@@ -150,6 +150,9 @@ Linux discovery reads the installed systemd system/global/user load paths and
 the actual `UnitPath` of running managers, including runtime and generated units.
 Missing tools, unreachable managers or unreadable directories defer cleanup;
 there is no fallback to a partial hard-coded directory list.
+If a login manager exits between discovery and its D-Bus query, discovery is
+restarted in full, up to three attempts. No manager is silently skipped and no
+partial inventory is reused; persistent query failure still defers cleanup.
 Environment-file discovery handles spaced assignments and continued lines,
 preserves literal spaces in filenames, and retains dependencies even across
 overrides/resets. Unresolved specifiers, wildcards or ambiguous quoting/escapes
@@ -174,6 +177,8 @@ installer's isolated Python `wrapper_exec.py` command. Hosts with unresolved
 indirect commands need an explicitly reviewed retention inventory; a successful
 update can therefore retain more than one previous generation. Discovery never
 executes a service or recursively crawls arbitrary external directories.
+The Relay uses the same isolated absolute-script entrypoint contract through
+`relay_exec.py`, so its own Python module lookup no longer blocks retention.
 The generated inventory also stores the service discovery context. Cleanup
 rediscovers load paths, definitions, environment files and aliases before each
 quarantine rename and permanent deletion, after any artifact tree walk. A newly
@@ -189,6 +194,42 @@ Unknown backups/uploads and external legacy roots remain outside automatic
 deletion and still require the reviewed agent inventory below. Configuration
 backup `files.json` records each original destination, absence, owner and mode;
 keep it with that generation for administrator-controlled recovery.
+
+For a host whose existing indirect system services have been inspected, an
+operator may reuse that review across deployments. Run
+`python deploy/retention_services.py --root <installation-root> --output <private-draft>
+--protect <runtime-or-alias> --extra-file <indirect-command-input> --note <review-summary>`.
+Repeat `--protect` for every dependency discovered by reviewing indirect commands,
+and `--extra-file` for their external scripts/configuration inputs. This only
+creates a draft: inspect the complete service inventory and inputs, then mark
+its `status` as `reviewed` and install it as `.retention-services.json` in the
+installation root, mode 0600 and owned by the installation owner. Do not approve
+a draft merely to silence a cleanup error. Secrets remain in their existing
+files; the review stores content fingerprints, not environment-file contents.
+
+This review is bound to all persistent service definitions, aliases, load paths,
+external environment files (including optional missing files), and declared
+inputs. A change invalidates it and defers cleanup until a fresh review. Only
+the deterministic `%p` prefix of a literal non-template systemd service is
+resolved for environment-file discovery; other dynamic inputs still defer.
+Transient services are scanned afresh. Transient login scopes cannot launch a
+dormant command, so their ordinary churn does not invalidate the review; their
+path references and all running processes remain protected. Declared runtime
+aliases are resolved again on every check. The review never suppresses direct
+candidate references, process/open-file checks, or retained dependency closure.
+Literal executable, script, working-directory, environment and search-path
+dependencies are also rediscovered through symlink chains on every check, even
+when an indirect command is covered by the review. They need no separate
+`--protect` declaration; that list covers dependencies hidden by indirection.
+
+Each retention attempt writes `.retention-status.json`, including its outcome,
+defer reason, protected dependencies, and untracked release count. Untracked
+legacy directories require a separate reviewed cleanup inventory; they are not
+silently adopted or deleted. A single inventory accepts up to 1024 candidates so
+all candidates participate in one dependency closure. Do not split a dependency
+universe into independent batches merely to fit a limit. Reports distinguish
+allocated bytes removed from the observed change in available filesystem space;
+the latter also includes concurrent activity on that filesystem.
 
 **v4.0.10 introduces automatic retention and Linux legacy migration.**
 These take effect through its installer bundle, including upgrades initiated by

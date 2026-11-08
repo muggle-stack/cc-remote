@@ -6,7 +6,7 @@ import "./CenteredSheet.css";
 
 /** Shared selection surface, centered in the visible chat on every device. */
 export function CenteredSheet({ open, label, onClose, children, className = "",
-  maxWidth = 520, maxHeight = 720, minimumHeight = 360, header = true, returnFocusRef }: {
+  maxWidth = 520, maxHeight = 720, minimumHeight = 360, header = true, returnFocusRef, viewport = false }: {
   open: boolean;
   label: string;
   onClose: () => void;
@@ -17,6 +17,8 @@ export function CenteredSheet({ open, label, onClose, children, className = "",
   /** Allow content-heavy pickers to use the visible viewport when chat space is short. */
   minimumHeight?: number;
   header?: boolean;
+  /** Sidebar actions must remain visible while the chat is shifted offscreen. */
+  viewport?: boolean;
   /** Touch browsers may leave the trigger unfocused when opening a dialog. */
   returnFocusRef?: RefObject<HTMLElement | null>;
 }) {
@@ -24,7 +26,7 @@ export function CenteredSheet({ open, label, onClose, children, className = "",
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
   const geometry = useChatDialogGeometry({
-    open, maxWidth, maxHeight, minimumHeight,
+    open, maxWidth, maxHeight, minimumHeight, viewport,
   });
   const visible = open && !!geometry;
   useEffect(() => {

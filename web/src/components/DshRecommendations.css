@@ -1,0 +1,11 @@
+.dsh-recommendation{border:1px solid var(--border-strong);border-radius:13px;background:var(--surface);padding:12px 14px;margin:14px 0;color:var(--text);font-size:13px}
+.dsh-recommendation-heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.dsh-recommendation small{color:var(--dim);font-size:11px}
+.dsh-recommendation-body{display:flex;gap:12px;align-items:flex-start}
+.dsh-recommendation-body>svg{flex:none;color:var(--accent);margin-top:3px}
+.dsh-recommendation-body>div{min-width:0}
+.dsh-recommendation strong{font-weight:600}
+.dsh-recommendation p{margin:4px 0;color:var(--dim);line-height:1.6;overflow-wrap:anywhere}
+.dsh-recommendation-actions{display:flex;justify-content:flex-end;gap:14px;flex-wrap:wrap;margin-top:10px}
+.dsh-recommendation-actions button{background:none;border:0;color:var(--accent);padding:5px 0;font-size:12px}
+.dsh-recommendation-actions button:disabled{opacity:.5}

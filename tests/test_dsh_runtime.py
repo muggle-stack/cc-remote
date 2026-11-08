@@ -463,7 +463,7 @@ async def test_history_image_uses_attachment_reader_not_full_content_entry(trunc
         return snapshot
     async def attachment(endpoint, args):
         assert endpoint == "session/attachment"
-        assert args == {"request": {"sessionId": "session", "attachmentId": "picture"}}
+        assert args == {"request": {"sessionId": "session", "attachment": snapshot["records"][1]["event"]["data"]["content"][-1]["attachment"]}}
         return {"data": data, "attachment": {"mediaType": "image/png"}}
     client.history_snapshot, client.rpc = read, attachment
 

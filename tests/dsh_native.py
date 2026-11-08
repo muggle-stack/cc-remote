@@ -12,12 +12,13 @@ import signal
 import socket
 import subprocess
 import tempfile
+import textwrap
 from cc_remote.wrapper.dsh_client import DshClient, DshConnection, TESTED_DSH_VERSION
 
 REPO = Path(__file__).resolve().parents[1]
 
 
-async def exercise(installation, root):
+async def exercise(installation, root, *, product_only=False):
     assert (
         json.loads(
             (installation / "node_modules/@deepseek-ai/dsh/package.json").read_text()
@@ -31,9 +32,14 @@ async def exercise(installation, root):
         REPO / "tests/fixtures/dsh/scripted-adapter.mjs", root / "scripted-adapter.mjs"
     )
     (root / "toggle-fixture.mjs").write_text("export function apply() {}\n")
+    # Explicitly opt the isolated preset into the upstream optional tool. The
+    # installation and operator presets stay untouched.
+    standard = (installation / "node_modules/@deepseek-ai/dsh-web-app/presets/standard.patch.yml").read_text()
+    patch_preset = textwrap.dedent(standard.split("- insert:\n", 1)[1]).replace("applyPatch: false", "applyPatch: true")
     (root / "patch.yml").write_text(
-        "- id: session-query-sqlite\n  config:\n    path: ':memory:'\n    openAt: first-search\n- id: llm-deepseek\n  disabled: true\n- id: llm-pi-ai\n  disabled: true\n- insert:\n"
+        "- id: tool-fs\n  config:\n    applyPatch: true\n- id: session-query-sqlite\n  config:\n    path: ':memory:'\n    openAt: first-search\n- id: llm-deepseek\n  disabled: true\n- id: llm-pi-ai\n  disabled: true\n- insert:\n"
         + f"    - id: cc-remote-metadata\n      name: {json.dumps(str(REPO / 'integrations/dsh/cc-remote.mjs'))}\n    - id: offline-model\n      name: {json.dumps(str(root / 'scripted-adapter.mjs'))}\n    - id: cc-remote-toggle-fixture\n      name: {json.dumps(str(root / 'toggle-fixture.mjs'))}\n"
+        + patch_preset
     )
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -152,8 +158,12 @@ async def exercise(installation, root):
                 if frame.get("event", {}).get("type") == "turn/end":
                     done.set()
 
+        passive_before = (await (await client._connection()).http.get("/api/cc-remote.test-state")).json()
         task = asyncio.create_task(watch())
         await asyncio.wait_for(ready.wait(), 10)
+        passive_after = (await (await client._connection()).http.get("/api/cc-remote.test-state")).json()
+        assert passive_before == passive_after
+        print("PASS passive follow does not activate an Agent or model turn", flush=True)
         await client.rpc(
             "session/prompt",
             {
@@ -230,6 +240,13 @@ async def exercise(installation, root):
                 "PASS Wrapper create, model selection, streaming, native terminal",
                 flush=True,
             )
+            if product_only:
+                from tests.dsh_native_plugins import exercise as exercise_plugins
+                from tests.dsh_native_product import exercise as exercise_product
+
+                await exercise_plugins(machine, runtime, ctx.key)
+                await exercise_product(machine, runtime, ctx.key)
+                return
             for operation in ["ask", "approval", "multi"]:
                 count = len(ends())
                 await machine._handle(
@@ -347,6 +364,14 @@ async def exercise(installation, root):
                 e.name == "diff-fixture.txt" for e in artifacts.entries
             ), artifacts
             print("PASS native file mutations enter current Artifacts", flush=True)
+            count = len(ends())
+            await machine._handle(Query(sid=ctx.key, prompt="compatibility:patch", msg_id="native-patch"))
+            await wait(lambda: len(ends()) > count and ctx.state == "idle")
+            assert (root / "patch-fixture.txt").read_text() == "native patch output\n"
+            artifacts = await machine._handle(GetSessionArtifacts(sid=ctx.key, engine="dsh",
+                request_id="patch-artifacts", client_id="native-test"))
+            assert any(e.name == "patch-fixture.txt" for e in artifacts.entries), artifacts
+            print("PASS native apply_patch acknowledged outputs enter Artifacts", flush=True)
             receipt = await (await client._connection()).http.post(
                 "/api/cc-remote.test-job", json={"sessionId": ctx.sdk.native_id}
             )
@@ -405,6 +430,10 @@ async def exercise(installation, root):
                     and not any(
                         c.get("activity") == "running" for c in ctx.sdk.children
                     )
+                    and any(m.type == "turn_binding" and m.sid == ctx.key
+                            and m.continuation == "subagent"
+                            and any(end.turn_id == m.turn_id for end in ends())
+                            for m in transport.sent)
                 )
             )
             child_page = await client.history_snapshot("dsh@" + child["id"])
@@ -417,12 +446,21 @@ async def exercise(installation, root):
             image = io.BytesIO()
             Image.new("RGB", (2, 2), (30, 90, 180)).save(image, format="PNG")
             count = len(ends())
-            await machine._handle(Query(sid=ctx.key, prompt="compatibility:attachments", msg_id="attachment-probe",
+            admitted = await machine._handle(Query(sid=ctx.key, prompt="compatibility:attachments", msg_id="attachment-probe",
                 files=[{"filename":"fixture.txt", "data":base64.b64encode(b"offline fixture").decode()}],
                 images=[{"media_type":"image/png", "data":base64.b64encode(image.getvalue()).decode()}]))
-            await wait(lambda: len(ends()) > count and ctx.state == "idle")
+            assert not admitted, admitted
+            await wait(lambda: ctx.state == "idle" and any(
+                m.type == "turn_binding" and m.sid == ctx.key and m.msg_id == "attachment-probe"
+                and any(end.turn_id == m.turn_id for end in ends()) for m in transport.sent))
             history = await machine._handle(GetHistory(session_id=ctx.key, detail="summary", client_id="native-test"))
             assert any(t.imageRefs for t in history.turns), history
+            from cc_remote.protocol import GetHistoryImage
+            image_turn = next(t for t in history.turns if t.imageRefs)
+            image_reply = await machine._handle(GetHistoryImage(session_id=ctx.key, turn_id=image_turn.id,
+                image_id=image_turn.imageRefs[0]["image_id"], revision=history.revision,
+                variant="full", request_id="native-image", client_id="native-test"))
+            assert image_reply.data and not image_reply.error, image_reply
             print("PASS native file/image admission and deferred history", flush=True)
             plugins = await machine._handle(ReadDsh(sid=ctx.key, kind="plugins", cmd_id="plugins", client_id="native-test"))
             toggle = next(item for item in plugins.items if "toggle-fixture" in item.title)
@@ -471,8 +509,12 @@ async def exercise(installation, root):
             await wait(lambda: command_ctx.sdk.state.plan_active)
             assert command_ctx.state == "idle"
             print("PASS native command as the first new-session input", flush=True)
+            from tests.dsh_native_plugins import exercise as exercise_plugins
+            await exercise_plugins(machine, runtime, ctx.key)
             from tests.dsh_native_surfaces import exercise as exercise_surfaces
             await exercise_surfaces(machine, runtime, ctx.key, child)
+            from tests.dsh_native_product import exercise as exercise_product
+            await exercise_product(machine, runtime, ctx.key)
         finally:
             await runtime.close()
 
@@ -488,11 +530,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--installation", type=Path, required=True)
     parser.add_argument("--keep", action="store_true")
+    parser.add_argument("--product-only", action="store_true")
     args = parser.parse_args()
     root = Path(tempfile.mkdtemp(prefix="cc-remote-dsh-v4-"))
     print("Offline probe directory:", root, flush=True)
     try:
-        asyncio.run(exercise(args.installation.resolve(), root))
+        asyncio.run(exercise(args.installation.resolve(), root, product_only=args.product_only))
     finally:
         if not args.keep:
             shutil.rmtree(root)

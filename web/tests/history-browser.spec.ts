@@ -785,6 +785,51 @@ async function mockRightPanelRelay(
   return { commands, emit: (message: PanelRelayEvent) => emit(message) };
 }
 
+for (const [engine, space] of [["claude", "code"], ["codex", "code"], ["claude", "work"]] as const) {
+  test(`session delete confirmation uses app styling and exact ${engine} ${space} target`, async ({ page }, info) => {
+    const relay = await mockRightPanelRelay(page, { engine, retained: false,
+      listReply: command => ({ type: "session_list", request_id: String(command.cmd_id), engine,
+        space: command.space === "work" ? "work" : "code", sessions: [{
+          session_id: "delete-target", engine, space, summary: "待删除的测试会话",
+          cwd: "/tmp/delete-test", state: "idle", last_modified: "100",
+        }] }),
+    });
+    if (space === "work") await page.addInitScript(() => localStorage.setItem("cc_remote_space", "work"));
+    const nativeDialogs: string[] = [];
+    page.on("dialog", async dialog => { nativeDialogs.push(dialog.type()); await dialog.dismiss(); });
+    await page.goto("/");
+    await page.getByLabel("显示会话侧栏", { exact: true }).click();
+    if (space === "work") await page.getByRole("tab", { name: "Work", exact: true }).click();
+    const card = page.locator(".scard").filter({ hasText: "待删除的测试会话" }).first();
+    const noun = space === "work" ? "工作" : "会话";
+    const open = async () => {
+      await card.getByRole("button", { name: "更多操作" }).click();
+      await page.locator(".card-menu").getByRole("button", { name: `删除${noun}`, exact: true }).click();
+    };
+    await open();
+    const dialog = page.getByRole("dialog", { name: space === "work" ? "删除这项工作？" : "删除这条会话？" });
+    await expect(dialog).toContainText("待删除的测试会话");
+    await expect(dialog).toContainText(space === "work" ? "私有文件将被永久删除" : "项目目录和代码文件会保留");
+    await expect(page.locator(".card-menu")).toHaveCount(0);
+    await page.screenshot({ path: info.outputPath(`delete-${engine}-${space}.png`) });
+    await dialog.getByRole("button", { name: "取消", exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(relay.commands.filter(c => c.type === "delete_session")).toEqual([]);
+    await open();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    expect(relay.commands.filter(c => c.type === "delete_session")).toEqual([]);
+    await open();
+    await dialog.getByRole("button", { name: `删除${noun}`, exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect.poll(() => relay.commands.filter(c => c.type === "delete_session").length).toBe(1);
+    expect(relay.commands.find(c => c.type === "delete_session")).toMatchObject({
+      session_id: "delete-target", engine, space,
+    });
+    expect(nativeDialogs).toEqual([]);
+  });
+}
+
 for (const engine of ["claude", "codex"] as const) {
   test(`side chat scope shows ${engine} background tasks independently of the parent and siblings`, async ({ page, isMobile }, testInfo) => {
     await page.setViewportSize(isMobile ? { width: 390, height: 844 } : { width: 1568, height: 900 });
@@ -14757,69 +14802,67 @@ test("session action menu keeps keyboard navigation and closes when its card scr
   await expect(menu).toHaveCount(0);
 });
 
-for (const engine of ["codex", "claude"]) {
-  test(`live token usage ${engine} updates and opens above the composer`, async ({ page, isMobile }, testInfo) => {
+for (const engine of ["codex", "claude", "dsh"]) {
+  test(`working words ${engine} replace token counters without changing native states`, async ({ page }) => {
+    await page.clock.install({ time: new Date("2026-11-09T00:00:00Z") });
     await page.goto(`/tests/history-browser.html?turn-usage&engine=${engine}&theme=dark`);
-    const trigger = page.getByRole("button", { name: "查看 token 用量" });
-    await expect(trigger).toContainText("↑ 184k");
-    await expect(trigger).toContainText("↓ 2.4k tokens");
-    const card = page.getByRole("dialog", { name: "Token 用量", exact: true });
-    if (!isMobile) await trigger.hover();
-    await trigger.focus();
-    await expect(card).toBeHidden();
-    await expect(trigger).toHaveAttribute("aria-expanded", "false");
-    await trigger.click();
-    await expect(card).toBeVisible();
-    await expect(card).toContainText("184,001");
-    await expect(trigger).toHaveCSS("color", await card.locator(".turn-usage-heading > span")
-      .evaluate(node => getComputedStyle(node).color));
-    await expect(card).toContainText("180,000");
-    const bounds = await card.boundingBox();
-    const composer = await page.locator(".composer").boundingBox();
-    expect(bounds!.y).toBeGreaterThanOrEqual(0);
-    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(composer!.y + 1);
-    expect(bounds!.x).toBeGreaterThanOrEqual(0);
-    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
-    // The compact counter and detail show the latest native reading directly.
+    const working = page.locator(".turn-working");
+    const word = working.locator(".working-word-layer.is-current");
+    await expect(word).toHaveText(/\S+\.\.\.$/);
+    const initial = await word.textContent();
+    await expect(page.getByRole("button", { name: "查看 token 用量" })).toHaveCount(0);
+    await expect(working).not.toContainText("tokens");
+    await expect(word).toHaveCSS("animation-duration", "3s, 0.25s");
+    await expect(word).toHaveCSS("--working-word-base", "#DB7C5E");
+    if (engine === "claude") {
+      await expect(working.locator(".is-alternating > img")).toHaveCSS(
+        "animation-name", "claude-working-entry, claude-working-alternating");
+    } else {
+      await expect(working.locator(".claude-working-mark")).toHaveCount(0);
+      await expect(working.locator("svg")).toBeVisible();
+    }
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
     await page.getByRole("button", { name: "更新用量" }).evaluate(el => (el as HTMLButtonElement).click());
-    await expect(card).toContainText("5,820");
-    await expect(card).toContainText("182,000");
-    await expect(trigger).toContainText("↓ 5.8k tokens");
-    await page.screenshot({ path: testInfo.outputPath("token-usage.png") });
-    await page.keyboard.press("Escape");
-    await expect(card).toBeHidden();
-    await trigger.click();
-    await expect(card).toBeVisible();
-    await trigger.click();
-    await expect(card).toBeHidden();
-    await trigger.click();
-    await expect(card).toBeVisible();
+    await expect(word).toHaveText(initial!);
+    await page.clock.runFor(8100);
+    await expect(word).not.toHaveText(initial!);
+    const rotated = await word.textContent();
+    await page.getByRole("button", { name: "切换会话显示" }).click();
+    await expect(working).toHaveCount(0);
+    await page.getByRole("button", { name: "切换会话显示" }).click();
+    await expect(word).toHaveText(rotated!);
+    await page.getByRole("button", { name: "压缩提示" }).click();
+    await expect(working).toContainText("正在压缩上下文");
+    await expect(word).toHaveCount(0);
     await page.getByRole("button", { name: "结束任务" }).click();
-    await expect(trigger).toBeHidden();
-    await expect(card).toBeHidden();
+    await expect(working).toHaveCount(0);
+    await expect(page.locator(".turn-done-mark")).toBeVisible();
   });
 }
 
-test("live token usage updates immediately and supports explicit keyboard activation", async ({ page }) => {
+test("working words preserve the original Claude completed click replay", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "no-preference" });
-  await page.clock.install({ time: new Date("2026-09-16T10:00:00Z") });
+  await page.clock.install({ time: new Date("2026-11-09T00:00:00Z") });
   await page.goto("/tests/history-browser.html?turn-usage&engine=claude");
-  const trigger = page.getByRole("button", { name: "查看 token 用量" });
-  const card = page.getByRole("dialog", { name: "Token 用量", exact: true });
-  await expect(trigger).toContainText("↑ 184k");
-  await expect(trigger).toContainText("↓ 2.4k tokens");
+  await page.getByRole("button", { name: "结束任务" }).click();
+  const mark = page.locator(".engine-done-mark");
+  await expect(mark.locator(".engine-brand-icon.claude")).toBeVisible();
   await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
-  await trigger.focus();
-  await expect(card).toBeHidden();
-  await trigger.press("Enter");
-  await expect(card).toBeVisible();
-  await trigger.press("Space");
-  await expect(card).toBeHidden();
-  await trigger.press("Enter");
-  await page.getByRole("button", { name: "更新用量" }).evaluate(el => (el as HTMLButtonElement).click());
-  await expect(trigger).toContainText("↓ 5.8k tokens");
-  await page.locator(".composer").dispatchEvent("pointerdown");
-  await expect(card).toBeHidden();
+  await mark.click();
+  const sprite = mark.locator(".claude-working-mark > img");
+  await expect(sprite).toHaveCSS("animation-name", "claude-working-frames");
+  await expect(sprite).toHaveCSS("animation-duration", "0.81s");
+  await expect(sprite).toHaveCSS("animation-iteration-count", "1");
+  await expect(mark.locator(".is-alternating")).toHaveCount(0);
+  await page.clock.runFor(810);
+  await expect(mark.locator(".engine-brand-icon.claude")).toBeVisible();
+  await mark.press("Enter");
+  await expect(sprite).toBeVisible();
+  await page.clock.runFor(810);
+  await expect(mark.locator(".engine-brand-icon.claude")).toBeVisible();
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await mark.click();
+  await expect(sprite).toHaveCount(0);
 });
 
 

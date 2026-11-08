@@ -1,14 +1,10 @@
 /** Bounded authenticated integration endpoints over native DSH services. */
 import { createRequire } from 'node:module';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, normalize, relative, resolve } from 'node:path';
 export const name = 'cc-remote-metadata';
 export const inject = ['connection', 'sessionQuery', 'agents', 'commands', 'agentPresets', 'skills'];
 const SID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,123}$/u;
 export function apply(ctx) {
-  ctx.inject(['schedule'], scoped => {
-    scoped.connection.fetch.register({ path: '/api/cc-remote.schedule', methods: ['POST'], requestBody: 'buffered',
-      fetch: request => createSchedule(scoped, request) });
-  });
   ctx.connection.fetch.register({ path: '/api/cc-remote.catalog', methods: ['GET'], requestBody: 'buffered', fetch: request => catalog(ctx, request) });
   ctx.connection.fetch.register({ path: '/api/cc-remote.metadata', methods: ['GET'], requestBody: 'buffered', fetch: request => metadata(ctx, request) });
 }
@@ -28,20 +24,34 @@ export async function metadata(ctx, request) {
         filters:[{kind:'type',values:['user/message','assistant/message']},{kind:'surface',values:['current']}],limit:20});
       matchSeq = matches.items.find(e => e.sessionId === sid && e.surface === 'current')?.seq;
     }
-    const body = JSON.stringify({contract:2,version:createRequire(process.argv[1])('@deepseek-ai/dsh/package.json').version,
-      sessionId:sid,commands:ctx.commands.list(live ?? lease.key),deliverables:producedFiles(observation.events),matchSeq});
+    const body = JSON.stringify({contract:3,version:createRequire(process.argv[1])('@deepseek-ai/dsh/package.json').version,
+      sessionId:sid,commands:ctx.commands.list(live ?? lease.key),deliverables:producedFiles(observation.events, observation.header.cwd),matchSeq});
     if (Buffer.byteLength(body) > 1024 * 1024) return Response.json({}, {status:413});
     return new Response(body,{headers:{'content-type':'application/json','cache-control':'no-store'}});
   } catch { return Response.json({}, {status:503}); }
   finally { await lease?.[Symbol.asyncDispose](); observation?.[Symbol.dispose](); }
 }
-export function producedFiles(events) {
-  const calls = new Map(), files = new Map();
+export function producedFiles(events, cwd) {
+  const calls = new Map(), patches = new Map(), files = new Map();
   for (const event of events) {
     if (event.surfaceOp && typeof event.surfaceOp === 'object') continue;
     const data = event.data;
     if (event.type === 'tool/call') {
       let args; try {args = JSON.parse(data.arguments);} catch {continue;}
+      if (data.name === 'apply_patch' && typeof args?.input === 'string') {
+        const paths = new Set();
+        for (const line of args.input.split('\n')) {
+          const match = /^\*\*\* (?:Add File|Update File|Delete File|Move to): ([^\0\r\n]{1,4096})$/u.exec(line);
+          if (!match) continue;
+          paths.add(normalize(match[1]));
+          if (typeof cwd === 'string' && isAbsolute(cwd)) {
+            const absolute = resolve(cwd, match[1]);
+            paths.add(absolute);
+            paths.add(relative(cwd, absolute));
+          }
+        }
+        patches.set(data.callId, paths);
+      }
       const path = ['write','edit'].includes(data.name) ? args?.file_path
         : data.name === 'str_replace_editor' && ['create','str_replace','insert'].includes(args?.command) ? args.path : null;
       if (typeof path === 'string' && path.trim() && path.length <= 4096) calls.set(data.callId,path);
@@ -49,6 +59,22 @@ export function producedFiles(events) {
     if (event.type === 'tool/result' && !data.error && !data.message?.isError) {
       const path = calls.get(data.message?.toolCallId);
       if (path) files.set(path,{path,label:'创建或修改的文件'});
+      if (patches.has(data.message?.toolCallId)) {
+        // 0.2.2's canonical renderer names only completed operations in these
+        // sections. Never infer successful output paths from the patch input:
+        // a commit may stop partway through and leave later operations undone.
+        const text = (data.message.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('\n');
+        const completed = text.startsWith('Success. Updated the following files:\n') ? text.split('\n').slice(1)
+          : /^Patch stopped after \d+ of \d+ operations\.\nCompleted:\n/u.test(text)
+            ? text.split('\n').slice(2) : [];
+        for (const line of completed) {
+          if (/^(Failed|Outcome unknown|Not executed):$/u.test(line)) break;
+          const match = /^([AMD]) ([^\0\r\n]{1,4096})$/u.exec(line);
+          if (!match || !patches.get(data.message.toolCallId).has(normalize(match[2]))) continue;
+          if (match[1] === 'D') files.delete(match[2]);
+          else files.set(match[2], {path:match[2],label:'创建或修改的文件'});
+        }
+      }
     }
     if (event.type === 'deliverables/presented') for (const file of data.files ?? []) {
       if (typeof file.path === 'string' && file.path.trim() && file.path.length <= 4096) files.set(file.path,{path:file.path,label:String(file.description ?? '交付文件').slice(0,4096)});
@@ -69,37 +95,10 @@ export async function catalog(ctx, request) {
     const { isUserInvocable } = require('@deepseek-ai/dsh-skill');
     const skills = (await ctx.skills.list({cwd, scope: lease.key})).filter(isUserInvocable)
       .slice(0,500).map(({name,description}) => ({name, description}));
-    const body = JSON.stringify({contract:2,version:require('@deepseek-ai/dsh/package.json').version,
+    const body = JSON.stringify({contract:3,version:require('@deepseek-ai/dsh/package.json').version,
       skills,commands:ctx.commands.list(lease.key)});
     if (Buffer.byteLength(body) > 1024*1024) return Response.json({}, {status:413});
     return new Response(body,{headers:{'content-type':'application/json','cache-control':'no-store'}});
   } catch { return Response.json({}, {status:503}); }
   finally { await lease?.[Symbol.asyncDispose](); }
-}
-
-/** Native Host creation does not activate an Agent or run a model turn. */
-export async function createSchedule(ctx, request) {
-  let body;
-  try {
-    const text = await request.text();
-    if (Buffer.byteLength(text) > 32768) return Response.json({}, {status:413});
-    body = JSON.parse(text);
-  } catch { return Response.json({}, {status:400}); }
-  const allowed = ['title','prompt','after_seconds','at','every_seconds','daily','weekly','cron'];
-  const rule = body?.request;
-  if (!SID.test(body?.sessionId ?? '') || !rule || typeof rule !== 'object' || Array.isArray(rule)
-    || Object.keys(body).some(k => !['sessionId','request'].includes(k))
-    || Object.keys(rule).some(k => !allowed.includes(k))
-    || typeof rule.title !== 'string' || !rule.title.trim() || rule.title.length > 120
-    || typeof rule.prompt !== 'string' || !rule.prompt.trim() || rule.prompt.length > 24000
-    || allowed.slice(2).filter(k => rule[k] !== undefined).length !== 1) return Response.json({}, {status:400});
-  try {
-    const record = await ctx.schedule.create(body.sessionId, rule, request.signal);
-    return Response.json({id:record.id}, {headers:{'cache-control':'no-store'}});
-  } catch (error) {
-    // Native validation errors are safe to classify; never expose prompts,
-    // filesystem details or internal exception strings through this bridge.
-    const invalid = error?.name === 'ScheduleError' || error?.name === 'ScheduleInputError';
-    return Response.json({}, {status:invalid ? 422 : 503});
-  }
 }

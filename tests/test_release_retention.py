@@ -110,6 +110,38 @@ def test_incomplete_unit_path_discovery_never_deletes(fleet, systemd_paths, monk
     assert old.is_dir()
 
 
+@pytest.mark.parametrize('next_state', ['exited', 'replaced', 'unreachable'])
+def test_user_manager_transition_restarts_complete_discovery(systemd_paths, monkeypatch, next_state):
+    home, paths, _ = systemd_paths
+    discover = retention.command
+    inventories = 0
+    queries = 0
+
+    def changing(argv):
+        nonlocal inventories, queries
+        if 'list-units' in argv:
+            inventories += 1
+            if inventories > 1 and next_state == 'exited':
+                return ''
+        if argv[0] == 'runuser':
+            queries += 1
+            if inventories == 1 or next_state == 'unreachable':
+                raise ValueError('user manager is stopping')
+        return discover(argv)
+
+    monkeypatch.setattr(retention, 'command', changing)
+    monkeypatch.setattr(retention.time, 'sleep', lambda delay: None)
+    if next_state == 'unreachable':
+        with pytest.raises(ValueError, match='user manager is stopping'):
+            retention.service_roots({'home': str(home)})
+        assert inventories == queries == 3
+    else:
+        roots = retention.service_roots({'home': str(home)})
+        assert inventories == 2
+        assert all(p in roots for scope in ['system', 'global', 'user', 'live-system'] for p in paths[scope])
+        assert all((p in roots) == (next_state == 'replaced') for p in paths['live-user'])
+
+
 @pytest.mark.parametrize('failure', ['permission', 'dangling-directory'])
 def test_unreadable_unit_directory_never_deletes(fleet, systemd_paths, monkeypatch, failure):
     root, _, activate = fleet
@@ -193,6 +225,12 @@ def test_three_upgrades_keep_current_and_complete_previous_recovery(fleet):
     assert report["status"] == "complete"
     assert third.is_dir() and second.is_dir() and not first.exists()
     assert unknown.is_dir()  # no filename/mtime guessing
+    summary = json.loads((root / retention.STATUS).read_text())
+    assert summary['status'] == 'complete'
+    assert summary['untracked_release_count'] == 1
+    assert summary['untracked_releases'] == [str(unknown)]
+    assert summary['removed_count'] > 0 and summary['available_bytes_after'] > 0
+    assert isinstance(summary['available_change_bytes'], int)
     assert Path(latest["snapshot"]).is_dir() and Path(latest["backup"]).is_dir()
     assert (Path(latest["backup"]) / "0").read_bytes() == service.read_bytes()
     assert Path(latest["backup"]).stat().st_mode & 0o777 == 0o700

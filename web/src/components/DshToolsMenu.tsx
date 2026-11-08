@@ -5,7 +5,7 @@ import type { DshPanelSelection } from "./DshPanel";
 type Kind = DshPanelSelection["kind"];
 import { dshToolLabels } from "../dsh-tool-labels";
 const groups: { label: string; entries: [Kind, string][] }[] = [
-  { label: "会话与任务", entries: [["subagents", "user"], ["jobs", "queue"], ["workflows", "branch"], ["trajectory", "clock"], ["deliverables", "read"], ["schedules", "calendar"]] },
+  { label: "会话与任务", entries: [["subagents", "user"], ["jobs", "queue"], ["workflows", "branch"], ["trajectory", "clock"], ["stats", "sliders"], ["deliverables", "read"], ["schedules", "calendar"]] },
   { label: "配置", entries: [["settings", "sliders"], ["bundles", "archive"], ["presets", "plan"], ["terminals", "bash"], ["plugins", "code"], ["diagnostics", "devices"]] },
 ];
 

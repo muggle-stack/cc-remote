@@ -47,7 +47,14 @@ export class DshApi {
   }
 
   control(sid: string, kind: "job_stop" | "plugin_enable" | "plugin_disable" | "manage" | "terminal", value: string) {
-    return this.request<DshCommandResult>(sid, () => this.transport()?.sendDshControl(sid, kind, value) ?? null);
+    let timeout = 30000;
+    if (kind === "manage") {
+      try {
+        if (["bundle_install", "bundle_update", "market_install"].includes(JSON.parse(value)?.action)) timeout = 660000;
+      } catch { /* The native request validator reports malformed controls. */ }
+    }
+    return this.request<DshCommandResult>(sid, () => this.transport()?.sendDshControl(sid, kind, value) ?? null, undefined,
+      timeout);
   }
 
   async goal(sid: string, action: DshGoalAction) {

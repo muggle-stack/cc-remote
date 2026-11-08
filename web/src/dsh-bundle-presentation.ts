@@ -2,6 +2,7 @@ import type { DshItem } from "./protocol";
 
 const bundled: Record<string, [string, string, string]> = {
   "dsh-base": ["DSH 核心组件", "基础能力与管理功能，随 DSH 更新。", "archive"],
+  "dsh-official-bundles": ["DSH 官方插件", "随 DSH 提供的官方插件组件。", "archive"],
   "dsh-web-app": ["DSH 网页界面", "提供原生网页界面与运行连接。", "globe"],
   "dsh-session-titles": ["会话标题", "自动生成便于识别的会话标题。", "message"],
   "dsh-plugin-market": ["插件市场", "发现插件，查看版本与兼容性。", "archive"],

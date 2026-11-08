@@ -1,6 +1,7 @@
 """Explicit offline acceptance for management, child history and native PTY."""
 import asyncio
 import json
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from cc_remote.protocol import CloseBtw, GetAgentDetail, OpenBtw, Query, ReadDsh, SetDshControl, SyncBtw
@@ -31,19 +32,52 @@ async def exercise(machine, runtime, sid, child):
         request_id=uuid4().hex, client_id=browser))
     assert detail.authoritative and not detail.error and detail.events, detail
     print("PASS native completed child process history", flush=True)
-    schedule = await runtime.client.create_schedule(sid, {"title": "Offline schedule", "prompt": "offline probe", "daily": {"time": "09:00:00", "time_zone": "Asia/Taipei"}})
-    rows = await runtime.client.rpc("schedule/catalog")
-    saved = next(row for row in rows if row["id"] == schedule["id"])
-    assert saved["sessionId"] == sid[4:] and saved["timeZone"] == "Asia/Taipei"
-    expected = {k: saved[k] for k in ("id", "kind", "title", "prompt", "scheduledAt", "time", "timeZone")}
-    changed = await runtime.client.rpc("schedule/update", {"request": {"sessionId": sid[4:], "id": saved["id"],
-        "expected": expected, "title": "Updated offline schedule", "change": {"kind": "weekly", "weekly": {
-            "time": "10:30:00", "time_zone": "Asia/Taipei", "weekdays": [1, 5]}}}})
-    assert not changed.get("code"), changed
-    current = next(row for row in await runtime.client.rpc("schedule/catalog") if row["id"] == saved["id"])
-    assert current["kind"] == "weekly" and current["weekdays"] == [1, 5]
-    await runtime.client.rpc("schedule/delete", {"request": {"sessionId": sid[4:], "id": saved["id"]}})
-    print("PASS native direct schedule creation, timezone and deletion without conversational input", flush=True)
+    async def manage(body, *, success=True):
+        result = await machine._handle(SetDshControl(sid=sid, kind="manage", value=json.dumps(body),
+            client_id=browser, cmd_id=uuid4().hex))
+        assert (result.status == "success") == success, result
+        return result
+    timing = {"kind": "daily", "daily": {"time": "09:00:00", "time_zone": "Asia/Taipei"}}
+    for destination in ({"kind": "session", "sid": sid}, {"kind": "new_once"}, {"kind": "new"}):
+        title = "Offline " + destination["kind"]
+        await manage({"action": "schedule_create", "request": {
+            "title": title, "prompt": "hi", "timing": timing, "target": destination}})
+        task = next(row for row in (await read("schedules")).items if row.title == title)
+        assert task.data["timeZone"] == "Asia/Taipei" and task.data["target"]["kind"] == destination["kind"]
+        if destination["kind"] != "session":
+            assert not task.sid  # reserved new_once identity is not a real Session
+        stale = task.data["updatedAt"]
+        await manage({"action": "schedule_pause", "id": task.id, "expectedUpdatedAt": stale})
+        task = next(row for row in (await read("schedules")).items if row.id == task.id)
+        assert task.state == "paused"
+        await manage({"action": "schedule_resume", "id": task.id, "expectedUpdatedAt": stale}, success=False)
+        await manage({"action": "schedule_resume", "id": task.id, "expectedUpdatedAt": task.data["updatedAt"]})
+        await manage({"action": "schedule_run", "id": task.id})
+        history = await read("schedule_history", query=task.id)
+        assert len(history.items) == 1 and history.items[0].sid
+        first_target = history.items[0].sid
+        # Admission is a delivery receipt, not a model completion receipt.
+        async with asyncio.timeout(90):
+            while any(row.get("executionActive") or (row.get("deliveryFloorEndsAt") and datetime.fromisoformat(row["deliveryFloorEndsAt"].replace("Z", "+00:00")) > datetime.now(timezone.utc)) for row in await runtime.client.rpc("schedule/catalog")):
+                await asyncio.sleep(.05)
+            while any(row.get("running") for row in await runtime.client.list_sessions()):
+                await asyncio.sleep(.05)
+        await manage({"action": "schedule_run", "id": task.id})
+        history = await read("schedule_history", query=task.id)
+        assert len(history.items) == 2
+        targets = {row.sid for row in history.items}
+        assert (len(targets) == 2) == (destination["kind"] == "new"), targets
+        if destination["kind"] != "new":
+            assert targets == {first_target}
+        task = next(row for row in (await read("schedules")).items if row.id == task.id)
+        await manage({"action": "schedule_update", "id": task.id, "expectedUpdatedAt": task.data["updatedAt"],
+            "patch": {"timing": {"kind": "weekly", "weekly": {
+                "time": "10:30:00", "time_zone": "Asia/Taipei", "weekdays": [1, 5]}}}})
+        task = next(row for row in (await read("schedules")).items if row.id == task.id)
+        assert task.data["kind"] == "weekly" and task.data["weekdays"] == [1, 5]
+        await manage({"action": "schedule_delete", "id": task.id, "expectedUpdatedAt": task.data["updatedAt"]})
+        assert not any(row.id == task.id for row in (await read("schedules")).items)
+    print("PASS native schedules: three destinations, run/reuse, pause/resume, CAS, timing and deletion", flush=True)
     refused = await machine._handle(OpenBtw(sid=sid, client_id=browser, owner_id=browser, request_id=uuid4().hex))
     assert refused.type == "error" and refused.code == "dsh_sidechat_unavailable"
     # The optional isolated probe still covers the dormant implementation;

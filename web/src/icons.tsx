@@ -5,6 +5,7 @@ import type { Engine } from "./protocol";
 import dshMark from "./assets/dsh-mark.svg?no-inline";
 import engineMarks from "./assets/engine-marks.svg?no-inline";
 import claudeWorkingFrames from "./assets/claude-working.svg?no-inline";
+import claudeAlternatingFrames from "./assets/claude-working-alternating.svg?no-inline";
 
 export function EngineIcon({ engine, size = 16 }: { engine: Engine; size?: number }) {
   if (engine === "dsh") return <span className="engine-brand-icon dsh" aria-hidden="true" style={{ width: size, height: size, maskImage: `url(${dshMark})`, WebkitMaskImage: `url(${dshMark})` }} />;
@@ -14,11 +15,18 @@ export function EngineIcon({ engine, size = 16 }: { engine: Engine; size?: numbe
   </svg>;
 }
 
-// Claude uses its brand mark; keep Codex's existing spark animation unchanged.
+// Keep the completed mark's click replay independent of the live animation.
+function ClaudeDoneReplay({ size }: { size: number }) {
+  return <span className="claude-working-mark" style={{ width: size, height: size }} aria-hidden="true">
+    <img src={claudeWorkingFrames} width={size * 9} height={size} alt="" draggable={false} />
+  </span>;
+}
+
+// Only Claude's live mark changes; Codex and DSH retain their existing sparks.
 export function EngineWorking({ engine, size = 22 }: { engine: Engine; size?: number }) {
   return engine === "claude"
-    ? <span className="claude-working-mark" style={{ width: size, height: size }} aria-hidden="true">
-        <img src={claudeWorkingFrames} width={size * 9} height={size} alt="" draggable={false} />
+    ? <span className="claude-working-mark is-alternating" style={{ width: size, height: size }} aria-hidden="true">
+        <img src={claudeAlternatingFrames} width={size * 326} height={size} alt="" draggable={false} />
       </span>
     : <ClaudeWorking size={size} />;
 }
@@ -37,7 +45,7 @@ export function EngineDone({ engine, size = 22, label }: {
         title="重播完成动画" onClick={() => {
           if (!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) setPlaying(true);
         }}>
-        {playing ? <EngineWorking engine={engine} size={size} /> : <EngineIcon engine={engine} size={size} />}
+        {playing ? <ClaudeDoneReplay size={size} /> : <EngineIcon engine={engine} size={size} />}
       </button>
     : engine === "dsh" ? <EngineIcon engine={engine} size={size} /> : <ClaudeSpark size={size} label={label ?? "Codex"} />;
 }

@@ -333,6 +333,7 @@ const AgentDetailController = lazy(() => import("./components/AgentDetailControl
   ({ AgentDetailController: Controller }) => ({ default: Controller }),
 ));
 const DshPanel = lazy(() => import("./components/DshPanel"));
+const SessionDeleteSheet = lazy(() => import("./components/SessionDeleteSheet"));
 const DshConnectionNotice = lazy(() => import("./components/DshCommandFeedback").then(m => ({ default: m.DshConnectionNotice })));
 const SessionsSidebar = lazy(() => import("./components/SessionsSidebar").then(
   ({ SessionsSidebar: Sidebar }) => ({ default: Sidebar }),
@@ -430,6 +431,9 @@ export default function App() {
   }, []);
   const filesListenerRef = useRef<((message: FilesListed) => void) | null>(null);
   const [directoryScope, setDirectoryScope] = useState<(DirectoryActionScope & { machineId: string }) | null>(null);
+  const [deleteSession, setDeleteSession] = useState<{
+    id: string; title: string; cwd: string; scope: string; engine: Engine; space: Space;
+  } | null>(null);
   const directoryListenerRef = useRef<((message: ServerEvent) => boolean) | null>(null);
   const listenDirectory = useCallback((listener: ((message: ServerEvent) => boolean) | null) => {
     directoryListenerRef.current = listener;
@@ -483,7 +487,7 @@ export default function App() {
   });
   const [machineId, setMachineId] = useState(
     () => localStorage.getItem(MACHINE_KEY) || "default");
-  useEffect(() => { setDirectoryScope(null); }, [machineId, engine, space]);
+  useEffect(() => { setDirectoryScope(null); setDeleteSession(null); }, [machineId, engine, space]);
   const artifactReadingMemory = useMemo(() => ({
     machineId, entries: new Map<string, ArtifactReadingState>(),
   }), [machineId]);
@@ -6009,20 +6013,27 @@ export default function App() {
             session.session_id, pinned, target.engine, target.space);
         }}
         onDelete={(id) => {
-          const warning = space === "work"
-            ? "删除后将永久移除这项工作及其私有文件，确定继续吗？"
-            : "删除后将永久移除这条会话历史；代码文件不会被删除，确定继续吗？";
-          if (!window.confirm(warning)) return;
           const deleted = state.sessions.find(
             (session) => session.session_id === id);
-          const target = deleted
-            ? sessionCommandTarget(deleted, engine, space)
-            : { engine, space };
+          if (!deleted) return;
+          const target = sessionCommandTarget(deleted, engine, space);
+          setDeleteSession({ id, title: deleted.summary || deleted.first_prompt || id,
+            cwd: deleted.cwd ?? "", scope: activeScopeKey, ...target });
+        }}
+        onForkWorktree={openForkWorktree}
+        onMigrate={openSessionMigration}
+      /></Suspense>}</SidebarState>
+      {deleteSession?.scope === activeScopeKey && <Suspense fallback={null}>
+        <SessionDeleteSheet key={deleteSession.id} title={deleteSession.title} cwd={deleteSession.cwd}
+          work={deleteSession.space === "work"} onClose={() => setDeleteSession(null)} onConfirm={() => {
+          const { id, engine: targetEngine, space: targetSpace } = deleteSession;
+          if (!wsRef.current?.sendDeleteSession(id, targetEngine, targetSpace)) return false;
+          setDeleteSession(null);
           if (forkFocusLeaseRef.current?.childSessionId === id) {
             clearForkFocusLease(false);
           }
           composerDraftsRef.current.delete(composerDraftKey(
-            machineId, target.space, target.engine, id,
+            machineId, targetSpace, targetEngine, id,
           ));
           invalidateHistoryPageScopes(id);
           if (focusedSid === id) clearHistoryDetailRequests();
@@ -6031,12 +6042,9 @@ export default function App() {
             claudeProfileId: newChatClaudeProfileId,
             codexProfileId: newChatCodexProfileId,
           });
-          wsRef.current?.sendDeleteSession(
-            id, target.engine, target.space);
-        }}
-        onForkWorktree={openForkWorktree}
-        onMigrate={openSessionMigration}
-      /></Suspense>}</SidebarState>
+          return true;
+        }} />
+      </Suspense>}
       {directoryScope && directoryScope.machineId === machineId && directoryScope.engine === engine && space === "code" && <Suspense fallback={null}>
         <DirectoryActionSheet key={`${directoryScope.machineId}:${directoryScope.engine}:${directoryScope.cwd}:${directoryScope.profile_id}:${directoryScope.action}`}
           scope={directoryScope} machineLabel={activeDevice?.label ?? machineId} listen={listenDirectory}
@@ -6245,6 +6253,8 @@ export default function App() {
             <Suspense fallback={<div className="thread" />}><ChatView key={`${activeScopeKey}\u0000${focusedSid ?? ""}`}
               {...chatReadingMemory}
               sid={focusedSid} turns={historyView.turns}
+              dshApi={focusedEngine === "dsh" ? dshApi : undefined}
+              onDshPlugin={focusedEngine === "dsh" && focusedSid ? name => setDshPanel({ sid: focusedSid, scope: activeScopeKey, selection: { kind: "bundles", query: name } }) : undefined}
               sessionLink={(nativeId) => {
                 const session = findMessageSession(nativeId);
                 return { title: relatedSessionTitle(session, nativeId), available: !!session,
@@ -6335,7 +6345,6 @@ export default function App() {
                 turnId: planProgress.turnId,
                 itemId: planProgress.block.item_id,
               } : null}
-              turnUsage={rt.turnUsage}
               activeTurnId={activeTurnId}
               ambiguousActiveTurnIds={ambiguousActiveTurnIds}
               onOpenAgent={space === "code"

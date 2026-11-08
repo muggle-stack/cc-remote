@@ -137,6 +137,26 @@ async def test_api_peer_is_owned_by_one_socket_and_exchanged_again_after_disconn
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint,args,write", [
+    ("pluginMarket/readEntryDetail", {"url": "https://index.test/plugins.json", "name": "example", "version": "1"}, False),
+    ("pluginMarket/setIndexes", {"urls": []}, True),
+    ("schedule/deleteInactive", {}, True),
+    ("actionCards/act", {"agentId": "root", "callId": "proposal", "verb": "dismiss"}, True),
+])
+async def test_product_endpoints_classify_disconnects_and_never_retry(endpoint, args, write):
+    host = Host()
+    client = host.client()
+    host.answers[endpoint] = {"ok": "fixture"}
+    assert await client.rpc(endpoint, args) == {"ok": "fixture"}
+    host.answers[endpoint] = httpx.Response(502)
+    with pytest.raises(DshError) as failure:
+        await client.rpc(endpoint, args)
+    assert failure.value.outcome_unknown is write
+    assert host.calls == [(endpoint, args)] * 2
+    await client.close()
+
+
+@pytest.mark.asyncio
 async def test_follow_burst_during_snapshot_reads_does_not_disconnect_or_drop_frames():
     host = Host()
     client = host.client()
@@ -381,22 +401,24 @@ async def test_direct_schedule_write_is_authenticated_and_never_retried(outcome)
     host, writes = Host(), []
     original = host.request
     def request(req):
-        if req.url.path != "/api/cc-remote.schedule":
+        if req.url.path != "/api/schedule/create":
             return original(req)
         assert "dsh-auth-" in req.headers["cookie"]
         writes.append(json.loads(req.content))
         if outcome == "timeout":
             raise httpx.ReadTimeout("unconfirmed")
-        return httpx.Response(outcome, json={"id": "schedule"})
+        return httpx.Response(outcome, json={"type": "server-response", "rpcId": writes[-1]["rpcId"],
+            "result": {"ok": True, "value": {"id": "schedule"}}})
     host.request = request
     client = host.client()
     try:
         if outcome == 200:
-            assert await client.create_schedule("dsh@one", {"title": "Check"}) == {"id": "schedule"}
+            assert await client.create_schedule({"title": "Check"}) == {"id": "schedule"}
         else:
             with pytest.raises(DshError) as error:
-                await client.create_schedule("dsh@one", {"title": "Check"})
-            assert error.value.outcome_unknown == (outcome in {503, "timeout"})
-        assert writes == [{"sessionId": "one", "request": {"title": "Check"}}]
+                await client.create_schedule({"title": "Check"})
+            assert error.value.outcome_unknown == (outcome in {422, 503, "timeout"})
+        assert len(writes) == 1
+        assert writes[0]["payload"] == {"args": {"request": {"title": "Check"}}}
     finally:
         await client.close()
