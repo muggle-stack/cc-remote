@@ -568,7 +568,6 @@ export function BtwPanel(p: Props) {
             // view, then swap its data once without a blank/loading frame.
             : <ChatView key={p.sid} ref={p.chatViewRef} sid={p.sid ?? null} turns={turns}
                 engine={p.engine}
-                turnUsage={historyView?.turnUsage}
                 activeTurnId={activeTurnId}
                 onEdit={() => {}} onGetDiff={() => {}}
                 onOpenFile={p.onOpenFile}

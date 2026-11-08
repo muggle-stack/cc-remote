@@ -25,12 +25,12 @@ import type {
 import type { Space } from "../protocol";
 import type { SessionMessageNavigation } from "../session-messages";
 import type { LoadTurnFilePage } from "../turn-file-pages";
-import { usageForTurn, type TurnUsageReadings } from "../turn-usage";
 import { MessageBlock } from "./MessageBlock";
 import { assistantContinuations, ContinuationRenderKeys, continuationTerminalOwner, type AssistantContinuation } from "../assistant-continuations";
 import { isReturnReceipt, returnRunId, returnedAgents } from "../agent-returns";
 import { TimedMessageTag } from "./TimedMessageTag";
 import { Icon, ClaudeMark, EngineWorking, EngineDone } from "../icons";
+import { WorkingWord } from "./WorkingWord";
 import { canForkTurn } from "../session-worktree";
 import { sidebarDragIntent } from "../responsive-layout";
 import {
@@ -101,7 +101,6 @@ import { DshRecommendation } from "./DshRecommendations";
 import { recommendationTurn, useDshRecommendations } from "../dsh-recommendations";
 
 const SessionMessageLinks = lazy(() => import("./SessionMessageLinks"));
-const TurnUsageIndicator = lazy(() => import("./TurnUsageIndicator").then(m => ({ default: m.TurnUsageIndicator })));
 const DshProducedFiles = lazy(() => import("./DshProducedFiles"));
 const AsyncQuestionCard = lazy(() => import("./AsyncQuestionCard"));
 const AsyncQuestionHost = lazy(() => import("./AsyncQuestionDialog"));
@@ -327,7 +326,7 @@ export interface ChatViewHandle {
   prepareLayoutChange: () => void;
 }
 
-export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "claude", loading,
+export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", loading,
   hasMore: incomingHasMore,
   historyPagingReady = true,
   historyRevision = null, historyViewRevision = historyRevision,
@@ -354,7 +353,6 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
   onOpenSession?: (nativeId: string) => void;
   dshApi?: DshApiClient;
   onDshPlugin?: (name: string) => void;
-  turnUsage?: TurnUsageReadings;
   sid: string | null;
   turns: Turn[];
   initialReadingState?: ChatReadingState;
@@ -3398,10 +3396,8 @@ export function ChatView({ ref, sid, turnUsage, turns: incomingTurns, engine = "
               {showWorking && (
                 <div className="turn-working" role="status" aria-live="polite">
                   <EngineWorking engine={engine} size={24} />
-                  <span className="turn-working-tx">{workingLabel}</span>
-                  {usageForTurn(t, turnUsage) && <Suspense fallback={null}>
-                    <TurnUsageIndicator key={`${sid}:${t.id}`} usage={usageForTurn(t, turnUsage)} />
-                  </Suspense>}
+                  <span className="turn-working-tx">{t.progress ?? <WorkingWord
+                    scope={`${engine}:${processOpenKey}`} label={workingLabel} />}</span>
                   {!showCompletionFooter && <Suspense fallback={null}>
                     <PagePreviewLinks turn={t} sid={sid} />
                   </Suspense>}

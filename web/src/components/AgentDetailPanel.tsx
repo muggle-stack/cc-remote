@@ -7,6 +7,7 @@ import { EngineDone, EngineWorking, Icon } from "../icons";
 import { MessageBlock } from "./MessageBlock";
 import { ProcessTimeline } from "./ProcessTimeline";
 import { PanelResizer } from "./PanelResizer";
+import { WorkingWord } from "./WorkingWord";
 
 const DshAgentConversation = lazy(() => import("./DshAgentConversation").then(m => ({ default: m.DshAgentConversation })));
 
@@ -91,7 +92,8 @@ export function AgentDetailPanel({ run, engine = "claude", canGoBack, onBack, on
         {!done && <div className="turn-working agent-detail-working" role="status"
           aria-live="polite">
           <EngineWorking engine={engine} size={24} />
-          <span className="turn-working-tx">子代理处理中</span>
+          <span className="turn-working-tx"><WorkingWord
+            scope={`${engine}:agent:${run.runId}`} label="子代理处理中" /></span>
         </div>}
         {run.status === "succeeded" && run.blocks.length > 0 && (
           <div className="turn-done-mark">

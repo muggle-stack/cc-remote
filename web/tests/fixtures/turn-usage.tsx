@@ -1,11 +1,12 @@
-import { useReducer } from "react";
+import { useReducer, useRef, useState } from "react";
 import { ChatView } from "../../src/components/ChatView";
 import { createRuntime, initialState, reduce } from "../../src/reducer";
 import { PROTOCOL_VERSION, type ServerEvent } from "../../src/protocol";
 
 export function TurnUsageFixture() {
   const params = new URLSearchParams(location.search);
-  const engine = params.get("engine") === "claude" ? "claude" : "codex";
+  const engine = params.get("engine") === "claude" ? "claude"
+    : params.get("engine") === "dsh" ? "dsh" : "codex";
   document.documentElement.dataset.engine = engine;
   document.documentElement.dataset.theme = params.get("theme") === "dark" ? "dark" : "light";
   const [state, dispatch] = useReducer(reduce, { ...initialState, focusedSid: "session", runtimes: {
@@ -17,8 +18,10 @@ export function TurnUsageFixture() {
       usage: { input_tokens: 184_001, output_tokens: 2400, cache_read_tokens: 180_000, cache_write_tokens: 500 } } } },
   } });
   const runtime = state.runtimes.session;
+  const [visible, setVisible] = useState(true);
+  const seq = useRef(1);
   const send = (event: Partial<ServerEvent>) => dispatch({ type: "event", event: {
-    v: PROTOCOL_VERSION, sid: "session", ts: 2, ...event,
+    v: PROTOCOL_VERSION, sid: "session", ts: 2, ...event, seq: ++seq.current,
   } as ServerEvent });
   return <main className="pane" style={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
     <div style={{ padding: 12, display: "flex", gap: 12 }}>
@@ -26,9 +29,12 @@ export function TurnUsageFixture() {
         usage: { input_tokens: 186_800, output_tokens: 5820, cache_read_tokens: 182_000, cache_write_tokens: 500 } })}>更新用量</button>
       <button onClick={() => send({ type: "turn_end", turn_id: "native", seq: 3,
         result: { subtype: "success", duration_ms: 1000, is_error: false } })}>结束任务</button>
+      <button onClick={() => setVisible(current => !current)}>切换会话显示</button>
+      <button onClick={() => send({ type: "state", state: "running",
+        detail: "正在压缩上下文" })}>压缩提示</button>
     </div>
-    <ChatView sid="session" engine={engine} turns={runtime.turns} turnUsage={runtime.turnUsage}
-      activeTurnId={runtime.turns[0].done ? null : "user"} />
+    {visible && <ChatView sid="session" engine={engine} turns={runtime.turns}
+      activeTurnId={runtime.turns[0].done ? null : "user"} />}
     <footer className="composer" style={{ height: 130, flex: "none" }}>输入消息</footer>
   </main>;
 }

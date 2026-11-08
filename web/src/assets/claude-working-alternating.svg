@@ -1,0 +1,342 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="7824" height="24" viewBox="0 0 7824 24">
+  <!-- 326 cells at 10ms: 450ms flower contraction, then a 2810ms loop.
+       Loop: six explicit vector marks out/back for 2000ms, classic flower for 810ms.
+       Same geometry and timing as the approved alternating-breath preview.
+       The completed click replay continues to use claude-working.svg. -->
+  <defs>
+    <path id="rays" d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z"/>
+    <path id="mark-1" d="M639 741Q676 741 723.0 790.5Q770 840 770 872Q770 913 737 1026Q684 1220 684 1311Q684 1365 713.5 1401.5Q743 1438 805 1438Q867 1438 896.5 1400.0Q926 1362 926 1309Q926 1220 872 1026Q840 913 840 874Q840 841 887.5 791.0Q935 741 973 741Q998 741 1122 774Q1316 829 1407 829Q1462 829 1499.0 799.0Q1536 769 1536 709Q1536 588 1407 588Q1309 588 1122 639Q1002 674 973 674Q936 674 888.0 624.5Q840 575 840 543Q840 505 872 389Q926 192 926 104Q926 50 896.5 13.5Q867 -23 805 -23Q743 -23 713.5 14.0Q684 51 684 106Q684 195 737 389Q770 502 770 541Q770 576 721.5 625.0Q673 674 639 674Q613 674 485 641Q302 588 203 588Q76 588 76 709Q76 772 113.5 800.5Q151 829 203 829Q295 829 485 774Q613 741 639 741Z"/>
+    <path id="mark-2" d="M801 774 1235 1210 1282 1163 848 727H1462V662H848L1282 227L1235 180L801 616V0H733V616L299 180L252 227L688 662H72V727H688L252 1163L299 1210L733 774V1391H801Z"/>
+    <path id="mark-3" d="M936 715 1350 387 1313 326 823 522 748 0H676L600 522L111 326L76 387L487 715L76 1042L111 1104L600 909L676 1432H748L823 909L1313 1104L1350 1042Z"/>
+    <path id="mark-4" d="M172 1161Q298 1161 449 985Q577 842 633 842Q686 842 686 909Q686 947 653 1063Q600 1257 600 1346Q600 1399 630.0 1436.0Q660 1473 723 1473Q782 1473 813.0 1437.5Q844 1402 844 1346Q844 1253 788 1063Q756 947 756 911Q756 886 769.5 864.0Q783 842 809 842Q862 842 993 983Q1167 1169 1264 1169Q1312 1169 1345.0 1137.0Q1378 1105 1378 1055Q1378 982 1302.0 934.5Q1226 887 1040 842Q917 809 885.5 789.5Q854 770 854 737Q854 714 874.5 692.5Q895 671 1014 645Q1186 608 1284.0 558.0Q1382 508 1382 426Q1382 377 1348.5 343.0Q1315 309 1270 309Q1219 309 1158.5 345.0Q1098 381 965 520Q890 598 861.5 615.5Q833 633 813 633Q768 633 768 582Q768 539 805 391Q846 227 846 154Q846 84 814.0 42.0Q782 0 725 0Q669 0 637.5 42.5Q606 85 606 152Q606 201 615.5 253.5Q625 306 672 489Q684 542 684 571Q684 627 641 627Q612 627 577.0 601.5Q542 576 440 477Q335 375 281.0 342.0Q227 309 180 309Q134 309 103.0 343.5Q72 378 72 428Q72 498 150.0 541.5Q228 585 435 643Q534 671 565.0 687.0Q596 703 596 729Q596 764 558.0 786.5Q520 809 432 825Q289 856 176.0 911.0Q63 966 63 1040Q63 1084 91.0 1122.5Q119 1161 172 1161Z"/>
+    <path id="mark-5" d="M698 877Q525 1202 515.5 1223.5Q506 1245 506 1286Q506 1363 559.5 1418.0Q613 1473 698 1473Q782 1473 837.5 1418.0Q893 1363 893 1280Q893 1243 870 1200ZM823 815 991 1075Q1040 1151 1051.0 1163.0Q1062 1175 1099.5 1187.5Q1137 1200 1176 1200Q1250 1200 1310.0 1145.5Q1370 1091 1370 1008Q1370 948 1332.0 896.0Q1294 844 1246.5 829.5Q1199 815 1114 815ZM573 815H283Q196 815 149.0 829.5Q102 844 64.5 895.0Q27 946 27 1008Q27 1091 86.5 1145.5Q146 1200 223 1200Q263 1200 290 1189L331 1174Q345 1169 371 1128ZM823 670H1186Q1261 670 1315.5 614.5Q1370 559 1370 475Q1370 392 1313.0 338.5Q1256 285 1171 285Q1082 285 1028 365ZM573 670Q409 426 375.0 373.0Q341 320 302.0 302.5Q263 285 221 285Q142 285 84.5 339.0Q27 393 27 475Q27 558 82.0 614.0Q137 670 213 670ZM698 596 870 273Q884 247 888.5 229.0Q893 211 893 186Q893 115 838.5 57.5Q784 0 698 0Q614 0 560.0 55.0Q506 110 506 193Q506 229 528 272Z"/>
+  </defs>
+  <g fill="#d97757">
+    <g transform="translate(0 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(24 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(48 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(72 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(96 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(120 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(144 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(168 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(192 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(216 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(240 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(264 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(288 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(312 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(336 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(360 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(384 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(408 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(432 0)"><use href="#rays" transform="translate(12 12) scale(0.820000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(456 0)"><use href="#rays" transform="translate(12 12) scale(0.820000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(480 0)"><use href="#rays" transform="translate(12 12) scale(0.820000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(504 0)"><use href="#rays" transform="translate(12 12) scale(0.820000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(528 0)"><use href="#rays" transform="translate(12 12) scale(0.820000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(552 0)"><use href="#rays" transform="translate(12 12) scale(0.820000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(576 0)"><use href="#rays" transform="translate(12 12) scale(0.820000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(600 0)"><use href="#rays" transform="translate(12 12) scale(0.820000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(624 0)"><use href="#rays" transform="translate(12 12) scale(0.820000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(648 0)"><use href="#rays" transform="translate(12 12) scale(0.590000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(672 0)"><use href="#rays" transform="translate(12 12) scale(0.590000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(696 0)"><use href="#rays" transform="translate(12 12) scale(0.590000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(720 0)"><use href="#rays" transform="translate(12 12) scale(0.590000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(744 0)"><use href="#rays" transform="translate(12 12) scale(0.590000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(768 0)"><use href="#rays" transform="translate(12 12) scale(0.590000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(792 0)"><use href="#rays" transform="translate(12 12) scale(0.590000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(816 0)"><use href="#rays" transform="translate(12 12) scale(0.590000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(840 0)"><use href="#rays" transform="translate(12 12) scale(0.590000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(864 0)"><use href="#rays" transform="translate(12 12) scale(0.380000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(888 0)"><use href="#rays" transform="translate(12 12) scale(0.337778) translate(-12 -12)"/><circle cx="12" cy="12" r="2.984444"/></g>
+    <g transform="translate(912 0)"><use href="#rays" transform="translate(12 12) scale(0.295556) translate(-12 -12)"/><circle cx="12" cy="12" r="2.768889"/></g>
+    <g transform="translate(936 0)"><use href="#rays" transform="translate(12 12) scale(0.253333) translate(-12 -12)"/><circle cx="12" cy="12" r="2.553333"/></g>
+    <g transform="translate(960 0)"><use href="#rays" transform="translate(12 12) scale(0.211111) translate(-12 -12)"/><circle cx="12" cy="12" r="2.337778"/></g>
+    <g transform="translate(984 0)"><use href="#rays" transform="translate(12 12) scale(0.168889) translate(-12 -12)"/><circle cx="12" cy="12" r="2.122222"/></g>
+    <g transform="translate(1008 0)"><use href="#rays" transform="translate(12 12) scale(0.126667) translate(-12 -12)"/><circle cx="12" cy="12" r="1.906667"/></g>
+    <g transform="translate(1032 0)"><use href="#rays" transform="translate(12 12) scale(0.084444) translate(-12 -12)"/><circle cx="12" cy="12" r="1.691111"/></g>
+    <g transform="translate(1056 0)"><use href="#rays" transform="translate(12 12) scale(0.042222) translate(-12 -12)"/><circle cx="12" cy="12" r="1.475556"/></g>
+    <g transform="translate(1080 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1104 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1128 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1152 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1176 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1200 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1224 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1248 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1272 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1296 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1320 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1344 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1368 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1392 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1416 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1440 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1464 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1488 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1512 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1536 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1560 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(1584 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(1608 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(1632 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(1656 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(1680 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(1704 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(1728 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(1752 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(1776 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(1800 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(1824 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(1848 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(1872 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(1896 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(1920 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(1944 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(1968 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(1992 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(2016 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(2040 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(2064 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(2088 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(2112 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(2136 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(2160 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(2184 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(2208 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(2232 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(2256 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(2280 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(2304 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(2328 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(2352 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(2376 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(2400 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(2424 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(2448 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(2472 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(2496 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(2520 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(2544 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(2568 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(2592 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(2616 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(2640 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(2664 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(2688 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(2712 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(2736 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(2760 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(2784 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(2808 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(2832 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(2856 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(2880 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(2904 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(2928 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(2952 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(2976 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(3000 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3024 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3048 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3072 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3096 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3120 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3144 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3168 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3192 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3216 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3240 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3264 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3288 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3312 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3336 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3360 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3384 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3408 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3432 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3456 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3480 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3504 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3528 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3552 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3576 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3600 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3624 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3648 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3672 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3696 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3720 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3744 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3768 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3792 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3816 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3840 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3864 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3888 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3912 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3936 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3960 0)"><use href="#mark-5" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-698.5 -736.5)"/></g>
+    <g transform="translate(3984 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(4008 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(4032 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(4056 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(4080 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(4104 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(4128 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(4152 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(4176 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(4200 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(4224 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(4248 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(4272 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(4296 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(4320 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(4344 0)"><use href="#mark-4" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-722.5 -736.5)"/></g>
+    <g transform="translate(4368 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(4392 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(4416 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(4440 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(4464 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(4488 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(4512 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(4536 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(4560 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(4584 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(4608 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(4632 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(4656 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(4680 0)"><use href="#mark-3" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-713 -716)"/></g>
+    <g transform="translate(4704 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(4728 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(4752 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(4776 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(4800 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(4824 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(4848 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(4872 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(4896 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(4920 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(4944 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(4968 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(4992 0)"><use href="#mark-2" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-767 -695.5)"/></g>
+    <g transform="translate(5016 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(5040 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(5064 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(5088 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(5112 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(5136 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(5160 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(5184 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(5208 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(5232 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(5256 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(5280 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(5304 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(5328 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(5352 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(5376 0)"><use href="#mark-1" transform="translate(12 12) scale(0.012304688 -0.012304688) translate(-806 -707.5)"/></g>
+    <g transform="translate(5400 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(5424 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(5448 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(5472 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(5496 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(5520 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(5544 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(5568 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(5592 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(5616 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(5640 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(5664 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(5688 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(5712 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(5736 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(5760 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(5784 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(5808 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(5832 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(5856 0)"><circle cx="12" cy="12" r="1.26"/></g>
+    <g transform="translate(5880 0)"><use href="#rays" transform="translate(12 12) scale(0.105000) translate(-12 -12)"/><circle cx="12" cy="12" r="1.260000"/></g>
+    <g transform="translate(5904 0)"><use href="#rays" transform="translate(12 12) scale(0.122963) translate(-12 -12)"/><circle cx="12" cy="12" r="1.475556"/></g>
+    <g transform="translate(5928 0)"><use href="#rays" transform="translate(12 12) scale(0.140926) translate(-12 -12)"/><circle cx="12" cy="12" r="1.691111"/></g>
+    <g transform="translate(5952 0)"><use href="#rays" transform="translate(12 12) scale(0.158889) translate(-12 -12)"/><circle cx="12" cy="12" r="1.906667"/></g>
+    <g transform="translate(5976 0)"><use href="#rays" transform="translate(12 12) scale(0.176852) translate(-12 -12)"/><circle cx="12" cy="12" r="2.122222"/></g>
+    <g transform="translate(6000 0)"><use href="#rays" transform="translate(12 12) scale(0.194815) translate(-12 -12)"/><circle cx="12" cy="12" r="2.337778"/></g>
+    <g transform="translate(6024 0)"><use href="#rays" transform="translate(12 12) scale(0.212778) translate(-12 -12)"/><circle cx="12" cy="12" r="2.553333"/></g>
+    <g transform="translate(6048 0)"><use href="#rays" transform="translate(12 12) scale(0.230741) translate(-12 -12)"/><circle cx="12" cy="12" r="2.768889"/></g>
+    <g transform="translate(6072 0)"><use href="#rays" transform="translate(12 12) scale(0.248704) translate(-12 -12)"/><circle cx="12" cy="12" r="2.984444"/></g>
+    <g transform="translate(6096 0)"><use href="#rays" transform="translate(12 12) scale(0.600000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6120 0)"><use href="#rays" transform="translate(12 12) scale(0.600000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6144 0)"><use href="#rays" transform="translate(12 12) scale(0.600000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6168 0)"><use href="#rays" transform="translate(12 12) scale(0.600000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6192 0)"><use href="#rays" transform="translate(12 12) scale(0.600000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6216 0)"><use href="#rays" transform="translate(12 12) scale(0.600000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6240 0)"><use href="#rays" transform="translate(12 12) scale(0.600000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6264 0)"><use href="#rays" transform="translate(12 12) scale(0.600000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6288 0)"><use href="#rays" transform="translate(12 12) scale(0.600000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6312 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6336 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6360 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6384 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6408 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6432 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6456 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6480 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6504 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6528 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6552 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6576 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6600 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6624 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6648 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6672 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6696 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6720 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6744 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6768 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6792 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6816 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6840 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6864 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6888 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6912 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6936 0)"><use href="#rays" transform="translate(12 12) scale(1.000000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6960 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(6984 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7008 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7032 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7056 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7080 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7104 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7128 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7152 0)"><use href="#rays" transform="translate(12 12) scale(0.830000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7176 0)"><use href="#rays" transform="translate(12 12) scale(0.820000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7200 0)"><use href="#rays" transform="translate(12 12) scale(0.820000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7224 0)"><use href="#rays" transform="translate(12 12) scale(0.820000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7248 0)"><use href="#rays" transform="translate(12 12) scale(0.820000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7272 0)"><use href="#rays" transform="translate(12 12) scale(0.820000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7296 0)"><use href="#rays" transform="translate(12 12) scale(0.820000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7320 0)"><use href="#rays" transform="translate(12 12) scale(0.820000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7344 0)"><use href="#rays" transform="translate(12 12) scale(0.820000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7368 0)"><use href="#rays" transform="translate(12 12) scale(0.820000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7392 0)"><use href="#rays" transform="translate(12 12) scale(0.590000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7416 0)"><use href="#rays" transform="translate(12 12) scale(0.590000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7440 0)"><use href="#rays" transform="translate(12 12) scale(0.590000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7464 0)"><use href="#rays" transform="translate(12 12) scale(0.590000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7488 0)"><use href="#rays" transform="translate(12 12) scale(0.590000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7512 0)"><use href="#rays" transform="translate(12 12) scale(0.590000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7536 0)"><use href="#rays" transform="translate(12 12) scale(0.590000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7560 0)"><use href="#rays" transform="translate(12 12) scale(0.590000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7584 0)"><use href="#rays" transform="translate(12 12) scale(0.590000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7608 0)"><use href="#rays" transform="translate(12 12) scale(0.380000) translate(-12 -12)"/><circle cx="12" cy="12" r="3.200000"/></g>
+    <g transform="translate(7632 0)"><use href="#rays" transform="translate(12 12) scale(0.337778) translate(-12 -12)"/><circle cx="12" cy="12" r="2.984444"/></g>
+    <g transform="translate(7656 0)"><use href="#rays" transform="translate(12 12) scale(0.295556) translate(-12 -12)"/><circle cx="12" cy="12" r="2.768889"/></g>
+    <g transform="translate(7680 0)"><use href="#rays" transform="translate(12 12) scale(0.253333) translate(-12 -12)"/><circle cx="12" cy="12" r="2.553333"/></g>
+    <g transform="translate(7704 0)"><use href="#rays" transform="translate(12 12) scale(0.211111) translate(-12 -12)"/><circle cx="12" cy="12" r="2.337778"/></g>
+    <g transform="translate(7728 0)"><use href="#rays" transform="translate(12 12) scale(0.168889) translate(-12 -12)"/><circle cx="12" cy="12" r="2.122222"/></g>
+    <g transform="translate(7752 0)"><use href="#rays" transform="translate(12 12) scale(0.126667) translate(-12 -12)"/><circle cx="12" cy="12" r="1.906667"/></g>
+    <g transform="translate(7776 0)"><use href="#rays" transform="translate(12 12) scale(0.084444) translate(-12 -12)"/><circle cx="12" cy="12" r="1.691111"/></g>
+    <g transform="translate(7800 0)"><use href="#rays" transform="translate(12 12) scale(0.042222) translate(-12 -12)"/><circle cx="12" cy="12" r="1.475556"/></g>
+  </g>
+</svg>

@@ -612,15 +612,58 @@ button.message-image-error{ font:inherit; cursor:pointer; }
 .thinking span:nth-child(3){ animation-delay:.36s; }
 /* The working indicator stays below streamed text. Animate the engine mark
    without changing the row's layout. */
-.turn-working{ display:inline-flex; align-items:center; gap:7px; margin:8px 0 2px; color:var(--accent-text,var(--accent)); }
+.turn-working{ display:inline-flex; align-items:center; flex-wrap:wrap; gap:4px 7px; margin:8px 0 2px; color:var(--accent-text,var(--accent)); }
 .turn-working svg{ display:block; }
 .claude-working-mark{ display:inline-block; flex:none; overflow:hidden; }
 .claude-working-mark>img{ display:block; max-width:none; animation:claude-working-frames .81s steps(9,end) infinite; }
 @keyframes claude-working-frames{ to{ transform:translateX(-100%); } }
+.claude-working-mark.is-alternating>img{
+  animation:claude-working-entry .45s steps(45,end),
+    claude-working-alternating 2.81s steps(281,end) .45s infinite;
+}
+/* 45 entry cells, then 200 six-shape cells and 81 classic flower cells.
+   The original nine-cell sprite remains exclusive to the completed replay. */
+@keyframes claude-working-entry{ to{ transform:translateX(-13.80368098%); } }
+@keyframes claude-working-alternating{
+  from{ transform:translateX(-13.80368098%); }
+  to{ transform:translateX(-100%); }
+}
 @media (prefers-reduced-motion:reduce){
   .claude-working-mark>img{ animation:none; transform:translateX(-33.333333%); }
+  .claude-working-mark.is-alternating>img{ animation:none; transform:none; }
 }
 .turn-working .turn-working-tx{ font-weight:var(--font-weight-600); color:var(--accent-ink); font-size:12.5px; }
+.working-word{ display:inline-grid; align-items:center; color:#C15F3C; }
+.working-word-label{ position:absolute; width:1px; height:1px; overflow:hidden;
+  clip-path:inset(50%); white-space:nowrap; }
+.working-word-layer{ grid-area:1 / 1; white-space:nowrap; }
+:root[data-theme="dark"] .working-word{ color:#DB7C5E; }
+@supports ((background-clip:text) or (-webkit-background-clip:text)){
+  .working-word-layer{
+    --working-word-base:#C15F3C;
+    --working-word-peak:#E5A17A;
+    background-image:linear-gradient(120deg,var(--working-word-base) 37.5%,var(--working-word-peak) 50%,var(--working-word-base) 62.5%);
+    background-size:400% 100%; background-position:83.333333% 0;
+    background-clip:text; -webkit-background-clip:text; color:transparent;
+    -webkit-text-fill-color:transparent;
+    animation:working-word-shine 3s linear var(--working-word-phase,0ms) infinite,
+      working-word-enter .25s ease-in-out;
+  }
+  :root[data-theme="dark"] .working-word-layer{ --working-word-base:#DB7C5E; --working-word-peak:#FFDBB9; }
+  .working-word-layer.is-leaving{ animation-name:working-word-shine,working-word-leave;
+    animation-duration:3s,.15s; animation-timing-function:linear,ease-out;
+    animation-fill-mode:none,forwards; }
+}
+@keyframes working-word-shine{
+  0%,15%{ background-position:83.333333% 0; animation-timing-function:cubic-bezier(.714,.121,.211,.888); }
+  85%,100%{ background-position:16.666667% 0; }
+}
+@keyframes working-word-enter{ from{opacity:0} to{opacity:1} }
+@keyframes working-word-leave{ from{opacity:1} to{opacity:0} }
+@media (prefers-reduced-motion:reduce),(forced-colors:active){
+  .working-word-layer{ animation:none; background:none; color:inherit; -webkit-text-fill-color:currentColor; }
+  .working-word-layer.is-leaving{ display:none; }
+}
 /* Completed replies stay static; clicking replays one engine animation. */
 .turn-done-mark{ margin-top:2px; }
 .engine-done-mark{ display:inline-flex; padding:3px; color:var(--accent-text,var(--accent)); }
