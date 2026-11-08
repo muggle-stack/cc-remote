@@ -564,6 +564,16 @@ const harness = await createServer({
   server: { middlewareMode: true, watch: null },
 });
 try {
+  const { default: QuestionMarkdown } = await harness.ssrLoadModule("/src/components/QuestionMarkdown.tsx");
+  const questionMarkup = renderToStaticMarkup(createElement(QuestionMarkdown, null,
+    "**重点**：检查 `build`，[文档](https://example.com)。 ![不要加载](https://example.com/image.png) <script>bad()</script>"));
+  assert.ok(questionMarkup.includes("<strong>重点</strong>") && questionMarkup.includes("<code>build</code>"));
+  assert.ok(questionMarkup.includes('rel="noopener noreferrer"'));
+  assert.ok(!questionMarkup.includes("<img") && !questionMarkup.includes("<script"));
+  const questionSummary = renderToStaticMarkup(createElement(QuestionMarkdown, { links: false }, "[文档](https://example.com)"));
+  assert.ok(!questionSummary.includes("<a "), "entry buttons cannot contain nested interactive links");
+  const unsafeQuestion = renderToStaticMarkup(createElement(QuestionMarkdown, null, "[危险](javascript:alert%281%29)"));
+  assert.ok(!unsafeQuestion.includes("javascript:"));
   const { initialState, reduce } = await harness.ssrLoadModule("/src/reducer.ts");
   const {
     advanceMarkdownMathState,

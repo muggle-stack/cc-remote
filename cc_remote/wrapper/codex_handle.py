@@ -77,6 +77,8 @@ from cc_remote.wrapper.codex_runtime import (
     resolve_codex_bin as _runtime_resolve_codex_bin,
 )
 from cc_remote.wrapper.codex_permissions import normalize_permission_profiles
+from cc_remote.wrapper.codex_approvals import ApprovalDecision, valid_approval_decision
+from cc_remote.wrapper.codex_errors import model_provider_mismatch
 from cc_remote.wrapper.codex_models import (
     codex_catalog, normalize_service_tier, resolve_service_tier,
 )
@@ -142,6 +144,8 @@ _ROLLOUT_SESSION_META_MAX_BYTES = 1024 * 1024
 _OPENAI_HTTP_RESUME_PROVIDER_ID = HTTP_COMPAT_PROVIDER_ID
 _OPENAI_HTTP_RESUME_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _CODEX_DESKTOP_BIN_CANDIDATES = (
+    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+    "/Applications/Codex.app/Contents/Resources/codex-cli/bin/codex",
     "/Applications/ChatGPT.app/Contents/Resources/codex",
     "/Applications/Codex.app/Contents/Resources/codex",
 )
@@ -175,7 +179,7 @@ _HTTP_PROVIDER_PERSISTING_NOTIFICATIONS = frozenset({
 })
 _EXTERNAL_THREAD_STARTED_SOURCES = frozenset({"cli", "vscode", "exec"})
 
-ApprovalCallback = Callable[[str, dict], Awaitable[str]]
+ApprovalCallback = Callable[[str, dict], Awaitable[ApprovalDecision]]
 InteractionCallback = Callable[[str, dict], Awaitable[dict[str, Any]]]
 GoalCallback = Callable[[Optional[dict[str, Any]]], Awaitable[None]]
 TurnLifecycleCallback = Callable[[str, str], Awaitable[None]]
@@ -338,6 +342,7 @@ class CodexAppServerError(RuntimeError):
         self.error = error
         self.code = error.get("code") if isinstance(error, dict) else None
         data = error.get("data") if isinstance(error, dict) else None
+        self.model_provider_mismatch = model_provider_mismatch(self.code, data)
         self.codex_error_info = (
             data.get("codexErrorInfo")
             if isinstance(data, dict)
@@ -1135,7 +1140,6 @@ _INTERACTION_METHODS = frozenset({
     "item/permissions/requestApproval",
     "mcpServer/elicitation/request",
 })
-_APPROVAL_DECISIONS = frozenset({"accept", "acceptForSession", "decline", "cancel"})
 _LEGACY_DECISIONS = {
     "accept": "approved",
     "acceptForSession": "approved_for_session",
@@ -1634,6 +1638,7 @@ class CodexHandle:
         self.goal_callback = goal_callback
         self.turn_lifecycle_callback = turn_lifecycle_callback
         self.thread_started_callback = thread_started_callback
+        self.metadata_changed_callback: Optional[ThreadStartedCallback] = None
         # App-server can emit initialize/config warnings before thread/start has
         # returned.  Machine binds this callback immediately but activates it only
         # after the SessionContext has a non-null routing key.  Until then, keep a
@@ -6369,7 +6374,7 @@ class CodexHandle:
 
     async def _approval_decision(
         self, method: str, params: dict,
-    ) -> Optional[str]:
+    ) -> Optional[ApprovalDecision]:
         """Return a decision, or stay silent for a shared pending request."""
         if self.approval == "never":
             return "decline"
@@ -6393,9 +6398,9 @@ class CodexHandle:
                 error_type=type(exc).__name__,
             )
             return None if self._using_daemon_proxy else "decline"
-        if decision not in _APPROVAL_DECISIONS:
+        if not valid_approval_decision(method, params, decision):
             log.warning("invalid codex approval decision",
-                        method=method, decision=decision)
+                        method=method)
             return None if self._using_daemon_proxy else "decline"
         return decision
 
@@ -7100,6 +7105,18 @@ class CodexHandle:
             # Responses are handled above and lifecycle collectors are the only
             # notifications used by this connection. In particular, never let
             # shared-daemon sibling lifecycle bind or mutate this handle.
+            return
+        if method in {"thread/readState/changed", "thread/section/changed"}:
+            target = _notification_thread_id(m)
+            callback = self.metadata_changed_callback
+            if (self._using_daemon_proxy and isinstance(target, str)
+                    and _STATUS_WIRE_ID.fullmatch(target) and callback is not None):
+                # Content-free, account-bound catalog invalidation. These are
+                # not turn events and must never enter chat/history queues.
+                try:
+                    callback(target)
+                except Exception as exc:
+                    log.warning("Codex metadata hint failed", error_type=type(exc).__name__)
             return
         if method == "thread/started" and self._using_daemon_proxy:
             target_thread_id = _notification_thread_id(m)

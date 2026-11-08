@@ -7,6 +7,7 @@ import { supplementalAnswerPrompt } from "../async-question-presentation";
 import { ImeSubmitGuard } from "../ime-submit";
 import type { QueryAcceptanceResult } from "../outbox";
 import { presentCommandProblem } from "../problem-presentation";
+import QuestionMarkdown from "./QuestionMarkdown";
 
 export interface AsyncQuestionDraft {
   choices: (string | null)[];
@@ -174,7 +175,7 @@ function AsyncQuestionDialog({ questions, initialDraft,
       </header>
       <div className="async-question-body" ref={bodyRef}>
         {questions.map((question, index) => <fieldset key={index} disabled={!onReply || !!submission}>
-          <legend>{question.title}</legend>
+          <legend><QuestionMarkdown>{question.title}</QuestionMarkdown></legend>
           {question.options?.map((option, optionIndex) => <label className="async-question-option" key={optionIndex}>
             <input type="radio" name={`option-${index}`} value={option}
               checked={draft.choices[index] === option}
@@ -182,7 +183,7 @@ function AsyncQuestionDialog({ questions, initialDraft,
                 ...draftRef.current,
                 choices: draftRef.current.choices.map((value, i) => i === index ? option : value),
               })} />
-            <span>{option}</span><span className="async-question-option-check" aria-hidden="true"><Icon name="check" size={18} /></span>
+            <span><QuestionMarkdown>{option}</QuestionMarkdown></span><span className="async-question-option-check" aria-hidden="true"><Icon name="check" size={18} /></span>
           </label>)}
           <label className="async-question-label-hidden" htmlFor={`${id}-${index}`}>
             {question.options?.length ? "其他回答（填写后替代选项）" : "你的回答"}

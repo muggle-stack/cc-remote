@@ -360,6 +360,22 @@ def _managed_pid(path: Path) -> Optional[int]:
     return pid if isinstance(pid, int) and pid > 1 else None
 
 
+def _daemon_pid_record(daemon_root: Path) -> Path:
+    """Prefer 0.167's record, retaining the legacy name only when absent.
+
+    An invalid or inaccessible new record must fail closed in _managed_pid;
+    falling back could select the retired generation during an upgrade.
+    """
+    current = daemon_root / "daemon.pid"
+    try:
+        current.lstat()
+    except FileNotFoundError:
+        return daemon_root / "app-server.pid"
+    except OSError:
+        pass
+    return current
+
+
 def _managed_daemon_process_identity(
     codex_home: str | Path,
 ) -> Optional[ProcessIdentity]:
@@ -372,7 +388,7 @@ def _managed_daemon_process_identity(
     proxy look current.
     """
     home = Path(os.path.realpath(os.path.expanduser(os.fspath(codex_home))))
-    pid = _managed_pid(home / "app-server-daemon" / "app-server.pid")
+    pid = _managed_pid(_daemon_pid_record(home / "app-server-daemon"))
     if pid is None or process_owner_uid(pid) != os.getuid():
         return None
     return process_identity(pid)
@@ -484,7 +500,7 @@ def _ensure_managed_daemon_nofile(
     daemon_root = Path(os.path.realpath(os.path.expanduser(codex_home))) / (
         "app-server-daemon"
     )
-    pid = _managed_pid(daemon_root / "app-server.pid")
+    pid = _managed_pid(_daemon_pid_record(daemon_root))
     if pid is None or process_owner_uid(pid) != os.getuid():
         return False
     proc_root = _PROC_ROOT / str(pid)
@@ -570,7 +586,7 @@ def _terminate_stale_darwin_daemon_updater(
         return False
     codex_home = env.get("CODEX_HOME") or os.path.expanduser("~/.codex")
     daemon_root = Path(codex_home) / "app-server-daemon"
-    app_server_pid = _managed_pid(daemon_root / "app-server.pid")
+    app_server_pid = _managed_pid(_daemon_pid_record(daemon_root))
     updater_pid = _managed_pid(daemon_root / "app-server-updater.pid")
     if (app_server_pid is None or updater_pid is None
             or app_server_pid == updater_pid):
@@ -798,7 +814,7 @@ class CodexDaemonManager:
         # Only a genuinely absent PID file permits the standalone identity.
         # Broken symlinks, corrupt records and permission errors fail closed.
         try:
-            (Path(home) / "app-server-daemon" / "app-server.pid").lstat()
+            _daemon_pid_record(Path(home) / "app-server-daemon").lstat()
         except FileNotFoundError:
             return _standalone_socket_identity(home, self._standalone_socket_path)
         except OSError:

@@ -292,6 +292,49 @@ class SessionPresentationStore:
                 ),
             )
 
+    def sync_codex_read_states(
+        self, receipts: dict[str, tuple[str, bool]],
+        *, expected_revisions: dict[str, int] | None = None,
+    ) -> None:
+        """Mirror authoritative native receipts without changing disk schema.
+
+        Local monotonic revisions still order browser projections. Native
+        revisions remain opaque and are represented by a bounded receipt id.
+        This is presentation only, never a native turn-terminal signal.
+        """
+        with self._lock:
+            updated = OrderedDict(self._sessions)
+            for session_id, (receipt_id, unread) in receipts.items():
+                key = _scope_key("codex", session_id)
+                _wire_id(receipt_id)
+                current = updated.get(key, SessionPresentationSnapshot())
+                if (expected_revisions is not None
+                        and current.completion_revision != expected_revisions.get(session_id, 0)):
+                    continue
+                if (current.completion_id == receipt_id
+                        and current.completion_unread == unread):
+                    continue
+                updated[key] = replace(
+                    current, completion_id=receipt_id, completion_unread=unread,
+                    completion_revision=current.completion_revision + 1,
+                    updated_at=time.time(),
+                )
+                updated.move_to_end(key)
+            if updated != self._sessions:
+                while len(updated) > _MAX_ENTRIES:
+                    updated.popitem(last=False)
+                self._persist_bounded(updated)
+                self._sessions = updated
+
+    def completion_revisions(self, engine: str) -> dict[str, int]:
+        with self._lock:
+            return {
+                sid: snapshot.completion_revision
+                for key, snapshot in self._sessions.items()
+                for owner, sid in [_split_persisted_scope_key(key)]
+                if owner == engine
+            }
+
     def clear_completion(
         self,
         engine: str,

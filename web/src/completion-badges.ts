@@ -164,6 +164,14 @@ export function completionNeedsHistoryRepair(
   completionId: string | null | undefined,
 ): boolean {
   if (!completionId) return false;
+  if (completionId.startsWith("codex-read-")) {
+    // Native read revisions are presentation receipts, not turn terminals.
+    // A completed-result receipt carries its exact native turn after the hash;
+    // a manually unread thread (or already-read row) has no terminal to repair.
+    const native = /^codex-read-[a-f0-9]{64}:([A-Za-z0-9._@-]{1,128})$/.exec(completionId);
+    if (!native) return false;
+    completionId = native[1];
+  }
   for (let index = turns.length - 1; index >= 0; index -= 1) {
     const turn = turns[index];
     if (turnMatchesCompletion(turn, completionId)) {

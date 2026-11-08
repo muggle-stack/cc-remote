@@ -589,6 +589,10 @@ def test_goal_dismissal_broadcasts_and_cannot_hide_a_replacement():
 def test_profiled_codex_receipts_use_the_routed_session_id():
     async def run():
         machine, transport = _mk_machine()
+        _install_two_codex_profiles(machine)
+        # Exercise the legacy server path without native read-state support.
+        machine._codex_rpc_for_profile = AsyncMock(return_value={
+            "thread": {"id": "native-session"}})
         wire_sid = "secondary@native-session"
         ctx = _mk_ctx(wire_sid, "native-session")
         ctx.engine = "codex"

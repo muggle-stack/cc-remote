@@ -289,6 +289,14 @@ from cc_remote.wrapper.stream import (
     transcript_timestamps, transcript_path, transcript_presence,
     translate_subagent_history, merge_subagent_history,
 )
+from cc_remote.wrapper.codex_approvals import (
+    ApprovalDecision, approval_choices, approval_prompt,
+)
+from cc_remote.wrapper.codex_errors import PROVIDER_MISMATCH_MESSAGE
+from cc_remote.wrapper.codex_organization import (
+    PINNED_SECTION_ID, READ_RECEIPT_PREFIX, native_pinned, native_read_state,
+    read_receipt_id,
+)
 from cc_remote.wrapper.codex_handle import (
     CodexAppServerError, CodexArchiveOutcomeUnknown, CodexEphemeralThreadGone,
     CodexDaemonProxyClosed, CodexHandle, CodexTurnStartDisconnected,
@@ -2414,6 +2422,7 @@ class WrapperMachine:
         self._codex_session_list_epoch = 0
         self._codex_session_list_refresh_epoch = -1
         self._codex_session_list_refresh_index_only = False
+        self._codex_session_list_read_revisions: dict[str, int] = {}
         self._directory_actions = DirectoryActions(self)
         self._codex_session_profile_errors: tuple[tuple[str, str], ...] = ()
         # Every subscribed handle on one shared daemon can observe the same CLI
@@ -19397,6 +19406,8 @@ class WrapperMachine:
             )
             return error
         except CodexAppServerError as exc:
+            if exc.model_provider_mismatch:
+                return await reject(ERR_NOT_STEERABLE, PROVIDER_MISMATCH_MESSAGE)
             if exc.active_turn_not_steerable or exc.steer_turn_changed:
                 kind = exc.unsteerable_turn_kind
                 stage = (
@@ -24907,6 +24918,12 @@ class WrapperMachine:
                     cmd.completion_id,
                 )
             )
+            if (engine is None and cmd.completion_id.startswith(READ_RECEIPT_PREFIX)
+                    and self._session_presentation.get("codex", session_id).completion_id):
+                # A cold row may already have a newer receipt. Its persisted
+                # Codex scope is sufficient for a stale-ack no-op, not a grant
+                # to mark the replacement native revision read.
+                engine = "codex"
             if engine is None:
                 error = Error(
                     code=ERR_PROTOCOL,
@@ -24916,6 +24933,10 @@ class WrapperMachine:
                 )
                 await self._emit_to_sid(sid, error)
                 return error
+            if engine == "codex" and (ctx is None or ctx.space == "code"):
+                event = await self._acknowledge_codex_read_state(cmd, session_id, ctx)
+                if event is not None:
+                    return event
             snapshot = await asyncio.to_thread(
                 self._session_presentation.acknowledge_completion,
                 engine,
@@ -24948,6 +24969,104 @@ class WrapperMachine:
             else:
                 await self._emit_to_sid(sid, error)
             return error
+
+    async def _acknowledge_codex_read_state(self, cmd, sid, ctx):
+        """Acknowledge a seen catalog revision or exact live terminal.
+
+        Live receipts contain a turn id, not a native read revision. Bind that
+        id to the newest completed turn before using the observed revision.
+        Return None only for Work or an explicitly unsupported legacy contract.
+        Conflicts never retry with a replacement revision.
+        """
+        try:
+            observed = self._session_presentation.get("codex", sid)
+            if observed.completion_id != cmd.completion_id:
+                event = self._completion_state(observed)
+                if ctx is not None:
+                    await self._emit(ctx, event)
+                else:
+                    await self._emit_to_sid(sid, event)
+                return event
+            profile, native_sid = self._codex_target(sid)
+            if ctx is None:
+                work_record = await asyncio.to_thread(
+                    self._work.for_engine("codex").get_by_session,
+                    native_sid, codex_profile_id=profile.id)
+                if work_record is not None:
+                    return None
+            native_receipt = cmd.completion_id.startswith(READ_RECEIPT_PREFIX)
+            try:
+                response = await self._codex_rpc_for_wire(
+                    sid, "thread/read", {"threadId": sid, "includeTurns": False})
+            except CodexRpcRejected as exc:
+                if not native_receipt and exc.code == -32601:
+                    return None
+                raise
+            thread = response.get("thread") if isinstance(response, dict) else None
+            if not isinstance(thread, dict) or thread.get("id") != native_sid:
+                raise ValueError("read receipt belongs to another thread")
+            if not native_receipt and "readState" not in response:
+                return None  # Older servers never exposed native read receipts.
+            state = native_read_state(response.get("readState"))
+            if state is None:
+                raise ValueError("native read state unavailable")
+            if native_receipt:
+                if read_receipt_id(state) != cmd.completion_id:
+                    raise ValueError("seen native read revision changed")
+            else:
+                position = state["firstUnread"]
+                if position is not None and position["type"] == "threadStart":
+                    raise ValueError("live completion cannot clear an explicit unread mark")
+                # firstUnread is the earliest unread result. It can still name
+                # this receipt even after a newer result has arrived, so read
+                # the bounded latest-turn page instead of trusting that field.
+                page = await self._codex_rpc_for_wire(sid, "thread/turns/list", {
+                    "threadId": sid, "limit": 1,
+                    "sortDirection": "desc", "itemsView": "summary",
+                })
+                turns = page.get("data") if isinstance(page, dict) else None
+                latest = turns[0] if isinstance(turns, list) and len(turns) == 1 else None
+                if (not isinstance(latest, dict) or latest.get("id") != cmd.completion_id
+                        or latest.get("status") != "completed"):
+                    raise ValueError("seen live terminal is no longer the latest result")
+            current = self._session_presentation.get("codex", sid)
+            if (current.completion_revision != observed.completion_revision
+                    or current.completion_id != observed.completion_id):
+                event = self._completion_state(current)
+                if ctx is not None:
+                    await self._emit(ctx, event)
+                else:
+                    await self._emit_to_sid(sid, event)
+                return event
+            self._invalidate_codex_session_catalog()
+            if state["firstUnread"] is not None:
+                result = await self._codex_rpc_for_wire(sid, "thread/readState/update", {
+                    "threadId": sid, "expectedRevision": state["revision"],
+                    "operation": {"type": "read"},
+                })
+                state = native_read_state(result.get("readState") if isinstance(result, dict) else None)
+                if state is None:
+                    raise ValueError("invalid native read acknowledgement")
+            self._invalidate_codex_session_catalog()
+            await asyncio.to_thread(
+                self._session_presentation.sync_codex_read_states,
+                {sid: (read_receipt_id(state), state["firstUnread"] is not None)},
+                expected_revisions={sid: observed.completion_revision})
+            event = self._completion_state(self._session_presentation.get("codex", sid))
+        except Exception as exc:
+            # Native rejection/unknown outcome stays unread. No local fallback
+            # write, retry, thread resume or model call is permitted here.
+            self._invalidate_codex_session_catalog()
+            log.warning("native Codex read acknowledgement unavailable",
+                        error_type=type(exc).__name__)
+            event = Error(code=ERR_BUSY, message="已读状态暂未确认，请重新打开会话确认。",
+                          request_id=getattr(cmd, "cmd_id", None),
+                          to=getattr(cmd, "client_id", None))
+        if ctx is not None:
+            await self._emit(ctx, event)
+        else:
+            await self._emit_to_sid(sid, event)
+        return event
 
     async def _handle_set_goal(self, cmd) -> None:
         ctx = await self._goal_ctx(cmd)
@@ -26254,58 +26373,33 @@ class WrapperMachine:
         return values if question.multi_select else values[0]
 
     async def _on_codex_approval(self, ctx: SessionContext, method: str,
-                                 params: dict) -> str:
+                                 params: dict) -> ApprovalDecision:
         """Bridge Codex app-server approvals to the existing AskUser flow.
 
         The callback returns the current app-server schema's exact decision enum.
         Anything unexpected fails closed; CodexHandle independently enforces a
         shorter timeout than the generic ask-user tool.
         """
-        def short(value, limit: int = 1200) -> str:
-            text = str(value or "").strip()
-            return text if len(text) <= limit else text[:limit] + "…"
-
-        command_request = method in {
-            "item/commandExecution/requestApproval", "execCommandApproval",
-        }
-        lines = ["Codex 请求执行命令：" if command_request else "Codex 请求修改文件："]
-        if command_request:
-            command = params.get("command")
-            if isinstance(command, list):
-                command = " ".join(str(part) for part in command)
-            if not command:
-                command = params.get("parsedCmd") or params.get("itemId")
-            if command:
-                lines.append(short(command))
-        else:
-            changes = params.get("fileChanges")
-            if isinstance(changes, dict) and changes:
-                paths = list(changes)[:12]
-                lines.append("\n".join(short(path, 240) for path in paths))
-                if len(changes) > len(paths):
-                    lines.append(f"另有 {len(changes) - len(paths)} 个文件")
-            elif params.get("itemId"):
-                lines.append(f"变更项 {short(params['itemId'], 240)}")
-        if params.get("cwd"):
-            lines.append(f"目录：{short(params['cwd'], 500)}")
-        if params.get("grantRoot"):
-            lines.append(f"授权目录：{short(params['grantRoot'], 500)}")
-        if params.get("reason"):
-            lines.append(f"原因：{short(params['reason'], 500)}")
-
-        options = [
-            {"label": "允许一次", "ds": "仅批准这一次操作"},
-            {"label": "本会话允许", "ds": "本会话后续同类操作不再询问"},
-            {"label": "拒绝", "ds": "拒绝这次操作"},
-            {"label": "取消", "ds": "取消当前操作或回合"},
-        ]
-        answer = await self._on_ask_optional(ctx, "\n".join(lines), options)
-        return {
-            "允许一次": "accept",
-            "本会话允许": "acceptForSession",
-            "拒绝": "decline",
-            "取消": "cancel",
-        }.get(answer, "decline")
+        choices = approval_choices(method, params)
+        if not choices:
+            return "decline"
+        prompt = approval_prompt(method, params)
+        page = 0
+        while True:
+            shown = choices if len(choices) <= 5 else choices[page * 3:page * 3 + 3]
+            options = [option for option, _ in shown]
+            if page:
+                options.append({"label": "上一页选项"})
+            if len(choices) > 5 and (page + 1) * 3 < len(choices):
+                options.append({"label": "下一页选项"})
+            answer = await self._on_ask_optional(ctx, prompt, options)
+            if answer == "下一页选项" and options[-1]["label"] == answer:
+                page += 1
+            elif answer == "上一页选项" and page:
+                page -= 1
+            else:
+                return next((decision for option, decision in shown
+                             if option["label"] == answer), "decline")
 
     async def _on_codex_interaction(self, ctx: SessionContext, method: str,
                                     params: dict) -> dict:
@@ -27582,6 +27676,25 @@ class WrapperMachine:
         self._codex_session_list_cache = None
         self._codex_session_list_epoch += 1
 
+    def _on_codex_metadata_hint(self, ctx: SessionContext, native_sid: str) -> None:
+        if ctx.engine != "codex" or ctx.space != "code" or ctx.btw:
+            return
+        try:
+            profile = self._codex_profile_for_ctx(ctx)
+            self._codex_wire_sid(profile, native_sid)
+        except (ValueError, RuntimeError):
+            return
+        if (profile.id, native_sid) in self._private_codex_btw_threads:
+            return
+        self._invalidate_codex_session_catalog()
+        self._codex_catalog_hint_dirty = True
+        self._codex_catalog_hint_last = (profile.id, native_sid)
+        if any(not task.done() for task in self._codex_catalog_hint_tasks):
+            return
+        task = asyncio.create_task(self._publish_codex_thread_started_hints())
+        self._codex_catalog_hint_tasks.add(task)
+        task.add_done_callback(self._codex_catalog_hint_tasks.discard)
+
     def _register_private_codex_btw_thread(
         self, ctx: SessionContext, native_thread_id: str,
     ) -> bool:
@@ -27694,11 +27807,15 @@ class WrapperMachine:
         if (task is None or task.done()
                 or self._codex_session_list_refresh_epoch != epoch
                 or (catalog_index_only() and not self._codex_session_list_refresh_index_only)):
+            self._codex_session_list_read_revisions = (
+                self._session_presentation.completion_revisions("codex")
+                if self._session_presentation is not None else {})
             task = asyncio.create_task(
                 self._read_codex_profile_catalog())
             self._codex_session_list_refresh_task = task
             self._codex_session_list_refresh_epoch = epoch
             self._codex_session_list_refresh_index_only = catalog_index_only()
+        read_revisions = self._codex_session_list_read_revisions
         try:
             raw, profile_errors = await asyncio.shield(task)
         finally:
@@ -27765,6 +27882,42 @@ class WrapperMachine:
         if epoch != self._codex_session_list_epoch:
             return await self._refresh_codex_session_catalog()
         raw = self._filter_private_codex_btw_rows(raw)
+        if self._session_presentation is not None:
+            # Only fresh, epoch-validated rows may update receipts. Cached
+            # SessionList paints must never undo a later acknowledgement.
+            store = self._work.for_engine("codex")
+            # Work owns its local completion state. Read pending bindings first
+            # so a concurrent unbound -> bound transition is covered by either
+            # snapshot, including crash-recovery rows reconciled at list send.
+            unbound = await asyncio.to_thread(store.unbound_records_by_cwd)
+            work_records = await asyncio.to_thread(store.records_by_profile_session)
+            work_cwds = {
+                (record.codex_profile_id or self._codex_profiles.default.id, cwd)
+                for cwd, record in unbound.items()
+            }
+            if epoch != self._codex_session_list_epoch:
+                return await self._refresh_codex_session_catalog()
+            raw = self._filter_private_codex_btw_rows(raw)
+            receipts = {}
+            for row in raw:
+                profile_id = row.get("codex_profile_id")
+                native_sid = row.get("native_session_id") or row["session_id"]
+                cwd = row.get("cwd")
+                if (profile_id in failed_profile_ids
+                        or (profile_id, native_sid) in work_records
+                        or (isinstance(cwd, str) and cwd
+                            and (profile_id, os.path.realpath(cwd)) in work_cwds)):
+                    continue
+                state = native_read_state(row.get("native_read_state"))
+                if state is not None:
+                    receipts[row["session_id"]] = (
+                        read_receipt_id(state), state["firstUnread"] is not None)
+            if receipts:
+                await asyncio.to_thread(
+                    self._session_presentation.sync_codex_read_states,
+                    receipts, expected_revisions=read_revisions)
+                if epoch != self._codex_session_list_epoch:
+                    return await self._refresh_codex_session_catalog()
         self._codex_session_profile_errors = profile_errors
         self._codex_session_list_cache = (
             time.monotonic(), raw, profile_errors,
@@ -28241,6 +28394,7 @@ class WrapperMachine:
             profile_rows.sort(
                 key=lambda row: (
                     int(row.get(_CODEX_CATALOG_PRIORITY) or 0),
+                    row.get("native_pinned") is True,
                     _codex_catalog_sort_key(row.get("last_modified")),
                 ),
                 reverse=True,
@@ -28741,7 +28895,8 @@ class WrapperMachine:
                     git_branch=row.get("git_branch"),
                     tag=("archived" if record and record.archived
                          else row.get("tag")),
-                    pinned=wire_sid in pinned_ids,
+                    pinned=(wire_sid in pinned_ids or (
+                        record is None and row.get("native_pinned") is True)),
                     engine="codex", space=space,
                     work_id=record.work_id if record else None,
                     state=(resident_state.get(wire_sid)
@@ -30376,8 +30531,12 @@ class WrapperMachine:
                              else self._handle_list_sessions(cmd))
             return error, listing
         try:
+            native_pin = False
+            if is_codex and work_record is None:
+                native_pin = await self._set_native_codex_pin(sid, bool(cmd.pinned))
             await asyncio.to_thread(
-                self._session_pins.set_pinned, engine, sid, bool(cmd.pinned))
+                self._session_pins.set_pinned, engine, sid,
+                False if native_pin else bool(cmd.pinned))
             log.info("session pin toggled", engine=engine, session_id=sid,
                      pinned=bool(cmd.pinned))
         except SessionPinStoreError as exc:
@@ -30391,6 +30550,12 @@ class WrapperMachine:
             listing = await (self._list_codex_sessions(cmd) if is_codex
                              else self._handle_list_sessions(cmd))
             return error, listing
+        except Exception as exc:
+            # A timed-out native move may have committed. Reconcile, never
+            # silently pretend a local fallback is the native mutation.
+            self._invalidate_codex_session_catalog()
+            return await reject(ERR_BUSY, "Codex 置顶状态暂未确认，请刷新列表查看。",
+                                type(exc).__name__)
         if is_codex and not cmd.pinned and self._codex_session_list_cache is not None:
             # Keep outage fallback rows, but reconcile them even when the
             # one-second cache is fresh: the user may be unpinning a deleted row.
@@ -30400,6 +30565,38 @@ class WrapperMachine:
             )
         return await (self._list_codex_sessions(cmd) if is_codex
                       else self._handle_list_sessions(cmd))
+
+    async def _set_native_codex_pin(self, sid: str, pinned: bool) -> bool:
+        _profile, native_sid = self._codex_target(sid)
+        try:
+            response = await self._codex_rpc_for_wire(
+                sid, "thread/read", {"threadId": sid, "includeTurns": False})
+        except CodexRpcRejected as exc:
+            if exc.code == -32601 or (not pinned and self._codex_thread_not_loaded(exc, native_sid)):
+                return False
+            raise
+        thread = response.get("thread") if isinstance(response, dict) else None
+        if not isinstance(thread, dict) or thread.get("id") != native_sid:
+            raise ValueError("native pin read returned another thread")
+        state = native_pinned(thread)
+        if state is None:
+            return False
+        if not pinned and not state:
+            # Removing a local legacy pin must not remove a native custom section.
+            self._invalidate_codex_session_catalog()
+            return True
+        if state != pinned:
+            try:
+                await self._codex_rpc_for_wire(sid, "thread/section/move", {
+                    "threadId": sid,
+                    "sectionId": PINNED_SECTION_ID if pinned else None,
+                })
+            except CodexRpcRejected as exc:
+                if exc.code == -32601:
+                    return False
+                raise
+        self._invalidate_codex_session_catalog()
+        return True
 
     async def _handle_delete_work_session(self, cmd):
         sid = self._resolve_session_alias(cmd.session_id) or cmd.session_id
@@ -37967,6 +38164,8 @@ class WrapperMachine:
             ctx.sdk.thread_started_callback = (
                 lambda thread_id: self._on_codex_thread_started_hint(
                     ctx, thread_id))
+            ctx.sdk.metadata_changed_callback = (
+                lambda thread_id: self._on_codex_metadata_hint(ctx, thread_id))
             ctx.sdk.runtime_event_callback = (
                 lambda event: self._on_codex_runtime_event(ctx, event))
 
@@ -38088,6 +38287,16 @@ class WrapperMachine:
             )
             return None
         except Exception as e:
+            if isinstance(e, CodexAppServerError) and e.model_provider_mismatch:
+                # An explicit native rejection must not enter bootstrap's
+                # resume-to-new-thread fallback or resubmit the user's prompt.
+                try:
+                    await ctx.sdk.disconnect()
+                except Exception:
+                    log.warning("provider mismatch spawn cleanup failed")
+                await reject(ERR_CC_CRASH, PROVIDER_MISMATCH_MESSAGE,
+                             route="sid", sid=wire_resume_id)
+                return None
             if bootstrap and resume_id:
                 log.warning("resume failed, starting a fresh session", error=str(e))
                 ctx.session_id = None
@@ -38602,6 +38811,8 @@ class WrapperMachine:
             ctx.sdk.thread_started_callback = (
                 lambda thread_id: self._on_codex_thread_started_hint(
                     ctx, thread_id))
+            ctx.sdk.metadata_changed_callback = (
+                lambda thread_id: self._on_codex_metadata_hint(ctx, thread_id))
             ctx.sdk.runtime_event_callback = (
                 lambda event: self._on_codex_runtime_event(ctx, event))
         if engine == "claude":
@@ -41136,6 +41347,8 @@ class WrapperMachine:
                     provider_request_too_large_message(
                         provider_too_large_kind)
                     if provider_too_large_kind is not None else
+                    PROVIDER_MISMATCH_MESSAGE
+                    if isinstance(e, CodexAppServerError) and e.model_provider_mismatch else
                     str(e) if isinstance(e, ClaudeServiceReplayRequired) else
                     "本次回复未完成，请重试。"
                 ),
