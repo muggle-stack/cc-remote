@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import { createServer } from "vite";
 import { PROTOCOL_VERSION } from "../src/protocol.ts";
 import type { Turn } from "../src/reducer.ts";
@@ -6,6 +7,17 @@ import type { Turn } from "../src/reducer.ts";
 const harness = await createServer({ root: process.cwd(), appType: "custom",
   logLevel: "silent", server: { middlewareMode: true, watch: null } });
 try {
+  const { producedFiles } = await harness.ssrLoadModule(resolve("../integrations/dsh/cc-remote.mjs"));
+  const patchEvents = (text: string, error = false) => [
+    { type: "tool/call", data: { callId: "patch", name: "apply_patch", arguments: JSON.stringify({ input: ["created.txt", "moved.txt", "removed.txt", "saved.txt", "forged.txt", "never.txt"].map(path => "*** Add File: " + path).join("\n") }) } },
+    { type: "tool/result", data: { message: { toolCallId: "patch", isError: error, content: [{ type: "text", text }] } } },
+  ];
+  assert.deepEqual(producedFiles(patchEvents("Success. Updated the following files:\nA created.txt\nM moved.txt\nD removed.txt")).map((f: { path: string }) => f.path).sort(), ["created.txt", "moved.txt"]);
+  assert.deepEqual(producedFiles(patchEvents("Patch stopped after 1 of 3 operations.\nCompleted:\nA saved.txt\nFailed:\nA forged.txt\nNot executed:\nA never.txt")).map((f: { path: string }) => f.path), ["saved.txt"]);
+  assert.deepEqual(producedFiles(patchEvents("A never.txt", true)), []);
+  assert.deepEqual(producedFiles(patchEvents("Success. Updated the following files:\nA unrequested.txt")), []);
+  assert.deepEqual(producedFiles(patchEvents("Success. Updated the following files:\nA /project/created.txt"), "/project").map((f: { path: string }) => f.path), ["/project/created.txt"]);
+  assert.deepEqual(producedFiles(patchEvents("Success. Updated the following files:\nA /other/created.txt"), "/project"), []);
   const { routeComposerInput, commandsFor, defaultModelFor } = await harness.ssrLoadModule("/src/data.ts");
   const { dshCommandMatches } = await harness.ssrLoadModule("/src/dsh-commands.ts");
   for (const input of ["/btw", "/btw question", " /BTW question "]) {

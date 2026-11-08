@@ -316,6 +316,7 @@ def test_autonomous_goal_round_opens_its_own_owner_in_live_and_cold_views():
 @pytest.mark.parametrize("live", [False, True])
 def test_child_wakeup_preserves_answer_and_continuation_in_live_and_cold_history(source, live):
     p = DshProjection()
+    record(p, "subagent/catalog", {"childId": "child", "mode": "continuable"})
     frames = record(p, "turn/start", {"turn": 1}) + user(p, "human")
     frames += record(p, "assistant/message", {"turn": 1, "step": 1,
         "message": {"content": [{"type": "text", "text": "initial answer"}]}})

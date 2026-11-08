@@ -785,6 +785,51 @@ async function mockRightPanelRelay(
   return { commands, emit: (message: PanelRelayEvent) => emit(message) };
 }
 
+for (const [engine, space] of [["claude", "code"], ["codex", "code"], ["claude", "work"]] as const) {
+  test(`session delete confirmation uses app styling and exact ${engine} ${space} target`, async ({ page }, info) => {
+    const relay = await mockRightPanelRelay(page, { engine, retained: false,
+      listReply: command => ({ type: "session_list", request_id: String(command.cmd_id), engine,
+        space: command.space === "work" ? "work" : "code", sessions: [{
+          session_id: "delete-target", engine, space, summary: "待删除的测试会话",
+          cwd: "/tmp/delete-test", state: "idle", last_modified: "100",
+        }] }),
+    });
+    if (space === "work") await page.addInitScript(() => localStorage.setItem("cc_remote_space", "work"));
+    const nativeDialogs: string[] = [];
+    page.on("dialog", async dialog => { nativeDialogs.push(dialog.type()); await dialog.dismiss(); });
+    await page.goto("/");
+    await page.getByLabel("显示会话侧栏", { exact: true }).click();
+    if (space === "work") await page.getByRole("tab", { name: "Work", exact: true }).click();
+    const card = page.locator(".scard").filter({ hasText: "待删除的测试会话" }).first();
+    const noun = space === "work" ? "工作" : "会话";
+    const open = async () => {
+      await card.getByRole("button", { name: "更多操作" }).click();
+      await page.locator(".card-menu").getByRole("button", { name: `删除${noun}`, exact: true }).click();
+    };
+    await open();
+    const dialog = page.getByRole("dialog", { name: space === "work" ? "删除这项工作？" : "删除这条会话？" });
+    await expect(dialog).toContainText("待删除的测试会话");
+    await expect(dialog).toContainText(space === "work" ? "私有文件将被永久删除" : "项目目录和代码文件会保留");
+    await expect(page.locator(".card-menu")).toHaveCount(0);
+    await page.screenshot({ path: info.outputPath(`delete-${engine}-${space}.png`) });
+    await dialog.getByRole("button", { name: "取消", exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(relay.commands.filter(c => c.type === "delete_session")).toEqual([]);
+    await open();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    expect(relay.commands.filter(c => c.type === "delete_session")).toEqual([]);
+    await open();
+    await dialog.getByRole("button", { name: `删除${noun}`, exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect.poll(() => relay.commands.filter(c => c.type === "delete_session").length).toBe(1);
+    expect(relay.commands.find(c => c.type === "delete_session")).toMatchObject({
+      session_id: "delete-target", engine, space,
+    });
+    expect(nativeDialogs).toEqual([]);
+  });
+}
+
 for (const engine of ["claude", "codex"] as const) {
   test(`side chat scope shows ${engine} background tasks independently of the parent and siblings`, async ({ page, isMobile }, testInfo) => {
     await page.setViewportSize(isMobile ? { width: 390, height: 844 } : { width: 1568, height: 900 });

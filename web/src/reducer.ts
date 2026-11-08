@@ -4863,6 +4863,16 @@ function reduceEvent(
       // with a complete usable cursor, still owns its stable reading boundary.
       const preserveStablePagination = preserveStableHeadHistory && (
         base.hasLoadedOlderHistory || (!!base.hasMore && !!base.oldestId)
+        // An authoritative complete head can later grow entirely through live
+        // events. A narrower refresh (including archive browsing) must not put
+        // an older-page cursor in the middle of those already retained rows.
+        // Cache paint alone, even with a saved head flag, is not that proof.
+        || (base.historyHeadKnown && base.hasMore === false
+          && base.hydratedCacheTurnIds.length === 0
+          && base.turns.findIndex(turn =>
+            turnHasIdentityAlias(turn, built.turns[0]?.id)
+            || turnHasIdentityAlias(turn, built.turns[0]?.historyTurnId)
+            || turnHasIdentityAlias(turn, built.turns[0]?.clientMsgId)) > 0)
       );
       // Older pages returned at the top of this case and never reach runtime
       // authority reconciliation; every remaining frame is a newest page.

@@ -122,7 +122,7 @@ class DshRuntime:
         self.changes = DshChanges(self)
         self.history_cursors: OrderedDict[tuple[str, str], int] = OrderedDict()
         self.fork_boundaries: OrderedDict[tuple[str, str], int] = OrderedDict()
-        self.image_refs: OrderedDict[tuple[str, str], str] = OrderedDict()
+        self.image_refs: OrderedDict[tuple[str, str], dict] = OrderedDict()
         self.builds: dict[str, int] = {}
         self.closed = False
         self.features = DshFeatures(self)
@@ -405,7 +405,7 @@ class DshRuntime:
         for refs in projection.image_refs.values():
             for ref in refs:
                 key = (sid, ref["image_id"])
-                self.image_refs[key] = ref["attachment_id"]
+                self.image_refs[key] = ref["attachment"]
                 self.image_refs.move_to_end(key)
         while len(self.image_refs) > 512:
             self.image_refs.popitem(last=False)
@@ -468,7 +468,7 @@ class DshRuntime:
             if refs:
                 # These attachments load through GetHistoryImage, not turn
                 # detail. Do not advertise them as deferred answer content.
-                row["imageRefs"] = [{k: v for k, v in ref.items() if k != "attachment_id"} for ref in refs]
+                row["imageRefs"] = [{k: v for k, v in ref.items() if k != "attachment"} for ref in refs]
         self.builds[sid] = self.builds.get(sid, 0) + (0 if cmd.before else 1)
         result = History(
             sid=sid, session_id=sid, revision=self.machine.instance_id,
@@ -594,7 +594,7 @@ class DshRuntime:
         if not attachment:
             raise DshError("history_expired", "图片引用已过期，请刷新对应历史页。")
         value = await self.client.rpc("session/attachment", {"request": {
-            "sessionId": native_session_id(cmd.session_id), "attachmentId": attachment}})
+            "sessionId": native_session_id(cmd.session_id), "attachment": attachment}})
         import base64
         from cc_remote.wrapper.machine import _render_history_image
         async with self.machine._preview_conversion_limit:
@@ -1524,7 +1524,13 @@ class DshRuntime:
                     elif frame.get("type") == "projection":
                         ctx = self.machine.sessions.get(wire_session_id(frame["sessionId"]))
                         if ctx:
-                            await self.projections(ctx, {frame["key"]: frame.get("value")}, seq=frame.get("seq"))
+                            changes = frame.get("changes")
+                            if (not isinstance(changes, list) or not changes
+                                    or any(not isinstance(change, dict) or not isinstance(change.get("key"), str)
+                                           or "val" not in change for change in changes)
+                                    or len({change["key"] for change in changes}) != len(changes)):
+                                raise DshError("invalid_projection", "DSH 状态更新格式不兼容。")
+                            await self.projections(ctx, {change["key"]: change["val"] for change in changes}, seq=frame.get("seq"))
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -1562,7 +1568,11 @@ class DshRuntime:
             summary=job.detail[:2048] or None, status="running") for job in ctx.sdk.state.jobs if job.status in {"running", "stopping"}]
         for child in ctx.sdk.children:
             if child.get("activity") == "running":
-                items.append(BackgroundProcessItem(item_id=wire_session_id(child["id"]), kind="agent",
+                local = child.get("mode") in {"one-shot", "continuable"}
+                items.append(BackgroundProcessItem(
+                    item_id=wire_session_id(child["id"]) if local else identity(child["id"], "dsh-external"),
+                    kind="agent" if local else "task",
+                    summary=None if local else "外部代理正在执行，结果返回当前会话。",
                     title=str(child.get("label") or "DSH 子代理")[:1024], status="running"))
         await self.machine._emit(ctx, BackgroundProcessSync(items=items[:64]))
 

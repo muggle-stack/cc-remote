@@ -1,4 +1,5 @@
 import json
+from uuid import uuid4
 
 import pytest
 
@@ -7,7 +8,7 @@ from tests.test_dsh_runtime import setup_runtime
 
 
 def command(action, **values):
-    return SetDshControl(sid="dsh@root", client_id="browser", cmd_id="manage", kind="manage", value=json.dumps({"action": action, **values}))
+    return SetDshControl(sid="dsh@root", client_id="browser", cmd_id=uuid4().hex, kind="manage", value=json.dumps({"action": action, **values}))
 
 
 @pytest.mark.asyncio
@@ -46,14 +47,14 @@ async def test_schedule_edit_preserves_original_session_and_observed_record():
     async def rpc(endpoint, args=None):
         calls.append((endpoint, args))
         if endpoint == "schedule/catalog":
-            return [{**record, "sessionId": "other", "status": "active"}]
+            return [{**record, "target": {"kind": "session", "sessionId": "other"}, "status": "active", "updatedAt": "rev1"}]
         if endpoint == "schedule/history":
             return {"records": [{"messageId": "delivery", "deliveredAt": "2026-10-22T00:00:00Z"}]}
-        return {"updated": True, "record": record}
+        return {**record, "updatedAt": "rev2"}
     client.rpc = rpc
-    result = await machine._handle(command("schedule_update", id="task", sid="dsh@other", expected=record, title="Review code", prompt="New", change={"kind": "every", "every_seconds": 600}))
+    result = await machine._handle(command("schedule_update", id="task", expectedUpdatedAt="rev1", patch={"title": "Review code", "prompt": "New", "timing": {"kind": "every", "every_seconds": 600}}))
     assert result.status == "success"
-    assert calls[-1] == ("schedule/update", {"request": {"sessionId": "other", "id": "task", "expected": record, "title": "Review code", "prompt": "New", "change": {"kind": "every", "every_seconds": 600}}})
+    assert calls[-1] == ("schedule/edit", {"request": {"id": "task", "action": "update", "expectedUpdatedAt": "rev1", "patch": {"title": "Review code", "prompt": "New", "timing": {"kind": "every", "every_seconds": 600}}}})
     page = await machine._handle(ReadDsh(sid="dsh@root", target_sid="dsh@other", kind="schedule_history", query="task", client_id="browser", cmd_id="history"))
     assert page.items[0].detail == "delivery"
     assert not machine.sessions
@@ -125,13 +126,15 @@ async def test_market_search_uses_only_native_configured_source_and_paginates():
         calls.append((endpoint, args))
         if endpoint == "pluginMarket/listIndexes":
             return [{"url": "https://example.org/approved-index"}]
+        if endpoint == "pluginManager/listBundles":
+            return []
         return {"entries": [{"name": "example", "title": {"zh-CN": "示例"}, "defaultVersion": "2.0", "versions": [
             {"version": "2.0", "install": {"spec": "example@2.0"}}], "installation": {"status": "update-available", "installedVersion": "1.0"}}], "nextOffset": 60}
     client.rpc = rpc
     page = await machine._handle(ReadDsh(sid="dsh@root", kind="bundles", query='{"market":true,"text":"test","url":"https://untrusted.invalid"}', before_seq=30, client_id="browser", cmd_id="read"))
     assert page.has_more and page.next_seq == 60
     assert page.items[0].state == "update-available" and page.items[0].data["installTarget"] is None
-    assert calls[-1][1] == {"url": "https://example.org/approved-index", "query": {"text": "test", "sort": {"kind": "relevance"}, "offset": 30, "limit": 30}}
+    assert next(args for endpoint, args in calls if endpoint == "pluginMarket/search") == {"url": "https://example.org/approved-index", "query": {"text": "test", "sort": {"kind": "relevance"}, "offset": 30, "limit": 30}}
     await runtime.close()
 
 

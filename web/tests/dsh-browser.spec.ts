@@ -16,12 +16,16 @@ const nativeState: Omit<DshState, "v" | "ts"> = { type: "dsh_state", sid, connec
     rounds: 3, max_rounds: 32, activation: "disarmed" },
 };
 
-async function mockDshRelay(page: Page, { running = false, commandSuccess = false, features = false, sidebarCards = false, failSettingsNamespace = "" } = {}) {
+async function mockDshRelay(page: Page, { running = false, commandSuccess = false, features = false, product = false, sidebarCards = false, failSettingsNamespace = "" } = {}) {
   const commands: Record<string, unknown>[] = [];
   let historyTurns: Record<string, unknown>[] | undefined;
+  let historyPagination: { has_more: boolean; oldest_id?: string } = { has_more: false };
   let archived = false;
   let terminalClosed = false;
   let currentGoal = nativeState.goal;
+  let recommendationDismissed = false;
+  let cleanupCount = 8;
+  const marketSources = [{ id: "source", title: "本机配置的插件源", data: { revision: "sources-1", url: "https://example.test/plugins.json" } }];
   const settingItems: DshItem[] = [
     { id: "subagent", title: "subagent", detail: "", state: "settings", has_children: false, controllable: true, data: { revision: 4, applies: "live", values: { maxDepth: 1, maxActiveSubagents: 8 }, constraints: { maxDepth: { min: 0, step: 1 }, maxActiveSubagents: { min: 1, step: 1 } } } },
     { id: "agent-loop", title: "agent-loop", detail: "", state: "settings", has_children: false, controllable: true, data: { revision: 7, applies: "live", values: { maxParallelToolCalls: 10 }, constraints: { maxParallelToolCalls: { min: 1, step: 1 } } } },
@@ -107,7 +111,7 @@ async function mockDshRelay(page: Page, { running = false, commandSuccess = fals
               input: { files: [{ path: "/tmp/dsh-test/report.xlsx", description: "路线图" }] },
               result: { content: "Presented", is_error: false }, done: true }] : []),
             { kind: "text", message_id: "answer", text: features ? "[项目目录](/tmp/dsh-test/dir) 和 [文件行号](/tmp/dsh-test/README.md:7)" : "DSH 已准备好。", channel: "final", done: true },
-          ] }], has_more: false });
+          ] }], ...historyPagination });
       if (cmd.type === "set_dsh_control" && cmd.kind === "terminal" && JSON.parse(String(cmd.value)).action === "input") {
         setTimeout(() => emit({ type: "dsh_command_result", sid: cmd.sid, request_id: cmd.cmd_id, status: "success", text: "" }), 350);
         return;
@@ -127,6 +131,9 @@ async function mockDshRelay(page: Page, { running = false, commandSuccess = fals
       }
       if (cmd.type === "set_dsh_control" && cmd.kind === "manage") {
         const body = JSON.parse(String(cmd.value));
+        if (commandSuccess && body.action === "recommendation" && body.verb === "dismiss") recommendationDismissed = true;
+        if (commandSuccess && body.action === "schedule_cleanup") cleanupCount = 0;
+        if (commandSuccess && body.action === "market_source_add") marketSources.push({ id: "added", title: "新增插件源", data: { revision: "sources-2", url: body.url } });
         if (body.action === "settings") {
           const row = settingItems.find(item => item.id === body.ns)!;
           const success = commandSuccess && body.ns !== failSettingsNamespace && row.data!.revision === body.revision;
@@ -178,27 +185,38 @@ async function mockDshRelay(page: Page, { running = false, commandSuccess = fals
         ] });
       if (features && cmd.type === "read_dsh") {
         const items = cmd.kind === "search" ? [{ id: "hit", sid, title: "DSH 原生会话", detail: `匹配 ${cmd.query}` }]
+          : product && cmd.kind === "plugins" && cmd.query === "recommendations" ? recommendationDismissed ? [] : [{ id: "recommend-1", title: "持久终端", detail: "让开发服务在后台持续运行。", state: "proposed", controllable: true, data: { owner: "native-prompt", name: "@example/plugin" } }]
           : cmd.kind === "references" ? [
             { id: "file", title: "report notes.md", path: "report notes.md", state: "file", mention: '@"report notes.md"' },
             { id: "session", sid, title: "相关会话", state: "session", mention: "@[相关会话](dsh-session:native-session)" }]
           : cmd.kind === "subagents" ? [{ id: "child", sid: "dsh@child", title: "检查构建", detail: "", mode: "continuable", state: "running", has_children: true, controllable: true }]
           : cmd.kind === "workflows" ? [{ id: "workflow", title: "审查工作流", state: "running", data: { members: [{ sid: "dsh@child", label: "检查构建", phase: "审查", state: "running" }] } }]
+          : product && cmd.kind === "trajectory" && cmd.query === "stats" ? [{ id: "12", title: "第 12 轮", state: "completed", data: { turn: 12, wall: 18600, model: 12400, tool: 6200, input: 24100, output: 1200, cacheHit: .84, partial: false, truncated: false, pendingTools: 0,
+            steps: [{ step: 1, wall: 18600, model: 12400, tool: 6200, input: 24100, output: 1200, ttft: 100 }], tools: [{ name: "读取文件", step: 1, duration: 100 }, { name: "运行命令", step: 1, duration: 6100 }] } }]
           : cmd.kind === "trajectory" ? [{ id: "1", title: "第 1 轮", state: "completed", data: { input: 3000, output: 420, events: [{ type: "tool/call", label: "run_code" }] } }]
           : cmd.kind === "settings" ? settingItems
           : cmd.kind === "presets" ? [{ id: "standard", title: "标准", state: "default", detail: "文件与命令" }, { id: "cordis", title: "配置助手", state: "available" }]
           : cmd.kind === "schedules" && cmd.query === "sessions" ? [{ id: sid, title: "当前项目", detail: "/tmp/dsh-test" }]
-          : cmd.kind === "schedules" ? [{ id: "review", sid, title: "每周审查", detail: "检查变更", state: "active", data: { id: "review", kind: "every", title: "每周审查", prompt: "检查变更", everySeconds: 300, scheduledAt: "2026-10-22T00:00:00Z" } }]
-          : cmd.kind === "schedule_history" ? [{ id: "delivery", title: "2026-10-22 08:00", detail: "delivery-1", state: "delivered" }]
-          : cmd.kind === "bundles" ? [
-            { id: "@deepseek-ai/dsh-base", title: "DSH Base", detail: "Core runtime", state: "enabled", data: { version: "0.2.1-rc.2", availability: "installation", readOnlyReason: "management-required" } },
-            { id: "@deepseek-ai/dsh-session-titles", title: "Session titles", state: "disabled", controllable: true, data: { version: "0.2.1-rc.2", availability: "installation", optional: true } },
-            { id: "@example/plugin", title: "Example", detail: "示例插件", state: "enabled", controllable: true, data: { version: "1.0.0", installed: true, removable: true } },
+          : product && cmd.kind === "schedules" && cmd.query === "cleanup" ? [{ id: "cleanup", data: { count: cleanupCount, revision: "cleanup-1" } }]
+          : cmd.kind === "schedules" ? [{ id: "review", sid, title: "每周审查", detail: "检查变更", state: "active", data: { id: "review", kind: "every", title: "每周审查", prompt: "检查变更", everySeconds: 300, updatedAt: "rev1", target: { kind: "session", sid }, scheduledAt: "2026-10-22T00:00:00Z" } }]
+          : cmd.kind === "schedule_history" ? [{ id: "delivery", sid, title: "2026-10-22 08:00", detail: "delivery-1", state: "delivered" }]
+          : cmd.kind === "bundles" && cmd.query && JSON.parse(String(cmd.query)).sources ? marketSources
+          : cmd.kind === "bundles" && cmd.query && JSON.parse(String(cmd.query)).detail ? [{ id: "detail", detail: "## 使用方式\n\n- 启动服务\n- 读取输出\n\n```sh\nnpm run dev\n```\n\n<script>window.fixtureBad = true</script>\n\n[unsafe](javascript:alert(1)) ![preview](https://tracker.invalid/image.png)", state: "found" }]
+          : product && cmd.kind === "bundles" && cmd.query && JSON.parse(String(cmd.query)).market ? [{ id: "market-plugin", title: "市场插件", detail: "原生索引中的示例", state: "not-installed", data: { source: "source", version: "1.0.0", fetchedAt: 1, installTarget: { source: "source", name: "market-plugin", version: "1.0.0" } } }]
+          : cmd.kind === "bundles" && cmd.query && JSON.parse(String(cmd.query)).versions ? [
+            { id: "2.0.0", title: "2.0.0", state: "incompatible" },
+            { id: "1.2.0-rc.1", title: "1.2.0-rc.1", state: "compatible", data: { prerelease: true, tags: ["next"] } },
+            { id: "1.1.0", title: "1.1.0", state: "compatible", data: { tags: ["latest"] } },
+          ] : cmd.kind === "bundles" ? [
+            { id: "@deepseek-ai/dsh-base", title: "DSH Base", detail: "Core runtime", state: "enabled", data: { version: "0.2.2-rc.1", availability: "installation", readOnlyReason: "management-required" } },
+            { id: "@deepseek-ai/dsh-session-titles", title: "Session titles", state: "disabled", controllable: true, data: { version: "0.2.2-rc.1", availability: "installation", optional: true } },
+            { id: "@example/plugin", title: "Example", detail: "示例插件", state: "enabled", controllable: true, data: { version: "1.0.0", installed: true, removable: true, updatable: true } },
           ]
           : cmd.kind === "terminals" ? terminalClosed ? [] : [{ id: "pty", title: "zsh", detail: "/tmp", state: "running", data: { cols: 80, rows: 24 } }]
           : cmd.kind === "terminal_output" ? (cmd.before_seq ? [] : [{ id: "1", title: "screen", data: { type: "snapshot", screen: "DSH terminal ready\r\n\x1b[36m~/workspace\x1b[0m $ pwd\r\n/home/user/workspace\r\n\x1b[36m~/workspace\x1b[0m $ ", writable: true, info: {} } }])
           : cmd.kind === "conversation" ? [{ id: "message", title: "DSH", detail: `已经检查构建 ${cmd.query ?? ""}`, state: "message" }]
           : cmd.kind === "deliverables" ? [{ id: "file", title: "report.xlsx", path: "/tmp/dsh-test/report.xlsx", detail: "交付文件" }]
-          : [{ id: "version", title: "DSH 版本", detail: "0.2.1-rc.2", state: "active" }];
+          : [{ id: "version", title: "DSH 版本", detail: "0.2.2-rc.1", state: "active" }];
         emit({ type: "dsh_read_result", sid: cmd.sid, request_id: cmd.cmd_id, kind: cmd.kind, items, available: true, has_more: false, ...(cmd.kind === "terminal_output" ? { next_seq: 1 } : {}) });
       }
       if (features && cmd.type === "act_dsh_subagent") emit({ type: "dsh_command_result", sid: cmd.sid,
@@ -223,7 +241,10 @@ async function mockDshRelay(page: Page, { running = false, commandSuccess = fals
     });
   });
   return { commands, emit: (event: Record<string, unknown>) => emit(event),
-    setHistory: (turns: Record<string, unknown>[]) => { historyTurns = turns; } };
+    setHistory: (turns: Record<string, unknown>[], pagination = { has_more: false } as typeof historyPagination) => {
+      historyTurns = turns;
+      historyPagination = pagination;
+    } };
 }
 
 async function openDsh(page: Page, options = {}) {
@@ -256,9 +277,11 @@ test("Deferred login form opens and enters the existing session without starting
 
 for (const theme of ["light", "dark"] as const) {
 test(`DSH sidebar uses session cards and directory subtitles (${theme})`, async ({ page }, info) => {
-  await page.addInitScript(theme => localStorage.setItem("cc_remote_theme", theme), theme);
+  await page.addInitScript(theme => {
+    localStorage.setItem("cc_remote_appearance_v2", JSON.stringify({ dsh: { mode: theme, sessionLayout: "comfortable" } }));
+  }, theme);
   await openDsh(page, { running: true, sidebarCards: true });
-  await expect(page.locator(".c-head .sub")).toHaveText("session c4edc56f");
+  await expect(page.locator(".c-head .sub")).toHaveText("session native-s");
   if (!await page.locator(".shell.sidebar-open").count()) await page.locator(".surface-head-title").click();
   const cards = page.locator(".sessions .scard");
   await expect(cards).toHaveCount(2);
@@ -269,7 +292,8 @@ test(`DSH sidebar uses session cards and directory subtitles (${theme})`, async 
     return { height: node.getBoundingClientRect().height, border: style.borderTopColor,
       background: style.backgroundColor, overflow: node.scrollWidth - node.clientWidth };
   }));
-  expect(sizes[0].height).toBeCloseTo(sizes[1].height, 0);
+  // The running badge can add a pixel of font leading across browser engines.
+  expect(Math.abs(sizes[0].height - sizes[1].height)).toBeLessThanOrEqual(2);
   for (const card of sizes) {
     expect(card.border).not.toBe("rgba(0, 0, 0, 0)");
     expect(card.background).not.toBe("rgba(0, 0, 0, 0)");
@@ -518,7 +542,12 @@ test("DSH child-result continuation stays connected across completion, refresh a
   relay.emit({ type: "delta", sid, turn_id: auto, message_id: "child-check", text: "子代理结果已核对，继续补充结论。" });
   const continuation = page.locator(`[data-turn-id="${auto}"]`);
   const cue = continuation.locator(".turn-continuation");
-  await expect(cue).toHaveText("收到子代理结果，继续处理");
+  await expect(cue).toContainText("DeepSeek 继续处理");
+  await expect(cue).toHaveClass(/background-followup-boundary/);
+  expect(await cue.evaluate(node => {
+    const style = getComputedStyle(node);
+    return { background: style.backgroundColor, radius: style.borderRadius, borderTop: style.borderTopWidth };
+  })).toEqual({ background: "rgba(0, 0, 0, 0)", radius: "0px", borderTop: "1px" });
   await expect(continuation.locator(".turn-working")).toBeVisible();
   await expect(page.getByText("DSH 已准备好。", { exact: true })).toBeVisible();
   await expect(page.locator('[data-turn-id="native-prompt"] .turn-working')).toHaveCount(0);
@@ -548,6 +577,60 @@ test("DSH child-result continuation stays connected across completion, refresh a
   relay.emit({ type: "turn_binding", sid, msg_id: "next-task", turn_id: "dsh-seq-30" });
   await expect(page.locator('[data-turn-id="next-task"] .ubub')).toHaveText("接下来检查另一个目录");
   await expect(page.locator('[data-turn-id="next-task"] .turn-continuation')).toHaveCount(0);
+  await expect(page.locator(".turn-continuation")).toHaveCount(1);
+});
+
+test("DSH scheduled prompts retain their task tag across reload", async ({ page }, info) => {
+  const relay = await openDsh(page);
+  const receipt = { task_id: "schedule-native", title: "自动化任务", scheduled_at: 1794130061.465 };
+  relay.emit({ type: "state", sid, state: "running" });
+  relay.emit({ type: "user_msg", sid, msg_id: "scheduled-input", client_msg_id: "scheduled-input", prompt: "检查构建结果", timed_task: receipt });
+  relay.emit({ type: "turn_binding", sid, msg_id: "scheduled-input", turn_id: "dsh-seq-9" });
+  relay.emit({ type: "assistant_msg_start", sid, message_id: "scheduled-answer", turn_id: "dsh-seq-9", channel: "final" });
+  relay.emit({ type: "delta", sid, message_id: "scheduled-answer", turn_id: "dsh-seq-9", channel: "final", text: "构建通过。" });
+  const row = page.locator('[data-turn-id="scheduled-input"]');
+  await expect(row.locator(".ubub")).toContainText("检查构建结果");
+  await expect(row.getByText("定时任务", { exact: true })).toBeVisible();
+  relay.setHistory([{ id: "scheduled-input", prompt: "检查构建结果", timedTask: receipt, done: true,
+    blocks: [{ kind: "text", message_id: "scheduled-answer", channel: "final", text: "构建通过。", done: true }] }]);
+  relay.emit({ type: "turn_end", sid, turn_id: "dsh-seq-9", result: { subtype: "success", duration_ms: 1200, is_error: false } });
+  relay.emit({ type: "state", sid, state: "idle" });
+  await page.reload();
+  await expect(row.locator(".ubub")).toContainText("检查构建结果");
+  await row.getByText("定时任务", { exact: true }).click();
+  await expect(row.getByText("自动化任务", { exact: true })).toBeVisible();
+  await expect(row).toContainText("计划发送于");
+  await page.screenshot({ path: info.outputPath("dsh-scheduled-prompt.png") });
+});
+
+test("DSH background-job continuation retains attribution after completion and reload", async ({ page }, info) => {
+  const relay = await openDsh(page);
+  const auto = "dsh-turn-job-return";
+  const receipt = { item_id: "dsh-return-70", kind: "task", phase: "end", status: "unknown",
+    server: "cc_remote", tool: "task_return", title: "后台任务返回", background: true, turn_id: auto };
+  relay.emit({ type: "state", sid, state: "running" });
+  relay.emit({ type: "turn_binding", sid, msg_id: auto, turn_id: auto, autonomous: true });
+  relay.emit({ type: "process", sid, ...receipt });
+  relay.emit({ type: "assistant_msg_start", sid, message_id: "job-answer", turn_id: auto, channel: "final" });
+  relay.emit({ type: "delta", sid, message_id: "job-answer", turn_id: auto, channel: "final", text: "后台构建已经完成。" });
+  const row = page.locator(`[data-turn-id="${auto}"]`);
+  await expect(row.locator(".turn-continuation")).toContainText("DeepSeek 继续处理");
+  await expect(row.locator(".ubub")).toHaveCount(0);
+  await expect(row.getByRole("button", { name: /代理返回/ })).toHaveCount(0);
+  relay.emit({ type: "turn_end", sid, turn_id: auto, result: { subtype: "success", duration_ms: 1300, is_error: false } });
+  relay.emit({ type: "state", sid, state: "idle" });
+  relay.setHistory([{ id: auto, prompt: "", done: true, ts: 1794130061465, blocks: [
+    { ...receipt, kind: "process", processKind: "task", done: true },
+    { kind: "text", message_id: "job-answer", channel: "final", text: "后台构建已经完成。", done: true },
+  ] }]);
+  await page.reload();
+  await expect(row.locator(".turn-continuation")).toContainText("DeepSeek 继续处理");
+  await expect(row).toContainText("后台构建已经完成。");
+  await page.screenshot({ path: info.outputPath("dsh-job-continuation.png") });
+  relay.emit({ type: "user_msg", sid, msg_id: "next-human", prompt: "接下来检查测试结果" });
+  relay.emit({ type: "turn_binding", sid, msg_id: "next-human", turn_id: "dsh-seq-next" });
+  relay.emit({ type: "process", sid, ...receipt, item_id: "dsh-return-80", turn_id: "dsh-seq-next" });
+  await expect(page.locator('[data-turn-id="next-human"] .turn-continuation')).toHaveCount(0);
   await expect(page.locator(".turn-continuation")).toHaveCount(1);
 });
 
@@ -594,9 +677,13 @@ test(`DSH native progress distinguishes inactive continuation and fits the viewp
   await expect.poll(() => relay.commands.some(c => c.type === "act_dsh_goal" && c.action === "resume")).toBe(true);
   await page.screenshot({ path: info.outputPath("dsh-controls.png") });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+  await page.clock.install();
   relay.emit({ ...nativeState, connected: false, error: "DSH 连接中断，正在重新连接。" });
-  await expect(page.getByText("DSH 连接中断，正在重新连接。", { exact: true })).toBeVisible();
+  await expect(page.locator(".hstat-label")).toHaveText("同步中");
   await expect(goal.getByRole("button", { name: "继续目标", exact: true })).toBeDisabled();
+  await goal.getByRole("button", { name: "关闭" }).click();
+  await page.clock.runFor(8_100);
+  await expect(page.locator(".pane > .notice-bar")).toContainText("DSH 连接中断，正在重新连接。");
 });
 }
 
@@ -691,7 +778,7 @@ async function openDshTools(page: Page) {
 
 async function selectDshTool(page: Page, label: string) {
   const panel = page.getByLabel("DSH 会话工具", { exact: true });
-  await panel.getByRole("button", { name: "工具", exact: true }).click();
+  await panel.locator('button[aria-haspopup="menu"]').filter({ hasText: "工具" }).click();
   await panel.getByRole("menuitem", { name: label, exact: true }).click();
 }
 
@@ -720,6 +807,34 @@ test("DSH archived sessions remain readable and can be unarchived without delete
   await expect(page.getByRole("button", { name: "取消归档", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "删除会话", exact: true })).toHaveCount(0);
   await expect(page.locator(".composer textarea")).toBeDisabled();
+});
+
+test("DSH archive refresh keeps the already visible history start without an older-page button", async ({ page }, info) => {
+  const relay = await openDsh(page, { features: true });
+  const turns = Array.from({ length: 7 }, (_, i) => ({ id: `seen-${i}`, prompt: `已经看过的问题 ${i + 1}`, done: true,
+    blocks: [{ kind: "text", message_id: `answer-${i}`, text: `答复 ${i + 1}`, channel: "final", done: true }] }));
+  const head = { type: "history", sid, session_id: sid, revision: "dsh-history", generation: "dsh-generation",
+    detail: "summary", events: [], authoritative: true, in_progress: false, live_seq: 0 };
+  relay.setHistory(turns);
+  relay.emit({ ...head, build_seq: 1, turns, has_more: false, oldest_id: "seen-0" });
+  await page.locator(".thread").evaluate(el => { el.scrollTop = 0; });
+  await expect(page.getByText("已经看过的问题 1", { exact: true })).toBeVisible();
+  await expect(page.getByText("答复 1", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("load-older-history")).toHaveCount(0);
+  relay.setHistory(turns.slice(-4), { has_more: true, oldest_id: "seen-3" });
+  if (!await page.locator(".shell.sidebar-open").count()) await page.locator(".surface-head-title").click();
+  await page.getByRole("button", { name: "更多操作", exact: true }).click();
+  await page.getByRole("button", { name: "归档", exact: true }).click();
+  await expect(page.locator(".composer textarea")).toBeDisabled();
+  relay.emit({ ...head, build_seq: 2, turns: turns.slice(-4), has_more: true, oldest_id: "seen-3" });
+  const scrim = page.locator(".scrim-side.show");
+  if (await scrim.isVisible()) await scrim.click({ position: { x: page.viewportSize()!.width - 8, y: 100 } });
+  await page.locator(".thread").evaluate(el => { el.scrollTop = 0; });
+  await expect(page.getByText("已经看过的问题 1", { exact: true })).toBeVisible();
+  await expect(page.getByText("答复 1", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("load-older-history")).toHaveCount(0);
+  await expect(page.locator(".shell")).not.toHaveAttribute("data-sidebar-motion", /.+/);
+  await page.screenshot({ path: info.outputPath("dsh-archived-history-floor.png") });
 });
 
 test("DSH references insert the native quoted file and session syntax", async ({ page }) => {
@@ -768,7 +883,7 @@ test("DSH subagent controls, jobs, diagnostics and complete export share a compa
   await expect(panel).toContainText("构建任务");
   await expect(panel).toContainText("运行中");
   await selectDshTool(page, "连接诊断");
-  await expect(panel).toContainText("0.2.1-rc.2");
+  await expect(panel).toContainText("0.2.2-rc.1");
   await panel.getByRole("button", { name: "导出完整会话", exact: true }).click();
   await expect(panel.getByRole("link", { name: "保存 ZIP" })).toBeVisible();
   const downloadEvent = page.waitForEvent("download");
@@ -1052,7 +1167,8 @@ test("DSH appearance editor uses its blue defaults in both modes and shortcuts r
     await expect(dialog.locator(".appearance-reset")).toHaveCSS("color", ink);
     await expect(dialog.locator(".theme-picker-intro > span")).toHaveCSS("color", ink);
     await expect(dialog.locator(`.appearance-miniature.${mode}`)).toHaveCSS("outline-color", accent);
-    if (info.project.name === "desktop") expect(await dialog.locator(".theme-picker-scroll").evaluate(node => node.scrollHeight - node.clientHeight)).toBeLessThanOrEqual(1);
+    expect(await dialog.locator(".theme-picker-scroll").evaluate(node => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1);
+    await expect(dialog.locator(".appearance-done")).toBeInViewport();
     await page.screenshot({ path: info.outputPath(`dsh-appearance-${mode}.png`), animations: "disabled" });
   }
   // Capture shortcuts work even inside an open sheet, without submitting work.
@@ -1086,7 +1202,7 @@ test("DSH management preserves native revisions and only stages creation prompts
   await panel.getByRole("button", { name: "保存修改" }).click();
   await expect.poll(() => relay.commands.filter(command => command.kind === "manage").length).toBe(2);
   const update = JSON.parse(String(relay.commands.filter(command => command.kind === "manage").at(-1)?.value));
-  expect(update.expected.title).toBe("每周审查"); expect(update.title).toBe("每日审查"); expect(update.sid).toBe(sid);
+  expect(update).toMatchObject({ action: "schedule_update", id: "review", expectedUpdatedAt: "rev1", patch: { title: "每日审查" } });
   await page.screenshot({ path: info.outputPath("dsh-automation.png") });
   await selectDshTool(page, "预设");
   await panel.getByRole("button", { name: "创建预设", exact: true }).click();
@@ -1143,7 +1259,7 @@ test("DSH return links decorate the native autonomous round without splitting th
   ];
   const history = (continuation: string | null) => relay.emit({ type: "history", sid, session_id: sid,
     generation: "dsh-generation", revision: "dsh-history", detail: "summary", events: [], has_more: false,
-    turns: [{ id: "native-prompt", prompt: "", continuation, done: true, blocks }] });
+    turns: [{ id: "native-prompt", prompt: "", continuation, done: true, ts: 1794130061465, blocks }] });
   relay.emit({ type: "background_process_sync", sid, generation: "dsh-generation", items: [] });
   history(null);
   await expect(page.locator(".agent-return-link")).toHaveCount(0);
@@ -1152,6 +1268,10 @@ test("DSH return links decorate the native autonomous round without splitting th
   await expect(receipt).toBeVisible();
   await expect(page.locator(".background-followup")).toHaveCount(0);
   await expect(page.locator(".turn-continuation")).toHaveCount(1);
+  const boundary = page.locator(".turn-continuation");
+  await expect(boundary).toHaveClass(/background-followup-boundary/);
+  await expect(boundary).toContainText("DeepSeek 继续处理");
+  await expect(boundary.locator("time")).toHaveText(/2026-11-08/);
   await page.screenshot({ path: info.outputPath("dsh-agent-return.png") });
   await receipt.click();
   await expect(page.getByLabel("协作代理详情", { exact: true })).toContainText("检查构建并验证回归");
@@ -1177,7 +1297,7 @@ test("DSH terminal interrupt keeps shell and explicit close does not surface a r
   await expect(panel.getByRole("alert")).toHaveCount(0);
 });
 
-test("DSH bundle catalog filters locally and explains unavailable official market", async ({ page }, info) => {
+test("DSH bundle catalog filters locally and reads configured sources", async ({ page }, info) => {
   const relay = await openDsh(page, { features: true, commandSuccess: true });
   await page.screenshot({ path: info.outputPath("dsh-session-mode.png") });
   await openDshTools(page);
@@ -1187,17 +1307,19 @@ test("DSH bundle catalog filters locally and explains unavailable official marke
   await page.screenshot({ path: info.outputPath("dsh-runtime-settings.png") });
   await selectDshTool(page, "插件");
   await expect(panel.getByText("示例插件", { exact: true })).toBeVisible();
+  await panel.getByRole("button", { name: "本机插件", exact: true }).click();
+  await expect(panel.getByText("示例插件", { exact: true })).toBeVisible();
   await page.screenshot({ path: info.outputPath("dsh-plugins-all.png") });
   await panel.getByRole("textbox", { name: "搜索插件" }).fill("not-there");
   await expect(panel.getByText("没有匹配的插件")).toBeVisible();
   await panel.getByRole("textbox", { name: "搜索插件" }).fill("example");
   await expect(panel.getByText("示例插件", { exact: true })).toBeVisible();
   await page.screenshot({ path: info.outputPath("dsh-plugins.png") });
-  await panel.getByRole("button", { name: "插件市场", exact: true }).click();
-  await expect(panel.getByText("DSH 暂未提供官方插件市场", { exact: true })).toBeVisible();
-  await expect(panel.getByRole("textbox", { name: "搜索插件" })).toHaveCount(0);
+  await panel.getByRole("button", { name: "插件源", exact: true }).click();
+  await expect(panel.getByText("来自这台设备在 DSH 中配置的插件源。", { exact: true })).toBeVisible();
+  await expect(panel.getByRole("textbox", { name: "搜索插件" })).toBeVisible();
   await expect(panel.getByRole("alert")).toHaveCount(0);
-  expect(relay.commands.some(c => c.type === "read_dsh" && c.kind === "bundles" && c.query)).toBe(false);
+  await expect.poll(() => relay.commands.some(c => c.type === "read_dsh" && c.kind === "bundles" && c.query)).toBe(true);
   await page.screenshot({ path: info.outputPath("dsh-market-unavailable.png") });
   await panel.getByRole("button", { name: "本机插件", exact: true }).click();
   await expect(panel.getByRole("textbox", { name: "搜索插件" })).toHaveValue("example");
@@ -1214,8 +1336,7 @@ test("DSH settings retain failed drafts after a partially successful save", asyn
   await panel.getByRole("spinbutton", { name: "并行调用上限" }).fill("4");
   await expect(panel.getByText("已修改 2 项")).toBeVisible();
   await panel.getByRole("button", { name: "保存修改", exact: true }).click();
-  await expect(panel.getByRole("status")).toContainText("已保存 1 项");
-  await expect(panel.getByRole("status")).toContainText("未确认的修改已保留");
+  await expect(panel.getByRole("status").filter({ hasText: "已保存 1 项" })).toContainText("未确认的修改已保留");
   await expect(panel.getByRole("spinbutton", { name: "并发子代理" })).toHaveValue("5");
   await expect(panel.getByRole("spinbutton", { name: "并行调用上限" })).toHaveValue("4");
   await expect(panel.getByText("已修改 1 项")).toBeVisible();
@@ -1326,6 +1447,7 @@ test("DSH terminal scrollback supports wheel and touch without sending shell inp
 });
 
 test("DSH schedule form creates directly in the selected session", async ({ page }, info) => {
+  await page.emulateMedia({ colorScheme: "dark" });
   const relay = await openDsh(page, { features: true, commandSuccess: true });
   await openDshTools(page); await selectDshTool(page, "自动化");
   const panel = page.getByLabel("DSH 会话工具", { exact: true });
@@ -1336,7 +1458,7 @@ test("DSH schedule form creates directly in the selected session", async ({ page
   await page.screenshot({ path: info.outputPath("schedule-create.png") });
   await panel.getByRole("button", { name: "创建任务", exact: true }).click();
   await expect.poll(() => relay.commands.filter(c => c.kind === "manage").map(c => JSON.parse(String(c.value))).find(c => c.action === "schedule_create")).toMatchObject({
-    sid, request: { title: "每日检查", prompt: "总结项目的新增改动", daily: { time: "09:00:00", time_zone: "Asia/Taipei" } },
+    request: { title: "每日检查", prompt: "总结项目的新增改动", target: { kind: "session", sid }, timing: { kind: "daily", daily: { time: "09:00:00", time_zone: "Asia/Taipei" } } },
   });
   expect(relay.commands.some(c => c.type === "query")).toBe(false);
 });
@@ -1377,4 +1499,117 @@ test("DSH side chat entry points stay disabled without changing drafts or creati
   expect(relay.commands.some(c => ["open_btw", "new_session", "query", "close_btw"].includes(String(c.type)))).toBe(false);
   expect(relay.commands.some(c => c.type === "set_dsh_control" && c.kind === "command")).toBe(false);
   expect(relay.commands.some(c => c.type === "sync_btw" && c.sid === "dsh@side")).toBe(false);
+});
+
+for (const target of ["new_once", "new"]) test(`DSH schedule destination ${target} creates directly in selected project`, async ({ page }, info) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  const relay = await openDsh(page, { features: true, commandSuccess: true });
+  await openDshTools(page); await selectDshTool(page, "自动化");
+  const panel = page.getByLabel("DSH 会话工具", { exact: true });
+  await panel.getByRole("button", { name: "新建任务", exact: true }).click();
+  await panel.getByLabel("任务名称", { exact: true }).fill("每日检查");
+  await panel.getByLabel("任务内容", { exact: true }).fill("检查构建结果");
+  await panel.getByRole("radio", { name: target === "new" ? /每次新建会话/ : /首次新建，之后复用/ }).check();
+  await panel.getByLabel("项目目录", { exact: false }).fill("/tmp/dsh-test");
+  await page.screenshot({ path: info.outputPath(`schedule-${target}.png`) });
+  await panel.getByRole("button", { name: "创建任务", exact: true }).click();
+  await expect.poll(() => relay.commands.filter(c => c.kind === "manage").map(c => JSON.parse(String(c.value))).find(c => c.action === "schedule_create")).toMatchObject({
+    request: { target: { kind: target, create: { cwd: "/tmp/dsh-test" } }, timing: { kind: "daily" } },
+  });
+  expect(relay.commands.some(c => ["query", "new_session"].includes(String(c.type)))).toBe(false);
+});
+
+test("DSH schedule actions use revision and rejected edits retain draft", async ({ page }) => {
+  const relay = await openDsh(page, { features: true });
+  await openDshTools(page); await selectDshTool(page, "自动化");
+  const panel = page.getByLabel("DSH 会话工具", { exact: true });
+  await panel.getByRole("button", { name: "暂停", exact: true }).click();
+  await expect.poll(() => relay.commands.filter(c => c.kind === "manage").map(c => JSON.parse(String(c.value)))[0]).toMatchObject({ action: "schedule_pause", id: "review", expectedUpdatedAt: "rev1" });
+  await panel.getByRole("button", { name: "立即运行", exact: true }).click();
+  await expect.poll(() => relay.commands.filter(c => c.kind === "manage").map(c => JSON.parse(String(c.value))).some(c => c.action === "schedule_run")).toBe(true);
+  await panel.getByRole("button", { name: "每周审查的操作" }).click();
+  await panel.getByRole("button", { name: "编辑任务", exact: true }).click();
+  await panel.getByLabel("任务内容", { exact: true }).fill("保留我的修改");
+  await panel.getByRole("button", { name: "保存修改", exact: true }).click();
+  await expect(panel.getByLabel("任务内容", { exact: true })).toHaveValue("保留我的修改");
+  await expect.poll(() => relay.commands.filter(c => c.kind === "manage").map(c => JSON.parse(String(c.value))).find(c => c.action === "schedule_update")).toMatchObject({
+    expectedUpdatedAt: "rev1", patch: { prompt: "保留我的修改" },
+  });
+});
+
+test("DSH plugin updates select compatible versions and keep selection after refusal", async ({ page }, info) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  const relay = await openDsh(page, { features: true });
+  await openDshTools(page); await selectDshTool(page, "插件");
+  const row = page.locator(".dsh-bundle-row").filter({ hasText: "示例插件" });
+  await row.locator("summary").click();
+  await row.getByRole("button", { name: "检查更新", exact: true }).click();
+  await expect(row.getByText("1.0.0 → 1.1.0", { exact: true })).toBeVisible();
+  await expect(row.getByText("不兼容的版本不可选择。", { exact: true })).toBeVisible();
+  await page.screenshot({ path: info.outputPath("plugin-version-picker.png") });
+  await row.getByRole("button", { name: "更新到所选版本", exact: true }).click();
+  await expect.poll(() => relay.commands.filter(c => c.kind === "manage").map(c => JSON.parse(String(c.value))).find(c => c.action === "bundle_update")).toMatchObject({ name: "@example/plugin", version: "1.1.0" });
+  await expect(row.getByRole("button", { name: "更新到所选版本", exact: true })).toBeVisible();
+  expect(relay.commands.filter(c => c.kind === "manage")).toHaveLength(1);
+});
+
+test("DSH product statistics and centered cleanup preserve the real shell", async ({ page }, info) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  const relay = await openDsh(page, { features: true, product: true, commandSuccess: true });
+  await openDshTools(page); await selectDshTool(page, "性能统计");
+  const panel = page.getByLabel("DSH 会话工具", { exact: true });
+  await expect(panel.getByText("18.6 s", { exact: true })).toBeVisible();
+  await expect(panel.getByText("84.0%", { exact: true })).toBeVisible();
+  await panel.getByRole("button", { name: "步骤", exact: true }).click();
+  await expect(panel.getByRole("cell", { name: "24,100", exact: true })).toBeVisible();
+  await panel.getByRole("button", { name: "概览", exact: true }).click();
+  await page.screenshot({ path: info.outputPath("dsh-product-stats.png") });
+  await selectDshTool(page, "自动化");
+  await panel.getByRole("button", { name: "自动化更多操作" }).click();
+  await panel.getByRole("menuitem", { name: "清理已结束任务…" }).click();
+  const dialog = page.getByRole("dialog", { name: "清理已结束任务？" });
+  await expect(dialog.getByRole("button", { name: "清理 8 项" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "清理已结束任务…" })).toHaveCount(0);
+  const box = await dialog.boundingBox();
+  expect(Math.abs(box!.x + box!.width / 2 - page.viewportSize()!.width / 2)).toBeLessThan(3);
+  await page.screenshot({ path: info.outputPath("dsh-product-cleanup.png") });
+  await dialog.getByRole("button", { name: "取消", exact: true }).click();
+  expect(relay.commands.filter(c => c.kind === "manage")).toHaveLength(0);
+  await panel.getByRole("button", { name: "自动化更多操作" }).click();
+  await panel.getByRole("menuitem", { name: "清理已结束任务…" }).click();
+  await dialog.getByRole("button", { name: "清理 8 项" }).click();
+  await expect(dialog.getByRole("button", { name: "关闭", exact: true })).toBeVisible();
+  const writes = relay.commands.filter(c => c.kind === "manage").map(c => JSON.parse(String(c.value)));
+  expect(writes).toEqual([{ action: "schedule_cleanup", revision: "cleanup-1" }]);
+  expect(relay.commands.some(c => c.type === "query" || c.type === "new_session")).toBe(false);
+});
+
+test("DSH product plugin detail market and recommendation use native controls", async ({ page }, info) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  const relay = await openDsh(page, { features: true, product: true, commandSuccess: true });
+  const card = page.getByLabel("插件推荐", { exact: true });
+  await expect(card).toBeVisible();
+  await card.getByRole("button", { name: "查看插件" }).click();
+  const panel = page.getByLabel("DSH 会话工具", { exact: true });
+  await expect(panel.getByRole("textbox", { name: "搜索插件" })).toHaveValue("@example/plugin");
+  await panel.locator(".dsh-bundle-row summary").click();
+  await expect(panel.getByRole("heading", { name: "使用方式" })).toBeVisible();
+  await expect(panel.locator(".dsh-bundle-document img")).toHaveCount(0);
+  await expect(panel.locator('.dsh-bundle-document a[href^="javascript:"]')).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath("dsh-product-plugins.png") });
+  await panel.getByRole("button", { name: "插件源", exact: true }).click();
+  await expect(panel.getByText("市场插件", { exact: true })).toBeVisible();
+  await panel.getByRole("button", { name: "管理插件源 · 1" }).click();
+  const sources = page.getByRole("dialog", { name: "管理插件源" });
+  await sources.getByRole("textbox", { name: "插件索引地址" }).fill("https://second.test/plugins.json");
+  await sources.getByRole("button", { name: "添加来源" }).click();
+  await expect(sources.locator(".dsh-source-row").filter({ hasText: "新增插件源" })).toBeVisible();
+  await sources.getByRole("button", { name: "关闭", exact: true }).click();
+  await panel.getByRole("button", { name: "安装", exact: true }).click();
+  await expect.poll(() => relay.commands.filter(c => c.kind === "manage").map(c => JSON.parse(String(c.value))).some(c => c.action === "market_install" && c.source === "source" && c.name === "market-plugin" && !c.spec)).toBe(true);
+  await panel.getByRole("button", { name: "关闭会话工具" }).click();
+  await card.getByRole("button", { name: "本会话不再提示" }).click();
+  await expect(card).toHaveCount(0);
+  await expect.poll(() => relay.commands.filter(c => c.kind === "manage").map(c => JSON.parse(String(c.value))).some(c => c.action === "recommendation" && c.verb === "dismiss")).toBe(true);
+  expect(relay.commands.some(c => c.type === "query" || c.type === "new_session")).toBe(false);
 });

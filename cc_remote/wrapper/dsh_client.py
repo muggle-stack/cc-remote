@@ -1,4 +1,4 @@
-"""DSH 0.2.1's official, local API Peer and bounded Remote transport.
+"""DSH 0.2.2's official, local API Peer and bounded Remote transport.
 
 Only control credentials live here. Model authentication stays entirely in DSH.
 Every socket generation owns its own API Cookie; a failed write is never retried.
@@ -26,7 +26,7 @@ from websockets.asyncio.client import connect
 
 from cc_remote.log import logger
 
-TESTED_DSH_VERSION = "0.2.1-rc.2"
+TESTED_DSH_VERSION = "0.2.2-rc.1"
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 # A follow snapshot is reconciled through bounded HTTP history reads before
 # consuming its live tail. Reasoning/tool chunks can burst while those complete;
@@ -37,23 +37,24 @@ log = logger("dsh_client")
 _SID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,123}\Z")
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 READ_ENDPOINTS = frozenset({
-    "pluginMarket/listIndexes", "pluginMarket/search",
+    "pluginMarket/listIndexes", "pluginMarket/search", "pluginMarket/readEntryDetail",
     "session/list", "session/search", "session/modelCatalog", "session/page",
-    "session/projections", "session/attachment", "agentPresets/list",
+    "session/projections", "session/events", "session/state", "session/attachment", "agentPresets/list",
     "commands/list", "skills/list", "permissionPresets/catalog", "goals/get",
     "pluginInventory/list", "pluginManager/listPlugins", "sessionReferenceResolver/candidates",
-    "terminal/list", "terminal/environment", "terminal/shells", "schedule/catalog", "schedule/history", "settings/describe", "agentPresets/read", "pluginManager/listBundles", "pluginManager/inspect",
+    "terminal/list", "terminal/environment", "terminal/shells", "schedule/catalog", "schedule/history", "schedule/deliveryLimits", "settings/describe", "agentPresets/read", "pluginManager/listBundles", "pluginManager/inspect", "pluginManager/listVersions", "pluginManager/readBundleDetail",
 })
 WRITE_ENDPOINTS = frozenset({
+    "pluginMarket/setIndexes", "schedule/deleteInactive", "actionCards/act",
     "session/create", "session/prompt", "session/cancel", "session/updateQueue",
     "session/selectModel", "session/rename", "session/fork", "commands/execute",
     "fileReferences/list", "fileUploads/upload", "$events/result",
     "goals/create", "goals/edit", "goals/pause", "goals/resume", "goals/complete",
     "goals/clear", "subagents/prompt", "subagents/interruptByParent",
     "pluginManager/setPluginEnabled", "job/kill", "workspace/archiveSession", "workspace/unarchiveSession",
-    "terminal/create", "terminal/rename", "terminal/close", "schedule/update", "schedule/delete", "settings/update", "settings/mutate", "pluginManager/installBundle", "pluginManager/setBundleEnabled", "pluginManager/removeBundle",
+    "terminal/create", "terminal/rename", "terminal/close", "schedule/create", "schedule/edit", "schedule/run", "settings/update", "settings/mutate", "pluginManager/installBundle", "pluginManager/updateBundle", "pluginManager/setBundleEnabled", "pluginManager/removeBundle",
 })
-STREAM_ENDPOINTS = frozenset({"session/follow", "session/control", "workspace/follow", "job/list", "job/follow", "terminal/attach", "terminal/retain", "$events"})
+STREAM_ENDPOINTS = frozenset({"session/follow", "session/control", "session/observeState", "session/observeEvent", "session/observeProjections", "workspace/follow", "job/list", "job/follow", "terminal/attach", "terminal/retain", "$events"})
 
 
 class DshError(RuntimeError):
@@ -234,7 +235,11 @@ class DshClient:
         envelope = {"type": "client-request", "rpcId": request_id,
                     "method": endpoint, "payload": {"args": args or {}}}
         try:
-            async with peer.http.stream("POST", "/api/" + endpoint, json=envelope) as response:
+            # Package operations can include a native download/build/restore. A
+            # timeout is still an unknown outcome and must never trigger replay.
+            timeout = 600 if endpoint in {"pluginManager/installBundle", "pluginManager/updateBundle"} else 30
+            async with asyncio.timeout(timeout), peer.http.stream("POST", "/api/" + endpoint, json=envelope,
+                                        timeout=httpx.Timeout(timeout, connect=5)) as response:
                 if response.status_code in {401, 403}:
                     raise DshError("auth_required", "DSH 连接未获授权，请检查配对状态。")
                 if response.status_code == 404:
@@ -258,7 +263,7 @@ class DshClient:
             return result.get("value")
         except DshError:
             raise
-        except (httpx.HTTPError, ValueError, TypeError, RuntimeError):
+        except (httpx.HTTPError, TimeoutError, ValueError, TypeError, RuntimeError):
             raise DshError("request_failed", "DSH 请求未能确认；已提交操作不会自动重发。",
                            outcome_unknown=uncertain) from None
 
@@ -476,8 +481,8 @@ class DshClient:
 
     async def draft_catalog(self, cwd, preset=None):
         value = await self.read_route("/api/cc-remote.catalog", {"cwd": cwd, **({"preset": preset} if preset else {})})
-        if not isinstance(value, dict) or value.get("contract") != 2 or value.get("version") != TESTED_DSH_VERSION:
-            raise DshError("metadata_required", "请加载 DSH 0.2.1-rc.2 对应的 cc-remote 元数据插件。")
+        if not isinstance(value, dict) or value.get("contract") != 3 or value.get("version") != TESTED_DSH_VERSION:
+            raise DshError("metadata_required", f"请加载 DSH {TESTED_DSH_VERSION} 对应的 cc-remote 元数据插件。")
         return value
 
     async def metadata(self, sid: str, *, query=None):
@@ -485,10 +490,10 @@ class DshClient:
         if query:
             params["query"] = query
         value = await self.read_route("/api/cc-remote.metadata", params)
-        if (not isinstance(value, dict) or value.get("contract") != 2
+        if (not isinstance(value, dict) or value.get("contract") != 3
                 or value.get("version") != TESTED_DSH_VERSION
                 or value.get("sessionId") != native_session_id(sid)):
-            raise DshError("metadata_required", "请加载与 DSH 0.2.1-rc.2 对应的 cc-remote 元数据插件。")
+            raise DshError("metadata_required", f"请加载与 DSH {TESTED_DSH_VERSION} 对应的 cc-remote 元数据插件。")
         return value
 
     async def read_route(self, route: str, params: dict):
@@ -513,23 +518,8 @@ class DshClient:
         except (httpx.HTTPError, ValueError):
             raise DshError("read_failed", "DSH 原生数据读取失败。") from None
 
-    async def create_schedule(self, sid, request):
-        peer = await self._connection()
-        try:
-            response = await peer.http.post("/api/cc-remote.schedule", json={
-                "sessionId": native_session_id(sid), "request": request})
-            if response.status_code == 404:
-                raise DshError("schedule_bridge_missing", "请更新 DSH 的 cc-remote 适配插件后再创建任务。")
-            if response.status_code in {400, 413, 422}:
-                raise DshError("schedule_invalid", "任务时间或内容无效，请检查执行时间和时区。")
-            if response.status_code != 200 or len(response.content) > 4096:
-                raise ValueError
-            value = response.json()
-            if not isinstance(value, dict) or not isinstance(value.get("id"), str):
-                raise ValueError
-            return value
-        except (httpx.HTTPError, ValueError):
-            raise DshError("schedule_unknown", "创建结果未确认，请刷新任务列表核实；任务不会自动重建。", outcome_unknown=True) from None
+    async def create_schedule(self, request):
+        return await self.rpc("schedule/create", {"request": request})
 
     async def workspace_changes(self, sid, seq, index=None):
         if type(seq) is not int or not 0 <= seq <= 9007199254740991 or (index is not None and (type(index) is not int or not 0 <= index < 4096)):

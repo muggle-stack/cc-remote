@@ -35,7 +35,7 @@ from cc_remote.attachments import (
     decode_attachment,
     image_dimensions,
 )
-from cc_remote.protocol import ConversationTurn
+from cc_remote.protocol import ConversationTurn, TimedMessage
 from cc_remote.wrapper.usage_limit import is_usage_limit_failure
 from cc_remote.wrapper.history_responses import response_process_summaries
 
@@ -590,6 +590,7 @@ def materialize_history_turns(
         continuation = None
         client_msg_id = None
         source_thread_id = None
+        timed_task = None
         session_messages: dict[str, dict] = {}
         prompt_truncated = False
         image_refs: list[dict[str, Any]] = []
@@ -761,6 +762,11 @@ def materialize_history_turns(
             if event_type == "user_msg":
                 has_user = True
                 source_thread_id = event.get("source_thread_id")
+                if isinstance(event.get("timed_task"), dict):
+                    try:
+                        timed_task = TimedMessage.model_validate(event["timed_task"]).model_dump()
+                    except ValueError:
+                        pass
                 if isinstance(event.get("client_msg_id"), str):
                     client_msg_id = event["client_msg_id"]
                 if isinstance(event.get("prompt"), str):
@@ -1305,6 +1311,7 @@ def materialize_history_turns(
         optional = {
             "clientMsgId": client_msg_id,
             "sourceThreadId": source_thread_id,
+            "timedTask": timed_task,
             "sessionMessages": list(session_messages.values()) or None,
             "continuation": continuation if not has_user else None,
             "forkPointId": fork_point,

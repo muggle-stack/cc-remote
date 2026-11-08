@@ -104,6 +104,22 @@ def test_retained_venv_symlink_protects_an_older_release(installation):
     assert old.is_dir()
 
 
+def test_large_legacy_inventory_keeps_live_tail_candidate_dependency(installation, monkeypatch):
+    _, _, _, old, inventory, _ = installation
+    others = [old.parent / f'legacy-{i}' for i in range(129)]
+    for path in others:
+        path.mkdir()
+    (others[-1] / '.venv').symlink_to(old)
+    update_inventory(installation, candidates=list(map(str, [old, *others])))
+    monkeypatch.setattr(module, 'process_references',
+                        lambda paths: {p: (['pid 42: cwd'] if p == others[-1] else []) for p in paths})
+    result = module.cleanup(inventory)
+    rows = {row['path']: row for row in result['candidates']}
+    assert rows[str(old)]['state'] == 'deferred'
+    assert rows[str(others[-1])]['state'] == 'deferred'
+    assert rows[str(others[0])]['state'] == 'planned'
+
+
 def test_shared_venv_dependencies_are_transitive_and_cycles_are_bounded(installation):
     root, current, _, old, inventory, _ = installation
     shared = root / "shared-runtime"

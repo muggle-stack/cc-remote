@@ -18,6 +18,7 @@ from cc_remote.protocol import (
 )
 from cc_remote.wrapper.token_usage import UsageLedger, native_usage
 from cc_remote.wrapper.dsh_client import DshError, wire_session_id
+from cc_remote.wrapper.dsh_schedule_messages import schedule_message
 
 
 def model_id(provider: str, model: str) -> str:
@@ -228,6 +229,15 @@ class DshProjection:
             if isinstance(event.get("surfaceOp"), dict):
                 return []
             source = data.get("source", {}).get("kind")
+            if source == "tool-jobs":
+                # Only a consumed native notice proves that a job woke the model.
+                # Keep its output in the job detail, with a compact source receipt
+                # on the exact current turn (also when consumed during human work).
+                return self.autonomous(self.turn) + [ProcessEvent(
+                    item_id=f"dsh-return-{seq}", kind="task", turn_id=self.owner,
+                    phase="end", status="unknown", title="后台任务返回",
+                    summary=str(data.get("source", {}).get("summary") or "")[:2048] or None,
+                    server="cc_remote", tool="task_return", background=True)]
             if source in {"agent-message", "subagent-settled"}:
                 # A child result can wake the parent after its answer ended.
                 # Mark that native autonomous round without reopening the old
@@ -243,12 +253,15 @@ class DshProjection:
                 sender = data.get("source", {}).get("senderSessionId")
                 # A message sent by an agent is not proof it has finished.
                 if source == "subagent-settled" and isinstance(sender, str) and sender:
+                    child = self.children.get(sender, {})
+                    local = child.get("mode") in {"one-shot", "continuable"}
                     out.append(ProcessEvent(item_id=f"dsh-return-{seq}", kind="agent",
                         turn_id=self.owner, phase="end", status="unknown",
-                        title=str(self.children.get(sender, {}).get("label") or "DSH 子代理")[:1024], server="cc_remote", tool="agent_return",
-                        input={"agent_run_id": wire_session_id(sender)}, background=True))
+                        title=str(child.get("label") or "DSH 子代理")[:1024], server="cc_remote", tool="agent_return",
+                        input={"agent_run_id": wire_session_id(sender) if local else None}, background=True))
                 return out
-            if source != "user":
+            scheduled = schedule_message(data) if source == "schedule" else None
+            if source != "user" and scheduled is None:
                 return []
             out = []
             if self.open:
@@ -272,13 +285,14 @@ class DshProjection:
                                  "media_type": attachment.get("mediaType", "image/png"),
                                  "width": attachment.get("width", 0), "height": attachment.get("height", 0),
                                  "byte_size": attachment.get("bytes", 0),
-                                 "attachment_id": attachment["attachmentId"]})
+                                 "attachment": dict(attachment)})
                 if block.get("type") == "file" and attachment.get("name"):
                     files.append({"filename": attachment["name"]})
             if refs:
                 self.image_refs[self.client_id] = refs
             out.extend([UserMsg(msg_id=self.client_id, client_msg_id=self.client_id,
-                                prompt=text_content(blocks), files=files or None),
+                                prompt=scheduled[0] if scheduled else text_content(blocks),
+                                timed_task=scheduled[1] if scheduled else None, files=files or None),
                         TurnBinding(msg_id=self.client_id, turn_id=self.owner)])
             return out
         if kind == "step/end":
@@ -383,11 +397,12 @@ class DshProjection:
             if message.get("role") != "tool" or not isinstance(message.get("toolCallId"), str):
                 raise DshError("invalid_tool_result", "DSH V4 工具结果格式不兼容。")
             failed = bool(message.get("isError") or data.get("error"))
+            cancelled = (data.get("error") or {}).get("code") in {"ABORTED", "ABORTED_BEFORE_DISPATCH"}
             self.tool_owners.pop(message["toolCallId"], None)
             return [ToolResult(
                 tool_use_id=identity(message["toolCallId"], "dsh-tool"), turn_id=self.owner_for(data),
                 content=text_content(message.get("content", [])), is_error=failed,
-                status="failed" if failed else "succeeded")]
+                status="cancelled" if cancelled else "failed" if failed else "succeeded")]
         if kind == "subagent/catalog":
             child = data.get("childId")
             if not isinstance(child, str) or not child:

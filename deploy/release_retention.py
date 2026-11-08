@@ -29,6 +29,7 @@ from deploy.release_manifest import load_manifest
 LEDGER = ".release-generations.json"
 BACKUPS = "rollback-config"
 INVENTORY = ".release-cleanup.json"
+STATUS = ".retention-status.json"
 
 
 def require(condition: bool, message: str) -> None:
@@ -241,7 +242,24 @@ def unit_paths(argv: list[str], *, lines: bool = False) -> list[Path]:
     return [Path(value) for value in values]
 
 
+class _UserManagerDiscoveryError(ValueError):
+    """A manager observed as active could not supply its complete UnitPath."""
+
+
 def service_roots(row: dict) -> list[Path]:
+    # A login manager can exit between list-units and its D-Bus query. Restart
+    # the *whole* discovery, never omit that manager or reuse a partial result.
+    for attempt in range(3):
+        try:
+            return _service_roots_once(row)
+        except _UserManagerDiscoveryError:
+            if attempt == 2:
+                raise
+            time.sleep(0.1)
+    raise AssertionError('service discovery did not finish')
+
+
+def _service_roots_once(row: dict) -> list[Path]:
     home = Path(row["home"])
     if sys.platform == "darwin":
         return [home / "Library/LaunchAgents", Path("/Library/LaunchAgents"), Path("/Library/LaunchDaemons")]
@@ -279,11 +297,14 @@ def service_roots(row: dict) -> list[Path]:
         environment = [*clean_env, f'HOME={user_home}', f'XDG_RUNTIME_DIR={runtime}']
         roots.extend(unit_paths([*environment, 'systemd-analyze', '--user', 'unit-paths'], lines=True))
         if account.pw_uid in active_users:
-            roots.extend(unit_paths([
-                'runuser', '-u', account.pw_name, '--', *environment,
-                f'DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus',
-                'systemctl', '--user', 'show', '-p', 'UnitPath', '--value',
-            ]))
+            try:
+                roots.extend(unit_paths([
+                    'runuser', '-u', account.pw_name, '--', *environment,
+                    f'DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus',
+                    'systemctl', '--user', 'show', '-p', 'UnitPath', '--value',
+                ]))
+            except ValueError as exc:
+                raise _UserManagerDiscoveryError(str(exc)) from exc
             active_users.remove(account.pw_uid)
     require(not active_users, "an active user manager has no discoverable service account")
     # A bound service can deliberately use a different HOME from passwd.
@@ -462,13 +483,8 @@ def service_path_dependencies(path: Path, candidates: list[Path]) -> set[str]:
     return found
 
 
-def service_dependencies(row: dict, candidates: list[Path]) -> list[str]:
-    """Read dormant service definitions and their literal environment files.
-
-    Do not source shell or run arbitrary services. Incomplete enumeration,
-    unreadable files or unresolved environment paths defer cleanup.
-    """
-    found = set()
+def service_files(row: dict) -> set[Path]:
+    """Enumerate the complete native search paths, including dormant units."""
     files = set()
 
     def walk_error(error: OSError) -> None:
@@ -491,6 +507,20 @@ def service_dependencies(row: dict, candidates: list[Path]) -> list[str]:
         validate(profile)
         files.update(config_files(Path(profile['supervisor_config'])))
         files.update(Path(profile[key]) for key in ('env_file', 'device_file') if Path(profile[key]).exists())
+    return files
+
+
+def service_dependencies(row: dict, candidates: list[Path]) -> list[str]:
+    """Discover dependencies afresh; an explicit review never relaxes by default."""
+    if row.get('review'):
+        from deploy.retention_services import reviewed_dependencies
+        return reviewed_dependencies(row, candidates)
+    return inspect_service_files(service_files(row), candidates)
+
+
+def inspect_service_files(files: set[Path], candidates: list[Path]) -> list[str]:
+    """Read literal commands without sourcing shell or running a service."""
+    found = set()
     total = 0
     paths_seen = set()
     executable_commands = set()
@@ -596,12 +626,18 @@ def service_dependencies(row: dict, candidates: list[Path]) -> list[str]:
                 found.add(str(candidate))
         return raw
 
-    for path in files:
-        raw = inspect(path)
-        for env, optional in service_environment_files(raw):
-            if optional and not env.exists() and not env.is_symlink():
-                continue
-            inspect(env)
+    for path in sorted(files):
+        try:
+            raw = inspect(path)
+            for env, optional in service_environment_files(raw):
+                if optional and not env.exists() and not env.is_symlink():
+                    continue
+                inspect(env)
+        except OSError as exc:
+            exc.add_note(f"While inspecting service definition {path}")
+            raise
+        except ValueError as exc:
+            raise ValueError(f"{path}: {exc}") from exc
     if executable_commands:
         require(not custom_namespace,
                 'custom service executable namespace requires explicit retention inventory')
@@ -658,7 +694,11 @@ def inventory(root: Path, data: dict, row: dict) -> dict | None:
                 "recorded artifact was replaced; cleanup requires inspection")
     if not candidates:
         return None
-    protected.update(service_dependencies(row, [Path(p) for p in candidates]))
+    service_context = {key: row[key] for key in ("home", "linux_service") if key in row}
+    review = root / '.retention-services.json'
+    if review.exists() or review.is_symlink():
+        service_context['review'] = str(review)
+    protected.update(service_dependencies(service_context, [Path(p) for p in candidates]))
     # Independent services may intentionally keep their own current pointer,
     # even while stopped. Preserve those targets and their runtime closure.
     for path in root.iterdir():
@@ -667,7 +707,6 @@ def inventory(root: Path, data: dict, row: dict) -> dict | None:
     python = str(Path(row["release"]) / ".venv/bin/python")
     check = [python, "-B", str(Path(row["release"]) / "deploy/release_retention.py"),
              "verify", "--root", str(root), "--generation", row["id"]]
-    service_context = {key: row[key] for key in ("home", "linux_service") if key in row}
     return {"schema": 1, "installation_root": str(root), "current_release": row["release"],
             "rollback_paths": rollback, "protected_paths": sorted(protected),
             "service_context": service_context,
@@ -678,8 +717,33 @@ def inventory(root: Path, data: dict, row: dict) -> dict | None:
                         "argv": check, "cwd": row["home"]}]}
 
 
+def available_bytes(root: Path) -> int:
+    filesystem = os.statvfs(root)
+    return filesystem.f_bavail * filesystem.f_frsize
+
+
+def record_retention(root: Path, data: dict, *, status: str, report: dict | None = None,
+                     before_available: int | None = None, reason: str | None = None) -> dict:
+    known = {p for row in data['generations'] for p in (row['release'], row['previous']) if p}
+    untracked = sorted(str(p) for p in (root / 'releases').iterdir() if p.is_dir() and str(p) not in known)
+    after = available_bytes(root)
+    result = {'schema': 1, 'checked_at': time.time(), 'status': status,
+              'current_release': str((root / 'current').resolve()),
+              'removed_count': sum(r['state'] == 'removed' for r in (report or {}).get('candidates', [])),
+              'removed_allocated_bytes': (report or {}).get('removed_allocated_bytes', 0),
+              'available_bytes_after': after,
+              'available_change_bytes': after - before_available if before_available is not None else None,
+              'retained_dependencies': [r for r in (report or {}).get('candidates', []) if r['state'] == 'deferred'],
+              'untracked_release_count': len(untracked), 'untracked_releases': untracked[:1024]}
+    if reason:
+        result['reason'] = reason
+    retirement.write_journal(root / STATUS, result)
+    return result
+
+
 def prune(root: Path, descriptor: int) -> dict | None:
     data = read_ledger(root)
+    before_available = available_bytes(root)
     current = str((root / "current").resolve(strict=True))
     rows = [r for r in data["generations"] if r["release"] == current and r["phase"] == "committed"]
     require(len(rows) == 1, "no unique committed generation; legacy artifacts remain untouched")
@@ -695,6 +759,7 @@ def prune(root: Path, descriptor: int) -> dict | None:
     retirement.write_journal(root / LEDGER, data)
     plan = inventory(root, data, row)
     if plan is None:
+        record_retention(root, data, status='complete', before_available=before_available)
         print("Retention: current release and previous rollback retained; no proven older artifacts to remove.")
         return None
     path = root / INVENTORY
@@ -707,8 +772,11 @@ def prune(root: Path, descriptor: int) -> dict | None:
     data["generations"] = [r for r in data["generations"] if r["id"] == row["id"] or any(
         p and Path(p).exists() for p in (r["release"], r["previous"], r["backup"], r.get("snapshot")))]
     retirement.write_journal(root / LEDGER, data)
+    summary = record_retention(root, data, status=result['status'], report=result, before_available=before_available)
     print(f"Retention: removed {result['removed_allocated_bytes']} allocated bytes; "
           f"{sum(r['state'] == 'deferred' for r in result['candidates'])} artifacts retained for dependencies.")
+    if summary['untracked_release_count']:
+        print(f"Retention: {summary['untracked_release_count']} untracked release directories still require inspection.")
     return result
 
 
@@ -754,6 +822,12 @@ def main(argv: list[str] | None = None) -> int:
             prune(root, descriptor)
         return 0
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        if descriptor is not None and args.action == 'prune':
+            try:
+                record_retention(root, read_ledger(root), status='deferred',
+                                 reason='; '.join([str(exc), *getattr(exc, '__notes__', [])]))
+            except (OSError, ValueError):
+                pass  # Preserve the original failure; no cleanup was authorized by this report.
         print(f"Retention deferred: {exc}", file=sys.stderr)
         return 1
     finally:

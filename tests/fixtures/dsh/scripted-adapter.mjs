@@ -19,6 +19,20 @@ class ScriptedAdapter extends LlmAdapter {
       .filter(b => b.type === 'text' && b.text.startsWith('compatibility:')).at(-1)?.text ?? '';
     const userIndex = options.messages.findLastIndex(m => m.role === 'user' && m.content.some(b => b.type === 'text' && b.text.startsWith('compatibility:')));
     const answered = options.messages.slice(userIndex + 1).some(m => m.role === 'tool');
+    if (input.startsWith('compatibility:recommend-')) {
+      const calls = options.messages.slice(userIndex + 1).flatMap(m => m.content)
+        .filter(b => b.type === 'tool-call').map(b => b.name);
+      const name = !calls.includes('skill') ? 'skill' : !calls.includes('propose_action') ? 'propose_action' : null;
+      if (name) {
+        const args = name === 'skill' ? { name: 'official-plugins' } : {
+          action: 'enable_official_plugin', title: '持久终端', brief: '为开发服务保留终端。',
+          details: { name: '@deepseek-ai/dsh-experimental-terminal-bundle' },
+        };
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' };
+        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: `${input}-${name}`, name, arguments: JSON.stringify(args) } };
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }; return;
+      }
+    }
     if (input.startsWith('compatibility:diff-')) {
       const calls = options.messages.slice(userIndex + 1).flatMap(m => m.content)
         .filter(b => b.type === 'tool-call').map(b => b.name);
@@ -33,6 +47,12 @@ class ScriptedAdapter extends LlmAdapter {
         yield { type: 'finish', reason: { kind: 'tool-calls' } };
         return;
       }
+    }
+    if (!answered && input === 'compatibility:patch') {
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' };
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'fixture-patch', name: 'apply_patch',
+        arguments: JSON.stringify({ input: '*** Begin Patch\n*** Add File: patch-fixture.txt\n+native patch output\n*** End Patch' }) } };
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }; return;
     }
     if (!answered && input === 'compatibility:subagent') {
       const name = options.tools.find(t => t.name === 'subagent_spawn')?.name ?? options.tools.find(t => t.name === 'subagent_fork')?.name;
