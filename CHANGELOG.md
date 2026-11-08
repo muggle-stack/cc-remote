@@ -4,6 +4,20 @@
 
 ## Unreleased
 
+## v5.3.12
+
+Complete DSH 0.2.2-rc.1 integration, refresh live working indicators, and improve release retention. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
+
+- Add native schedule destinations, editing, run-now and confirmed cleanup with per-task revision checks; preserve private tasks and durable unknown-write receipts.
+- Add DSH performance statistics, configured plugin markets, compatible package updates and optional recommendations.
+- Restore scheduled prompts and autonomous continuation boundaries, correct archive pagination, and align DeepSeek continuation receipts with Claude.
+- Use the application's centered confirmation for session deletion.
+- Share orange shimmer working words across Claude, Codex and DSH and remove input/output token counters. Update only Claude's live breathing sequence; preserve completed click replay and the other engines' sparks.
+- Give Relay an isolated entrypoint and reusable reviewed retention inventories. Rediscover literal service paths and symlink dependencies before retiring old releases.
+- Retain the verified HarmonyOS preview.6 HAP with each release.
+
+See the bilingual [release notes](docs/releases/v5.3.12.md).
+
 ## v5.3.11
 
 Adapt to Codex app-server 0.167.0. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
