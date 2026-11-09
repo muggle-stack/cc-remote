@@ -5910,6 +5910,9 @@ export default function App() {
   const activeDevice = remoteDevices.find(
     (device) => device.machine_id === machineId);
   const versionNotice = deviceVersionNotice(activeDevice?.compatibility);
+  const compatibleVersionNotice = activeDevice?.compatibility
+    && activeDevice.compatibility.wrapper_protocol === activeDevice.compatibility.relay_protocol
+    ? versionNotice : null;
   const activeDeviceOnline = state.connState === "connected" && state.wrapperOnline;
   // A native client can advance the transcript without a wrapper-owned turn.
   // Present that mirrored activity as running in every status surface while
@@ -6101,7 +6104,7 @@ export default function App() {
             </div>
             <div className="sub">{space === "work" ? "私有工作区 · " : ""}{focusedNativeSessionId ? `session ${shortSessionId(focusedEngine, focusedNativeSessionId)}` : "connected"}</div>
           </div>
-          <HeaderFeedback update={webUpdate.id ? {
+          <HeaderFeedback versionNotice={compatibleVersionNotice} update={webUpdate.id ? {
             id: webUpdate.id, version: webUpdate.version!, message: webUpdate.message,
             updating: webUpdate.updating, onReload: webUpdate.reload,
           } : undefined} deviceScope={machineId} sessionScope={`${activeScopeKey}:${focusedSid ?? "new"}`}
@@ -6152,7 +6155,7 @@ export default function App() {
           /></Suspense>
         </header>
 
-        {versionNotice && <div className="notice-bar attention version-notice" role="status">
+        {versionNotice && !compatibleVersionNotice && <div className="notice-bar attention version-notice" role="status">
           <span className="notice-icon" aria-hidden="true"><Icon name="info" size={16} /></span>
           <span className="notice-copy">{versionNotice}</span>
         </div>}

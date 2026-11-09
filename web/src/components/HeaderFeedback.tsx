@@ -10,6 +10,8 @@ import {
 
 interface Props {
   update?: { id: string; version: string; message: string | null; updating: boolean; onReload: () => void };
+  /** Compatible version drift only; protocol mismatches keep their blocking banner. */
+  versionNotice?: string | null;
   deviceScope: string;
   sessionScope: string;
   phase: ConnectionPhase | null;
@@ -36,7 +38,7 @@ function SuccessExpiry({ id, paused, onExpire }: {
 /** A presentation-only status slot; hiding it never changes engine/transport state. */
 export function HeaderFeedback({
   deviceScope, sessionScope, phase, banner, bannerRevision = 0, notices,
-  onDismissBanner, onDismissNotice, update,
+  onDismissBanner, onDismissNotice, update, versionNotice,
 }: Props) {
   const dialogId = useId();
   const trigger = useRef<HTMLButtonElement>(null);
@@ -60,6 +62,10 @@ export function HeaderFeedback({
     message: `新版 ${update.version} 已就绪，更新页面即可使用，无需退出登录。`,
     detail: update.message ?? "更新会重新加载页面，设备上已开始的任务会继续运行。",
   } : null;
+  const versionItem: HeaderFeedbackItem | null = versionNotice ? {
+    id: JSON.stringify([deviceScope, "device-version", versionNotice]),
+    label: "版本待同步", tone: "warning", message: versionNotice,
+  } : null;
   const items = notices.map(notice => headerNoticeItem(notice, scope));
   let commandItem = commandFeedback.find(item => item.deviceScope === deviceScope);
   if (banner && headerBannerKind(banner) === "failure") {
@@ -77,13 +83,21 @@ export function HeaderFeedback({
   if (updateItem) items.push(updateItem);
   const visible = items.filter(item => !dismissed.includes(item.id)).reverse();
   if (connectionItem) visible.push(connectionItem);
+  // Compatible version drift stays available without masking connection or
+  // command feedback, and disappears as soon as the device versions align.
   const selected = visible.find(item => item.tone === "warning")
-    ?? visible.find(item => item.tone === "info") ?? connectionItem ?? visible[0];
+    ?? visible.find(item => item.tone === "info") ?? connectionItem ?? visible[0] ?? versionItem;
+  if (versionItem) visible.push(versionItem);
+  const hasFeedback = !!selected;
   const open = openFor === scope && !!selected;
 
-  useEffect(() => { setOpenFor(null); }, [scope]);
+  useEffect(() => { setOpenFor(null); }, [scope, hasFeedback]);
 
   const dismiss = (item: HeaderFeedbackItem) => {
+    if (item.id === versionItem?.id) {
+      setOpenFor(null);
+      return;
+    }
     if (item.id === connectionItem?.id) {
       setConnection(previous => connectionFeedbackItem(previous)?.id === item.id
         ? { ...previous, dismissed: true, recovered: false } : previous);
@@ -166,7 +180,8 @@ export function HeaderFeedback({
               {update?.updating ? "检查中…" : "更新页面"}
             </button>}
             <button type="button" className="header-feedback-dismiss" onClick={() => dismiss(item)}>
-              {item.id === updateItem?.id ? "稍后" : item.id === connectionItem?.id && phase ? "收起提示" : "知道了"}
+              {item.id === versionItem?.id ? "收起详情" : item.id === updateItem?.id ? "稍后"
+                : item.id === connectionItem?.id && phase ? "收起提示" : "知道了"}
             </button>
           </div>)}
         </section>
