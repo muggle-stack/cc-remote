@@ -4661,8 +4661,18 @@ function reduceEvent(
           // Plan spans the clarification, but only a current running History
           // (or a newer live frame which raced this page) may keep it open. An
           // exact idle page must settle stale cache/detail children too.
-          finishCompletedTurnChildren(
-            merged, preserveProjectionOpenPlans, isClaudeHistory);
+          const activeClaudeContinuation = isClaudeHistory
+            && preserveProjectionOpenPlans && !!base.liveOwner
+            && turnHasIdentityAlias(merged, base.liveOwner.turnId);
+          if (!activeClaudeContinuation && merged.done
+              && [...mutableTurnBlocks(merged), ...(merged.detailProjection?.blocks ?? [])]
+                .some(block => !block.done)) {
+            // Detail may still be shared with the previous reducer state.
+            const settled = cloneTurns([merged])[0];
+            finishCompletedTurnChildren(
+              settled, preserveProjectionOpenPlans, isClaudeHistory);
+            return settled;
+          }
           return merged;
         });
         const cachedScopeMatches = e.generation != null

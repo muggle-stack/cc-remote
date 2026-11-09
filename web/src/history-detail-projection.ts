@@ -108,10 +108,6 @@ function isFinal(block: Block): boolean {
   return block.kind === "text" && block.channel === "final";
 }
 
-function visibleBlocks(detail: Turn | undefined): Block[] {
-  return detail?.blocks.filter((block) => !isFinal(block)) ?? [];
-}
-
 function insertSegment(
   current: readonly TurnDetailSegment[],
   incoming: TurnDetailSegment,
@@ -177,7 +173,7 @@ function materializeSegments(
     const decoded = decode(segment.events);
     if (!decoded) continue;
     detail = decoded;
-    for (const block of visibleBlocks(decoded)) {
+    for (const block of decoded.blocks) {
       const identity = blockIdentity(block);
       const existing = blockIndexes.get(identity);
       if (existing == null) {
@@ -203,7 +199,14 @@ function materializeSegments(
       }
     }
   }
-  return { detail, blocks };
+  // Each page is decoded in an isolated reducer, so its liveOrder starts at
+  // zero. Establish one source order across pages, including final answers:
+  // they anchor which continuation owns each preceding process block.
+  const ordered = blocks.map((block, liveOrder) => ({ ...block, liveOrder }));
+  return {
+    detail: detail ? { ...detail, blocks: ordered } : undefined,
+    blocks: ordered.filter((block) => !isFinal(block)),
+  };
 }
 
 function segmentChars(segments: readonly TurnDetailSegment[]): number {

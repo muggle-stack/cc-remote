@@ -1442,6 +1442,59 @@ export function mergeAuthoritativeTurnDetail(
   };
 }
 
+function alignDetailChronology(
+  summary: Turn, detail: Turn, projection: TurnDetailProjection | undefined,
+): { summary: Turn; detail: Turn; projection: TurnDetailProjection | undefined } {
+  const unchanged = { summary, detail, projection };
+  const source = detail.blocks.filter(block => !isSyntheticReturnReceipt(block));
+  const sourceOrders = source.map(block => block.liveOrder);
+  if (source.length === 0
+      || !sourceOrders.every((order): order is number => Number.isFinite(order))
+      || new Set(sourceOrders).size !== source.length) return unchanged;
+
+  const observed = mergeDetailWithLiveTail(
+    mergeDetailWithLiveTail(summary.detailProjection?.blocks ?? [],
+      summary.liveSpillBlocks ?? []), summary.blocks);
+  const nativeObserved = observed.filter(block => !isSyntheticReturnReceipt(block));
+  if (nativeObserved.length === 0) return unchanged;
+  // Detail and live counters describe different sequences (hooks and replay
+  // windows need not match). Never compare their numbers across projections.
+  // Weave around exact shared IDs first, then rebase all retained slices onto
+  // that one timeline before merging payloads or extracting final answers.
+  const sourceIds = new Set(source.map(blockIdentity));
+  if (sourceIds.size !== source.length
+      || new Set(nativeObserved.map(blockIdentity)).size !== nativeObserved.length
+      || !nativeObserved.some(block => sourceIds.has(blockIdentity(block)))) return unchanged;
+  // Source order also repairs a previously misordered live/cache projection.
+  // Only live-only items are inserted before their next shared native anchor;
+  // conflicting observed positions never reorder source-backed responses.
+  const beforeAnchor = new Map<string, Block[]>();
+  let pending: Block[] = [];
+  for (const block of nativeObserved) {
+    const id = blockIdentity(block);
+    if (sourceIds.has(id)) {
+      beforeAnchor.set(id, pending);
+      pending = [];
+    } else pending.push(block);
+  }
+  const ordered = [...source]
+    .sort((left, right) => left.liveOrder! - right.liveOrder!)
+    .flatMap(block => [...(beforeAnchor.get(blockIdentity(block)) ?? []), block]);
+  ordered.push(...pending);
+  const timeline = restoreReturnReceipts(ordered, [...detail.blocks, ...observed]);
+  const orders = new Map(timeline.map((block, index) => [blockIdentity(block), index]));
+  const rebase = (blocks: Block[]) => blocks.map(block => ({
+    ...block, liveOrder: orders.get(blockIdentity(block)),
+  }));
+  return {
+    summary: { ...summary, blocks: rebase(summary.blocks),
+      liveSpillBlocks: summary.liveSpillBlocks && rebase(summary.liveSpillBlocks),
+      nextLiveBlockOrder: timeline.length },
+    detail: { ...detail, blocks: rebase(detail.blocks) },
+    projection: projection ? { ...projection, blocks: rebase(projection.blocks) } : undefined,
+  };
+}
+
 /** Install one bounded intra-turn detail page.
  *
  * Pages are source-disjoint and may be visited in either direction, so the
@@ -1460,6 +1513,7 @@ export function installAuthoritativeTurnDetailPage(
   projection?: TurnDetailProjection,
   preserveLiveTail = false,
 ): Turn {
+  ({ summary, detail, projection } = alignDetailChronology(summary, detail, projection));
   const summaryFinals = summary.blocks.filter(isFinalTextBlock);
   const pageFinals = detail.blocks.filter(isFinalTextBlock);
 

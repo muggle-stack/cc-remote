@@ -94,6 +94,117 @@ try {
     sid: responseSid, engine: "claude", turns: cachedProjection, onLoadDetail: () => true,
   }))), coldHeaders, "restoring cached detail must retain each response boundary and item count");
 
+  // Live-only hook notifications advance the browser's local order counter;
+  // replaying transcript detail starts an independent counter. Loading that
+  // detail during an AskUser wait must not move tools to a preceding response.
+  for (const completedParent of [false, true]) {
+    for (const refreshFirst of [false, true]) {
+      const sid = `active-detail-${completedParent}-${refreshFirst}`;
+      const root = responseFixture.summary.id;
+      let activeState = { ...initialState, focusedSid: sid,
+        sessions: [{ session_id: sid, engine: "claude" }],
+        runtimes: { [sid]: { ...createRuntime(), historyRevision: "active-detail-r1" } } };
+      const send = (body: Record<string, unknown> | ServerEvent) => {
+        activeState = reduce(activeState, { type: "event", event: event({ sid, ...body }) });
+      };
+      const source: ServerEvent[] = [];
+      for (const [index, body] of responseFixture.events.slice(0, -1).entries()) {
+        if (index === 9) {
+          if (completedParent) send({ type: "turn_end", turn_id: root,
+            result: { subtype: "success", duration_ms: 8000, is_error: false } });
+          send({ type: "state", state: "running", msg_id: root, continuation: true });
+          send({ type: "process", turn_id: root, item_id: "live-hook",
+            kind: "hook", phase: "end", status: "succeeded", title: "Hook" });
+        }
+        const item = event({ ...body, sid, turn_id: root });
+        source.push(item);
+        send(item);
+      }
+      const ask = event({ type: "tool_use", sid, turn_id: root, ts: 2411,
+        message_id: "ask-message", tool_use_id: "ask-tool",
+        tool: "mcp__cc-remote-ask__ask_user", input: {}, background: true });
+      source.push(ask);
+      send(ask);
+      send({ type: "ask_user", ask_id: "question", question: "Continue?", options: [] });
+      // A detached return can arrive while the callback is waiting. It must
+      // neither dismiss the question nor close the active owner.
+      send({ type: "process", turn_id: root, item_id: "late-task",
+        kind: "task", phase: "end", status: "succeeded", title: "Task finished",
+        background: true });
+      const refresh = () => send({ type: "history", session_id: sid,
+        revision: "active-detail-r1", detail: "summary", in_progress: true,
+        has_more: false, events: [], turns: [{ ...responseFixture.summary,
+          done: completedParent }] });
+      const load = () => send({ type: "turn_detail", session_id: sid, turn_id: root,
+        revision: "active-detail-r1", authoritative: true,
+        has_more: false, has_newer: false, events: source });
+      const verify = () => {
+        const rt = activeState.runtimes[sid];
+        const turn = rt.turns[0];
+        const timeline = mergeDetailWithLiveTail(
+          mergeDetailWithLiveTail(turn.detailProjection?.blocks ?? [],
+            turn.liveSpillBlocks ?? [], false), turn.blocks, false);
+        const narrative = claudeContinuations(timeline,
+          turn.blocks.filter((b: Block) => b.kind === "text" && b.channel === "final"),
+          "claude", turn.responseProcesses);
+        for (let index = 0; index < 4; index++) {
+          const segment = narrative.continuations.find((c: { answers: Block[] }) =>
+            c.answers.some(b => b.kind === "text" && b.message_id === `answer-${index}`));
+          assert.ok(segment, "each completed continuation remains visible during AskUser");
+          assert.deepEqual(segment.blocks.filter((b: Block) => b.kind === "tool")
+            .map((b: Block) => b.kind === "tool" && b.tool_use_id), [`tool-${index}`],
+          "a loaded active detail page keeps each tool beside its own answer");
+          assert.equal(segment.blocks.filter((b: Block) => b.kind === "text"
+            && b.channel === "thinking").length, 1);
+        }
+        assert.equal(timeline.filter((b: Block) => b.kind === "process"
+          && b.item_id === "live-hook").length, 1, "live-only hook survives detail refresh");
+        assert.equal(timeline.filter((b: Block) => b.kind === "process"
+          && b.item_id === "late-task").length, 1, "newer task result survives an older detail page");
+        assert.equal(turn.done, completedParent);
+        assert.equal(rt.liveOwner?.turnId, root);
+      };
+      if (refreshFirst) refresh();
+      load();
+      if (!refreshFirst) refresh();
+      verify();
+      assert.equal(activeState.runtimes[sid].pendingQuestion?.ask_id, "question");
+      assert.equal(activeState.runtimes[sid].turns[0].blocks.find(
+        (b: Block) => b.kind === "tool" && b.tool_use_id === "ask-tool")?.done, false,
+      "a running history snapshot cannot synthesize an answer to AskUser");
+      send({ type: "ask_user_closed", ask_id: "question" });
+      const answer = event({ type: "tool_result", sid, turn_id: root, ts: 2500,
+        tool_use_id: "ask-tool", content: "Continue", is_error: false, background: true });
+      source.push(answer);
+      send(answer);
+      send({ type: "tool_use", turn_id: root, ts: 2501, message_id: "new-work",
+        tool_use_id: "new-work", tool: "Bash", input: {}, background: true });
+      for (let repeat = 0; repeat < 3; repeat++) {
+        const prior = JSON.stringify(activeState);
+        const previous = activeState;
+        refresh();
+        load();
+        verify();
+        assert.equal(JSON.stringify(previous), prior, "detail ordering repair is immutable");
+        const work = activeState.runtimes[sid].turns[0].blocks.find(
+          (b: Block) => b.kind === "tool" && b.tool_use_id === "new-work");
+        assert.equal(work?.done, false, "summary refresh cannot settle active continuation work");
+        assert.equal(activeState.runtimes[sid].pendingQuestion, null);
+      }
+      // Both independently decoded pages start their own counter at zero.
+      // Paging backwards must retain all response anchors across the seam.
+      send({ type: "turn_detail", session_id: sid, turn_id: root,
+        revision: "active-detail-r1", authoritative: true,
+        has_more: true, oldest_cursor: "older-responses", has_newer: false,
+        events: [source[0], ...source.slice(27)] });
+      send({ type: "turn_detail", session_id: sid, turn_id: root,
+        revision: "active-detail-r1", authoritative: true, before: "older-responses",
+        has_more: false, has_newer: true, newer_cursor: "latest-responses",
+        events: source.slice(0, 27) });
+      verify();
+    }
+  }
+
   const sid = "claude-background-sync";
   let state = {
     ...initialState,
