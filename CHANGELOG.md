@@ -4,6 +4,19 @@
 
 ## Unreleased
 
+## v5.3.13
+
+Refine file-preview headers and engine working indicators. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
+
+- Size rounded filename controls to their text, keep actions aligned to the right, and group the full path and reload action in a dismissible popover.
+- Separate navigation from preview/source controls, keep image headers on one row, and preserve preview state and return navigation.
+- Keep download and editing controls in place while reading files; disable unavailable actions and revoke stale download URLs on reload.
+- Use each harness’s theme accent for shimmer words instead of applying Claude orange to every engine.
+- Fix cumulative horizontal drift in Claude’s running animation at fractional zoom without changing its shapes, timing or completed-click replay.
+- Retain the verified HarmonyOS preview.6 HAP with each release.
+
+See the bilingual [release notes](docs/releases/v5.3.13.md).
+
 ## v5.3.12
 
 Complete DSH 0.2.2-rc.1 integration, refresh live working indicators, and improve release retention. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
