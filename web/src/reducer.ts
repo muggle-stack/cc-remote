@@ -83,6 +83,7 @@ import { boundRuntimeTurns, pruneRuntimeMap } from "./runtime-bounds";
 import { bumpSessionActivity, setSessionPinned } from "./session-order";
 import { normalizeSessionList } from "./session-list";
 import { codexTransportInterruption, presentCommandProblem, presentTurnProblem } from "./problem-presentation";
+import { isUpdateMaintenance, UPDATE_MAINTENANCE_MESSAGE } from "./update-maintenance.ts";
 import {
   matchQueryAcceptanceHistory,
   queryAcceptanceDescriptor,
@@ -2511,6 +2512,7 @@ export function reduce(state: AppState, action: Action): AppState {
 }
 
 function commandBanner(state: AppState, banner: string) {
+  if (banner === UPDATE_MAINTENANCE_MESSAGE) return {};
   return { banner, bannerRevision: (state.bannerRevision ?? 0) + 1 };
 }
 
@@ -6198,7 +6200,7 @@ function reduceEvent(
         });
         return { ...next, ...commandBanner(state, presentCommandProblem(e)) };
       }
-      const sendRejection = e.code === "busy" || e.code === "not_running" || e.code === "bad_prompt";
+      const sendRejection = isUpdateMaintenance(e) || e.code === "busy" || e.code === "not_running" || e.code === "bad_prompt";
       if (e.msg_id) {
         const key = e.sid ?? state.focusedSid;
         const runtime = key ? state.runtimes[key] : undefined;

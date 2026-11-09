@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen, getproxies_environment, proxy_bypas
 
 from websockets.asyncio.client import connect
 
-from cc_remote.protocol import Error, ERR_BUSY
+from cc_remote.protocol import Error
 from cc_remote.update import UpdateError, host_platform, read_installation, release_repository, version_tuple
 from cc_remote.update_jobs import (TERMINAL, UpdateJobs, failure_reason, helper_path, job_id, public_job)
 
@@ -111,7 +111,7 @@ class UIUpdates:
                                 "acknowledge_completion"}):
             return None
         sid = getattr(cmd, "session_id", None) or getattr(cmd, "sid", None) or self.machine.focused_sid
-        error = Error(code=ERR_BUSY, message="设备正在安装更新，请在重新连接后继续。",
+        error = Error(code="update_in_progress", message="设备正在安装更新，请在重新连接后继续。",
                       sid=sid, request_id=getattr(cmd, "cmd_id", None),
                       msg_id=getattr(cmd, "msg_id", None), to=getattr(cmd, "client_id", None))
         await self.machine.transport.send(error)
@@ -131,7 +131,8 @@ class UIUpdates:
 
     async def status(self, *, check: bool = False) -> dict:
         result = {"schema": 1, "managed": False, "enabled": False, "reason": "unsupported",
-                  "busy_count": self.busy_count(), "latest": self.catalog, "job": None}
+                  "busy_count": self.busy_count(), "latest": self.catalog, "job": None,
+                  "maintenance": self.guarded()}
         if self.root is None:
             return result
         try:
@@ -166,9 +167,9 @@ class UIUpdates:
                         self.catalog = await asyncio.to_thread(release_catalog, repository)
                         self.checked_at = time.monotonic()
                 result["latest"] = self.catalog
-            self.guarded()
         except (OSError, ValueError) as exc:
             result["reason"] = failure_reason(exc)
+        result["maintenance"] = self.guarded()
         return result
 
     def invoke(self, operation: str, identity: str, version: str | None = None) -> dict:

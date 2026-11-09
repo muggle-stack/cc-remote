@@ -239,7 +239,7 @@ async def test_reservation_checks_activity_before_blocking_new_work(managed, mon
         assert updates.reserve(IDENTITY)["status"] == ("ready" if busy == "idle" else "busy")
         if busy == "idle":
             from cc_remote.protocol import Query, GetHistory
-            assert (await updates.reject(Query(prompt="test", msg_id="q", sid=ctx.key))).code == "busy"
+            assert (await updates.reject(Query(prompt="test", msg_id="q", sid=ctx.key))).code == "update_in_progress"
             assert await updates.reject(GetHistory(session_id=ctx.key)) is None
             store.save({**store.state(IDENTITY), "phase": "succeeded"})
             assert updates.guarded() is False
@@ -377,7 +377,31 @@ async def test_guard_preserves_target_and_prevents_cold_resume(managed):
     machine.focused_sid = 'foreground'
     error = await updates.reject(Query(prompt='new', msg_id='q', sid='background'))
     assert error.sid == 'background'
-    assert await updates.reject(SwitchSession(session_id='cold-session')) is not None
+    switch = await updates.reject(SwitchSession(session_id='cold-session'))
+    assert switch.code == 'update_in_progress'
+    assert switch.sid == 'cold-session'
+    await machine._command_scheduler.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reserve_during_check", [False, True])
+async def test_catalog_network_error_does_not_release_maintenance(managed, monkeypatch, reserve_during_check):
+    root, _, store = managed
+    machine, _ = _mk_machine()
+    updates = UIUpdates(machine, root)
+    with store.lock():
+        state, _ = store.create(IDENTITY, '4.0.1', '4.0.0')
+        store.save({**state, 'phase': 'installing'})
+    updates.reserved = None if reserve_during_check else IDENTITY
+    def fail_catalog(*args):
+        # The admission barrier can activate while the network check is in flight.
+        updates.reserved = IDENTITY
+        raise OSError('network failed')
+    monkeypatch.setattr(device_updates, 'release_catalog', fail_catalog)
+    assert (await updates.status(check=True))['maintenance'] is True
+    with store.lock():
+        store.save({**store.active(), 'phase': 'succeeded'})
+    assert (await updates.status())['maintenance'] is False
     await machine._command_scheduler.close()
 
 

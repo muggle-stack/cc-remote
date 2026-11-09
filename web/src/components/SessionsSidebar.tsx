@@ -29,6 +29,7 @@ import { SessionCardMenu } from "./SessionCardMenu";
 const TimedTaskIndicator = lazy(() => import("./TimedTaskIndicator").then(module => ({ default: module.TimedTaskIndicator })));
 
 interface Props {
+  maintenance?: boolean;
   readDsh?: DshRead;
   onDshSearch?: (sid: string, query: string) => void;
   open: boolean;
@@ -84,7 +85,7 @@ function sessionDateGroup(value?: string | null): { key: string; label: string }
   return { key: "older", label: "更早" };
 }
 
-export function SessionsSidebar({ open, engine, space, sessionLayout = "compact", readDsh, onDshSearch,
+export function SessionsSidebar({ maintenance = false, open, engine, space, sessionLayout = "compact", readDsh, onDshSearch,
   profileScopeKey, machineId, claudeProfiles = [], defaultClaudeProfileId,
   codexProfiles = [], defaultCodexProfileId,
   onSpaceChange, sessions, liveStates,
@@ -349,8 +350,8 @@ export function SessionsSidebar({ open, engine, space, sessionLayout = "compact"
       : visibleCompletion ? "已完成" : null;
     const forkBlocked = isWorktreeForkBlockedByState(st);
     const migrationBlocked = isSessionMigrationBlockedByState(st);
-    const archiveBlocked = !isArchived && (engine === "codex" || engine === "dsh")
-      && isSessionArchiveBlockedByState(st);
+    const archiveBlocked = maintenance || (!isArchived && (engine === "codex" || engine === "dsh")
+      && isSessionArchiveBlockedByState(st));
     const profilePresentation = profilePresentationFor(s);
     const title = s.summary || (s.first_prompt || "").slice(0, 40) || s.session_id.slice(0, 8);
     return (
@@ -406,23 +407,23 @@ export function SessionsSidebar({ open, engine, space, sessionLayout = "compact"
               <span>{engine === "codex" ? "Codex" : "Claude"} 账号：{profilePresentation.fullLabel}</span>
             </div>}
             {capabilities.rename && (
-              <button onClick={() => startRename(s)}><Icon name="edit" size={15} />重命名</button>
+              <button disabled={maintenance} onClick={() => startRename(s)}><Icon name="edit" size={15} />重命名</button>
             )}
-            <button onClick={() => doPin(s)}>
+            <button disabled={maintenance} onClick={() => doPin(s)}>
               <Icon name="pin" size={15} />{s.pinned ? "取消置顶" : "置顶"}
             </button>
             {unreadScope && <button onClick={() => {
               manualUnread.update(unreadScope, s.session_id, true); setMenuCardId(null); setLifting(false);
             }}><Icon name="message" size={15} />标记为未读</button>}
             {space === "code" && capabilities.forkWorktree && (
-              <button onClick={() => doForkWorktree(s)} disabled={forkBlocked}
-                title={forkBlocked ? "请等待当前任务结束" : "从当前 Git HEAD 创建新工作树"}>
+              <button onClick={() => doForkWorktree(s)} disabled={maintenance || forkBlocked}
+                title={maintenance ? "设备正在更新" : forkBlocked ? "请等待当前任务结束" : "从当前 Git HEAD 创建新工作树"}>
                 <Icon name="branch" size={15} />派生到新工作树…
               </button>
             )}
             {space === "code" && capabilities.migrate && (
-              <button onClick={() => doMigrate(s)} disabled={migrationBlocked}
-                title={migrationBlocked
+              <button onClick={() => doMigrate(s)} disabled={maintenance || migrationBlocked}
+                title={maintenance ? "设备正在更新" : migrationBlocked
                   ? "请等待当前任务结束"
                   : "保留对话历史并在另一目录继续"}>
                 <Icon name="folder-open" size={15} />迁移到目录…
@@ -430,16 +431,16 @@ export function SessionsSidebar({ open, engine, space, sessionLayout = "compact"
             )}
             <button onClick={() => doCopyId(s)}><Icon name={copiedId === s.session_id ? "check" : "copy"} size={15} />{copiedId === s.session_id ? "已复制" : "复制 session ID"}</button>
             {capabilities.archive && (isArchived ? (
-              <button onClick={() => doArchive(s, false)}><Icon name="archive" size={15} />取消归档</button>
+              <button disabled={maintenance} onClick={() => doArchive(s, false)}><Icon name="archive" size={15} />取消归档</button>
             ) : (
               <button onClick={() => doArchive(s, true)} disabled={archiveBlocked}
-                title={archiveBlocked ? "请停止当前任务并清空排队后再归档" : "归档会话"}>
+                title={maintenance ? "设备正在更新" : archiveBlocked ? "请停止当前任务并清空排队后再归档" : "归档会话"}>
                 <Icon name="archive" size={15} />归档
               </button>
             ))}
             {capabilities.delete
                 && canDeleteSidebarSession(engine, space, isArchived) && (
-              <button className="danger" onClick={() => doDelete(s)}>
+              <button disabled={maintenance} className="danger" onClick={() => doDelete(s)}>
                 <Icon name="trash" size={15} />{space === "work" ? "删除工作" : "删除会话"}
               </button>
             )}
@@ -489,15 +490,15 @@ export function SessionsSidebar({ open, engine, space, sessionLayout = "compact"
           )}
           {menuDirectory === key && <SessionCardMenu anchor={directoryAnchor} onClose={closeMenu}>
             <div className="card-menu-account"><span>{profileFilter === "all" ? "全部账号" : accountProfiles.find(profile => profile.id === profileFilter)?.label ?? profileFilter}</span></div>
-            <button onClick={() => { closeMenu(); onNewInDir(key, profileFilter === "all" ? undefined : profileFilter); }}>
+            <button disabled={maintenance} onClick={() => { closeMenu(); onNewInDir(key, profileFilter === "all" ? undefined : profileFilter); }}>
               <Icon name="plus" size={15} />新建会话
             </button>
             {engine !== "dsh" && onDirectoryAction && <>
               <div className="directory-menu-divider" />
-              <button onClick={() => { closeMenu(); onDirectoryAction(key, "archive", profileFilter === "all" ? undefined : profileFilter); }}>
+              <button disabled={maintenance} onClick={() => { closeMenu(); onDirectoryAction(key, "archive", profileFilter === "all" ? undefined : profileFilter); }}>
                 <Icon name="archive" size={15} />归档目录会话…
               </button>
-              <button className="danger" onClick={() => { closeMenu(); onDirectoryAction(key, "delete", profileFilter === "all" ? undefined : profileFilter); }}>
+              <button disabled={maintenance} className="danger" onClick={() => { closeMenu(); onDirectoryAction(key, "delete", profileFilter === "all" ? undefined : profileFilter); }}>
                 <Icon name="trash" size={15} />删除目录会话…
               </button>
             </>}
@@ -589,7 +590,7 @@ export function SessionsSidebar({ open, engine, space, sessionLayout = "compact"
             <div className={"s-lift-scrim" + (lifting ? " show" : "")} onClick={closeMenu} />
           </div>
           <div className="s-foot">
-            <button className="newbtn" onClick={() => onNew(
+            <button disabled={maintenance} title={maintenance ? "设备正在更新" : undefined} className="newbtn" onClick={() => onNew(
               newWorkProfileForSidebarFilter(
                 engine, space, profileFilter,
               ),

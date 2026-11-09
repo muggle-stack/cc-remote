@@ -1,3 +1,4 @@
+import { allowedDuringUpdate, isUpdateMaintenance } from "./update-maintenance.ts";
 // WebSocket client to the relay. Browser authentication is carried by the
 // relay's Secure HttpOnly cookie, so no credential appears in JS or the URL.
 // Auto-reconnects with backoff.
@@ -68,6 +69,7 @@ export function sessionScopeKey(
 }
 
 export interface WsCallbacks {
+  onMaintenance?: () => void;
   onEvent: (msg: ServerEvent, ownership?: EventOwnership) => void;
   onConnState: (s: ConnState, detail?: string) => void;
   onAuthFail?: () => void;
@@ -178,6 +180,19 @@ function nowTs(): number {
 }
 
 export class RelayWs {
+  private maintenance = false;
+  private maintenanceSwitch: string | null = null;
+
+  /** Release only from a fresh device maintenance read; never infer from idle. */
+  setMaintenance(active: boolean): void {
+    const previous = this.maintenance;
+    this.maintenance = active;
+    if (previous && !active && this.ws?.readyState === WebSocket.OPEN) {
+      const restoreFocus = !!this.maintenanceSwitch && this.maintenanceSwitch === this.focusedSid;
+      this.maintenanceSwitch = null;
+      if (restoreFocus || this.outbox.size) this.sendRecoveryPreamble(restoreFocus);
+    }
+  }
   private ws: WebSocket | null = null;
   private lastSeqBySession: Record<string, number> = {};
   private generationBySession: Record<string, string> = {};
@@ -849,6 +864,7 @@ export class RelayWs {
   }
 
   private sendDshMutation(frame: Record<string, unknown>, cmd_id = uuid()): string | null {
+    if (this.maintenance && !allowedDuringUpdate(String(frame.type))) return null;
     // A lost response cannot authorize another native write. Keep a correlation
     // ID, but no reconnect outbox entry for RPCs without native deduplication.
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return null;
@@ -1484,6 +1500,7 @@ export class RelayWs {
     const targetEngine = engine ?? this.activeEngine;
     if (engine) this.engineBySession[sessionId] = engine;
     this.spaceBySession[sessionId] = space;
+    if (this.maintenance) { this.maintenanceSwitch = sessionId; return; }
     const ownership = this.ownershipSnapshot(
       targetEngine,
       space,
@@ -1786,14 +1803,14 @@ export class RelayWs {
     if (flush) this.flushOutbox();
   }
 
-  private sendRecoveryPreamble(): void {
+  private sendRecoveryPreamble(restoreFocus = true): void {
     // Preserve socket order: Hello/alias recovery, then make each command's
     // target resident immediately before replaying that exact serialized frame.
     // Pre-warming all targets first can exceed the wrapper's resident-session
     // cap and evict early targets before their command arrives.
     this.sendHello(false);
     const plan = planRecoveryReplay(
-      this.outbox.pendingFramesWithSessionIds(), this.focusedSid);
+      this.outbox.pendingFramesWithSessionIds(), restoreFocus ? this.focusedSid : null);
     for (const step of plan) {
       if (step.type === "switch") this.sendRecoverySwitch(step.sid);
       else this.sendRaw(step.raw);
@@ -1801,6 +1818,10 @@ export class RelayWs {
   }
 
   private sendRecoverySwitch(sid: string): void {
+    if (this.maintenance) {
+      if (sid === this.focusedSid) this.maintenanceSwitch = sid;
+      return;
+    }
     const frame: Record<string, unknown> = {
       v: PROTOCOL_VERSION, type: "switch_session", session_id: sid, ts: nowTs(),
     };
@@ -1816,6 +1837,7 @@ export class RelayWs {
   private sendTracked(
     obj: Record<string, unknown>, commandId = uuid(),
   ): string | null {
+    if (this.maintenance && !allowedDuringUpdate(String(obj.type))) return null;
     const result = this.outbox.enqueue(obj, this.clientId, commandId);
     if (!result.ok) {
       console.error("command not queued", result.reason);
@@ -1833,6 +1855,7 @@ export class RelayWs {
   }
 
   private sendRaw(raw: string): void {
+    if (this.maintenance && !allowedDuringUpdate(String(JSON.parse(raw).type))) return;
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(raw);
     }
@@ -1878,6 +1901,13 @@ export class RelayWs {
         clearProtocolReloadMarker();
         const msg = this.filterControl(decoded);
         if (!msg) return;
+        if (msg.type === "error" && isUpdateMaintenance(msg)) {
+          this.setMaintenance(true);
+          // A login/reconnect switch may have raced the first maintenance read.
+          // Retry only the still-visible session, never a rejected query.
+          if (!msg.msg_id && (!msg.sid || msg.sid === this.focusedSid)) this.maintenanceSwitch = this.focusedSid;
+          this.cb.onMaintenance?.();
+        }
         if ((msg as { type: string }).type === "pong") return;  // heartbeat reply — consume, don't dispatch
         // A BtwSync can be the first proof of a replacement Wrapper when this
         // browser slept through wrapper_reconnected. Invalidate the old

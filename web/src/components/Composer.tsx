@@ -77,6 +77,7 @@ const ContextPopover = lazy(() => import("./ContextPopover"));
 const DshCommandFeedback = lazy(() => import("./DshCommandFeedback"));
 
 interface Props {
+  maintenance?: boolean;
   dsh?: DshState;
   dshSid?: string;
   readDsh?: DshRead;
@@ -305,7 +306,7 @@ export function Composer(p: Props) {
       ) : null;
   const controlUi = p.control ? presentSessionControl(p.control) : legacyControl;
   // The connection and authoritative write state independently gate input.
-  const locked = offline || !!controlUi?.locked || p.archived === true;
+  const locked = offline || !!controlUi?.locked || p.archived === true || p.maintenance === true;
   const externalClaudeOwner = p.engine === "claude"
     ? (p.control?.control_mode === "external_cli" ? "外部 CLI"
       : p.control?.control_mode === "agent_view" ? "Agent View"
@@ -831,6 +832,7 @@ export function Composer(p: Props) {
       rows={1}
       value={input}
       placeholder={importing ? "正在安全导入附件…"
+        : p.maintenance ? "设备正在更新，草稿已保留…"
         : offline ? "机器离线 — 等待重连…"
         : p.archived ? "会话已归档 — 取消归档后可继续对话"
         : (controlUi?.placeholder
