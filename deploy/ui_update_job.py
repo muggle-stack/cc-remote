@@ -16,7 +16,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from cc_remote.update import (UpdateError, host_platform, latest_version, read_installation,
+from cc_remote.update import (UpdateError, UpdateOutcomeUnknown, host_platform, latest_version, read_installation,
                               release_repository, update, version_tuple)
 from cc_remote.update_jobs import (JOBS, POLICY, UpdateJobs, failure_reason,
                                    helper_path, job_id, public_job, write_json)
@@ -214,7 +214,8 @@ def run(root: Path, identity: str) -> None:
     job_id(identity)
     with store.lock(blocking=True):
         state = store.state(identity)
-        if state["phase"] not in {"submitting", "unknown"}:
+        if (state["phase"] not in {"submitting", "unknown"}
+                or state["phase"] == "unknown" and state.get("worker_pid")):
             # Even a duplicate OS invocation cannot start a second installer.
             return
         from cc_remote.wrapper.process_scan import process_identity
@@ -255,6 +256,9 @@ def run(root: Path, identity: str) -> None:
         outcome = {"phase": "succeeded", "reason": None, "cleanup_pending": deferred}
     except Cancelled:
         outcome = {"phase": "cancelled", "reason": None}
+    except UpdateOutcomeUnknown as exc:
+        outcome = {"phase": "unknown", "reason": "outcome_pending"}
+        print(f"UI update unresolved: {exc}", file=sys.stderr, flush=True)
     except Exception as exc:
         reason = failure_reason(exc)
         phase = store.state(identity)["phase"]

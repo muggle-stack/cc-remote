@@ -82,6 +82,31 @@ test("application update response from a previous device cannot replace current 
   await expect(page.getByText("发现新版本", { exact: true })).toHaveCount(0);
 });
 
+test("application update unresolved Relay keeps installation disabled across reload", async ({ page }) => {
+  const commands: string[] = [];
+  await page.route("**/api/updates/*", async route => {
+    const body = route.request().postDataJSON();
+    if (body?.op) commands.push(body.op);
+    await route.fulfill({ json: { ...base, busy_count: 0, job: {
+      id: "a".repeat(32), version: "5.3.15", previous: "5.3.14",
+      phase: "unknown", reason: "outcome_pending",
+    } } });
+  });
+  await page.goto(url);
+  for (let reload = 0; reload < 2; reload++) {
+    if (reload) await page.reload();
+    await open(page);
+    const sheet = page.getByRole("dialog", { name: "检查更新", exact: true });
+    await expect(sheet.getByRole("button", { name: "更新结果待确认", exact: true })).toBeDisabled();
+    await expect(sheet).toContainText("不要重复创建更新");
+    await expect(sheet.getByRole("button", { name: "取消更新", exact: true })).toHaveCount(0);
+    await sheet.getByRole("button", { name: "重新检查更新", exact: true }).click();
+    await expect(sheet.getByRole("button", { name: "更新结果待确认", exact: true })).toBeDisabled();
+  }
+  expect(commands).not.toContain("start");
+  expect(commands).not.toContain("cancel");
+});
+
 test("appearance contains global bold preference and updates menu dismisses outside", async ({ page }) => {
   await page.route("**/api/updates/*", route => route.fulfill({ json: base }));
   await page.goto(url);

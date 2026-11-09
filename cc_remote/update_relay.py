@@ -18,7 +18,7 @@ import uuid
 
 from dotenv import dotenv_values
 
-from cc_remote.update import Installation, UpdateError, version_tuple
+from cc_remote.update import Installation, UpdateError, UpdateOutcomeUnknown, version_tuple
 from cc_remote.update_errors import endpoint, network_reason, ssh_reason
 from deploy.install_cli import _atomic_file
 from deploy import relay_update_job
@@ -263,11 +263,11 @@ class RelayUpdate:
                 if not isinstance(transaction, dict):
                     raise ValueError("invalid journal")
             except (OSError, ValueError) as exc:
-                raise UpdateError("cannot read upstream-update.json; inspect the previous update") from exc
+                raise UpdateOutcomeUnknown("cannot read upstream-update.json; inspect the previous update") from exc
             if transaction.get("complete") is not True:
                 if not self.allow_update:
-                    raise UpdateError("upstream upgrade is not authorized for this UI update")
-                self._finish(transaction)
+                    raise UpdateOutcomeUnknown("previous upstream update is unresolved; administrator inspection is required")
+                self._resolve(transaction)
         info = self.inspect()
         if version_tuple(info["version"]) >= version_tuple(version):
             if info["protocol"] != protocol:
@@ -292,8 +292,18 @@ class RelayUpdate:
                        "launch_receipt": 1, "allow_protocol_change": allow_protocol_change}
         self._write_transaction(transaction)
         print(f"Updating Relay first; independent server transaction: {unit}", flush=True)
-        self._submit(transaction)
-        self._finish(transaction)
+        self._resolve(transaction, submit=True)
+
+    def _resolve(self, transaction: dict, *, submit: bool = False) -> None:
+        # Intent was persisted before SSH could deliver the launcher. A lost
+        # submission/status/health response cannot prove that activation never
+        # happened, nor that a failed unit finished its rollback safely.
+        try:
+            if submit:
+                self._submit(transaction)
+            self._finish(transaction)
+        except Exception as exc:
+            raise UpdateOutcomeUnknown(str(exc)) from exc
 
 
 def installer_main(argv: list[str] | None = None) -> int:

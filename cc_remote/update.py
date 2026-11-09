@@ -33,6 +33,10 @@ class UpdateError(ValueError):
     pass
 
 
+class UpdateOutcomeUnknown(UpdateError):
+    """An accepted activation has no verified terminal outcome yet."""
+
+
 _VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 _MAX_ARCHIVE = 256 * 1024 * 1024
 _MAX_EXPANDED = 1024 * 1024 * 1024
