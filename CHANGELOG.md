@@ -4,6 +4,16 @@
 
 ## Unreleased
 
+## v5.3.14
+
+Move compatible device/server version differences into the header status slot. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
+
+- Show a compact version-sync indicator beside the session status, with version details and the update command in its popover.
+- Keep connection and command feedback prioritized, and retain prominent banners for incompatible protocols.
+- Close details on outside click, Escape or scope changes; clear the indicator when versions align without reopening stale details later.
+
+See the bilingual [release notes](docs/releases/v5.3.14.md).
+
 ## v5.3.13
 
 Refine file-preview headers and engine working indicators. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
