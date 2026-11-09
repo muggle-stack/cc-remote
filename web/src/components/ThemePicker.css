@@ -197,3 +197,6 @@
 @media(max-width:430px) {
   .theme-picker-dsh .appearance-miniature { width:100%; }
 }
+.appearance-reading-section { margin-top:18px; border-top:1px solid var(--border); padding-top:16px; }
+.appearance-reading-section h3 { display:flex; justify-content:space-between; align-items:center; gap:12px; font-size:13px; margin:0 0 8px; }
+.appearance-reading-section h3 small { font-size:11px; color:var(--dim); font-weight:var(--font-weight-400); }

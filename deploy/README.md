@@ -378,6 +378,18 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
   Direct role installers use the same per-installation `.update.lock` before
   reading rollback state or changing services. They validate the inherited file
   descriptor from a managed update; an environment marker cannot bypass the lock.
+- `ui_update_job.py` — opt-in application updates through an independent schema-1
+  maintenance channel. `cc-remote ui-updates enable` configures one fixed Wrapper
+  root; `--allow-relay-update` separately permits its existing administrator SSH
+  route. Linux creates a root-owned, argument-restricted sudo helper and requires
+  systemd; macOS uses the original user's launchd domain. Browser requests cannot
+  choose commands, paths, package URLs, environment or protocol overrides.
+  Intent is fsynced before OS submission; retries observe the same receipt.
+  A private control-socket barrier waits for work to finish and blocks new work
+  before activation. Independent OS jobs survive Wrapper/Relay reconnects.
+  All normal updater locks, contract checks, installers and retention still apply.
+  An unknown launch or activation remains unresolved until the original transaction
+  is inspected; never erase receipts to resubmit. See [setup, scope and recovery](../docs/in-app-updates.md).
 - `linux_service.py` / `wrapper_exec.py` — Linux Supervisor adapter for the same
   Wrapper installer/update transaction. Explicitly bind the root, Unix control
   config, program/file, user, HOME and external environment/device files. Require

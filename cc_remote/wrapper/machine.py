@@ -2096,6 +2096,9 @@ class WrapperMachine:
         self._session_messages = SessionMessages(self) if cfg.session_messages_enabled else None
         from cc_remote.wrapper.local_control import LocalControl
         self._local_control = LocalControl(self)
+        from cc_remote.wrapper.updates import UIUpdates
+        self._ui_updates = UIUpdates(self)
+        self._ui_schedule_scanning = False
         self._timed_tasks = TimedTaskStore(cfg.state_dir)
         self._timed_task_catalog = {}
         self.transport = transport
@@ -9443,12 +9446,14 @@ class WrapperMachine:
             if self._session_messages is not None:
                 await self._session_messages.start()
             await self._local_control.start()
+            await self._ui_updates.start()
             self._work_schedule_task = asyncio.create_task(
                 self._work_schedule_loop())
             async for cmd in self.transport.incoming():
                 await self._dispatch_incoming_command(cmd)
             await self._command_scheduler.drain()
         finally:
+            await self._ui_updates.close()
             if self._session_messages is not None:
                 await self._session_messages.close()
             await self._local_control.close()
@@ -9644,6 +9649,10 @@ class WrapperMachine:
         """Claim and launch due Work tasks without stealing the UI focus."""
         while True:
             try:
+                if self._ui_updates.guarded():
+                    await asyncio.sleep(2)
+                    continue
+                self._ui_schedule_scanning = True
                 now = time.time()
                 for engine in ("claude", "codex"):
                     if (
@@ -9673,6 +9682,8 @@ class WrapperMachine:
                 raise
             except Exception:
                 log.exception("Work schedule scan failed")
+            finally:
+                self._ui_schedule_scanning = False
             await asyncio.sleep(15)
 
     def _finish_work_schedule_task(self, task: asyncio.Task) -> None:
@@ -12299,6 +12310,9 @@ class WrapperMachine:
             await self._send_command_ack(client_id, cmd_id)
 
     async def _handle(self, cmd) -> None:
+        rejected = await self._ui_updates.reject(cmd)
+        if rejected is not None:
+            return rejected
         rejected = await self._directory_actions.reject_conflict(cmd)
         if rejected is not None:
             return rejected

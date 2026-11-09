@@ -289,6 +289,9 @@ cc-remote update --check   # 只检查版本
 cc-remote update           # 升级到最新稳定 Release，不需要加 latest
 ```
 
+也可在右上角「⋮ → 检查更新」查看版本并启动已授权的更新。设备需先启用一次应用内更新，
+入口、支持的安装方式和恢复规则见[应用内更新](docs/in-app-updates.md)。加粗字体位于「外观 → 阅读设置」。
+
 设备会先检查配对的 VPS：需要时先升级 Relay + Web，已是兼容的新版本则只更新本机。
 首次远程升级 VPS 可用 `cc-remote update --relay-ssh operator@relay-host` 绑定已有的
 SSH 管理入口。其他设备各自执行更新即可。安装使用预构建产物，不在用户机器跑 CI、

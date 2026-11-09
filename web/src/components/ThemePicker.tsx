@@ -10,11 +10,13 @@ import { AppearancePalette } from "./AppearancePalette";
 import { AppearanceSessionLayout } from "./AppearanceSessionLayout";
 import "./ThemePicker.css";
 
-export default function ThemePicker({ engine, appearance, onClose, returnFocusRef }: {
+export default function ThemePicker({ engine, appearance, onClose, returnFocusRef, boldText, onBoldText }: {
   engine: ThemeEngine;
   appearance: AppearanceController;
   onClose: () => void;
   returnFocusRef?: RefObject<HTMLElement | null>;
+  boldText?: boolean;
+  onBoldText?: (enabled: boolean) => void;
 }) {
   const { choice, mode, look, colors, sessionLayout, selectTheme, updateLook, replaceLook, selectSessionLayout } = appearance;
   const custom = isCustomPalette(engine, mode, look);
@@ -25,7 +27,7 @@ export default function ThemePicker({ engine, appearance, onClose, returnFocusRe
     className={`theme-picker${engine === "dsh" ? " theme-picker-dsh" : ""}`} returnFocusRef={returnFocusRef}>
     <div className="theme-picker-intro">
       <span><EngineIcon engine={engine} size={17} />{({ claude: "Claude", codex: "Codex", dsh: "DSH" })[engine]}</span>
-      <p>仅影响当前引擎，自动保存</p>
+      <p>配色与字体按当前引擎保存</p>
     </div>
     <div className="sheet-scroll theme-picker-scroll">
       <div className="appearance-mode-section">
@@ -57,6 +59,14 @@ export default function ThemePicker({ engine, appearance, onClose, returnFocusRe
       <p className="appearance-help">{custom ? "手动调色后，自动标记为自定义。" : "点击色块选色，也可输入 HEX 色值。调整即时预览。"}</p>
       {lowContrast && <p className="appearance-contrast" role="status">文字与背景较接近，建议拉开明暗差距，便于阅读。</p>}
       <AppearanceSessionLayout value={sessionLayout} onChange={selectSessionLayout} />
+      {onBoldText && <section className="appearance-reading-section" aria-label="阅读设置">
+        <h3>阅读设置 <small>适用于所有引擎</small></h3>
+        <button type="button" className="header-menu-item" role="switch" aria-label="加粗字体"
+          aria-checked={!!boldText} onClick={() => onBoldText(!boldText)}>
+          <span><b>加粗字体</b><small>整页文字加粗，更易阅读</small></span>
+          <span className="header-menu-switch" aria-hidden="true" />
+        </button>
+      </section>}
     </div>
     <footer className="theme-picker-footer">
       <button type="button" className="appearance-reset" onClick={() => replaceLook({})}

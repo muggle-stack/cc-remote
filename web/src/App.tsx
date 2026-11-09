@@ -1,6 +1,10 @@
 import { QuestionNotificationGate, questionNotificationPresentation } from "./question-notification";
 import { canSubmitSteer } from "./pending-steers";
 import { useWebUpdate } from "./use-web-update";
+import { WEB_BUILD } from "./web-build";
+import { useAppUpdates } from "./use-app-updates";
+import { appUpdateFeedback, newerVersion } from "./app-updates";
+const AppUpdateSheet = lazy(() => import("./components/AppUpdateSheet"));
 import { lazyDshApi } from "./lazy-dsh-api";
 import type { DshPanelSelection } from "./components/DshPanel";
 import {
@@ -564,11 +568,18 @@ export default function App() {
       return "还有未发送的内容或正在导入的附件，请先发送或自行保存并清空，再更新页面。";
     }
     if (wsRef.current?.hasPendingUpdateCommands) return "有操作正在等待确认，请稍后再更新。";
-    if (document.querySelector('dialog[open], [role="dialog"][aria-modal="true"]:not(.header-feedback-popover)')) {
+    if (document.querySelector('dialog[open], [role="dialog"][aria-modal="true"]:not(.header-feedback-popover):not(.app-update-sheet)')) {
       return "请先完成或关闭当前对话框，再更新页面。";
     }
     return null;
   });
+  const [appUpdateOpen, setAppUpdateOpen] = useState(false);
+  const appUpdates = useAppUpdates(authed, machineId, appUpdateOpen);
+  const maintenanceFeedback = appUpdateFeedback(appUpdates.data);
+  const finishedUpdate = appUpdates.data?.job?.phase === "succeeded" ? appUpdates.data.job.id : null;
+  const checkWebUpdate = webUpdate.check;
+  useEffect(() => { setAppUpdateOpen(false); }, [machineId, authed]);
+  useEffect(() => { if (finishedUpdate) checkWebUpdate(); }, [finishedUpdate, checkWebUpdate]);
   const goalApiRef = useRef<GoalApi | null>(null);
   const getGoalApi = useCallback(async () => {
     const transport = wsRef.current;
@@ -6104,7 +6115,8 @@ export default function App() {
             </div>
             <div className="sub">{space === "work" ? "私有工作区 · " : ""}{focusedNativeSessionId ? `session ${shortSessionId(focusedEngine, focusedNativeSessionId)}` : "connected"}</div>
           </div>
-          <HeaderFeedback versionNotice={compatibleVersionNotice} update={webUpdate.id ? {
+          <HeaderFeedback versionNotice={compatibleVersionNotice} maintenance={maintenanceFeedback}
+            onOpenUpdates={() => setAppUpdateOpen(true)} update={webUpdate.id ? {
             id: webUpdate.id, version: webUpdate.version!, message: webUpdate.message,
             updating: webUpdate.updating, onReload: webUpdate.reload,
           } : undefined} deviceScope={machineId} sessionScope={`${activeScopeKey}:${focusedSid ?? "new"}`}
@@ -6139,6 +6151,8 @@ export default function App() {
             engine={engine}
             appearance={appearance}
             boldText={boldText} onBoldText={setBoldText}
+            onOpenUpdates={() => setAppUpdateOpen(true)} currentVersion={WEB_BUILD.version}
+            updateAvailable={!!webUpdate.id || newerVersion(appUpdates.data?.latest?.version, appUpdates.data?.current)}
             notificationMode={notificationMode}
             notificationBinding={pushBinding.state}
             notificationAvailable={harmonyPush.available || typeof Notification !== "undefined"}
@@ -6154,6 +6168,9 @@ export default function App() {
             onLogout={() => void logout()}
           /></Suspense>
         </header>
+        {appUpdateOpen && <Suspense fallback={null}><AppUpdateSheet updates={appUpdates}
+          deviceName={activeDevice?.label ?? machineId} webUpdate={webUpdate}
+          onClose={() => setAppUpdateOpen(false)} /></Suspense>}
 
         {versionNotice && !compatibleVersionNotice && <div className="notice-bar attention version-notice" role="status">
           <span className="notice-icon" aria-hidden="true"><Icon name="info" size={16} /></span>
