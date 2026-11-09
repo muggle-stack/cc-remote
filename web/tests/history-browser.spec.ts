@@ -15812,6 +15812,80 @@ test("Claude fresh query waits for live output without flashing a history detail
   expect(relay.commands.filter(c => c.type === "get_turn_detail")).toEqual([]);
 });
 
+test("turn regressions Claude active detail stays segmented after AskUser and a task return", async ({ page }) => {
+  const fixture = JSON.parse(readFileSync("tests/fixtures/claude-responses.json", "utf8"));
+  const sid = "active-detail", root = fixture.summary.id;
+  const relay = await mockRightPanelRelay(page, { engine: "claude", parentSid: sid,
+    retained: false, seedTurns: [] });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
+  let seq = 100;
+  const emit = (body: Record<string, unknown>) => relay.emit({ sid, seq: seq++, ...body } as PanelRelayEvent);
+  const source = fixture.events.slice(0, -1).map((body: Record<string, unknown>) =>
+    ({ v: PROTOCOL_VERSION, ...body, sid, turn_id: root }));
+  for (const [index, body] of source.entries()) {
+    if (index === 9) {
+      emit({ type: "turn_end", turn_id: root,
+        result: { subtype: "success", duration_ms: 8000, is_error: false } });
+      emit({ type: "state", state: "running", msg_id: root, continuation: true });
+      emit({ type: "process", turn_id: root, item_id: "live-hook",
+        kind: "hook", phase: "end", status: "succeeded", title: "Hook" });
+    }
+    emit(body);
+  }
+  const ask = { v: PROTOCOL_VERSION, type: "tool_use", sid, turn_id: root, ts: 2411,
+    message_id: "ask-message", tool_use_id: "ask-tool",
+    tool: "mcp__cc-remote-ask__ask_user", input: {}, background: true };
+  source.push(ask);
+  emit(ask);
+  emit({ type: "ask_user", ask_id: "pending-question", question: "是否继续检查？",
+    options: [{ label: "继续" }], allow_text: false });
+  const dialog = page.getByRole("dialog", { name: "操作确认" });
+  await expect(dialog).toBeVisible();
+  emit({ type: "process", turn_id: root, item_id: "late-task", kind: "task",
+    phase: "end", status: "succeeded", title: "Task finished", background: true });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "继续", exact: true }).click();
+  await expect.poll(() => relay.commands.some(c => c.type === "answer_question"
+    && c.ask_id === "pending-question")).toBe(true);
+  await expect(dialog).toHaveCount(0);
+  emit({ type: "ask_user_closed", ask_id: "pending-question", reason: "answered" });
+  const answer = { v: PROTOCOL_VERSION, type: "tool_result", sid, turn_id: root, ts: 2500,
+    tool_use_id: "ask-tool", content: "Continue", is_error: false, background: true };
+  source.push(answer);
+  emit(answer);
+  emit({ type: "tool_use", turn_id: root, ts: 2501, message_id: "current-tool",
+    tool_use_id: "current-tool", tool: "Bash", input: { command: "echo checking" }, background: true });
+  const refresh = () => emit({ type: "history", session_id: sid,
+    revision: "layout-history", generation: "layout-generation", detail: "summary",
+    in_progress: true, has_more: false, events: [], turns: [fixture.summary] });
+  const detail = () => emit({ type: "turn_detail", session_id: sid, turn_id: root,
+    revision: "layout-history", authoritative: true, has_more: false, has_newer: false, events: source });
+  refresh();
+  detail();
+  const turn = page.locator(`[data-turn-id="${root}"]`);
+  const heads = turn.locator(".turn-process-head");
+  await expect(heads).toHaveCount(6);
+  // A reader scrolls away from the live tail before opening an older response.
+  // Programmatic scrollIntoView alone does not release follow mode on iOS.
+  await page.locator(".thread").dispatchEvent("wheel", { deltaY: -600 });
+  for (let index = 1; index <= 4; index++) {
+    const head = heads.nth(index);
+    await expect(head).toContainText("2 项");
+    if (await head.getAttribute("aria-expanded") !== "true") await head.click();
+    await expect(turn.getByText(`Inspect result ${index - 1}`, { exact: true })).toBeVisible();
+    refresh();
+    detail();
+    await expect(head).toHaveAttribute("aria-expanded", "true");
+    await expect(turn.getByText(`Inspect result ${index - 1}`, { exact: true })).toBeVisible();
+    await expect(turn.getByText("详细过程未完整返回，请重试", { exact: true })).toHaveCount(0);
+    await head.click();
+    await expect(head).toHaveAttribute("aria-expanded", "false");
+  }
+  await expect(turn.locator(".assistant-answer-segment")).toHaveCount(5);
+  expect(relay.commands.some(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toBe(false);
+});
+
 for (const firstHeader of [0, 1, 2, 3, 4]) {
 test(`turn regressions Claude cold history keeps response headers through expand collapse and reload (${firstHeader})`, async ({ page }) => {
   const fixture = JSON.parse(readFileSync("tests/fixtures/claude-responses.json", "utf8"));
