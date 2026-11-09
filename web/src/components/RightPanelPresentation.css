@@ -7,10 +7,6 @@
 .right-panel-frame.panel-expanded { position: fixed; inset: var(--app-offset-top,0px) 0 var(--keyboard-inset,0px); margin: auto; width: min(1080px,calc(100vw - 64px)); height: min(900px,calc(var(--app-height,100dvh) - 48px)); max-width: none; max-height: none; z-index: 39; border: 1px solid var(--border-strong); border-radius: 24px; padding: 0; animation: none; }
 @media (max-width: 980px) {
   .right-panel-frame.panel-expanded { width: calc(100vw - 20px); height: calc(var(--app-height,100dvh) - 20px); border-radius: 20px; }
-  /* Keep the filename and layout controls readable beside editor actions. */
-  .artifact-panel > .artifact-head:has(.preview-modes) { flex-wrap: wrap; }
-  .artifact-panel > .artifact-head:has(.preview-modes) > :is(.artifact-title,.panel-tabs) { order: -1; flex: 1 1 calc(100% - 100px); }
-  .artifact-panel > .artifact-head:has(.preview-modes) > :is(.panel-expand,.iconbtn:last-child) { order: -1; flex: none; }
 }
 
 .panel-expanded-backdrop.panel-chat-layer { z-index: 40; }

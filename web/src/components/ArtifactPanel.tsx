@@ -33,6 +33,8 @@ import { PdfArtifactPreview } from "./PdfArtifactPreview";
 import { VideoArtifactPreview } from "./VideoArtifactPreview";
 import { AudioArtifactPreview } from "./AudioArtifactPreview";
 import { ZoomableImage } from "./ZoomableImage";
+import { ArtifactHeader } from "./ArtifactHeader";
+import ArtifactDownload from "./ArtifactDownload";
 import { previewImageDimension, rehypePreviewHtml } from "../markdown-preview-html";
 
 const EMPTY_GIT_DIFF_SECTIONS: GitDiffSection[] = [];
@@ -77,7 +79,6 @@ function MarkdownPreviewCode({
   return <code className={className}>{children}</code>;
 }
 
-const ArtifactDownload = lazy(() => import("./ArtifactDownload"));
 const SpreadsheetPreview = lazy(() => import("./SpreadsheetPreview"));
 
 function HtmlArtifactPreview({ content, theme }: {
@@ -326,9 +327,11 @@ function PreviewImage({ markdownPath, src, alt, title, width, height, asset, req
 
 export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
   onRefresh, onOpenFile, onLoadPreviewAsset, onAuthorizePreview,
-  onSaveMarkdown, onDirtyChange, theme, displayName, machineId }: {
+  onSaveMarkdown, onDirtyChange, theme, displayName, machineId, onBack, backLabel }: {
   machineId?: string | null;
   displayName?: string;
+  onBack?: () => void;
+  backLabel?: string;
   artifact: Artifact;
   active: RightPanelView;
   hasBtw: boolean;
@@ -578,55 +581,54 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
   const mermaidFile = artifact.kind === "file" && /\.(?:mmd|mermaid)$/i.test(artifact.file);
   const renderedArtifact = ["image", "pdf", "audio", "video"].includes(artifact.kind)
     || (artifact.kind === "html" && mode === "preview");
+  const tabs = hasBtw ? <PanelTabs active={active}
+    artifactKind={artifact.kind} hasArtifact hasBtw={hasBtw} onTab={switchPanelTab} /> : null;
+  const controlsUnavailable = loading || !!artifact.error || !!artifact.authorization;
+  // The optimistic file request only distinguishes Markdown from generic files.
+  // Reserve HTML controls before the device confirms the preview format.
+  const htmlFile = artifact.kind === "html" || (controlsUnavailable
+    && artifact.kind === "file" && /\.html?$/i.test(artifact.file));
+  const modes = (artifact.kind === "md" || htmlFile || mermaidFile)
+    ? <div className="preview-modes" role="group"
+        aria-label={`${mermaidFile ? "Mermaid" : htmlFile ? "HTML" : "Markdown"} 显示模式`}>
+        <button className={mode === "preview" ? "on" : ""} aria-pressed={mode === "preview"}
+          disabled={controlsUnavailable} onClick={() => showMode("preview")}>预览</button>
+        <button className={mode === "source" ? "on" : ""} aria-pressed={mode === "source"}
+          disabled={controlsUnavailable} onClick={() => showMode("source")}>源码</button>
+      </div> : null;
+  const actions = <>
+    {artifact.kind === "md" && <button
+      type="button" className="markdown-save"
+      disabled={!dirty || artifact.saving || !canSave} onClick={saveDraft}
+      title={artifact.writable === false ? "此文件仅获准查看"
+        : artifact.truncated ? "截断的文件不可编辑" : "保存 Markdown（Ctrl/⌘+S）"}>
+      <Icon name={artifact.saving ? "refresh" : "check"} size={15} />
+      {artifact.saving ? "保存中" : "保存"}
+    </button>}
+    {artifact.kind === "md" && artifact.saveStatus === "saved" && !dirty
+      && <span className="markdown-save-state ok">已保存</span>}
+    {["md", "file", "html", "image", "pdf"].includes(artifact.kind)
+      && <ArtifactDownload id={artifactKey} file={displayName || artifact.file} data={artifact.data}
+        content={artifact.content} converted={artifact.convertedFrom}
+        unavailable={loading ? "正在读取文件…" : artifact.authorization ? "授权后可下载"
+          : artifact.error ? "文件读取失败" : artifact.truncated ? "截断的文件不可下载" : undefined} />}
+    <PanelExpandButton label="文件预览" />
+  </>;
 
   return (
     <PanelFrame className="artifact-panel" label={artifact.kind === "gitdiff" ? "改动" : "文件预览"}
       onKeyDown={handlePanelKeyDown}>
       <PanelResizer ariaLabel="调整文件面板宽度" />
-      <div className="artifact-head">
-        {hasBtw ? <PanelTabs active={active}
-            artifactKind={artifact.kind} hasArtifact hasBtw={hasBtw}
-            onTab={switchPanelTab} />
-          : <span className="artifact-title">{title}</span>}
+      {artifact.kind === "gitdiff" ? <div className="artifact-head">
+        {tabs || <span className="artifact-title">{title}</span>}
         <span className="artifact-path" title={artifact.file}>{artifact.file || "所有改动"}</span>
-        {(["md", "html"].includes(artifact.kind) || mermaidFile) && !loading && !artifact.error && <div
-          className="preview-modes" role="group"
-          aria-label={`${mermaidFile ? "Mermaid" : artifact.kind === "html" ? "HTML" : "Markdown"} 显示模式`}>
-          <button className={mode === "preview" ? "on" : ""}
-            onClick={() => showMode("preview")}>预览</button>
-          <button className={mode === "source" ? "on" : ""}
-            onClick={() => showMode("source")}>源码</button>
-        </div>}
-        {artifact.kind === "md" && !loading && !artifact.error && <button
-          type="button" className="markdown-save"
-          disabled={!dirty || artifact.saving || !canSave}
-          onClick={saveDraft}
-          title={artifact.writable === false
-            ? "此文件仅获准查看"
-            : artifact.truncated
-              ? "截断的文件不可编辑"
-              : "保存 Markdown（Ctrl/⌘+S）"}>
-          <Icon name={artifact.saving ? "refresh" : "check"} size={15} />
-          {artifact.saving ? "保存中" : "保存"}
-        </button>}
-        {artifact.kind === "md" && artifact.saveStatus === "saved" && !dirty
-          && <span className="markdown-save-state ok">已保存</span>}
-        {!loading && !artifact.error && !artifact.authorization && !artifact.truncated
-          && ["md", "file", "html", "image", "pdf"].includes(artifact.kind)
-          && (artifact.data != null || artifact.content != null) && <Suspense fallback={null}>
-            <ArtifactDownload id={artifactKey} file={displayName || artifact.file} data={artifact.data}
-              content={artifact.content} converted={artifact.convertedFrom} />
-          </Suspense>}
-        {artifact.convertedFrom && <span className="artifact-converted"
-          title="由 nono 本机沙箱临时转换，VPS 不保存文件">
-          {artifact.convertedFrom.toUpperCase()} → PDF
-        </span>}
-        {["md", "file", "html", "image", "pdf", "audio", "video", "spreadsheet"].includes(artifact.kind) && <button className="iconbtn"
-          onClick={() => onRefresh?.(artifact.file, artifact.line)}
-          aria-label="刷新文件" title="重新读取文件"><Icon name="refresh" size={17} /></button>}
-        <PanelExpandButton label={artifact.kind === "gitdiff" ? "改动" : "文件预览"} />
+        <PanelExpandButton label="改动" />
         <button className="iconbtn" onClick={leavePanel} aria-label="收起"><Icon name="chevrons-right" /></button>
-      </div>
+      </div> : <ArtifactHeader key={artifactKey} title={title} path={artifact.file}
+        onBack={onBack} backLabel={backLabel} onClose={leavePanel}
+        onReload={onRefresh ? () => onRefresh(artifact.file, artifact.line) : undefined}
+        reloadDisabled={loading || artifact.saving} convertedFrom={artifact.convertedFrom}
+        tabs={tabs} modes={modes} actions={actions} />}
       <div ref={bodyRef} onScrollCapture={event => {
         const target = event.target;
         if (!(target instanceof HTMLElement)) return;

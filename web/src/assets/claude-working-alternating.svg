@@ -1,4 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="7824" height="24" viewBox="0 0 7824 24">
+<svg xmlns="http://www.w3.org/2000/svg" width="7824" height="24" viewBox="0 0 7824 24" preserveAspectRatio="none">
+  <!-- Fill the sprite box exactly: fractional zoom can round its height and width
+       differently. Aspect-ratio letterboxing would then misalign later cells. -->
   <!-- 326 cells at 10ms: 450ms flower contraction, then a 2810ms loop.
        Loop: six explicit vector marks out/back for 2000ms, classic flower for 810ms.
        Same geometry and timing as the approved alternating-breath preview.

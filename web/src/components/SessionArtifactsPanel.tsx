@@ -158,12 +158,10 @@ export default function SessionArtifactsPanel({ sid, engine, space, ws, revision
       </div>
     </div>
     {hasPreview && <>
-      <button type="button" className="session-artifacts-back" onClick={onBack}>
-        <Icon name="chevron-left" size={14} />返回 Artifacts
-      </button>
       <Suspense fallback={<p role="status">加载预览…</p>}>
         <ArtifactPanel key={`${preview.artifact?.sid}:${preview.artifact?.file}:${preview.artifact?.requestId}`}
           {...preview} artifact={preview.artifact!} active="diff" hasBtw={false} onTab={() => {}}
+          onBack={onBack} backLabel="返回 Artifacts"
           displayName={selected?.path === preview.artifact?.file ? selected?.name : undefined}
           onRefresh={(path, line) => {
             if (selected?.path === path) onSelect(selected);

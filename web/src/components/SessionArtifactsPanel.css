@@ -22,16 +22,11 @@
 .session-artifacts-more:disabled { opacity:.7; cursor:wait; }
 .session-artifacts-error { padding:8px; font-size:12px; color:var(--dim); }
 .session-artifacts-panel > .artifact-panel { position:relative; inset:auto; width:100%; height:auto; max-width:none; min-height:0; flex:1; border:0; border-radius:0; box-shadow:none; }
-/* This panel can open before the file browser's lazy stylesheet is loaded. */
-.session-artifacts-back { display:inline-flex; align-items:center; align-self:flex-start; gap:5px; flex:none; min-height:32px; margin:4px 10px 0; padding:4px 8px; border-radius:8px; color:var(--dim); font-size:13px; line-height:20px; white-space:nowrap; text-align:left; }
-.session-artifacts-back svg { flex:none; }
 @media(hover:hover) and (pointer:fine) {
-  .session-artifacts-back:hover { color:var(--text); background:var(--raised); }
   .session-artifact-row:not(:disabled):hover { background:var(--raised); }
   .session-artifacts-more:not(:disabled):hover { color:var(--text); background:var(--border); }
 }
 @media(pointer:coarse) {
-  .session-artifacts-back { min-height:40px; }
   .session-artifacts-more { min-height:44px; }
 }
 @media(max-width:980px) {
