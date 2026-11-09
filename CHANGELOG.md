@@ -4,6 +4,17 @@
 
 ## Unreleased
 
+## v5.3.15
+
+Add administrator-enabled in-app updates and fix Claude continuation details and release retention. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
+
+- Show release versions, notes and progress under the header's update action; move bold text into Appearance.
+- Run authorized updates as durable OS jobs, wait for active work, and preserve unresolved Relay outcomes without duplicate installation.
+- Preserve Claude tool/reasoning details when background returns overlap a pending question and a later answer.
+- Recognize Chromium Singleton markers during retention while protecting actual runtime dependencies.
+
+See setup requirements and known limitations in the bilingual [release notes](docs/releases/v5.3.15.md).
+
 ## v5.3.14
 
 Move compatible device/server version differences into the header status slot. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
