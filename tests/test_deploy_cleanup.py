@@ -57,6 +57,128 @@ def test_preview_never_moves_deletes_or_runs_acceptance(installation, monkeypatc
     assert not (root / module.JOURNAL).exists()
 
 
+def test_coherent_browser_markers_survive_cleanup(installation, browser_singletons):
+    root, _, _, old, inventory, _ = installation
+    temporary = browser_singletons(root)
+    before = {p: (p.lstat().st_ino, os.readlink(p)) for p in root.glob('Singleton*')}
+    assert module.cleanup(inventory, apply=True)['status'] == 'complete'
+    assert not old.exists()
+    assert {p: (p.lstat().st_ino, os.readlink(p)) for p in before} == before
+    assert (temporary / 'SingletonSocket').exists()
+
+
+@pytest.mark.parametrize('fault', [
+    'cookie-mismatch', 'cookie-target-exists', 'cookie-target-is-dangling-link',
+    'lock-target-exists', 'socket-is-file', 'socket-missing', 'cookie-missing',
+    'unsafe-socket-directory', 'socket-inside-candidate', 'unknown-dangling-link',
+])
+def test_unrecognized_browser_markers_never_allow_removal(installation, browser_singletons, fault):
+    root, _, _, old, inventory, _ = installation
+    temporary = browser_singletons(root)
+    if fault == 'cookie-mismatch':
+        (temporary / 'SingletonCookie').unlink()
+        (temporary / 'SingletonCookie').symlink_to('123')
+    elif fault == 'cookie-target-exists':
+        (root / os.readlink(root / 'SingletonCookie')).write_text('real dependency')
+    elif fault == 'cookie-target-is-dangling-link':
+        (root / os.readlink(root / 'SingletonCookie')).symlink_to('missing')
+    elif fault == 'lock-target-exists':
+        (root / os.readlink(root / 'SingletonLock')).mkdir()
+    elif fault in {'socket-is-file', 'socket-missing'}:
+        (temporary / 'SingletonSocket').unlink()
+        if fault == 'socket-is-file':
+            (temporary / 'SingletonSocket').write_text('not a socket')
+    elif fault == 'cookie-missing':
+        (root / 'SingletonCookie').unlink()
+    elif fault == 'unsafe-socket-directory':
+        temporary.chmod(0o777)
+    elif fault == 'socket-inside-candidate':
+        update_inventory(installation, candidates=[str(old), str(temporary)],
+                         cleanup_roots=[str(old.parent), str(temporary.parent)])
+    else:
+        (root / 'unknown-current').symlink_to('missing-runtime')
+    with pytest.raises((OSError, module.CleanupError)):
+        module.cleanup(inventory, apply=True)
+    assert old.is_dir()
+
+
+@pytest.mark.parametrize('phase', ['before-quarantine', 'before-removal'])
+@pytest.mark.parametrize('name', ['service-current', 'SingletonCookie'])
+def test_new_root_pointer_protects_runtime_and_transitive_dependencies(installation, monkeypatch, phase, name):
+    root, _, _, old, inventory, _ = installation
+    runtime = old.parent / 'dormant-service'
+    runtime.mkdir()
+    (runtime / '.venv').symlink_to(old)
+    update_inventory(installation, candidates=[str(old), str(runtime)])
+    calls = 0
+
+    def checks(plan):
+        nonlocal calls
+        calls += 1
+        if calls == (1 if phase == 'before-quarantine' else 2):
+            (root / name).symlink_to(runtime)
+
+    monkeypatch.setattr(module, 'run_checks', checks)
+    if phase == 'before-quarantine':
+        report = module.cleanup(inventory, apply=True)
+        assert all(row['state'] == 'deferred' for row in report['candidates'])
+    else:
+        # The newly required original path is already quarantined: abort and
+        # restore the whole set, rather than treating the dangling alias as IPC.
+        with pytest.raises(FileNotFoundError):
+            module.cleanup(inventory, apply=True)
+    assert old.is_dir() and runtime.is_dir()
+    assert (root / name / '.venv').resolve(strict=True) == old
+    assert not list(old.parent.glob('.cc-remote-retired-*'))
+
+
+def test_marker_retarget_before_removal_restores_runtime(installation, browser_singletons, monkeypatch):
+    root, _, _, old, inventory, _ = installation
+    browser_singletons(root)
+    calls = 0
+
+    def checks(plan):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            (root / 'SingletonCookie').unlink()
+            (root / 'SingletonCookie').symlink_to(old)
+
+    monkeypatch.setattr(module, 'run_checks', checks)
+    with pytest.raises(FileNotFoundError):
+        module.cleanup(inventory, apply=True)
+    assert old.is_dir()
+    assert (root / 'SingletonCookie').resolve(strict=True) == old
+
+
+@pytest.mark.parametrize('scan', ['artifact', 'dependency'])
+@pytest.mark.parametrize('kind', ['directory', 'root-file', 'nested-file'])
+def test_mount_guard_still_blocks_tree_walk(installation, monkeypatch, scan, kind):
+    from types import SimpleNamespace
+
+    _, _, _, old, _, _ = installation
+    mount = old / 'mounted' if kind == 'directory' else old / 'payload'
+    if kind == 'directory':
+        mount.mkdir()
+    if kind == 'root-file':
+        old = mount
+    if kind == 'nested-file':
+        original = Path.lstat
+
+        def different_device(path, *args, **kwargs):
+            info = original(path, *args, **kwargs)
+            return SimpleNamespace(st_dev=info.st_dev + 1, st_ino=info.st_ino,
+                                   st_mode=info.st_mode) if path == mount else info
+
+        monkeypatch.setattr(Path, 'lstat', different_device)
+    monkeypatch.setattr(module.os.path, 'ismount', lambda p: p == mount)
+    with pytest.raises(module.CleanupError, match='mount'):
+        if scan == 'artifact':
+            list(module.artifact_entries(old))
+        else:
+            module.symlink_dependencies([old])
+
+
 @pytest.mark.parametrize('context', [None, {}, {'home': 'relative'}, {'home': '/', 'unknown': True}])
 def test_invalid_service_discovery_context_never_retires(installation, context):
     _, _, _, old, inventory, _ = installation

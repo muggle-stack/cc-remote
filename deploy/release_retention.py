@@ -747,9 +747,7 @@ def inventory(root: Path, data: dict, row: dict) -> dict | None:
     protected.update(service_dependencies(service_context, [Path(p) for p in candidates]))
     # Independent services may intentionally keep their own current pointer,
     # even while stopped. Preserve those targets and their runtime closure.
-    for path in root.iterdir():
-        if path.is_symlink():
-            protected.add(str(path.resolve(strict=True)))
+    protected.update(map(str, retirement.runtime_link_dependencies(root, [Path(p) for p in candidates])))
     python = str(Path(row["release"]) / ".venv/bin/python")
     check = [python, "-B", str(Path(row["release"]) / "deploy/release_retention.py"),
              "verify", "--root", str(root), "--generation", row["id"]]

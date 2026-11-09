@@ -11,10 +11,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -73,6 +75,60 @@ def overlaps(first: Path, second: Path) -> bool:
     # This hot loop runs for every open file and retained dependency rescan.
     left, right = first.parts, second.parts
     return left[:len(right)] == right or right[:len(left)] == left
+
+
+def browser_singleton_markers(root: Path, candidates: list[Path]) -> set[Path]:
+    """Recognize a coherent Chromium socket/cookie/lock set, not runtime aliases.
+
+    Chromium deliberately uses dangling, opaque symlink values for its cookie
+    and hostname-PID lock. Require the matching cookie beside an actual private
+    temporary Unix socket. Incomplete/stale sets use normal strict resolution.
+    A same-named link to a real file/directory is always a dependency.
+    """
+    cookie, lock, socket = [root / name for name in
+                            ("SingletonCookie", "SingletonLock", "SingletonSocket")]
+
+    def opaque(path: Path, pattern: str) -> str | None:
+        if not stat.S_ISLNK(path.lstat().st_mode):
+            return None
+        value = os.readlink(path)
+        if not re.fullmatch(pattern, value):
+            return None
+        try:
+            (path.parent / value).lstat()
+        except FileNotFoundError:
+            return value
+        return None
+
+    try:
+        token = opaque(cookie, r"[0-9]{1,20}")
+        if token is None or int(token) >= 2**64 or not opaque(lock, r"[A-Za-z0-9_.-]+-[1-9][0-9]*"):
+            return set()
+        if not stat.S_ISLNK(socket.lstat().st_mode):
+            return set()
+        target = socket.resolve(strict=True)
+        temporary = Path(tempfile.gettempdir()).resolve(strict=True)
+        if (target.name != "SingletonSocket" or target.parent == temporary
+                or not target.is_relative_to(temporary) or target.is_relative_to(root)
+                or any(overlaps(target, candidate) for candidate in candidates)):
+            return set()
+        info, parent = target.lstat(), target.parent.lstat()
+        owner = root.stat().st_uid
+        if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != owner
+                or not stat.S_ISDIR(parent.st_mode) or parent.st_uid != owner
+                or parent.st_mode & 0o022
+                or opaque(target.parent / "SingletonCookie", r"[0-9]{1,20}") != token):
+            return set()
+    except FileNotFoundError:
+        return set()
+    return {cookie, lock, socket}
+
+
+def runtime_link_dependencies(root: Path, candidates: list[Path]) -> set[Path]:
+    """Rediscover installation pointers, including stopped independent services."""
+    markers = browser_singleton_markers(root, candidates)
+    return {path.resolve(strict=True) for path in root.iterdir()
+            if stat.S_ISLNK(path.lstat().st_mode) and path not in markers}
 
 
 def load_inventory(path: Path) -> dict:
@@ -252,7 +308,9 @@ def artifact_entries(root: Path):
     while pending:
         path = pending.pop()
         info = path.lstat()
-        if info.st_dev != device or os.path.ismount(path):
+        # Device checks cover nested file mounts. Each traversal root (including
+        # a file) still needs its parent/mount check, as do all directories.
+        if info.st_dev != device or ((path == root or stat.S_ISDIR(info.st_mode)) and os.path.ismount(path)):
             raise CleanupError(f"mounted artifact must be retained: {path}")
         yield path, info
         if stat.S_ISDIR(info.st_mode):
@@ -284,7 +342,7 @@ def symlink_dependencies(roots: list[Path], *, candidates: list[Path] | None = N
             visited.add(key)
             if len(visited) > MAX_DEPENDENCY_ENTRIES:
                 raise CleanupError("dependency scan exceeds limit; retain artifacts")
-            if info.st_dev != device or os.path.ismount(path):
+            if info.st_dev != device or ((path == root or stat.S_ISDIR(info.st_mode)) and os.path.ismount(path)):
                 raise CleanupError("dependency scan crosses a mount; retain artifacts")
             if stat.S_ISLNK(info.st_mode):
                 target = path.resolve(strict=True)
@@ -309,13 +367,17 @@ def protections(plan: dict, paths: list[Path]) -> dict[Path, list[str]]:
         *plan["candidates"], *plan.get("quarantined_paths", []), *paths,
     ])))
     found = {p: list(reasons) for p, reasons in observed.items()}
-    for protected in plan["protected"]:
+    # Root aliases can change after inventory creation. Include fresh targets
+    # and their complete closure before every rename/removal. Dangling unknown
+    # pointers abort; quarantined artifacts are restored by the caller.
+    pointers = runtime_link_dependencies(plan["root"], list(found))
+    for protected in [*plan["protected"], *pointers]:
         for candidate in found:
             if overlaps(candidate, protected):
                 found[candidate].append("active release, rollback, transaction or explicit dependency")
     # Every retained candidate protects its complete dependency closure, even
     # when this is a single-path rescan or only a nested file is protected.
-    roots = [p for p in plan["protected"] if p.exists()]
+    roots = [p for p in [*plan["protected"], *pointers] if p.exists()]
     roots.extend(p for p, reasons in found.items() if reasons and p.exists())
     for target in symlink_dependencies(roots, candidates=list(found)):
         for candidate in paths:

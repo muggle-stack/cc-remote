@@ -51,3 +51,25 @@ def _isolate_native_picker_writes(monkeypatch, tmp_path_factory):
         return None
 
     monkeypatch.setattr(sdk, "save_user_defaults", isolated_save)
+
+
+@pytest.fixture
+def browser_singletons():
+    """Real Chromium-style IPC markers; keep Unix socket paths short on macOS."""
+    from pathlib import Path
+    import socket
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="ccr-ipc-") as directory:
+        temporary = Path(directory).resolve()
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(str(temporary / "SingletonSocket"))
+            (temporary / "SingletonCookie").symlink_to("12345678901234567890")
+
+            def install(root):
+                (root / "SingletonCookie").symlink_to("12345678901234567890")
+                (root / "SingletonLock").symlink_to("example.local-12345")
+                (root / "SingletonSocket").symlink_to(temporary / "SingletonSocket")
+                return temporary
+
+            yield install
