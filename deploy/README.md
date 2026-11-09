@@ -184,6 +184,13 @@ rediscovers load paths, definitions, environment files and aliases before each
 quarantine rename and permanent deletion, after any artifact tree walk. A newly
 referenced candidate or incomplete scan stops the transaction and restores all
 still-intact quarantined artifacts; regenerate the inventory before retrying.
+Installation-root symlinks are also rediscovered before every rename/removal.
+Desktop Chromium `SingletonCookie` and `SingletonLock` links contain opaque
+cookie and hostname-PID values, not runtime paths. Cleanup recognizes them only
+as part of a coherent set with a matching cookie beside an actual private
+temporary Unix `SingletonSocket`, outside the installation and all candidates.
+The markers stay untouched. Same-named links to real files/directories remain
+dependencies; incomplete, stale or unrecognized sets still defer cleanup.
 
 Failed/incomplete acceptance or insufficient process visibility retains files and
 warns without rolling back an already committed installation. A same-version

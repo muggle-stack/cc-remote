@@ -1088,3 +1088,27 @@ def test_stopped_independent_service_pointer_keeps_its_old_release(fleet):
     activate('third')
     assert prune(root)['status'] == 'deferred'
     assert first.is_dir()
+
+
+def test_desktop_browser_markers_do_not_block_managed_retention(fleet, browser_singletons):
+    root, _, activate = fleet
+    first, _ = activate('first')
+    second, _ = activate('second')
+    third, _ = activate('third')
+    browser_singletons(root)
+    report = prune(root)
+    assert report['status'] == 'complete'
+    assert not first.exists() and second.is_dir() and third.is_dir()
+    assert all((root / name).is_symlink() for name in
+               ['SingletonCookie', 'SingletonLock', 'SingletonSocket'])
+
+
+@pytest.mark.parametrize('name', ['SingletonCookie', 'SingletonLock', 'SingletonSocket'])
+def test_browser_marker_names_do_not_exempt_actual_runtime_pointers(fleet, name):
+    root, _, activate = fleet
+    first, _ = activate('first')
+    activate('second')
+    activate('third')
+    (root / name).symlink_to(first)
+    assert prune(root)['status'] == 'deferred'
+    assert first.is_dir()
