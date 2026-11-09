@@ -150,3 +150,19 @@ def test_explicit_migration_reads_old_contract_but_keeps_upstream_records_in_new
     assert bool(calls) is compatible
     assert not (destination / 'current').exists()
     assert (installation.root / 'current').resolve() == installation.release
+
+
+def test_ui_policy_still_blocks_upstream_in_downloaded_installer(tmp_path, monkeypatch):
+    installation = _installation(tmp_path, monkeypatch)
+    bundle = tmp_path / 'downloaded'
+    bundle.mkdir()
+    (bundle / 'release-manifest.json').write_text(json.dumps(_manifest(version='4.0.2')))
+    monkeypatch.setattr(update_relay, 'relay_release', lambda _: {'version': '4.0.1', 'protocol': 72})
+    monkeypatch.setenv('CC_REMOTE_UI_ALLOW_RELAY_UPDATE', '0')
+    monkeypatch.setenv('CC_REMOTE_RELAY_SSH', 'operator@relay')
+    monkeypatch.setattr(update_relay.RelayUpdate, '_ssh', lambda *a, **k: pytest.fail('must not mutate upstream'))
+    assert update_relay.installer_main([
+        '--root', str(installation.root), '--bundle', str(bundle), '--user', 'service-user',
+    ]) == 1
+    assert (installation.root / 'current').resolve() == installation.release
+    assert (installation.root / 'native-service-alive').read_text() == 'still running\n'

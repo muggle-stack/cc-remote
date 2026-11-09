@@ -110,6 +110,7 @@ const PATHS: Record<string, string> = {
   copy: '<rect x="8" y="8" width="14" height="14" rx="2"/><path d="M4 16a2 2 0 01-2-2V4a2 2 0 012-2h10a2 2 0 012 2"/>',
   expand: '<path d="M9 4H4v5M15 4h5v5M20 15v5h-5M9 20H4v-5"/>',
   refresh: '<path d="M20 7v5h-5"/><path d="M19 12a7.5 7.5 0 10.4 4.7"/>',
+  download: '<path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/>',
   history: '<path d="M4 8V3m0 0h5M4 3l3.2 3.2"/><path d="M5.2 17.5A8.5 8.5 0 1012 3.5"/><path d="M12 7.5V12l3 2"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18"/>',
   calendar: '<rect x="3.5" y="5.5" width="17" height="15" rx="2.5"/><path d="M8 3.5v4M16 3.5v4M3.5 10h17"/>',

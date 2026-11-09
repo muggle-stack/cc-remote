@@ -349,6 +349,10 @@ cc-remote update --check   # Check versions only
 cc-remote update           # Install the latest stable Release; no latest argument needed
 ```
 
+The top-right menu also provides **Check for updates** for explicitly enabled managed devices.
+See [in-app update setup and recovery](docs/in-app-updates.md) for supported installations and authorization.
+The global bold-text preference now lives in Appearance → Reading settings.
+
 Each device checks its paired VPS first, updating Relay + Web when necessary.
 An already-current compatible Relay is skipped. Use
 `cc-remote update --relay-ssh operator@relay-host` to bind an existing SSH admin

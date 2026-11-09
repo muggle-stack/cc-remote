@@ -32,12 +32,14 @@ from cc_remote.config import (
     RelayConfig, relay_config, valid_machine_id, validate_relay_config,
 )
 from cc_remote.log import logger
+from cc_remote import __version__
 from cc_remote.protocol import PROTOCOL_VERSION
 from cc_remote.relay.auth import (
     SessionClaims, authenticate_login,
     make_session_token, session_token_claims, wrapper_machine_scope,
 )
 from cc_remote.relay.devices import DeviceStore
+from cc_remote.relay.updates import UpdateRelay, UpdateChannelError
 from cc_remote.relay.harmony_push import (
     HarmonyPushDispatcher, HarmonyPushStore, HarmonySubscription, HuaweiPushSender,
     TOKEN_RE as HARMONY_TOKEN_RE,
@@ -622,6 +624,67 @@ def create_app(
         lambda req: _request_origin_allowed(req, cfg),
     )
     app.state.viewers = viewers
+    updates = UpdateRelay()
+    update_limiter = LoginRateLimiter(max_per_ip=180)
+    app.state.updates = updates
+
+    @app.api_route("/api/updates/{machine_id}", methods=["GET", "POST"])
+    async def application_update(req: Request, machine_id: str):
+        headers = {"Cache-Control": "no-store"}
+        claims = await _active_claims(req, cfg, sessions)
+        if claims is None:
+            return JSONResponse({"reason": "unauthorized"}, status_code=401, headers=headers)
+        if (not _request_origin_allowed(req, cfg, allow_missing=req.method == "GET")
+                or not await _claims_allow_machine(claims, machine_id, devices)):
+            return JSONResponse({"reason": "forbidden"}, status_code=403, headers=headers)
+        if update_limiter.limited(_request_ip(req)):
+            return JSONResponse({"reason": "busy"}, status_code=429, headers=headers)
+        try:
+            command = {"op": "status"}
+            if req.method == "POST":
+                async with asyncio.timeout(10):
+                    command = await _read_json_limited(req, 4096)
+                if not isinstance(command, dict):
+                    raise ValueError("invalid update request")
+                operation = command.get("op")
+                if not isinstance(operation, str):
+                    raise ValueError("invalid update operation")
+                expected = ({"op", "job_id", "version"} if operation == "start"
+                            else {"op", "job_id"} if operation == "cancel" else {"op"})
+                if operation not in {"check", "start", "cancel"} or set(command) != expected:
+                    raise ValueError("invalid update operation")
+                if operation in {"start", "cancel"}:
+                    from cc_remote.update_jobs import job_id
+                    job_id(command["job_id"])
+                if operation == "start":
+                    from cc_remote.update import version_tuple
+                    version_tuple(command["version"])
+            result = await updates.request(machine_id, command)
+            # Browser sessions may expire/revoke while an OS launch is pending.
+            if await _active_claims(req, cfg, sessions) is None:
+                return JSONResponse({"reason": "unauthorized"}, status_code=401, headers=headers)
+            return JSONResponse({**result, "relay_version": __version__, "relay_protocol": PROTOCOL_VERSION}, headers=headers)
+        except UpdateChannelError as exc:
+            return JSONResponse({"reason": exc.code}, status_code=503, headers=headers)
+        except (ValueError, _BodyTooLarge, asyncio.TimeoutError):
+            return JSONResponse({"reason": "invalid_request"}, status_code=400, headers=headers)
+
+    @app.websocket("/ws/updates")
+    async def update_wrapper_socket(websocket: WebSocket):
+        auth = websocket.headers.get("authorization", "")
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        scope = wrapper_machine_scope(token, cfg)
+        dynamic = scope is None
+        if dynamic:
+            scope = await devices.machine_for_token(token)
+        if scope is None or websocket.headers.get("origin"):
+            await websocket.close(code=1008)
+            return
+
+        async def authorized(machine_id: str) -> bool:
+            return (await devices.machine_for_token(token) == machine_id) if dynamic else True
+
+        await updates.serve(websocket, scope, authorized)
 
     @app.api_route("/api/media/{machine_id}/{media_id}", methods=["GET", "HEAD"])
     async def native_video(req: Request, machine_id: str, media_id: str):

@@ -403,6 +403,11 @@ class SessionMessages:
         try:
             if self.closing:
                 return  # Durable queued item belongs to the next Wrapper.
+            updates = getattr(machine, "_ui_updates", None)
+            if updates is not None and updates.guarded():
+                self._resolve_waiter(cmd.msg_id)
+                self.retry_after[target] = asyncio.get_running_loop().time() + 5
+                return
             directory_actions = getattr(machine, "_directory_actions", None)
             if directory_actions is not None and cmd.sid in directory_actions.mutating:
                 self._resolve_waiter(cmd.msg_id)

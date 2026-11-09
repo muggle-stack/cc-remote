@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -30,6 +31,10 @@ from deploy.install_lock import LOCK_FD_ENV, InstallLockError, acquire_install_l
 
 class UpdateError(ValueError):
     pass
+
+
+class UpdateOutcomeUnknown(UpdateError):
+    """An accepted activation has no verified terminal outcome yet."""
 
 
 _VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
@@ -337,7 +342,10 @@ def run_installer(command: list[str], lock_descriptor: int) -> int:
 
 
 def update(*, role: str | None, target_version: str | None, check: bool,
-           allow_protocol_change: bool = False, relay_ssh: str | None = None) -> int:
+           allow_protocol_change: bool = False, relay_ssh: str | None = None,
+           allow_relay_update: bool = True,
+           progress: Callable[[str], None] | None = None) -> int:
+    report = progress or (lambda _phase: None)
     system, machine = host_platform()
     installation = select_installation(role, system, machine)
     repository = release_repository()
@@ -362,6 +370,7 @@ def update(*, role: str | None, target_version: str | None, check: bool,
             from cc_remote.update_relay import RelayUpdate
 
             relay = RelayUpdate(installation, relay_ssh)
+            relay.allow_update = allow_relay_update
             if check:
                 relay.inspect()
         elif relay_ssh:
@@ -390,7 +399,9 @@ def update(*, role: str | None, target_version: str | None, check: bool,
         with tempfile.TemporaryDirectory(prefix="cc-remote-update-") as temporary:
             stage = Path(temporary)
             print(f"Downloading and verifying {installation.role} v{version}...", flush=True)
+            report("downloading")
             bundle = download_bundle(installation, version, release_base(repository, version), stage)
+            report("validating")
             target = load_manifest(bundle / "release-manifest.json")
             if installation.role == "wrapper" and _claude_contract(installation.release) != _claude_contract(bundle):
                 raise UpdateError(
@@ -407,7 +418,9 @@ def update(*, role: str | None, target_version: str | None, check: bool,
             fresh = read_installation(installation.root, system, machine)
             if fresh != installation:
                 raise UpdateError("installation changed while downloading; inspect it before retrying")
+            report("ready")
             if relay:
+                report("updating_relay")
                 relay.ensure(version, target["protocol_version"], allow_protocol_change=allow_protocol_change)
             command = ["bash", str(bundle / "deploy" / f"install-{installation.role}.sh"), str(bundle)]
             if installation.role == "relay":
@@ -425,8 +438,10 @@ def update(*, role: str | None, target_version: str | None, check: bool,
             if installation.role == "wrapper" and allow_protocol_change:
                 command += ["--allow-protocol-change"]
             print("Activating with the release installer; previous release retained for rollback.", flush=True)
+            report("installing")
             if run_installer(command, lock_descriptor):
                 raise UpdateError("installer did not complete successfully; see the failure stage and recovery status above before retrying")
+            report("verifying")
             active = read_installation(installation.root, system, machine)
             if active.manifest != target:
                 raise UpdateError("installer returned without activating the selected release; inspect current")

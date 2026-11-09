@@ -16,6 +16,9 @@ interface Props {
   appearance: AppearanceController;
   boldText: boolean;
   onBoldText: (enabled: boolean) => void;
+  onOpenUpdates?: () => void;
+  updateAvailable?: boolean;
+  currentVersion?: string;
   notificationMode: NotificationMode;
   notificationBinding: PushBindingState;
   notificationAvailable: boolean;
@@ -47,6 +50,9 @@ export function HeaderMenu({
   appearance,
   boldText,
   onBoldText,
+  onOpenUpdates,
+  updateAvailable = false,
+  currentVersion,
   notificationMode,
   notificationBinding,
   notificationAvailable,
@@ -227,13 +233,13 @@ export function HeaderMenu({
                   <span><b>外观</b><small>{themeLabel(appearance.choice)} · {appearancePaletteLabel(engine, appearance.mode, appearance.look)}</small></span>
                   <Icon name="chevron-right" size={16} />
                 </button>
-                <button type="button" className="header-menu-item" role="switch"
-                  aria-label="加粗字体" aria-checked={boldText}
-                  onClick={() => onBoldText(!boldText)}>
-                  <Icon name="bold" size={18} />
-                  <span><b>加粗字体</b><small>整页文字加粗，更易阅读</small></span>
-                  <span className="header-menu-switch" aria-hidden="true" />
-                </button>
+                {onOpenUpdates && <button type="button" className="header-menu-item"
+                  onClick={() => { close(); onOpenUpdates(); }}>
+                  <Icon name="download" size={18} />
+                  <span><b>检查更新</b><small>{currentVersion ? `当前版本 ${currentVersion}` : "页面、服务器与当前设备"}</small></span>
+                  {updateAvailable ? <small className="header-menu-update-badge">● 有新版本</small>
+                    : <Icon name="chevron-right" size={16} />}
+                </button>}
                 <button type="button" className="header-menu-item danger"
                   onClick={onLogout}>
                   <Icon name="logout" size={18} />
@@ -286,6 +292,7 @@ export function HeaderMenu({
       )}
       {themeOpen && <Suspense fallback={null}>
         <ThemePicker key={engine} engine={engine} appearance={appearance}
+          boldText={boldText} onBoldText={onBoldText}
           onClose={() => setThemeOpen(false)} returnFocusRef={triggerRef} />
       </Suspense>}
     </>

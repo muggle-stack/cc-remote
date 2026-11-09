@@ -144,7 +144,7 @@ test("preset content keeps emphasis, highlighted code and links distinct in both
       if (engine === "codex" && ["lagoon", "bordeaux", "heritage"].includes(palette)) {
         await page.screenshot({ path: info.outputPath(`readability-${palette}.png`), animations: "disabled" });
       }
-      await page.getByRole("button", { name: "更多设置", exact: true }).click();
+      await openPicker(page);
       const toggle = page.getByRole("switch", { name: "加粗字体", exact: true });
       await toggle.click();
       const bold = await sample();
@@ -153,9 +153,10 @@ test("preset content keeps emphasis, highlighted code and links distinct in both
       if (engine === "codex" && ["lagoon", "bordeaux", "heritage"].includes(palette)) {
         await page.keyboard.press("Escape");
         await page.screenshot({ path: info.outputPath(`readability-${palette}-bold.png`), animations: "disabled" });
-        await page.getByRole("button", { name: "更多设置", exact: true }).click();
+        await openPicker(page);
       }
       await toggle.click();
+      await page.keyboard.press("Escape");
     }
   }
   expect(errors).toEqual([]);
@@ -577,7 +578,7 @@ test("bold text preserves hierarchy and drafts across engines, themes and reload
   await page.goto(url);
   const input = page.locator(".inrow textarea");
   await input.fill("保留草稿，调整阅读效果");
-  await page.getByRole("button", { name: "更多设置", exact: true }).click();
+  await openPicker(page);
   const toggle = page.getByRole("switch", { name: "加粗字体", exact: true });
   await expect(toggle).not.toBeChecked();
   const normal = await sampleTypography(page);
@@ -626,7 +627,7 @@ test("bold text preserves hierarchy and drafts across engines, themes and reload
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("data-bold-text", "true");
   await expect(page.locator("html")).toHaveAttribute("data-palette", "moss");
-  await page.getByRole("button", { name: "更多设置", exact: true }).click();
+  await openPicker(page);
   await expect(toggle).toBeChecked();
   await toggle.click();
   await expect(page.locator("html")).toHaveAttribute("data-bold-text", "false");
@@ -639,10 +640,10 @@ test("bold text syncs between browser tabs and works without storage", async ({ 
   await page.goto(url);
   const other = await page.context().newPage();
   await other.goto("/tests/theme-preview.html?engine=claude");
-  await page.getByRole("button", { name: "更多设置", exact: true }).click();
+  await openPicker(page);
   await page.getByRole("switch", { name: "加粗字体", exact: true }).click();
   await expect(other.locator(".prose p").first()).toHaveCSS("font-weight", "700");
-  await other.getByRole("button", { name: "更多设置", exact: true }).click();
+  await openPicker(other);
   await expect(other.getByRole("switch", { name: "加粗字体", exact: true })).toBeChecked();
   await other.getByRole("switch", { name: "加粗字体", exact: true }).click();
   await expect(page.getByRole("switch", { name: "加粗字体", exact: true })).not.toBeChecked();
@@ -654,7 +655,7 @@ test("bold text syncs between browser tabs and works without storage", async ({ 
     get() { throw new DOMException("Storage unavailable", "SecurityError"); },
   }));
   await page.reload();
-  await page.getByRole("button", { name: "更多设置", exact: true }).click();
+  await openPicker(page);
   await page.getByRole("switch", { name: "加粗字体", exact: true }).click();
   await expect(page.locator(".prose p").first()).toHaveCSS("font-weight", "700");
   expect(errors).toEqual([]);

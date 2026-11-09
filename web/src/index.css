@@ -2467,3 +2467,4 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .artifact-video-footer{ display:flex; flex:none; justify-content:space-between; align-items:center; color:var(--dim); font-size:12px; }
 .artifact-video-footer a{ display:inline-flex; align-items:center; min-height:32px; color:var(--accent-ink); }
 .artifact-video-error{ flex:none; margin:0; color:var(--danger); font-size:13px; line-height:1.6; }
+.header-menu-update-badge { color:var(--accent-ink); font-size:10px; white-space:nowrap; }

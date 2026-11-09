@@ -91,6 +91,9 @@ class LocalControl:
             self.lock_fd = None
 
     async def handle(self, request: object) -> dict:
+        if (isinstance(request, dict) and set(request) == {"op", "id"}
+                and request["op"] == "reserve_ui_update"):
+            return self.machine._ui_updates.reserve(request["id"])
         if (not isinstance(request, dict) or set(request) != {"op", "config_dir", "session_id"}
                 or request["op"] != "release_claude_session"):
             raise ValueError("Unknown control request")

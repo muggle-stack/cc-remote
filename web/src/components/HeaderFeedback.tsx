@@ -12,6 +12,8 @@ interface Props {
   update?: { id: string; version: string; message: string | null; updating: boolean; onReload: () => void };
   /** Compatible version drift only; protocol mismatches keep their blocking banner. */
   versionNotice?: string | null;
+  maintenance?: { id: string; label: string; message: string; tone: "info" | "warning" | "success" };
+  onOpenUpdates?: () => void;
   deviceScope: string;
   sessionScope: string;
   phase: ConnectionPhase | null;
@@ -38,7 +40,7 @@ function SuccessExpiry({ id, paused, onExpire }: {
 /** A presentation-only status slot; hiding it never changes engine/transport state. */
 export function HeaderFeedback({
   deviceScope, sessionScope, phase, banner, bannerRevision = 0, notices,
-  onDismissBanner, onDismissNotice, update, versionNotice,
+  onDismissBanner, onDismissNotice, update, versionNotice, maintenance, onOpenUpdates,
 }: Props) {
   const dialogId = useId();
   const trigger = useRef<HTMLButtonElement>(null);
@@ -66,6 +68,9 @@ export function HeaderFeedback({
     id: JSON.stringify([deviceScope, "device-version", versionNotice]),
     label: "版本待同步", tone: "warning", message: versionNotice,
   } : null;
+  const maintenanceItem: HeaderFeedbackItem | null = maintenance ? {
+    ...maintenance, id: JSON.stringify([deviceScope, maintenance.id]),
+  } : null;
   const items = notices.map(notice => headerNoticeItem(notice, scope));
   let commandItem = commandFeedback.find(item => item.deviceScope === deviceScope);
   if (banner && headerBannerKind(banner) === "failure") {
@@ -81,6 +86,7 @@ export function HeaderFeedback({
   }
   if (commandItem?.sessionScope === sessionScope) items.push(commandItem);
   if (updateItem) items.push(updateItem);
+  if (maintenanceItem) items.push(maintenanceItem);
   const visible = items.filter(item => !dismissed.includes(item.id)).reverse();
   if (connectionItem) visible.push(connectionItem);
   // Compatible version drift stays available without masking connection or
@@ -175,7 +181,11 @@ export function HeaderFeedback({
             <h2>{item.label}</h2>
             <p>{item.message}</p>
             {item.detail && <p className="header-feedback-extra">{item.detail}</p>}
-            {item.id === updateItem?.id && <button type="button" className="header-feedback-dismiss"
+            {onOpenUpdates && [updateItem?.id, versionItem?.id, maintenanceItem?.id].includes(item.id)
+              ? <button type="button" className="header-feedback-dismiss" onClick={() => {
+                setOpenFor(null); onOpenUpdates();
+              }}>查看更新</button>
+              : item.id === updateItem?.id && <button type="button" className="header-feedback-dismiss"
               disabled={update?.updating} onClick={update?.onReload}>
               {update?.updating ? "检查中…" : "更新页面"}
             </button>}
