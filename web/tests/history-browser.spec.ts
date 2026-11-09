@@ -4072,7 +4072,8 @@ test("external preview replacement stops automatic grant retries and allows a fr
   await expect(page.locator(".artifact-panel")).toContainText("读取未完成");
   expect(relay.commands.filter(c => c.type === "authorize_preview")).toHaveLength(1);
   expect(relay.commands.filter(c => c.type === "get_file_preview")).toHaveLength(2);
-  await page.getByRole("button", { name: "刷新文件" }).click();
+  await page.locator(".artifact-file-trigger").click();
+  await page.getByRole("button", { name: "重新读取", exact: true }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "authorize_preview").length).toBe(2);
   await expect(page.locator(".artifact-panel")).toContainText("读取未完成");
   expect(relay.commands.filter(c => c.type === "get_file_preview")).toHaveLength(4);
@@ -5573,10 +5574,10 @@ for (const fromBrowser of [false, true]) {
     expect(bounds.width).toBe(370);
     expect(bounds.y + bounds.height).toBeLessThanOrEqual(844);
     expect(await panel.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
-    const heading = panel.locator(".artifact-title:visible, .artifact-head > .panel-tabs:visible");
+    const heading = panel.locator(".artifact-file-trigger .artifact-title");
     await expect.poll(async () => {
       const name = (await heading.boundingBox())!;
-      const action = (await panel.getByRole("button", { name: "收回右侧", exact: true }).boundingBox())!;
+      const action = (await panel.getByRole("button", { name: "收起", exact: true }).boundingBox())!;
       return Math.abs(name.y + name.height / 2 - action.y - action.height / 2);
     }).toBeLessThan(4);
     await page.screenshot({ path: info.outputPath(`centered-file-${fromBrowser}.png`), animations: "disabled" });
@@ -6670,6 +6671,46 @@ async function gotoWithProductionCsp(
   await page.goto(path);
 }
 
+test("HTML preview filename menu preserves the frame and closes before the expanded panel", async ({ page }, info) => {
+  await page.setViewportSize({ width: 320, height: 740 });
+  await gotoWithProductionCsp(page, "/tests/history-browser.html?artifact-html=1");
+  const panel = page.locator(".artifact-panel");
+  const header = panel.locator(".artifact-preview-head");
+  const trigger = header.getByRole("button", { name: "文件信息：preview.html", exact: true });
+  const menu = panel.getByRole("dialog", { name: "文件信息", exact: true });
+  const frame = page.frameLocator('iframe[title="HTML 交互预览"]');
+  await expect(frame.getByRole("button", { name: "计数 0", exact: true })).toBeVisible();
+  const original = (await panel.locator("iframe").elementHandle())!;
+  await header.getByRole("button", { name: "居中展开文件预览", exact: true }).click();
+  await expect(panel).toHaveClass(/panel-expanded/);
+  const nav = (await header.locator(".artifact-preview-navigation").boundingBox())!;
+  const toolbar = (await header.locator(".artifact-preview-toolbar").boundingBox())!;
+  expect(toolbar.y).toBeGreaterThanOrEqual(nav.y + nav.height);
+  expect(await header.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+  await expect(header.getByRole("button", { name: "刷新文件" })).toHaveCount(0);
+  await expect(header.locator(".artifact-path")).toHaveCount(0);
+  await trigger.click();
+  await expect(menu).toContainText("preview.html");
+  await expect(menu).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  await expect(panel).toHaveClass(/panel-expanded/);
+  await trigger.press("Enter");
+  await expect(menu).toBeVisible();
+  await header.getByRole("button", { name: "预览", exact: true }).click();
+  await expect(menu).toHaveCount(0);
+  await trigger.click();
+  const frameBounds = (await panel.locator("iframe").boundingBox())!;
+  // Click an uncovered part of the sandboxed frame, below the open popover.
+  await page.mouse.click(frameBounds.x + frameBounds.width / 2, frameBounds.y + frameBounds.height - 20);
+  await expect(menu).toHaveCount(0);
+  await frame.getByRole("button", { name: "计数 0", exact: true }).click();
+  await expect(frame.getByRole("button", { name: "计数 1", exact: true })).toBeVisible();
+  expect(await original.evaluate(node => node.isConnected)).toBe(true);
+  await header.screenshot({ path: info.outputPath("html-preview-header.png") });
+});
+
 test("HTML preview opens interactive by default and stays isolated under production CSP", async ({
   page,
 }) => {
@@ -6900,7 +6941,8 @@ test("artifact-audio stops and releases its source when refreshed or closed", as
   const box = await audio.boundingBox();
   await audio.click({ position: { x: 24, y: box!.height / 2 } });
   await expect.poll(() => old.evaluate((node) => (node as HTMLAudioElement).paused)).toBe(false);
-  await page.getByRole("button", { name: "刷新文件", exact: true }).click();
+  await page.locator(".artifact-file-trigger").click();
+  await page.getByRole("button", { name: "重新读取", exact: true }).click();
   await expect(page.getByLabel("second.wav 播放器")).toBeVisible();
   expect(await old.evaluate((node) => (node as HTMLAudioElement).paused)).toBe(true);
   expect(await old.getAttribute("src")).toBeNull();
@@ -6921,7 +6963,8 @@ test("artifact-audio explains decoder errors and recovers on the next file", asy
   await gotoWithProductionCsp(page, "/tests/history-browser.html?artifact-audio=invalid");
   await expect(page.getByRole("alert")).toContainText("无法播放该音频编码");
   await expect(page.getByRole("link", { name: "下载音频" })).toBeVisible();
-  await page.getByRole("button", { name: "刷新文件", exact: true }).click();
+  await page.locator(".artifact-file-trigger").click();
+  await page.getByRole("button", { name: "重新读取", exact: true }).click();
   await expect(page.getByRole("alert")).toHaveCount(0);
   await expect.poll(() => page.locator("audio").evaluate((node) => (node as HTMLAudioElement).duration)).toBe(3);
 });
@@ -14802,7 +14845,7 @@ test("session action menu keeps keyboard navigation and closes when its card scr
   await expect(menu).toHaveCount(0);
 });
 
-for (const engine of ["codex", "claude", "dsh"]) {
+for (const [engine, color] of [["codex", "#8590FF"], ["claude", "#DB7C5E"], ["dsh", "#94BDFF"]]) {
   test(`working words ${engine} replace token counters without changing native states`, async ({ page }) => {
     await page.clock.install({ time: new Date("2026-11-09T00:00:00Z") });
     await page.goto(`/tests/history-browser.html?turn-usage&engine=${engine}&theme=dark`);
@@ -14813,7 +14856,7 @@ for (const engine of ["codex", "claude", "dsh"]) {
     await expect(page.getByRole("button", { name: "查看 token 用量" })).toHaveCount(0);
     await expect(working).not.toContainText("tokens");
     await expect(word).toHaveCSS("animation-duration", "3s, 0.25s");
-    await expect(word).toHaveCSS("--working-word-base", "#DB7C5E");
+    await expect(word).toHaveCSS("--working-word-base", color);
     if (engine === "claude") {
       await expect(working.locator(".is-alternating > img")).toHaveCSS(
         "animation-name", "claude-working-entry, claude-working-alternating");
@@ -14839,6 +14882,52 @@ for (const engine of ["codex", "claude", "dsh"]) {
     await expect(page.locator(".turn-done-mark")).toBeVisible();
   });
 }
+
+test("working words Claude sprite stays centered across cycles at fractional zoom", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.goto("/tests/history-browser.html?turn-usage&engine=claude&theme=dark");
+  const mark = page.locator(".turn-working .claude-working-mark");
+  await mark.locator("img").evaluate(async (node: HTMLImageElement) => {
+    await node.decode();
+    node.getAnimations().forEach(animation => animation.pause());
+  });
+  for (const zoom of [0.8, 0.9, 1, 1.1, 1.25]) {
+    await mark.evaluate((node, zoom) => {
+      (node.closest(".turn-working") as HTMLElement).style.zoom = String(zoom);
+    }, zoom);
+    const positions: number[] = [];
+    // These times all show the same small dot, at the beginning/end of loops.
+    // Inspect painted pixels: a fixed DOM box cannot detect drift inside an SVG.
+    for (const time of [451, 2441, 3261, 5251, 6071]) {
+      await mark.locator("img").evaluate((node, time) => {
+        node.getAnimations().forEach(animation => { animation.currentTime = time; });
+      }, time);
+      const pixels = (await mark.screenshot()).toString("base64");
+      positions.push(await page.evaluate(async pixels => {
+        const image = new Image();
+        image.src = `data:image/png;base64,${pixels}`;
+        await image.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = image.width; canvas.height = image.height;
+        const context = canvas.getContext("2d")!;
+        context.drawImage(image, 0, 0);
+        const rgba = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        const background = rgba[0] - rgba[2];
+        let weight = 0, center = 0;
+        for (let y = 0; y < canvas.height; y++) for (let x = 0; x < canvas.width; x++) {
+          const offset = (y * canvas.width + x) * 4;
+          const orange = Math.max(0, rgba[offset] - rgba[offset + 2] - background);
+          if (orange <= 10) continue;
+          weight += orange; center += (x + 0.5) * orange;
+        }
+        if (!weight) throw new Error("The Claude mark disappeared between frames");
+        return center / weight * 24 / canvas.width;
+      }, pixels));
+    }
+    // Allow subpixel rasterization differences, but not the old multi-pixel drift.
+    expect(Math.max(...positions) - Math.min(...positions), `painted drift at zoom ${zoom}`).toBeLessThan(0.5);
+  }
+});
 
 test("working words preserve the original Claude completed click replay", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "no-preference" });
@@ -15008,6 +15097,78 @@ for (const centered of [false, true]) {
 
 const ARTIFACT_THUMBNAIL = "UklGRtwCAABXRUJQVlA4INACAABwFgCdASqgAGQAPmkskUWkIqGYrQ2AQAaEoA0yImv9/wfKu8jGc1fj1NZwv9jP2Z7D285+g70wWRO+LY6qs6n0dvyfQA/XRQB23osL5Oml9nMS4gNItz/BqkDYvgLeLSEm08g24to6NGBdwgvlda3JG+dJOhgXbkzpQgaXwvKFiucB0JgYGCCrW2xsMKYgri2Bh3wIA3LPS1vqF4VCEH5XMfezkei12+V6oH2DOqg/4rIIaAyQMsP3Su+LwAD+/L0kmiyLtH7qy5e7S7xMQ0RpoCM4bi2O9b1Hx1RUnmE+vjjVs4XHpkwxpI/pFBxd/MXRYmC1H1g1yF9yf5CD+8/A1yi0UxY0dZaaXjkNbh93x1lXGdhNwgT7ondUHCAZekBFY3IYNVfU6dMwzF4/CH7CPGiL0Teb1Dusbmu9G5dhjPkoyXCsJDeNwZ/rQ5QoRAEFaui98RXfOcyaHd6m7cEkY+yb4LukxgkFIlbgg2xc+wpZPnVjVPTOApxiG1MuiCwjW4B6PP89Yjmp9/DBbGAwutiYT+ZQrfyxzuxpfqjJ+X6QQYxqSHRJsz8ELfwjNNdtZinkYO0mP/GJzD0gijO7d74/4Mj1zKh+hWzf8VyXcCXoX141t07IRnXWHujnMfNNup2EEJVcSqC3/BGkMVAVxA+aIGPe7k3rH23ah/K4nG/Z/gtGdHuKP4dMKVMOC6+baEyer1F9psT4Zm6vo45c1o9Ac4HtZinkYO0li0Z2/nWWQ6l8f8EvIz1+mWZTwAYP/f6qSmVV876qwMQY3eCpgTJd17CWpzW05cAhbyJZaX/INkj1DPQy2hYKkNhhL1Qh567JeVGDBkbZWnAl+DFAwEO6Nm5Kd13BxrU74C3n3537tm2uoqs4xbNC9rEGo1qNpj+vM+lddxhgEdkQnTFjCo2dPrAWTZ80TDkSdWH5uqHDRaVoz/ZG6AYAAAAAAAA=";
 
+for (const format of ["image", "html", "markdown"] as const) {
+  test(`right panel layout ${format} file controls stay stable while loading and reloading`, async ({ page }, info) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 320, height: 740 });
+    const extension = { image: "webp", html: "html", markdown: "md" }[format];
+    const path = `/tmp/layout/exec-bcecc55b-6c70-4858-8033-38343e2ed9f2.${extension}`;
+    const relay = await mockRightPanelRelay(page, { seedTurns: [{ id: "file", prompt: "查看文件", done: true,
+      blocks: [{ kind: "text", message_id: "answer", text: `[交付文件](${path})`, done: true }] }] });
+    await page.goto("/");
+    await page.getByRole("button", { name: `在 Remote 中打开 ${path}`, exact: true }).click();
+    const requests = () => relay.commands.filter(c => c.type === "get_file_preview");
+    await expect.poll(() => requests().length).toBe(1);
+    const header = page.locator(".artifact-preview-head");
+    const disabledDownload = header.getByRole("button", { name: "下载原文件", exact: true });
+    await expect(disabledDownload).toBeVisible();
+    await expect(disabledDownload).toBeDisabled();
+    const bounds = (await disabledDownload.boundingBox())!;
+    const headerBounds = (await header.boundingBox())!;
+    const closeBounds = (await header.getByRole("button", { name: "收起", exact: true }).boundingBox())!;
+    await expect(header.getByRole("link", { name: "下载原文件", exact: true })).toHaveCount(0);
+    if (format !== "image") {
+      await expect(header.getByRole("button", { name: "预览", exact: true })).toBeDisabled();
+      await expect(header.getByRole("button", { name: "源码", exact: true })).toBeDisabled();
+    }
+    const content = format === "html" ? "<!doctype html><p>测试文件</p>" : "# 测试文件";
+    const respond = (index: number, error?: string) => relay.emit({ type: "file_preview", sid: "layout-parent",
+      request_id: String(requests()[index].request_id), path, format,
+      ...(error ? { error } : format === "image"
+        ? { data: ARTIFACT_THUMBNAIL, media_type: "image/webp" } : { content }), size: 740, writable: false });
+    respond(0);
+    const download = header.getByRole("link", { name: "下载原文件", exact: true });
+    await expect(download).toBeVisible();
+    expect(await download.boundingBox()).toEqual(bounds);
+    expect(await header.boundingBox()).toEqual(headerBounds);
+    expect(await header.getByRole("button", { name: "收起", exact: true }).boundingBox()).toEqual(closeBounds);
+    expect(await header.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+    const previousUrl = await download.getAttribute("href");
+    const event = page.waitForEvent("download");
+    await download.click();
+    const file = await event;
+    expect(file.suggestedFilename()).toBe(path.split("/").at(-1));
+    expect(readFileSync((await file.path())!)).toEqual(
+      format === "image" ? Buffer.from(ARTIFACT_THUMBNAIL, "base64") : Buffer.from(content));
+
+    const openInfo = () => header.getByRole("button", { name: /^文件信息：/ }).click();
+    await openInfo();
+    const menu = page.getByRole("dialog", { name: "文件信息", exact: true });
+    const reload = menu.getByRole("button", { name: "重新读取", exact: true });
+    expect((await reload.boundingBox())!.width).toBeLessThan((await menu.boundingBox())!.width * .6);
+    await page.locator(".artifact-panel").screenshot({ path: info.outputPath(`${format}-compact-controls.png`) });
+    await reload.click();
+    await expect.poll(() => requests().length).toBe(2);
+    await expect(disabledDownload).toBeDisabled();
+    expect(await disabledDownload.boundingBox()).toEqual(bounds);
+    await expect(download).toHaveCount(0);
+    await expect.poll(() => page.evaluate(async url => {
+      try { await fetch(url!); return false; } catch { return true; }
+    }, previousUrl)).toBe(true);
+    respond(1, "文件读取失败");
+    await expect(page.locator(".preview-error")).toContainText("文件读取失败");
+    await expect(disabledDownload).toBeDisabled();
+    expect(await header.boundingBox()).toEqual(headerBounds);
+    await openInfo();
+    await reload.click();
+    await expect.poll(() => requests().length).toBe(3);
+    respond(2);
+    await expect(download).toBeVisible();
+    expect(await download.boundingBox()).toEqual(bounds);
+    expect(await download.getAttribute("href")).not.toBe(previousUrl);
+  });
+}
+
 test("right panel layout session Artifacts list and preview stay separate and reject stale responses", async ({ page }, info) => {
   await page.setViewportSize({ width: 1568, height: 1000 });
   const relay = await mockRightPanelRelay(page, { secondParent: true, seedTurns: [{
@@ -15022,7 +15183,7 @@ test("right panel layout session Artifacts list and preview stay separate and re
   await open();
   await expect.poll(() => relay.commands.filter(c => c.type === "get_session_artifacts").length).toBe(1);
   const first = relay.commands.find(c => c.type === "get_session_artifacts")!;
-  const entries = ["技术架构.md", "路线图.png", "会议记录.txt"].map((name, i) => ({
+  const entries = ["技术架构.md", "路线图与部署流程（最终交付版本）.png", "会议记录.txt"].map((name, i) => ({
     id: `artifact-${i}`, name, path: `/tmp/layout/${name}`, source: i === 2 ? "upload" as const : "delivered" as const,
     kind: i === 1 ? "image" as const : "document" as const, created_at: (Date.now() / 1000) - (i === 2 ? 86400 : i), available: true, size: 1024,
   }));
@@ -15059,6 +15220,23 @@ test("right panel layout session Artifacts list and preview stay separate and re
   await panel.getByRole("button", { name: "返回 Artifacts" }).click();
   await expect(panel.locator(".session-artifact-row")).toHaveCount(3);
   await expect(panel.locator(".artifact-panel")).toHaveCount(0);
+  await page.setViewportSize({ width: 320, height: 740 });
+  await panel.getByRole("button", { name: /路线图与部署流程/ }).click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "get_session_artifact_preview" && c.variant !== "thumbnail").length).toBe(2);
+  const imageRequest = relay.commands.filter(c => c.type === "get_session_artifact_preview" && c.variant !== "thumbnail")[1];
+  relay.emit({ type: "file_preview", sid: "layout-parent", request_id: String(imageRequest.request_id),
+    path: entries[1].path, format: "image", media_type: "image/webp", data: ARTIFACT_THUMBNAIL, size: 740, writable: false });
+  const imageHeader = panel.locator(".artifact-preview-head");
+  await expect(imageHeader.getByRole("link", { name: "下载原文件" })).toBeVisible();
+  await expect(imageHeader.locator(".artifact-preview-toolbar")).toHaveCount(0);
+  expect((await imageHeader.boundingBox())!.height).toBeLessThan(80);
+  expect(await imageHeader.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+  await imageHeader.getByRole("button", { name: `文件信息：${entries[1].name}`, exact: true }).click();
+  await expect(panel.getByRole("dialog", { name: "文件信息", exact: true })).toContainText(entries[1].path);
+  await panel.locator(".artifact-image-stage img").click();
+  await expect(panel.getByRole("dialog", { name: "文件信息", exact: true })).toHaveCount(0);
+  await imageHeader.screenshot({ animations: "disabled", path: info.outputPath("image-preview-header.png") });
+  await panel.getByRole("button", { name: "返回 Artifacts", exact: true }).click();
   await page.setViewportSize({ width: 390, height: 844 });
   const button = panel.getByRole("button", { name: "查看更早的文件", exact: true });
   await expect(button).toBeVisible();

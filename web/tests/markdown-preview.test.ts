@@ -1702,7 +1702,7 @@ $$`,
   }));
   assert.match(audioMarkup, /<audio[^>]*controls/);
   assert.doesNotMatch(audioMarkup, /auto[Pp]lay/);
-  assert.match(audioMarkup, /刷新文件/);
+  assert.match(audioMarkup, /aria-label="文件信息：sample\.wav"/);
   audioState = reduce(audioState, {
     type: "open_file_loading", file: "next.wav", sid: "audio-session",
     requestId: "audio-2", kind: "file",
@@ -1753,7 +1753,13 @@ $$`,
   assert.match(artifactPanelSource, /sandbox="allow-scripts"/);
   assert.doesNotMatch(artifactPanelSource, /allow-same-origin/);
   assert.match(artifactPanelSource, /iframe,object,embed,form,base,link,meta\[http-equiv\],script\[src\]/);
-  assert.match(artifactPanelSource, /\["md", "html"\]\.includes\(artifact\.kind\)/);
+  const htmlLoadingMarkup = renderToStaticMarkup(createElement(ArtifactPanel, {
+    artifact: { file: "preview.html", kind: "file", loading: true },
+    active: "diff", hasBtw: false, onTab: () => {}, onClose: () => {},
+  }));
+  assert.match(htmlLoadingMarkup, /aria-label="HTML 显示模式"/);
+  assert.match(htmlLoadingMarkup, /disabled="">预览<\/button>/);
+  assert.match(htmlLoadingMarkup, /disabled="">源码<\/button>/);
   assert.match(artifactPanelSource, /artifact\.kind === "html" && mode === "preview"/);
   assert.match(artifactPanelSource, /mode === "source"[\s\S]*?<SourceFile content=\{artifact\.content/);
 } finally {
