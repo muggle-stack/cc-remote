@@ -22,6 +22,29 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
 
+def observe_marker(row, engine, event):
+    """Only a standalone marker in a final answer is acceptance evidence."""
+    if event['type'] not in {'assistant_msg_start', 'delta', 'assistant_msg_end'}:
+        return
+    identity = event.get('message_id')
+    if not identity:
+        return
+    messages = row.setdefault('answer_messages', {})
+    item = messages.setdefault(identity, {'text': '', 'channel': 'unknown'})
+    if event.get('channel') not in {None, 'unknown'}:
+        item['channel'] = event['channel']
+    if event['type'] == 'delta':
+        item['text'] = (('' if event.get('replace') else item['text']) + event.get('text', ''))[-8192:]
+    while len(messages) > 64:
+        del messages[next(iter(messages))]
+    final = [item['text'] for item in messages.values() if item['channel'] == 'final']
+    row['answer'] = '\n'.join(final)[-8192:]
+    lines = {line.strip() for text in final for line in text.splitlines()}
+    row['marker'] = 'CCR_UPDATE_' + engine.upper() + '_OK' in lines
+    if engine == 'claude-queue':
+        row['marker'] = row['marker'] and 'CCR_UPDATE_QUEUED_OK' in lines and bool(row.get('queue_observed'))
+
+
 async def run(config, evidence):
     evidence.mkdir(mode=0o700, parents=True, exist_ok=True)
     report_path = evidence / 'native-sessions.json'
@@ -62,24 +85,29 @@ async def run(config, evidence):
                     async def send(value):
                         await ws.send(json.dumps({'v': config['protocol'], 'client_id': client, **value}))
                     await send({'type': 'hello', 'role': 'client', 'cursors': cursors, 'generations': generations})
-                    for engine, row in report['sessions'].items():
-                        if row['sent']:
-                            continue
-                        command = shlex.join(['python3', config['cwd'] + '/native_probe.py', engine])
-                        prompt = ('This is an authorized isolated update-continuity acceptance. Run exactly one foreground shell command: '
-                                  + command + '. Allow up to 300 seconds for this command. Do not start a background task or any subagent. '
-                                  'Do not inspect or edit other files. After the command finishes, reply only CCR_UPDATE_' + engine.upper() + '_OK.')
-                        if engine == 'claude-question':
-                            prompt = ('This is an authorized question-recovery acceptance. Use AskUserQuestion to ask exactly one question: '
-                                      'Continue the update acceptance? Offer Continue and Stop. Wait for the answer. Do not run commands '
-                                      'or spawn agents. After Continue, reply only CCR_UPDATE_CLAUDE-QUESTION_OK.')
-                        row['sent'] = True
-                        save()  # A disconnect after this point is an unknown create, never permission to resend.
-                        await send({'type': 'new_session', 'request_id': row['request_id'], 'cmd_id': row['request_id'],
-                                    'msg_id': row['msg_id'], 'cwd': config['cwd'], 'engine': engine.split('-')[0],
-                                    'prompt': prompt, **config.get('options', {}).get(engine.split('-')[0], {})})
+                    async def submit_ready_sessions():
+                        for engine, row in report['sessions'].items():
+                            question = report['sessions'].get('claude-question')
+                            if engine != 'claude-question' and question and not question.get('ask'):
+                                continue
+                            if row['sent']:
+                                continue
+                            command = shlex.join(['python3', config['cwd'] + '/native_probe.py', engine])
+                            prompt = ('This is an authorized isolated update-continuity acceptance. Run exactly one foreground shell command: '
+                                      + command + '. Allow up to 300 seconds for this command. Do not start a background task or any subagent. '
+                                      'Do not inspect or edit other files. After the command finishes, reply only CCR_UPDATE_' + engine.upper() + '_OK.')
+                            if engine == 'claude-question':
+                                prompt = ('This is an authorized question-recovery acceptance. Use AskUserQuestion to ask exactly one question: '
+                                          'Continue the update acceptance? Offer Continue and Stop. Wait for the answer. Do not run commands '
+                                          'or spawn agents. After Continue, reply only CCR_UPDATE_CLAUDE-QUESTION_OK.')
+                            row['sent'] = True
+                            save()  # A disconnect after this point is an unknown create, never permission to resend.
+                            await send({'type': 'new_session', 'request_id': row['request_id'], 'cmd_id': row['request_id'],
+                                        'msg_id': row['msg_id'], 'cwd': config['cwd'], 'engine': engine.split('-')[0],
+                                        'prompt': prompt, **config.get('options', {}).get(engine.split('-')[0], {})})
                     last_history = 0.0
                     while time.monotonic() < deadline:
+                        await submit_ready_sessions()
                         if time.monotonic() - last_history > 10:
                             for row in report['sessions'].values():
                                 if row['sid'] and not row['sid'].startswith('tmp-'):
@@ -140,15 +168,7 @@ async def run(config, evidence):
                                     raise RuntimeError(engine + ' ended with an error')
                             if event['type'] == 'user_msg':
                                 row['terminal'] = False
-                            if event['type'] in {'delta', 'history'} and 'CCR_UPDATE_' + engine.upper() + '_OK' in json.dumps(event):
-                                # History can contain the original prompt, so only live answer deltas establish this marker.
-                                if event['type'] == 'delta':
-                                    row['marker'] = True
-                            if event['type'] == 'delta':
-                                row['answer'] = (row.get('answer', '') + event.get('text', ''))[-8192:]
-                                row['marker'] = 'CCR_UPDATE_' + engine.upper() + '_OK' in row['answer']
-                                if engine == 'claude-queue':
-                                    row['marker'] = row['marker'] and 'CCR_UPDATE_QUEUED_OK' in row['answer'] and bool(row.get('queue_observed'))
+                            observe_marker(row, engine, event)
                         save()
                         if all(row['terminal'] and row['marker'] for row in report['sessions'].values()):
                             report['pass'] = True

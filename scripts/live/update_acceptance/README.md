@@ -91,14 +91,18 @@ The driver creates one temporary session per selected engine and submits each
 prompt only once. Wait for all heartbeat files before activating a staged release
 with the normal deployment procedure. Capture independent native service/process
 identities before and after. Release each command by creating `finish-ENGINE` in
-the probe directory. Check continuous heartbeat PIDs, exact success markers and
-native terminal results. Archive only these temporary sessions afterward.
+the probe directory. Check continuous heartbeat PIDs, each local `ENGINE-result.json`
+receipt's `success:true`, standalone success markers in final answers, and native
+terminal results. Reasoning, quoted tokens and a model turn's successful completion
+do not establish a successful command. Archive only these temporary sessions afterward.
 
 Optional `claude-queue` adds a real deferred query; release that probe only after
 the installer reports waiting for it, then verify the queued query runs before
 activation proceeds. Optional `claude-question` holds a native question across
 the restart. Create `answer-claude-question` in the Relay evidence directory only
 after reconnect, then verify that the same question is answered and completed.
+The driver waits for this question before starting timed command probes, so a
+slow initial model response does not consume their continuity window.
 
 Container fault tests prove updater recovery. Native probes prove real model
 continuity. Report their evidence separately; passing one is not proof of the

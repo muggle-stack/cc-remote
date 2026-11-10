@@ -15,13 +15,22 @@ if __name__ == '__main__':
     folder = Path(__file__).resolve().parent
     # Exclusive creation detects an accidentally duplicated model command.
     with (folder / (args.engine + '-heartbeat.jsonl')).open('x') as output:
-        deadline = time.monotonic() + min(max(args.seconds, 1), 600)
-        while time.monotonic() < deadline:
-            output.write(json.dumps({'at': time.time(), 'pid': os.getpid(), 'ppid': os.getppid()}) + '\n')
-            output.flush()
-            if (folder / ('finish-' + args.engine)).exists():
-                print('CCR_UPDATE_' + args.engine.upper() + '_OK', flush=True)
-                break
-            time.sleep(1)
-        else:
-            raise TimeoutError('acceptance controller did not release the probe')
+        result = {'engine': args.engine, 'pid': os.getpid(), 'started': time.time(), 'success': False}
+        try:
+            deadline = time.monotonic() + min(max(args.seconds, 1), 600)
+            while time.monotonic() < deadline:
+                output.write(json.dumps({'at': time.time(), 'pid': os.getpid(), 'ppid': os.getppid()}) + '\n')
+                output.flush()
+                if (folder / ('finish-' + args.engine)).exists():
+                    result['success'] = True
+                    print('CCR_UPDATE_' + args.engine.upper() + '_OK', flush=True)
+                    break
+                time.sleep(1)
+            else:
+                raise TimeoutError('acceptance controller did not release the probe')
+        finally:
+            # Verify actual command outcome independently of anything the model
+            # says about it. A quoted success token cannot conceal a timeout.
+            result['finished'] = time.time()
+            with (folder / (args.engine + '-result.json')).open('x') as receipt:
+                json.dump(result, receipt)
