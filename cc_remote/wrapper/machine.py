@@ -16570,7 +16570,7 @@ class WrapperMachine:
                 # just-finished previous row is exactly the steered turn being
                 # reconciled. Hydrate both once; later mirrors reuse the
                 # generation-local bounded cache.
-                hydrate_recent=2 if before is None else 0,
+                hydrate_recent=min(2, limit or 4) if before is None else 0,
                 source=source_before,
                 **alias_kwargs,
             )

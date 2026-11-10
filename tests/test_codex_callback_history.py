@@ -8,6 +8,9 @@ from cc_remote.wrapper.codex_client_messages import CodexClientMessageAliases
 from cc_remote.wrapper.codex_stream import codex_translate_history
 from cc_remote.wrapper.machine import WrapperMachine
 from cc_remote.wrapper.history_store import materialize_history_turns
+from cc_remote.wrapper.codex_history import CodexOfficialHistory
+from tests.test_codex_history import _agent, _turn, _user
+from tests.test_multisession import _mk_machine, _mk_ctx
 
 
 @pytest.mark.parametrize("completed", [False, True])
@@ -44,3 +47,27 @@ def test_old_callback_cache_drops_only_synthetic_user_alias(turns):
     assert not result[0].get(client)
     assert result[1][client] == "browser"
     assert rows[0][client] == "browser", "repair must not mutate cached input rows"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [1, 2, 4])
+async def test_small_requested_page_respects_official_hydration_bounds(tmp_path, monkeypatch, limit):
+    from cc_remote.wrapper import machine as machine_module
+    rollout = tmp_path / "small-page.jsonl"
+    rollout.write_text('{"type":"session_meta","payload":{"id":"small-page"}}\n')
+    monkeypatch.setattr(machine_module, "codex_rollout_path", lambda _: str(rollout))
+
+    async def rpc(_method, params, cwd=None):
+        assert 1 <= params["limit"] <= limit
+        return {"data": [_turn("native", [_user("human", "question"), _agent("answer", "reply")],
+                               items_view=params["itemsView"])], "nextCursor": None}
+
+    machine, _ = _mk_machine()
+    machine._codex_history = CodexOfficialHistory(4096, rpc=rpc)
+    ctx = _mk_ctx("small-page", "small-page")
+    ctx.engine = "codex"
+    machine.sessions[ctx.key] = ctx
+    history = await machine._build_requested_history(
+        ctx.key, before=None, limit=limit, cwd=ctx.cwd, detail="summary")
+    assert history.authoritative and history.error is None
+    assert len(history.turns) == 1 and history.turns[0].prompt == "question"
