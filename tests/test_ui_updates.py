@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -246,6 +247,239 @@ async def test_reservation_checks_activity_before_blocking_new_work(managed, mon
     finally:
         machine._command_scheduler._pending.clear()
         await machine._command_scheduler.close()
+
+
+def independent_session(machine, engine):
+    """Real adapters with only their native transport/liveness stubbed."""
+    ctx = _mk_ctx("session", "session")
+    ctx.engine, ctx.state, ctx.active_msg_id = engine, "running", "message"
+    if engine == "claude":
+        from claude_agent_sdk import ClaudeAgentOptions
+        from cc_remote.claude_service.client import RemoteClient
+        from cc_remote.wrapper.sdk import SdkHandle
+
+        ctx.sdk = SdkHandle(machine.cfg)
+        client = ctx.sdk.client = RemoteClient("/tmp/fixture-service.sock", options=ClaudeAgentOptions(), metadata={})
+        client.id = "worker"
+        client.connection.task = asyncio.Future()
+        ctx.sdk.service_metadata = {"service_id": client.id}
+        ctx.sdk.service_turn_metadata = {"id": "message"}
+        ctx.sdk._turn_active, ctx.sdk._turn_root_id = True, "message"
+        ctx.turn_task = asyncio.Future()
+    elif engine == "codex":
+        from cc_remote.wrapper.codex_handle import CodexHandle
+
+        manager = SimpleNamespace(current_process_identity=lambda: "daemon-generation")
+        ctx.sdk = CodexHandle(machine.cfg, daemon_manager=manager)
+        ctx.sdk.proc = SimpleNamespace(returncode=None)
+        ctx.sdk._using_daemon_proxy, ctx.sdk._dead = True, False
+        ctx.sdk._daemon_process_identity = "daemon-generation"
+        ctx.sdk.thread_id, ctx.sdk.turn_id, ctx.sdk.turn_active = "session", "turn", True
+        machine._codex_turn_leases.claim("session", "turn", "message")
+        ctx.codex_owned_turn_id, ctx.codex_owned_msg_id = "turn", "message"
+        ctx.turn_task = asyncio.Future()
+    else:
+        from cc_remote.wrapper.dsh_client import DshClient, DshConnection
+        from cc_remote.wrapper.dsh_runtime import DshHandle
+
+        ctx.key, ctx.session_id = "dsh@session", "session"
+        ctx.sdk = DshHandle("session", connected=True)
+        machine._dsh.client = DshClient(DshConnection("http://127.0.0.1:8000", "a" * 43))
+        machine._dsh.client._peer = SimpleNamespace(reader=asyncio.Future())
+        machine._dsh.events_ready.set()
+    machine.sessions[ctx.key] = ctx
+    return ctx
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["claude", "codex", "dsh"])
+async def test_update_admits_independent_running_turn_and_still_blocks_new_commands(managed, engine):
+    from cc_remote.protocol import Query, GetHistory, AnswerQuestion
+
+    root, _, store = managed
+    machine, _ = _mk_machine()
+    ctx = independent_session(machine, engine)
+    updates = machine._ui_updates = UIUpdates(machine, root)
+    state, _ = store.create(IDENTITY, "4.0.1", "4.0.0")
+    store.save({**state, "phase": "waiting"})
+    assert updates.busy_count() == 0
+    assert updates.reserve(IDENTITY) == {"status": "ready"}
+    assert ctx.state == "running" and ctx.active_msg_id == "message"
+    assert (await machine._handle(Query(sid=ctx.key, prompt="next", msg_id="new"))).code == "update_in_progress"
+    assert await updates.reject(GetHistory(session_id=ctx.key)) is None
+    assert await updates.reject(AnswerQuestion(ask_id="ask", answer="yes", sid=ctx.key)) is None
+    await machine._command_scheduler.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["claude", "codex", "dsh"])
+@pytest.mark.parametrize("blocker", ["queue", "launch", "steer", "attachments", "compact", "btw"])
+async def test_independent_owner_never_bypasses_wrapper_local_work(engine, blocker):
+    machine, _ = _mk_machine()
+    ctx = independent_session(machine, engine)
+    if blocker == "queue":
+        ctx.queued_queries.append(object())
+    elif blocker in {"launch", "steer"}:
+        await getattr(ctx, blocker + "_lock").acquire()
+    elif blocker == "attachments":
+        ctx.transient_turn_attachment_dir = "/tmp/still-needed"
+    elif blocker == "compact":
+        ctx.auto_compact_apply_task = asyncio.Future()
+    else:
+        ctx.btw = True
+    assert machine._ui_updates.busy_count() == 1
+    await machine._command_scheduler.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["private", "dead", "generation", "missing-lease", "lease-turn", "lease-message",
+                                  "preflight", "reconcile", "steer-files", "question", "tool-callback", "work"])
+async def test_codex_update_requires_live_shared_owner_and_exact_recovery_lease(fault):
+    machine, _ = _mk_machine()
+    ctx = independent_session(machine, "codex")
+    if fault == "private":
+        ctx.sdk._using_daemon_proxy = False
+    elif fault == "dead":
+        ctx.sdk.proc.returncode = 0
+    elif fault == "generation":
+        ctx.sdk._daemon_process_identity = "old-generation"
+    elif fault == "missing-lease":
+        machine._codex_turn_leases.path.unlink()
+    elif fault == "lease-turn":
+        ctx.sdk.turn_id = "different-turn"
+    elif fault == "lease-message":
+        ctx.active_msg_id = "unpersisted-steer"
+    elif fault == "preflight":
+        ctx.sdk.turn_start_pending = True
+    elif fault == "reconcile":
+        ctx.codex_turn_start_reconciling = True
+    elif fault == "steer-files":
+        ctx.codex_steer_attachment_dirs.append("/tmp/still-needed")
+    elif fault == "question":
+        ctx.pending_asks["ask"] = object()
+    elif fault == "tool-callback":
+        ctx.sdk._server_request_tasks.add(asyncio.Future())
+    elif fault == "work":
+        ctx.space = "work"
+    assert machine._ui_updates.busy_count() == 1
+    await machine._command_scheduler.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["local-sdk", "unbound-worker", "lost-connection", "preflight", "control"])
+async def test_claude_update_requires_attached_service_and_submitted_prompt(fault):
+    machine, _ = _mk_machine()
+    ctx = independent_session(machine, "claude")
+    if fault == "local-sdk":
+        ctx.sdk.client = object()
+    elif fault == "unbound-worker":
+        ctx.sdk.service_metadata = {"service_id": "old-worker"}
+    elif fault == "lost-connection":
+        ctx.sdk.client.connection.task.cancel()
+    elif fault == "preflight":
+        ctx.sdk.service_turn_metadata = {"id": "not-submitted-yet"}
+    elif fault == "control":
+        await ctx.sdk._control_request_lock.acquire()
+    assert machine._ui_updates.busy_count() == 1
+    await machine._command_scheduler.close()
+
+
+@pytest.mark.asyncio
+async def test_independent_background_jobs_do_not_hold_updates_but_local_jobs_do():
+    from cc_remote.protocol import BackgroundProcessItem, DshJob
+
+    machine, _ = _mk_machine()
+    ctx = independent_session(machine, "claude")
+    ctx.state, ctx.turn_task = "idle", None
+    ctx.claude_active_tasks.add("native-agent")
+    ctx.pending_asks["recoverable-service-question"] = object()
+    assert machine._ui_updates.busy_count() == 0
+    machine.sessions.clear()
+    ctx = independent_session(machine, "codex")
+    ctx.state, ctx.turn_task, ctx.sdk.turn_active = "idle", None, False
+    ctx.codex_background_processes = {"native-agent": BackgroundProcessItem(
+        item_id="native-agent", kind="agent", title="Agent", status="running")}
+    assert machine._ui_updates.busy_count() == 0
+    machine.sessions.clear()
+    ctx = independent_session(machine, "dsh")
+    ctx.state = "idle"
+    ctx.sdk.children = [{"id": "child", "activity": "running"}]
+    machine._dsh.jobs["session"] = [DshJob(id="job", label="Job", status="running")]
+    assert machine._ui_updates.busy_count() == 0
+    machine._dsh.questions["ask"] = asyncio.Future()
+    assert machine._ui_updates.busy_count() == 1
+    machine._dsh.questions.clear()
+    machine._dsh.events_ready.clear()
+    assert machine._ui_updates.busy_count() == 2
+    await machine._command_scheduler.close()
+
+
+@pytest.mark.asyncio
+async def test_admitted_update_keeps_service_question_and_offline_result_without_resubmission(managed):
+    from claude_agent_sdk import PermissionResultAllow, ToolPermissionContext
+    from cc_remote.wrapper.sdk import SdkHandle
+    from tests.test_claude_service import environment, released
+
+    root, _, store = managed
+    machine, _ = _mk_machine()
+    updates = machine._ui_updates = UIUpdates(machine, root)
+    state, _ = store.create(IDENTITY, "4.0.1", "4.0.0")
+    store.save({**state, "phase": "waiting"})
+    asked = asyncio.Event()
+
+    async def pending_permission(*args):
+        asked.set()
+        await asyncio.Future()
+
+    async def allow(*args):
+        return PermissionResultAllow()
+
+    async with environment() as (service, attach):
+        first = await attach(permission=pending_permission)
+        first.next_turn = {"id": "message", "prompt": "hello"}
+        await first.query("hello")
+        ctx = _mk_ctx("session", "native-session")
+        machine.sessions[ctx.key] = ctx
+        ctx.state, ctx.active_msg_id = "running", "message"
+        ctx.sdk = SdkHandle(machine.cfg)
+        ctx.sdk.client = first
+        ctx.sdk.service_metadata = {"service_id": first.id}
+        ctx.pending_asks["question"] = object()
+        worker = service.sessions[first.id]
+        permission = asyncio.create_task(worker.client.options.can_use_tool(
+            "Bash", {"command": "true"}, ToolPermissionContext(tool_use_id="tool")))
+        await asyncio.wait_for(asked.wait(), 2)
+        assert updates.reserve(IDENTITY) == {"status": "ready"}
+        await ctx.sdk.detach_for_shutdown()
+        await released(worker)
+        assert not worker.client.closed and worker.client.interrupts == 0
+        assert not permission.done()
+        await worker.client.queue.put({"type": "assistant", "message": {"content": "completed offline"}})
+        await worker.client.queue.put({"type": "result", "subtype": "success"})
+        restored = await attach(permission=allow)
+        assert isinstance(await asyncio.wait_for(permission, 2), PermissionResultAllow)
+        assert restored.id == first.id and restored.recovery["id"] == "message"
+        replay = restored.receive_messages()
+        assert (await anext(replay))["message"]["content"] == "completed offline"
+        assert (await anext(replay))["subtype"] == "success"
+        assert worker.client.prompts == ["hello"]
+    await machine._command_scheduler.close()
+
+
+@pytest.mark.asyncio
+async def test_native_completion_cannot_start_wrapper_compaction_after_update_reserved(managed, monkeypatch):
+    root, _, store = managed
+    machine, _ = _mk_machine()
+    ctx = independent_session(machine, "claude")
+    updates = machine._ui_updates = UIUpdates(machine, root)
+    state, _ = store.create(IDENTITY, "4.0.1", "4.0.0")
+    store.save({**state, "phase": "waiting"})
+    assert updates.reserve(IDENTITY) == {"status": "ready"}
+    ctx.state, ctx.turn_task = "idle", None
+    monkeypatch.setattr(machine, "_claude_auto_compact_event", lambda _: SimpleNamespace(pending=True))
+    machine._schedule_pending_claude_auto_compact(ctx)
+    assert ctx.auto_compact_apply_task is None
+    await machine._command_scheduler.close()
 
 
 @pytest.mark.asyncio

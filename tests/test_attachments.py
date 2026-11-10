@@ -148,12 +148,14 @@ def test_turn_temp_directory_is_removed_when_query_fails():
             assert match is not None
             self.path = match.group(1)
             assert os.path.isfile(self.path)
+            assert self.ctx.transient_turn_attachment_dir == os.path.dirname(self.path)
             raise RuntimeError("synthetic failure")
 
     async def run():
         machine, _ = _mk_machine()
         ctx = _mk_ctx("sid-1", "sid-1")
         sdk = FailingSdk()
+        sdk.ctx = ctx
         ctx.sdk = sdk
         ctx.state = "running"
 
@@ -164,6 +166,7 @@ def test_turn_temp_directory_is_removed_when_query_fails():
         assert ctx.state == "idle"
         assert sdk.path is not None
         assert not os.path.exists(os.path.dirname(sdk.path))
+        assert ctx.transient_turn_attachment_dir is None
 
     asyncio.run(run())
 

@@ -7832,6 +7832,7 @@ class WrapperMachine:
         if existing is not None and not existing.done():
             return
         if (ctx.engine != "claude" or ctx.state != "idle"
+                or self._ui_updates.guarded()
                 or getattr(ctx.sdk, "is_claude_broker", False)
                 or self._claude_has_background_work(ctx)
                 or ctx.auto_compact_phase == "blocked"
@@ -7844,6 +7845,7 @@ class WrapperMachine:
             await asyncio.sleep(0)
             async with ctx.query_lock:
                 if (not self._is_resident_context(ctx)
+                        or self._ui_updates.guarded()
                         or ctx.state != "idle"
                         or self._claude_has_background_work(ctx)):
                     return
@@ -40354,6 +40356,7 @@ class WrapperMachine:
                         if files or stage_images:
                             temp_dir = tempfile.mkdtemp(prefix="cc-remote-turn-")
                             os.chmod(temp_dir, 0o700)
+                            ctx.transient_turn_attachment_dir = temp_dir
                         if files:
                             prompt = self._stash_files(
                                 prompt, files, temp_dir, ctx.engine)
@@ -41419,6 +41422,8 @@ class WrapperMachine:
                     pass
                 except Exception as e:
                     log.warning("turn attachment cleanup failed", error=str(e))
+                finally:
+                    ctx.transient_turn_attachment_dir = None
             if reader_task is not None and not reader_task.done():
                 reader_task.cancel()
                 try:

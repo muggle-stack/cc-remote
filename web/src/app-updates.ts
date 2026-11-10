@@ -17,7 +17,7 @@ const PHASES = new Set<UpdatePhase>(["submitting", "preparing", "downloading", "
   "updating_relay", "installing", "verifying", "unknown", ...UPDATE_TERMINAL]);
 export const UPDATE_LABELS: Record<UpdatePhase, string> = {
   submitting: "正在启动更新", preparing: "准备更新", downloading: "下载更新包", validating: "校验更新包",
-  waiting: "等待任务结束", updating_relay: "检查并更新服务器", installing: "安装设备更新",
+  waiting: "等待安全更新", updating_relay: "检查并更新服务器", installing: "安装设备更新",
   verifying: "验证更新结果", unknown: "更新结果待确认", succeeded: "更新完成", failed: "更新未完成",
   blocked: "更新需要处理", cancelled: "更新已取消",
 };
@@ -130,10 +130,11 @@ export class AppUpdateClient {
 export function appUpdateFeedback(state: AppUpdateState | null, now = Date.now()) {
   const job = state?.job;
   if (job && (!UPDATE_TERMINAL.has(job.phase) || (job.updated_at && now / 1000 - job.updated_at < 300))) {
-    return { id: `maintenance:${job.id}:${job.phase}`, label: ({ waiting: "等待空闲", unknown: "待确认", succeeded: "已更新", failed: "更新失败", blocked: "需处理", cancelled: "已取消" } as Partial<Record<UpdatePhase, string>>)[job.phase] ?? "正在更新",
+    return { id: `maintenance:${job.id}:${job.phase}`, label: ({ waiting: "等待更新", unknown: "待确认", succeeded: "已更新", failed: "更新失败", blocked: "需处理", cancelled: "已取消" } as Partial<Record<UpdatePhase, string>>)[job.phase] ?? "正在更新",
       tone: (job.phase === "succeeded" ? "success" : ["failed", "blocked", "unknown"].includes(job.phase)
         ? "warning" : "info") as "success" | "warning" | "info",
-      message: updateReason(job.reason) || (job.phase === "succeeded" ? `设备已更新至 v${job.version}。`
+      message: updateReason(job.reason) || (job.phase === "waiting" ? "等待会受更新影响的操作结束，可独立运行的任务不受影响。"
+        : job.phase === "succeeded" ? `设备已更新至 v${job.version}。`
         : `目标版本 v${job.version}，可以打开更新窗口查看进度。`) };
   }
   if (newerVersion(state?.latest?.version, state?.current)) return {

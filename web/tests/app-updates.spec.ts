@@ -33,18 +33,18 @@ test("application updates preserve drafts, reattach to one job and fit mobile", 
   expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
   expect(await sheet.locator(".app-update-body").evaluate(node => parseFloat(getComputedStyle(node).paddingLeft))).toBeGreaterThanOrEqual(16);
   await expect(sheet.getByRole("button", { name: "收起更新窗口" })).toBeVisible();
-  const install = sheet.getByRole("button", { name: "任务结束后更新", exact: true });
+  const install = sheet.getByRole("button", { name: "就绪后更新", exact: true });
   expect(await install.evaluate(node => parseFloat(getComputedStyle(node).borderRadius))).toBeGreaterThan(20);
   await page.screenshot({ path: info.outputPath("update-sheet.png"), animations: "disabled" });
   await install.click();
-  await expect(sheet.getByText("等待任务结束", { exact: true }).first()).toBeVisible();
+  await expect(sheet.getByText("等待安全更新", { exact: true }).first()).toBeVisible();
   await sheet.getByRole("button", { name: "收起，后台继续", exact: true }).click();
   await expect(page.getByRole("textbox", { name: "输入消息" })).toHaveValue("这段草稿必须保留");
   await open(page);
-  await expect(sheet.getByText("等待任务结束", { exact: true }).first()).toBeVisible();
+  await expect(sheet.getByText("等待安全更新", { exact: true }).first()).toBeVisible();
   expect(starts).toHaveLength(1);
   await sheet.getByRole("button", { name: "取消更新", exact: true }).click();
-  await expect(sheet.getByRole("button", { name: "任务结束后更新", exact: true })).toBeEnabled();
+  await expect(sheet.getByRole("button", { name: "就绪后更新", exact: true })).toBeEnabled();
 });
 
 test("application update retry after lost response reuses durable identity across reload", async ({ page }) => {
@@ -58,7 +58,7 @@ test("application update retry after lost response reuses durable identity acros
     } else await route.fulfill({ json: base });
   });
   await page.goto(url); await open(page);
-  await page.getByRole("button", { name: "任务结束后更新", exact: true }).click();
+  await page.getByRole("button", { name: "就绪后更新", exact: true }).click();
   await expect(page.getByRole("button", { name: "确认原更新", exact: true })).toBeEnabled();
   await page.reload(); await open(page);
   await page.getByRole("button", { name: "确认原更新", exact: true }).click();
@@ -129,7 +129,7 @@ test("application update long notes fit a small viewport with footer visible", a
     ...base, latest: { ...base.latest, notes: "一段完整的更新记录，包含功能和修复。\n".repeat(120) },
   } }));
   await page.goto(url); await open(page);
-  const install = page.getByRole("button", { name: "任务结束后更新", exact: true });
+  const install = page.getByRole("button", { name: "就绪后更新", exact: true });
   await expect(install).toBeInViewport();
   const box = await install.boundingBox();
   expect(box!.y + box!.height).toBeLessThan(568);
@@ -165,7 +165,7 @@ test("login during installation defers recovery without an error banner and resu
   await open(page);
   const sheet = page.getByRole("dialog", { name: "检查更新", exact: true });
   await expect(sheet.getByText("正在确认更新进度", { exact: true })).toBeVisible();
-  await expect(sheet.getByRole("button", { name: /更新到|任务结束后更新|刷新页面/ })).toHaveCount(0);
+  await expect(sheet.getByRole("button", { name: /更新到|就绪后更新|刷新页面/ })).toHaveCount(0);
   await sheet.getByRole("button", { name: "收起更新窗口", exact: true }).click();
   releaseFirst();
   await expect(page.getByRole("status").first()).toHaveText("正在更新");
