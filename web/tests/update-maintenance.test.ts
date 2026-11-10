@@ -102,5 +102,38 @@ for (const engine of ["claude", "codex"] as const) {
     assert.equal(frames.at(-1).session_id, "visible-code", "restore the user's visible focus last");
   } finally { relay.stop(); }
 }
+
+// A replacement Wrapper may have no resident context when an in-flight live
+// diff is replayed. Its handler rejects a cold read and ACKs that failure, so
+// restoring focus after the read is too late to recover the open diff panel.
+for (const trigger of ["maintenance", "reconnect"]) {
+  for (const engine of ["claude", "codex"] as const) {
+    for (const space of ["code", "work"] as const) {
+      const relay = new RelayWs({ onEvent: () => {}, onConnState: () => {} });
+      relay.setFocusedSid("visible-session", engine, space);
+      relay.start();
+      const socket = Socket.instances.at(-1)!; socket.onopen?.();
+      try {
+        if (trigger === "maintenance") relay.setMaintenance(true);
+        const requestId = relay.sendGetDiff("README.md", "dark");
+        const original = socket.sent.map(raw => JSON.parse(raw)).find(frame => frame.cmd_id === requestId);
+        assert.ok(original);
+        relay.sendGetContextTo("background-work");
+        const before = socket.sent.length;
+        if (trigger === "maintenance") relay.setMaintenance(false);
+        else socket.receive({ type: "wrapper_reconnected", state: "idle", generation: "cold-wrapper" });
+        const replay = socket.sent.slice(before).map(raw => JSON.parse(raw));
+        const readIndex = replay.findIndex(frame => frame.cmd_id === requestId);
+        assert.ok(readIndex > 0);
+        assert.deepEqual(replay[readIndex], original, "replay the exact request the diff panel is waiting for");
+        assert.equal(replay[readIndex - 1].type, "switch_session", "restore the context before the live diff read");
+        assert.equal(replay[readIndex - 1].session_id, "visible-session");
+        assert.equal(replay[readIndex - 1].engine, engine);
+        assert.equal(replay[readIndex - 1].space, space);
+        assert.equal(replay.some(frame => frame.type === "switch_session" && frame.session_id === "background-work"), false);
+      } finally { relay.stop(); }
+    }
+  }
+}
 } finally { await harness.close(); }
 console.log("maintenance: reconnect, history reads, current-session recovery and ordinary errors passed");

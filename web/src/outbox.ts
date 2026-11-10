@@ -17,6 +17,13 @@ export type RecoveryReplayStep =
   | { type: "switch"; sid: string }
   | { type: "command"; raw: string };
 
+// These handlers require a resident session. Only the visible session may be
+// prepared for a read; background reads never authorize a focus/resume.
+const FOCUSED_RESIDENT_READS = new Set([
+  "get_context", "get_status", "get_goal", "get_queued_query",
+  "get_file_preview", "get_preview_asset", "browse_files",
+]);
+
 export interface QueryAcceptanceEvent {
   type: "user_msg" | "turn_steered" | "turn_binding" | "error";
   sid?: string | null;
@@ -390,22 +397,25 @@ export class CommandOutbox {
     return [...this.pending.values()].map((item) => item.raw);
   }
 
-  /** Insertion-ordered frames plus targets needing preparation for mutations.
-   * Read-only requests keep their own target in raw without a recovery switch. */
-  pendingFramesWithSessionIds(): Array<{ raw: string; sid?: string }> {
+  /** Interleave preparation for mutations and focused resident-only reads.
+   * Background and independent history reads keep only their raw target. */
+  pendingFramesWithSessionIds(focusedSid: string | null = null): Array<{ raw: string; sid?: string }> {
     return [...this.pending.values()].map((item) => {
       try {
         const frame = JSON.parse(item.raw) as {
-          type?: unknown; sid?: unknown;
+          type?: unknown; sid?: unknown; turn_id?: unknown; cwd?: unknown;
         };
-        // Reads own their lookup/fallback behavior. Replaying a background read
-        // must never focus or resume that session (its engine/space catalog may
-        // not even have been loaded on this page).
         const read = typeof frame.type === "string"
           && /^(get_|list_|read_|browse_)/.test(frame.type);
+        const focusedRead = read && frame.sid === focusedSid && (
+          FOCUSED_RESIDENT_READS.has(frame.type as string)
+          // Any turn_id selects the historical handler, even if incomplete.
+          || (frame.type === "get_diff" && !frame.turn_id)
+          || (frame.type === "get_permission_profiles" && frame.cwd == null)
+        );
         return {
           raw: item.raw,
-          ...(!read && typeof frame.sid === "string" && frame.sid ? { sid: frame.sid } : {}),
+          ...((!read || focusedRead) && typeof frame.sid === "string" && frame.sid ? { sid: frame.sid } : {}),
         };
       } catch {
         return { raw: item.raw }; // enqueue always generated valid JSON

@@ -1810,7 +1810,7 @@ export class RelayWs {
     // cap and evict early targets before their command arrives.
     this.sendHello(false);
     const plan = planRecoveryReplay(
-      this.outbox.pendingFramesWithSessionIds(), restoreFocus ? this.focusedSid : null);
+      this.outbox.pendingFramesWithSessionIds(this.focusedSid), restoreFocus ? this.focusedSid : null);
     for (const step of plan) {
       if (step.type === "switch") this.sendRecoverySwitch(step.sid);
       else this.sendRaw(step.raw);
