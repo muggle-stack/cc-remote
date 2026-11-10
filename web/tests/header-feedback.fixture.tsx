@@ -28,6 +28,9 @@ export function HeaderFeedbackFixture() {
   const [syncing, setSyncing] = useState(false);
   const [device, setDevice] = useState("test-device");
   const [running, setRunning] = useState(false);
+  const [versionBlocked, setVersionBlocked] = useState(false);
+  const [engineError, setEngineError] = useState<string | null>(null);
+  const [reloadCount, setReloadCount] = useState(0);
   const runtime = state.runtimes[sid];
   const notice = (id: string, warning = false, detail?: string) => dispatch({ type: "event", event: {
     v: PROTOCOL_VERSION, type: "notice", ts: 1, sid, notice_id: id,
@@ -61,6 +64,12 @@ export function HeaderFeedbackFixture() {
       v: PROTOCOL_VERSION, type: "notice", ts: 1, sid, notice_id: "compact-exception",
       severity: "warning", category: "runtime", title: "上下文压缩失败", message: "请稍后重试。",
     } as Notice })}>other exception</button>
+    <button onClick={() => dispatch({ type: "command_error", detail: "当前操作不适用于这个会话。" })}>session failure</button>
+    <button onClick={() => dispatch({ type: "command_error", detail: "通知权限未开启，设置没有更改。" })}>permission failure</button>
+    <button onClick={() => dispatch({ type: "command_error", detail: "页面版本已更新，请刷新后重试。" })}>page mismatch</button>
+    <button onClick={() => setVersionBlocked(value => !value)}>protocol mismatch</button>
+    <button onClick={() => setEngineError(value => value ? null : "本机连接断开")}>engine connection</button>
+    <span data-testid="reload-count">{reloadCount}</span>
     <button onClick={() => setSid(value => value === "a" ? "b" : "a")}>session</button>
     <button onClick={() => setDevice(value => value === "test-device" ? "other-device" : "test-device")}>device</button>
     <button onClick={() => setSpace(value => value === "code" ? "work" : "code")}>space</button>
@@ -80,6 +89,9 @@ export function HeaderFeedbackFixture() {
           <span>{space === "work" ? "Work" : "Code"}</span>
         </button></div><div className="sub">session test-session</div></div>
         <HeaderFeedback deviceScope={device} sessionScope={sid}
+          versionNotice={versionBlocked ? "版本不兼容，请更新设备。" : null} versionBlocked={versionBlocked}
+          engineConnectionError={engineError}
+          pageReload={{ onReload: () => setReloadCount(count => count + 1), updating: false, message: null }}
           phase={headerConnectionPhase(state.connState, state.wrapperOnline, syncing, state.banner, state.wrapperConnection)}
           banner={state.banner} bannerRevision={state.bannerRevision} notices={runtime.notices.filter(isHeaderNotice)}
           onDismissBanner={(banner, revision) => dispatch({ type: "dismiss_banner", banner, revision })}

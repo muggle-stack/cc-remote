@@ -1810,7 +1810,7 @@ export class RelayWs {
     // cap and evict early targets before their command arrives.
     this.sendHello(false);
     const plan = planRecoveryReplay(
-      this.outbox.pendingFramesWithSessionIds(), restoreFocus ? this.focusedSid : null);
+      this.outbox.pendingFramesWithSessionIds(this.focusedSid), restoreFocus ? this.focusedSid : null);
     for (const step of plan) {
       if (step.type === "switch") this.sendRecoverySwitch(step.sid);
       else this.sendRaw(step.raw);
@@ -1822,11 +1822,14 @@ export class RelayWs {
       if (sid === this.focusedSid) this.maintenanceSwitch = sid;
       return;
     }
+    const engine = this.engineBySession[sid];
+    const space = this.spaceBySession[sid];
+    // A background runtime announcement does not establish its product route.
+    // Never guess Claude/Code for an unknown target during recovery.
+    if (!engine || !space) return;
     const frame: Record<string, unknown> = {
-      v: PROTOCOL_VERSION, type: "switch_session", session_id: sid, ts: nowTs(),
+      v: PROTOCOL_VERSION, type: "switch_session", session_id: sid, engine, space, ts: nowTs(),
     };
-    if (this.engineBySession[sid]) frame.engine = this.engineBySession[sid];
-    if (this.spaceBySession[sid] === "work") frame.space = "work";
     this.sendUntracked(frame);
   }
 

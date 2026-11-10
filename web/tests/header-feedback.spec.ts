@@ -5,6 +5,48 @@ test.beforeEach(async ({ page }) => {
   await expect(page.locator(".hstat-label")).toHaveText("idle");
 });
 
+test("header feedback includes all command warnings and preserves page refresh actions", async ({ page }) => {
+  await page.clock.install();
+  for (const [control, copy] of [["session failure", "当前操作不适用于这个会话。"],
+    ["permission failure", "通知权限未开启，设置没有更改。"],
+    ["page mismatch", "页面版本已更新，请刷新后重试。"]]) {
+    await page.getByRole("button", { name: control, exact: true }).click();
+    await expect(page.locator(".banner.show, .notice-stack")).toHaveCount(0);
+    await page.clock.fastForward(60_000);
+    await page.locator(".header-feedback").click();
+    await expect(page.getByRole("dialog")).toContainText(copy);
+    if (control === "page mismatch") {
+      await page.getByRole("button", { name: "刷新页面", exact: true }).click();
+      await expect(page.getByTestId("reload-count")).toHaveText("1");
+    }
+    await page.getByRole("button", { name: "知道了", exact: true }).click();
+    await expect(page.locator(".header-feedback")).toHaveCount(0);
+  }
+  await page.getByRole("button", { name: "protocol mismatch", exact: true }).click();
+  await expect(page.locator(".header-feedback")).toHaveText("版本不兼容");
+  await page.locator(".header-feedback").click();
+  await expect(page.getByRole("dialog")).toContainText("版本不兼容，请更新设备。");
+  await page.getByRole("button", { name: "收起详情", exact: true }).click();
+  await expect(page.locator(".header-feedback")).toHaveText("版本不兼容");
+  await page.getByRole("button", { name: "protocol mismatch", exact: true }).click();
+  await expect(page.locator(".header-feedback")).toHaveCount(0);
+});
+
+test("header feedback keeps native connection recovery compact and scoped", async ({ page }) => {
+  await page.clock.install();
+  await page.getByRole("button", { name: "engine connection", exact: true }).click();
+  await page.clock.fastForward(7_900);
+  await expect(page.locator(".header-feedback")).toHaveCount(0);
+  await page.clock.fastForward(101);
+  await expect(page.locator(".header-feedback")).toHaveText("连接未恢复");
+  await page.locator(".header-feedback").click();
+  await expect(page.getByRole("dialog")).toContainText("本机连接断开");
+  await page.getByRole("button", { name: "收起详情", exact: true }).click();
+  await expect(page.locator(".header-feedback")).toBeVisible();
+  await page.getByRole("button", { name: "engine connection", exact: true }).click();
+  await expect(page.locator(".header-feedback")).toHaveCount(0);
+});
+
 test("header feedback hides an outage through recovery and accepts a new outage", async ({ page }) => {
   const feedback = page.locator(".header-feedback");
   await page.getByRole("button", { name: "offline", exact: true }).click();
@@ -69,7 +111,9 @@ test("header feedback failure stays until acknowledged and identical later failu
   await page.getByRole("button", { name: "fail", exact: true }).click();
   await expect(feedback).toHaveText("操作未完成");
   await page.getByRole("button", { name: "other exception", exact: true }).click();
-  await expect(page.locator(".notice-stack")).toContainText("上下文压缩失败");
+  await expect(page.locator(".notice-stack, .banner.show")).toHaveCount(0);
+  await feedback.click();
+  await expect(page.getByRole("dialog")).toContainText("压缩未完成");
 });
 
 test("header feedback shows checkpoint limitations compactly and keeps acknowledged replays hidden", async ({ page }) => {

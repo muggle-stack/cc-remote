@@ -149,6 +149,46 @@ assert.deepEqual(planRecoveryReplay(archiveReads.pendingFramesWithSessionIds(), 
   ...archiveReads.pendingFrames().map((raw) => ({ type: "command", raw })),
   { type: "switch", sid: "foreground" },
 ], "archive file pagination and historical diffs must not resume a cold engine on replay");
+
+const focusedReads = new CommandOutbox(32, 16_384);
+const residentReads = [
+  { type: "get_diff", file: "README.md" },
+  { type: "get_context" }, { type: "get_status" }, { type: "get_goal" },
+  { type: "get_queued_query", msg_id: "pending-message" },
+  { type: "get_file_preview", path: "README.md" },
+  { type: "get_preview_asset", path: "image.png" },
+  { type: "browse_files", path: "." },
+  { type: "get_permission_profiles" },
+];
+const independentReads = [
+  { type: "get_diff", turn_id: "historical", revision: "immutable" },
+  { type: "get_diff", turn_id: "historical" }, // invalid history never becomes a live read
+  { type: "get_turn_file_changes", turn_id: "historical" },
+  { type: "get_history", session_id: "visible" },
+  { type: "get_claude_plan" },
+  { type: "get_permission_profiles", cwd: "/new-session" },
+  { type: "get_session_artifacts" },
+  { type: "get_future_read" },
+];
+for (const [i, frame] of [...residentReads, ...independentReads].entries()) {
+  assert.ok(focusedReads.enqueue({ ...frame, sid: "visible" }, "client", `read-${i}`).ok);
+}
+const focusedPlan = planRecoveryReplay(focusedReads.pendingFramesWithSessionIds("visible"), "visible");
+let step = 0;
+for (const [i, raw] of focusedReads.pendingFrames().entries()) {
+  if (i < residentReads.length) assert.deepEqual(focusedPlan[step++], { type: "switch", sid: "visible" });
+  assert.deepEqual(focusedPlan[step++], { type: "command", raw });
+}
+assert.deepEqual(focusedPlan.slice(step), [{ type: "switch", sid: "visible" }]);
+assert.ok(focusedReads.pendingFramesWithSessionIds("other-session").every(item => !item.sid),
+  "changing focus must not resume old read targets, including live diffs");
+assert.ok(focusedReads.pendingFramesWithSessionIds(null).every(item => !item.sid),
+  "no selected session means no read preparation");
+const privateRead = new CommandOutbox(2, 4096);
+privateRead.enqueue({ type: "get_context", sid: "btw-private" }, "client", "private-read");
+assert.deepEqual(planRecoveryReplay(privateRead.pendingFramesWithSessionIds("btw-private"), "btw-private"),
+  privateRead.pendingFrames().map(raw => ({ type: "command", raw })), "private side chats are never cold-resumed");
+
 assert.equal(acceptance.accept({
   type: "user_msg", sid: "offline-session", msg_id: "offline-message",
 }), true);

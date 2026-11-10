@@ -35,7 +35,7 @@ for (const code of ["update_in_progress", "busy"]) {
     onEvent: event => { state = reduce(state, { type: "event", event }); },
     onConnState: () => {}, onMaintenance: () => { notices++; },
   });
-  guarded.setFocusedSid("update-a", "codex"); guarded.start();
+  guarded.setFocusedSid("update-a", "codex", "code"); guarded.start();
   const socket = Socket.instances.at(-1)!; socket.onopen?.();
   socket.receive({ type: "error", code, sid: "update-a", message: "设备正在安装更新，请在重新连接后继续。" });
   assert.equal(notices, 1);
@@ -56,6 +56,84 @@ for (const code of ["update_in_progress", "busy"]) {
   assert.equal(state.banner, "当前操作暂时无法执行，请稍后重试。");
   assert.equal(notices, 1);
   guarded.stop();
+}
+
+for (const trigger of ["maintenance", "reconnect"]) {
+  for (const engine of ["claude", "codex", "dsh"] as const) {
+    for (const known of [false, true]) {
+      const relay = new RelayWs({ onEvent: () => {}, onConnState: () => {} });
+      relay.setFocusedSid("visible-code", "claude", "code");
+      if (known) relay.setSessionEngines([{ session_id: "background-work", engine, space: "work" }]);
+      relay.start();
+      const socket = Socket.instances.at(-1)!; socket.onopen?.();
+      try {
+        if (trigger === "maintenance") relay.setMaintenance(true);
+        const requestId = relay.sendGetContextTo("background-work");
+        const original = socket.sent.map(raw => JSON.parse(raw)).find(frame => frame.cmd_id === requestId);
+        const before = socket.sent.length;
+        if (trigger === "maintenance") relay.setMaintenance(false);
+        else socket.receive({ type: "wrapper_reconnected", state: "idle", generation: "replacement" });
+        const replay = socket.sent.slice(before).map(raw => JSON.parse(raw));
+        assert.deepEqual(replay.find(frame => frame.cmd_id === requestId), original,
+          "background reads retain their exact command identity");
+        assert.equal(replay.some(frame => frame.type === "switch_session" && frame.session_id === "background-work"), false,
+          `${trigger}/${engine}/${known}: background reads must never switch or resume a session`);
+        assert.equal(relay.pendingSessionIds().includes("background-work"), true);
+      } finally { relay.stop(); }
+    }
+  }
+}
+
+for (const engine of ["claude", "codex"] as const) {
+  const relay = new RelayWs({ onEvent: () => {}, onConnState: () => {} });
+  relay.setFocusedSid("visible-code", "claude", "code");
+  relay.setSessionEngines([{ session_id: "work-target", engine, space: "work" }]);
+  relay.sendSetModelTo("work-target", "selected-model");
+  relay.sendSetModelTo("unknown-target", "selected-model");
+  relay.start();
+  const socket = Socket.instances.at(-1)!; socket.onopen?.();
+  try {
+    const frames = socket.sent.map(raw => JSON.parse(raw));
+    const preparation = frames.find(frame => frame.type === "switch_session" && frame.session_id === "work-target");
+    assert.equal(preparation.engine, engine); assert.equal(preparation.space, "work");
+    assert.equal(frames.some(frame => frame.type === "switch_session" && frame.session_id === "unknown-target"), false);
+    assert.equal(frames.filter(frame => frame.type === "set_model").length, 2,
+      "unknown routing must not silently discard queued commands");
+    assert.equal(frames.at(-1).session_id, "visible-code", "restore the user's visible focus last");
+  } finally { relay.stop(); }
+}
+
+// A replacement Wrapper may have no resident context when an in-flight live
+// diff is replayed. Its handler rejects a cold read and ACKs that failure, so
+// restoring focus after the read is too late to recover the open diff panel.
+for (const trigger of ["maintenance", "reconnect"]) {
+  for (const engine of ["claude", "codex"] as const) {
+    for (const space of ["code", "work"] as const) {
+      const relay = new RelayWs({ onEvent: () => {}, onConnState: () => {} });
+      relay.setFocusedSid("visible-session", engine, space);
+      relay.start();
+      const socket = Socket.instances.at(-1)!; socket.onopen?.();
+      try {
+        if (trigger === "maintenance") relay.setMaintenance(true);
+        const requestId = relay.sendGetDiff("README.md", "dark");
+        const original = socket.sent.map(raw => JSON.parse(raw)).find(frame => frame.cmd_id === requestId);
+        assert.ok(original);
+        relay.sendGetContextTo("background-work");
+        const before = socket.sent.length;
+        if (trigger === "maintenance") relay.setMaintenance(false);
+        else socket.receive({ type: "wrapper_reconnected", state: "idle", generation: "cold-wrapper" });
+        const replay = socket.sent.slice(before).map(raw => JSON.parse(raw));
+        const readIndex = replay.findIndex(frame => frame.cmd_id === requestId);
+        assert.ok(readIndex > 0);
+        assert.deepEqual(replay[readIndex], original, "replay the exact request the diff panel is waiting for");
+        assert.equal(replay[readIndex - 1].type, "switch_session", "restore the context before the live diff read");
+        assert.equal(replay[readIndex - 1].session_id, "visible-session");
+        assert.equal(replay[readIndex - 1].engine, engine);
+        assert.equal(replay[readIndex - 1].space, space);
+        assert.equal(replay.some(frame => frame.type === "switch_session" && frame.session_id === "background-work"), false);
+      } finally { relay.stop(); }
+    }
+  }
 }
 } finally { await harness.close(); }
 console.log("maintenance: reconnect, history reads, current-session recovery and ordinary errors passed");

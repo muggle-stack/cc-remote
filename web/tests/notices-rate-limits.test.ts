@@ -1057,8 +1057,10 @@ try {
     "a changed or unmounted banner must cancel its stale timer");
 
   const appSource = readFileSync(resolve(process.cwd(), "src/App.tsx"), "utf8");
-  assert.ok(appSource.indexOf("<ReconnectBanner") < appSource.indexOf("<NoticeStack"),
-    "NoticeStack must remain below, not replace, ReconnectBanner");
+  assert.match(appSource, /<HeaderFeedback[\s\S]*notices=\{rt\.notices\.filter\(isHeaderNotice\)\}/,
+    "conversation notices must reach the compact status entry");
+  assert.doesNotMatch(appSource, /<(?:ReconnectBanner|NoticeStack|DshConnectionNotice)\b/,
+    "global feedback must not duplicate the status entry above the transcript");
   assert.match(appSource,
     /msg\.type === "state" && msg\.state === "idle"[\s\S]*sendGetStatusTo\(msg\.sid\)/,
     "Codex quota must refresh after the authoritative idle boundary");

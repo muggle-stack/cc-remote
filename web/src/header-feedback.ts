@@ -6,13 +6,13 @@ export const HEADER_SUCCESS_TTL_MS = 6_000;
 export type ConnectionPhase = "connecting" | "reconnecting" | "disconnected" | "offline" | "syncing";
 export type FeedbackTone = "progress" | "warning" | "success" | "info";
 
-/** Only these existing banners move into the header. Other errors stay visible. */
+/** All global command banners share the status entry; details remain readable. */
 export function headerBannerKind(banner?: string): "connection" | "failure" | null {
   if (!banner) return null;
   if (["正在连接…", "正在重新连接…", "设备正在重新连接…",
     "设备离线，正在等待重新连接…", "machine offline — waiting for reconnect",
     "machine reconnected — syncing…"].includes(banner)) return "connection";
-  return banner === "操作未完成，请稍后重试。" ? "failure" : null;
+  return "failure";
 }
 
 export function headerConnectionPhase(
@@ -29,9 +29,9 @@ export function headerConnectionPhase(
 }
 
 export function isHeaderNotice(notice: Notice): boolean {
-  if (notice.notice_id.startsWith("rollback-")) return true;
-  return notice.category === "runtime" && notice.severity === "warning"
-    && !/^(codex-notice-|schedule-|compact-)/.test(notice.notice_id);
+  // Keep native diagnostics in their dedicated status sheet and routine
+  // compaction receipts inline, exactly as before.
+  return conversationNotices([notice]).length > 0;
 }
 
 export interface HeaderFeedbackItem {
@@ -47,14 +47,24 @@ export interface HeaderFeedbackItem {
 
 export function headerNoticeItem(notice: Notice, scope: string): HeaderFeedbackItem {
   const presented = conversationNotices([notice])[0];
-  const success = notice.severity === "info";
+  const info = notice.severity === "info";
   const rollback = notice.notice_id.startsWith("rollback-");
+  const schedule = notice.notice_id.startsWith("schedule-");
+  const preserveRuntimeCopy = notice.category === "runtime" && !rollback
+    && notice.severity === "warning" && !/^(schedule-|compact-)/.test(notice.notice_id);
+  const success = info && (rollback || schedule);
+  const label = notice.notice_id.startsWith("checkpoint-") ? "回滚受限"
+    : rollback ? info ? "已撤销" : "操作未完成"
+    : schedule ? info ? "任务已完成" : "任务未完成"
+    : notice.notice_id.startsWith("compact-") ? "压缩未完成"
+    : ({ runtime: "操作未完成", guardian: "安全提示", config: "配置提示",
+      deprecation: "兼容提示", security: "安全提示", rate_limit: "使用限额" })[notice.category];
   return {
     id: JSON.stringify([scope, notice.notice_id]), noticeId: notice.notice_id,
-    label: notice.notice_id.startsWith("checkpoint-") ? "回滚受限" : success ? "已撤销" : "操作未完成",
-    tone: success ? "success" : "warning",
-    message: rollback ? presented.message : cleanProductText(notice.message) || presented.message,
-    detail: rollback ? presented.detail : notice.detail ? cleanProductText(notice.detail) : null,
+    label: info && !success ? "会话提示" : label,
+    tone: success ? "success" : info ? "info" : "warning",
+    message: preserveRuntimeCopy ? cleanProductText(notice.message) || presented.message : presented.message,
+    detail: preserveRuntimeCopy && notice.detail ? cleanProductText(notice.detail) : presented.detail,
   };
 }
 
