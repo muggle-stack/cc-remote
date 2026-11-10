@@ -11,7 +11,7 @@ export function useAppUpdates(enabled: boolean, machine: string, open: boolean) 
   const [pending, setPending] = useState<UpdateIntent | null>(null);
   const [pendingStatus, setPendingStatus] = useState<"unconfirmed" | "missing" | "unsupported">("unconfirmed");
   const openRef = useRef(open); openRef.current = open;
-  const actions = useRef({ check: async () => {}, start: async (_version: string) => {}, cancel: async () => {}, observeMaintenance: () => {} });
+  const actions = useRef({ check: async () => {}, start: async (_version: string) => {}, cancel: async () => {}, recover: async () => {}, observeMaintenance: () => {} });
   useEffect(() => {
     setMaintenance(false); setData(null); setError(null); setChecking(false); setChanging(false); setPending(null);
     setPendingStatus("unconfirmed");
@@ -127,12 +127,12 @@ export function useAppUpdates(enabled: boolean, machine: string, open: boolean) 
         if (active) { setChanging(false); void probe(recheck); }
       }
     };
-    const cancel = async () => {
+    const changeJob = async (op: "cancel" | "reconcile") => {
       const job = snapshot?.job;
       if (mutation || !active || !job) return;
       mutation = true; mutationRevision++; operationError = null; setChanging(true);
       try {
-        const raw = await client.call({ op: "cancel", job_id: job.id });
+        const raw = await client.call({ op, job_id: job.id });
         const next = parseUpdateJob(raw.job);
         if (!next || next.id !== job.id || next.version !== job.version) throw new Error("outcome_pending");
         if (active && snapshot) reconcile({ ...snapshot, job: next });
@@ -142,7 +142,7 @@ export function useAppUpdates(enabled: boolean, machine: string, open: boolean) 
       }
       finally { mutation = false; if (active) { setChanging(false); void probe(recheck); } }
     };
-    actions.current = { check: () => probe(true), start, cancel, observeMaintenance: () => {
+    actions.current = { check: () => probe(true), start, cancel: () => changeJob("cancel"), recover: () => changeJob("reconcile"), observeMaintenance: () => {
       if (!active) return;
       guardRevision++; guardObserved = true; setMaintenance(true); void probe();
     } };
@@ -158,14 +158,15 @@ export function useAppUpdates(enabled: boolean, machine: string, open: boolean) 
     return () => {
       active = false; client.close(); window.clearInterval(poll);
       window.removeEventListener("online", focus); window.removeEventListener("focus", focus);
-      actions.current = { check: async () => {}, start: async () => {}, cancel: async () => {}, observeMaintenance: () => {} };
+      actions.current = { check: async () => {}, start: async () => {}, cancel: async () => {}, recover: async () => {}, observeMaintenance: () => {} };
     };
   }, [enabled, machine]);
   const check = useCallback(() => actions.current.check(), []);
   const start = useCallback((version: string) => actions.current.start(version), []);
   const cancel = useCallback(() => actions.current.cancel(), []);
+  const recover = useCallback(() => actions.current.recover(), []);
   useEffect(() => { if (open) void check(); }, [open, check, machine]);
   const observeMaintenance = useCallback(() => actions.current.observeMaintenance(), []);
-  return { data, error, checking, changing, pending, pendingStatus, maintenance, observeMaintenance, check, start, cancel };
+  return { data, error, checking, changing, pending, pendingStatus, maintenance, observeMaintenance, check, start, cancel, recover };
 }
 export type AppUpdatesController = ReturnType<typeof useAppUpdates>;

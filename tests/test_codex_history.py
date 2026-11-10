@@ -1130,6 +1130,31 @@ def test_summary_supports_assistant_only_and_multiple_steer_segments():
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("official_client_id", [None, "browser-user"])
+def test_automatic_prefix_cannot_borrow_later_user_client_identity(official_client_id):
+    async def rpc(_method, _params, cwd=None):
+        return {"data": [_turn("callback-turn", [
+            _agent("callback-answer", "background progress"),
+            _user("real-user", "where did my message go?", client_id=official_client_id),
+            _agent("user-answer", "reply"),
+        ])], "nextCursor": None}
+
+    async def run():
+        history = CodexOfficialHistory(64 * 1024, rpc=rpc)
+        page = await history.summary_page("thread-1", before=None, limit=1,
+            segment_client_message_ids={("callback-turn", 0): "browser-user"})
+        automatic, user = page.turns
+        assert automatic["prompt"] == "" and automatic.get("clientMsgId") is None
+        assert user["prompt"] == "where did my message go?"
+        assert user["clientMsgId"] == "browser-user"
+        assert page.native_segment_by_visible_id == {
+            "callback-turn": ("callback-turn", -1),
+            "real-user": ("callback-turn", 0),
+        }
+
+    asyncio.run(run())
+
+
 def test_rollout_detail_fallback_covers_every_visible_steer_segment():
     async def rpc(_method, _params, cwd=None):
         assert cwd is None

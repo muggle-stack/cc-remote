@@ -196,8 +196,11 @@ class TaskStore:
         db.row_factory = sqlite3.Row
         try:
             db.execute("PRAGMA query_only=ON")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
+            callback = ("delivery_turn_id" if "delivery_turn_id" in columns
+                        else "NULL AS delivery_turn_id")
             return [dict(row) for row in db.execute(
-                "SELECT id,sid,state,delivery,created,updated,"
+                "SELECT id,sid,state,delivery,created,updated," + callback + ","
                 "json_extract(spec,'$.title') AS title FROM tasks "
                 "WHERE cancel_requested=0 AND (state IN ('queued','running') "
                 "OR delivery IN ('pending','sending','accepted','failed','unknown','rejected')) "

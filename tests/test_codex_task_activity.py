@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 
 from cc_remote.task_store import TaskStore, public_task
-from cc_remote.wrapper.codex_tasks import read_task_activity
+from cc_remote.wrapper.codex_tasks import read_task_activity, read_task_callbacks
 from cc_remote.wrapper.history_store import materialize_history_turns
 from tests.test_multisession import _mk_ctx, _mk_machine
 
@@ -23,6 +23,21 @@ def task(home, sid, title="Background verification"):
 def test_absent_task_state_is_empty_without_writes(tmp_path):
     assert read_task_activity(tmp_path) == {}
     assert list(tmp_path.iterdir()) == []
+
+
+def test_callback_recovery_reads_only_exact_account_thread_acceptance(tmp_path):
+    sid, other_sid, turn = str(uuid4()), str(uuid4()), str(uuid4())
+    store, key = task(tmp_path / "first", sid)
+    assert read_task_callbacks(store.home, sid) == ()
+    store.update(key, state="completed", delivery="accepted", delivery_turn_id=turn)
+    assert read_task_callbacks(store.home, sid) == (turn,)
+    assert read_task_callbacks(store.home, other_sid) == ()
+    other = tmp_path / "other"
+    other.mkdir()
+    assert read_task_callbacks(other, sid) == ()
+    assert list(other.iterdir()) == []
+    store.update(key, delivery="unknown")
+    assert read_task_callbacks(store.home, sid) == ()
 
 
 def test_activity_is_account_scoped_and_independent_of_parent_completion(tmp_path):

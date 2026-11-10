@@ -46,6 +46,7 @@ MANAGED_RELEASE=0
 CLI_PATH=/usr/local/bin/cc-remote
 RETENTION_GENERATION=""
 RETENTION_STARTED=0
+ACTIVATION_ID=""
 
 [ -r "$SOURCE_DIR/deploy/setup_transaction.sh" ] || {
   echo "ERROR: $SOURCE_DIR/deploy/setup_transaction.sh is missing" >&2
@@ -231,14 +232,19 @@ fi
   die "WEB_STATIC_DIR must be $CURRENT_LINK/web/dist"
 chmod 0600 "$ENV_FILE"
 
-echo "==> installing system deps (python3-venv) + Caddy (official repo)"
-apt-get update -y
-apt-get install -y python3-venv debian-keyring debian-archive-keyring apt-transport-https curl gnupg
-command -v gpg >/dev/null 2>&1 || die "gnupg/gpg is required to install the Caddy repository key"
-curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt" > /etc/apt/sources.list.d/caddy-stable.list
-apt-get update -y
-apt-get install -y caddy
+if command -v caddy >/dev/null 2>&1 && python3 -c 'import venv, ensurepip' 2>/dev/null; then
+  echo "==> using installed Python and Caddy"
+else
+  echo "==> installing system deps (python3-venv) + Caddy (official repo)"
+  apt_network=(-o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
+  apt-get "${apt_network[@]}" update -y
+  apt-get "${apt_network[@]}" install -y python3-venv debian-keyring debian-archive-keyring apt-transport-https curl gnupg
+  command -v gpg >/dev/null 2>&1 || die "gnupg/gpg is required to install the Caddy repository key"
+  curl -1sLf --connect-timeout 10 --max-time 45 --retry 2 "https://dl.cloudsmith.io/public/caddy/stable/gpg.key" | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  curl -1sLf --connect-timeout 10 --max-time 45 --retry 2 "https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt" > /etc/apt/sources.list.d/caddy-stable.list
+  apt-get "${apt_network[@]}" update -y
+  apt-get "${apt_network[@]}" install -y caddy
+fi
 
 echo "==> creating service user"
 getent group ccremote >/dev/null 2>&1 || groupadd --system ccremote
@@ -343,12 +349,17 @@ if (( MANAGED_RELEASE )); then
   # begin journals the prepared transaction before copying configuration. Its
   # stdout may be empty on failure/interruption; keep the release either way.
   RETENTION_STARTED=1
+  ACTIVATION_ID="$("$NEW_RELEASE_DIR/.venv/bin/python" "$NEW_RELEASE_DIR/deploy/activation.py" \
+    --root "$APPDIR" begin --role relay --origin "$PUBLIC_SCHEME://$TARGET" \
+    --release "$NEW_RELEASE_DIR")"
   RETENTION_GENERATION="$(
     "$NEW_RELEASE_DIR/.venv/bin/python" "$NEW_RELEASE_DIR/deploy/release_retention.py" begin \
       --root "$APPDIR" --release "$NEW_RELEASE_DIR" --previous "$PREVIOUS_RELEASE" \
       --role relay --home /root --service cc-remote-relay --service-file "$RELAY_UNIT_FILE" \
       --config "$CADDYFILE" --config "$ENV_FILE" --config "$APPDIR/installation.json"
   )"
+  "$NEW_RELEASE_DIR/.venv/bin/python" "$NEW_RELEASE_DIR/deploy/activation.py" \
+    --root "$APPDIR" phase --id "$ACTIVATION_ID" --value stopping --generation "$RETENTION_GENERATION"
 fi
 
 echo "==> Caddy config ($PUBLIC_SCHEME://$TARGET)"
@@ -444,6 +455,10 @@ if (( MANAGED_RELEASE )); then
     --root "$APPDIR" --destination "$CLI_PATH" --role relay --domain "$TARGET"
 fi
 DEPLOY_READY=1
+if [ -n "${ACTIVATION_ID:-}" ]; then
+  "$NEW_RELEASE_DIR/.venv/bin/python" "$NEW_RELEASE_DIR/deploy/activation.py" \
+    --root "$APPDIR" finish --id "$ACTIVATION_ID" --value succeeded
+fi
 
 if [ -n "$RETENTION_GENERATION" ]; then
   if "$NEW_RELEASE_DIR/.venv/bin/python" "$NEW_RELEASE_DIR/deploy/release_retention.py" commit \

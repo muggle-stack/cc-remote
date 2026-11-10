@@ -726,6 +726,8 @@ export default function App() {
   );
   const pendingCreateRef = useRef<string | null>(null);
   const createRequestsRef = useRef<Map<string, {
+    draftKey: string;
+    draft: string;
     scopeKey: string;
     cwdSource: "default" | "inherited" | "explicit";
   }>>(new Map());
@@ -3475,6 +3477,10 @@ export default function App() {
             ? createRequestsRef.current.get(createResponseRequestId) : undefined;
           if (createRequest && (msg.type === "session_focus"
               || (msg.type === "error" && msg.code !== "wrapper_offline"))) {
+            if (msg.type === "session_focus"
+                && JSON.stringify(composerDraftsRef.current.get(createRequest.draftKey)) === createRequest.draft) {
+              composerDraftsRef.current.delete(createRequest.draftKey);
+            }
             createRequestsRef.current.delete(createResponseRequestId!);
             if (createResponseRequestId !== pendingCreateRef.current) return;
             pendingCreateRef.current = null;
@@ -5245,6 +5251,9 @@ export default function App() {
       createRequestsRef.current.set(msg_id, {
         scopeKey: sessionScopeKey(machineId, engine, space),
         cwdSource,
+        draftKey: composerDraftKey(machineId, space, engine, "new"),
+        draft: JSON.stringify(composerDraftsRef.current.get(
+          composerDraftKey(machineId, space, engine, "new"))),
       });
       while (createRequestsRef.current.size > 64) {
         const oldest = createRequestsRef.current.keys().next().value;
@@ -6187,6 +6196,8 @@ export default function App() {
           </div>
         ) : state.newChat ? (
           <Suspense fallback={null}><NewChatView cwd={state.newChat.cwd}
+            draftKey={composerDraftKey(machineId, space, engine, "new")}
+            draftStore={composerDraftsRef.current}
             editPrompt={editPrompt} onEditConsumed={() => setEditPrompt(null)}
             dshPresets={state.dshPresets} dshPermissions={state.dshPermissions}
             dshError={state.dshError}

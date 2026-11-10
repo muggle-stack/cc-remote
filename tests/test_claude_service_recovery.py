@@ -103,6 +103,20 @@ def session_item(profile, session_id):
     }}
 
 
+@pytest.mark.asyncio
+async def test_service_recovery_restores_the_pre_capture_route(tmp_path):
+    machine, _ = _mk_machine()
+    profile = machine._claude_profile()
+    item = session_item(profile, "native-question")
+    item["metadata"]["key"] = "tmp-unanswered"
+    ctx = SimpleNamespace(key="native-question", cwd=str(tmp_path))
+    machine._spawn = AsyncMock(return_value=ctx)
+    await claude_service._restore_session(machine, "existing-service", item)
+    assert machine._resolve_session_alias("tmp-unanswered") == ctx.key
+    assert machine._spawn.await_args.kwargs["_service_worker_id"] == item["id"]
+    assert machine.focused_sid is None
+
+
 @pytest.mark.parametrize("failure", ["none", "exception"])
 def test_one_failed_session_does_not_strand_other_accepted_turns(failure, monkeypatch):
     async def go():

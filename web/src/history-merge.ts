@@ -31,7 +31,11 @@ function textChannel(block: TextBlock): string {
 }
 
 function canCompatibilityMatchText(block: TextBlock): boolean {
-  return block.text.length > 0 || !block.done;
+  // An empty live item may be a tool envelope, or a new assistant message
+  // whose first delta has not arrived. Neither is evidence that an older
+  // source message belongs to it, even if that is the only unmatched text.
+  // Exact message identity is matched above this compatibility path.
+  return block.text.length > 0;
 }
 
 function textAffinity(first: string, second: string): number {
@@ -362,8 +366,6 @@ function mergeBlocks(
           existingIndex = index;
         }
       }
-      if (existingIndex == null && block.text.length === 0 && !block.done
-          && candidates.length === 1) existingIndex = candidates[0];
     }
     const existing = existingIndex == null
       ? undefined : out[existingIndex] as TextBlock;
@@ -1699,6 +1701,23 @@ export function mergeInitialHistory(
    * This positional internal flag avoids shipping another merge-option key. */
   settledCodex = false,
 ): Turn[] {
+  if (options.reconcileReplayOrphans) {
+    live = live.map(turn => {
+      if (!turn.clientMsgId) return turn;
+      const source = history.find(row => row.id === turn.id);
+      const user = history.find(row => row.id !== turn.id
+        && row.clientMsgId === turn.clientMsgId
+        && (row.prompt || row.images?.length || row.imageRefs?.length || row.files?.length));
+      if (!source || !user || source.clientMsgId || source.prompt
+          || source.images?.length || source.imageRefs?.length || source.files?.length) return turn;
+      // Older source pages assigned the first later steer's browser alias to
+      // an empty automatic anchor too. Repair that exact row before matching:
+      // otherwise the final alias dedupe swallows the real user message again.
+      // The corrupted row may also contain the human segment's live blocks.
+      // Rebuild this one row from its source instead of preserving a mixed tail.
+      return { ...source, blocks: source.blocks.map(block => ({ ...block })) };
+    });
+  }
   const merged = history.map((turn) => ({ ...turn,
     blocks: anchorClaudeReturnReceipts(turn.blocks).map((b) => ({ ...b })) }));
   const matches = new Array<number>(live.length).fill(-1);

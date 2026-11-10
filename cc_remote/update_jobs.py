@@ -162,8 +162,24 @@ def public_job(value: dict | None) -> dict | None:
 
 
 def failure_reason(exc: BaseException) -> str:
+    import ssl
+    from urllib.error import URLError
+    if isinstance(exc, URLError) and isinstance(exc.reason, BaseException):
+        return failure_reason(exc.reason)
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return "tls_certificate"
+    if isinstance(exc, ssl.SSLError):
+        return "tls_connection"
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return "network"
     message = str(exc).lower()
     for pattern, reason in (
+        ("control connection unavailable", "control_unavailable"),
+        ("cancelled before activation", "cancelled"),
+        ("certificate verification", "tls_certificate"), ("tls", "tls_connection"),
+        ("ssh authentication", "ssh_auth"), ("host key verification", "ssh_host_key"),
+        ("ssh connection", "network"), ("ssh hostname", "network"), ("ssh host is unreachable", "network"),
+        ("no space left", "disk_space"), ("disk space", "disk_space"),
         ("disabled", "setup_required"), ("selected release changed", "release_changed"),
         ("os job manager", "unsupported"),
         ("not newer", "release_changed"),

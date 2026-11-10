@@ -4610,6 +4610,12 @@ class WrapperMachine:
             else:
                 overlaid.append(row)
                 continue
+            if not any(row.get(key) for key in ("prompt", "images", "imageRefs", "files")):
+                # Repair old cached automatic anchors which borrowed the first
+                # later user's alias and consequently swallowed that user row.
+                row.pop(client_field, None)
+                overlaid.append(row)
+                continue
             if (
                 isinstance(native_id, str)
                 and row.get(client_field) is None
@@ -5663,7 +5669,9 @@ class WrapperMachine:
             )
             return False
         if lease is None:
-            return await self._recover_unleased_codex_goal(ctx, session_id)
+            if await self._recover_unleased_codex_goal(ctx, session_id):
+                return True
+            return await self._recover_unleased_codex_callback(ctx, session_id)
 
         try:
             path = await asyncio.to_thread(
@@ -6081,6 +6089,54 @@ class WrapperMachine:
             log.info("recovered shared Codex Goal continuation",
                      session_id=session_id, turn_id=turn_id)
         return bool(recovered)
+
+    async def _recover_unleased_codex_callback(
+        self, ctx: SessionContext, session_id: str,
+    ) -> bool:
+        """Reattach an accepted task callback whose start preceded this proxy.
+
+        The account-local receipt supplies the exact official turn/start ID.
+        Probe and recover only that already-active turn; never submit input or
+        infer ownership from task prose, a completed command, or an old warning.
+        """
+        from cc_remote.wrapper.codex_tasks import read_task_callbacks
+
+        sdk = ctx.sdk
+        home = self._codex_profile_for_ctx(ctx).home
+        native_sid = ctx.session_id
+
+        def available() -> bool:
+            return bool(
+                self._is_resident_context(ctx) and ctx.sdk is sdk
+                and ctx.session_id == native_sid
+                and self._codex_profile_for_ctx(ctx).home == home
+                and self._codex_shared_live(ctx) and ctx.state == "idle"
+                and ctx.turn_task is None and ctx.codex_spontaneous_task is None
+                and not getattr(sdk, "turn_active", False))
+
+        if not available() or not all(callable(getattr(sdk, name, None)) for name in (
+                "probe_owned_turn", "recover_owned_turn")):
+            return False
+        try:
+            candidates = await asyncio.to_thread(read_task_callbacks, home, native_sid)
+            for turn_id in candidates:
+                if not available():
+                    return False
+                if await sdk.probe_owned_turn(turn_id) is None or not available():
+                    continue
+                # Re-read the same private receipt after asynchronous native
+                # reads; account replacement/cancellation cannot transfer it.
+                current = await asyncio.to_thread(read_task_callbacks, home, native_sid)
+                if turn_id not in current or not available():
+                    continue
+                if await sdk.recover_owned_turn(turn_id):
+                    log.info("recovered shared Codex task callback",
+                             session_id=session_id, turn_id=turn_id)
+                    return True
+        except Exception as exc:
+            log.warning("Codex task callback recovery unavailable",
+                        session_id=session_id, error_type=type(exc).__name__)
+        return False
 
     async def _adopt_reconciled_codex_turn_start(
         self,
@@ -6987,6 +7043,11 @@ class WrapperMachine:
                     combined.sort(key=lambda item: item.status not in {"running", "pending"})
                     replacement = {item.item_id: item for item in
                                    combined[:MAX_BACKGROUND_PROCESS_ITEMS]}
+                    if tasks:
+                        # A callback can start while the Wrapper is offline or
+                        # before the fresh proxy subscribes. Activity alone does
+                        # not reopen a turn: recovery proves its exact native ID.
+                        await self._recover_unleased_codex_callback(ctx, ctx.key)
                     if replacement == previous:
                         continue
                     ctx.codex_background_processes = replacement
@@ -16509,7 +16570,7 @@ class WrapperMachine:
                 # just-finished previous row is exactly the steered turn being
                 # reconciled. Hydrate both once; later mirrors reuse the
                 # generation-local bounded cache.
-                hydrate_recent=2 if before is None else 0,
+                hydrate_recent=min(2, limit or 4) if before is None else 0,
                 source=source_before,
                 **alias_kwargs,
             )

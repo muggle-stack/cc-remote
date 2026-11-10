@@ -31,6 +31,8 @@ _SYSTEMS = {"linux", "darwin"}
 _ARCHES = {"x86_64", "arm64"}
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
 _RELAY_DEPLOY = (
+    "ui_update_broker.py",
+    "activation.py",
     "ui_update_job.py",
     "linux_service.py",
     "Caddyfile",
@@ -54,6 +56,8 @@ _RELAY_DEPLOY = (
     "validate_protocol_bundle.py",
 )
 _WRAPPER_DEPLOY = (
+    "ui_update_broker.py",
+    "activation.py",
     "ui_update_job.py",
     "linux_service.py",
     "wrapper_exec.py",

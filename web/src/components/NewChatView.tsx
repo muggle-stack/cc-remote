@@ -5,7 +5,7 @@ import type { DshCommandInfo, DshPreset, DshPermissionOption } from "../protocol
 // A null override is intentional: the wrapper/engine keeps its own local default.
 /* oxlint-disable react/only-export-components */
 import {
-  lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent,
+  lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type SetStateAction,
 } from "react";
 import { EngineIcon, Icon } from "../icons";
 import { SpeedPicker } from "./SpeedPicker";
@@ -38,6 +38,7 @@ import {
 } from "../composer-pastes";
 import { PasteCards } from "./PasteCards";
 import { uuid } from "../util";
+import { ComposerDraftStore, type ComposerDraft } from "../composer-drafts";
 import {
   autoCompactSelectionLabel,
   parseAutoCompactArgument,
@@ -53,6 +54,8 @@ export { compatibleNewChatEffort, newChatCatalogRequest, resolveNewChatLocalDefa
   reconcileNewChatSelection, newChatEfforts } from "../new-chat-selection";
 
 interface Props {
+  draftKey?: string;
+  draftStore?: ComposerDraftStore;
   editPrompt?: string | null;
   onEditConsumed?: () => void;
   dshCommands?: DshCommandInfo[];
@@ -193,14 +196,42 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
   onPickCodexProfile, skills, skillsOnline = true, skillsError = false, onRequestSkills,
   permissionProfiles, onGetPermissionProfiles, onOpenExtensions,
   dshCommands, dshPresets = [], dshPermissions = [], dshPreset, dshError, onPickDshPreset,
-  onSend }: Props) {
-  const [text, setText] = useState("");
+  onSend, draftKey, draftStore }: Props) {
+  const localDrafts = useRef(new ComposerDraftStore());
+  const drafts = draftStore ?? localDrafts.current;
+  const key = draftKey ?? "new";
+  const draftKeyRef = useRef(key);
+  const [draft, setDraft] = useState(() => drafts.get(key));
+  const draftRef = useRef(draft);
+  const updateDraft = useCallback((update: (value: ComposerDraft) => ComposerDraft) => {
+    const scope = draftKeyRef.current;
+    const next = update(draftRef.current);
+    draftRef.current = next;
+    drafts.set(scope, next);
+    setDraft(next);
+  }, [drafts]);
+  useLayoutEffect(() => {
+    if (draftKeyRef.current === key) return;
+    draftKeyRef.current = key;
+    draftRef.current = drafts.get(key);
+    setDraft(draftRef.current);
+  }, [key, drafts]);
+  const text = draft.input, images = draft.images, files = draft.files, pastes = draft.pastes;
+  const setText = useCallback((value: SetStateAction<string>) => updateDraft(previous => ({
+    ...previous, input: typeof value === "function" ? value(previous.input) : value,
+  })), [updateDraft]);
+  const setImages = useCallback((value: SetStateAction<QueryImg[]>) => updateDraft(previous => ({
+    ...previous, images: typeof value === "function" ? value(previous.images) : value,
+  })), [updateDraft]);
+  const setFiles = useCallback((value: SetStateAction<QueryFile[]>) => updateDraft(previous => ({
+    ...previous, files: typeof value === "function" ? value(previous.files) : value,
+  })), [updateDraft]);
+  const setPastes = useCallback((value: SetStateAction<ComposerPaste[]>) => updateDraft(previous => ({
+    ...previous, pastes: typeof value === "function" ? value(previous.pastes) : value,
+  })), [updateDraft]);
   useEffect(() => {
     if (editPrompt != null) { setText(editPrompt); onEditConsumed?.(); }
-  }, [editPrompt, onEditConsumed]);
-  const [images, setImages] = useState<QueryImg[]>([]);
-  const [files, setFiles] = useState<QueryFile[]>([]);
-  const [pastes, setPastes] = useState<ComposerPaste[]>([]);
+  }, [editPrompt, onEditConsumed, setText]);
   const [importing, setImporting] = useState(false);
   const importingRef = useRef(false);
   const [creating, setCreating] = useState(false);

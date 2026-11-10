@@ -131,6 +131,11 @@ async def _restore_session(machine, socket, item) -> None:
     )
     if ctx is None:
         raise RuntimeError("could not reattach a persistent Claude session")
+    old_key = metadata.get("key")
+    if isinstance(old_key, str) and old_key.startswith("tmp-") and old_key != ctx.key:
+        # The service owns this exact account/session. Recover the temporary
+        # route too, for clients which disconnected before its first re-key.
+        machine._remember_session_alias(old_key, ctx.key, ctx.cwd, engine="claude")
 
 
 async def activate(machine, ctx) -> None:

@@ -37,12 +37,17 @@ def verify_install_lock(root: Path, descriptor: int) -> None:
         raise InstallLockError(
             "another install or update is already running; inspect it before retrying"
         ) from exc
+    os.fchmod(descriptor, 0o644)
 
 
 def acquire_install_lock(root: Path) -> int:
     descriptor = os.open(root / ".update.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         verify_install_lock(root, descriptor)
+        # The service user may observe this empty lock file without being able
+        # to modify it. Activation admission follows the installer's live flock,
+        # not the lifetime of a browser request or an updater receipt.
+        os.fchmod(descriptor, 0o644)
     except BaseException:
         os.close(descriptor)
         raise

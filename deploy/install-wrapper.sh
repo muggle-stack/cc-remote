@@ -507,6 +507,19 @@ cleanup() {
   elif [ "$status" -ne 0 ]; then
     echo "WARNING: Wrapper activation was committed; inspect it before retrying." >&2
   fi
+  if [ -n "${activation_id:-}" ]; then
+    activation_outcome=recovery_required
+    if [ "$activation_committed" -eq 1 ]; then
+      activation_outcome=succeeded
+    elif [ "${rollback_ready:-0}" -eq 1 ]; then
+      activation_outcome=unchanged
+      if [ "$service_stopped" -eq 1 ] || [ "$switched" -eq 1 ] || [ "$snapshot_created" -eq 1 ]; then
+        activation_outcome=rolled_back
+      fi
+    fi
+    "$target/.venv/bin/python" "$target/deploy/activation.py" --root "$appdir" \
+      finish --id "$activation_id" --value "$activation_outcome" || true
+  fi
   [ -z "$stage" ] || rm -rf -- "$stage"
   [ -z "$service_backup" ] || rm -f -- "$service_backup"
   [ -z "$device_backup" ] || rm -f -- "$device_backup"
@@ -606,10 +619,23 @@ PY_BIND
   retention_args+=(--linux-service "$linux_profile")
 fi
 
+# Journal staging before its recovery set; admission still happens only after upstream checks.
+# The installer's inherited flock owns its lifetime; a UI receipt never does.
+activation_args=(--root "$appdir" begin --release "$target"
+  --home "$target_home" --user "$target_user")
+if [ "$system" = darwin ] && [ "$service_had_file" -eq 1 ]; then
+  activation_args+=(--plist "$service_file")
+elif [ "$system" = linux ] && [ -f "$wrapper_env_file" ]; then
+  activation_args+=(--env-file "$wrapper_env_file")
+fi
+activation_id="$("$target/.venv/bin/python" "$target/deploy/activation.py" "${activation_args[@]}")"
+
 if [ "$previous" != "$target" ]; then
   retention_generation="$(
     "$target/.venv/bin/python" "$target/deploy/release_retention.py" "${retention_args[@]}"
   )"
+  "$target/.venv/bin/python" "$target/deploy/activation.py" --root "$appdir" \
+    phase --id "$activation_id" --value waiting --generation "$retention_generation"
 fi
 
 if [ -n "$pair_code" ]; then
@@ -708,6 +734,10 @@ if [ "$service_had_file" -eq 1 ]; then
     service_was_running=1
   fi
 fi
+if [ "$service_was_running" -eq 1 ]; then
+  "$target/.venv/bin/python" "$target/deploy/activation.py" --root "$appdir" prepare --id "$activation_id"
+fi
+"$target/.venv/bin/python" "$target/deploy/activation.py" --root "$appdir" phase --id "$activation_id" --value stopping
 if [ "$system" = linux ] && [ "$service_manager" = systemd ] && [ "$service_had_file" -eq 1 ]; then
   # Check existing units even when is-active was false: an activating/restarting
   # legacy service must not bypass the barrier. A stopped unit is a no-op.
@@ -726,6 +756,7 @@ elif [ "$service_was_running" -eq 1 ]; then
   service_stopped=1
   stop_wrapper_service || die "existing wrapper could not be stopped safely"
 fi
+"$target/.venv/bin/python" "$target/deploy/activation.py" --root "$appdir" phase --id "$activation_id" --value stopped
 rollback_snapshot="$(
   mktemp -d "$rollback_root/activation-$release_name.XXXXXX"
 )"
@@ -746,6 +777,8 @@ else
     "${snapshot_args[@]}" >/dev/null
 fi
 snapshot_created=1
+"$target/.venv/bin/python" "$target/deploy/activation.py" --root "$appdir" phase --id "$activation_id" \
+  --value snapshotted --snapshot "$rollback_snapshot"
 
 if [ "$system" = darwin ]; then
   "$target/.venv/bin/python" - \
@@ -865,6 +898,7 @@ fi
 "$target/.venv/bin/python" "$target/deploy/atomic_symlink.py" "$target" "$current"
 switched=1
 activation_started="$(date +%s)"
+"$target/.venv/bin/python" "$target/deploy/activation.py" --root "$appdir" phase --id "$activation_id" --value verifying
 
 if [ "$system" = darwin ]; then
   domain="gui/$(id -u)"
@@ -932,6 +966,8 @@ elif [ -n "${linux_profile:-}" ]; then
 fi
 "$target/.venv/bin/python" "$target/deploy/install_cli.py" "${cli_args[@]}"
 activation_committed=1
+"$target/.venv/bin/python" "$target/deploy/activation.py" --root "$appdir" \
+  finish --id "$activation_id" --value succeeded
 
 # The downloaded installer owns retention, so even an older update command gets
 # the new policy. Never roll back a committed activation because cleanup defers.
