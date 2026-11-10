@@ -4,6 +4,17 @@
 
 ## Unreleased
 
+## v5.3.16
+
+Fix session recovery during application updates and simplify the update dialog. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
+
+- Show maintenance progress instead of a generic failure when signing in during an update; recover the currently viewed session after readiness is confirmed.
+- Preserve drafts, attachments and rejected messages for manual retry while keeping history readable.
+- Check automatically when the update dialog opens, show concise release highlights with expandable details, and remove manual check controls and backup notices.
+- Replace native mobile tap overlays with themed feedback while retaining keyboard focus.
+
+See the bilingual [release notes](docs/releases/v5.3.16.md).
+
 ## v5.3.15
 
 Add administrator-enabled in-app updates and fix Claude continuation details and release retention. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
