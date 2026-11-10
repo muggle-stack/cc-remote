@@ -4,6 +4,16 @@
 
 ## Unreleased
 
+## v5.3.18
+
+Allow in-app updates while independently owned, recoverable tasks continue running. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
+
+- Verify independent Claude service ownership, exact recovery records for shared Codex turns, and connected DSH native tasks instead of waiting for every session to become idle.
+- Continue waiting for Wrapper-owned queues, private tasks, in-flight operations, temporary attachments, pending Codex/DSH questions and activity whose ownership cannot be confirmed.
+- Defer automatic Claude compaction during installation and clarify the update dialog's waiting state.
+
+See the bilingual [release notes](docs/releases/v5.3.18.md).
+
 ## v5.3.17
 
 Fix session recovery after updates and consolidate global warnings in the header. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
