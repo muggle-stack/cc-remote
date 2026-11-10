@@ -1722,6 +1722,14 @@ def _cc_img_block(b: dict) -> dict | None:
 
 def extract_session_id(msg) -> str | None:
     """Pull the cc session id out of any SDK message that carries it."""
+    if isinstance(msg, (StreamEvent, AssistantMessage)):
+        # Init may have been consumed by a native control read. The first
+        # streamed answer still carries the parent's identity, including a
+        # tool-only AskUserQuestion turn which cannot reach Result until answered.
+        # A child agent's frame cannot establish its parent's routing identity.
+        if msg.parent_tool_use_id is not None:
+            return None
+        return msg.session_id or None
     if isinstance(msg, ResultMessage):
         return msg.session_id
     if isinstance(msg, SystemMessage):

@@ -177,7 +177,7 @@ class Lab:
     def fault_relay(self, scenario):
         gate = "#!/usr/bin/python3\nfrom pathlib import Path\nimport json,time\nr=Path('/opt/cc-remote')\nif json.loads((r/'current/release-manifest.json').read_text())['product_version']=='5.3.19': time.sleep(10)\n"
         watcher = Path(__file__).with_name('watch_relay.py').read_text()
-        self.python('relay', "from pathlib import Path\np=Path('/usr/local/libexec/ccr-relay-start');p.write_text(" + repr(gate) + ");p.chmod(0o755)\n"
+        self.python('relay', "from pathlib import Path\np=Path('/usr/local/libexec/ccr-relay-start');p.parent.mkdir(parents=True,exist_ok=True);p.write_text(" + repr(gate) + ");p.chmod(0o755)\n"
                     "p=Path('/etc/systemd/system/cc-remote-relay.service.d');p.mkdir(exist_ok=True);(p/'acceptance.conf').write_text('[Service]\\nExecStartPre=/usr/local/libexec/ccr-relay-start\\n')\n"
                     "Path('/opt/ccr-watch-relay.py').write_text(" + repr(watcher) + ')\n')
         self.execute('relay', ['systemctl', 'daemon-reload'])

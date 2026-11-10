@@ -31,7 +31,11 @@ function textChannel(block: TextBlock): string {
 }
 
 function canCompatibilityMatchText(block: TextBlock): boolean {
-  return block.text.length > 0 || !block.done;
+  // An empty live item may be a tool envelope, or a new assistant message
+  // whose first delta has not arrived. Neither is evidence that an older
+  // source message belongs to it, even if that is the only unmatched text.
+  // Exact message identity is matched above this compatibility path.
+  return block.text.length > 0;
 }
 
 function textAffinity(first: string, second: string): number {
@@ -362,8 +366,6 @@ function mergeBlocks(
           existingIndex = index;
         }
       }
-      if (existingIndex == null && block.text.length === 0 && !block.done
-          && candidates.length === 1) existingIndex = candidates[0];
     }
     const existing = existingIndex == null
       ? undefined : out[existingIndex] as TextBlock;

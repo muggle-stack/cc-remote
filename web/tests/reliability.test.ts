@@ -1,5 +1,6 @@
 import "./push-binding.test.ts";
 import "./session-messages.test.ts";
+import "./codex-empty-envelope.test.ts";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -2555,8 +2556,9 @@ assert.deepEqual(openEmptyMessageMerged[0].blocks.flatMap(
   (block) => block.kind === "text"
     ? [{ id: block.message_id, text: block.text }]
     : []),
-[{ id: "live-before-delta", text: "history prefix" }],
-"an open empty placeholder must retain the id targeted by future deltas");
+[{ id: "history-before-delta", text: "history prefix" },
+  { id: "live-before-delta", text: "" }],
+"an empty new message must not borrow an unrelated historical message's text");
 
 // A focus-triggered History page can use a regenerated response_item id while
 // the app-server keeps streaming deltas to the live id. Reconciliation must

@@ -96,6 +96,11 @@ async def run(config, evidence):
                             event = json.loads(await asyncio.wait_for(ws.recv(), 5))
                         except asyncio.TimeoutError:
                             continue
+                        if event.get('type') == 'wrapper_reconnected':
+                            # Like the browser, rebuild replay/question state
+                            # when only the Wrapper reconnects and our Relay
+                            # WebSocket stays open. Never resubmit a query.
+                            await send({'type': 'hello', 'role': 'client', 'cursors': cursors, 'generations': generations})
                         if event.get('type') == 'session_focus':
                             for row in report['sessions'].values():
                                 if event.get('request_id') == row['request_id']:
