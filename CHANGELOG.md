@@ -4,6 +4,16 @@
 
 ## Unreleased
 
+## v5.3.19
+
+Recover in-app updates after a lost submission acknowledgement instead of leaving the dialog stuck confirming the previous request. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
+
+- Look up the original request, including historical receipts, without starting an installer; restore progress or offer an explicit retry when no record is found.
+- Reuse the same request identity on retries and reloads, preserving submission errors and ignoring stale or mismatched responses.
+- Distinguish an unconfirmed request from an update that has not started, with a same-request retry fallback for older devices.
+
+See the bilingual [release notes](docs/releases/v5.3.19.md).
+
 ## v5.3.18
 
 Allow in-app updates while independently owned, recoverable tasks continue running. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
