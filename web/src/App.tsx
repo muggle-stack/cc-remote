@@ -60,10 +60,8 @@ import { useSidebarController } from "./sidebar-state";
 
 const BackgroundTaskControl = lazy(() => import("./components/BackgroundTaskControl"));
 import type { QueuedQueryEditor } from "./components/QueuedQueryDialog";
-import { ReconnectBanner } from "./components/ReconnectBanner";
-import { NoticeStack } from "./components/NoticeStack";
 import { HeaderFeedback } from "./components/HeaderFeedback";
-import { headerBannerKind, headerConnectionPhase, isHeaderNotice } from "./header-feedback";
+import { headerConnectionPhase, isHeaderNotice } from "./header-feedback";
 import { presentCommandProblem } from "./problem-presentation";
 const LoginForm = lazy(() => import("./components/LoginForm").then(m => ({ default: m.LoginForm })));
 import {
@@ -338,7 +336,6 @@ const AgentDetailController = lazy(() => import("./components/AgentDetailControl
 ));
 const DshPanel = lazy(() => import("./components/DshPanel"));
 const SessionDeleteSheet = lazy(() => import("./components/SessionDeleteSheet"));
-const DshConnectionNotice = lazy(() => import("./components/DshCommandFeedback").then(m => ({ default: m.DshConnectionNotice })));
 const SessionsSidebar = lazy(() => import("./components/SessionsSidebar").then(
   ({ SessionsSidebar: Sidebar }) => ({ default: Sidebar }),
 ));
@@ -546,9 +543,6 @@ export default function App() {
   const questionDraftsRef = useRef(new Map<string, QuestionDraft>());
   const artifactDirtyRef = useRef(false);
   const [, bumpHistoryImageRevision] = useReducer((value: number) => value + 1, 0);
-  const dismissBanner = useCallback((banner: string) => {
-    dispatch({ type: "dismiss_banner", banner });
-  }, []);
   const pushCoordinatorRef = useRef<PushBindingCoordinator | null>(null);
   if (pushCoordinatorRef.current === null) {
     pushCoordinatorRef.current = new PushBindingCoordinator(async (target) => (
@@ -6126,7 +6120,10 @@ export default function App() {
             </div>
             <div className="sub">{space === "work" ? "私有工作区 · " : ""}{focusedNativeSessionId ? `session ${shortSessionId(focusedEngine, focusedNativeSessionId)}` : "connected"}</div>
           </div>
-          <HeaderFeedback versionNotice={compatibleVersionNotice} maintenance={maintenanceFeedback}
+          <HeaderFeedback versionNotice={versionNotice} versionBlocked={!!versionNotice && !compatibleVersionNotice}
+            engineConnectionError={focusedEngine === "dsh" ? dshConnectionError : null}
+            pageReload={{ onReload: webUpdate.reload, updating: webUpdate.updating, message: webUpdate.message }}
+            maintenance={maintenanceFeedback}
             onOpenUpdates={() => setAppUpdateOpen(true)} update={webUpdate.id ? {
             id: webUpdate.id, version: webUpdate.version!, message: webUpdate.message,
             updating: webUpdate.updating, onReload: webUpdate.reload,
@@ -6182,23 +6179,6 @@ export default function App() {
         {appUpdateOpen && <Suspense fallback={null}><AppUpdateSheet updates={appUpdates}
           deviceName={activeDevice?.label ?? machineId} webUpdate={webUpdate}
           onClose={() => setAppUpdateOpen(false)} /></Suspense>}
-
-        {versionNotice && !compatibleVersionNotice && <div className="notice-bar attention version-notice" role="status">
-          <span className="notice-icon" aria-hidden="true"><Icon name="info" size={16} /></span>
-          <span className="notice-copy">{versionNotice}</span>
-        </div>}
-        <ReconnectBanner banner={headerBannerKind(state.banner) ? undefined : state.banner}
-          replaying={false}
-          truncated={rt.truncated}
-          busy={state.connState !== "connected" || !state.wrapperOnline
-            || rt.replaying || historyView.recovering}
-          onDismiss={dismissBanner} />
-        {focusedEngine === "dsh" && <Suspense fallback={null}><DshConnectionNotice
-          key={`${activeScopeKey}:${focusedSid}`} error={dshConnectionError} /></Suspense>}
-        <NoticeStack notices={rt.notices.filter(notice => !isHeaderNotice(notice))}
-          onDismiss={(noticeId) => {
-            if (focusedSid) dispatch({ type: "dismiss_notice", sid: focusedSid, noticeId });
-          }} />
 
         {restoringSurfaceScope === activeScopeKey ? (
           <div className="empty" role="status" aria-live="polite">

@@ -45,16 +45,18 @@ try {
   assert.equal(phase("disconnected", false, false), "disconnected",
     "an exhausted protocol recovery must not claim to still be reconnecting");
   assert.equal(headerBannerKind("操作未完成，请稍后重试。"), "failure");
-  assert.equal(headerBannerKind("通知权限未开启，设置没有更改。"), null);
-  assert.equal(headerBannerKind("客户端与服务器版本不一致，请刷新页面。"), null);
+  assert.equal(headerBannerKind("通知权限未开启，设置没有更改。"), "failure");
+  assert.equal(headerBannerKind("客户端与服务器版本不一致，请刷新页面。"), "failure");
+  assert.equal(headerBannerKind("当前操作不适用于这个会话。"), "failure");
 
   const base = { type: "notice", v: 85, ts: 1, severity: "warning", category: "runtime",
     title: "操作需要处理", message: "稍后重试" } as Notice;
-  for (const prefix of ["codex-notice-", "schedule-", "compact-"]) {
-    assert.equal(isHeaderNotice({ ...base, notice_id: prefix + "1" }), false,
-      "specialized exceptions must keep their existing top-level presentation");
+  assert.equal(isHeaderNotice({ ...base, notice_id: "codex-notice-1" }), false);
+  for (const prefix of ["schedule-", "compact-"]) {
+    assert.equal(isHeaderNotice({ ...base, notice_id: prefix + "1" }), true);
   }
-  assert.equal(isHeaderNotice({ ...base, notice_id: "security-1", category: "security" }), false);
+  assert.equal(isHeaderNotice({ ...base, notice_id: "compact-done", severity: "info" }), false);
+  assert.equal(isHeaderNotice({ ...base, notice_id: "security-1", category: "security" }), true);
   const rollback = { ...base, notice_id: "rollback-1", severity: "info",
     message: "对话：已恢复 · 代码：已恢复" } as Notice;
   assert.equal(isHeaderNotice(rollback), true);

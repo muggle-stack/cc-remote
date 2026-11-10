@@ -10,8 +10,10 @@ import {
 
 interface Props {
   update?: { id: string; version: string; message: string | null; updating: boolean; onReload: () => void };
-  /** Compatible version drift only; protocol mismatches keep their blocking banner. */
   versionNotice?: string | null;
+  versionBlocked?: boolean;
+  engineConnectionError?: string | null;
+  pageReload?: { onReload: () => void; updating: boolean; message: string | null };
   maintenance?: { id: string; label: string; message: string; tone: "info" | "warning" | "success" };
   onOpenUpdates?: () => void;
   deviceScope: string;
@@ -40,7 +42,8 @@ function SuccessExpiry({ id, paused, onExpire }: {
 /** A presentation-only status slot; hiding it never changes engine/transport state. */
 export function HeaderFeedback({
   deviceScope, sessionScope, phase, banner, bannerRevision = 0, notices,
-  onDismissBanner, onDismissNotice, update, versionNotice, maintenance, onOpenUpdates,
+  onDismissBanner, onDismissNotice, update, versionNotice, versionBlocked = false,
+  engineConnectionError, pageReload, maintenance, onOpenUpdates,
 }: Props) {
   const dialogId = useId();
   const trigger = useRef<HTMLButtonElement>(null);
@@ -58,6 +61,14 @@ export function HeaderFeedback({
   const [openFor, setOpenFor] = useState<string | null>(null);
   const scope = JSON.stringify([deviceScope, sessionScope]);
   const [position, setPosition] = useState({ top: 60, right: 12 });
+  const [engineOutage, setEngineOutage] = useState<string | null>(null);
+  const engineOutageScope = engineConnectionError ? scope : null;
+  useEffect(() => {
+    setEngineOutage(null);
+    if (!engineOutageScope) return;
+    const timer = window.setTimeout(() => setEngineOutage(engineOutageScope), 8_000);
+    return () => window.clearTimeout(timer);
+  }, [engineOutageScope]);
   const connectionItem = connectionFeedbackItem(currentConnection);
   const updateItem: HeaderFeedbackItem | null = update ? {
     id: `web-update:${update.id}`, label: "有更新", tone: "info",
@@ -66,7 +77,11 @@ export function HeaderFeedback({
   } : null;
   const versionItem: HeaderFeedbackItem | null = versionNotice ? {
     id: JSON.stringify([deviceScope, "device-version", versionNotice]),
-    label: "版本待同步", tone: "warning", message: versionNotice,
+    label: versionBlocked ? "版本不兼容" : "版本待同步", tone: "warning", message: versionNotice,
+  } : null;
+  const engineItem: HeaderFeedbackItem | null = engineConnectionError && engineOutage === scope ? {
+    id: JSON.stringify([scope, "engine-connection"]), label: "连接未恢复", tone: "warning",
+    message: "DSH 连接尚未恢复，正在自动重连。", detail: engineConnectionError,
   } : null;
   const maintenanceItem: HeaderFeedbackItem | null = maintenance ? {
     ...maintenance, id: JSON.stringify([deviceScope, maintenance.id]),
@@ -87,20 +102,22 @@ export function HeaderFeedback({
   if (commandItem?.sessionScope === sessionScope) items.push(commandItem);
   if (updateItem) items.push(updateItem);
   if (maintenanceItem) items.push(maintenanceItem);
+  if (versionBlocked && versionItem) items.push(versionItem);
   const visible = items.filter(item => !dismissed.includes(item.id)).reverse();
   if (connectionItem) visible.push(connectionItem);
+  if (engineItem) visible.push(engineItem);
   // Compatible version drift stays available without masking connection or
   // command feedback, and disappears as soon as the device versions align.
   const selected = visible.find(item => item.tone === "warning")
     ?? visible.find(item => item.tone === "info") ?? connectionItem ?? visible[0] ?? versionItem;
-  if (versionItem) visible.push(versionItem);
+  if (versionItem && !versionBlocked) visible.push(versionItem);
   const hasFeedback = !!selected;
   const open = openFor === scope && !!selected;
 
   useEffect(() => { setOpenFor(null); }, [scope, hasFeedback]);
 
   const dismiss = (item: HeaderFeedbackItem) => {
-    if (item.id === versionItem?.id) {
+    if (item.id === versionItem?.id || item.id === engineItem?.id) {
       setOpenFor(null);
       return;
     }
@@ -181,6 +198,13 @@ export function HeaderFeedback({
             <h2>{item.label}</h2>
             <p>{item.message}</p>
             {item.detail && <p className="header-feedback-extra">{item.detail}</p>}
+            {item.banner && /(?:版本.*刷新|刷新.*版本)/.test(item.banner) && pageReload && <>
+              {pageReload.message && <p>{pageReload.message}</p>}
+              <button type="button" className="header-feedback-dismiss"
+                disabled={pageReload.updating} onClick={pageReload.onReload}>
+                {pageReload.updating ? "检查中…" : "刷新页面"}
+              </button>
+            </>}
             {onOpenUpdates && [updateItem?.id, versionItem?.id, maintenanceItem?.id].includes(item.id)
               ? <button type="button" className="header-feedback-dismiss" onClick={() => {
                 setOpenFor(null); onOpenUpdates();
@@ -190,7 +214,7 @@ export function HeaderFeedback({
               {update?.updating ? "检查中…" : "更新页面"}
             </button>}
             <button type="button" className="header-feedback-dismiss" onClick={() => dismiss(item)}>
-              {item.id === versionItem?.id ? "收起详情" : item.id === updateItem?.id ? "稍后"
+              {item.id === versionItem?.id || item.id === engineItem?.id ? "收起详情" : item.id === updateItem?.id ? "稍后"
                 : item.id === connectionItem?.id && phase ? "收起提示" : "知道了"}
             </button>
           </div>)}

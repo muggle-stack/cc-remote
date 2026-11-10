@@ -390,22 +390,22 @@ export class CommandOutbox {
     return [...this.pending.values()].map((item) => item.raw);
   }
 
-  /** Insertion-ordered frames plus their explicit runtime target. Recovery uses
-   * this to make one target resident immediately before replaying that command,
-   * instead of pre-warming every target and evicting early ones at pool capacity. */
+  /** Insertion-ordered frames plus targets needing preparation for mutations.
+   * Read-only requests keep their own target in raw without a recovery switch. */
   pendingFramesWithSessionIds(): Array<{ raw: string; sid?: string }> {
     return [...this.pending.values()].map((item) => {
       try {
         const frame = JSON.parse(item.raw) as {
-          type?: unknown; sid?: unknown; turn_id?: unknown; revision?: unknown;
+          type?: unknown; sid?: unknown;
         };
-        // Archived files are private disk reads, not engine operations. A
-        // reconnect must replay the read without resuming its background sid.
-        const archiveRead = frame.type === "get_turn_file_changes"
-          || (frame.type === "get_diff" && !!frame.turn_id && !!frame.revision);
+        // Reads own their lookup/fallback behavior. Replaying a background read
+        // must never focus or resume that session (its engine/space catalog may
+        // not even have been loaded on this page).
+        const read = typeof frame.type === "string"
+          && /^(get_|list_|read_|browse_)/.test(frame.type);
         return {
           raw: item.raw,
-          ...(!archiveRead && typeof frame.sid === "string" && frame.sid ? { sid: frame.sid } : {}),
+          ...(!read && typeof frame.sid === "string" && frame.sid ? { sid: frame.sid } : {}),
         };
       } catch {
         return { raw: item.raw }; // enqueue always generated valid JSON
