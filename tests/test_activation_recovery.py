@@ -209,7 +209,8 @@ def test_recovery_launch_is_generation_fenced_and_bounded(managed, monkeypatch):
 
 
 @pytest.mark.parametrize("failure", [None, "stop", "corrupt-snapshot"])
-def test_interrupted_switch_restores_actual_database_and_configuration(managed, monkeypatch, failure):
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_interrupted_switch_restores_actual_database_and_configuration(managed, monkeypatch, failure, platform):
     root, previous, _ = managed
     value = record(root, previous, phase="verifying")
     target = Path(value["release"])
@@ -241,6 +242,13 @@ def test_interrupted_switch_restores_actual_database_and_configuration(managed, 
         if failure == "stop":
             raise ValueError("cannot confirm stop")
     monkeypatch.setattr(installer, "service", service)
+    monkeypatch.setattr(installer.sys, "platform", platform)
+    def system_command(argv, **kwargs):
+        assert argv == ["systemctl", "daemon-reload"]
+        assert kwargs["check"] and kwargs["pass_fds"] == (fd,)
+        calls.append("daemon-reload")
+        return subprocess.CompletedProcess(argv, 0)
+    monkeypatch.setattr(installer.subprocess, "run", system_command)
     monkeypatch.setattr(installer, "health", lambda v, release: calls[-1:] == ["start"] and release == str(previous))
     fd = acquire_install_lock(root)
     monkeypatch.setenv(LOCK_FD_ENV, str(fd))
@@ -253,7 +261,7 @@ def test_interrupted_switch_restores_actual_database_and_configuration(managed, 
             assert calls == ["stop"]
         else:
             assert installer.recover(root, IDENTITY) == "failed"
-            assert calls == ["stop", "start"]
+            assert calls == ["stop", *(["daemon-reload"] if platform == "linux" else []), "start"]
             assert (root / "current").resolve() == previous
             assert config.read_text() == "old service configuration\n"
             assert activation.receipt(root)["phase"] == "rolled_back"

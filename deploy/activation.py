@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -20,7 +21,58 @@ from cc_remote.update_jobs import UpdateJobs, job_id, read_json, failure_reason
 from deploy.install_lock import LOCK_FD_ENV, verify_install_lock
 
 
-def control(path: Path, request: dict, uid: int) -> dict:
+def _peer_identity(peer: socket.socket, uid: int):
+    from cc_remote.wrapper.process_scan import process_identity, process_owner_uid
+    if sys.platform == "linux":
+        pid, owner, _ = struct.unpack("3i", peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        if owner != uid:
+            raise ValueError("Wrapper control peer has the wrong owner")
+    elif sys.platform == "darwin":
+        # sys/un.h: SOL_LOCAL=0, LOCAL_PEERPID=2. The PID comes from the
+        # connected socket, never from the JSON response or a stale receipt.
+        pid = peer.getsockopt(0, 2)
+    else:
+        raise ValueError("Wrapper control peer identity is unavailable")
+    identity = process_identity(pid)
+    if identity is None or process_owner_uid(pid) != uid:
+        raise ValueError("Wrapper control peer cannot be identified")
+    return identity
+
+
+def _legacy_wrapper_release(identity, release: str) -> bool:
+    from cc_remote.wrapper.process_scan import process_command, process_environment_value
+    args = process_command(identity)
+    if not args or args[1:] not in {(b"-m", b"cc_remote.wrapper"), (b"-s", b"-m", b"cc_remote.wrapper")}:
+        return False
+    executable = Path(os.fsdecode(args[0]))
+    if sys.platform == "darwin":
+        # Framework Python execs its app binary, replacing argv[0]. Its original
+        # venv launcher remains in the kernel's process environment snapshot.
+        complete, launcher = process_environment_value(identity, "__PYVENV_LAUNCHER__")
+        if not complete:
+            return False
+        if launcher:
+            executable = Path(launcher)
+    expected = Path(release).resolve(strict=True)
+    # Do not resolve the interpreter symlink itself: different release venvs
+    # can share one Python runtime. Verify the release containing that venv.
+    if (not executable.is_absolute() or executable.name not in {"python", "python3"}
+            or executable.parent.name != "bin" or executable.parent.parent.name != ".venv"
+            or executable.parent.parent.parent.resolve(strict=True) != expected):
+        return False
+    if sys.platform == "linux":
+        cwd = Path(f"/proc/{identity.pid}/cwd").resolve(strict=True)
+    else:
+        result = subprocess.run(["/usr/sbin/lsof", "-n", "-P", "-a", "-p", str(identity.pid),
+                                 "-d", "cwd", "-Fn"], capture_output=True, text=True, timeout=5, check=True)
+        paths = [line[1:] for line in result.stdout.splitlines() if line.startswith("n")]
+        if len(paths) != 1:
+            return False
+        cwd = Path(paths[0]).resolve(strict=True)
+    return cwd == expected
+
+
+def control(path: Path, request: dict, uid: int, *, expected_release: str | None = None) -> dict:
     import stat
     info = path.lstat()
     if not stat.S_ISSOCK(info.st_mode) or info.st_uid != uid or info.st_mode & 0o077:
@@ -28,11 +80,24 @@ def control(path: Path, request: dict, uid: int) -> dict:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
         peer.settimeout(5)
         peer.connect(str(path))
+        identity = _peer_identity(peer, uid) if expected_release is not None else None
         peer.sendall(json.dumps(request).encode() + b"\n")
         with peer.makefile("rb") as stream:
             result = json.loads(stream.readline(4097))
         if not isinstance(result, dict):
             raise ValueError("invalid Wrapper control response")
+        if identity is not None:
+            from dataclasses import asdict
+            from cc_remote.wrapper.process_scan import process_identity
+            if result == {"status": "rejected", "error": "Unknown control request"}:
+                # Previous Wrappers do not implement update_status. An exact
+                # legacy rejection proves the control loop answered; only the
+                # kernel-identified Wrapper from this release may satisfy it.
+                if _legacy_wrapper_release(identity, expected_release):
+                    result = {"status": "ready", "release": expected_release, "process": asdict(identity)}
+            if (process_identity(identity.pid) != identity
+                    or result.get("status") == "ready" and result.get("process") != asdict(identity)):
+                raise ValueError("Wrapper control process changed during health inspection")
         return result
 
 
@@ -49,7 +114,7 @@ def health(value: dict, release: str) -> bool:
             return (observed["version"] == expected["product_version"] and observed["protocol"] == expected["protocol_version"]
                     and web == expected_web and pid.isdecimal() and int(pid) > 0
                     and Path(f"/proc/{pid}/cwd").resolve(strict=True) == Path(release))
-        result = control(Path(value["control_socket"]), {"op": "update_status"}, value["uid"])
+        result = control(Path(value["control_socket"]), {"op": "update_status"}, value["uid"], expected_release=release)
         return result.get("status") == "ready" and result.get("release") == release and bool(result.get("process"))
     except (OSError, ValueError, subprocess.SubprocessError):
         return False
