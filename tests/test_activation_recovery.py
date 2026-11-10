@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import pwd
 import sqlite3
 import subprocess
 import sys
@@ -182,6 +183,63 @@ def test_interrupted_journal_creation_can_settle_without_touching_service(manage
         assert activation.receipt(root)["phase"] == "unchanged"
         assert release_retention.generation(root, generation)[1]["phase"] == "aborted"
         assert config.read_text() == "original"
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("phase", sorted(activation.ACTIVE_PHASES | {"waiting"}))
+def test_direct_installer_retry_cannot_replace_unresolved_activation(managed, monkeypatch, phase):
+    root, previous, _ = managed
+    value = record(root, previous, phase=phase)
+    config = root / "service.conf"
+    config.write_text("original")
+    generation = release_retention.begin(root, Path(value["release"]), str(previous), role="wrapper", home=root,
+                                         service="fixture", service_file=config, configs=[])
+    original = {**value, "generation": generation}
+    activation.save(root, original)
+    replacement = "d" * 32
+    monkeypatch.setenv("CC_REMOTE_ACTIVATION_ID", replacement)
+    args = SimpleNamespace(root=root, release=Path(value["release"]), role="wrapper", generation=None,
+                           home=root, user=pwd.getpwuid(os.getuid()).pw_name, env_file=None, plist=None)
+    fd = acquire_install_lock(root)
+    monkeypatch.setenv(LOCK_FD_ENV, str(fd))
+    try:
+        guarded = activation.guarded(root)
+        with pytest.raises(ValueError, match="original activation must be recovered"):
+            installer.begin(args)
+        assert activation.receipt(root) == original
+        assert activation.receipt(root, IDENTITY) == original
+        assert activation.receipt(root, replacement) is None
+        assert release_retention.generation(root, generation)[1]["phase"] == "prepared"
+        assert activation.guarded(root) == guarded
+    finally:
+        os.close(fd)
+
+
+def test_installer_retry_can_begin_after_original_recovery(managed, monkeypatch):
+    root, previous, _ = managed
+    value = record(root, previous, phase="quiesced")
+    config = root / "service.conf"
+    config.write_text("original")
+    generation = release_retention.begin(root, Path(value["release"]), str(previous), role="wrapper", home=root,
+                                         service="fixture", service_file=config, configs=[])
+    activation.save(root, {**value, "generation": generation})
+    replacement = "d" * 32
+    monkeypatch.setenv("CC_REMOTE_ACTIVATION_ID", replacement)
+    monkeypatch.setattr(installer, "health", lambda *args: True)
+    monkeypatch.setattr(installer, "service", lambda *args: pytest.fail("original service remains healthy"))
+    args = SimpleNamespace(root=root, release=Path(value["release"]), role="wrapper", generation=None,
+                           home=root, user=pwd.getpwuid(os.getuid()).pw_name, env_file=None, plist=None)
+    fd = acquire_install_lock(root)
+    monkeypatch.setenv(LOCK_FD_ENV, str(fd))
+    try:
+        assert installer.recover(root, IDENTITY) == "failed"
+        assert installer.begin(args) == replacement
+        assert activation.receipt(root)["id"] == replacement
+        assert activation.receipt(root, IDENTITY)["phase"] == "unchanged"
+        assert release_retention.generation(root, generation)[1]["phase"] == "aborted"
+        assert release_retention.begin(root, Path(value["release"]), str(previous), role="wrapper", home=root,
+                                       service="fixture", service_file=config, configs=[])
     finally:
         os.close(fd)
 

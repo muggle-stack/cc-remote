@@ -136,6 +136,12 @@ def begin(args) -> str:
     target = args.release.resolve(strict=True)
     if target.parent != root / "releases":
         raise ValueError("activation target escapes releases")
+    active = activation.receipt(root)
+    if active and active.get("phase") not in activation.TERMINAL_PHASES:
+        # Direct role-installer invocations bypass update()'s recovery step.
+        # Do not replace the original pointer: its phase and generation own
+        # recovery and protect provisional state until that recovery finishes.
+        raise ValueError("original activation must be recovered before starting another installation")
     identity = job_id(os.environ.get("CC_REMOTE_UI_UPDATE_ID") or os.environ.get("CC_REMOTE_ACTIVATION_ID") or uuid.uuid4().hex)
     if activation.receipt(root, identity) is not None:
         raise ValueError("activation already has a receipt; reconcile it before retrying")
