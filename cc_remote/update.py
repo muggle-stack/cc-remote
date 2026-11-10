@@ -418,10 +418,13 @@ def update(*, role: str | None, target_version: str | None, check: bool,
             fresh = read_installation(installation.root, system, machine)
             if fresh != installation:
                 raise UpdateError("installation changed while downloading; inspect it before retrying")
-            report("ready")
             if relay:
                 report("updating_relay")
                 relay.ensure(version, target["protocol_version"], allow_protocol_change=allow_protocol_change)
+            # Downloading and reconciling the upstream transaction do not touch
+            # the local service. Admit the local switch only after they finish,
+            # rechecking any work started while the Relay was updating.
+            report("ready")
             command = ["bash", str(bundle / "deploy" / f"install-{installation.role}.sh"), str(bundle)]
             if installation.role == "relay":
                 command += ["--domain", installation.metadata["domain"]]

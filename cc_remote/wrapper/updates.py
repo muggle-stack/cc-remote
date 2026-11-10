@@ -55,7 +55,7 @@ class UIUpdates:
         if self.root is not None:
             try:
                 state = self.store().active()
-                if state and (state["phase"] in {"updating_relay", "installing", "verifying"}
+                if state and (state["phase"] in {"installing", "verifying"}
                               or state["phase"] == "unknown" and state.get("worker_pid")):
                     self.reserved = state["id"]
             except (OSError, ValueError):

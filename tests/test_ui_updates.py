@@ -550,7 +550,7 @@ def test_existing_installer_progress_waits_before_mutation(tmp_path, monkeypatch
         if phase == "ready":
             assert not marker.exists()
     updater.update(role="wrapper", target_version="4.0.1", check=False, progress=progress)
-    assert phases == ["downloading", "validating", "ready", "updating_relay", "installing", "verifying"]
+    assert phases == ["downloading", "validating", "updating_relay", "ready", "installing", "verifying"]
     assert marker.exists()
 
 
@@ -742,7 +742,7 @@ def test_installer_failure_requires_reconciliation_before_new_job(managed, monke
     "submit-timeout", "submit-disconnect", "invalid-ack", "status-timeout",
     "status-disconnect", "health-unavailable", "failed-unit", "preflight-denied",
 ])
-def test_relay_uncertainty_keeps_receipt_and_barrier(managed, monkeypatch, failure):
+def test_relay_uncertainty_preserves_transaction_without_locking_chat(managed, monkeypatch, failure):
     root, _, store = managed
     launcher.configure(root, enabled=True, allow_relay=True)
     prepare_worker(store, monkeypatch)
@@ -752,6 +752,7 @@ def test_relay_uncertainty_keeps_receipt_and_barrier(managed, monkeypatch, failu
     updates = UIUpdates(SimpleNamespace(sessions={}), root)
     requests = []
     calls = []
+    monkeypatch.setattr(update_relay.time, "sleep", lambda _: None)
     def inspect(_origin):
         if requests and failure == "health-unavailable":
             raise updater.UpdateError("Relay health check failed")
@@ -765,6 +766,10 @@ def test_relay_uncertainty_keeps_receipt_and_barrier(managed, monkeypatch, failu
         stage = "status" if "systemctl" in command else "submit" if len(command) == 7 else "preflight"
         if stage == "submit":
             requests.append(json.loads(command[-1]))
+        if stage == "status" and failure.startswith("submit-"):
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        if stage == "status" and failure == "invalid-ack":
+            return SimpleNamespace(returncode=0, stdout="LoadState=not-found\nActiveState=inactive\nSubState=dead\n", stderr="")
         if failure == f"{stage}-timeout":
             raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
         if failure == f"{stage}-disconnect" or failure == "preflight-denied" and stage == "preflight":
@@ -784,8 +789,8 @@ def test_relay_uncertainty_keeps_receipt_and_barrier(managed, monkeypatch, failu
         assert updates.reserve(identity) == {"status": "ready"}
     monkeypatch.setattr(launcher, "reserve", reserve)
     def update(**kwargs):
-        kwargs["progress"]("ready")
         kwargs["progress"]("updating_relay")
+        assert not updates.guarded()
         relay.ensure("4.0.1", 72, allow_protocol_change=False)
         pytest.fail("an uncertain Relay cannot activate the device")
     monkeypatch.setattr(launcher, "update", update)
@@ -797,21 +802,22 @@ def test_relay_uncertainty_keeps_receipt_and_barrier(managed, monkeypatch, failu
         assert not updates.guarded()
         return
 
-    assert store.active()["phase"] == "unknown"
-    assert store.active()["reason"] == "outcome_pending"
-    assert updates.guarded()
-    assert UIUpdates(SimpleNamespace(), root).guarded(), "Wrapper restart restores the reservation"
+    assert store.active()["phase"] == "failed"
+    assert store.active()["reason"] == "relay_unconfirmed"
+    assert not updates.guarded()
+    assert not UIUpdates(SimpleNamespace(), root).guarded()
     transaction = json.loads(relay.journal.read_text())
     assert transaction["complete"] is False
-    assert requests[0]["unit"] == transaction["unit"]
+    assert all(request["unit"] == transaction["unit"] for request in requests)
     before = list(calls)
-    assert launcher.launch(root, IDENTITY, "4.0.1")["phase"] == "unknown"
+    assert launcher.launch(root, IDENTITY, "4.0.1")["phase"] == "failed"
     launcher.run(root, IDENTITY)
-    assert calls == before, "neither a browser replay nor a duplicate worker may launch again"
-    with pytest.raises(ValueError, match="pending"):
-        launcher.launch(root, "b" * 32, "4.0.1")
-    assert not launcher.cancel(root, IDENTITY).get("cancel_requested")
-    assert updates.guarded()
+    assert calls == before, "the original worker must not execute again"
+    with store.lock():
+        _, created = store.create("b" * 32, "4.0.1", "4.0.0")
+    assert created, "the user can retry while retaining the upstream transaction"
+    assert json.loads(relay.journal.read_text()) == transaction
+
 
 
 def test_linux_os_job_has_system_path_and_collects_after_exit(managed, monkeypatch):
@@ -850,6 +856,8 @@ def test_restart_restores_only_an_activation_reservation(managed):
     state, _ = store.create(IDENTITY, '4.0.1', '4.0.0')
     machine = SimpleNamespace()
     store.save({**state, 'phase': 'unknown', 'reason': 'launch_unknown'})
+    assert UIUpdates(machine, root).reserved is None
+    store.save({**state, 'phase': 'updating_relay', 'worker_pid': 123})
     assert UIUpdates(machine, root).reserved is None
     store.save({**state, 'phase': 'installing', 'worker_pid': 123})
     assert UIUpdates(machine, root).reserved == IDENTITY

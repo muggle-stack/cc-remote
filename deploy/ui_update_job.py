@@ -257,7 +257,13 @@ def run(root: Path, identity: str) -> None:
     except Cancelled:
         outcome = {"phase": "cancelled", "reason": None}
     except UpdateOutcomeUnknown as exc:
-        outcome = {"phase": "unknown", "reason": "outcome_pending"}
+        # The upstream receipt remains authoritative and the next attempt will
+        # follow that same transaction. Before local activation there is no
+        # local installer to fence: do not strand chat behind a dead worker.
+        phase = store.state(identity)["phase"]
+        outcome = ({"phase": "failed", "reason": "relay_unconfirmed"}
+                   if phase in {"preparing", "downloading", "validating", "updating_relay", "waiting"}
+                   else {"phase": "unknown", "reason": "outcome_pending"})
         print(f"UI update unresolved: {exc}", file=sys.stderr, flush=True)
     except Exception as exc:
         reason = failure_reason(exc)

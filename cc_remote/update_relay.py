@@ -25,6 +25,10 @@ from deploy import relay_update_job
 from deploy.release_manifest import load_manifest
 
 
+class RelayConnectionError(UpdateError):
+    """Transport failed; a submitted command may still have been accepted."""
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         return None
@@ -154,12 +158,16 @@ class RelayUpdate:
         try:
             response = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
         except subprocess.TimeoutExpired as exc:
-            raise UpdateError(f"{operation} timed out; check your network and SSH access; a submitted job may still be running, so retry update to inspect the same transaction") from exc
+            raise RelayConnectionError(f"{operation} timed out; check your network and SSH access; a submitted job may still be running, so retry update to inspect the same transaction") from exc
         except OSError as exc:
             raise UpdateError(f"{operation}: cannot start the SSH client; check SSH installation and permissions") from exc
         if response.returncode:
             reason = ssh_reason(response.returncode, response.stderr or "")
-            raise UpdateError(f"{operation} on {self.target}: {reason}; no local activation was started; retry update to inspect any recorded transaction")
+            transport = response.returncode == 255 and not any(text in reason for text in (
+                "authentication failed", "host key verification failed", "sudo access denied",
+            ))
+            error = RelayConnectionError if transport else UpdateError
+            raise error(f"{operation} on {self.target}: {reason}; no local activation was started; retry update to inspect any recorded transaction")
         return response.stdout
 
     def _verify_host(self) -> None:
@@ -194,7 +202,7 @@ class RelayUpdate:
         try:
             status = json.loads(output).get("status")
         except (ValueError, AttributeError) as exc:
-            raise UpdateError("invalid Relay launch acknowledgement; retry update to inspect the same transaction") from exc
+            raise RelayConnectionError("invalid Relay launch acknowledgement; retry update to inspect the same transaction") from exc
         if not isinstance(status, str) or status not in {"submitted", "existing", "busy"}:
             unit = transaction["unit"]
             reason = status if isinstance(status, str) and status in {"uncertain", "launch-error", "unavailable"} else "unavailable"
@@ -298,12 +306,21 @@ class RelayUpdate:
         # Intent was persisted before SSH could deliver the launcher. A lost
         # submission/status/health response cannot prove that activation never
         # happened, nor that a failed unit finished its rollback safely.
-        try:
-            if submit:
-                self._submit(transaction)
-            self._finish(transaction)
-        except Exception as exc:
-            raise UpdateOutcomeUnknown(str(exc)) from exc
+        for attempt in range(3):
+            try:
+                if submit and attempt == 0:
+                    self._submit(transaction)
+                self._finish(transaction)
+                return
+            except RelayConnectionError as exc:
+                if attempt == 2:
+                    raise UpdateOutcomeUnknown(str(exc)) from exc
+                # Inspect the original unit first. Only its receipt-aware
+                # launcher may resubmit the SAME identity if delivery failed.
+                print("Relay connection interrupted; reconnecting to the same update transaction.", flush=True)
+                time.sleep(2 * (attempt + 1))
+            except Exception as exc:
+                raise UpdateOutcomeUnknown(str(exc)) from exc
 
 
 def installer_main(argv: list[str] | None = None) -> int:

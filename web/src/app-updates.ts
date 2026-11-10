@@ -34,6 +34,7 @@ const REASONS: Record<string, string> = {
   confirmation_unavailable: "当前设备尚不支持自动核实，可重试原请求；不会创建重复任务。",
   launch_unknown: "系统升级任务的启动结果尚未确认，需要检查原任务。",
   job_unknown: "原升级进程已无法确认，需要检查安装状态后再继续。",
+  relay_unconfirmed: "服务器更新暂未确认，设备尚未开始安装，可以继续使用。重试会核对原服务器任务，不会重复安装。",
   network: "暂时无法连接更新服务，请稍后重新检查。",
   update_failed: "更新没有完成，请检查设备上的升级记录后再继续。",
   busy: "已有更新或其他操作正在处理，请稍后检查。",

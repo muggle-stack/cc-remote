@@ -4,6 +4,7 @@ import json
 import pytest
 
 from cc_remote import update_relay
+from cc_remote import update as updater
 from cc_remote.__main__ import main
 from cc_remote.update import UpdateError
 from tests.test_update import _bundle, _installation
@@ -23,9 +24,11 @@ def test_device_update_updates_relay_first_or_skips_it_when_current(tmp_path, mo
     remote = {"version": "4.0.1" if relay_current else "4.0.0", "protocol": 72}
     monkeypatch.setattr(update_relay, "relay_release", lambda _: dict(remote))
     calls = []
+    phases = []
 
     def ssh(self, command, **kwargs):
         assert not marker.exists(), "device was activated before the Relay"
+        assert "ready" not in phases, "Relay I/O must not reserve the local Wrapper"
         calls.append(command)
         if request := launch_request(command):
             assert request["version"] == "4.0.1"
@@ -36,7 +39,9 @@ def test_device_update_updates_relay_first_or_skips_it_when_current(tmp_path, mo
         return "LoadState=loaded\nActiveState=active\nSubState=exited\nResult=success\nExecMainStatus=0\n"
 
     monkeypatch.setattr(update_relay.RelayUpdate, "_ssh", ssh)
-    assert main(["update", "--version", "4.0.1", "--relay-ssh", "operator@relay"]) == 0
+    assert updater.update(role="wrapper", target_version="4.0.1", check=False,
+                          relay_ssh="operator@relay", progress=phases.append) == 0
+    assert phases == ["downloading", "validating", "updating_relay", "ready", "installing", "verifying"]
     assert marker.exists()
     assert bool(calls) is not relay_current
     assert json.loads((installation.root / "update.json").read_text()) == {"relay_ssh": "operator@relay"}
@@ -101,6 +106,43 @@ def test_ssh_failure_before_remote_submission_is_retried_with_the_same_identity(
     assert main(["update", "--version", "4.0.1"]) == 0
     assert requests[0] == requests[1]
     assert marker.exists()
+
+
+@pytest.mark.parametrize("failure", ["before-delivery", "lost-ack", "status-disconnect"])
+def test_transient_ssh_failure_finishes_original_transaction_without_user_retry(tmp_path, monkeypatch, failure):
+    installation = _installation(tmp_path, monkeypatch)
+    mirror, marker, _ = _bundle(tmp_path, installation)
+    monkeypatch.setenv("CC_REMOTE_RELEASE_BASE_URL", mirror.as_uri())
+    remote = {"version": "4.0.0", "protocol": 72}
+    monkeypatch.setattr(update_relay, "relay_release", lambda _: dict(remote))
+    monkeypatch.setattr(update_relay.time, "sleep", lambda _: None)
+    requests, activations, statuses = [], [], []
+
+    def ssh(self, command, **kwargs):
+        if request := launch_request(command):
+            requests.append(request)
+            if failure == "before-delivery" and len(requests) == 1:
+                raise update_relay.RelayConnectionError("SSH connection reset")
+            activations.append(request["unit"])
+            remote["version"] = "4.0.1"
+            if failure == "lost-ack" and len(requests) == 1:
+                raise update_relay.RelayConnectionError("SSH acknowledgement lost")
+            return '{"status":"submitted"}'
+        if "-c" in command:
+            return '{"domain":"remote.example.test"}'
+        statuses.append(command)
+        if failure == "status-disconnect" and len(statuses) == 1:
+            raise update_relay.RelayConnectionError("SSH status response lost")
+        if not activations:
+            return "LoadState=not-found\nActiveState=inactive\nSubState=dead\n"
+        return "LoadState=loaded\nActiveState=active\nSubState=exited\nResult=success\nExecMainStatus=0\n"
+
+    monkeypatch.setattr(update_relay.RelayUpdate, "_ssh", ssh)
+    assert main(["update", "--version", "4.0.1", "--relay-ssh", "relay"]) == 0
+    assert marker.exists() and len(activations) == 1
+    assert len(requests) == (2 if failure == "before-delivery" else 1)
+    assert all(request == requests[0] for request in requests)
+    assert json.loads((installation.root / "upstream-update.json").read_text())["complete"]
 
 
 def test_legacy_missing_job_is_not_guessed_to_have_never_started(tmp_path, monkeypatch, capsys):
