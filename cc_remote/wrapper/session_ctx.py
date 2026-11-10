@@ -150,6 +150,9 @@ class SessionContext:
     # control selection to an older completed transcript row.
     claude_native_controls_dirty: bool = False
     turn_task: Optional[asyncio.Task] = None
+    # Code attachment files owned by the current runner's finally block cannot
+    # outlive a Wrapper replacement, even when its model server can.
+    transient_turn_attachment_dir: Optional[str] = None
     # Browser queue mode transfers complete Query commands here immediately.
     # The wrapper-owned drain keeps running while browsers are disconnected or
     # suspended and starts entries only after the current native turn settles.

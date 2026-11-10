@@ -12,7 +12,7 @@ assert.equal(parseUpdateJob({ ...job, id: "../../a" }), null);
 assert(!("secret" in parseUpdateJob(job)!));
 const state = parseAppUpdate({ managed: true, enabled: true, current: "5.3.14", busy_count: 2,
   latest: { version: "5.3.15", notes: "更新内容" }, job });
-assert.equal(appUpdateFeedback(state)?.label, "等待空闲");
+assert.equal(appUpdateFeedback(state)?.label, "等待更新");
 assert.equal(appUpdateFeedback({ ...state, job: null })?.label, "有更新");
 assert.equal(appUpdateFeedback({ ...state, latest: null, job: { ...state.job!, phase: "succeeded", updated_at: 1 } }, 500_000), undefined);
 assert.match(updateReason("unknown secret"), /更新没有完成/);

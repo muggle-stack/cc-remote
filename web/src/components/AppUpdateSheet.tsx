@@ -66,7 +66,7 @@ export default function AppUpdateSheet({ updates, deviceName, webUpdate, onClose
             </li>;
           })}
         </ol>
-        <p className="app-update-progress-copy">{job.phase === "waiting" ? "等待当前会话、后台任务和排队消息结束。"
+        <p className="app-update-progress-copy">{job.phase === "waiting" ? "仅等待会受更新影响的操作结束，例如排队消息或尚未完成的提交。可独立运行的任务会继续。"
           : uncertain ? "正在核实原更新任务，请勿重复安装。" : "短暂断线时更新仍会继续，完成后自动重连。"}</p>
         {job.cancel_requested && <p className="app-update-help">正在等待安全取消。</p>}
       </section> : <section aria-label="更新范围" className="app-update-versions">
@@ -92,13 +92,13 @@ export default function AppUpdateSheet({ updates, deviceName, webUpdate, onClose
     </div>
     <footer className="app-update-footer">
       <p>{readyPage ? "有未保存内容时会先提醒。" : active || recovering ? "收起窗口不会中断更新。"
-        : canInstall ? data?.busy_count ? `${data.busy_count} 项活动正在进行，安装前会等待它们结束。` : "安装前会检查当前任务。" : ""}</p>
+        : canInstall ? data?.busy_count ? `${data.busy_count} 项操作需要先完成，其余任务可继续运行。` : "安装前会检查任务能否安全继续。" : ""}</p>
       <div className="app-update-actions">
         {canCancel && <button type="button" className="app-update-later" disabled={changing || job.cancel_requested} onClick={() => void updates.cancel()}>取消更新</button>}
         <button type="button" className="app-update-later" onClick={onClose}>{active || recovering ? "收起，后台继续" : available || readyPage || pending ? "稍后" : "完成"}</button>
         {readyPage ? <button type="button" className="app-update-primary" disabled={webUpdate.updating} onClick={() => void webUpdate.reload()}>{webUpdate.updating ? "检查中…" : "刷新页面"}</button>
           : !active && !recovering && (available || pending) && <button type="button" className="app-update-primary" disabled={pending ? changing || checking : !canInstall}
-            onClick={() => target && void updates.start(target)}>{changing ? "提交中…" : pending ? "确认原更新" : data?.busy_count && canInstall ? "任务结束后更新" : `更新到 v${target}`}</button>}
+            onClick={() => target && void updates.start(target)}>{changing ? "提交中…" : pending ? "确认原更新" : data?.busy_count && canInstall ? "就绪后更新" : `更新到 v${target}`}</button>}
       </div>
     </footer>
   </CenteredSheet>;

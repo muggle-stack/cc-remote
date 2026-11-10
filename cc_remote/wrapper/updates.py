@@ -67,13 +67,22 @@ class UIUpdates:
         return UpdateJobs(self.root)
 
     def busy_count(self) -> int:
+        """Count work that would lose ownership/state when this Wrapper exits.
+
+        A live model turn is not itself an activation blocker. Only proven
+        independent owners may keep running; launch/control windows, local
+        queues and temporary attachments must still drain. This stays
+        synchronous with reserve() so new commands cannot enter between the
+        final check and the maintenance barrier.
+        """
         count = 0
         for ctx in self.machine.sessions.values():
-            tasks = [getattr(ctx, name, None) for name in
-                     ("turn_task", "codex_spontaneous_task", "auto_compact_apply_task", "queued_query_drain_task")]
+            if self._local_session_work(ctx):
+                count += 1
+                continue
+            tasks = [getattr(ctx, name, None) for name in ("turn_task", "codex_spontaneous_task")]
             backgrounds = (getattr(ctx, "codex_background_processes", None) or {}).values()
-            if (ctx.state != "idle" or ctx.queued_queries or ctx.query_lock.locked()
-                    or ctx.pending_asks or ctx.queued_query_starting_msg_id
+            if (ctx.state != "idle" or ctx.pending_asks
                     or getattr(ctx.sdk, "turn_active", False) is True
                     or (ctx.engine == "dsh" and any(child.get("activity") == "running"
                                                    for child in getattr(ctx.sdk, "children", [])))
@@ -81,17 +90,103 @@ class UIUpdates:
                     or self.machine._claude_has_background_work(ctx)
                     or any(getattr(item, "status", None) in {"running", "pending", "unknown"}
                            for item in backgrounds)):
-                count += 1
+                count += not self._independent_session(ctx)
         count += sum(not task.done() for task in getattr(self.machine, "_work_schedule_runs", ()))
         count += bool(getattr(self.machine, "_ui_schedule_scanning", False))
+        for name in ("_interactive_control_tasks", "_codex_fork_tasks", "_claude_fork_tasks", "_codex_archive_tasks"):
+            count += sum(not task.done() for task in getattr(self.machine, name, {}).values())
+        count += sum(not task.done() for task in getattr(self.machine, "_codex_terminal_persist_tasks", ()))
         scheduler = getattr(self.machine, "_command_scheduler", None)
         if scheduler is not None:
             count += sum(not p.task.done() for p in scheduler._pending.values())
         runtime = getattr(self.machine, "_dsh", None)
-        count += sum(job.status in {"running", "stopping"}
-                     for rows in getattr(runtime, "jobs", {}).values() for job in rows)
+        # Native DSH jobs are owned by its separately running server. An
+        # unavailable connection cannot establish that boundary for this check.
+        if not self._independent_dsh():
+            count += sum(job.status in {"running", "stopping"}
+                         for rows in getattr(runtime, "jobs", {}).values() for job in rows)
         count += sum(not task.done() for task in getattr(runtime, "questions", {}).values())
         return count
+
+    @staticmethod
+    def _local_session_work(ctx) -> bool:
+        return bool(
+            ctx.queued_queries or ctx.queued_query_starting_msg_id
+            or any(getattr(ctx, name).locked() for name in (
+                "query_lock", "launch_lock", "steer_lock", "queued_query_lock",
+                "permission_profile_lock", "claude_control_persist_lock", "codex_daemon_generation_lock"))
+            or any(task is not None and not task.done() for task in (
+                getattr(ctx, name, None) for name in (
+                    "auto_compact_apply_task", "queued_query_drain_task",
+                    "claude_followup_recovery_task", "claude_autonomous_interrupt_task")))
+            or ctx.transient_turn_attachment_dir or ctx.codex_steer_attachment_dirs
+            or ctx.codex_uncertain_steer or ctx.codex_pending_steer_user_identities
+            or ctx.codex_turn_start_reconciling or ctx.codex_account_handoff
+            or ctx.state in {"interrupting", "draining"}
+        )
+
+    def _independent_dsh(self) -> bool:
+        from cc_remote.wrapper.dsh_client import DshClient
+
+        runtime = getattr(self.machine, "_dsh", None)
+        client = getattr(runtime, "client", None)
+        peer = getattr(client, "_peer", None)
+        return (isinstance(client, DshClient) and not client._closed
+                and peer is not None and peer.reader is not None and not peer.reader.done()
+                and not runtime.closed and runtime.events_ready.is_set())
+
+    def _independent_session(self, ctx) -> bool:
+        if ctx.btw:
+            return False
+        sdk = ctx.sdk
+        if ctx.engine == "claude":
+            from cc_remote.claude_service.client import RemoteClient
+            from cc_remote.wrapper.sdk import SdkHandle
+
+            if not isinstance(sdk, SdkHandle) or not isinstance(sdk.client, RemoteClient):
+                return False
+            client = sdk.client
+            if (not client.id or not sdk.service_metadata
+                    or sdk.service_metadata.get("service_id") != client.id
+                    or client.connection.task is None or client.connection.task.done()
+                    or sdk._control_request_lock.locked()):
+                return False
+            # An existing service worker is not proof that a newly scheduled
+            # browser prompt has reached it. query() owns the launch lock until
+            # accepted; its original turn identity also guards preflight.
+            if ctx.turn_task is not None and not ctx.turn_task.done():
+                return bool(sdk._turn_active and sdk._turn_root_id
+                            and sdk._turn_root_id == (sdk.service_turn_metadata or {}).get("id"))
+            return True
+        if ctx.engine == "codex":
+            from cc_remote.wrapper.codex_handle import CodexHandle
+
+            if (ctx.space != "code" or not isinstance(sdk, CodexHandle)
+                    or not sdk.using_daemon_proxy or not sdk.daemon_process_generation_current
+                    or sdk.thread_id != ctx.session_id or sdk.turn_start_pending
+                    or ctx.pending_asks
+                    or any(not task.done() for task in sdk._server_request_tasks)):
+                return False
+            if (ctx.state != "idle" or sdk.turn_active
+                    or any(task is not None and not task.done()
+                           for task in (ctx.turn_task, ctx.codex_spontaneous_task))):
+                # Restart recovery only reattaches a persisted exact owner.
+                # A failed lease write must not turn a live response into an
+                # unowned/background thread after the controller restarts.
+                try:
+                    lease = self.machine._codex_turn_leases.get(ctx.key)
+                except (OSError, ValueError):
+                    return False
+                return bool(lease and sdk.turn_active and sdk.turn_id
+                            and lease.turn_id == sdk.turn_id == ctx.codex_owned_turn_id
+                            and lease.msg_id == ctx.active_msg_id == ctx.codex_owned_msg_id)
+            return True
+        if ctx.engine == "dsh":
+            from cc_remote.wrapper.dsh_runtime import DshHandle
+
+            return (isinstance(sdk, DshHandle) and sdk.connected and self._independent_dsh()
+                    and not ctx.pending_asks)
+        return False
 
     def guarded(self) -> bool:
         if self.reserved is None:
