@@ -265,6 +265,13 @@ def recover(root: Path, identity: str) -> str:
     if not value.get("generation"):
         if value["phase"] == "succeeded" and current == value["release"] and health(value, current):
             return "succeeded"
+        if current == value["previous"] == value["release"] and health(value, current):
+            # Reinstalling the same immutable release deliberately has no
+            # retention generation. A live, identity-verified original service
+            # can settle the interrupted attempt without restoring private
+            # state or claiming that every reinstall step completed.
+            finish(root, identity, "unchanged")
+            return "failed"
         if value["phase"] in {"waiting", "quiesced", "unchanged"} and current == value["previous"] and health(value, current):
             finish(root, identity, "unchanged")
             return "failed"

@@ -160,3 +160,56 @@ def test_restored_legacy_wrapper_finalizes_original_recovery(managed, monkeypatc
                        for line in requests.read_text().splitlines())
         finally:
             os.close(fd)
+
+
+@pytest.mark.parametrize("phase", ["stopping", "verifying", "recovery_required"])
+@pytest.mark.parametrize("origin", ["terminal", "ui"])
+def test_healthy_same_release_reinstall_releases_chat_without_restarting(managed, monkeypatch, phase, origin):
+    root, previous, store = managed
+    preserved = root / "private-state"
+    preserved.write_bytes(b"current live data")
+    with legacy_wrapper(previous) as (peer, child, _):
+        record(root, previous, release=str(previous), phase=phase,
+               ui_job=IDENTITY if origin == "ui" else None, **peer)
+        if origin == "ui":
+            state, _ = store.create(IDENTITY, "4.0.0", "4.0.0")
+            store.save({**state, "phase": "unknown"})
+        monkeypatch.setattr(installer, "service", lambda *args: pytest.fail("healthy service must keep running"))
+        fd = acquire_install_lock(root)
+        monkeypatch.setenv(LOCK_FD_ENV, str(fd))
+        try:
+            assert activation.guarded(root)
+            assert installer.recover(root, IDENTITY) == "failed"
+            assert activation.receipt(root)["phase"] == "unchanged"
+            assert not activation.guarded(root)
+            assert installer.recover(root, IDENTITY) == "failed"
+            assert child.poll() is None
+            assert preserved.read_bytes() == b"current live data"
+            assert release_retention.read_ledger(root)["generations"] == []
+            if origin == "ui":
+                assert store.state(IDENTITY)["phase"] == "failed"
+        finally:
+            os.close(fd)
+        assert not activation.guarded(root)
+
+
+@pytest.mark.parametrize("mismatch", ["unhealthy", "different-release"])
+def test_same_release_recovery_requires_the_original_healthy_service(managed, monkeypatch, mismatch):
+    root, previous, _ = managed
+    with legacy_wrapper(previous) as (peer, child, _):
+        record(root, previous, release=str(previous), phase="verifying", **peer)
+        if mismatch == "unhealthy":
+            child.terminate()
+            child.wait(timeout=5)
+        else:
+            (root / "current").unlink()
+            (root / "current").symlink_to(root / "releases/new")
+        monkeypatch.setattr(installer, "service", lambda *args: pytest.fail("no recovery inventory; do not guess"))
+        fd = acquire_install_lock(root)
+        monkeypatch.setenv(LOCK_FD_ENV, str(fd))
+        try:
+            with pytest.raises(ValueError, match="generation is unavailable"):
+                installer.recover(root, IDENTITY)
+            assert activation.receipt(root)["phase"] == "verifying"
+        finally:
+            os.close(fd)
