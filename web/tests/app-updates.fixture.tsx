@@ -30,7 +30,7 @@ export function Fixture() {
         if (event.type === "error") setBanner(reduce(initialState, { type: "event", event }).banner);
       },
     }, machine);
-    transport.current = ws; ws.setFocusedSid("session-a", "codex");
+    transport.current = ws; ws.setFocusedSid("session-a", "codex", "code");
     ws.setMaintenance(updatesRef.current.maintenance); ws.start();
     return () => { ws.stop(); transport.current = null; };
   }, [machine]);
@@ -47,7 +47,7 @@ export function Fixture() {
     </header>
     <main style={{ padding: 28, flex: 1 }}><p>更新会在任务结束后安装。</p>{banner && <div role="alert">{banner}</div>}
       {query.has("maintenance") && <button onClick={() => {
-        transport.current?.setFocusedSid("session-b", "codex");
+        transport.current?.setFocusedSid("session-b", "codex", "code");
         transport.current?.sendSwitchSession("session-b", "codex");
         transport.current?.sendGetHistory("session-b");
       }}>查看另一条历史</button>}

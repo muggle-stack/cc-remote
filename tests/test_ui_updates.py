@@ -96,6 +96,54 @@ def test_unknown_os_acknowledgement_is_not_retried(managed, monkeypatch, failure
     assert store.active()["id"] == IDENTITY
 
 
+@pytest.mark.asyncio
+async def test_missing_receipt_lookup_does_not_launch_and_late_retry_deduplicates(managed, monkeypatch):
+    root, _, store = managed
+    updates = UIUpdates(SimpleNamespace(), root)
+    calls = []
+    monkeypatch.setattr(launcher.subprocess, "run", lambda argv, **kw: calls.append(argv) or SimpleNamespace(returncode=0))
+    before = set(store.folder.iterdir())
+    assert await updates.handle({"op": "lookup", "job_id": IDENTITY}) == {
+        "ok": True, "job_id": IDENTITY, "receipt": "missing", "job": None,
+    }
+    assert set(store.folder.iterdir()) == before and not calls
+    # The first start may arrive AFTER the missing observation. A retry keeps
+    # its id, so it cannot create a second OS task even in this ordering.
+    first = launcher.launch(root, IDENTITY, "4.0.1")
+    assert launcher.launch(root, IDENTITY, "4.0.1") == first
+    found = await updates.handle({"op": "lookup", "job_id": IDENTITY})
+    assert found["receipt"] == "found" and found["job"]["id"] == IDENTITY
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_receipt_lookup_reads_original_terminal_job_without_changing_active(managed):
+    root, _, store = managed
+    original, _ = store.create(IDENTITY, "4.0.1", "4.0.0")
+    store.save({**original, "phase": "cancelled", "private_path": "/private/secret"})
+    latest, _ = store.create("b" * 32, "4.0.1", "4.0.0")
+    updates = UIUpdates(SimpleNamespace(), root)
+    result = await updates.handle({"op": "lookup", "job_id": IDENTITY})
+    assert result["receipt"] == "found" and result["job"]["phase"] == "cancelled"
+    assert "secret" not in json.dumps(result)
+    assert store.active()["id"] == latest["id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["malformed", "unsafe", "missing-folder"])
+async def test_receipt_read_failures_are_not_reported_as_absence(managed, fault):
+    root, _, store = managed
+    path = store.folder / f"{IDENTITY}.json"
+    if fault == "missing-folder":
+        store.folder.rename(root / "unavailable-jobs")
+    else:
+        path.write_text("{}" if fault == "unsafe" else "{")
+        if fault == "unsafe":
+            path.chmod(0o666)
+    result = await UIUpdates(SimpleNamespace(), root).handle({"op": "lookup", "job_id": IDENTITY})
+    assert result["ok"] is False and "receipt" not in result
+
+
 @pytest.mark.parametrize("identity,version", [
     ("../../escape", "4.0.1"), (IDENTITY, "4.0.1; touch /tmp/oops"),
     (IDENTITY, "4.0.1-beta"), (IDENTITY, "4.0.0"), (IDENTITY, "4.0.2"),
@@ -517,12 +565,18 @@ def test_browser_update_api_enforces_auth_origin_scope_and_strict_commands(tmp_p
         assert client.post("/api/updates/device-a", json={"op": "check"}).status_code == 403
         headers = {"Origin": cfg.public_origin}
         for request in [{"op": "shell", "argv": ["rm"]}, {"op": "start", "job_id": IDENTITY, "version": "4.0.1", "argv": []},
-                        {"op": "start", "job_id": "../escape", "version": "4.0.1"}]:
+                        {"op": "start", "job_id": "../escape", "version": "4.0.1"},
+                        {"op": "lookup", "job_id": "../escape"}, {"op": "lookup", "job_id": IDENTITY, "version": "4.0.1"}]:
             assert client.post("/api/updates/device-a", json=request, headers=headers).status_code == 400
         assert app.state.updates.request.await_count == 0
         response = client.post("/api/updates/device-a", json={"op": "check"}, headers=headers)
         assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
         app.state.updates.request.assert_awaited_once_with("device-a", {"op": "check"})
+        lookup = {"op": "lookup", "job_id": IDENTITY}
+        assert client.post("/api/updates/device-a", json=lookup).status_code == 403
+        assert client.post("/api/updates/device-b", json=lookup, headers=headers).status_code == 403
+        assert client.post("/api/updates/device-a", json=lookup, headers=headers).status_code == 200
+        app.state.updates.request.assert_awaited_with("device-a", lookup)
 
 
 def test_maintenance_roundtrip_is_independent_of_chat_protocol(tmp_path):
@@ -654,6 +708,9 @@ async def test_worker_pid_reuse_is_unknown_and_never_unblocks_installation(manag
     assert state['job']['reason'] == 'job_unknown'
     assert updates.guarded()
     assert 'worker_pid' not in state['job']
+    exact = await updates.handle({'op': 'lookup', 'job_id': IDENTITY})
+    assert exact['receipt'] == 'found' and exact['job']['phase'] == 'unknown'
+    assert exact['job']['reason'] == 'job_unknown' and 'worker_pid' not in exact['job']
     await machine._command_scheduler.close()
 
 

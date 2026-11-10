@@ -31,6 +31,7 @@ const REASONS: Record<string, string> = {
   relay_permission: "服务器也需要升级，但尚未为当前设备授权服务器升级。",
   device_unavailable: "设备未连接更新服务，或尚未安装支持应用内更新的版本。",
   outcome_pending: "尚未收到完整结果，请继续检查原更新任务。不要重复创建更新。",
+  confirmation_unavailable: "当前设备尚不支持自动核实，可重试原请求；不会创建重复任务。",
   launch_unknown: "系统升级任务的启动结果尚未确认，需要检查原任务。",
   job_unknown: "原升级进程已无法确认，需要检查安装状态后再继续。",
   network: "暂时无法连接更新服务，请稍后重新检查。",
@@ -144,7 +145,16 @@ export function appUpdateFeedback(state: AppUpdateState | null, now = Date.now()
   return undefined;
 }
 
-export interface UpdateIntent { id: string; version: string }
+export interface UpdateIntent { id: string; version: string; reason?: string }
+export type UpdateReceipt = { status: "found"; job: UpdateJob } | { status: "missing" };
+export function parseUpdateReceipt(raw: Record<string, unknown>, intent: UpdateIntent): UpdateReceipt {
+  if (raw.job_id === intent.id) {
+    if (raw.receipt === "missing" && raw.job === null) return { status: "missing" };
+    const job = parseUpdateJob(raw.job);
+    if (raw.receipt === "found" && job?.id === intent.id && job.version === intent.version) return { status: "found", job };
+  }
+  throw new Error("outcome_pending");
+}
 export class UpdateIntentStore {
   private readonly key: string;
   private readonly storage: Pick<Storage, "getItem" | "setItem" | "removeItem"> | null;
@@ -155,7 +165,9 @@ export class UpdateIntentStore {
   read(): UpdateIntent | null {
     try {
       const value = JSON.parse(this.storage?.getItem(this.key) ?? "null") as UpdateIntent | null;
-      return value && /^[a-f0-9]{32}$/.test(value.id) && validVersion(value.version) ? value : null;
+      return value && typeof value.id === "string" && /^[a-f0-9]{32}$/.test(value.id) && validVersion(value.version)
+        ? { id: value.id, version: value.version,
+          ...(typeof value.reason === "string" && value.reason.length <= 64 ? { reason: value.reason } : {}) } : null;
     } catch { return null; }
   }
   save(value: UpdateIntent) { try { this.storage?.setItem(this.key, JSON.stringify(value)); } catch { /* memory remains valid */ } }

@@ -650,10 +650,10 @@ def create_app(
                 if not isinstance(operation, str):
                     raise ValueError("invalid update operation")
                 expected = ({"op", "job_id", "version"} if operation == "start"
-                            else {"op", "job_id"} if operation == "cancel" else {"op"})
-                if operation not in {"check", "start", "cancel"} or set(command) != expected:
+                            else {"op", "job_id"} if operation in {"cancel", "lookup"} else {"op"})
+                if operation not in {"check", "start", "cancel", "lookup"} or set(command) != expected:
                     raise ValueError("invalid update operation")
-                if operation in {"start", "cancel"}:
+                if operation in {"start", "cancel", "lookup"}:
                     from cc_remote.update_jobs import job_id
                     job_id(command["job_id"])
                 if operation == "start":
