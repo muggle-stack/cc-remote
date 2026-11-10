@@ -49,21 +49,159 @@ test("application updates preserve drafts, reattach to one job and fit mobile", 
 
 test("application update retry after lost response reuses durable identity across reload", async ({ page }) => {
   const starts: string[] = [];
+  let job: Record<string, unknown> | null = { id: "b".repeat(32), version: "5.3.15", previous: "5.3.14", phase: "cancelled" };
   await page.route("**/api/updates/*", async route => {
     const body = route.request().postDataJSON();
     if (body?.op === "start") {
       starts.push(body.job_id);
       if (starts.length === 1) await route.abort("failed");
-      else await route.fulfill({ json: { ok: true, job: { id: body.job_id, version: body.version, previous: "5.3.14", phase: "waiting" } } });
+      else {
+        job = { id: body.job_id, version: body.version, previous: "5.3.14", phase: "waiting" };
+        await route.fulfill({ json: { ok: true, job } });
+      }
+    } else if (body?.op === "lookup") await route.fulfill({ json: { ok: true, job_id: body.job_id, receipt: "missing", job: null } });
+    else await route.fulfill({ json: { ...base, job } });
+  });
+  await page.goto(url); await open(page);
+  await page.getByRole("button", { name: "就绪后更新", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "更新尚未启动", exact: true })).toBeVisible();
+  expect(starts).toHaveLength(1);
+  await page.reload(); await open(page);
+  await page.getByRole("button", { name: "重试更新", exact: true }).click();
+  expect(starts).toHaveLength(2);
+  expect(starts[1]).toBe(starts[0]);
+  await expect(page.getByRole("heading", { name: "等待安全更新", exact: true })).toBeVisible();
+});
+
+test("update submission error survives successful polling and reload without automatic installation", async ({ page }) => {
+  await page.clock.install();
+  let starts = 0, lookups = 0;
+  await page.route("**/api/updates/*", async route => {
+    const body = route.request().postDataJSON();
+    if (body?.op === "start") {
+      starts++;
+      await route.fulfill({ json: { ok: false, reason: "permission_required" } });
+    } else if (body?.op === "lookup") {
+      lookups++;
+      await route.fulfill({ json: { ok: true, job_id: body.job_id, receipt: "missing", job: null } });
     } else await route.fulfill({ json: base });
   });
   await page.goto(url); await open(page);
   await page.getByRole("button", { name: "就绪后更新", exact: true }).click();
-  await expect(page.getByRole("button", { name: "确认原更新", exact: true })).toBeEnabled();
+  await expect(page.getByRole("heading", { name: "更新尚未启动" })).toBeVisible();
+  await expect(page.locator(".app-update-warning")).toContainText("升级权限");
+  const before = lookups;
+  await page.clock.fastForward(5000);
+  await expect.poll(() => lookups).toBeGreaterThan(before);
+  await expect(page.locator(".app-update-warning")).toContainText("升级权限");
   await page.reload(); await open(page);
-  await page.getByRole("button", { name: "确认原更新", exact: true }).click();
-  expect(starts).toHaveLength(2);
-  expect(starts[1]).toBe(starts[0]);
+  await expect(page.getByRole("button", { name: "重试更新", exact: true })).toBeEnabled();
+  await expect(page.locator(".app-update-warning")).toContainText("升级权限");
+  expect(starts).toBe(1);
+});
+
+test("original update receipt resolves a restored intent without replacing another active update", async ({ page }) => {
+  const id = "a".repeat(32), other = "b".repeat(32);
+  await page.addInitScript(({ id }) => localStorage.setItem("cc_remote_ui_update:device-a",
+    JSON.stringify({ id, version: "5.3.15" })), { id });
+  const commands: string[] = [];
+  await page.route("**/api/updates/*", async route => {
+    const body = route.request().postDataJSON(); commands.push(body?.op ?? "status");
+    const job = { id: body?.op === "lookup" ? id : other, version: "5.3.15", previous: "5.3.14",
+      phase: body?.op === "lookup" ? "cancelled" : "waiting" };
+    await route.fulfill({ json: body?.op === "lookup"
+      ? { ok: true, job_id: id, receipt: "found", job } : { ...base, job } });
+  });
+  await page.goto(url); await open(page);
+  await expect(page.getByRole("heading", { name: "等待安全更新" })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("cc_remote_ui_update:device-a"))).toBeNull();
+  expect(commands).toContain("lookup"); expect(commands).not.toContain("start");
+  await expect(page.getByRole("button", { name: "取消更新", exact: true })).toBeEnabled();
+});
+
+for (const phase of ["waiting", "unknown"] as const) {
+  test(`lost start acknowledgement restores exact ${phase} receipt without another start`, async ({ page }) => {
+    let job: Record<string, unknown> | null = null, original: Record<string, unknown> | null = null;
+    let starts = 0;
+    await page.route("**/api/updates/*", async route => {
+      const body = route.request().postDataJSON();
+      if (body?.op === "start") {
+        starts++;
+        original = { id: body.job_id, version: body.version, previous: "5.3.14", phase };
+        await route.abort("failed");
+      } else if (body?.op === "lookup") {
+        job = original;
+        await route.fulfill({ json: { ok: true, job_id: body.job_id, receipt: "found", job } });
+      } else await route.fulfill({ json: { ...base, job } });
+    });
+    await page.goto(url); await open(page);
+    await page.getByRole("button", { name: "就绪后更新", exact: true }).click();
+    await expect(page.getByRole("heading", { name: phase === "waiting" ? "等待安全更新" : "更新结果待确认" })).toBeVisible();
+    expect(starts).toBe(1);
+    expect(await page.evaluate(() => localStorage.getItem("cc_remote_ui_update:device-a"))).toBeNull();
+    await expect(page.getByRole("button", { name: /重试更新|重新确认|更新到 v/ })).toHaveCount(0);
+  });
+}
+
+for (const lookupFailure of ["offline", "wrong-receipt", "old-device"] as const) {
+  test(`unconfirmed update handles ${lookupFailure} without clearing its identity or submitting automatically`, async ({ page }) => {
+    const id = "a".repeat(32);
+    await page.addInitScript(({ id }) => localStorage.setItem("cc_remote_ui_update:device-a",
+      JSON.stringify({ id, version: "5.3.15" })), { id });
+    const starts: string[] = [];
+    await page.route("**/api/updates/*", async route => {
+      const body = route.request().postDataJSON();
+      if (body?.op === "lookup") {
+        if (lookupFailure === "offline") await route.abort("failed");
+        else if (lookupFailure === "old-device") await route.fulfill({ status: 400, json: { reason: "invalid_request" } });
+        else await route.fulfill({ json: { ok: true, job_id: "b".repeat(32), receipt: "missing", job: null } });
+      } else if (body?.op === "start") {
+        starts.push(body.job_id);
+        await route.fulfill({ json: { ok: true, job: { id, version: "5.3.15", previous: "5.3.14", phase: "waiting" } } });
+      } else await route.fulfill({ json: base });
+    });
+    await page.goto(url); await open(page);
+    await expect(page.getByRole("heading", { name: "更新请求待确认" })).toBeVisible();
+    const action = page.getByRole("button", { name: lookupFailure === "old-device" ? "重试更新" : "重新确认", exact: true });
+    await expect(action).toBeEnabled();
+    expect(starts).toHaveLength(0);
+    expect(JSON.parse((await page.evaluate(() => localStorage.getItem("cc_remote_ui_update:device-a")))!).id).toBe(id);
+    await action.click();
+    if (lookupFailure === "old-device") await expect.poll(() => starts).toEqual([id]);
+    else { await expect(action).toBeEnabled(); expect(starts).toHaveLength(0); }
+  });
+}
+
+test("late missing receipt cannot replace an acknowledged update after retry", async ({ page }) => {
+  const id = "a".repeat(32);
+  await page.addInitScript(({ id }) => localStorage.setItem("cc_remote_ui_update:device-a",
+    JSON.stringify({ id, version: "5.3.15" })), { id });
+  let release = () => {}, delay = false, waiting = false;
+  const delayed = new Promise<void>(resolve => { release = resolve; });
+  let job: Record<string, unknown> | null = null;
+  const starts: string[] = [];
+  await page.route("**/api/updates/*", async route => {
+    const body = route.request().postDataJSON();
+    if (body?.op === "lookup") {
+      if (delay) { waiting = true; await delayed; }
+      await route.fulfill({ json: { ok: true, job_id: id, receipt: "missing", job: null } });
+    } else if (body?.op === "start") {
+      starts.push(body.job_id);
+      job = { id, version: "5.3.15", previous: "5.3.14", phase: "waiting" };
+      await route.fulfill({ json: { ok: true, job } });
+    } else await route.fulfill({ json: { ...base, job } });
+  });
+  await page.goto(url); await open(page);
+  await expect(page.getByRole("button", { name: "重试更新", exact: true })).toBeEnabled();
+  delay = true;
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect.poll(() => waiting).toBe(true);
+  await page.getByRole("button", { name: "重试更新", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "等待安全更新" })).toBeVisible();
+  release();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("cc_remote_ui_update:device-a"))).toBeNull();
+  await expect(page.getByRole("heading", { name: "等待安全更新" })).toBeVisible();
+  expect(starts).toEqual([id]);
 });
 
 test("application update response from a previous device cannot replace current device", async ({ page }) => {

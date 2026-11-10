@@ -244,12 +244,7 @@ class UIUpdates:
                         or self.machine._local_control.server is None):
                     result.update(enabled=False, reason="control_unavailable")
                 state = store.active()
-                result["job"] = public_job(state)
-                if state and state["phase"] not in TERMINAL and state.get("worker_pid"):
-                    from cc_remote.wrapper.process_scan import process_identity
-                    worker = await asyncio.to_thread(process_identity, state["worker_pid"])
-                    if worker is None or worker.start_ticks != state.get("worker_start"):
-                        result["job"].update(phase="unknown", reason="job_unknown")
+                result["job"] = await self._public_state(state)
             except FileNotFoundError:
                 pass
             if check:
@@ -266,6 +261,30 @@ class UIUpdates:
             result["reason"] = failure_reason(exc)
         result["maintenance"] = self.guarded()
         return result
+
+    async def _public_state(self, state: dict | None) -> dict | None:
+        result = public_job(state)
+        if state and state["phase"] not in TERMINAL and state.get("worker_pid"):
+            from cc_remote.wrapper.process_scan import process_identity
+            worker = await asyncio.to_thread(process_identity, state["worker_pid"])
+            if worker is None or worker.start_ticks != state.get("worker_start"):
+                result.update(phase="unknown", reason="job_unknown")
+        return result
+
+    async def lookup(self, identity: str) -> dict:
+        """Observe an exact receipt without launching, cancelling or replacing it.
+
+        Absence is not a fence against a delayed start: clients must retain and
+        reuse this identity when the user retries, even after a missing result.
+        """
+        job_id(identity)
+        store = self.store()
+        store.validate_folder()
+        try:
+            state = store.state(identity)
+        except FileNotFoundError:
+            return {"ok": True, "job_id": identity, "receipt": "missing", "job": None}
+        return {"ok": True, "job_id": identity, "receipt": "found", "job": await self._public_state(state)}
 
     def invoke(self, operation: str, identity: str, version: str | None = None) -> dict:
         store = self.store()
@@ -301,10 +320,12 @@ class UIUpdates:
         if operation in {"check", "status"} and set(request) == {"op"}:
             return await self.status(check=operation == "check")
         required = {"op", "job_id", "version"} if operation == "start" else {"op", "job_id"}
-        if operation not in {"start", "cancel"} or set(request) != required:
+        if operation not in {"start", "cancel", "lookup"} or set(request) != required:
             return {"ok": False, "reason": "invalid_request"}
         try:
             job_id(request["job_id"])
+            if operation == "lookup":
+                return await self.lookup(request["job_id"])
             async with self.request_lock:
                 # The root launcher remains authoritative, but avoid accepting
                 # an install that cannot reach this Wrapper's idle barrier.

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { AppUpdateClient, appUpdateFeedback, newerVersion, parseAppUpdate, parseUpdateJob,
-  UpdateIntentStore, updateReason, releaseHighlights } from "../src/app-updates.ts";
+  UpdateIntentStore, updateReason, releaseHighlights, parseUpdateReceipt } from "../src/app-updates.ts";
 
 assert(newerVersion("5.10.0", "5.9.99"));
 for (const target of ["5.3.14", "5.3.13", "05.3.15", "5.3.15-beta", "$(id)"]) {
@@ -25,6 +25,19 @@ ledger.save({ id: job.id, version: job.version });
 assert.deepEqual(new UpdateIntentStore("one", adapter).read(), { id: job.id, version: job.version });
 assert.equal(new UpdateIntentStore("two", adapter).read(), null);
 ledger.clear(); assert.equal(ledger.read(), null);
+ledger.save({ id: job.id, version: job.version, reason: "permission_required" });
+assert.equal(ledger.read()?.reason, "permission_required");
+adapter.setItem("cc_remote_ui_update:one", JSON.stringify({ id: [job.id], version: job.version }));
+assert.equal(ledger.read(), null);
+assert.deepEqual(parseUpdateReceipt({ job_id: job.id, receipt: "missing", job: null }, job), { status: "missing" });
+assert.equal(parseUpdateReceipt({ job_id: job.id, receipt: "found", job }, job).status, "found");
+for (const raw of [
+  { job_id: "b".repeat(32), receipt: "missing", job: null },
+  { job_id: job.id, receipt: "missing" },
+  { job_id: job.id, receipt: "found", job: { ...job, version: "5.3.16" } },
+  { job_id: job.id, receipt: "found", job: { ...job, id: "b".repeat(32) } },
+  { job_id: job.id, receipt: "found", job: null },
+]) assert.throws(() => parseUpdateReceipt(raw, job), { message: "outcome_pending" });
 const client = new AppUpdateClient("machine/one", (async (url, init) => {
   assert.equal(url, "/api/updates/machine%2Fone");
   assert.equal(init?.credentials, "same-origin");

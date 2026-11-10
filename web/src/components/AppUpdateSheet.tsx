@@ -10,7 +10,7 @@ export default function AppUpdateSheet({ updates, deviceName, webUpdate, onClose
   updates: AppUpdatesController; deviceName: string; onClose: () => void;
   webUpdate: { version: string | null; updating: boolean; message: string | null; reload: () => Promise<void> };
 }) {
-  const { data, error, checking, changing, pending } = updates;
+  const { data, error, checking, changing, pending, pendingStatus } = updates;
   const job = data?.job;
   const active = !!job && !UPDATE_TERMINAL.has(job.phase);
   const recovering = updates.maintenance && !active;
@@ -23,12 +23,14 @@ export default function AppUpdateSheet({ updates, deviceName, webUpdate, onClose
   const canCancel = active && ["submitting", "preparing", "downloading", "validating", "waiting"].includes(job.phase);
   const readyPage = !!webUpdate.version && !active && !recovering && !pending;
   const succeeded = job?.phase === "succeeded";
-  const reason = updateReason(error || (active ? job.reason : blocked || job?.reason));
+  const retryPending = !!pending && pendingStatus !== "unconfirmed";
+  const reason = updateReason(pending && pendingStatus === "missing" && error === "outcome_pending" ? null
+    : error || (active ? job.reason : blocked || job?.reason));
   const title = recovering ? "正在确认更新进度" : active ? job.phase === "installing" ? `正在安装 ${deviceName} 更新` : UPDATE_LABELS[job.phase]
-    : pending ? "正在确认原更新结果" : readyPage ? "刷新页面即可使用新版"
+    : pending ? pendingStatus === "missing" ? "更新尚未启动" : "更新请求待确认" : readyPage ? "刷新页面即可使用新版"
     : available ? `cc-remote v${target}` : succeeded ? "更新已完成"
     : checking ? "正在检查更新" : data?.latest && data.current ? "已是最新版本" : "检查应用更新";
-  const eyebrow = recovering ? "正在更新" : active ? uncertain ? "需要确认" : "正在更新" : pending ? "请稍候"
+  const eyebrow = recovering ? "正在更新" : active ? uncertain ? "需要确认" : "正在更新" : pending ? checking ? "正在核实" : retryPending ? "可以重试" : "需要确认"
     : readyPage && succeeded ? "设备更新完成" : readyPage ? "新版页面已就绪"
     : available ? "发现新版本" : succeeded ? "更新完成" : "版本状态";
   const rows = [
@@ -50,7 +52,10 @@ export default function AppUpdateSheet({ updates, deviceName, webUpdate, onClose
         <span className={`app-update-eyebrow${succeeded && !active && !available ? " success" : ""}`}>
           {succeeded && !active && !available && <Icon name="check" size={16} />}{eyebrow}</span>
         <h3>{title}</h3>
-        <p>{recovering ? "设备正在更新，正在获取最新进度。" : active ? `目标版本 v${job.version}` : readyPage ? succeeded && data?.current === data?.relay_version ? `${deviceName} 和服务器已更新至 v${data?.current}` : "新版页面已就绪，可刷新后继续。"
+        <p>{recovering ? "设备正在更新，正在获取最新进度。" : active ? `目标版本 v${job.version}`
+          : pending ? pendingStatus === "missing" ? "设备暂未查到这次更新请求。可以重试，不会重复安装。"
+            : "尚未确认上次提交的结果，将保留原请求继续核实。"
+          : readyPage ? succeeded && data?.current === data?.relay_version ? `${deviceName} 和服务器已更新至 v${data?.current}` : "新版页面已就绪，可刷新后继续。"
           : available ? "查看本次更新内容，选择合适的时间安装。" : data?.current ? `当前设备 v${data.current}` : "正在读取设备与服务器版本…"}</p>
       </div>
       {active ? <section className="app-update-progress" aria-label="更新进度">
@@ -83,7 +88,7 @@ export default function AppUpdateSheet({ updates, deviceName, webUpdate, onClose
       <details className="app-update-details">
         <summary>{active || recovering || pending ? "更新详情" : available ? "查看完整更新说明" : "版本与更新记录"}<Icon name="chevron-right" size={18} /></summary>
         {active && <div className="app-update-record"><p>目标版本 v{job.version}</p><p>当前阶段：{UPDATE_LABELS[job.phase]}</p></div>}
-        {pending && !active && <p>正在核实原更新编号，不会创建重复任务。</p>}
+        {pending && !active && <p>重试沿用原更新请求；查询进度不会自动启动安装。</p>}
         {data?.latest?.notes && <div className="app-update-notes"><ReactMarkdown skipHtml
           allowedElements={["p", "h1", "h2", "h3", "h4", "ul", "ol", "li", "strong", "em", "code", "pre", "a", "blockquote", "hr", "br"]}
           components={{ a: ({ children, href }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a> }}
@@ -92,13 +97,14 @@ export default function AppUpdateSheet({ updates, deviceName, webUpdate, onClose
     </div>
     <footer className="app-update-footer">
       <p>{readyPage ? "有未保存内容时会先提醒。" : active || recovering ? "收起窗口不会中断更新。"
+        : pending ? "重试会保留原请求，避免重复安装。"
         : canInstall ? data?.busy_count ? `${data.busy_count} 项操作需要先完成，其余任务可继续运行。` : "安装前会检查任务能否安全继续。" : ""}</p>
       <div className="app-update-actions">
         {canCancel && <button type="button" className="app-update-later" disabled={changing || job.cancel_requested} onClick={() => void updates.cancel()}>取消更新</button>}
         <button type="button" className="app-update-later" onClick={onClose}>{active || recovering ? "收起，后台继续" : available || readyPage || pending ? "稍后" : "完成"}</button>
         {readyPage ? <button type="button" className="app-update-primary" disabled={webUpdate.updating} onClick={() => void webUpdate.reload()}>{webUpdate.updating ? "检查中…" : "刷新页面"}</button>
           : !active && !recovering && (available || pending) && <button type="button" className="app-update-primary" disabled={pending ? changing || checking : !canInstall}
-            onClick={() => target && void updates.start(target)}>{changing ? "提交中…" : pending ? "确认原更新" : data?.busy_count && canInstall ? "就绪后更新" : `更新到 v${target}`}</button>}
+            onClick={() => pending && !retryPending ? void updates.check() : target && void updates.start(target)}>{changing ? "提交中…" : pending ? checking ? "核实中…" : retryPending ? "重试更新" : "重新确认" : data?.busy_count && canInstall ? "就绪后更新" : `更新到 v${target}`}</button>}
       </div>
     </footer>
   </CenteredSheet>;
