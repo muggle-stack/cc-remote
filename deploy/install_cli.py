@@ -102,6 +102,21 @@ def install_cli(root: Path, destination: Path, *, role: str, user: str | None = 
         metadata["domain"] = domain
     else:
         raise ValueError("unknown installation role")
+    if role == "wrapper" and sys.platform == "linux" and (root / "ui-update-policy.json").exists():
+        # Refresh an already authorized fixed-root helper; keep its policy,
+        # repository, control socket and sudo rule unchanged.
+        from cc_remote.update_jobs import helper_path
+        helper = helper_path(root)
+        marker = '#!/bin/sh\n# cc-remote restricted UI update launcher.\n'
+        if not helper.is_file() or not helper.read_text().startswith(marker):
+            raise ValueError("configured UI update helper is missing or unrelated")
+        command = [str(root / "current/.venv/bin/python"), "-I", "-B",
+                   str(root / "current/deploy/ui_update_job.py"), "--root", str(root)]
+        _atomic_file(helper, (marker + 'case "$1:$#" in start:3|cancel:2|reconcile:2|observe:2) ;; *) exit 2 ;; esac\n'
+                             + 'exec ' + shlex.join(command) + ' "$@"\n').encode(), 0o755)
+        import pwd
+        from deploy.ui_update_broker import install
+        install(root, pwd.getpwnam(user))
     destination.parent.mkdir(parents=True, exist_ok=True)
     previous = destination.read_bytes() if destination.exists() else None
     previous_mode = stat.S_IMODE(destination.stat().st_mode) if previous is not None else 0o755
@@ -114,6 +129,7 @@ def install_cli(root: Path, destination: Path, *, role: str, user: str | None = 
         else:
             _atomic_file(destination, previous, previous_mode)
         raise
+
 
 
 def main() -> int:

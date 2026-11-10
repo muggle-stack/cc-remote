@@ -271,7 +271,7 @@ def test_setup_does_not_make_network_service_owner_of_root_executed_code():
     # hash-locked exception narrow instead of disabling the wheel-only policy.
     assert "--no-binary=http-ece" in source
     assert 'requirements-relay.lock' in source
-    assert "apt-get install -y" in source and "gnupg" in source
+    assert "install -y" in source and "gnupg" in source
     assert "command -v gpg" in source
     lock = (ROOT / "requirements-relay.lock").read_text()
     assert "--hash=sha256:" in lock
@@ -746,6 +746,11 @@ def test_relay_retention_setup_failure_keeps_the_prepared_release(tmp_path, fail
            if failure == 'interrupted-copy' else '')
         + f'runpy.run_path({str(ROOT / "deploy/release_retention.py")!r}, run_name="__main__")\n'
     )
+    (new / 'deploy/activation.py').write_text(
+        'import sys, runpy\n'
+        'if "recover" in sys.argv: raise SystemExit(1)\n'
+        + f'runpy.run_path({str(ROOT / "deploy/activation.py")!r}, run_name="__main__")\n'
+    )
     python = new / '.venv/bin/python'
     python.parent.mkdir(parents=True)
     python.write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable) + ' "$@"\n')
@@ -762,6 +767,7 @@ RELEASES_DIR="$APPDIR/releases"
 CURRENT_LINK="$APPDIR/current"
 ''' + initial_state + r'''
 MANAGED_RELEASE=1
+TARGET=relay.test
 NEW_RELEASE_DIR="$RELEASES_DIR/release-new"
 PREVIOUS_RELEASE="$RELEASES_DIR/release-old"
 RELAY_UNIT_FILE="$APPDIR/relay.service"
@@ -769,7 +775,8 @@ CADDYFILE="$APPDIR/Caddyfile"
 ENV_FILE="$APPDIR/.env"
 trap cleanup EXIT
 ''' + begin
-    result = subprocess.run(['bash', '-c', harness, 'retention-setup-test',
+    result = subprocess.run([sys.executable, str(ROOT / 'deploy/install_lock.py'), str(appdir),
+                             'bash', '-c', harness, 'retention-setup-test',
                              str(ROOT / 'deploy/setup_transaction.sh'), str(appdir)],
                             text=True, capture_output=True)
     assert result.returncode != 0

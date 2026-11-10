@@ -1,6 +1,23 @@
 import { expect, test } from "@playwright/test";
 
 const url = "/tests/composer-queue.html";
+test("new-chat controls retain private draft and attachments across login remount", async ({ page }) => {
+  await page.goto(`${url}?engine=claude&new=1&attachment=1`);
+  const input = page.locator("textarea");
+  await input.fill("更新期间保留的草稿");
+  await page.getByTestId("auth-remount").click();
+  await expect(input).toHaveCount(0);
+  await page.getByTestId("auth-remount").click();
+  await expect(input).toHaveValue("更新期间保留的草稿");
+  await expect(page.locator(".attach-file")).toContainText("notes.txt");
+  await input.fill("/clear");
+  await input.press("Enter");
+  await page.getByTestId("auth-remount").click();
+  await page.getByTestId("auth-remount").click();
+  await expect(input).toHaveValue("");
+  await expect(page.locator(".attach-file")).toHaveCount(0);
+  await expect(page.getByTestId("events")).toHaveText("[]");
+});
 for (const side of [false, true]) {
   for (const engine of ["claude", "codex", "dsh"]) {
     test(`${engine} ${side ? "side" : "main"} composer queues only this Tab submission`, async ({ page }) => {

@@ -22,6 +22,7 @@ const profiles = [
 ];
 const sid = "queue-fixture";
 export function Fixture() {
+  const [visible, setVisible] = useState(true);
   const [state, setState] = useState<State>("running");
   const [perm, setPerm] = useState(engine === "codex" ? "never" : work ? "acceptEdits" : "bypassPermissions");
   const [profile, setProfile] = useState<string | null>(work ? "cc_remote_work" : null);
@@ -61,7 +62,9 @@ export function Fixture() {
   return <>
     <button data-testid="state" onClick={() => setState(state === "running" ? "idle" : "running")}>Toggle state</button>
     <output data-testid="events">{JSON.stringify(events)}</output>
-    {fresh ? <NewChatView engine={engine} space={work ? "work" : "code"}
+    {fresh && <button data-testid="auth-remount" onClick={() => setVisible(value => !value)}>Toggle login</button>}
+    {fresh ? visible && <NewChatView engine={engine} space={work ? "work" : "code"}
+      draftKey={sid} draftStore={drafts}
       cwd="/tmp" controlScopeKey={`${engine}:${work}:new`} onPickCwd={() => {}}
       onGetPermissionProfiles={() => record("catalog")} permissionProfiles={profiles}
       onSend={(prompt, _images, _files, _collaboration, permission, permissionProfile, webSearch) =>

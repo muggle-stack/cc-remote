@@ -85,6 +85,7 @@ def test_wrapper_preflight_preserves_arguments_under_nounset(tmp_path, shell, ba
         "if sys.argv[1] == 'begin': print('test-generation')\n"
     )
     shutil.copyfile(recorder, target / "deploy/release_retention.py")
+    (target / "deploy/activation.py").write_text("import sys\nif 'begin' in sys.argv: print('c' * 32)\n")
     calls = tmp_path / "calls.jsonl"
     env_file = tmp_path / "wrapper.env"
     env_file.touch()
@@ -100,7 +101,7 @@ def test_wrapper_preflight_preserves_arguments_under_nounset(tmp_path, shell, ba
         "wrapper_env_file": str(env_file), "device_file": str(tmp_path / "device.json"),
         "supervisor_config": str(tmp_path / "supervisord.conf"),
         "adopt_supervisor": "1" if backend == "adopt-supervisor" else "0",
-        "linux_profile": "", "retention_generation": "",
+        "linux_profile": "", "retention_generation": "", "service_had_file": "0",
         "test_python": sys.executable, "test_recorder": str(recorder),
     }
     source = (ROOT / "deploy/install-wrapper.sh").read_text()
@@ -232,6 +233,7 @@ def test_wrapper_registration_matches_the_activation_commit(tmp_path, previous_i
         "    os.kill(os.getppid(), signal.SIGTERM)\n"
     )
     (target / "deploy/release_retention.py").write_text("raise SystemExit(1)\n")
+    (target / "deploy/activation.py").write_text("raise SystemExit(0)\n")
     (target / "bin").mkdir()
     launcher = (ROOT / "scripts/cc-remote").read_bytes()
     (target / "bin/cc-remote").write_bytes(launcher)
@@ -249,7 +251,7 @@ def test_wrapper_registration_matches_the_activation_commit(tmp_path, previous_i
         metadata.write_bytes(old_metadata)
 
     settings = {
-        "system": "darwin", "appdir": str(root), "target": str(target), "adopt_root": "",
+        "activation_id": "c" * 32, "system": "darwin", "appdir": str(root), "target": str(target), "adopt_root": "",
         "previous": str(previous) if previous_install else "", "current": str(current),
         "cli_path": str(cli), "target_user": "fixture-user", "target_home": str(tmp_path),
         "service_file": str(tmp_path / "wrapper.plist"), "service_label": "fixture-wrapper",

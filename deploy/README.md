@@ -195,8 +195,10 @@ dependencies; incomplete, stale or unrecognized sets still defer cleanup.
 Failed/incomplete acceptance or insufficient process visibility retains files and
 warns without rolling back an already committed installation. A same-version
 `cc-remote update` retries deferred retention with fresh checks, without restarting
-services or sending model messages; `--check` is read-only. An interrupted
-installation's prepared record requires explicit inspection, not automatic retry.
+services or sending model messages; `--check` is read-only. An interrupted installation's prepared record is recovered under the original
+activation identity and install lock before another update can begin. The updater
+verifies the live outcome or restores the uncommitted configuration/data snapshot;
+it never reruns an unknown installation under a new identity.
 Unknown backups/uploads and external legacy roots remain outside automatic
 deletion and still require the reviewed agent inventory below. Configuration
 backup `files.json` records each original destination, absence, owner and mode;

@@ -191,8 +191,13 @@ cleanup() {
   local exit_status=$?
   if (( ! DEPLOY_READY )); then
     rollback_deployment
-    # A restored current link alone does not prove Caddy, service and data
-    # recovery. Leave a failed managed activation prepared for inspection.
+    # Verify/finish the original transaction while still holding its install
+    # lock. The journal remains recoverable if this process itself is killed.
+    if [ -n "${ACTIVATION_ID:-}" ]; then
+      "$NEW_RELEASE_DIR/.venv/bin/python" "$NEW_RELEASE_DIR/deploy/activation.py" \
+        --root "$APPDIR" recover --id "$ACTIVATION_ID" || \
+        echo "ERROR: original Relay activation still needs recovery" >&2
+    fi
     if [ -n "$NEW_RELEASE_DIR" ]; then
       if (( RELEASE_SWITCHED || ${RETENTION_STARTED:-0} )) || [ -n "${RETENTION_GENERATION:-}" ]; then
         # A failed rollback may have left current pointing at the new release.

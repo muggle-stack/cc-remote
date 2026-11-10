@@ -54,6 +54,27 @@ def test_repeated_submission_starts_one_job_and_binds_the_receipt(server):
     assert state["launches"] == 1
 
 
+def test_verified_unchanged_server_fences_failed_request_and_allows_new_attempt(server, monkeypatch):
+    root, request, state = server
+    previous = root / "releases/old"
+    previous.mkdir(parents=True)
+    (previous / "release-manifest.json").write_text(json.dumps({"product_version": "5.0.0"}))
+    (root / "current").symlink_to(previous)
+    assert job.submit(root, request)["status"] == "submitted"
+    path = root / "update-jobs" / (request["unit"] + ".json")
+    prior = json.loads(path.read_text())
+    monkeypatch.setattr(job, "_server_health", lambda release, origin: release == previous)
+    result = job.inspect_original(root, request, prior,
+                                  {"LoadState": "loaded", "ActiveState": "failed", "SubState": "failed"}, path)
+    assert result == {"status": "failed_safe"}
+    assert job.submit(root, request) == result
+    assert state["launches"] == 1, "late original requests must not relaunch"
+    request["unit"] = "cc-remote-update-" + "b" * 32
+    state["loaded"] = False
+    assert job.submit(root, request)["status"] == "submitted"
+    assert state["launches"] == 2
+
+
 @pytest.mark.parametrize("lost_ack", [False, True])
 def test_removed_unit_or_reboot_does_not_erase_launch_evidence(server, lost_ack):
     root, request, state = server

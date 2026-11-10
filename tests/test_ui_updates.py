@@ -41,6 +41,7 @@ def isolated_login_limiter():
 
 @pytest.fixture
 def managed(tmp_path, monkeypatch):
+    monkeypatch.setenv("CC_REMOTE_UI_UPDATE_ID", "")
     root = tmp_path.resolve() / "managed"
     release = root / "releases/current-build"
     release.mkdir(parents=True)
@@ -54,6 +55,14 @@ def managed(tmp_path, monkeypatch):
     monkeypatch.setenv("CC_REMOTE_GITHUB_REPOSITORY", "fixture/releases")
     launcher.configure(root, enabled=True, control_socket=Path("/tmp/fixture-ui-update.sock"))
     return root, release, UpdateJobs(root)
+
+
+@pytest.fixture
+def installer_lock(managed):
+    from deploy.install_lock import acquire_install_lock
+    descriptor = acquire_install_lock(managed[0])
+    yield descriptor
+    os.close(descriptor)
 
 
 def test_os_job_launch_is_durable_and_replays_never_resubmit(managed, monkeypatch):
@@ -181,26 +190,22 @@ def prepare_worker(store, monkeypatch):
     monkeypatch.setattr(process_scan, "process_identity", lambda pid: SimpleNamespace(start_ticks=123))
 
 
-def test_worker_reserves_idle_boundary_and_keeps_terminal_receipt(managed, monkeypatch):
+def test_worker_leaves_admission_to_installer_and_keeps_terminal_receipt(managed, monkeypatch):
     root, _, store = managed
     prepare_worker(store, monkeypatch)
     order = []
     monkeypatch.setenv("CC_REMOTE_RELEASE_BASE_URL", "file:///untrusted")
-    def reserve(_store, identity):
-        assert identity == IDENTITY and store.state(identity)["phase"] == "waiting"
-        order.append("reserved")
     def update(**kwargs):
         assert kwargs["allow_relay_update"] is False
         assert os.environ["CC_REMOTE_GITHUB_REPOSITORY"] == "fixture/releases"
         assert "CC_REMOTE_RELEASE_BASE_URL" not in os.environ
-        for phase in ["downloading", "validating", "ready", "updating_relay", "installing", "verifying"]:
+        for phase in ["downloading", "validating", "updating_relay", "ready", "installing", "verifying"]:
             kwargs["progress"](phase)
             order.append(phase)
         return 0
-    monkeypatch.setattr(launcher, "reserve", reserve)
     monkeypatch.setattr(launcher, "update", update)
     launcher.run(root, IDENTITY)
-    assert order.index("reserved") < order.index("installing")
+    assert order.index("updating_relay") < order.index("installing")
     assert store.state(IDENTITY)["phase"] == "succeeded"
     assert store.state(IDENTITY)["cleanup_pending"] is True
     before = list(order)
@@ -245,7 +250,7 @@ def test_cancel_before_install_is_cooperative_and_never_kills_services(managed, 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("busy", ["idle", "turn", "queue", "background", "query-lock", "scheduler", "work-scan", "dsh-job",
                                   "question", "queue-start", "queue-drain", "native-turn", "dsh-child", "dsh-question"])
-async def test_reservation_checks_activity_before_blocking_new_work(managed, monkeypatch, busy):
+async def test_reservation_checks_activity_before_blocking_new_work(managed, monkeypatch, busy, installer_lock):
     root, _, store = managed
     machine, transport = _mk_machine()
     updates = UIUpdates(machine, root)
@@ -341,7 +346,7 @@ def independent_session(machine, engine):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("engine", ["claude", "codex", "dsh"])
-async def test_update_admits_independent_running_turn_and_still_blocks_new_commands(managed, engine):
+async def test_update_admits_independent_running_turn_and_still_blocks_new_commands(managed, engine, installer_lock):
     from cc_remote.protocol import Query, GetHistory, AnswerQuestion
 
     root, _, store = managed
@@ -515,7 +520,7 @@ async def test_admitted_update_keeps_service_question_and_offline_result_without
 
 
 @pytest.mark.asyncio
-async def test_native_completion_cannot_start_wrapper_compaction_after_update_reserved(managed, monkeypatch):
+async def test_native_completion_cannot_start_wrapper_compaction_after_update_reserved(managed, monkeypatch, installer_lock):
     root, _, store = managed
     machine, _ = _mk_machine()
     ctx = independent_session(machine, "claude")
@@ -631,8 +636,13 @@ def test_linux_setup_writes_only_fixed_root_validated_helper(managed, monkeypatc
     helper = tmp_path / 'libexec' / 'cc-remote-ui-update-fixture'
     monkeypatch.setattr(launcher, 'helper_path', lambda _root: helper)
     monkeypatch.setattr(launcher, 'SUDOERS_DIRECTORY', tmp_path / 'sudoers')
+    from deploy import ui_update_broker
+    units = tmp_path / 'units'
+    units.mkdir()
+    monkeypatch.setattr(ui_update_broker, 'UNIT_DIRECTORY', units)
+    monkeypatch.setattr(ui_update_broker, 'helper_path', lambda _root: helper)
     calls = []
-    monkeypatch.setattr(launcher.subprocess, 'run', lambda args, **kw: calls.append(args))
+    monkeypatch.setattr(launcher.subprocess, 'run', lambda args, **kw: calls.append(args) or SimpleNamespace(returncode=0))
     launcher.configure(root, enabled=True, allow_relay=True)
     assert calls[0][:2] == ['/usr/sbin/visudo', '-cf']
     content = helper.read_text()
@@ -642,6 +652,8 @@ def test_linux_setup_writes_only_fixed_root_validated_helper(managed, monkeypatc
     assert '--root "$' not in content
     assert (tmp_path / 'sudoers' / helper.name).stat().st_mode & 0o777 == 0o440
     assert store.policy()['allow_relay_update'] is True
+    assert 'NoNewPrivileges=yes' in (units / (helper.name + '@.service')).read_text()
+    assert 'SocketMode=0660' in (units / (helper.name + '.socket')).read_text()
     launcher.configure(root, enabled=False)
     assert store.policy()['enabled'] is False
 
@@ -653,7 +665,7 @@ def test_no_systemd_cannot_enable_or_launch_linux_job(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_guard_preserves_target_and_prevents_cold_resume(managed):
+async def test_guard_preserves_target_and_prevents_cold_resume(managed, installer_lock):
     from cc_remote.protocol import Query, SwitchSession
     root, _, store = managed
     machine, transport = _mk_machine()
@@ -673,7 +685,7 @@ async def test_guard_preserves_target_and_prevents_cold_resume(managed):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reserve_during_check", [False, True])
-async def test_catalog_network_error_does_not_release_maintenance(managed, monkeypatch, reserve_during_check):
+async def test_catalog_network_error_does_not_release_maintenance(managed, monkeypatch, reserve_during_check, installer_lock):
     root, _, store = managed
     machine, _ = _mk_machine()
     updates = UIUpdates(machine, root)
@@ -694,7 +706,7 @@ async def test_catalog_network_error_does_not_release_maintenance(managed, monke
 
 
 @pytest.mark.asyncio
-async def test_worker_pid_reuse_is_unknown_and_never_unblocks_installation(managed, monkeypatch):
+async def test_worker_pid_reuse_is_unknown_and_never_unblocks_installation(managed, monkeypatch, installer_lock):
     root, _, store = managed
     machine, _ = _mk_machine()
     machine._local_control.socket = Path(store.policy()['control_socket'])
@@ -725,7 +737,7 @@ async def test_missing_control_barrier_cannot_launch(managed, monkeypatch):
     await machine._command_scheduler.close()
 
 
-def test_installer_failure_requires_reconciliation_before_new_job(managed, monkeypatch):
+def test_installer_failure_starts_recovery_before_new_job(managed, monkeypatch):
     root, _, store = managed
     prepare_worker(store, monkeypatch)
     def fail(**kwargs):
@@ -733,7 +745,8 @@ def test_installer_failure_requires_reconciliation_before_new_job(managed, monke
         raise updater.UpdateError('installer did not complete successfully')
     monkeypatch.setattr(launcher, 'update', fail)
     launcher.run(root, IDENTITY)
-    assert store.active()['phase'] == 'unknown'
+    assert store.active()['phase'] == 'verifying'
+    assert store.active()['reason'] == 'recovering'
     with pytest.raises(ValueError, match='pending'):
         store.create('b' * 32, '4.0.1', '4.0.0')
 
@@ -785,9 +798,6 @@ def test_relay_uncertainty_preserves_transaction_without_locking_chat(managed, m
         return SimpleNamespace(returncode=0, stdout=output, stderr="")
 
     monkeypatch.setattr(update_relay.subprocess, "run", ssh)
-    def reserve(_store, identity):
-        assert updates.reserve(identity) == {"status": "ready"}
-    monkeypatch.setattr(launcher, "reserve", reserve)
     def update(**kwargs):
         kwargs["progress"]("updating_relay")
         assert not updates.guarded()
@@ -797,7 +807,7 @@ def test_relay_uncertainty_preserves_transaction_without_locking_chat(managed, m
     launcher.run(root, IDENTITY)
     if failure == "preflight-denied":
         assert store.active()["phase"] == "blocked"
-        assert store.active()["reason"] == "relay_permission"
+        assert store.active()["reason"] == "ssh_auth"
         assert not relay.journal.exists() and not requests
         assert not updates.guarded()
         return
@@ -835,6 +845,8 @@ def test_linux_os_job_has_system_path_and_collects_after_exit(managed, monkeypat
     assert calls[0][0] == '/usr/bin/systemd-run'
     assert '--collect' in calls[0] and '--no-block' in calls[0]
     assert '--setenv=PATH=/usr/sbin:/usr/bin:/sbin:/bin' in calls[0]
+    assert '--setenv=HOME=' + pwd.getpwuid(0).pw_dir in calls[0]
+    assert '--setenv=USER=' + pwd.getpwuid(0).pw_name in calls[0]
     assert calls[0][-2:] == ['run', IDENTITY]
     assert store.active()['phase'] == 'submitting'
 
@@ -851,7 +863,7 @@ def test_mac_completed_os_job_is_retired_only_after_terminal_receipt(managed, mo
     assert calls == [['/bin/launchctl', 'bootout', f'gui/{os.geteuid()}/cc-remote-ui-update-{IDENTITY}']]
 
 
-def test_restart_restores_only_an_activation_reservation(managed):
+def test_ui_receipt_alone_never_restores_an_activation_reservation(managed):
     root, _, store = managed
     state, _ = store.create(IDENTITY, '4.0.1', '4.0.0')
     machine = SimpleNamespace()
@@ -860,9 +872,9 @@ def test_restart_restores_only_an_activation_reservation(managed):
     store.save({**state, 'phase': 'updating_relay', 'worker_pid': 123})
     assert UIUpdates(machine, root).reserved is None
     store.save({**state, 'phase': 'installing', 'worker_pid': 123})
-    assert UIUpdates(machine, root).reserved == IDENTITY
+    assert UIUpdates(machine, root).reserved is None
     store.save({**state, 'phase': 'unknown', 'worker_pid': 123})
-    assert UIUpdates(machine, root).reserved == IDENTITY
+    assert UIUpdates(machine, root).reserved is None
 
 
 def test_disabling_permission_during_download_stops_before_activation(managed, monkeypatch):

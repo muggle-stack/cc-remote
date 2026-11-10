@@ -15,14 +15,14 @@ from websockets.asyncio.client import connect
 
 from cc_remote.protocol import Error
 from cc_remote.update import UpdateError, host_platform, read_installation, release_repository, version_tuple
+from cc_remote.update_errors import read_with_retry
 from cc_remote.update_jobs import (TERMINAL, UpdateJobs, failure_reason, helper_path, job_id, public_job)
 
 
 def release_catalog(repository: str | None = None) -> dict:
     request = Request(f"https://api.github.com/repos/{repository or release_repository()}/releases/latest",
                       headers={"Accept": "application/vnd.github+json", "User-Agent": "cc-remote-updater"})
-    with urlopen(request, timeout=15) as response:
-        raw = response.read(1024 * 1024 + 1)
+    raw = read_with_retry(urlopen, request, timeout=15, limit=1024 * 1024)
     if len(raw) > 1024 * 1024:
         raise UpdateError("oversized GitHub release response")
     value = json.loads(raw)
@@ -43,7 +43,9 @@ class UIUpdates:
         self.root = root or (release.parent.parent if release.parent.name == "releases"
                              and (release / "release-manifest.json").is_file() else None)
         self.task = None
+        self.recovery_task = None
         self.reserved: str | None = None
+        self.activation_admitted: str | None = None
         self.catalog = None
         self.checked_at = 0.0
         self.check_lock = asyncio.Lock()
@@ -51,15 +53,9 @@ class UIUpdates:
         self.restore_reservation()
 
     def restore_reservation(self) -> None:
-        # Recovery precedes scheduler/message startup on a new Wrapper.
-        if self.root is not None:
-            try:
-                state = self.store().active()
-                if state and (state["phase"] in {"installing", "verifying"}
-                              or state["phase"] == "unknown" and state.get("worker_pid")):
-                    self.reserved = state["id"]
-            except (OSError, ValueError):
-                pass
+        # Admission is reconstructed from the live install lock and its exact
+        # activation receipt by guarded(). UI task status cannot close chat.
+        self.reserved = None
 
     def store(self) -> UpdateJobs:
         if self.root is None:
@@ -189,9 +185,22 @@ class UIUpdates:
         return False
 
     def guarded(self) -> bool:
+        if self.root is not None:
+            from cc_remote.activation import guarded
+            try:
+                if guarded(self.root, self.activation_admitted):
+                    return True
+            except (OSError, ValueError):
+                # A corrupt receipt is not authority to disable all sessions.
+                # The installer must obtain positive admission before stopping.
+                pass
         if self.reserved is None:
             return False
         try:
+            from cc_remote.activation import install_locked
+            if not install_locked(self.root):
+                self.reserved = None
+                return False
             state = self.store().state(self.reserved)
             if state["phase"] in TERMINAL:
                 self.reserved = None
@@ -199,6 +208,21 @@ class UIUpdates:
         except (OSError, ValueError):
             pass
         return True
+
+    def reserve_activation(self, identity: str) -> dict:
+        """Common CLI/UI installer admission; no UI job or policy is required."""
+        from cc_remote.activation import install_locked, receipt
+        if self.root is None:
+            return {"status": "rejected"}
+        value = receipt(self.root)
+        if (not value or value["id"] != job_id(identity)
+                or value["phase"] not in {"waiting", "quiesced"}
+                or not install_locked(self.root)):
+            return {"status": "rejected"}
+        if self.busy_count():
+            return {"status": "busy"}
+        self.activation_admitted = identity
+        return {"status": "ready"}
 
     async def reject(self, cmd):
         if (not self.guarded() or cmd.type.startswith(("get_", "list_", "read_", "browse_"))
@@ -269,6 +293,14 @@ class UIUpdates:
             worker = await asyncio.to_thread(process_identity, state["worker_pid"])
             if worker is None or worker.start_ticks != state.get("worker_start"):
                 result.update(phase="unknown", reason="job_unknown")
+                from cc_remote import activation
+                try:
+                    running = activation.receipt(self.root)
+                    if running and running["id"] == state["id"] and activation.install_locked(self.root):
+                        result.update(phase="verifying" if running["phase"] == "verifying" else "installing",
+                                      reason="installer_running")
+                except (OSError, ValueError):
+                    pass
         return result
 
     async def lookup(self, identity: str) -> dict:
@@ -289,12 +321,34 @@ class UIUpdates:
     def invoke(self, operation: str, identity: str, version: str | None = None) -> dict:
         store = self.store()
         policy = store.policy()
-        if not policy["enabled"]:
+        if not policy["enabled"] and operation not in {"cancel", "reconcile", "observe"}:
             raise UpdateError("UI updates are disabled")
         job_id(identity)
         if version is not None:
             version_tuple(version)
         if host_platform()[0] == "linux":
+            broker = self.root / "ui-update.sock"
+            if broker.exists():
+                import socket
+                import stat
+                info = broker.lstat()
+                if not stat.S_ISSOCK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o007:
+                    raise UpdateError("unsafe update broker permissions")
+                request = {"op": operation, "id": identity}
+                if version is not None:
+                    request["version"] = version
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
+                    peer.settimeout(50)
+                    peer.connect(str(broker))
+                    peer.sendall(json.dumps(request).encode() + b"\n")
+                    with peer.makefile("rb") as stream:
+                        raw = stream.readline(32769)
+                    if len(raw) > 32768:
+                        raise UpdateError("invalid update broker response")
+                    result = json.loads(raw)
+                if not isinstance(result, dict) or type(result.get("ok")) is not bool:
+                    raise UpdateError("invalid update broker response")
+                return result
             command = ["/usr/bin/sudo", "-n", str(helper_path(self.root)), operation, identity]
         else:
             current = read_installation(self.root, *host_platform())
@@ -320,7 +374,7 @@ class UIUpdates:
         if operation in {"check", "status"} and set(request) == {"op"}:
             return await self.status(check=operation == "check")
         required = {"op", "job_id", "version"} if operation == "start" else {"op", "job_id"}
-        if operation not in {"start", "cancel", "lookup"} or set(request) != required:
+        if operation not in {"start", "cancel", "lookup", "reconcile"} or set(request) != required:
             return {"ok": False, "reason": "invalid_request"}
         try:
             job_id(request["job_id"])
@@ -347,8 +401,30 @@ class UIUpdates:
             return
         self.restore_reservation()
         self.task = asyncio.create_task(self._connect())
+        self.recovery_task = asyncio.create_task(self._recover_pending())
+
+    async def _recover_pending(self):
+        from cc_remote import activation
+        from deploy.ui_update_job import worker_alive
+        while True:
+            try:
+                state = self.store().active()
+                if state and state["phase"] not in TERMINAL:
+                    if not await asyncio.to_thread(worker_alive, state):
+                        await asyncio.to_thread(self.invoke, "observe", state["id"])
+                else:
+                    record = activation.receipt(self.root)
+                    if record and record["phase"] in activation.ACTIVE_PHASES and not activation.install_locked(self.root):
+                        await asyncio.to_thread(self.invoke, "observe", record["id"])
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass  # Keep the receipt and retry observation, never resubmit an installation.
+            await asyncio.sleep(5)
 
     async def close(self):
+        if self.recovery_task:
+            self.recovery_task.cancel()
+            await asyncio.gather(self.recovery_task, return_exceptions=True)
+            self.recovery_task = None
         if self.task:
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)

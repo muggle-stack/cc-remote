@@ -19,12 +19,13 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from cc_remote.update_errors import download_reason, endpoint, network_reason
+from cc_remote.update_errors import download_reason, endpoint, network_reason, read_with_retry
 from deploy.release_manifest import ReleaseManifestError, load_manifest
 from deploy.install_lock import LOCK_FD_ENV, InstallLockError, acquire_install_lock
 
@@ -161,8 +162,7 @@ def latest_version(repository: str) -> str:
         headers={"Accept": "application/vnd.github+json", "User-Agent": "cc-remote-updater"},
     )
     try:
-        with urlopen(request, timeout=20) as response:
-            payload = response.read(1024 * 1024 + 1)
+        payload = read_with_retry(urlopen, request, timeout=20, limit=1024 * 1024)
         if len(payload) > 1024 * 1024:
             raise ValueError("oversized response")
         data = json.loads(payload)
@@ -195,13 +195,18 @@ def release_base(repository: str, version: str) -> str:
 
 
 def _download(url: str, destination: Path, limit: int) -> None:
-    result = subprocess.run(
-        ["curl", "--fail", "--location", "--proto", "=https,file", "--proto-redir", "=https",
-         "--tlsv1.2", "--connect-timeout", "15", "--max-time", "300",
-         "--retry", "2", "--retry-max-time", "60", "--max-filesize", str(limit),
-         "--silent", "--show-error", "--write-out", "%{http_code}", "--output", str(destination), url],
-        check=False, capture_output=True, text=True,
-    )
+    for attempt in range(3):
+        result = subprocess.run(
+            ["curl", "--fail", "--location", "--proto", "=https,file", "--proto-redir", "=https",
+             "--tlsv1.2", "--connect-timeout", "15", "--max-time", "300", "--max-filesize", str(limit),
+             "--silent", "--show-error", "--write-out", "%{http_code}", "--output", str(destination), url],
+            check=False, capture_output=True, text=True,
+        )
+        transient = (result.returncode in {5, 6, 7, 28, 35, 52, 55, 56}
+                     or result.returncode == 22 and result.stdout.strip() in {"408", "429", "500", "502", "503", "504"})
+        if not transient or attempt == 2:
+            break
+        time.sleep(0.5 * (attempt + 1))
     if result.returncode:
         reason = download_reason(result.returncode, result.stdout.strip())
         raise UpdateError(f"download failed for {destination.name} from {endpoint(url)}: {reason}; no service was changed")
@@ -357,6 +362,26 @@ def update(*, role: str | None, target_version: str | None, check: bool,
         raise UpdateError("run macOS updates as the desktop user, without sudo")
     with (nullcontext() if check else update_lock(installation.root)) as lock_descriptor:
         if not check:
+            from cc_remote import activation
+            from deploy.activation import recover
+            pending = activation.receipt(installation.root)
+            uncommitted = False
+            if pending and pending["phase"] == "succeeded" and pending.get("generation"):
+                from deploy.release_retention import generation
+                uncommitted = generation(installation.root, pending["generation"])[1]["phase"] == "prepared"
+            if pending and (pending["phase"] not in activation.TERMINAL_PHASES or uncommitted):
+                # Both terminal and UI retries settle the original switch
+                # while holding its installation lock, before downloading or
+                # launching another installer.
+                prior_fd = os.environ.get(LOCK_FD_ENV)
+                os.environ[LOCK_FD_ENV] = str(lock_descriptor)
+                try:
+                    recover(installation.root, pending["id"])
+                finally:
+                    if prior_fd is None:
+                        os.environ.pop(LOCK_FD_ENV, None)
+                    else:
+                        os.environ[LOCK_FD_ENV] = prior_fd
             # A switched current link is provisional until its installer releases
             # the lock. Re-read it before even reporting a no-op as successful.
             fresh = read_installation(installation.root, system, machine)

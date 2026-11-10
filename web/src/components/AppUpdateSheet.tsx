@@ -101,6 +101,7 @@ export default function AppUpdateSheet({ updates, deviceName, webUpdate, onClose
         : canInstall ? data?.busy_count ? `${data.busy_count} 项操作需要先完成，其余任务可继续运行。` : "安装前会检查任务能否安全继续。" : ""}</p>
       <div className="app-update-actions">
         {canCancel && <button type="button" className="app-update-later" disabled={changing || job.cancel_requested} onClick={() => void updates.cancel()}>取消更新</button>}
+        {uncertain && <button type="button" className="app-update-primary" disabled={changing} onClick={() => void updates.recover()}>{changing ? "核对中…" : "重新核对并恢复"}</button>}
         <button type="button" className="app-update-later" onClick={onClose}>{active || recovering ? "收起，后台继续" : available || readyPage || pending ? "稍后" : "完成"}</button>
         {readyPage ? <button type="button" className="app-update-primary" disabled={webUpdate.updating} onClick={() => void webUpdate.reload()}>{webUpdate.updating ? "检查中…" : "刷新页面"}</button>
           : !active && !recovering && (available || pending) && <button type="button" className="app-update-primary" disabled={pending ? changing || checking : !canInstall}

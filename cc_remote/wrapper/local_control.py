@@ -91,6 +91,15 @@ class LocalControl:
             self.lock_fd = None
 
     async def handle(self, request: object) -> dict:
+        if isinstance(request, dict) and request == {"op": "update_status"}:
+            from cc_remote.wrapper.process_scan import process_identity
+            from dataclasses import asdict
+            identity = process_identity(os.getpid())
+            return {"status": "ready", "release": str(Path(__file__).resolve().parents[2]),
+                    "process": asdict(identity) if identity else None}
+        if (isinstance(request, dict) and set(request) == {"op", "id"}
+                and request["op"] == "reserve_activation"):
+            return self.machine._ui_updates.reserve_activation(request["id"])
         if (isinstance(request, dict) and set(request) == {"op", "id"}
                 and request["op"] == "reserve_ui_update"):
             return self.machine._ui_updates.reserve(request["id"])

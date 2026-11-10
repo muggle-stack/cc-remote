@@ -1,10 +1,33 @@
 """Actionable updater diagnostics without echoing URLs, credentials or stderr."""
 from __future__ import annotations
 
+import errno
 import socket
 import ssl
+import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
+
+
+def read_with_retry(open_request, request, *, timeout: int, limit: int) -> bytes:
+    """Bounded retries for read-only metadata; never retry authentication errors."""
+    for attempt in range(3):
+        try:
+            with open_request(request, timeout=timeout) as response:
+                return response.read(limit + 1)
+        except OSError as exc:
+            cause = exc.reason if isinstance(exc, URLError) else exc
+            transient = (
+                isinstance(exc, HTTPError) and exc.code in {408, 429, 500, 502, 503, 504}
+                or isinstance(cause, (TimeoutError, ConnectionError, ssl.SSLEOFError))
+                or isinstance(cause, socket.gaierror) and cause.errno == socket.EAI_AGAIN
+                or isinstance(cause, OSError) and cause.errno in {errno.EHOSTUNREACH, errno.ENETUNREACH}
+            ) and not isinstance(cause, ssl.SSLCertVerificationError)
+            if attempt == 2 or not transient:
+                raise
+            time.sleep(0.5 * (attempt + 1))
+    raise AssertionError("unreachable metadata retry")
+
 
 
 def endpoint(url: str) -> str:

@@ -87,6 +87,8 @@ def test_ssh_failure_before_remote_submission_is_retried_with_the_same_identity(
 
     def ssh(self, command, **kwargs):
         if request := launch_request(command):
+            if request.get("operation") == "inspect":
+                return '{"status":"missing"}'
             requests.append(request)
             if len(requests) == 1:
                 raise UpdateError("SSH connection refused before command delivery")
@@ -120,6 +122,8 @@ def test_transient_ssh_failure_finishes_original_transaction_without_user_retry(
 
     def ssh(self, command, **kwargs):
         if request := launch_request(command):
+            if request.get("operation") == "inspect":
+                return '{"status":"missing"}'
             requests.append(request)
             if failure == "before-delivery" and len(requests) == 1:
                 raise update_relay.RelayConnectionError("SSH connection reset")
@@ -213,3 +217,32 @@ def test_legacy_relay_requires_web_and_protocol_to_agree(monkeypatch):
     payloads["/cc-remote-build.json"]["protocol"] = 73
     with pytest.raises(UpdateError, match="inconsistent"):
         update_relay.relay_release("https://relay")
+
+
+def test_verified_server_rollback_finishes_old_intent_and_allows_real_retry(tmp_path, monkeypatch):
+    installation = _installation(tmp_path, monkeypatch)
+    mirror, marker, _ = _bundle(tmp_path, installation)
+    monkeypatch.setenv("CC_REMOTE_RELEASE_BASE_URL", mirror.as_uri())
+    remote = {"version": "4.0.0", "protocol": 72}
+    monkeypatch.setattr(update_relay, "relay_release", lambda _: dict(remote))
+    monkeypatch.setattr(update_relay.time, "sleep", lambda _: None)
+    launches = []
+    def ssh(self, command, **kwargs):
+        if request := launch_request(command):
+            if request.get("operation") == "inspect":
+                return '{"status":"failed_safe"}'
+            launches.append(request["unit"])
+            return '{"status":"submitted"}'
+        if "-c" in command:
+            return '{"domain":"remote.example.test"}'
+        if len(launches) == 1:
+            return "LoadState=loaded\nActiveState=failed\nSubState=failed\nResult=exit-code\nExecMainStatus=1\n"
+        remote["version"] = "4.0.1"
+        return "LoadState=loaded\nActiveState=active\nSubState=exited\nResult=success\nExecMainStatus=0\n"
+    monkeypatch.setattr(update_relay.RelayUpdate, "_ssh", ssh)
+    assert main(["update", "--version", "4.0.1", "--relay-ssh", "relay"]) == 1
+    original = json.loads((installation.root / "upstream-update.json").read_text())
+    assert original["complete"] and original["outcome"] == "failed"
+    assert not marker.exists()
+    assert main(["update", "--version", "4.0.1"]) == 0
+    assert len(set(launches)) == 2 and marker.exists()

@@ -19,7 +19,7 @@ import uuid
 from dotenv import dotenv_values
 
 from cc_remote.update import Installation, UpdateError, UpdateOutcomeUnknown, version_tuple
-from cc_remote.update_errors import endpoint, network_reason, ssh_reason
+from cc_remote.update_errors import endpoint, network_reason, ssh_reason, read_with_retry
 from deploy.install_cli import _atomic_file
 from deploy import relay_update_job
 from deploy.release_manifest import load_manifest
@@ -27,6 +27,10 @@ from deploy.release_manifest import load_manifest
 
 class RelayConnectionError(UpdateError):
     """Transport failed; a submitted command may still have been accepted."""
+
+
+class RelayUpdateFailed(UpdateError):
+    """The original server transaction ended and its healthy state was verified."""
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -71,8 +75,7 @@ def relay_origin(installation: Installation) -> str:
 def _get_json(url: str) -> dict:
     try:
         request = Request(url, headers={"Cache-Control": "no-cache", "User-Agent": "cc-remote-updater"})
-        with build_opener(_NoRedirect).open(request, timeout=15) as response:
-            payload = response.read(65537)
+        payload = read_with_retry(build_opener(_NoRedirect).open, request, timeout=15, limit=65536)
         if len(payload) > 65536:
             raise ValueError("oversized response")
         value = json.loads(payload)
@@ -178,9 +181,17 @@ class RelayUpdate:
             "i=read_installation(Path('/opt/cc-remote'),*host_platform());"
             "print(json.dumps({'domain':i.metadata['domain'],'version':i.manifest['product_version']}))"
         )
+        for attempt in range(3):
+            try:
+                output = self._ssh(["sudo", "-n", "/opt/cc-remote/current/.venv/bin/python",
+                                    "-I", "-c", script], operation="Relay SSH host verification")
+                break
+            except RelayConnectionError:
+                if attempt == 2:
+                    raise
+                time.sleep(0.5 * (attempt + 1))
         try:
-            info = json.loads(self._ssh(["sudo", "-n", "/opt/cc-remote/current/.venv/bin/python",
-                                         "-I", "-c", script], operation="Relay SSH host verification"))
+            info = json.loads(output)
         except (ValueError, TypeError) as exc:
             raise UpdateError("cannot verify the SSH host's managed Relay installation") from exc
         if not isinstance(info, dict) or info.get("domain") != urlsplit(self.origin).hostname:
@@ -189,9 +200,12 @@ class RelayUpdate:
     def _write_transaction(self, transaction: dict) -> None:
         _atomic_file(self.journal, (json.dumps(transaction, sort_keys=True) + "\n").encode(), 0o600)
 
-    def _submit(self, transaction: dict) -> None:
+    def _remote_receipt(self, transaction: dict, *, inspect: bool = False) -> str:
         request = {key: transaction[key] for key in ("unit", "version", "protocol", "allow_protocol_change")}
         request["domain"] = urlsplit(self.origin).hostname
+        request["origin"] = self.origin
+        if inspect:
+            request["operation"] = "inspect"
         # Send the small stdlib-only launcher so older Relays need no separate
         # bootstrap deployment. The remote receipt serializes lost-SSH retries.
         script = Path(relay_update_job.__file__).read_text()
@@ -203,7 +217,11 @@ class RelayUpdate:
             status = json.loads(output).get("status")
         except (ValueError, AttributeError) as exc:
             raise RelayConnectionError("invalid Relay launch acknowledgement; retry update to inspect the same transaction") from exc
-        if not isinstance(status, str) or status not in {"submitted", "existing", "busy"}:
+        return status if isinstance(status, str) else "unavailable"
+
+    def _submit(self, transaction: dict) -> None:
+        status = self._remote_receipt(transaction)
+        if status not in {"submitted", "existing", "busy", "succeeded", "failed_safe"}:
             unit = transaction["unit"]
             reason = status if isinstance(status, str) and status in {"uncertain", "launch-error", "unavailable"} else "unavailable"
             raise UpdateError(
@@ -232,6 +250,22 @@ class RelayUpdate:
                                 "--property=LoadState,ActiveState,SubState,Result,ExecMainStatus"],
                                operation="Relay update status check")
             state = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+            if transaction.get("launch_receipt") == 1 and (state.get("ActiveState") == "failed" or state.get("LoadState") == "not-found"):
+                outcome = self._remote_receipt(transaction, inspect=True)
+                if outcome in {"running", "recovering", "busy"}:
+                    time.sleep(2)
+                    continue
+                if outcome == "failed_safe":
+                    self.inspect()  # The original server proved identity; also verify the public route.
+                    self._write_transaction({**transaction, "complete": True, "outcome": "failed"})
+                    raise RelayUpdateFailed("Relay update failed and the previous healthy installation was restored; retry is available")
+                if outcome == "succeeded":
+                    info = self.inspect()
+                    if info["version"] == transaction["version"] and info["protocol"] == transaction["protocol"]:
+                        self._write_transaction({**transaction, "complete": True})
+                        return
+                if outcome not in {"missing", "succeeded"}:
+                    raise UpdateError("original Relay recovery could not be verified; no second update was submitted")
             if state.get("LoadState") != "loaded":
                 if state.get("LoadState") == "not-found" and transaction.get("launch_receipt") == 1:
                     # The server submits only if neither its receipt nor the unit
@@ -319,6 +353,8 @@ class RelayUpdate:
                 # launcher may resubmit the SAME identity if delivery failed.
                 print("Relay connection interrupted; reconnecting to the same update transaction.", flush=True)
                 time.sleep(2 * (attempt + 1))
+            except RelayUpdateFailed:
+                raise
             except Exception as exc:
                 raise UpdateOutcomeUnknown(str(exc)) from exc
 
