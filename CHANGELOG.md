@@ -4,6 +4,16 @@
 
 ## Unreleased
 
+## v5.3.17
+
+Fix session recovery after updates and consolidate global warnings in the header. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
+
+- Replay background and historical reads without switching sessions; require a known engine and Work/Code route for recovery.
+- Restore the focused session before replaying live file diffs, previews and other reads that require a resident context.
+- Move global warnings, conversation notices, version differences and prolonged DSH connection errors into the header status entry, retaining details and update actions.
+
+See the bilingual [release notes](docs/releases/v5.3.17.md).
+
 ## v5.3.16
 
 Fix session recovery during application updates and simplify the update dialog. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
