@@ -60,3 +60,22 @@ assert.equal(finalTimeline.filter(block => block.kind === "text"
   && block.text === opening.text).length, 1, "settling the task preserves the same single opening");
 
 console.log("Codex empty tool-envelope history regressions passed");
+
+const callback: Turn = { id: "callback", prompt: "", done: true, blocks: [opening] };
+const insertedUser: Turn = { id: "native-user", clientMsgId: "browser-user", prompt: "怎么说？",
+  done: false, blocks: [{ ...opening, message_id: "user-answer", text: "reply" }] };
+for (const collapsed of [false, true]) {
+  const stale: Turn = { ...callback, done: false, clientMsgId: insertedUser.clientMsgId,
+    ...(collapsed ? { prompt: insertedUser.prompt, historyTurnId: insertedUser.id,
+      blocks: [...callback.blocks, ...insertedUser.blocks] } : {}) };
+  for (const refreshed of [mergeInitialHistory([callback, insertedUser],
+    collapsed ? [stale] : [stale, insertedUser],
+    { preserveLiveTailOpen: true, reconcileReplayOrphans: true, activeOwnerId: insertedUser.id })]) {
+    assert.deepEqual(refreshed.map(turn => [turn.id, turn.clientMsgId, turn.prompt]),
+      [[callback.id, undefined, ""], [insertedUser.id, insertedUser.clientMsgId, insertedUser.prompt]],
+      "source-confirmed callback and human steer remain two rows, including old merged caches");
+    assert.equal(refreshed.flatMap(turn => turn.blocks).filter(block => block.kind === "text"
+      && block.message_id === "user-answer").length, 1,
+    "repair does not leave a second copy of the human reply inside the callback");
+  }
+}

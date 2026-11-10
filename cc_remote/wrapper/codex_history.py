@@ -133,6 +133,9 @@ class _TurnLocator:
     segment_count: int
     request_before: str | None
     request_limit: int
+    # Rollout ordinals count real users. A preceding automatic segment is -1;
+    # the separate visual index still addresses official items/detail pages.
+    source_segment_index: int | None = None
 
 
 def _wire_id(value: Any, kind: str) -> str:
@@ -1088,6 +1091,9 @@ class CodexOfficialHistory:
             projected_rows.append(turn)
             segments = _translate_turn(
                 thread_id, turn, tool_result_max=self.tool_result_max)
+            automatic_prefix = len(segments) > 1 and not any(
+                item.get("type") == "userMessage"
+                for item in _segments(turn["items"])[0])
             for segment_index, segment_events in enumerate(segments):
                 materialized = materialize_history_turns(
                     segment_events,
@@ -1111,6 +1117,7 @@ class CodexOfficialHistory:
                         segment_count=len(segments),
                         request_before=before,
                         request_limit=limit,
+                        source_segment_index=segment_index - int(automatic_prefix),
                     ),
                     turn.get("itemsView") == "full",
                 ))
@@ -1165,7 +1172,11 @@ class CodexOfficialHistory:
                 event for event in segment_events
                 if event.get("type") == "user_msg"
             ), None)
-            if user is None or user.get("client_msg_id") is not None:
+            if (user is None or user.get("client_msg_id") is not None
+                    or not any(user.get(key) for key in ("prompt", "images", "files"))):
+                # Empty anchors represent automatic output, not native user
+                # items. A later first steer can own ordinal zero in rollout;
+                # its browser alias must never attach to this synthetic row.
                 continue
             native_message_id = user.get("msg_id")
             alias = (
@@ -1175,7 +1186,8 @@ class CodexOfficialHistory:
             if alias is None:
                 alias = segment_aliases.get((
                     locator.native_turn_id,
-                    locator.segment_index,
+                    (locator.source_segment_index if locator.source_segment_index is not None
+                     else locator.segment_index),
                 ))
             if alias is not None:
                 user["client_msg_id"] = alias
@@ -1240,7 +1252,8 @@ class CodexOfficialHistory:
         native_segment_by_visible_id = {
             turn["id"]: (
                 locator.native_turn_id,
-                locator.segment_index,
+                (locator.source_segment_index if locator.source_segment_index is not None
+                 else locator.segment_index),
             )
             for turn, (_events, locator, _exact) in zip(turns, ordered)
         }

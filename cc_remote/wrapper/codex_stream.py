@@ -4845,11 +4845,14 @@ def codex_translate_history(
                         # but it must be a neutral non-error boundary.
                         steered_same_task = task_has_user and turn_has_user
                         active_mid_task_steer = bool(
-                            snapshot_in_progress
-                            and turn_open
+                            turn_open
                             and not turn_has_user
                             and isinstance(next_turn_id, str)
-                            and next_turn_id in known_active_task_ids
+                            and ((next_turn_id == active_turn_id
+                                  and (task_segment_index is not None
+                                       or user_record.turn_id == active_turn_id))
+                                 or (snapshot_in_progress
+                                     and next_turn_id in known_active_task_ids))
                         )
                         # No terminal record proved where the previous visible
                         # reply ended. In particular, pending_turn_id now often

@@ -20,6 +20,15 @@ TASK_LABELS = {
 }
 
 
+def read_task_callbacks(home: Path, sid: str) -> tuple[str, ...]:
+    """Exact accepted callback IDs, scoped to this account and native thread."""
+    return tuple(dict.fromkeys(
+        thread_id(row["delivery_turn_id"])
+        for row in TaskStore(home).activity_snapshot()
+        if row["sid"] == sid and row["state"] in TERMINAL
+        and row["delivery"] == "accepted" and row.get("delivery_turn_id")))
+
+
 def read_task_activity(home: Path) -> dict[str, list[BackgroundProcessItem]]:
     result: dict[str, list[BackgroundProcessItem]] = {}
     for row in TaskStore(home).activity_snapshot():

@@ -95,7 +95,8 @@ from cc_remote.wrapper.history_responses import response_process_summaries
 # v57 demotes provider errors Claude Code continued past to progress text.
 # v58 restores native tool-result clocks instead of history-read timestamps.
 # v59 supplies per-response process headers before lazy detail is opened.
-_SCHEMA_VERSION = 59
+# v60 removes human aliases from synthetic Codex callback anchors.
+_SCHEMA_VERSION = 60
 _FINGERPRINT_SAMPLE_BYTES = 64 * 1024
 _DEFAULT_MAX_ENTRIES = 128
 _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
@@ -1413,6 +1414,9 @@ class HistoryIndexStore:
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
             current = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if current in range(10, 60):
+                for table in ("history_pages", "history_turn_details"):
+                    connection.execute(f"DELETE FROM {table} WHERE engine='codex'")
             if current == 58:
                 # Only the lightweight headers changed; retain source detail.
                 connection.execute("DELETE FROM history_pages WHERE engine='claude'")
@@ -1600,7 +1604,7 @@ class HistoryIndexStore:
                 for table in ("history_pages", "history_turn_details"):
                     connection.execute(
                         f"DELETE FROM {table} WHERE engine='codex'")
-            elif current in range(21, 59):
+            elif current in range(21, 60):
                 # The independent projection invalidations above suffice.
                 pass
             elif current not in (0, _SCHEMA_VERSION):

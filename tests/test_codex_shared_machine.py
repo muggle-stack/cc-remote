@@ -3758,3 +3758,94 @@ def test_unleased_goal_recovery_requires_live_exact_continuation(tmp_path, monke
                  "unavailable", "completed-during-probe", "rotated", "new-user-query",
                  "evicted", "private"):
         asyncio.run(go(case))
+
+
+def test_restart_recovers_exact_accepted_task_callback_without_resubmitting(tmp_path, monkeypatch):
+    from uuid import uuid4
+    from cc_remote.task_store import TaskStore
+
+    async def go():
+        machine, transport = _mk_machine()
+        sid, turn_id = str(uuid4()), str(uuid4())
+        store = TaskStore(tmp_path)
+        key = store.create(sid, argv=["true"], cwd=str(tmp_path),
+                           title="done", request_id=str(uuid4()))
+        store.update(key, state="completed", delivery="accepted", delivery_turn_id=turn_id)
+        monkeypatch.setattr(machine, "_codex_profile_for_ctx", lambda _: SimpleNamespace(home=tmp_path))
+        ctx = _mk_ctx(sid, sid)
+        ctx.engine, ctx.space = "codex", "code"
+        sdk = _RecoveredOwnedTurnSdk()
+        sdk.machine, sdk.ctx = machine, ctx
+        sdk.probe_owned_turn = AsyncMock(return_value=SimpleNamespace(turn_id=turn_id))
+        ctx.sdk = sdk
+        machine.sessions[sid] = ctx
+        # An ordinary callback has no Goal lineage and no prior Wrapper lease.
+        monkeypatch.setattr(machine, "_recover_unleased_codex_goal", AsyncMock(return_value=False))
+        assert await machine._recover_codex_owned_turn(ctx, sid)
+        assert ctx.state == "running" and ctx.codex_spontaneous_turn_id == turn_id
+        assert machine._codex_turn_leases.get(sid).automatic
+        assert sdk.queries == [] and sdk.interrupts == 0
+        assert not await machine._recover_unleased_codex_callback(ctx, sid)
+        sdk.probe_owned_turn.assert_awaited_once_with(turn_id)
+        task = ctx.codex_spontaneous_task
+        await asyncio.sleep(0)
+        sdk.interrupted.set()
+        await asyncio.wait_for(task, 1)
+        assert ctx.state == "idle"
+        assert machine._codex_turn_leases.get(sid) is None
+        assert any(isinstance(event, StateEvent) and event.state == "running"
+                   for event in transport.sent)
+
+    asyncio.run(go())
+
+
+def test_callback_recovery_rechecks_receipt_context_and_native_owner(tmp_path, monkeypatch):
+    from uuid import uuid4
+    from cc_remote.task_store import TaskStore
+
+    async def go(case):
+        machine, _ = _mk_machine()
+        home = tmp_path / case
+        home.mkdir()
+        sid, turn_id = str(uuid4()), str(uuid4())
+        store = TaskStore(home)
+        key = store.create(sid, argv=["true"], cwd=str(home),
+                           title="done", request_id=str(uuid4()))
+        store.update(key, state="completed", delivery="accepted", delivery_turn_id=turn_id)
+        profile = SimpleNamespace(home=home)
+        monkeypatch.setattr(machine, "_codex_profile_for_ctx", lambda _: profile)
+        ctx = _mk_ctx(sid, sid)
+        ctx.engine, ctx.space = "codex", "code"
+        sdk = _RecoveredOwnedTurnSdk()
+        sdk.machine, sdk.ctx = machine, ctx
+
+        async def probe(candidate):
+            assert candidate == turn_id
+            if case == "finished":
+                return None
+            if case == "unavailable":
+                raise OSError("daemon unavailable")
+            if case == "receipt-changed":
+                store.update(key, delivery="delivered")
+            if case == "account-changed":
+                profile.home = tmp_path / "other-account"
+            if case == "session-changed":
+                ctx.session_id = str(uuid4())
+            if case == "new-query":
+                ctx.state = "running"
+            if case == "evicted":
+                machine.sessions.pop(sid)
+            return SimpleNamespace(turn_id=turn_id)
+
+        sdk.probe_owned_turn = probe
+        if case == "private":
+            sdk.using_daemon_proxy = sdk.shared_daemon_affinity = False
+        ctx.sdk = sdk
+        machine.sessions[sid] = ctx
+        assert not await machine._recover_unleased_codex_callback(ctx, sid), case
+        assert ctx.codex_spontaneous_task is None and not sdk.queries and not sdk.interrupts
+        assert machine._codex_turn_leases.get(sid) is None
+
+    for case in ("finished", "unavailable", "receipt-changed", "account-changed",
+                 "session-changed", "new-query", "evicted", "private"):
+        asyncio.run(go(case))
