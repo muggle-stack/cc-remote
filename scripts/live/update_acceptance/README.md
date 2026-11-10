@@ -95,6 +95,10 @@ the probe directory. Check continuous heartbeat PIDs, each local `ENGINE-result.
 receipt's `success:true`, standalone success markers in final answers, and native
 terminal results. Reasoning, quoted tokens and a model turn's successful completion
 do not establish a successful command. Archive only these temporary sessions afterward.
+Repeated live replay replaces the same completed answer. For a cold unfocused
+session, authoritative History can supply its final answer and terminal state,
+but only when its user ID matches this run's exact submitted message. An unrelated
+row, open response, interrupted turn or reasoning text cannot pass acceptance.
 
 Optional `claude-queue` adds a real deferred query; release that probe only after
 the installer reports waiting for it, then verify the queued query runs before

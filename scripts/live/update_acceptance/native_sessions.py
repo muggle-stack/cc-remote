@@ -31,10 +31,17 @@ def observe_marker(row, engine, event):
         return
     messages = row.setdefault('answer_messages', {})
     item = messages.setdefault(identity, {'text': '', 'channel': 'unknown'})
+    if event['type'] == 'assistant_msg_start' and item.get('ended'):
+        # Full native replay can repeat a completed message under the same ID.
+        # DSH also emits start for each live delta, so reset only after an end.
+        item['text'] = ''
+        item['ended'] = False
     if event.get('channel') not in {None, 'unknown'}:
         item['channel'] = event['channel']
     if event['type'] == 'delta':
         item['text'] = (('' if event.get('replace') else item['text']) + event.get('text', ''))[-8192:]
+    if event['type'] == 'assistant_msg_end':
+        item['ended'] = True
     while len(messages) > 64:
         del messages[next(iter(messages))]
     final = [item['text'] for item in messages.values() if item['channel'] == 'final']
@@ -43,6 +50,38 @@ def observe_marker(row, engine, event):
     row['marker'] = 'CCR_UPDATE_' + engine.upper() + '_OK' in lines
     if engine == 'claude-queue':
         row['marker'] = row['marker'] and 'CCR_UPDATE_QUEUED_OK' in lines and bool(row.get('queue_observed'))
+
+
+def observe_history(row, engine, event):
+    """Accept only an exact submitted user boundary from canonical history.
+
+    Cold unfocused sessions rebuild through History after Wrapper replacement.
+    Their real terminal is not necessarily replayed as another live TurnEnd.
+    """
+    if (event.get('type') != 'history' or event.get('authoritative') is not True
+            or event.get('error') or not row.get('sid')
+            or event.get('session_id') != row['sid']):
+        return
+    expected = {row['msg_id']}
+    if row.get('queued'):
+        expected.add(row['queued'])
+    completed = set()
+    for turn in event.get('turns', []):
+        owner = turn.get('clientMsgId') or turn.get('id')
+        if owner not in expected or turn.get('done') is not True or turn.get('interrupted'):
+            continue
+        if (turn.get('result') or {}).get('is_error'):
+            continue
+        completed.add(owner)
+        for block in turn.get('blocks', []):
+            if (block.get('kind') != 'text' or block.get('channel') != 'final'
+                    or block.get('done') is not True or not block.get('message_id')):
+                continue
+            observe_marker(row, engine, {'type': 'delta', 'message_id': block['message_id'],
+                           'channel': 'final', 'text': block.get('text', ''), 'replace': True})
+    if completed == expected:
+        row['terminal'] = True
+        row['terminal_history_revision'] = event.get('revision')
 
 
 async def run(config, evidence):
@@ -169,6 +208,7 @@ async def run(config, evidence):
                             if event['type'] == 'user_msg':
                                 row['terminal'] = False
                             observe_marker(row, engine, event)
+                            observe_history(row, engine, event)
                         save()
                         if all(row['terminal'] and row['marker'] for row in report['sessions'].values()):
                             report['pass'] = True

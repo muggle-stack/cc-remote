@@ -1,4 +1,4 @@
-from scripts.live.update_acceptance.native_sessions import observe_marker
+from scripts.live.update_acceptance.native_sessions import observe_marker, observe_history
 
 
 def test_reasoning_and_quoted_failure_cannot_pass_native_acceptance():
@@ -49,3 +49,42 @@ def test_unknown_stream_requires_final_channel_confirmation_and_exact_queue_answ
     observe_marker(row, 'claude-queue', {'type': 'delta', 'message_id': 'two',
                                        'channel': 'final', 'text': 'CCR_UPDATE_QUEUED_OK'})
     assert row['marker']
+
+
+def test_completed_message_replay_is_idempotent_without_resetting_dsh_partial_starts():
+    row = {}
+    for _reconnect in range(3):
+        for text in ['CCR_UPDATE_', 'CODEX_OK']:
+            observe_marker(row, 'codex', {'type': 'assistant_msg_start', 'message_id': 'answer', 'channel': 'final'})
+            observe_marker(row, 'codex', {'type': 'delta', 'message_id': 'answer', 'text': text})
+        observe_marker(row, 'codex', {'type': 'assistant_msg_end', 'message_id': 'answer', 'channel': 'final'})
+        assert row['marker'] and row['answer'] == 'CCR_UPDATE_CODEX_OK'
+
+
+def test_cold_history_accepts_only_exact_submitted_final_completion():
+    import copy
+    event = {'type': 'history', 'authoritative': True, 'session_id': 'session', 'revision': 'revision',
+             'turns': [{'id': 'native', 'clientMsgId': 'browser', 'done': True,
+                        'blocks': [{'kind': 'text', 'message_id': 'answer', 'done': True,
+                                    'channel': 'final', 'text': 'CCR_UPDATE_DSH_OK'}]}]}
+    for case in ('other-session', 'other-user', 'non-authoritative', 'running', 'interrupted', 'reasoning'):
+        changed = copy.deepcopy(event)
+        turn = changed['turns'][0]
+        if case == 'other-session':
+            changed['session_id'] = 'other'
+        if case == 'other-user':
+            turn['clientMsgId'] = 'other'
+        if case == 'non-authoritative':
+            changed['authoritative'] = False
+        if case == 'running':
+            turn['done'] = False
+        if case == 'interrupted':
+            turn['interrupted'] = True
+        if case == 'reasoning':
+            turn['blocks'][0]['channel'] = 'thinking'
+        row = {'sid': 'session', 'msg_id': 'browser'}
+        observe_history(row, 'dsh', changed)
+        assert not (row.get('terminal') and row.get('marker')), case
+    row = {'sid': 'session', 'msg_id': 'browser'}
+    observe_history(row, 'dsh', event)
+    assert row['terminal'] and row['marker']
