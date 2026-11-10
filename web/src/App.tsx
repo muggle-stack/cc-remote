@@ -575,8 +575,15 @@ export default function App() {
   });
   const [appUpdateOpen, setAppUpdateOpen] = useState(false);
   const appUpdates = useAppUpdates(authed, machineId, appUpdateOpen);
-  const maintenanceFeedback = appUpdateFeedback(appUpdates.data);
-  const finishedUpdate = appUpdates.data?.job?.phase === "succeeded" ? appUpdates.data.job.id : null;
+  const appUpdatesRef = useRef(appUpdates); appUpdatesRef.current = appUpdates;
+  const maintenanceFeedback = appUpdates.maintenance && !appUpdates.data?.maintenance ? {
+    id: "maintenance:recovering", label: "正在更新", tone: "info" as const,
+    message: "设备正在更新，完成后会自动恢复会话。",
+  } : appUpdateFeedback(appUpdates.data);
+  useEffect(() => {
+    wsRef.current?.setMaintenance(appUpdates.maintenance);
+  }, [appUpdates.maintenance, machineId, state.connState]);
+  const finishedUpdate = !appUpdates.maintenance && appUpdates.data?.job?.phase === "succeeded" ? appUpdates.data.job.id : null;
   const checkWebUpdate = webUpdate.check;
   useEffect(() => { setAppUpdateOpen(false); }, [machineId, authed]);
   useEffect(() => { if (finishedUpdate) checkWebUpdate(); }, [finishedUpdate, checkWebUpdate]);
@@ -2421,6 +2428,9 @@ export default function App() {
       if (cancelled) return;
       const ws = new RelayWs({
         onReloadRequired: webUpdate.check,
+        onMaintenance: () => {
+          if (acceptsLifecycle()) appUpdatesRef.current.observeMaintenance();
+        },
         onEvent: (msg, ownership) => {
           if (!acceptsLifecycle()) return;
           if (directoryListenerRef.current?.(msg)) return;
@@ -4101,6 +4111,7 @@ export default function App() {
         });
       }
       wsRef.current = ws;
+      ws.setMaintenance(appUpdatesRef.current.maintenance);
       ws.start();
     })();
 
@@ -5966,7 +5977,7 @@ export default function App() {
       ? { machineId, sid: visibleParentSid, space, engine } : null} onOpen={openViewerPage}>
     <RemoteViewerContext.Provider value={visibleParentSid ? openViewerLink : null}>
     <SidebarShell controller={sidebar} className={visibleRightPanel !== null && !panelExpanded && !(visibleRightPanel === "btw" && btwExpanded) ? "panel-open" : ""}>
-      <SidebarState controller={sidebar}>{sidebarOpen => <Suspense fallback={null}><SessionsSidebar
+      <SidebarState controller={sidebar}>{sidebarOpen => <Suspense fallback={null}><SessionsSidebar maintenance={appUpdates.maintenance}
         open={sidebarOpen}
         sessionLayout={appearance.sessionLayout}
         onOpenChange={setSidebarOpen}
@@ -6476,7 +6487,7 @@ export default function App() {
               </Suspense>
             )}
 
-            <Composer
+            <Composer maintenance={appUpdates.maintenance}
           dsh={rt.dsh}
           dshSid={focusedSid ?? undefined}
           readDsh={dshApi.read}

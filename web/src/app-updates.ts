@@ -7,6 +7,7 @@ export interface UpdateJob {
   updated_at?: number;
 }
 export interface AppUpdateState {
+  maintenance?: boolean;
   managed: boolean; enabled: boolean; current?: string; relay_version?: string;
   reason?: string | null; busy_count: number; allow_relay_update?: boolean;
   latest?: { version: string; notes: string } | null; job: UpdateJob | null;
@@ -44,6 +45,17 @@ const REASONS: Record<string, string> = {
 export function updateReason(reason: string | null | undefined): string {
   return reason ? REASONS[reason] ?? REASONS.update_failed : "";
 }
+
+/** Short excerpts of authored release notes; never synthesize release claims. */
+export function releaseHighlights(notes: string): string[] {
+  const chinese = notes.split(/^##\s+中文\s*$/m)[1];
+  const section = (chinese ?? notes).split(/^##\s+(English|英文)\s*$/m)[0];
+  return section.split(/\r?\n/).filter(line => /^[-*]\s+/.test(line)).slice(0, 3).map(line => {
+    const plain = line.replace(/^[-*]\s+/, "").replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+      .replace(/[*`]/g, "").split(/[。；]/)[0];
+    return plain.length > 64 ? plain.slice(0, 64) + "…" : plain;
+  });
+}
 export function validVersion(value: unknown): value is string {
   return typeof value === "string" && value.length < 65 && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value);
 }
@@ -68,7 +80,10 @@ export function parseAppUpdate(raw: unknown): AppUpdateState {
   if (!raw || typeof raw !== "object") throw new Error("invalid_request");
   const value = raw as Record<string, unknown>;
   const latest = value.latest as Record<string, unknown> | undefined;
+  const job = parseUpdateJob(value.job);
   return { managed: value.managed === true, enabled: value.enabled === true,
+    maintenance: typeof value.maintenance === "boolean" ? value.maintenance
+      : !!job && ["updating_relay", "installing", "verifying", "unknown"].includes(job.phase),
     current: validVersion(value.current) ? value.current : undefined,
     relay_version: validVersion(value.relay_version) ? value.relay_version : undefined,
     reason: typeof value.reason === "string" ? value.reason : null,
@@ -77,7 +92,7 @@ export function parseAppUpdate(raw: unknown): AppUpdateState {
     allow_relay_update: value.allow_relay_update === true,
     latest: latest && validVersion(latest.version) ? { version: latest.version,
       notes: typeof latest.notes === "string" ? latest.notes.slice(0, 4000) : "" } : null,
-    job: parseUpdateJob(value.job) };
+    job };
 }
 
 export class AppUpdateClient {
@@ -115,7 +130,7 @@ export class AppUpdateClient {
 export function appUpdateFeedback(state: AppUpdateState | null, now = Date.now()) {
   const job = state?.job;
   if (job && (!UPDATE_TERMINAL.has(job.phase) || (job.updated_at && now / 1000 - job.updated_at < 300))) {
-    return { id: `maintenance:${job.id}:${job.phase}`, label: UPDATE_LABELS[job.phase],
+    return { id: `maintenance:${job.id}:${job.phase}`, label: ({ waiting: "等待空闲", unknown: "待确认", succeeded: "已更新", failed: "更新失败", blocked: "需处理", cancelled: "已取消" } as Partial<Record<UpdatePhase, string>>)[job.phase] ?? "正在更新",
       tone: (job.phase === "succeeded" ? "success" : ["failed", "blocked", "unknown"].includes(job.phase)
         ? "warning" : "info") as "success" | "warning" | "info",
       message: updateReason(job.reason) || (job.phase === "succeeded" ? `设备已更新至 v${job.version}。`

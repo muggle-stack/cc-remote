@@ -3,17 +3,20 @@ import { AppUpdateClient, parseAppUpdate, parseUpdateJob, UpdateIntentStore, UPD
   type AppUpdateState, type UpdateIntent } from "./app-updates";
 
 export function useAppUpdates(enabled: boolean, machine: string, open: boolean) {
+  const [maintenance, setMaintenance] = useState(false);
   const [data, setData] = useState<AppUpdateState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const [changing, setChanging] = useState(false);
   const [pending, setPending] = useState<UpdateIntent | null>(null);
   const openRef = useRef(open); openRef.current = open;
-  const actions = useRef({ check: async () => {}, start: async (_version: string) => {}, cancel: async () => {} });
+  const actions = useRef({ check: async () => {}, start: async (_version: string) => {}, cancel: async () => {}, observeMaintenance: () => {} });
   useEffect(() => {
-    setData(null); setError(null); setChecking(false); setChanging(false); setPending(null);
+    setMaintenance(false); setData(null); setError(null); setChecking(false); setChanging(false); setPending(null);
     if (!enabled || !machine) return;
-    let active = true, probing = false, mutation = false, lastCheck = 0;
+    let active = true, probing = false, mutation = false, lastCheck = 0, guardRevision = 0;
+    let probeChecksCatalog = false, recheck = false;
+    let guardObserved = false;
     let snapshot: AppUpdateState | null = null;
     const client = new AppUpdateClient(machine);
     let storage: Storage | null = null;
@@ -30,16 +33,32 @@ export function useAppUpdates(enabled: boolean, machine: string, open: boolean) 
       snapshot = next; setData(next);
     };
     const probe = async (check = false) => {
-      if (probing || !active) return;
-      probing = true;
+      if (!active) return;
+      if (probing) {
+        // Opening during a status poll still needs a catalog check. Coalesce
+        // concurrent opens with an already-running catalog request.
+        if (check && !probeChecksCatalog) { recheck = true; setChecking(true); }
+        return;
+      }
+      probing = true; probeChecksCatalog = check;
+      const observedRevision = guardRevision;
       if (check) setChecking(true);
       try {
         const raw = await client.call(check ? { op: "check" } : undefined);
         if (!active) return;
         reconcile(parseAppUpdate(raw)); setError(null);
+        if (observedRevision === guardRevision) {
+          guardObserved = snapshot?.maintenance === true;
+          setMaintenance(guardObserved);
+        }
         if (check) lastCheck = Date.now();
       } catch (reason) { failed(reason); }
-      finally { probing = false; if (active && check) setChecking(false); }
+      finally {
+        const checkNext = recheck; recheck = false;
+        probing = false; probeChecksCatalog = false;
+        if (active && check && !checkNext) setChecking(false);
+        if (active && (checkNext || observedRevision !== guardRevision)) void probe(checkNext);
+      }
     };
     const start = async (version: string) => {
       if (mutation || !active) return;
@@ -76,11 +95,14 @@ export function useAppUpdates(enabled: boolean, machine: string, open: boolean) 
       } catch (reason) { failed(reason); }
       finally { mutation = false; if (active) setChanging(false); }
     };
-    actions.current = { check: () => probe(true), start, cancel };
+    actions.current = { check: () => probe(true), start, cancel, observeMaintenance: () => {
+      if (!active) return;
+      guardRevision++; guardObserved = true; setMaintenance(true); void probe();
+    } };
     void probe(true);
     const poll = window.setInterval(() => {
       const running = snapshot?.job && !UPDATE_TERMINAL.has(snapshot.job.phase);
-      if (openRef.current || running || intent) void probe();
+      if (openRef.current || running || intent || guardObserved) void probe();
       else if (document.visibilityState === "visible" && Date.now() - lastCheck > 15 * 60_000) void probe(true);
     }, 5000);
     const focus = () => { if (openRef.current || intent || snapshot?.job) void probe(); };
@@ -89,13 +111,14 @@ export function useAppUpdates(enabled: boolean, machine: string, open: boolean) 
     return () => {
       active = false; client.close(); window.clearInterval(poll);
       window.removeEventListener("online", focus); window.removeEventListener("focus", focus);
-      actions.current = { check: async () => {}, start: async () => {}, cancel: async () => {} };
+      actions.current = { check: async () => {}, start: async () => {}, cancel: async () => {}, observeMaintenance: () => {} };
     };
   }, [enabled, machine]);
   const check = useCallback(() => actions.current.check(), []);
   const start = useCallback((version: string) => actions.current.start(version), []);
   const cancel = useCallback(() => actions.current.cancel(), []);
   useEffect(() => { if (open) void check(); }, [open, check, machine]);
-  return { data, error, checking, changing, pending, check, start, cancel };
+  const observeMaintenance = useCallback(() => actions.current.observeMaintenance(), []);
+  return { data, error, checking, changing, pending, maintenance, observeMaintenance, check, start, cancel };
 }
 export type AppUpdatesController = ReturnType<typeof useAppUpdates>;

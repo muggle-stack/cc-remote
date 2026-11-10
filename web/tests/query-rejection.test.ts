@@ -78,6 +78,15 @@ try {
   }
 
   const unrelated = reduce(sent, { type: "event", event: { ...rejection, msg_id: "other-message" } });
+  const maintenance = reduce(sent, { type: "event", event: {
+    ...rejection, code: "update_in_progress", request_id: "send-command", to: "sender",
+  } });
+  assert.equal(maintenance.banner, sent.banner, "maintenance is shown in update status, not a failure banner");
+  assert.equal(maintenance.runtimes[sid].failedDeferred[0].prompt, "new instruction");
+  assert.deepEqual(maintenance.runtimes[sid].failedDeferred[0].images, images);
+  assert.deepEqual(maintenance.runtimes[sid].failedDeferred[0].files, files);
+  assert.equal(maintenance.runtimes[sid].queue.length, 0, "never resubmit a maintenance-rejected message");
+  assert.equal(maintenance.runtimes[sid].acceptancePending, null);
   assert.deepEqual(unrelated.runtimes[sid].acceptanceQuery, sent.runtimes[sid].acceptanceQuery);
   const rekeyed = reduce({ ...sent, runtimes: {
     ...sent.runtimes, "real-session": createRuntime(),

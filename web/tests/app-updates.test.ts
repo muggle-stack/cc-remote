@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { AppUpdateClient, appUpdateFeedback, newerVersion, parseAppUpdate, parseUpdateJob,
-  UpdateIntentStore, updateReason } from "../src/app-updates.ts";
+  UpdateIntentStore, updateReason, releaseHighlights } from "../src/app-updates.ts";
 
 assert(newerVersion("5.10.0", "5.9.99"));
 for (const target of ["5.3.14", "5.3.13", "05.3.15", "5.3.15-beta", "$(id)"]) {
@@ -12,7 +12,7 @@ assert.equal(parseUpdateJob({ ...job, id: "../../a" }), null);
 assert(!("secret" in parseUpdateJob(job)!));
 const state = parseAppUpdate({ managed: true, enabled: true, current: "5.3.14", busy_count: 2,
   latest: { version: "5.3.15", notes: "更新内容" }, job });
-assert.equal(appUpdateFeedback(state)?.label, "等待任务结束");
+assert.equal(appUpdateFeedback(state)?.label, "等待空闲");
 assert.equal(appUpdateFeedback({ ...state, job: null })?.label, "有更新");
 assert.equal(appUpdateFeedback({ ...state, latest: null, job: { ...state.job!, phase: "succeeded", updated_at: 1 } }, 500_000), undefined);
 assert.match(updateReason("unknown secret"), /更新没有完成/);
@@ -45,3 +45,7 @@ await assert.rejects(offline.call({ op: "start" }), { message: "outcome_pending"
 await assert.rejects(offline.call(), { message: "network" });
 offline.close();
 console.log("app updates: scope, retry receipts, parsing and state feedback passed");
+
+assert.deepEqual(releaseHighlights("## 中文\n- **修复历史**。详细信息\n- [更新入口](https://example.com)\n## English\n- English detail"), ["修复历史", "更新入口"]);
+assert.equal(parseAppUpdate({ ...state, maintenance: false }).maintenance, false);
+assert.equal(parseAppUpdate({ ...state, maintenance: true }).maintenance, true);

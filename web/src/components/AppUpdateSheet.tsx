@@ -1,6 +1,7 @@
+import ReactMarkdown from "react-markdown";
 import { Icon } from "../icons";
 import { WEB_BUILD } from "../web-build";
-import { newerVersion, UPDATE_LABELS, UPDATE_TERMINAL, updateReason } from "../app-updates";
+import { newerVersion, UPDATE_LABELS, UPDATE_TERMINAL, updateReason, releaseHighlights } from "../app-updates";
 import type { AppUpdatesController } from "../use-app-updates";
 import { CenteredSheet } from "./CenteredSheet";
 import "./AppUpdateSheet.css";
@@ -12,69 +13,93 @@ export default function AppUpdateSheet({ updates, deviceName, webUpdate, onClose
   const { data, error, checking, changing, pending } = updates;
   const job = data?.job;
   const active = !!job && !UPDATE_TERMINAL.has(job.phase);
+  const recovering = updates.maintenance && !active;
+  const uncertain = active && job.phase === "unknown";
   const available = newerVersion(data?.latest?.version, data?.current);
-  const target = active ? job.version : pending?.version ?? data?.latest?.version;
+  const target = active ? job.version : pending?.version ?? data?.latest?.version ?? job?.version;
   const needsRelay = newerVersion(target, data?.relay_version);
   const blocked = data?.reason || (needsRelay && !data?.allow_relay_update ? "relay_permission" : null);
-  const canInstall = !!data?.enabled && available && !blocked && !active && !checking && !changing;
+  const canInstall = !!data?.enabled && available && !blocked && !active && !recovering && !checking && !changing;
   const canCancel = active && ["submitting", "preparing", "downloading", "validating", "waiting"].includes(job.phase);
-  const readyPage = !!webUpdate.version && !active;
-  const title = active ? UPDATE_LABELS[job.phase] : pending ? "确认更新状态"
-    : available ? "发现新版本" : readyPage ? "新版页面已就绪"
-    : job?.phase === "succeeded" ? "更新完成"
-    : checking ? "正在检查更新" : data?.latest && data.current ? "已是最新版本" : "检查应用更新";
+  const readyPage = !!webUpdate.version && !active && !recovering && !pending;
+  const succeeded = job?.phase === "succeeded";
   const reason = updateReason(error || (active ? job.reason : blocked || job?.reason));
+  const title = recovering ? "正在确认更新进度" : active ? job.phase === "installing" ? `正在安装 ${deviceName} 更新` : UPDATE_LABELS[job.phase]
+    : pending ? "正在确认原更新结果" : readyPage ? "刷新页面即可使用新版"
+    : available ? `cc-remote v${target}` : succeeded ? "更新已完成"
+    : checking ? "正在检查更新" : data?.latest && data.current ? "已是最新版本" : "检查应用更新";
+  const eyebrow = recovering ? "正在更新" : active ? uncertain ? "需要确认" : "正在更新" : pending ? "请稍候"
+    : readyPage && succeeded ? "设备更新完成" : readyPage ? "新版页面已就绪"
+    : available ? "发现新版本" : succeeded ? "更新完成" : "版本状态";
   const rows = [
-    ["页面", WEB_BUILD.version], ["服务器", data?.relay_version], [`当前设备 · ${deviceName}`, data?.current],
+    { label: deviceName, current: data?.current, icon: "devices" as const },
+    { label: "服务器", current: data?.relay_version, icon: "globe" as const },
+    { label: "当前页面", current: WEB_BUILD.version, icon: "code" as const },
   ];
+  const step = active && ["installing", "verifying"].includes(job.phase) ? 1 : 0;
+  const highlights = releaseHighlights(data?.latest?.notes ?? "");
   return <CenteredSheet open label="检查更新" onClose={onClose} header={false}
-    className="app-update-sheet" maxWidth={560} maxHeight={780} minimumHeight={450}>
+    className="app-update-sheet" maxWidth={510} maxHeight={760} minimumHeight={360}>
     <header className="app-update-heading">
-      <h2>检查更新</h2>
-      <button type="button" className="iconbtn" aria-label="重新检查更新" disabled={checking || changing}
-        onClick={() => void updates.check()}><Icon name="refresh" size={18} /></button>
+      <h2>应用更新</h2><span className="app-update-device" title={deviceName}>{deviceName}</span>
+      <button type="button" className="app-update-close" aria-label="收起更新窗口" onClick={onClose}>
+        <Icon name="chevrons-right" size={20} /></button>
     </header>
     <div className="sheet-scroll app-update-body">
       <div className="app-update-summary" role="status" aria-live="polite">
-        <span className="app-update-symbol"><Icon name="download" size={27} /></span>
-        <div><b>{title}</b>{(target || webUpdate.version) && <strong>v{target || webUpdate.version}</strong>}
-          <small>当前页面 v{WEB_BUILD.version}</small></div>
+        <span className={`app-update-eyebrow${succeeded && !active && !available ? " success" : ""}`}>
+          {succeeded && !active && !available && <Icon name="check" size={16} />}{eyebrow}</span>
+        <h3>{title}</h3>
+        <p>{recovering ? "设备正在更新，正在获取最新进度。" : active ? `目标版本 v${job.version}` : readyPage ? succeeded && data?.current === data?.relay_version ? `${deviceName} 和服务器已更新至 v${data?.current}` : "新版页面已就绪，可刷新后继续。"
+          : available ? "查看本次更新内容，选择合适的时间安装。" : data?.current ? `当前设备 v${data.current}` : "正在读取设备与服务器版本…"}</p>
       </div>
-      <section><h3>更新范围</h3><div className="app-update-versions">
-        {rows.map(([name, current]) => <div key={name}><span>{name}</span><span>{current || "待连接"}
-          {newerVersion(target, current) && <> <i>→</i> {target}</>}</span></div>)}
-      </div></section>
-      {data?.latest?.notes && <section><h3>更新内容</h3>
-        <div className="app-update-notes">{data.latest.notes}</div>
+      {active ? <section className="app-update-progress" aria-label="更新进度">
+        {!uncertain && job.phase !== "waiting" && <div className="app-update-progress-track" aria-hidden="true"><i /></div>}
+        <ol className="app-update-steps">
+          {["服务器", deviceName, "当前页面"].map((label, index) => {
+            const done = !uncertain && (index < step || (index === 0 && !needsRelay));
+            const current = !uncertain && index === step && !done;
+            return <li key={index} className={done ? "done" : current ? "current" : ""}>
+              <span className="app-update-step-icon">{done && <Icon name="check" size={14} />}</span>
+              <span>{label}</span><small>{index === 2 ? "待更新后检查" : done ? "已就绪" : uncertain ? "待确认"
+                : current ? index === 1 ? job.phase === "verifying" ? "验证中" : "安装中" : job.phase === "updating_relay" ? "更新中" : "准备中" : "等待中"}</small>
+            </li>;
+          })}
+        </ol>
+        <p className="app-update-progress-copy">{job.phase === "waiting" ? "等待当前会话、后台任务和排队消息结束。"
+          : uncertain ? "正在核实原更新任务，请勿重复安装。" : "短暂断线时更新仍会继续，完成后自动重连。"}</p>
+        {job.cancel_requested && <p className="app-update-help">正在等待安全取消。</p>}
+      </section> : <section aria-label="更新范围" className="app-update-versions">
+        {rows.map(({ label, current, icon }) => <div key={label}>
+          <span><Icon name={icon} size={18} />{label}</span>
+          <span>{current || "待连接"}{newerVersion(target, current) && <><i>→</i><b>{target}</b></>}</span>
+        </div>)}
       </section>}
-      {active && <section aria-label="更新进度" className="app-update-progress">
-        <div className={`app-update-progress-track${job.phase === "unknown" ? " uncertain" : ""}`}><i /></div>
-        <p>{job.phase === "waiting" ? "等待正在运行的任务、后台任务和排队消息完成。"
-          : job.phase === "unknown" ? "保留原任务编号，确认结果后再继续。"
-          : "升级由设备独立执行，关闭这个窗口不会中断。"}</p>
-        {job.cancel_requested && <p>取消请求已提交，正在等待安全停止。</p>}
+      {available && !active && !recovering && !pending && highlights.length > 0 && <section className="app-update-highlights">
+        <h4>更新亮点</h4><ul>{highlights.map((line, index) => <li key={index}>{line}</li>)}</ul>
       </section>}
       {reason && <p className="app-update-warning" role="status">{reason}</p>}
-      {pending && !active && <p className="app-update-help">尚未确认原请求结果。继续检查会使用同一个更新编号。</p>}
-      {job?.phase === "succeeded" && job.cleanup_pending && <p className="app-update-help">
-        版本已更新，部分旧文件仍有引用或需要管理员检查，已保留。</p>}
-      <p className="app-update-info">更新期间会短暂断开连接，完成后自动重连。</p>
-      <p className="app-update-help">{data?.busy_count ? `${data.busy_count} 项活动仍在进行，安装前会等待它们结束。`
-        : "安装前会检查运行中的任务。"}</p>
       {webUpdate.message && <p className="app-update-warning" role="status">{webUpdate.message}</p>}
+      <details className="app-update-details">
+        <summary>{active || recovering || pending ? "更新详情" : available ? "查看完整更新说明" : "版本与更新记录"}<Icon name="chevron-right" size={18} /></summary>
+        {active && <div className="app-update-record"><p>目标版本 v{job.version}</p><p>当前阶段：{UPDATE_LABELS[job.phase]}</p></div>}
+        {pending && !active && <p>正在核实原更新编号，不会创建重复任务。</p>}
+        {data?.latest?.notes && <div className="app-update-notes"><ReactMarkdown skipHtml
+          allowedElements={["p", "h1", "h2", "h3", "h4", "ul", "ol", "li", "strong", "em", "code", "pre", "a", "blockquote", "hr", "br"]}
+          components={{ a: ({ children, href }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a> }}
+        >{data.latest.notes}</ReactMarkdown></div>}
+      </details>
     </div>
     <footer className="app-update-footer">
-      {canCancel && <button type="button" className="app-update-cancel" disabled={changing || job.cancel_requested}
-        onClick={() => void updates.cancel()}>取消更新</button>}
-      <button type="button" className="app-update-later" onClick={onClose}>{active ? "收起" : "稍后"}</button>
-      {readyPage ? <button type="button" className="app-update-primary" disabled={webUpdate.updating}
-        onClick={() => void webUpdate.reload()}>{webUpdate.updating ? "检查中…" : "更新页面"}</button>
-        : <button type="button" className="app-update-primary"
-          disabled={pending ? changing || active : !canInstall}
-          onClick={() => target && void updates.start(target)}>
-          {changing ? "提交中…" : pending && !active ? "确认原更新" : active ? UPDATE_LABELS[job.phase]
-            : data?.busy_count && canInstall ? "任务结束后更新" : "立即更新"}
-        </button>}
+      <p>{readyPage ? "有未保存内容时会先提醒。" : active || recovering ? "收起窗口不会中断更新。"
+        : canInstall ? data?.busy_count ? `${data.busy_count} 项活动正在进行，安装前会等待它们结束。` : "安装前会检查当前任务。" : ""}</p>
+      <div className="app-update-actions">
+        {canCancel && <button type="button" className="app-update-later" disabled={changing || job.cancel_requested} onClick={() => void updates.cancel()}>取消更新</button>}
+        <button type="button" className="app-update-later" onClick={onClose}>{active || recovering ? "收起，后台继续" : available || readyPage || pending ? "稍后" : "完成"}</button>
+        {readyPage ? <button type="button" className="app-update-primary" disabled={webUpdate.updating} onClick={() => void webUpdate.reload()}>{webUpdate.updating ? "检查中…" : "刷新页面"}</button>
+          : !active && !recovering && (available || pending) && <button type="button" className="app-update-primary" disabled={pending ? changing || checking : !canInstall}
+            onClick={() => target && void updates.start(target)}>{changing ? "提交中…" : pending ? "确认原更新" : data?.busy_count && canInstall ? "任务结束后更新" : `更新到 v${target}`}</button>}
+      </div>
     </footer>
   </CenteredSheet>;
 }

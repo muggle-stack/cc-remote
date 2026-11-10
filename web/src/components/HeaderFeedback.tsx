@@ -163,7 +163,7 @@ export function HeaderFeedback({
   return <div className="header-feedback-slot">
     {selected && <>
       <button ref={trigger} type="button" className={`header-feedback tone-${selected.tone}`}
-        onClick={toggle} aria-label={`状态详情：${selected.label}`}
+        onClick={selected.id === maintenanceItem?.id && onOpenUpdates ? onOpenUpdates : toggle} aria-label={`状态详情：${selected.label}`}
         aria-expanded={open} aria-haspopup="dialog" aria-controls={open ? dialogId : undefined}>
         <span key={selected.label} className="header-feedback-label" role="status" aria-live="polite">
           <span className="header-feedback-mark" aria-hidden="true">{selected.tone === "success" ? "✓" : ""}</span>

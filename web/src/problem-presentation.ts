@@ -1,4 +1,5 @@
 import type { ErrorMsg } from "./protocol";
+import { isUpdateMaintenance, UPDATE_MAINTENANCE_MESSAGE } from "./update-maintenance.ts";
 
 const OWNERSHIP_GUIDANCE = /(本机终端|原生 .*CLI|Codex App|Claude TUI)/;
 const INCOMPLETE_CLAUDE_SESSION =
@@ -99,6 +100,7 @@ function ownershipMessage(message: string): string | null {
 }
 
 export function presentTurnProblem(error: Pick<ErrorMsg, "code" | "message">): string {
+  if (isUpdateMaintenance(error)) return UPDATE_MAINTENANCE_MESSAGE;
   if (error.code === "busy") {
     return ownershipMessage(error.message)
       ?? "本次消息未发送，会话当前不可写，请稍后重试。";
@@ -122,6 +124,7 @@ export function presentTurnProblem(error: Pick<ErrorMsg, "code" | "message">): s
 export function presentCommandProblem(
   error: Pick<ErrorMsg, "code" | "message">,
 ): string {
+  if (isUpdateMaintenance(error)) return UPDATE_MAINTENANCE_MESSAGE;
   if ((error.code === "cc_crash" || error.code === "not_steerable")
       && error.message === CODEX_PROVIDER_MISMATCH) return CODEX_PROVIDER_MISMATCH;
   if (error.code === "busy" && CODEX_METADATA_PROBLEMS.has(error.message)) return error.message;
