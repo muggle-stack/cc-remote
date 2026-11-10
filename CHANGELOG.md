@@ -4,6 +4,17 @@
 
 ## Unreleased
 
+## v5.3.20
+
+Recover interrupted in-app updates without stranding healthy sessions, and repair long-running conversation history. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
+
+- Share original-transaction recovery between CLI and UI updates after lost connections, installer termination or startup failure, restoring matching configuration and private state when needed.
+- Fix previous-release health checks, same-release reinstall recovery and retries replacing unfinished receipts; release session admission after confirmed recovery.
+- Bound retries for transient network failures, distinguish TLS, certificate, authentication and protocol errors, and preserve new-chat drafts across authentication reconnects.
+- Fix repeated opening text and missing human messages during Codex background/history merging, one-row history hydration, and Claude tool-first identity/question recovery.
+
+See the bilingual [release notes](docs/releases/v5.3.20.md).
+
 ## v5.3.19
 
 Recover in-app updates after a lost submission acknowledgement instead of leaving the dialog stuck confirming the previous request. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
