@@ -4,6 +4,17 @@
 
 ## Unreleased
 
+## v5.3.21
+
+Unify Web panel controls and keep session status indicators stable during loading. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
+
+- Use consistent icon-only refresh and close buttons, with loading feedback and keyboard-accessible row menus.
+- Refine device pairing commands, copy and expiry feedback, and highlight the current device along its left edge.
+- Add artifact type filters and file metadata, and simplify file browsing, terminal status, previews and usage activity.
+- Use compact, fixed-width Chinese idle/running labels with the running indicator; reserve the terminal icon's space during session restoration to prevent header jumps after refresh.
+
+See the bilingual [release notes](docs/releases/v5.3.21.md).
+
 ## v5.3.20
 
 Recover interrupted in-app updates without stranding healthy sessions, and repair long-running conversation history. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
