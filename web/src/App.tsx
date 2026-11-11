@@ -4,7 +4,7 @@ import { canSubmitSteer } from "./pending-steers";
 import { useWebUpdate } from "./use-web-update";
 import { WEB_BUILD } from "./web-build";
 import { useAppUpdates } from "./use-app-updates";
-import { appUpdateFeedback, newerVersion } from "./app-updates";
+import { appUpdateFeedback, newerVersion, UPDATE_TERMINAL } from "./app-updates";
 const AppUpdateSheet = lazy(() => import("./components/AppUpdateSheet"));
 import { lazyDshApi } from "./lazy-dsh-api";
 import type { DshPanelSelection } from "./components/DshPanel";
@@ -570,18 +570,24 @@ export default function App() {
   });
   const [appUpdateOpen, setAppUpdateOpen] = useState(false);
   const appUpdates = useAppUpdates(authed, machineId, appUpdateOpen);
+  const serverUpdates = useAppUpdates(authed, "", appUpdateOpen, "server");
   const appUpdatesRef = useRef(appUpdates); appUpdatesRef.current = appUpdates;
+  const serverUpdateFeedback = appUpdateFeedback(serverUpdates.data, undefined, "服务器");
+  const serverUpdateActive = !!serverUpdates.data?.job && !UPDATE_TERMINAL.has(serverUpdates.data.job.phase);
   const maintenanceFeedback = appUpdates.maintenance && !appUpdates.data?.maintenance ? {
     id: "maintenance:recovering", label: "正在更新", tone: "info" as const,
     message: "设备正在更新，完成后会自动恢复会话。",
-  } : appUpdateFeedback(appUpdates.data);
+  } : serverUpdateActive ? serverUpdateFeedback : appUpdateFeedback(appUpdates.data) ?? serverUpdateFeedback;
   useEffect(() => {
     wsRef.current?.setMaintenance(appUpdates.maintenance);
   }, [appUpdates.maintenance, machineId, state.connState]);
   const finishedUpdate = !appUpdates.maintenance && appUpdates.data?.job?.phase === "succeeded" ? appUpdates.data.job.id : null;
+  const finishedServerUpdate = serverUpdates.data?.job?.phase === "succeeded" ? serverUpdates.data.job.id : null;
   const checkWebUpdate = webUpdate.check;
+  const checkDeviceUpdate = appUpdates.check;
   useEffect(() => { setAppUpdateOpen(false); }, [machineId, authed]);
   useEffect(() => { if (finishedUpdate) checkWebUpdate(); }, [finishedUpdate, checkWebUpdate]);
+  useEffect(() => { if (finishedServerUpdate) { checkWebUpdate(); void checkDeviceUpdate(); } }, [finishedServerUpdate, checkWebUpdate, checkDeviceUpdate]);
   const goalApiRef = useRef<GoalApi | null>(null);
   const getGoalApi = useCallback(async () => {
     const transport = wsRef.current;
@@ -6171,7 +6177,8 @@ export default function App() {
             appearance={appearance}
             boldText={boldText} onBoldText={setBoldText}
             onOpenUpdates={() => setAppUpdateOpen(true)} currentVersion={WEB_BUILD.version}
-            updateAvailable={!!webUpdate.id || newerVersion(appUpdates.data?.latest?.version, appUpdates.data?.current)}
+            updateAvailable={!!webUpdate.id || newerVersion(appUpdates.data?.latest?.version, appUpdates.data?.current)
+              || newerVersion(serverUpdates.data?.latest?.version, serverUpdates.data?.current)}
             notificationMode={notificationMode}
             notificationBinding={pushBinding.state}
             notificationAvailable={harmonyPush.available || typeof Notification !== "undefined"}
@@ -6187,7 +6194,7 @@ export default function App() {
             onLogout={() => void logout()}
           /></Suspense>
         </header>
-        {appUpdateOpen && <Suspense fallback={null}><AppUpdateSheet updates={appUpdates}
+        {appUpdateOpen && <Suspense fallback={null}><AppUpdateSheet updates={appUpdates} serverUpdates={serverUpdates}
           deviceName={activeDevice?.label ?? machineId} webUpdate={webUpdate}
           onClose={() => setAppUpdateOpen(false)} /></Suspense>}
 

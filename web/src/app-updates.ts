@@ -24,6 +24,8 @@ export const UPDATE_LABELS: Record<UpdatePhase, string> = {
 const REASONS: Record<string, string> = {
   unsupported: "当前安装方式暂不支持应用内更新。页面更新仍可单独使用。",
   setup_required: "需要先在这台设备上启用应用内更新权限。",
+  server_setup_required: "需要管理员在服务器上启用一次应用内更新权限，之后可从任意设备操作。",
+  server_forbidden: "当前账号仅有设备访问权限，服务器更新需要具有全部设备权限的管理员账号。",
   control_unavailable: "设备的更新配置与本地控制连接不一致，需要检查安装配置。",
   permission_required: "设备尚未获得所需的升级权限，请先由管理员完成配置。",
   protocol_change: "这个版本需要协调服务器和全部设备的协议升级，请安排统一升级。",
@@ -77,6 +79,15 @@ export function newerVersion(target: string | undefined, current: string | undef
   for (let i = 0; i < 3; i++) { if (a[i] !== b[i]) return a[i] > b[i]; }
   return false;
 }
+/** A running device job keeps its own view; server work survives device switches. */
+export function preferServerUpdate(device: AppUpdateState | null, server: AppUpdateState | null,
+  devicePending: boolean, serverPending: boolean): boolean {
+  if (devicePending || (device?.job && !UPDATE_TERMINAL.has(device.job.phase))) return false;
+  if (serverPending || (server?.job && !UPDATE_TERMINAL.has(server.job.phase))) return true;
+  const version = server?.latest?.version ?? device?.latest?.version;
+  return newerVersion(version, server?.relay_version ?? device?.relay_version)
+    && (!device?.enabled || !device.allow_relay_update);
+}
 export function parseUpdateJob(raw: unknown): UpdateJob | null {
   if (!raw || typeof raw !== "object") return null;
   const value = raw as Record<string, unknown>;
@@ -111,13 +122,16 @@ export class AppUpdateClient {
   private readonly controller = new AbortController();
   readonly machine: string;
   private readonly fetcher: typeof fetch;
-  constructor(machine: string, fetcher: typeof fetch = fetch) { this.machine = machine; this.fetcher = fetcher; }
+  private readonly scope: "device" | "server";
+  constructor(machine: string, fetcher: typeof fetch = fetch, scope: "device" | "server" = "device") {
+    this.machine = machine; this.fetcher = fetcher; this.scope = scope;
+  }
   close() { this.controller.abort(); }
   async call(command?: Record<string, string>): Promise<Record<string, unknown>> {
     const timeout = new AbortController();
     const timer = setTimeout(() => timeout.abort(), 35_000);
     try {
-      const response = await this.fetcher.call(globalThis, `/api/updates/${encodeURIComponent(this.machine)}`, {
+      const response = await this.fetcher.call(globalThis, this.scope === "server" ? "/api/server-updates" : `/api/updates/${encodeURIComponent(this.machine)}`, {
         method: command ? "POST" : "GET", credentials: "same-origin", cache: "no-store",
         headers: command ? { "Content-Type": "application/json" } : undefined,
         body: command ? JSON.stringify(command) : undefined,
@@ -125,7 +139,7 @@ export class AppUpdateClient {
       });
       if (response.status === 404) throw new Error("unsupported");
       if (response.status === 401) throw new Error("unauthorized");
-      if (response.status === 403) throw new Error("forbidden");
+      if (response.status === 403) throw new Error(this.scope === "server" ? "server_forbidden" : "forbidden");
       const body = await response.json() as Record<string, unknown>;
       if (!body || typeof body !== "object") throw new Error("invalid_request");
       if (!response.ok || body.ok === false) throw new Error(typeof body.reason === "string" ? body.reason : "network");
@@ -139,14 +153,14 @@ export class AppUpdateClient {
   }
 }
 
-export function appUpdateFeedback(state: AppUpdateState | null, now = Date.now()) {
+export function appUpdateFeedback(state: AppUpdateState | null, now = Date.now(), subject = "设备") {
   const job = state?.job;
   if (job && (!UPDATE_TERMINAL.has(job.phase) || (job.updated_at && now / 1000 - job.updated_at < 300))) {
     return { id: `maintenance:${job.id}:${job.phase}`, label: ({ waiting: "等待更新", unknown: "待确认", succeeded: "已更新", failed: "更新失败", blocked: "需处理", cancelled: "已取消" } as Partial<Record<UpdatePhase, string>>)[job.phase] ?? "正在更新",
       tone: (job.phase === "succeeded" ? "success" : ["failed", "blocked", "unknown"].includes(job.phase)
         ? "warning" : "info") as "success" | "warning" | "info",
       message: updateReason(job.reason) || (job.phase === "waiting" ? "等待会受更新影响的操作结束，可独立运行的任务不受影响。"
-        : job.phase === "succeeded" ? `设备已更新至 v${job.version}。`
+        : job.phase === "succeeded" ? `${subject}已更新至 v${job.version}。`
         : `目标版本 v${job.version}，可以打开更新窗口查看进度。`) };
   }
   if (newerVersion(state?.latest?.version, state?.current)) return {
@@ -169,8 +183,8 @@ export function parseUpdateReceipt(raw: Record<string, unknown>, intent: UpdateI
 export class UpdateIntentStore {
   private readonly key: string;
   private readonly storage: Pick<Storage, "getItem" | "setItem" | "removeItem"> | null;
-  constructor(machine: string, storage: Pick<Storage, "getItem" | "setItem" | "removeItem"> | null) {
-    this.key = `cc_remote_ui_update:${machine}`;
+  constructor(machine: string, storage: Pick<Storage, "getItem" | "setItem" | "removeItem"> | null, scope: "device" | "server" = "device") {
+    this.key = scope === "server" ? "cc_remote_server_update" : `cc_remote_ui_update:${machine}`;
     this.storage = storage;
   }
   read(): UpdateIntent | null {

@@ -40,6 +40,7 @@ from cc_remote.relay.auth import (
 )
 from cc_remote.relay.devices import DeviceStore
 from cc_remote.relay.updates import UpdateRelay, UpdateChannelError
+from cc_remote.relay.server_updates import ServerUpdates
 from cc_remote.relay.harmony_push import (
     HarmonyPushDispatcher, HarmonyPushStore, HarmonySubscription, HuaweiPushSender,
     TOKEN_RE as HARMONY_TOKEN_RE,
@@ -554,7 +555,19 @@ def create_app(
     if cfg is None:
         cfg = relay_config()
     validate_relay_config(cfg)
-    app = FastAPI(title="cc-remote relay")
+    from contextlib import asynccontextmanager
+
+    server_updates = ServerUpdates()
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        await server_updates.start()
+        try:
+            yield
+        finally:
+            await server_updates.close()
+
+    app = FastAPI(title="cc-remote relay", lifespan=lifespan)
     sessions = SessionRegistry(cfg.session_registry_cap)
     link_previews = LinkPreviewService()
     link_preview_limiter = LoginRateLimiter(max_per_ip=120)
@@ -627,15 +640,18 @@ def create_app(
     updates = UpdateRelay()
     update_limiter = LoginRateLimiter(max_per_ip=180)
     app.state.updates = updates
+    app.state.server_updates = server_updates
 
-    @app.api_route("/api/updates/{machine_id}", methods=["GET", "POST"])
-    async def application_update(req: Request, machine_id: str):
+    async def application_update(req: Request, machine_id: str | None = None):
         headers = {"Cache-Control": "no-store"}
         claims = await _active_claims(req, cfg, sessions)
         if claims is None:
             return JSONResponse({"reason": "unauthorized"}, status_code=401, headers=headers)
-        if (not _request_origin_allowed(req, cfg, allow_missing=req.method == "GET")
-                or not await _claims_allow_machine(claims, machine_id, devices)):
+        # Server maintenance is a separate administrative boundary. Owning an
+        # enrolled device does not grant permission over the shared Relay.
+        permitted = (claims.machines == ("*",) if machine_id is None else
+                     await _claims_allow_machine(claims, machine_id, devices))
+        if (not _request_origin_allowed(req, cfg, allow_missing=req.method == "GET") or not permitted):
             return JSONResponse({"reason": "forbidden"}, status_code=403, headers=headers)
         if update_limiter.limited(_request_ip(req)):
             return JSONResponse({"reason": "busy"}, status_code=429, headers=headers)
@@ -659,7 +675,8 @@ def create_app(
                 if operation == "start":
                     from cc_remote.update import version_tuple
                     version_tuple(command["version"])
-            result = await updates.request(machine_id, command)
+            result = (await server_updates.handle(command) if machine_id is None else
+                      await updates.request(machine_id, command))
             # Browser sessions may expire/revoke while an OS launch is pending.
             if await _active_claims(req, cfg, sessions) is None:
                 return JSONResponse({"reason": "unauthorized"}, status_code=401, headers=headers)
@@ -668,6 +685,14 @@ def create_app(
             return JSONResponse({"reason": exc.code}, status_code=503, headers=headers)
         except (ValueError, _BodyTooLarge, asyncio.TimeoutError):
             return JSONResponse({"reason": "invalid_request"}, status_code=400, headers=headers)
+
+    @app.api_route("/api/server-updates", methods=["GET", "POST"])
+    async def server_application_update(req: Request):
+        return await application_update(req)
+
+    @app.api_route("/api/updates/{machine_id}", methods=["GET", "POST"])
+    async def device_application_update(req: Request, machine_id: str):
+        return await application_update(req, machine_id)
 
     @app.websocket("/ws/updates")
     async def update_wrapper_socket(websocket: WebSocket):

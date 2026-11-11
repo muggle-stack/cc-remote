@@ -77,11 +77,14 @@ class UpdateJobs:
                 or type(value.get("enabled")) is not bool
                 or type(value.get("allow_relay_update")) is not bool
                 or type(value.get("uid")) is not int
-                or value.get("role") != "wrapper"
+                or value.get("role") not in ("wrapper", "relay")
                 or not isinstance(value.get("repository"), str)
                 or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value["repository"])
-                or not isinstance(value.get("control_socket"), str)
-                or not Path(value["control_socket"]).is_absolute()):
+                or (value["role"] == "wrapper" and (
+                    not isinstance(value.get("control_socket"), str)
+                    or not Path(value["control_socket"]).is_absolute()))
+                or (value["role"] == "relay" and (
+                    value.get("control_socket") is not None or value["allow_relay_update"]))):
             raise UpdateError("invalid UI update policy")
         return value
 

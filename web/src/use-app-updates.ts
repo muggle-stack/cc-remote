@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AppUpdateClient, parseAppUpdate, parseUpdateJob, parseUpdateReceipt, UpdateIntentStore, UPDATE_TERMINAL,
   type AppUpdateState, type UpdateIntent } from "./app-updates";
 
-export function useAppUpdates(enabled: boolean, machine: string, open: boolean) {
+export function useAppUpdates(enabled: boolean, machine: string, open: boolean, scope: "device" | "server" = "device") {
   const [maintenance, setMaintenance] = useState(false);
   const [data, setData] = useState<AppUpdateState | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -15,16 +15,16 @@ export function useAppUpdates(enabled: boolean, machine: string, open: boolean) 
   useEffect(() => {
     setMaintenance(false); setData(null); setError(null); setChecking(false); setChanging(false); setPending(null);
     setPendingStatus("unconfirmed");
-    if (!enabled || !machine) return;
+    if (!enabled || (scope === "device" && !machine)) return;
     let active = true, probing = false, mutation = false, lastCheck = 0, guardRevision = 0;
     let probeChecksCatalog = false, recheck = false;
     let guardObserved = false;
     let mutationRevision = 0, lookupUnsupported = false;
     let snapshot: AppUpdateState | null = null;
-    const client = new AppUpdateClient(machine);
+    const client = new AppUpdateClient(machine, fetch, scope);
     let storage: Storage | null = null;
     try { storage = window.localStorage; } catch { /* private storage unavailable */ }
-    const ledger = new UpdateIntentStore(machine, storage);
+    const ledger = new UpdateIntentStore(machine, storage, scope);
     let intent = ledger.read(); setPending(intent);
     let operationError = intent?.reason ?? null;
     const failed = (reason: unknown) => {
@@ -50,6 +50,9 @@ export function useAppUpdates(enabled: boolean, machine: string, open: boolean) 
       const observedRevision = guardRevision;
       const observedMutation = mutationRevision;
       if (check) setChecking(true);
+      // A restricted login or older Relay need not retry catalog discovery
+      // every five seconds in the background. Opening still checks immediately.
+      if (check && scope === "server") lastCheck = Date.now();
       try {
         const raw = await client.call(check ? { op: "check" } : undefined);
         if (!active || observedMutation !== mutationRevision) return;
@@ -160,7 +163,7 @@ export function useAppUpdates(enabled: boolean, machine: string, open: boolean) 
       window.removeEventListener("online", focus); window.removeEventListener("focus", focus);
       actions.current = { check: async () => {}, start: async () => {}, cancel: async () => {}, recover: async () => {}, observeMaintenance: () => {} };
     };
-  }, [enabled, machine]);
+  }, [enabled, machine, scope]);
   const check = useCallback(() => actions.current.check(), []);
   const start = useCallback((version: string) => actions.current.start(version), []);
   const cancel = useCallback(() => actions.current.cancel(), []);

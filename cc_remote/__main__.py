@@ -20,6 +20,8 @@ def main(argv: list[str] | None = None) -> int:
     messages.add_argument("message_args", nargs=argparse.REMAINDER)
     ui_updates = commands.add_parser("ui-updates", help="authorize UI updates for this managed device")
     ui_updates.add_argument("action", choices=("enable", "disable"))
+    ui_updates.add_argument("--role", choices=("relay", "wrapper"), default="wrapper",
+                            help="authorize this server independently of device updates")
     ui_updates.add_argument("--allow-relay-update", action="store_true",
                             help="also allow this device's existing administrator SSH route to upgrade its Relay")
     ui_updates.add_argument("--control-socket", type=Path,
@@ -38,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
         from cc_remote.update import host_platform, select_installation
         from deploy.ui_update_job import configure
         try:
-            current = select_installation("wrapper", *host_platform())
+            current = select_installation(args.role, *host_platform())
             result = configure(current.root, enabled=args.action == "enable",
                                allow_relay=args.allow_relay_update, control_socket=args.control_socket)
             print("UI updates enabled." if result["enabled"] else "UI updates disabled.")
