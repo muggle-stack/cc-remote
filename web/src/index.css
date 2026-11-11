@@ -197,9 +197,12 @@ body{
 .terminal-control-trigger.tone-disconnected{ color:var(--danger); }
 .terminal-control-trigger.tone-disconnected .terminal-control-dot{ background:var(--danger); }
 .terminal-control-scrim{ position:fixed; inset:0; z-index:62; background:rgba(20,16,10,.08); }
-.terminal-control-card{ position:fixed; z-index:63; top:var(--terminal-card-top); right:var(--terminal-card-right);
-  width:min(350px,calc(100vw - 20px)); max-height:min(480px,calc(100dvh - var(--terminal-card-top) - 12px));
-  overflow:auto; padding:18px; border:1px solid var(--border); border-radius:16px;
+.terminal-control-card{ --terminal-card-width:min(350px,calc(100vw - 20px));
+  position:fixed; z-index:63; top:var(--terminal-card-top);
+  right:clamp(10px,var(--terminal-card-right),calc(100vw - var(--terminal-card-width) - 10px));
+  width:var(--terminal-card-width);
+  max-height:min(480px,calc(var(--app-offset-top,0px) + var(--app-height,100dvh) - var(--terminal-card-top) - 12px));
+  overflow:auto; overscroll-behavior:contain; padding:18px; border:1px solid var(--border); border-radius:16px;
   background:var(--surface); box-shadow:var(--shadow-lg); animation:panel-in .16s var(--ease); }
 .terminal-control-card>header{ display:flex; align-items:center; gap:10px; color:var(--dim); }
 .terminal-control-card>header b{ flex:1; min-width:0; color:var(--text); font-size:14px; font-weight:var(--font-weight-600); }
@@ -223,12 +226,6 @@ body{
 .terminal-control-takeover:hover{ filter:brightness(1.05); }
 .terminal-control-takeover:disabled{ opacity:.55; cursor:default; filter:none; }
 @media(max-width:640px){
-  .terminal-control-scrim{ background:rgba(20,16,10,.34); }
-  .terminal-control-card{ top:auto!important; right:0!important; bottom:var(--keyboard-inset,0px); left:0;
-    width:100%; max-height:min(72dvh,calc(var(--app-height,100dvh) - var(--keyboard-inset,0px) - 12px));
-    padding:18px max(16px,env(safe-area-inset-right))
-      calc(18px + env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));
-    border-width:1px 0 0; border-radius:18px 18px 0 0; animation:sheetup .2s var(--ease); }
   .c-head{ gap:3px; padding-right:5px; }
   .c-head .titlewrap{ flex:1 1 64px; min-width:64px; }
   .c-head .sub{ display:none; }
