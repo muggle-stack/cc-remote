@@ -787,9 +787,9 @@ async function mockRightPanelRelay(
 }
 
 for (const engine of ["claude", "codex"] as const) {
-  for (const width of [390, 1280]) {
-    test(`terminal status reserves its header position during ${engine} restoration at ${width}px`, async ({ page }) => {
-      await page.setViewportSize({ width, height: 844 });
+  for (const [width, height] of [[320, 844], [390, 844], [640, 320], [1280, 844]]) {
+    test(`terminal status reserves its header position during ${engine} restoration at ${width}px`, async ({ page }, info) => {
+      await page.setViewportSize({ width, height });
       const relay = await mockRightPanelRelay(page, { engine, retained: false, listReply: () => null });
       for (const reload of [false, true]) {
         relay.commands.length = 0;
@@ -815,7 +815,18 @@ for (const engine of ["claude", "codex"] as const) {
         expect(await page.locator(".hstat").boundingBox()).toEqual(before);
         expect(await terminal.boundingBox()).toEqual(iconBefore);
         await terminal.click();
-        await expect(page.getByRole("dialog", { name: "终端连接状态" })).toBeVisible();
+        const dialog = page.getByRole("dialog", { name: "终端连接状态" });
+        await expect(dialog).toBeVisible();
+        await dialog.evaluate(async element => {
+          await Promise.all(element.getAnimations().map(animation => animation.finished));
+        });
+        const bounds = (await dialog.boundingBox())!;
+        expect(bounds.y).toBeCloseTo(iconBefore!.y + iconBefore!.height + 8, 0);
+        expect(bounds.x).toBeGreaterThanOrEqual(10);
+        expect(bounds.x + bounds.width).toBeLessThanOrEqual(width - 10);
+        expect(bounds.y + bounds.height).toBeLessThanOrEqual(height - 12);
+        if (height === 320) expect(await dialog.evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true);
+        if (!reload) await page.screenshot({ path: info.outputPath("terminal-status-popover.png") });
         await page.keyboard.press("Escape");
         await expect(terminal).toBeFocused();
       }
