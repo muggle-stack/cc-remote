@@ -4,6 +4,16 @@
 
 ## Unreleased
 
+## v5.3.23
+
+Update the server independently of the selected chat device. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
+
+- Separate server and device update permissions, progress and pending requests across reloads and device changes.
+- Add an explicitly authorized server maintenance endpoint for full-scope browser logins, without requiring SSH access on each Wrapper.
+- Reuse durable OS jobs and installation recovery, preserving device admission checks and authorization boundaries.
+
+See the bilingual [release notes](docs/releases/v5.3.23.md).
+
 ## v5.3.22
 
 Keep mobile terminal status close to its header button. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
