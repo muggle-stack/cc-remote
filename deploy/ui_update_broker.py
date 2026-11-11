@@ -103,9 +103,10 @@ RuntimeMaxSec=100
 
 def dispatch(root: Path, request: dict, uid: int) -> dict:
     from deploy.ui_update_job import cancel, installation, launch, reconcile
-    _, account = installation(root)
+    installation_value, account = installation(root)
     policy = UpdateJobs(root).policy()
-    if uid not in {0, account.pw_uid} or policy['uid'] != account.pw_uid:
+    if (uid not in {0, account.pw_uid} or policy['uid'] != account.pw_uid
+            or policy['role'] != installation_value.role):
         raise ValueError('update broker permission denied')
     if not isinstance(request, dict):
         raise ValueError('invalid update request')

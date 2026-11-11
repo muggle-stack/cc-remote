@@ -5,6 +5,10 @@
 .app-update-close { margin-left:auto; display:grid; place-items:center; flex:none; width:36px; height:36px; border-radius:50%; background:var(--raised); border:1px solid var(--border); color:var(--dim); }
 .app-update-sheet .app-update-body { padding:22px 24px 4px; }
 .app-update-summary { margin-bottom:22px; }
+.app-update-targets { display:flex; gap:4px; padding:4px; margin-bottom:20px; border:1px solid var(--border); border-radius:12px; }
+.app-update-targets button { flex:1; min-width:0; padding:8px 12px; border:0; border-radius:8px; background:transparent; color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.app-update-targets button[aria-pressed="true"] { background:var(--raised); color:var(--text); }
+.app-update-server-link { padding:10px 16px; border-radius:12px; }
 .app-update-eyebrow { display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:var(--font-weight-600); color:var(--accent-ink); }
 .app-update-eyebrow.success { color:var(--green); }
 .app-update-summary h3 { margin:9px 0 8px; font-size:23px; line-height:1.35; font-weight:var(--font-weight-650); overflow-wrap:anywhere; }

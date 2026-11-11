@@ -399,6 +399,11 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
   All normal updater locks, contract checks, installers and retention still apply.
   An unknown launch or activation remains unresolved until the original transaction
   is inspected; never erase receipts to resubmit. See [setup, scope and recovery](../docs/in-app-updates.md).
+  `sudo cc-remote ui-updates enable --role relay` independently authorizes the
+  managed server's socket broker. Only full-scope browser logins can use this
+  server-wide endpoint; device ownership never grants server maintenance rights.
+  Its root-owned receipts and OS worker survive Relay restarts and device changes.
+  The Relay remains unprivileged; no SSH route on a selected Wrapper is required.
 - `linux_service.py` / `wrapper_exec.py` — Linux Supervisor adapter for the same
   Wrapper installer/update transaction. Explicitly bind the root, Unix control
   config, program/file, user, HOME and external environment/device files. Require

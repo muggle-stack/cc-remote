@@ -34,9 +34,9 @@ def installation(root: Path):
         raise UpdateError("installation root must be canonical")
     system, arch = host_platform()
     value = read_installation(root, system, arch)
-    if value.role != "wrapper":
-        raise UpdateError("UI updates require a device installation")
-    account = pwd.getpwnam(value.metadata["user"])
+    if value.role == "relay" and system != "linux":
+        raise UpdateError("server UI updates require a managed Linux installation")
+    account = pwd.getpwnam("ccremote" if value.role == "relay" else value.metadata["user"])
     if system == "linux":
         from deploy.linux_service import trusted
         trusted(root)
@@ -45,7 +45,7 @@ def installation(root: Path):
         trusted((value.release / ".venv/bin/python").resolve())
         if os.geteuid() != 0:
             raise UpdateError("UI update launch needs configured sudo authorization")
-        if os.environ.get("SUDO_UID") not in (None, str(account.pw_uid), "0"):
+        if value.role == "wrapper" and os.environ.get("SUDO_UID") not in (None, str(account.pw_uid), "0"):
             raise UpdateError("caller does not own this device")
     elif os.geteuid() != account.pw_uid or root.stat().st_uid != account.pw_uid:
         raise UpdateError("run macOS UI updates as the installation user")
@@ -63,6 +63,8 @@ def configure(root: Path, *, enabled: bool, allow_relay: bool = False,
         write_json(root / POLICY, policy)
         return {"enabled": False}
     require_job_manager(system)
+    if value.role == "relay" and (allow_relay or control_socket is not None):
+        raise UpdateError("server UI updates do not use a Wrapper control socket or SSH route")
     control = control_socket or Path(account.pw_dir) / ".cc-remote/control/control.sock"
     if not control.is_absolute() or len(os.fsencode(control)) > 103:
         raise UpdateError("invalid Wrapper control socket")
@@ -70,39 +72,40 @@ def configure(root: Path, *, enabled: bool, allow_relay: bool = False,
     folder.mkdir(mode=0o755 if system == "linux" else 0o700, exist_ok=True)
     store.validate_folder()
     if system == "linux":
-        from deploy.install_cli import _atomic_file
-        from deploy.linux_service import trusted
-        helper = helper_path(root)
-        helper.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-        trusted(helper.parent)
-        entry = root / "current/deploy/ui_update_job.py"
-        command = [str(root / "current/.venv/bin/python"), "-I", "-B", str(entry), "--root", str(root)]
-        content = ('#!/bin/sh\n# cc-remote restricted UI update launcher.\n'
-                   'case "$1:$#" in start:3|cancel:2|reconcile:2|observe:2) ;; *) exit 2 ;; esac\n'
-                   'exec ' + shlex.join(command) + ' "$@"\n')
-        if helper.exists() and not helper.read_text().startswith('#!/bin/sh\n# cc-remote restricted UI update launcher.\n'):
-            raise UpdateError("unrelated update launcher already exists")
-        _atomic_file(helper, content.encode(), 0o755)
-        rule = SUDOERS_DIRECTORY / helper.name
-        rule.parent.mkdir(mode=0o755, exist_ok=True)
-        trusted(rule.parent)
-        if rule.exists() and not rule.read_text().startswith('# cc-remote restricted UI update authorization\n'):
-            raise UpdateError("unrelated sudo rule already exists")
-        # Only this fixed-root launcher is authorized; it validates operation,
-        # request id, stable version, owner and durable policy on every call.
-        content = ("# cc-remote restricted UI update authorization\n"
-                   f"{account.pw_name} ALL=(root) NOPASSWD: {helper} *\n")
-        draft = folder / "sudoers.pending"
-        _atomic_file(draft, content.encode(), 0o440)
-        try:
-            subprocess.run(["/usr/sbin/visudo", "-cf", str(draft)], capture_output=True, check=True, timeout=10)
-            _atomic_file(rule, content.encode(), 0o440)
-        finally:
-            draft.unlink(missing_ok=True)
+        if value.role == "wrapper":
+            from deploy.install_cli import _atomic_file
+            from deploy.linux_service import trusted
+            helper = helper_path(root)
+            helper.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+            trusted(helper.parent)
+            entry = root / "current/deploy/ui_update_job.py"
+            command = [str(root / "current/.venv/bin/python"), "-I", "-B", str(entry), "--root", str(root)]
+            content = ('#!/bin/sh\n# cc-remote restricted UI update launcher.\n'
+                       'case "$1:$#" in start:3|cancel:2|reconcile:2|observe:2) ;; *) exit 2 ;; esac\n'
+                       'exec ' + shlex.join(command) + ' "$@"\n')
+            if helper.exists() and not helper.read_text().startswith('#!/bin/sh\n# cc-remote restricted UI update launcher.\n'):
+                raise UpdateError("unrelated update launcher already exists")
+            _atomic_file(helper, content.encode(), 0o755)
+            rule = SUDOERS_DIRECTORY / helper.name
+            rule.parent.mkdir(mode=0o755, exist_ok=True)
+            trusted(rule.parent)
+            if rule.exists() and not rule.read_text().startswith('# cc-remote restricted UI update authorization\n'):
+                raise UpdateError("unrelated sudo rule already exists")
+            # Only this fixed-root launcher is authorized; it validates operation,
+            # request id, stable version, owner and durable policy on every call.
+            content = ("# cc-remote restricted UI update authorization\n"
+                       f"{account.pw_name} ALL=(root) NOPASSWD: {helper} *\n")
+            draft = folder / "sudoers.pending"
+            _atomic_file(draft, content.encode(), 0o440)
+            try:
+                subprocess.run(["/usr/sbin/visudo", "-cf", str(draft)], capture_output=True, check=True, timeout=10)
+                _atomic_file(rule, content.encode(), 0o440)
+            finally:
+                draft.unlink(missing_ok=True)
         from deploy.ui_update_broker import install
         install(root, account)
-    policy = {"schema": 1, "root": str(root), "role": "wrapper", "enabled": True,
-              "uid": account.pw_uid, "control_socket": str(control),
+    policy = {"schema": 1, "root": str(root), "role": value.role, "enabled": True,
+              "uid": account.pw_uid, "control_socket": str(control) if value.role == "wrapper" else None,
               "allow_relay_update": allow_relay, "repository": release_repository()}
     write_json(root / POLICY, policy)
     return {"enabled": True, "allow_relay_update": allow_relay}
@@ -112,7 +115,7 @@ def launch(root: Path, identity: str, version: str) -> dict:
     value, account = installation(root)
     store = UpdateJobs(root)
     policy = store.policy()
-    if not policy["enabled"] or policy["uid"] != account.pw_uid:
+    if not policy["enabled"] or policy["uid"] != account.pw_uid or policy["role"] != value.role:
         raise UpdateError("UI updates are disabled")
     job_id(identity)
     version_tuple(version)
@@ -256,7 +259,10 @@ def reconcile(root: Path, identity: str, *, explicit: bool = False) -> dict:
             return public_job(state)
         record = activation.receipt(root, identity)
         policy = store.policy()
-        probe = record or {"control_socket": policy["control_socket"], "uid": policy["uid"]}
+        prior = activation.receipt(root) if value.role == "relay" and record is None else None
+        probe = record or ({"role": "relay", "origin": (prior or {}).get("origin") or "https://" + value.metadata["domain"]}
+                           if value.role == "relay" else
+                           {"control_socket": policy["control_socket"], "uid": policy["uid"]})
         current = str(value.release)
         if health(probe, current):
             # A later CLI activation may already have moved current. A durable
@@ -348,7 +354,7 @@ def resume_original(root: Path, identity: str) -> None:
 
 
 def run(root: Path, identity: str) -> None:
-    installation(root)
+    value, account = installation(root)
     store = UpdateJobs(root)
     job_id(identity)
     with store.lock(blocking=True):
@@ -369,6 +375,8 @@ def run(root: Path, identity: str) -> None:
         resume_original(root, identity)
         return
     policy = store.policy()
+    if policy["role"] != value.role or policy["uid"] != account.pw_uid:
+        raise UpdateError("invalid update policy binding")
     # Elevation never inherits an unprivileged caller's package source override.
     os.environ["CC_REMOTE_GITHUB_REPOSITORY"] = policy["repository"]
     os.environ.pop("CC_REMOTE_RELEASE_BASE_URL", None)
@@ -389,7 +397,7 @@ def run(root: Path, identity: str) -> None:
     try:
         if not policy["enabled"]:
             raise Cancelled("UI updates were disabled")
-        update(role="wrapper", target_version=state["version"], check=False,
+        update(role=value.role, target_version=state["version"], check=False,
                allow_relay_update=policy["allow_relay_update"], progress=progress)
         from deploy.release_retention import STATUS
         try:

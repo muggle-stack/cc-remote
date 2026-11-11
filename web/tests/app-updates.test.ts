@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { AppUpdateClient, appUpdateFeedback, newerVersion, parseAppUpdate, parseUpdateJob,
-  UpdateIntentStore, updateReason, releaseHighlights, parseUpdateReceipt } from "../src/app-updates.ts";
+  UpdateIntentStore, updateReason, releaseHighlights, parseUpdateReceipt, preferServerUpdate } from "../src/app-updates.ts";
 
 assert(newerVersion("5.10.0", "5.9.99"));
 for (const target of ["5.3.14", "5.3.13", "05.3.15", "5.3.15-beta", "$(id)"]) {
@@ -62,3 +62,37 @@ console.log("app updates: scope, retry receipts, parsing and state feedback pass
 assert.deepEqual(releaseHighlights("## 中文\n- **修复历史**。详细信息\n- [更新入口](https://example.com)\n## English\n- English detail"), ["修复历史", "更新入口"]);
 assert.equal(parseAppUpdate({ ...state, maintenance: false }).maintenance, false);
 assert.equal(parseAppUpdate({ ...state, maintenance: true }).maintenance, true);
+
+// Server intent survives selected-device changes, but never aliases a device's
+// journal, even when that device is literally named "server".
+const serverLedger = new UpdateIntentStore("one", adapter, "server");
+serverLedger.save({ id: job.id, version: job.version });
+assert.equal(new UpdateIntentStore("two", adapter, "server").read()?.id, job.id);
+assert.equal(new UpdateIntentStore("server", adapter).read(), null);
+new UpdateIntentStore("two", adapter).clear();
+assert.equal(serverLedger.read()?.id, job.id);
+serverLedger.clear();
+
+const routes: string[] = [];
+const fakeFetch = (async (url: string) => {
+  routes.push(url); return new Response(JSON.stringify({ schema: 1 }));
+}) as typeof fetch;
+for (const selectedDevice of ["one", "two", "server"]) {
+  const client = new AppUpdateClient(selectedDevice, fakeFetch, "server");
+  await client.call(); client.close();
+}
+assert.deepEqual(routes, Array(3).fill("/api/server-updates"));
+const scoped = new AppUpdateClient("one", (async () => new Response("{}", { status: 403 })) as typeof fetch, "server");
+await assert.rejects(scoped.call(), { message: "server_forbidden" }); scoped.close();
+
+const device = { ...state, job: null, relay_version: "5.3.14", allow_relay_update: false };
+const serverState = { ...device, managed: true, busy_count: 0 };
+assert(preferServerUpdate(device, serverState, false, false));
+assert(preferServerUpdate({ ...device, enabled: false }, serverState, false, false));
+assert(!preferServerUpdate({ ...device, allow_relay_update: true }, serverState, false, false));
+assert(!preferServerUpdate(device, { ...serverState, relay_version: "5.3.15" }, false, false));
+assert(preferServerUpdate(null, { ...serverState, job: state.job }, false, false));
+assert(!preferServerUpdate({ ...device, job: state.job }, serverState, false, true));
+assert(!preferServerUpdate(device, serverState, true, true));
+assert.equal(appUpdateFeedback({ ...serverState, job: { ...state.job!, phase: "succeeded", updated_at: 10 } }, 10_000, "服务器")?.message,
+  "服务器已更新至 v5.3.15。");
