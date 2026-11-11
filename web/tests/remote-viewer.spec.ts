@@ -697,7 +697,7 @@ test("remote Viewer survives refresh, keeps session scope and closes without del
     await expect(page.frameLocator("iframe").locator("#status")).toHaveText("已旋转 1 次");
     expect(await page.locator("iframe").evaluate((node, old) => node === old, frame)).toBe(true);
   }
-  await page.getByRole("button", { name: isMobile ? "返回对话" : "关闭预览", exact: true }).click();
+  await page.getByRole("button", { name: "关闭预览", exact: true }).click();
   await expect(page.locator(".remote-viewer-panel")).toHaveCount(0);
   await page.getByRole("button", { name: "打开远程预览" }).click();
   await expect(page.getByRole("button", { name: /^机器人结构/ })).toBeVisible();
@@ -714,7 +714,7 @@ test("remote Viewer uses one desktop side panel and fills the mobile viewport", 
     expect(box!.x).toBe(0);
     expect(box!.width).toBe(viewport.width);
     expect(box!.height).toBeCloseTo(viewport.height, 2);
-    await expect(page.getByRole("button", { name: "返回对话", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "关闭预览", exact: true })).toBeVisible();
   } else {
     expect(box!.width).toBeLessThan(viewport.width * 0.6);
     await page.getByRole("button", { name: "居中展开远程预览" }).click();
@@ -770,7 +770,7 @@ test("remote Viewer reacquires authorization after a cached page is restored", a
   await expect(page.frameLocator("iframe").locator("#status")).toHaveText("已旋转 1 次");
 });
 
-test("session page discovery is explicit, durable and leaves cloud links alone", async ({ page, isMobile }) => {
+test("session page discovery is explicit, durable and leaves cloud links alone", async ({ page }) => {
   const sid = `artifact-${Date.now()}`;
   await page.goto(`${ORIGIN}/tests/remote-viewer.html?sid=${sid}`);
   await page.getByRole("button", { name: "显示页面产物" }).click();
@@ -788,14 +788,15 @@ test("session page discovery is explicit, durable and leaves cloud links alone",
   await expect(frame.locator("#status")).toHaveText("已旋转 1 次");
   await expect(page.locator(".remote-viewer-panel")).toHaveCSS("opacity", "1");
   await page.screenshot({ path: test.info().outputPath("session-page-preview.png"), fullPage: true });
-  await page.getByRole("button", { name: isMobile ? "返回对话" : "关闭预览", exact: true }).click();
+  await page.getByRole("button", { name: "关闭预览", exact: true }).click();
   // Browser panel memory is not the source of session associations.
   await page.evaluate(() => sessionStorage.clear());
   await page.reload();
   await page.getByRole("button", { name: "打开远程预览", exact: true }).click();
   await expect(page.getByRole("button", { name: /^机器人结构/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /^动态模块限制测试/ })).toHaveCount(0);
-  await page.getByRole("button", { name: "移除关联 机器人结构", exact: true }).click();
+  await page.getByRole("button", { name: "管理预览 机器人结构", exact: true }).click();
+  await page.getByRole("menuitem", { name: "移除关联", exact: true }).click();
   await expect(page.getByText("本会话还没有页面", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "+ 关联已有预览", exact: true }).click();
   await page.getByRole("button", { name: /^机器人结构/ }).click();

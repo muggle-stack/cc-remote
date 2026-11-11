@@ -1192,7 +1192,7 @@ assert.match(historyAppSource,
   /const refreshStatus = useCallback[\s\S]{0,300}\?\.tag === "archived"[\s\S]{0,220}sendGetStatus/,
   "archived history must not request live Codex status");
 assert.match(historyAppSource,
-  /!archivedBrowse && focusedEngine !== "dsh" && \(\s*<TerminalControl/,
+  /focusedSid && !state\.newChat && !archivedBrowse \? \(\s*<TerminalControl/,
   "archived history must not expose terminal takeover controls");
 assert.match(historyAppSource,
   /<GoalPanel[\s\S]{0,180}revealed=\{!archivedBrowse[\s\S]{0,100}open=\{!archivedBrowse/,

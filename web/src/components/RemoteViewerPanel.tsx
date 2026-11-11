@@ -4,6 +4,7 @@ import { Icon } from "../icons";
 import { isLocalViewerUrl, matchingViewer, type ViewerScope, type ViewerSelection, type ViewerSite } from "../remote-viewer";
 import { viewerRequest, ViewerRequestError } from "../viewer-request";
 import { PanelResizer } from "./PanelResizer";
+import { PanelCloseButton, PanelRowMenu, RefreshButton } from "./PanelActions";
 import { ViewerBridge, type BridgeGrant } from "../viewer-bridge";
 import { useViewerPages } from "../viewer-pages-context";
 import { useViewerZoom } from "../use-viewer-zoom";
@@ -335,9 +336,9 @@ export function RemoteViewerPanel({ active = true, scope, selection, requestedUr
             <span><b>{page.label}</b><small>{label(page.machine_id)} · {page.entry}{!page.available && " · 暂不可用"}</small></span>
             <Icon name={selected?.id === page.id ? "check" : "chevron-right"} size={16} />
           </button>
-          <button className="iconbtn" title="从本会话移除，不删除文件" aria-label={`移除关联 ${page.label}`}
-            onClick={() => void pageContext?.remove(page.id).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "移除失败。"))}>
-            <Icon name="close" size={14} /></button>
+          <PanelRowMenu label={`管理预览 ${page.label}`} items={[{ label: "移除关联", onClick: () => {
+            void pageContext?.remove(page.id).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "移除失败。"));
+          } }]} />
         </div>)}
         {browseAll && sites.map((site) => <button className="viewer-site" key={`${site.machine_id}:${site.id}`}
           onClick={() => void choose(site)}>
@@ -358,21 +359,21 @@ export function RemoteViewerPanel({ active = true, scope, selection, requestedUr
     <PanelResizer ariaLabel="调整预览宽度" />
     {pickerOpen && <div className="viewer-picker-backdrop" aria-hidden="true" onClick={() => setPickerOpen(null)} />}
     <header className="viewer-header">
-      <button className="iconbtn viewer-mobile-back" onClick={onClose} aria-label="返回对话"><Icon name="back" /></button>
       {selection ? <button ref={pickerTrigger} type="button" className="viewer-heading" aria-label="切换预览"
         aria-expanded={pickerOpen === "pages"} aria-haspopup="dialog" aria-controls={pickerOpen === "pages" ? pickerId : undefined}
         onClick={() => { setBrowseAll(false); setPickerOpen(value => value === "pages" ? null : "pages"); }}>
         <strong>{heading}</strong><Icon name="chev" size={14} />
-      </button> : <div className="viewer-heading"><strong>页面预览</strong></div>}
+      </button> : <div className="viewer-heading"><Icon name="globe" size={18} /><strong>页面预览</strong></div>}
       {grant && <button ref={zoomTrigger} className="viewer-zoom-trigger" disabled={!zoom.ready}
         aria-label="页面缩放" title="页面缩放，也可双指缩放" aria-haspopup="dialog"
         aria-expanded={pickerOpen === "zoom"} aria-controls={pickerOpen === "zoom" ? pickerId : undefined}
         onClick={() => setPickerOpen(value => value === "zoom" ? null : "zoom")}>
         {Math.round(zoom.scale * 100)}%
       </button>}
-      <button className="iconbtn" onClick={refresh} title="刷新预览" aria-label="刷新预览"><Icon name="refresh" size={18} /></button>
+      <RefreshButton onClick={refresh} label="刷新预览" failed={!!error}
+        busy={loading || !!pageContext?.loading || (!!selection && !!selected && enabled && !loaded && !error)} />
       <PanelExpandButton label="远程预览" />
-      <button className="iconbtn viewer-desktop-close" onClick={onClose} aria-label="关闭预览"><Icon name="close" size={18} /></button>
+      <PanelCloseButton onClick={onClose} label="关闭预览" />
       {pickerOpen && <div id={pickerId} ref={picker} className={`viewer-picker${pickerOpen === "zoom" ? " viewer-zoom-picker" : ""}`}
         role="dialog" aria-label={pickerOpen === "zoom" ? "调整页面缩放" : "页面详情与切换"} tabIndex={-1}>
         {pickerOpen === "pages" ? <>{catalog}{originalLink}</> : <>

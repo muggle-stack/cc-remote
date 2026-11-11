@@ -42,7 +42,7 @@
   .c-head:has(.header-feedback-slot) .device-trigger,
   .c-head:has(.header-feedback-slot) .iconbtn { width:32px; flex:0 0 32px; padding-left:0; padding-right:0; }
   .c-head:has(.header-feedback-slot) .engine-label { justify-content:center; }
-  .c-head:has(.header-feedback-slot) .hstat { max-width:61px; }
+  .c-head:has(.header-feedback-slot) .hstat { max-width:54px; }
   .c-head:has(.header-feedback-slot) .hstat-label { overflow:hidden; text-overflow:ellipsis; }
   .c-head:has(.header-feedback-slot) .hstat .sd { flex:none; }
 }
@@ -52,7 +52,7 @@
   .c-head:has(.header-feedback-slot) .surface-head-mark { width:20px; height:24px; }
   .c-head .header-feedback-slot { width:66px; flex-basis:66px; }
   .c-head .header-feedback { font-size:10px; padding:4px 0; }
-  .c-head:has(.header-feedback-slot) .hstat { max-width:49px; }
+  .c-head:has(.header-feedback-slot) .hstat { width:50px; max-width:50px; font-size:10.5px; }
   .c-head:has(.header-feedback-slot) .terminal-control-trigger,
   .c-head:has(.header-feedback-slot) .device-trigger,
   .c-head:has(.header-feedback-slot) .iconbtn { width:30px; flex-basis:30px; }

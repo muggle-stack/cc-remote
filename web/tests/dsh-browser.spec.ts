@@ -313,7 +313,7 @@ test("DSH reconnect feedback stays out of the composer and brief resyncs stay qu
   await expect(page.getByText(error, { exact: true })).toHaveCount(0);
   await page.clock.runFor(1_000);
   relay.emit({ ...nativeState, connected: true, error: null });
-  await expect(page.locator(".hstat-label")).toHaveText("running");
+  await expect(page.locator(".hstat-label")).toHaveText("运行");
   await page.clock.runFor(8_000);
   await expect(page.getByText(error, { exact: true })).toHaveCount(0);
   relay.emit({ ...nativeState, connected: false, error });

@@ -5,6 +5,7 @@ import "../src/App.css";
 import { HeaderFeedback } from "../src/components/HeaderFeedback";
 import { EngineSelector } from "../src/components/EngineSelector";
 import { TerminalControl } from "../src/components/TerminalControl";
+import { SessionStatus } from "../src/components/SessionStatus";
 import { NoticeStack } from "../src/components/NoticeStack";
 import { ReconnectBanner } from "../src/components/ReconnectBanner";
 import { SessionsSidebar } from "../src/components/SessionsSidebar";
@@ -96,8 +97,7 @@ export function HeaderFeedbackFixture() {
           banner={state.banner} bannerRevision={state.bannerRevision} notices={runtime.notices.filter(isHeaderNotice)}
           onDismissBanner={(banner, revision) => dispatch({ type: "dismiss_banner", banner, revision })}
           onDismissNotice={noticeId => dispatch({ type: "dismiss_notice", sid, noticeId })} />
-        <span className={`hstat ${running ? "running" : "idle"}`}><span className="sd" />
-          <span className="hstat-label">{running ? "running" : "idle"}</span></span>
+        <SessionStatus state={running ? "running" : "idle"} />
         {space === "code" && <TerminalControl engine="claude" availability="online" />}
         <button className="device-trigger online" aria-label="设备中心"><Icon name="devices" size={18} /><span>Mac</span><i /></button>
         <EngineSelector engine={engine} onChange={setEngine} />

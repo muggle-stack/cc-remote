@@ -645,7 +645,7 @@ async function mockRightPanelRelay(
     imageData?: { data: string; width: number; height: number };
     externalPreview?: "allow" | "replace";
     historyReply?: (command: Record<string, unknown>) => PanelRelayEvent<Extract<ServerEvent, { type: "history" }>> | null;
-    listReply?: (command: Record<string, unknown>) => PanelRelayEvent | undefined;
+    listReply?: (command: Record<string, unknown>) => PanelRelayEvent | null | undefined;
     capabilityReply?: (command: Record<string, unknown>) => PanelRelayEvent | undefined;
   } = {},
 ) {
@@ -701,6 +701,7 @@ async function mockRightPanelRelay(
         snapshot(parentSid);
       } else if (command.type === "list_sessions") {
         const response = listReply?.(command);
+        if (response === null) return; // Allow a test to release restoration explicitly.
         if (response) { emit(response); return; }
         emit({ type: "session_list",
           engine: command.engine === "codex" ? "codex" : "claude",
@@ -783,6 +784,44 @@ async function mockRightPanelRelay(
     });
   });
   return { commands, emit: (message: PanelRelayEvent) => emit(message) };
+}
+
+for (const engine of ["claude", "codex"] as const) {
+  for (const width of [390, 1280]) {
+    test(`terminal status reserves its header position during ${engine} restoration at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 844 });
+      const relay = await mockRightPanelRelay(page, { engine, retained: false, listReply: () => null });
+      for (const reload of [false, true]) {
+        relay.commands.length = 0;
+        if (reload) await page.reload();
+        else await page.goto("/");
+        await expect.poll(() => relay.commands.some(command => command.type === "list_sessions")).toBe(true);
+        const terminal = page.locator(".terminal-control-trigger");
+        await expect(terminal).toBeVisible();
+        if (!reload) await expect(terminal).toBeDisabled();
+        await page.evaluate(() => document.fonts.ready);
+        const before = await page.locator(".hstat").boundingBox();
+        const iconBefore = await terminal.boundingBox();
+        for (const command of relay.commands.filter(command => command.type === "list_sessions")) {
+          relay.emit({ type: "session_list", engine, space: "code", request_id: String(command.cmd_id),
+            sessions: [{ session_id: "layout-parent", engine, space: "code", summary: "Layout parent",
+              cwd: "/tmp/layout", state: "idle", last_modified: "100" }] });
+        }
+        await expect(terminal).toBeEnabled();
+        relay.emit({ type: "session_control", sid: "layout-parent", revision: 1,
+          generation: "layout-generation", control_mode: engine === "codex" ? "codex_shared" : "claude_broker",
+          write_state: "writable", terminal_attached: true, can_takeover: false });
+        await expect(terminal).toHaveAccessibleName("终端状态：终端双向连接");
+        expect(await page.locator(".hstat").boundingBox()).toEqual(before);
+        expect(await terminal.boundingBox()).toEqual(iconBefore);
+        await terminal.click();
+        await expect(page.getByRole("dialog", { name: "终端连接状态" })).toBeVisible();
+        await page.keyboard.press("Escape");
+        await expect(terminal).toBeFocused();
+      }
+      expect(relay.commands.some(command => ["query", "takeover"].includes(String(command.type)))).toBe(false);
+    });
+  }
 }
 
 for (const [engine, space] of [["claude", "code"], ["codex", "code"], ["claude", "work"]] as const) {

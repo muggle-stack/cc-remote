@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "../icons";
+import "./PanelActions.css";
 import type { Engine, SessionControl } from "../protocol";
 import {
   presentLegacyExternalControl,
@@ -23,6 +24,15 @@ interface Props {
 interface CardPosition {
   top: number;
   right: number;
+}
+
+/** Match the live trigger's geometry while no actionable session is selected. */
+export function TerminalControlPlaceholder({ reason }: { reason: string }) {
+  return <button className="terminal-control-trigger" type="button" disabled
+    aria-label={`终端状态：${reason}`} title={reason}>
+    <Icon name="term" size={18} />
+    <span className="terminal-control-dot" aria-hidden="true" />
+  </button>;
 }
 
 export function TerminalControl({
@@ -138,16 +148,14 @@ export function TerminalControl({
             aria-label="终端连接状态" tabIndex={-1}
             onClick={(event) => event.stopPropagation()}>
             <header>
-              <span className="terminal-control-mark"><Icon name="term" size={19} /></span>
-              <div>
-                <b>{ui.title}</b>
-                <p>{ui.detail}</p>
-              </div>
-              <button ref={closeRef} type="button" className="terminal-control-close"
+              <Icon name="term" size={19} />
+              <b>终端状态</b>
+              <button ref={closeRef} type="button" className="iconbtn panel-action terminal-control-close"
                 onClick={() => setOpen(false)} aria-label="关闭终端状态">
-                <Icon name="close" size={16} />
+                <Icon name="chevrons-right" size={18} />
               </button>
             </header>
+            <div className="terminal-control-summary"><b><i aria-hidden="true" />{ui.title}</b><p>{ui.detail}</p></div>
             <dl>
               <div><dt>引擎</dt><dd>{engine === "codex" ? "Codex" : "Claude"}</dd></div>
               <div><dt>连接方式</dt><dd>{ui.connection}</dd></div>

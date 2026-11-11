@@ -1,0 +1,17 @@
+.iconbtn.panel-action { display:inline-grid; place-items:center; width:32px; height:32px; min-width:32px; flex:none; padding:0; border:0; border-radius:9px; color:var(--dim); background:transparent; box-shadow:none; transition:color .15s,background .15s; }
+.iconbtn.panel-action > svg { width:18px; height:18px; flex:none; }
+.iconbtn.panel-action:active { background:var(--raised); color:var(--text); }
+.iconbtn.panel-action:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.iconbtn.panel-action:disabled { cursor:default; opacity:.45; }
+.iconbtn.panel-refresh[aria-busy="true"] { opacity:1; cursor:wait; color:var(--dim); }
+.panel-refresh-track { opacity:.2; }
+.panel-refresh-arc { transform-origin:12px 12px; animation:panel-refresh-spin .85s linear infinite; }
+.panel-row-menu { position:relative; flex:none; }
+.panel-row-menu-items { position:absolute; z-index:9; top:calc(100% + 4px); right:0; display:grid; min-width:120px; padding:5px; border:1px solid var(--border); border-radius:10px; background:var(--surface); box-shadow:var(--shadow-lg); }
+.panel-row-menu-items > button { padding:9px 12px; border:0; border-radius:6px; background:transparent; color:var(--text); text-align:left; font-size:12px; white-space:nowrap; }
+.panel-row-menu-items > button:hover,.panel-row-menu-items > button:focus-visible { outline:none; background:var(--raised); }
+.panel-row-menu-items > button.danger { color:var(--danger); }
+@keyframes panel-refresh-spin { to { transform:rotate(360deg); } }
+@media(hover:hover) and (pointer:fine) { .iconbtn.panel-action:hover:not(:disabled) { background:var(--raised); color:var(--text); } }
+@media(pointer:coarse) { .iconbtn.panel-action { width:40px; height:40px; min-width:40px; } .panel-row-menu-items > button { min-height:44px; } }
+@media(prefers-reduced-motion:reduce) { .panel-refresh-arc { animation:none; } .iconbtn.panel-action { transition:none; } }

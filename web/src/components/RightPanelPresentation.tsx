@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useRef, type HTMLAttributes } fro
 import { Icon } from "../icons";
 import { RightPanelPresentation } from "../right-panel-presentation";
 import "./RightPanelPresentation.css";
+import "./PanelActions.css";
 
 const InsidePanel = createContext(false);
 const focusable = (panel: HTMLElement) => [...panel.querySelectorAll<HTMLElement>(
@@ -125,7 +126,7 @@ export function PanelFrame({ children, className = "", label, ...props }:
 
 export function PanelExpandButton({ label }: { label: string }) {
   const { expanded, onExpand, onDock, chat } = useContext(RightPanelPresentation);
-  return <button type="button" className="iconbtn panel-expand"
+  return <button type="button" className="iconbtn panel-action panel-expand"
     onClick={expanded ? onDock : onExpand}
     aria-label={expanded ? "收回右侧" : `居中展开${label}`}
     title={expanded ? "收回右侧" : chat ? "居中展开 (⌘/Ctrl+Shift+E)" : "居中展开"}

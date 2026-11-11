@@ -4,6 +4,7 @@ import type { FilesListed } from "../protocol";
 import type { RelayWs } from "../ws";
 import { Icon } from "../icons";
 import { PanelResizer } from "./PanelResizer";
+import { PanelCloseButton, RefreshButton } from "./PanelActions";
 import "./FileBrowserPanel.css";
 
 export function FileBrowserPanel({ sid, initialPath, ws, hidden, onListen,
@@ -70,18 +71,18 @@ export function FileBrowserPanel({ sid, initialPath, ws, hidden, onListen,
     <PanelResizer ariaLabel="调整文件面板宽度" />
     <div className="artifact-head">
       <Icon name="folder-open" size={18} /><strong>会话文件</strong>
-      <span className="artifact-path" title={visibleListing?.path}>{visibleListing?.path}</span>
-      <button className="iconbtn" title="刷新目录" aria-label="刷新目录"
-        onClick={() => browse(listing?.path ?? path, showHidden)}><Icon name="refresh" size={17} /></button>
+      <span className="workspace-head-spacer" />
+      <RefreshButton label="刷新目录" busy={loading} failed={!!error}
+        onClick={() => browse(listing?.path ?? path, showHidden)} />
       <PanelExpandButton label="会话文件" />
-      <button className="iconbtn" title="关闭文件浏览" aria-label="关闭文件浏览" onClick={onClose}><Icon name="close" size={18} /></button>
+      <PanelCloseButton label="关闭文件浏览" onClick={onClose} />
     </div>
     <form className="workspace-path" onSubmit={(event) => {
       event.preventDefault(); browse(path, showHidden);
     }}>
       <input aria-label="文件或目录路径" value={path} onChange={(event) => setPath(event.target.value)}
         spellCheck={false} placeholder="输入文件或目录路径" />
-      <button type="submit" disabled={loading}>打开</button>
+      <button type="submit" disabled={loading} aria-label="打开路径" title="打开路径"><Icon name="arrow-right" size={17} /></button>
     </form>
     <div className="workspace-options">
       <button disabled={!listing?.parent || loading} onClick={() => browse(listing!.parent!, showHidden)}>
@@ -106,5 +107,6 @@ export function FileBrowserPanel({ sid, initialPath, ws, hidden, onListen,
       {listing?.next_offset != null && <button className="workspace-more" disabled={loading}
         onClick={() => browse(listing.path, showHidden, listing.next_offset!, listing.revision)}>加载更多</button>}
     </div>
+    {listing && !loading && !error && <div className="workspace-count">{listing.entries.length} 个项目{listing.next_offset != null ? " · 还有更多" : ""}</div>}
   </div>;
 }
