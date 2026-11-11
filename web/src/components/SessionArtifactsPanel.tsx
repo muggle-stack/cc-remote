@@ -7,6 +7,7 @@ import type { ArtifactPanel as ArtifactPanelType } from "./ArtifactPanel";
 import { PanelExpandButton, PanelFrame } from "./RightPanelPresentation";
 import { PanelResizer } from "./PanelResizer";
 import { useArtifactThumbnails } from "./artifact-thumbnails";
+import { PanelCloseButton, RefreshButton } from "./PanelActions";
 import "./SessionArtifactsPanel.css";
 
 const ArtifactPanel = lazy(() => import("./ArtifactPanel").then(m => ({ default: m.ArtifactPanel })));
@@ -37,6 +38,7 @@ export default function SessionArtifactsPanel({ sid, engine, space, ws, revision
   preview: PreviewProps;
 }) {
   const [entries, setEntries] = useState<SessionArtifactInfo[]>([]);
+  const [filter, setFilter] = useState<SessionArtifactInfo["kind"] | "all">("all");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [cursor, setCursor] = useState<number | null>(null);
@@ -50,7 +52,8 @@ export default function SessionArtifactsPanel({ sid, engine, space, ws, revision
   const lastRequest = useRef<[number | null, boolean, string | null]>([null, false, null]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const hasPreview = !!selected && !!preview.artifact;
-  const thumbnails = useArtifactThumbnails(scrollRef, entries, !hasPreview, ws, sid, engine, space);
+  const visibleEntries = filter === "all" ? entries : entries.filter(entry => entry.kind === filter);
+  const thumbnails = useArtifactThumbnails(scrollRef, visibleEntries, !hasPreview, ws, sid, engine, space);
   const receiveThumbnail = thumbnails.receive;
 
   const request = useCallback((before: number | null = null, scan = false, historyBefore: string | null = null) => {
@@ -120,19 +123,26 @@ export default function SessionArtifactsPanel({ sid, engine, space, ws, revision
     <div className="session-artifacts-list" hidden={hasPreview}>
       <div className="artifact-head">
         <div className="artifact-title"><Icon name="archive" size={18} /><b>Artifacts</b></div>
-        <button className="iconbtn" aria-label="刷新 Artifacts" disabled={busy} onClick={() => {
+        <RefreshButton label="刷新 Artifacts" busy={busy} failed={!!error} onClick={() => {
           thumbnails.refresh(); firstScan.current = false; request();
-        }}><Icon name="refresh" /></button>
+        }} />
         <PanelExpandButton label="Artifacts" />
-        <button className="iconbtn" aria-label="收起 Artifacts" onClick={onClose}><Icon name="chevrons-right" /></button>
+        <PanelCloseButton label="收起 Artifacts" onClick={onClose} />
       </div>
-      <p className="session-artifacts-caption">当前会话的附件与交付文件</p>
+      <p className="session-artifacts-caption">附件与交付文件</p>
+      <div className="session-artifacts-filters" role="group" aria-label="文件类型">
+        {([["all", "全部"], ["image", "图片"], ["document", "文档"], ["file", "其他"]] as const).map(([value, label]) =>
+          <button key={value} type="button" aria-pressed={filter === value} onClick={() => setFilter(value)}>
+            {label}{value === "all" && <small>{entries.length}</small>}
+          </button>)}
+      </div>
       <div className="session-artifacts-scroll" ref={scrollRef}>
         {!entries.length && !busy && !error && <div className="session-artifacts-empty">
           <Icon name="archive" size={32} /><p>还没有文件</p><small>上传的附件和回答中的文件会整理在这里。</small>
         </div>}
-        {entries.map((entry, index) => <Fragment key={entry.id}>
-          {(index === 0 || dateGroup(entry.created_at) !== dateGroup(entries[index - 1].created_at)) &&
+        {!!entries.length && !visibleEntries.length && <p className="session-artifacts-empty">已加载的文件中没有此类型</p>}
+        {visibleEntries.map((entry, index) => <Fragment key={entry.id}>
+          {(index === 0 || dateGroup(entry.created_at) !== dateGroup(visibleEntries[index - 1].created_at)) &&
             <h3 className="session-artifacts-date">{dateGroup(entry.created_at)}</h3>}
           <button className="session-artifact-row" data-artifact-image={entry.kind === "image" ? entry.id : undefined}
           title={entry.path} disabled={!entry.available} onClick={() => onSelect(entry)}>
@@ -142,7 +152,10 @@ export default function SessionArtifactsPanel({ sid, engine, space, ws, revision
               : <Icon name={entry.kind === "image" ? "image" : entry.kind === "file" ? "code" : "read"} size={22} />}
           </span>
           <span className="session-artifact-info"><b>{entry.name}</b><small>
-            {entry.source === "upload" ? "上传附件" : "AI 交付"}
+            {entry.kind === "image" ? "图片" : entry.kind === "document" ? "文档" : "文件"}
+            {entry.size >= 0 && ` · ${entry.size < 1024 ? `${entry.size} B` : entry.size < 1048576
+              ? `${(entry.size / 1024).toFixed(1)} KB` : `${(entry.size / 1048576).toFixed(1)} MB`}`}
+            {` · ${entry.source === "upload" ? "上传附件" : "AI 交付"}`}
             {!entry.available && " · 文件已移动或删除"}
           </small></span><Icon name="chevron-right" size={16} />
         </button></Fragment>)}

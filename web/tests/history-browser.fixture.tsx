@@ -579,7 +579,6 @@ function UsageActivityBrowserFixture({
       report={report}
       hasSession
       onClose={() => setActivityOpen(false)}
-      onRefresh={() => {}}
     />
   </main>;
 }

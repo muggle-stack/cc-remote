@@ -1,4 +1,5 @@
 import { QuestionNotificationGate, questionNotificationPresentation } from "./question-notification";
+import { SessionStatus } from "./components/SessionStatus";
 import { canSubmitSteer } from "./pending-steers";
 import { useWebUpdate } from "./use-web-update";
 import { WEB_BUILD } from "./web-build";
@@ -6145,8 +6146,7 @@ export default function App() {
             onDismissNotice={(noticeId) => {
               if (focusedSid) dispatch({ type: "dismiss_notice", sid: focusedSid, noticeId });
             }} />
-          <span className={`hstat ${dshConnectionError ? "reconnecting" : effectiveState}`}><span className="sd" />
-            <span className="hstat-label">{dshConnectionError ? "同步中" : effectiveState}</span></span>
+          <SessionStatus state={dshConnectionError ? "reconnecting" : effectiveState} />
           {space === "code" && focusedSid && !state.newChat
               && !archivedBrowse && focusedEngine !== "dsh" && (
             <TerminalControl control={rt.control} engine={focusedEngine}
@@ -6862,7 +6862,6 @@ export default function App() {
           loading={rt.statusRequestId !== null}
           hasSession={!!focusedSid && focusedEngine === "codex" && !state.newChat}
           onClose={() => setUsageActivityOpen(false)}
-          onRefresh={refreshStatus}
         />
       </Suspense>}
       {forkWorktreeSession !== null && <Suspense fallback={null}>

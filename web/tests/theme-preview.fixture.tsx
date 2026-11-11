@@ -1,3 +1,4 @@
+import { SessionStatus } from "../src/components/SessionStatus";
 /** Isolated, zero-network preview using the production chat and controls. */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -94,7 +95,7 @@ export function ThemePreview() {
       <header className="c-head">
         <button className="iconbtn" onClick={() => setSidebarOpen(value => !value)} aria-label="会话列表"><Icon name="code" /></button>
         <div className="titlewrap"><div className="ttl">Code</div><div className="sub">主题预览 · 示例会话</div></div>
-        <span className="hstat idle"><span className="sd" />idle</span>
+        <SessionStatus state="idle" />
         <EngineSelector engine={engine} onChange={setEngine} />
         <HeaderMenu engine={engine} appearance={appearance}
           boldText={boldText} onBoldText={setBoldText}

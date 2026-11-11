@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/tests/header-feedback.html");
-  await expect(page.locator(".hstat-label")).toHaveText("idle");
+  await expect(page.locator(".hstat-label")).toHaveText("空闲");
 });
 
 test("header feedback includes all command warnings and preserves page refresh actions", async ({ page }) => {
@@ -65,7 +65,7 @@ test("header feedback hides an outage through recovery and accepts a new outage"
   await expect(feedback).toHaveText("同步中");
   await page.getByRole("button", { name: "ready", exact: true }).click();
   await expect(feedback).toHaveText("✓已重连");
-  await expect(page.locator(".hstat-label")).toHaveText("idle");
+  await expect(page.locator(".hstat-label")).toHaveText("空闲");
 });
 
 test("header feedback success expires and a replay cannot resurrect an acknowledged receipt", async ({ page }) => {
@@ -123,7 +123,7 @@ test("header feedback shows checkpoint limitations compactly and keeps acknowled
   await page.clock.fastForward(60_000);
   await expect(feedback).toHaveText("回滚受限");
   await expect(page.locator(".notice-stack, .banner.show")).toHaveCount(0);
-  await expect(page.locator(".hstat-label")).toHaveText("idle");
+  await expect(page.locator(".hstat-label")).toHaveText("空闲");
   await feedback.click();
   const dialog = page.getByRole("dialog", { name: "状态详情" });
   await expect(dialog).toContainText("本轮修改了 Git 暂存区或包含当前无法安全记录的文件；对话仍可正常回滚。");

@@ -8,6 +8,7 @@ import {
 import type { StatusReport } from "../protocol";
 import { Icon } from "../icons";
 import { CenteredSheet } from "./CenteredSheet";
+import { PanelCloseButton } from "./PanelActions";
 import { accountStatsNote } from "../status-capabilities";
 import {
   buildUsageActivityCalendar,
@@ -24,7 +25,6 @@ interface Props {
   loading?: boolean;
   hasSession: boolean;
   onClose: () => void;
-  onRefresh: () => void;
 }
 
 const EMPTY_BUCKETS = [] as const;
@@ -45,7 +45,6 @@ export function UsageActivitySheet({
   loading = false,
   hasSession,
   onClose,
-  onRefresh,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const usage = error ? null : report?.usage;
@@ -92,15 +91,10 @@ export function UsageActivitySheet({
         {report?.account?.plan_type && (
           <em>{report.account.plan_type}</em>
         )}
-        <button type="button" className="usage-activity-refresh"
-          onClick={onRefresh} disabled={loading || !hasSession}>
-          <Icon name="refresh" size={15} />
-          <span>{loading ? "更新中" : "刷新"}</span>
-        </button>
-        <button type="button" className="usage-activity-close"
-          onClick={onClose} aria-label="关闭使用活动">
-          <Icon name="close" size={17} />
-        </button>
+        <span className="usage-activity-update" role="status" aria-label={loading ? "正在更新使用活动" : "打开时自动更新"}>
+          {loading && <span className="usage-activity-spinner" aria-hidden="true" />}
+        </span>
+        <PanelCloseButton onClick={onClose} label="关闭使用活动" />
       </header>
 
       <div className="usage-activity-scroll">
