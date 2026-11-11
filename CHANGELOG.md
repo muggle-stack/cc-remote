@@ -4,6 +4,15 @@
 
 ## Unreleased
 
+## v5.3.24
+
+Match session selection to the device center's soft left-edge glow. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
+
+- Use subtle backgrounds and borders in compact and comfortable session lists, following each engine's theme colors.
+- Preserve card geometry, account labels, session status and menu interactions; the glow does not intercept clicks.
+
+See the bilingual [release notes](docs/releases/v5.3.24.md).
+
 ## v5.3.23
 
 Update the server independently of the selected chat device. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
