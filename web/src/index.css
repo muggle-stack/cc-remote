@@ -1955,11 +1955,6 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
   user-select:none; -webkit-user-select:none; }
 .scard + .scard{ margin-top:2px; }
 @media (hover:hover){ .scard:hover{ background:var(--surface); } }
-.scard.active{ background:color-mix(in srgb,var(--accent) 10%,var(--surface));
-  border-color:color-mix(in srgb,var(--accent) 32%,var(--border)); }
-:root[data-theme="dark"] .scard.active{
-  background:color-mix(in srgb,var(--accent) 13%,var(--surface));
-  border-color:color-mix(in srgb,var(--accent) 32%,var(--border-strong)); }
 /* Account dots live in the existing group gutter, outside the row highlight.
    Reserve the right edge only for the menu; dots never consume title width. */
 .scard-top{ display:flex; align-items:center; gap:7px; min-height:20px; padding-right:30px; }
@@ -1975,15 +1970,19 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
   background:color-mix(in srgb,var(--surface) 42%,transparent); }
 .sessions[data-layout="comfortable"] .scard + .scard{ margin-top:7px; }
 .sessions[data-layout="comfortable"] .scard-top{ gap:9px; margin-bottom:3px; }
-.sessions[data-layout="comfortable"] .scard.active{
-  background:color-mix(in srgb,var(--accent) 11%,var(--surface));
-  border-color:color-mix(in srgb,var(--accent) 45%,var(--border-strong));
-  box-shadow:var(--shadow-sm),inset 3px 0 color-mix(in srgb,var(--accent) 72%,transparent); }
 .sessions[data-layout="comfortable"] .scard-actions{ top:8px; right:8px; }
 .sessions[data-layout="comfortable"] .sgroup-toggle{ padding:14px 8px 7px; }
 @media (hover:hover){
   .sessions[data-layout="comfortable"] .scard:hover{ background:var(--surface); }
 }
+/* Match the device selection edge without changing row geometry or hit targets. */
+.scard.active,.sessions[data-layout="comfortable"] .scard.active{
+  background:color-mix(in srgb,var(--accent) 3%,var(--surface));
+  border-color:color-mix(in srgb,var(--accent) 25%,var(--border)); }
+.scard.active::before{ content:""; position:absolute; inset:-1px auto -1px -1px;
+  width:15px; border-radius:inherit; border-top-right-radius:0; border-bottom-right-radius:0;
+  border-left:3px solid color-mix(in srgb,var(--accent) 72%,var(--text));
+  box-shadow:inset 5px 0 9px -6px var(--accent); pointer-events:none; }
 .scard-profile-ribbon{ position:absolute; top:-6px; left:12px; z-index:2;
   display:inline-flex; align-items:center; justify-content:center;
   min-width:26px; height:16px; max-width:64px; padding:0 6px;
