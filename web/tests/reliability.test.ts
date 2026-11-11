@@ -65,7 +65,8 @@ import {
   rekeyCompletionReceipts,
 } from "../src/completion-badges.ts";
 import { imageDimensions } from "../src/img.ts";
-import "./presentation-state.test.ts";
+// Run node:test suites separately in test:reliability. Their implicit runner
+// can keep a failed top-level assertion pending behind live RelayWs timers.
 import "./slash-command.test.ts";
 import {
   historyImageDisplaySource,
@@ -18809,8 +18810,10 @@ assert.match(serviceWorkerSource, /self\.clients\.openWindow\(target\)/,
 assert.match(serviceWorkerSource,
   /url\.pathname === "\/html-preview-runner\.html"[\s\S]*url\.pathname === "\/html-preview-runner\.js"[\s\S]*return/,
   "the isolated HTML runner must bypass shell and asset caching");
-assert.match(layoutCss, /var\(--app-height,100dvh\) - var\(--keyboard-inset,0px\)/,
-  "keyboard-aware mobile sheets must account for the virtual keyboard inset");
+assert.match(layoutCss, /\.sheet\{[^}]*bottom:var\(--keyboard-inset,0px\)/,
+  "mobile bottom sheets must remain above the virtual keyboard");
+assert.match(layoutCss, /\.sheet\{[^}]*max-height:[^;]*var\(--app-height,100dvh\)/,
+  "mobile bottom sheets must fit within the already keyboard-adjusted visual viewport");
 
 class MemoryStorage {
   readonly values = new Map<string, string>();
