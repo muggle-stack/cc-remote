@@ -185,8 +185,9 @@ body{
    is reserved for a terminal positively matched to this exact session. */
 .terminal-control-trigger{ position:relative; display:grid; place-items:center; width:40px; height:40px;
   flex:none; border:1px solid transparent; border-radius:10px; color:var(--faint); transition:.14s; }
-.terminal-control-trigger:hover,.terminal-control-trigger[aria-expanded="true"]{
+.terminal-control-trigger:hover:not(:disabled),.terminal-control-trigger[aria-expanded="true"]{
   color:var(--text); background:var(--raised); border-color:var(--border); }
+.terminal-control-trigger:disabled{ cursor:default; }
 .terminal-control-dot{ position:absolute; right:5px; bottom:5px; width:7px; height:7px; border-radius:50%;
   border:1.5px solid var(--bg); background:var(--faint); }
 .terminal-control-trigger.tone-attached{ color:var(--accent-ink); }

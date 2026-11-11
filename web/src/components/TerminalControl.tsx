@@ -26,6 +26,15 @@ interface CardPosition {
   right: number;
 }
 
+/** Match the live trigger's geometry while no actionable session is selected. */
+export function TerminalControlPlaceholder({ reason }: { reason: string }) {
+  return <button className="terminal-control-trigger" type="button" disabled
+    aria-label={`终端状态：${reason}`} title={reason}>
+    <Icon name="term" size={18} />
+    <span className="terminal-control-dot" aria-hidden="true" />
+  </button>;
+}
+
 export function TerminalControl({
   control,
   engine,

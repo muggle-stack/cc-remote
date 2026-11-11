@@ -76,7 +76,7 @@ const QuestionSheet = lazy(() => import("./components/QuestionSheet").then(
   m => ({ default: m.QuestionSheet })));
 const WorkDashboardSheet = lazy(() => import("./components/WorkDashboardSheet").then(m => ({ default: m.WorkDashboardSheet })));
 import type { HookDraft, SkillDraft } from "./components/CapabilitiesSheet";
-import { TerminalControl } from "./components/TerminalControl";
+import { TerminalControl, TerminalControlPlaceholder } from "./components/TerminalControl";
 import { DeviceSheet, type PairingState, type RemoteDevice } from "./components/DeviceSheet";
 import { deviceVersionNotice } from "./device-version";
 import { EngineSelector } from "./components/EngineSelector";
@@ -6147,15 +6147,17 @@ export default function App() {
               if (focusedSid) dispatch({ type: "dismiss_notice", sid: focusedSid, noticeId });
             }} />
           <SessionStatus state={dshConnectionError ? "reconnecting" : effectiveState} />
-          {space === "code" && focusedSid && !state.newChat
-              && !archivedBrowse && focusedEngine !== "dsh" && (
-            <TerminalControl control={rt.control} engine={focusedEngine}
-              availability={state.connState !== "connected" || !state.wrapperOnline
-                ? "offline" : rt.replaying || !rt.syncReady ? "syncing" : "online"}
-              legacyExternal={!rt.control && !!rt.external}
-              legacyTakeoverPending={rt.takeoverPending}
-              legacyMessage={rt.takeoverMessage}
-              onTakeover={() => wsRef.current?.sendTakeover(focusedSid)} />
+          {space === "code" && focusedEngine !== "dsh" && (
+            focusedSid && !state.newChat && !archivedBrowse ? (
+              <TerminalControl control={rt.control} engine={focusedEngine}
+                availability={state.connState !== "connected" || !state.wrapperOnline
+                  ? "offline" : rt.replaying || !rt.syncReady ? "syncing" : "online"}
+                legacyExternal={!rt.control && !!rt.external}
+                legacyTakeoverPending={rt.takeoverPending}
+                legacyMessage={rt.takeoverMessage}
+                onTakeover={() => wsRef.current?.sendTakeover(focusedSid)} />
+            ) : <TerminalControlPlaceholder reason={archivedBrowse ? "归档会话不提供终端状态"
+              : state.newChat ? "会话创建后可查看终端状态" : "选择会话后查看终端状态"} />
           )}
           <button className={`device-trigger${activeDeviceOnline ? " online" : ""}`}
             onClick={() => setDeviceSheetOpen(true)} aria-label="设备中心"
