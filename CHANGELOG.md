@@ -4,6 +4,16 @@
 
 ## Unreleased
 
+## v5.3.22
+
+Keep mobile terminal status close to its header button. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
+
+- Open terminal status beneath its trigger on phones as well as desktops, with viewport edge bounds and internal scrolling on short screens.
+- Cover narrow phones, landscape and desktop layouts for both Claude and Codex, including header stability after reload.
+- Correct an obsolete keyboard-layout assertion and isolate the presentation-state test runner so reliability failures report and exit instead of hanging.
+
+See the bilingual [release notes](docs/releases/v5.3.22.md).
+
 ## v5.3.21
 
 Unify Web panel controls and keep session status indicators stable during loading. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
