@@ -27,8 +27,9 @@ from cc_remote.attachments import (
     MAX_FILENAME_BYTES,
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
+from cc_remote.collaboration import CollaborationMemberSpec, MAX_ROOM_MESSAGE
 
-PROTOCOL_VERSION = 90
+PROTOCOL_VERSION = 92
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -1224,6 +1225,7 @@ class TurnEnd(_Base):
 
 
 class Error(_Base):
+    _outcome_unknown: bool = PrivateAttr(default=False)
     type: Literal["error"] = "error"
     code: str = Field(min_length=1, max_length=128)
     message: str = Field(max_length=64 * 1024)
@@ -3278,7 +3280,67 @@ class CompletionState(_Base):
         return self
 
 
+class CollaborationCommand(_Command):
+    type: Literal["collaboration"] = "collaboration"
+    cmd_id: WireId
+    client_id: WireId
+    operation: Literal["list", "create", "read", "update", "add_member", "remove_member", "restore_member", "rename_member", "sessions", "send", "stop", "catalog", "answer", "reconcile", "dismiss"]
+    room_id: Optional[WireId] = None
+    member_id: Optional[WireId] = None
+    delivery_id: Optional[WireId] = None
+    revision: Optional[int] = Field(default=None, ge=1)
+    name: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    members: list[CollaborationMemberSpec] = Field(default_factory=list, max_length=16)
+    member: Optional[CollaborationMemberSpec] = None
+    default_member_id: Optional[WireId] = None
+    archived: Optional[bool] = None
+    message_id: Optional[WireId] = None
+    prompt: Optional[str] = Field(default=None, max_length=MAX_ROOM_MESSAGE)
+    targets: list[WireId] = Field(default_factory=list, max_length=16)
+    images: Optional[list[QueryImage]] = Field(default=None, max_length=MAX_ATTACHMENT_COUNT)
+    files: Optional[list[QueryFile]] = Field(default=None, max_length=MAX_ATTACHMENT_COUNT)
+    before: Optional[int] = Field(default=None, ge=1)
+    ask_id: Optional[WireId] = None
+    answer: Optional[AskAnswer] = None
+    answers: Optional[list[AskAnswer]] = Field(default=None, min_length=1, max_length=4)
+
+    @model_validator(mode="after")
+    def operation_fields(self):
+        if self.operation not in {"list", "create", "catalog", "sessions"} and not self.room_id:
+            raise ValueError("room_id is required")
+        if self.operation == "create" and (not self.name or not self.name.strip() or not self.members):
+            raise ValueError("create requires a name and participants")
+        if self.name is not None and not self.name.strip():
+            raise ValueError("name must contain text")
+        if self.operation in {"add_member", "catalog", "sessions"} and not self.member:
+            raise ValueError("member configuration is required")
+        if self.operation in {"remove_member", "restore_member", "rename_member", "stop", "answer"} and not self.member_id:
+            raise ValueError("member_id is required")
+        if self.operation == "rename_member" and (not self.name or len(self.name.strip()) > 80):
+            raise ValueError("member name must contain between 1 and 80 characters")
+        if self.operation == "dismiss" and not self.delivery_id:
+            raise ValueError("delivery_id is required")
+        if self.operation == "answer" and (not self.ask_id or (self.answer is None) == (self.answers is None)):
+            raise ValueError("answer requires ask_id and one answer form")
+        if self.operation == "send" and (not self.message_id or not (self.prompt and self.prompt.strip() or self.images or self.files)):
+            raise ValueError("send requires message_id and content")
+        if _attachment_count(self.images, self.files) > MAX_ATTACHMENT_COUNT:
+            raise ValueError("too many attachments")
+        if self.operation != "send" and (self.images or self.files):
+            raise ValueError("attachments require send")
+        return self
+
+
+class CollaborationState(_Base):
+    type: Literal["collaboration_state"] = "collaboration_state"
+    request_id: Optional[WireId] = None
+    room_id: Optional[WireId] = None
+    data: dict[str, Any] = Field(default_factory=dict)
+    error: Optional[str] = Field(default=None, max_length=4096)
+
+
 AnyMessage = Union[
+    CollaborationCommand, CollaborationState,
     PrepareDirectoryAction, RunDirectoryAction, DirectoryActionPlan, DirectoryActionProgress,
     GetRewindPreview, RewindPreview,
     ReorderQueuedQueries,
@@ -3315,6 +3377,8 @@ DOWNSTREAM_TYPES = frozenset({
 })
 
 _TYPE_MAP: dict[str, type[BaseModel]] = {
+    "collaboration": CollaborationCommand,
+    "collaboration_state": CollaborationState,
     "prepare_directory_action": PrepareDirectoryAction,
     "run_directory_action": RunDirectoryAction,
     "directory_action_plan": DirectoryActionPlan,

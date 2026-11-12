@@ -54,6 +54,7 @@ class CommandScheduler:
     async def submit(
         self, command, *, target: str | None = None,
         serial: bool = True, barrier: bool = False, urgent: bool = False,
+        handler: Callable[[object], Awaitable[None]] | None = None,
     ) -> None:
         received = asyncio.get_running_loop().time()
         fields = {
@@ -114,7 +115,7 @@ class CommandScheduler:
             log.info("command dispatch", **fields,
                      queued_ms=round((started - received) * 1000))
             try:
-                await self._process(command)
+                await (handler or self._process)(command)
             finally:
                 log.info("command handler finished", **fields,
                          elapsed_ms=round((asyncio.get_running_loop().time()

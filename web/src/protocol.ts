@@ -799,7 +799,80 @@ export interface CodexContext extends Base {
   error: string | null;
 }
 
-export type ServerEvent = SessionArtifacts | FilesListed | CodexContext
+export interface CollaborationMemberSpec {
+  engine: Engine;
+  name?: string;
+  profile_id?: string | null;
+  session_id?: string | null;
+  cwd?: string | null;
+  model?: string | null;
+  effort?: string | null;
+  permission_mode?: string | null;
+  permission_profile?: string | null;
+  service_tier?: string | null;
+  dsh_permission?: string | null;
+  dsh_agent_preset?: string | null;
+}
+export interface CollaborationMember {
+  id: string; room_id: string; name: string; spec: CollaborationMemberSpec;
+  sid: string | null; native_sid: string | null; cwd: string | null; removed: boolean | number;
+}
+export interface CollaborationSession {
+  sid: string; native_sid: string; name: string; cwd: string;
+  state: string; unavailable?: boolean;
+}
+export interface CollaborationRoom {
+  id: string; name: string; default_member: string | null; revision: number;
+  updated: number; archived: boolean | number; members?: CollaborationMember[];
+}
+export interface CollaborationMessage {
+  id: string; seq: number; role: "user" | "assistant"; member_id: string | null;
+  text: string; created: number; targets: string[]; reply_to: string[]; truncated?: boolean;
+  attachments?: {kind: "file" | "image"; name: string}[];
+}
+export interface CollaborationDelivery {
+  id: string; message_id: string; member_id: string; status: string;
+  mode: "query" | "steer" | null; error: string | null; created: number; updated: number;
+}
+export interface CollaborationState extends Base {
+  type: "collaboration_state"; request_id?: string | null; room_id?: string | null; error?: string | null;
+  data: {
+    generation?: string; version?: number;
+    rooms?: CollaborationRoom[]; room?: CollaborationRoom; messages?: CollaborationMessage[];
+    deliveries?: CollaborationDelivery[]; before?: number | null; has_more?: boolean;
+    profiles?: Partial<Record<Engine, {id: string; label: string}[]>>;
+    catalog?: Models; catalog_spec?: CollaborationMemberSpec;
+    permission_profiles?: PermissionProfiles;
+    sessions?: CollaborationSession[]; sessions_spec?: CollaborationMemberSpec;
+    questions?: {member_id: string; sid: string; question: AskUser}[];
+  };
+}
+export interface CollaborationCommand extends Base {
+  type: "collaboration";
+  cmd_id: string;
+  client_id: string;
+  operation: "list" | "create" | "read" | "update" | "add_member" | "remove_member" | "restore_member" | "rename_member" | "sessions" | "send" | "stop" | "catalog" | "answer" | "reconcile" | "dismiss";
+  room_id?: string | null;
+  member_id?: string | null;
+  delivery_id?: string | null;
+  revision?: number | null;
+  name?: string | null;
+  members?: CollaborationMemberSpec[];
+  member?: CollaborationMemberSpec | null;
+  default_member_id?: string | null;
+  archived?: boolean | null;
+  message_id?: string | null;
+  prompt?: string | null;
+  targets?: string[];
+  images?: QueryImg[] | null;
+  files?: QueryFile[] | null;
+  before?: number | null;
+  ask_id?: string | null;
+  answer?: string | string[] | null;
+  answers?: (string | string[])[] | null;
+}
+
+export type ServerEvent = CollaborationState | SessionArtifacts | FilesListed | CodexContext
   | DirectoryActionPlan | DirectoryActionProgress
   | TurnFileChangesPage
   | Pong | CommandAck | ReplayStart | ReplayEnd | Snapshot | StateEvent | QueryQueueState | QueuedQueryDetail | QueuedQueryUpdated | Model | Effort | AutoCompact | Fast | CollaborationMode | BtwOpened | BtwSync | BtwClosed | Perm | PermissionProfiles | PermissionProfile | WebSearch | ContextReport | DiffReport | FilePreview | FileSaveResult | PreviewAsset | PreviewAuthorizationRequired | PreviewAuthorizationResult | History | TurnDetail | AgentDetail | HistoryImage | HistoryInvalidated | ArtifactInvalidated | Models | DshState | DshCommandResult | DshReadResult | DshDownloadChunk | EngineCapabilities | TakeoverState | SessionControl
@@ -810,7 +883,7 @@ export type ServerEvent = SessionArtifacts | FilesListed | CodexContext
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnUsage | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 90;
+export const PROTOCOL_VERSION = 92;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

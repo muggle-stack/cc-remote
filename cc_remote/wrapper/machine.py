@@ -2041,6 +2041,7 @@ class WrapperMachine:
         ".pdf": "application/pdf",
     }
     SAFE_RETRY_COMMANDS = frozenset({
+        "collaboration",
         "get_rewind_preview",
         "list_sessions", "get_history", "get_turn_detail", "get_agent_detail",
         "get_history_image", "read_dsh",
@@ -2106,6 +2107,8 @@ class WrapperMachine:
         self._command_scheduler = CommandScheduler(
             self._process_command_safely, self._command_target_identity)
         self._dsh = DshRuntime(self)
+        from cc_remote.wrapper.collaboration import Collaboration
+        self._collaboration = Collaboration(self)
         self.instance_id = uuid4().hex
         # Each configured CLAUDE_CONFIG_DIR is an independent account/session
         # boundary. Keep implicit single-account mode source-compatible and
@@ -9510,12 +9513,14 @@ class WrapperMachine:
                 await self._session_messages.start()
             await self._local_control.start()
             await self._ui_updates.start()
+            await self._collaboration.start()
             self._work_schedule_task = asyncio.create_task(
                 self._work_schedule_loop())
             async for cmd in self.transport.incoming():
                 await self._dispatch_incoming_command(cmd)
             await self._command_scheduler.drain()
         finally:
+            await self._collaboration.close()
             await self._ui_updates.close()
             if self._session_messages is not None:
                 await self._session_messages.close()
@@ -11045,6 +11050,12 @@ class WrapperMachine:
                         await self._emit_locked(
                             ctx, self._completion_state(snapshot)
                         )
+        collaboration = getattr(self, "_collaboration", None)
+        if collaboration is not None:
+            try:
+                await collaboration.observe(ctx, msg)
+            except Exception as exc:
+                log.warning("collaboration projection deferred", error_type=type(exc).__name__)
 
     async def _emit_focused(self, msg) -> None:
         """For control-path errors with no target ctx (cap reached, bad cwd):
@@ -12018,6 +12029,9 @@ class WrapperMachine:
         if cmd.type == "list_sessions":
             self._start_session_list_command(cmd)
             return
+        if cmd.type == "collaboration":
+            await self._command_scheduler.submit(cmd, serial=False, urgent=cmd.operation in {"stop", "answer"})
+            return
         # DSH streams/export packaging can wait on native I/O. Independent read
         # tasks keep focus/create commands and export cancellation responsive.
         if (cmd.type in {"get_session_artifacts", "get_session_artifact_preview", "get_history", "get_turn_detail", "get_agent_detail", "get_turn_file_changes", "read_dsh", "download_dsh"}
@@ -12393,6 +12407,8 @@ class WrapperMachine:
             )
             await self._emit(ctx, error)
             return error
+        if cmd.type == "collaboration":
+            return await self._collaboration.handle(cmd)
         result = await self._dsh.dispatch(cmd)
         if result is UNHANDLED_COMMAND:
             result = await self._command_router.dispatch(cmd)
@@ -29477,7 +29493,7 @@ class WrapperMachine:
             focus_followed=(self.focused_sid == route_sid),
         )
 
-    async def _handle_new_session(self, cmd) -> None:
+    async def _handle_new_session(self, cmd, *, _focus=True, _persist_defaults=True):
         attachment_error = validate_attachments(
             getattr(cmd, "images", None), getattr(cmd, "files", None))
         if attachment_error:
@@ -29636,7 +29652,8 @@ class WrapperMachine:
             )
             await self.transport.send(error)
             return error
-        self.focused_sid = ctx.key
+        if _focus:
+            self.focused_sid = ctx.key
         # Establish the temp runtime's wrapper lifetime before any other
         # sequenced frame. Otherwise its cursor has no paired generation and a
         # normal transport reconnect is mistaken for a wrapper restart.
@@ -29652,17 +29669,18 @@ class WrapperMachine:
         # session_id is None until captured in _run_turn; use the pool (temp) key
         # as the focus id — the client migrates to the real sid on capture.
         focus = SessionFocus(
-            session_id=self.focused_sid,
+            session_id=ctx.key,
             cwd=ctx.cwd,
             request_id=getattr(cmd, "request_id", None),
             to=getattr(cmd, "client_id", None),
         )
-        await self._emit(ctx, focus)
+        if _focus:
+            await self._emit(ctx, focus)
         # _spawn records explicit picks as already announced. Emit them now that
         # SessionFocus has created the temp-keyed client runtime; otherwise the
         # removed client-side pending-query effect would leave its chips stale.
         cached_responses = [snap, focus]
-        if ctx.engine == "claude" and ctx.space == "code":
+        if _persist_defaults and ctx.engine == "claude" and ctx.space == "code":
             # Creating a session with explicit picker choices follows native
             # Enter-to-save semantics. Implicit/restored values never write.
             selected_model = (
@@ -37309,6 +37327,9 @@ class WrapperMachine:
 
     def _session_can_evict(self, key: str, ctx: SessionContext) -> bool:
         """One residency policy for every engine and ordinary/side-chat spawn."""
+        collaboration = getattr(self, "_collaboration", None)
+        if collaboration is not None and collaboration.pins(ctx):
+            return False
         return key != self.focused_sid and self._session_idle(key, ctx)
 
     def _session_idle(self, key: str, ctx: SessionContext) -> bool:

@@ -4,6 +4,9 @@
 
 ## 未发布
 
+- 新增协作聊天室，支持 Claude、Codex、DSH 参与者、原生会话配置、公开上下文同步及运行中引导。
+- Relay、Wrapper、Web 统一使用 wire protocol v92，协作数据库纳入升级与回滚事务快照。
+
 ## v5.3.24
 
 会话列表采用与设备中心一致的左侧柔光。通信协议 v90 和 Claude Agent SDK 0.2.174 保持不变。

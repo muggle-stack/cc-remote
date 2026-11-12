@@ -5253,6 +5253,8 @@ function reduceEvent(
       return patch(state, e.sid, (rt) => { rt.dshCommandResult = e; });
     case "dsh_state":
       return patch(state, e.sid, (rt) => { rt.dsh = e; });
+    case "collaboration_state":
+      return state;
     case "models": {
       // DSH catalogs are authoritative, including empty responses. Other engines
       // retain their existing catalog on a failed/empty read.

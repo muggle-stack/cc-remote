@@ -42,6 +42,9 @@ class UIUpdates(InstallationUpdates):
         final check and the maintenance barrier.
         """
         count = 0
+        collaboration = getattr(self.machine, "_collaboration", None)
+        if collaboration is not None:
+            count += collaboration.busy_count()
         for ctx in self.machine.sessions.values():
             if self._local_session_work(ctx):
                 count += 1
@@ -195,6 +198,8 @@ class UIUpdates(InstallationUpdates):
         return {"status": "ready"}
 
     async def reject(self, cmd):
+        if cmd.type == "collaboration" and cmd.operation in {"list", "read", "catalog", "sessions", "reconcile", "stop", "answer"}:
+            return None
         if (not self.guarded() or cmd.type.startswith(("get_", "list_", "read_", "browse_"))
                 or cmd.type in {"hello", "ping", "interrupt", "cancel_queued_query", "answer_question",
                                 "acknowledge_completion"}):

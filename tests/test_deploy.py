@@ -341,7 +341,7 @@ def test_release_snapshot_restores_versioned_claude_control_state(tmp_path):
     assert controls.read_bytes() == original
     assert stat.S_IMODE(controls.stat().st_mode) == 0o600
     manifest = json.loads((snapshot / "manifest.json").read_text())
-    assert manifest["version"] == 4
+    assert manifest["version"] == 5
     assert manifest["wrapper_state"]["files"][controls.name]["exists"] is True
 
 

@@ -27,8 +27,8 @@ import time
 from typing import Any
 
 
-SNAPSHOT_VERSION = 4
-_SUPPORTED_SNAPSHOT_VERSIONS = frozenset({1, 2, 3, SNAPSHOT_VERSION})
+SNAPSHOT_VERSION = 5
+_SUPPORTED_SNAPSHOT_VERSIONS = frozenset({1, 2, 3, 4, SNAPSHOT_VERSION})
 _ENGINES = ("claude", "codex")
 _ROOT_KEYS = {
     "claude": "CLAUDE_WORK_ROOT",
@@ -53,6 +53,7 @@ _STATE_FILES = {
     "private-btw-sessions.json": 2 * 1024 * 1024,
     "session-plans.json": 16 * 1024 * 1024,
     "claude-plans.sqlite3": 64 * 1024 * 1024,
+    "collaboration.sqlite3": 256 * 1024 * 1024,
     "session-presentation.json": 16 * 1024 * 1024,
     "viewer-pages.json": 4 * 1024 * 1024,
     "claude-profile-transition.json": 64 * 1024,
@@ -565,11 +566,11 @@ def create_snapshot(
             except FileNotFoundError:
                 state_entry["exists"] = False
             else:
-                if filename == "claude-plans.sqlite3":
+                if filename.endswith(".sqlite3"):
                     info = state_path.lstat()
                     if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & ~0o700
                             or info.st_size > max_bytes):
-                        raise WorkRegistrySnapshotError("Claude plans must be a private bounded database")
+                        raise WorkRegistrySnapshotError("wrapper state must be a private bounded database")
                     state_entry.update(_backup_database(state_path, destination / filename))
                     _validate_private_backup(destination / filename, state_entry, max_bytes=max_bytes)
                 else:
@@ -709,6 +710,8 @@ def _state_entries(snapshot: Path, manifest: dict[str, Any]):
         expected = set(_STATE_FILES)
         if version == 3:
             expected.remove("claude-plans.sqlite3")
+        if version < 5:
+            expected.remove("collaboration.sqlite3")
         if not isinstance(entries, dict) or set(entries) != expected:
             raise WorkRegistrySnapshotError("incomplete profile transaction snapshot")
     result = []
@@ -723,7 +726,7 @@ def _state_entries(snapshot: Path, manifest: dict[str, Any]):
             raise WorkRegistrySnapshotError("inconsistent wrapper state directory")
         if entry["exists"]:
             _validate_private_backup(backup, entry, max_bytes=_STATE_FILES[filename])
-            if filename == "claude-plans.sqlite3":
+            if filename.endswith(".sqlite3"):
                 db = sqlite3.connect(_sqlite_uri(backup), uri=True, timeout=5)
                 try:
                     _check_database(db, label=str(backup))
@@ -871,7 +874,7 @@ def restore_snapshot(snapshot: Path) -> None:
         state = manifest["wrapper_state"]
         _restore_checkpoints(Path(state["directory"]), snapshot, state["checkpoints"])
     for state_path, backup, state_entry, max_bytes in state_entries:
-        if state_path.name == "claude-plans.sqlite3":
+        if state_path.suffix == ".sqlite3":
             # A failed activation may have left SQLite sidecars behind. Restore
             # the checked standalone image, never apply a newer hot journal.
             for suffix in ("-wal", "-shm", "-journal"):

@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+- Add collaboration rooms with Claude, Codex and DSH participants, native session
+  settings, public context sharing and running-turn steering.
+- Coordinate Relay, Wrapper and Web on wire protocol v92. Include the private
+  collaboration database in transactional upgrade and rollback snapshots.
+
 ## v5.3.24
 
 Match session selection to the device center's soft left-edge glow. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.

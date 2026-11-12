@@ -304,6 +304,7 @@ class DshRuntime:
         msg = Error(code=code, message=str(exc), sid=sid,
                     to=getattr(cmd, "client_id", None), request_id=getattr(cmd, "cmd_id", None),
                     msg_id=getattr(cmd, "msg_id", None))
+        msg._outcome_unknown = exc.outcome_unknown
         await self.machine.transport.send(msg)
         if cmd.type == "get_models":
             await self.machine.transport.send(Models(
@@ -718,17 +719,17 @@ class DshRuntime:
             await self.activate(ctx)
         return None
 
-    async def handle_new_session(self, cmd):
+    async def handle_new_session(self, cmd, *, focus=True):
         if cmd.prompt is not None or cmd.images or cmd.files:
             self.validate_input(cmd)
         payload = cmd.model_dump(exclude={"ts", "v", "client_id", "owner_id", "cmd_id", "machine_id"})
         identity, fresh, receipt = await self.mutation_intent(cmd, "create", payload)
         if not fresh:
-            focus = None
+            focus_frame = None
             if receipt["sid"]:
                 # A recovery read must not follow, reconfigure or resubmit work.
                 ctx = await self.ctx(receipt["sid"])
-                focus = await self.created_focus(ctx, cmd)
+                focus_frame = await self.created_focus(ctx, cmd, publish=focus)
             if receipt["result"] is None:
                 raise self.uncertain_mutation()
             result = json.loads(receipt["result"])
@@ -739,25 +740,26 @@ class DshRuntime:
                 reply = {"error": Error, "dsh_command_result": DshCommandResult}[reply["type"]].model_validate(reply)
                 reply.to = cmd.client_id
                 await self.machine.transport.send(reply)
-            return tuple(frame for frame in (focus, reply) if frame is not None)
+            return tuple(frame for frame in (focus_frame, reply) if frame is not None)
         try:
-            focus, reply = await self.create_session(cmd, identity)
+            focus_frame, reply = await self.create_session(cmd, identity, focus=focus)
         except DshError as exc:
             await asyncio.to_thread(self.mutations.finish, identity, {"error": {
                 "code": exc.code, "message": str(exc), "outcome_unknown": exc.outcome_unknown}})
             raise
         await asyncio.to_thread(self.mutations.finish, identity, {
             "reply": reply.model_dump(exclude={"v", "ts", "to"}) if reply is not None else None})
-        return tuple(frame for frame in (focus, reply) if frame is not None)
+        return tuple(frame for frame in (focus_frame, reply) if frame is not None)
 
-    async def created_focus(self, ctx, cmd):
-        self.machine.focused_sid = ctx.key
+    async def created_focus(self, ctx, cmd, *, publish=True):
         focus = SessionFocus(session_id=ctx.key, cwd=ctx.cwd,
                              request_id=cmd.request_id, to=cmd.client_id)
-        await self.machine.transport.send(focus)
+        if publish:
+            self.machine.focused_sid = ctx.key
+            await self.machine.transport.send(focus)
         return focus
 
-    async def create_session(self, cmd, identity):
+    async def create_session(self, cmd, identity, *, focus=True):
         await self.read_catalog()
         preset = getattr(cmd, "dsh_agent_preset", None)
         if preset and not any(p["id"] == preset and p["available"] for p in self.presets):
@@ -787,7 +789,7 @@ class DshRuntime:
         await self.select_model(ctx, selected, effort)
         if cmd.dsh_permission:
             await self.command(ctx, "/permission " + cmd.dsh_permission)
-        focus = await self.created_focus(ctx, cmd)
+        focus = await self.created_focus(ctx, cmd, publish=focus)
         await self.projections(ctx, {})
         await self.invalidate()
         if cmd.prompt is not None or cmd.images or cmd.files:

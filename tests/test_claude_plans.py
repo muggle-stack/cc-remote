@@ -631,6 +631,7 @@ def test_legacy_snapshot_does_not_claim_to_restore_new_plan_database(tmp_path):
     manifest = json.loads(path.read_text())
     manifest["version"] = 3
     del manifest["wrapper_state"]["files"]["claude-plans.sqlite3"]
+    del manifest["wrapper_state"]["files"]["collaboration.sqlite3"]
     path.write_text(json.dumps(manifest))
     store = ClaudePlanStore(state_dir)
     plan = approve(store)

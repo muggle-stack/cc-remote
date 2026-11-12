@@ -803,7 +803,10 @@ def test_all_existing_command_surfaces_are_exposed_or_owned_by_core_ui():
         "get_turn_detail",
         "answer_question",
     }
-    assert commands == set(ACTIONS) | core
+    # Rooms use a Web workspace and a structured member editor. The terminal
+    # continues to expose the participants' underlying native sessions.
+    web_workspaces = {"collaboration"}
+    assert commands == set(ACTIONS) | core | web_workspaces
 
 
 @pytest.mark.asyncio

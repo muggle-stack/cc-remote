@@ -1184,6 +1184,11 @@ export class RelayWs {
     return this.send(frame);
   }
 
+  /** Room requests use durable receipts and the ordinary reconnect outbox. */
+  sendCollaboration(command: Record<string, unknown>): string | null {
+    return this.sendTracked({ v: PROTOCOL_VERSION, type: "collaboration", ts: nowTs(), ...command });
+  }
+
   /** Ask the engine for its catalog and explicit new-session defaults. Claude
    *  needs cwd because project/local settings can change the selected model. */
   sendGetModels(
@@ -1840,7 +1845,7 @@ export class RelayWs {
   private sendTracked(
     obj: Record<string, unknown>, commandId = uuid(),
   ): string | null {
-    if (this.maintenance && !allowedDuringUpdate(String(obj.type))) return null;
+    if (this.maintenance && !allowedDuringUpdate(String(obj.type), String(obj.operation ?? ""))) return null;
     const result = this.outbox.enqueue(obj, this.clientId, commandId);
     if (!result.ok) {
       console.error("command not queued", result.reason);
@@ -1858,7 +1863,10 @@ export class RelayWs {
   }
 
   private sendRaw(raw: string): void {
-    if (this.maintenance && !allowedDuringUpdate(String(JSON.parse(raw).type))) return;
+    if (this.maintenance) {
+      const command = JSON.parse(raw);
+      if (!allowedDuringUpdate(String(command.type), command.operation)) return;
+    }
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(raw);
     }

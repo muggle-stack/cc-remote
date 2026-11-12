@@ -53,7 +53,7 @@ def test_snapshot_restores_every_participant_and_absence(tmp_path, exists):
     snapshots.create_snapshot(snapshot, _roots(tmp_path), state_dir=state)
     manifest = json.loads((snapshot / "manifest.json").read_text())
     # The SQLite participant has separate native-image/receipt rollback tests.
-    assert set(manifest["wrapper_state"]["files"]) == STATE_FILES | {"claude-plans.sqlite3"}
+    assert set(manifest["wrapper_state"]["files"]) == STATE_FILES | {"claude-plans.sqlite3", "collaboration.sqlite3"}
     for name in STATE_FILES:
         _write(state / name, b'{"after":true}')
     _write(state / "codex-profiles.json", b'{"operator":"preserved"}')
