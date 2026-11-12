@@ -1426,6 +1426,166 @@ async def test_shared_history_read_keeps_its_earlier_live_watermark():
     assert store.delivery(delivery["id"])["status"] == "running"
 
 
+async def emit_native_claude_reply(machine, ctx, stream_id, canonical_id, *, ambiguous=False):
+    from claude_agent_sdk.types import AssistantMessage, ResultMessage, StreamEvent, TextBlock
+    from cc_remote.wrapper.stream import StreamTranslator
+
+    translator = StreamTranslator(10000, turn_id="native-user")
+    frames = translator.feed(StreamEvent(
+        uuid=stream_id, session_id=ctx.session_id,
+        event={"type": "content_block_delta", "index": 0,
+               "delta": {"type": "text_delta", "text": "same answer"}},
+    ))
+    frames.extend(translator.feed(AssistantMessage(
+        content=[TextBlock(text="same answer")], model="claude-test", uuid=canonical_id,
+        stop_reason=None if ambiguous else "end_turn",
+    )))
+    if ambiguous:
+        completed = translator.feed(ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=1,
+            is_error=False, num_turns=1, session_id=ctx.session_id,
+        ))
+        frames.extend(frame for frame in completed if isinstance(frame, AssistantMsgEnd))
+    for frame in frames:
+        await machine._emit(ctx, frame)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("ambiguous", [False, True])
+async def test_claude_live_reply_keeps_its_canonical_identity_after_recovery(monkeypatch, restart, ambiguous):
+    from types import SimpleNamespace
+    from cc_remote.protocol import History
+    from cc_remote.wrapper.collaboration import Collaboration
+    from cc_remote.wrapper.stream import translate_history
+
+    machine, _transport, controller, sid, native, _title = native_named_member("claude")
+    store, room_id, member = await store_named_member(controller, "claude", sid, native)
+    delivery = send(store, room_id)
+    store.consume(delivery["id"], "native-user")
+    ctx = _mk_ctx(sid, native)
+    machine.sessions[sid] = ctx
+    controller.watch(ctx, member["id"])
+    canonical = "12121212-1212-4212-8212-121212121212"
+    await emit_native_claude_reply(
+        machine, ctx, "34343434-3434-4434-8434-343434343434", canonical,
+        ambiguous=ambiguous,
+    )
+    initial = [row for row in store.messages("owner", room_id) if row["role"] == "assistant"]
+    assert len(initial) == 1
+    version = store.room("owner", room_id)["context_version"]
+    if restart:
+        controller = Collaboration(machine)
+        machine._collaboration = controller
+        store = await controller.database()
+        monkeypatch.setattr(controller, "schedule_reconcile", lambda _member: None)
+        await controller.restore_observers()
+    frames = translate_history([
+        SimpleNamespace(type="user", uuid="native-user", message={"role": "user", "content": "hello"}),
+        SimpleNamespace(type="assistant", uuid=canonical, parent_tool_use_id=None,
+                        message={"role": "assistant", "content": [{"type": "text", "text": "same answer"}]}),
+    ], 10000, client_message_ids={"native-user": delivery["id"]})
+    machine._history_page_singleflight = AsyncMock(return_value=History(
+        session_id=sid, revision="native", live_seq=ctx.seq,
+        events=[frame.model_dump() for frame in frames],
+    ))
+    await controller.reconcile(store.member_by_id(member["id"]))
+    replies = [row for row in store.messages("owner", room_id) if row["role"] == "assistant"]
+    assert len(replies) == 1
+    assert replies[0]["id"] == initial[0]["id"]
+    assert replies[0]["source"] == f"claude:{member['id']}:{canonical}"
+    assert store.room("owner", room_id)["context_version"] == version
+    assert store.delivery(delivery["id"])["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_equal_claude_reply_text_keeps_distinct_native_message_identities():
+    machine, _transport, controller, sid, native, _title = native_named_member("claude")
+    store, room_id, member = await store_named_member(controller, "claude", sid, native)
+    delivery = send(store, room_id)
+    store.consume(delivery["id"], "native-user")
+    ctx = _mk_ctx(sid, native)
+    machine.sessions[sid] = ctx
+    controller.watch(ctx, member["id"])
+    for stream, canonical in [
+        ("34343434-3434-4434-8434-343434343434", "12121212-1212-4212-8212-121212121212"),
+        ("78787878-7878-4878-8878-787878787878", "56565656-5656-4656-8656-565656565656"),
+    ]:
+        await emit_native_claude_reply(machine, ctx, stream, canonical)
+    replies = [row for row in store.messages("owner", room_id) if row["role"] == "assistant"]
+    assert len(replies) == 2
+    assert replies[0]["text"] == replies[1]["text"] == "same answer"
+    assert len({row["source"] for row in replies}) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["live", "history"])
+@pytest.mark.parametrize("phase", [None, "commentary", "final_answer"])
+@pytest.mark.parametrize("has_questions", [False, True])
+async def test_native_async_progress_stays_out_of_public_replies(tmp_path, source, phase, has_questions):
+    from cc_remote.protocol import History, TurnBinding
+    from cc_remote.wrapper.codex_stream import CodexStreamTranslator, codex_translate_history
+
+    machine, _transport, controller, sid, native, _title = native_named_member("codex")
+    store, room_id, member = await store_named_member(controller, "codex", sid, native)
+    delivery = send(store, room_id)
+    store.consume(delivery["id"], "task")
+    ctx = _mk_ctx(sid, native)
+    ctx.engine = "codex"
+    machine.sessions[sid] = ctx
+    controller.watch(ctx, member["id"])
+    text = "Which directory?" if has_questions else "Still working"
+    questions = [{"title": text, "options": ["Here", "Other"]}] if has_questions else None
+    terminal = TurnEnd(turn_id="task", result=TurnResult(subtype="success", is_error=False, duration_ms=1))
+    if source == "live":
+        translator = CodexStreamTranslator(8000)
+        frames = translator.feed({"method": "item/completed", "params": {
+            "threadId": "thread", "turnId": "task", "item": {
+                "id": "notice", "type": "agentMessage", "phase": phase,
+                "text": text, "delivery": "async", "questions": questions,
+            },
+        }})
+        for frame in frames:
+            await machine._emit(ctx, frame)
+        # A later channel promotion may omit the earlier delivery metadata.
+        await machine._emit(ctx, AssistantMsgEnd(message_id="notice", turn_id="task", channel="final"))
+        assert store.delivery(delivery["id"])["status"] == "running"
+        expected = [text] if has_questions else []
+        assert [row["text"] for row in store.messages("owner", room_id) if row["role"] == "assistant"] == expected
+        for frame in translator.feed({"method": "item/completed", "params": {
+            "threadId": "thread", "turnId": "task", "item": {
+                "id": "answer", "type": "agentMessage", "phase": "final_answer", "text": "Done",
+            },
+        }}):
+            await machine._emit(ctx, frame)
+        await machine._emit(ctx, terminal)
+    else:
+        rows = [
+            {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "task"}},
+            {"type": "event_msg", "payload": {"type": "agent_message", "message": text, "phase": phase,
+                                                "delivery": "async", "questions": questions}},
+            {"type": "event_msg", "payload": {"type": "agent_message", "message": "Done", "phase": "final_answer"}},
+            {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "task"}},
+        ]
+        path = tmp_path / "rollout.jsonl"
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+        native_frames, _ = codex_translate_history(str(path), 8000)
+        frames = [
+            UserMsg(msg_id="native-user", client_msg_id=delivery["id"], prompt="hello"),
+            TurnBinding(msg_id="native-user", turn_id="task"),
+            *[frame for frame in native_frames if isinstance(frame, (AssistantMsgStart, Delta, AssistantMsgEnd))],
+            terminal,
+        ]
+        machine._history_page_singleflight = AsyncMock(return_value=History(
+            session_id=sid, revision="native", live_seq=ctx.seq,
+            events=[frame.model_dump() for frame in frames],
+        ))
+        await controller.reconcile(store.member_by_id(member["id"]))
+    replies = [row for row in store.messages("owner", room_id) if row["role"] == "assistant"]
+    assert [row["text"] for row in replies] == ([text, "Done"] if has_questions else ["Done"])
+    assert store.delivery(delivery["id"])["status"] == "succeeded"
+
+
 def test_native_preflight_rejection_updates_the_pending_room_input():
     async def run():
         machine, _transport = _mk_machine()

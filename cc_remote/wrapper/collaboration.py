@@ -1170,6 +1170,13 @@ class Collaboration:
             channel = getattr(frame, "channel", "unknown")
             if channel != "unknown":
                 item["channel"] = channel
+            if kind == "assistant_msg_end":
+                if frame.canonical_message_id:
+                    item["canonical_id"] = frame.canonical_message_id
+                if frame.delivery:
+                    item["delivery"] = frame.delivery
+                if frame.questions is not None:
+                    item["has_questions"] = bool(frame.questions)
             if kind == "delta" and item["channel"] != "thinking":
                 text = frame.text if frame.replace else item["text"] + frame.text
                 item["text"] = text if isinstance(ctx, _ProjectionContext) else text[: 2 * 1024 * 1024]
@@ -1279,8 +1286,14 @@ class Collaboration:
         if kind == "assistant_msg_end" and running:
             key = (member_id, frame.message_id)
             item = texts.get(key, {})
-            if item.get("channel") == "final" and item["text"].strip():
-                source = f"{ctx.engine}:{member_id}:{frame.message_id}"
+            public_reply = (
+                item.get("has_questions", False)
+                if item.get("delivery") == "async"
+                else item.get("channel") == "final"
+            )
+            if public_reply and item["text"].strip():
+                message_id = item.get("canonical_id") or frame.message_id
+                source = f"{ctx.engine}:{member_id}:{message_id}"
                 # Mark before the write. If it raises, live terminals must leave
                 # these rows active so native history can recover the reply.
                 for row in running:
