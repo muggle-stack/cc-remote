@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 from pathlib import Path
@@ -51,6 +51,9 @@ class _ProjectionContext:
     session_id: str | None
     cwd: str | None
     engine: str
+    texts: OrderedDict = field(default_factory=OrderedDict)
+    live_context: object | None = None
+    live_seq: int | None = None
 
 
 class Collaboration:
@@ -63,6 +66,9 @@ class Collaboration:
         self.workers: dict[str, asyncio.Task] = {}
         self.members: dict[int, tuple[weakref.ReferenceType, str]] = {}
         self.texts: OrderedDict[tuple[str, str], dict] = OrderedDict()
+        self.pending_replies: dict[str, set[str]] = {}
+        self.recovery_pending: set[str] = set()
+        self.projection_locks: dict[str, asyncio.Lock] = {}
         self.wake = asyncio.Event()
         self.closed = False
         self.dirty: set[tuple[str, str]] = set()
@@ -908,10 +914,13 @@ class Collaboration:
             self.dirty.add((owner, member["room_id"]))
 
     async def restore_observers(self):
-        pending = {
-            row["member_id"]
-            for row in await asyncio.to_thread(self.store.deliveries, active=True)
-        }
+        rows = await asyncio.to_thread(self.store.deliveries, active=True)
+        pending = {row["member_id"] for row in rows}
+        # After a restart, a terminal can replay before its missing text. Keep
+        # these durable active rows until authoritative history repairs them.
+        self.recovery_pending.update(
+            row["id"] for row in rows if row["status"] != "queued"
+        )
         for member in await asyncio.to_thread(self.store.bound_members):
             self.bindings[member["sid"]] = member["id"]
             ctx = self.machine._ctx_for(member["sid"])
@@ -974,6 +983,7 @@ class Collaboration:
                 sid, member["native_sid"], member["cwd"], member["spec"]["engine"]
             )
             self.watch(projection, member["id"])
+            read_seq = ctx.seq if ctx else None
             command = GetHistory(
                 session_id=sid, detail="full", limit=16, cwd=member["cwd"]
             )
@@ -986,16 +996,23 @@ class Collaboration:
                 history = await self.machine._history_page_singleflight(command, sid)
             if not history.authoritative or history.error:
                 return
-            # A live event newer than the read owns the projection. Its next
-            # reconciliation can repair a missed write without racing the tail.
-            if ctx and history.live_seq is not None and ctx.seq > history.live_seq:
-                return
-            identities = (
-                {row["id"] for row in pending}
-                | {row["native_turn"] for row in pending if row["native_turn"]}
-                | {row["native_input_id"] for row in pending if row["native_input_id"]}
-            )
-            matching = False
+            projection.live_context = ctx
+            projection.live_seq = history.live_seq if history.live_seq is not None else read_seq
+            identities: dict[str, set[str]] = {}
+            for row in pending:
+                # A known native owner wins over the business input ID, which
+                # may also identify a completed predecessor of a follow-up.
+                keys = (row["native_turn"],) if row["native_turn"] else (
+                    row["id"], row["native_input_id"],
+                )
+                for identity in keys:
+                    if identity:
+                        identities.setdefault(identity, set()).add(row["id"])
+            native_owners = {
+                event["msg_id"]: event["turn_id"] for event in history.events
+                if event.get("type") == "turn_binding"
+            }
+            matching = set()
             event_types = {
                 cls.model_fields["type"].default: cls
                 for cls in (
@@ -1018,25 +1035,39 @@ class Collaboration:
             )
             for index, event in enumerate(history.events):
                 kind = event.get("type")
-                if kind in {"user_msg", "turn_steered"}:
-                    matching = bool(
-                        identities & {event.get("msg_id"), event.get("client_msg_id")}
-                    )
-                if kind == "turn_binding" and identities & {
-                    event.get("msg_id"),
-                    event.get("turn_id"),
-                }:
-                    matching = True
-                if not matching or kind not in event_types:
+                if kind in {"user_msg", "turn_steered", "turn_binding"}:
+                    keys = {event.get("msg_id"), event.get("client_msg_id")}
+                    keys.add(native_owners.get(event.get("msg_id")))
+                    if kind != "user_msg":
+                        keys.add(event.get("turn_id"))
+                    matching = set()
+                    for key in keys:
+                        matching.update(identities.get(key, ()))
+                    owner = event.get("turn_id") or event.get("msg_id")
+                    if matching and owner:
+                        identities.setdefault(owner, set()).update(matching)
+                # Claude terminal turn_id is an assistant fork point. Its
+                # checkpoint_id identifies the owning native user turn.
+                owner = (
+                    event.get("checkpoint_id")
+                    if kind == "turn_end" and projection.engine == "claude"
+                    else event.get("turn_id")
+                )
+                scope = identities.get(owner, set()) if owner else matching
+                if not scope or kind not in event_types:
                     continue
                 if kind == "turn_end" and history.in_progress and index > last_user:
                     continue
-                await self.observe(projection, event_types[kind].model_validate(event))
+                if await self.observe(
+                    projection, event_types[kind].model_validate(event),
+                    delivery_ids=frozenset(scope),
+                ) is False:
+                    return
                 if (
                     kind == "turn_end"
                     and event.get("result", {}).get("subtype") != "steered"
                 ):
-                    matching = False
+                    matching = set()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1046,7 +1077,7 @@ class Collaboration:
                 error_type=type(exc).__name__,
             )
 
-    async def observe(self, ctx, frame):
+    async def observe(self, ctx, frame, *, delivery_ids=None):
         entry = self.members.get(id(ctx))
         if self.store and entry is None and ctx.key in self.bindings:
             self.watch(ctx, self.bindings[ctx.key])
@@ -1054,15 +1085,28 @@ class Collaboration:
         if not self.store or not entry or entry[0]() is not ctx:
             return
         member_id = entry[1]
+        async with self.projection_locks.setdefault(member_id, asyncio.Lock()):
+            if isinstance(ctx, _ProjectionContext):
+                live = self.machine._ctx_for(ctx.key)
+                if live is not ctx.live_context or (
+                    live and ctx.live_seq is not None and live.seq > ctx.live_seq
+                ):
+                    return False
+            # Serialize projection writes with native consumption. Live frames
+            # can advance seq during I/O, then their observation runs next.
+            await self._observe(ctx, frame, member_id, delivery_ids=delivery_ids)
+
+    async def _observe(self, ctx, frame, member_id, *, delivery_ids=None):
         kind = frame.type
+        texts = ctx.texts if isinstance(ctx, _ProjectionContext) else self.texts
         if kind in {"assistant_msg_start", "delta", "assistant_msg_end"}:
             key = (member_id, frame.message_id)
             if getattr(frame, "channel", "unknown") == "thinking":
                 return
             if kind == "assistant_msg_start":
-                self.texts[key] = {"text": "", "channel": frame.channel}
-            item = self.texts.setdefault(key, {"text": "", "channel": "unknown"})
-            self.texts.move_to_end(key)
+                texts[key] = {"text": "", "channel": frame.channel}
+            item = texts.setdefault(key, {"text": "", "channel": "unknown"})
+            texts.move_to_end(key)
             channel = getattr(frame, "channel", "unknown")
             if channel != "unknown":
                 item["channel"] = channel
@@ -1070,8 +1114,8 @@ class Collaboration:
                 item["text"] = (
                     frame.text if frame.replace else item["text"] + frame.text
                 )[: 2 * 1024 * 1024]
-            while len(self.texts) > 32:
-                self.texts.popitem(last=False)
+            while len(texts) > 32:
+                texts.popitem(last=False)
             if kind != "assistant_msg_end":
                 return
         if kind not in {
@@ -1105,12 +1149,16 @@ class Collaboration:
             and frame.continuation == "subagent"
         ):
             await asyncio.to_thread(
-                self.store.resume_source, member_id, autonomous=True
+                self.store.resume_source, member_id, autonomous=True, native_turn=frame.turn_id
             )
         rows = await asyncio.to_thread(
             self.store.deliveries, member["room_id"], active=True
         )
-        active = [row for row in rows if row["member_id"] == member_id]
+        active = [
+            row for row in rows
+            if row["member_id"] == member_id
+            and (delivery_ids is None or row["id"] in delivery_ids)
+        ]
         if kind == "error":
             for row in active:
                 if frame.msg_id == row["id"] and row["status"] in {
@@ -1159,11 +1207,25 @@ class Collaboration:
                 ):
                     await asyncio.to_thread(self.store.clear_source, member_id)
         running = [row for row in active if row["status"] in {"running", "stopping"}]
+        owners = (
+            {frame.checkpoint_id, frame._changes_turn_id}
+            if kind == "turn_end" and ctx.engine == "claude"
+            else {getattr(frame, "turn_id", None)}
+        ) - {None}
+        if kind in {"assistant_msg_end", "turn_end"} and owners:
+            running = [
+                row for row in running
+                if owners & {row["id"], row["native_turn"], row["native_input_id"]}
+            ]
         if kind == "assistant_msg_end" and running:
             key = (member_id, frame.message_id)
-            item = self.texts.get(key, {})
+            item = texts.get(key, {})
             if item.get("channel") == "final" and item["text"].strip():
                 source = f"{ctx.engine}:{member_id}:{frame.message_id}"
+                # Mark before the write. If it raises, live terminals must leave
+                # these rows active so native history can recover the reply.
+                for row in running:
+                    self.pending_replies.setdefault(row["id"], set()).add(source)
                 await asyncio.to_thread(
                     self.store.publish,
                     member_id,
@@ -1171,6 +1233,12 @@ class Collaboration:
                     item["text"],
                     [row["message_id"] for row in running],
                 )
+                for row in running:
+                    pending = self.pending_replies.get(row["id"])
+                    if pending is not None:
+                        pending.discard(source)
+                        if not pending:
+                            self.pending_replies.pop(row["id"], None)
         if kind == "turn_end" and frame.result.subtype != "steered":
             status = (
                 "cancelled"
@@ -1184,12 +1252,22 @@ class Collaboration:
                 if frame.result.is_error
                 else "succeeded"
             )
+            completed = {
+                row["id"] for row in running
+                if delivery_ids is not None
+                or (row["id"] not in self.pending_replies
+                    and row["id"] not in self.recovery_pending)
+            }
             await asyncio.to_thread(
                 self.store.finish,
                 member_id,
                 status,
                 frame.result.subtype if status == "failed" else None,
+                delivery_ids=completed,
             )
+            for delivery_id in completed:
+                self.pending_replies.pop(delivery_id, None)
+                self.recovery_pending.discard(delivery_id)
         if kind in {
             "assistant_msg_end",
             "turn_end",

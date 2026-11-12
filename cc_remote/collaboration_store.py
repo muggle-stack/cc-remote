@@ -677,7 +677,7 @@ class CollaborationStore:
                     (row["context_through"], row["id"], row["member_id"]),
                 )
 
-    def resume_source(self, member_id, identities=(), *, autonomous=False):
+    def resume_source(self, member_id, identities=(), *, autonomous=False, native_turn=None):
         with self.db() as db:
             row = db.execute(
                 "SELECT deliveries.* FROM members JOIN deliveries ON deliveries.id=members.source_delivery WHERE members.id=?",
@@ -692,8 +692,8 @@ class CollaborationStore:
                 )
             ):
                 db.execute(
-                    "UPDATE deliveries SET status='running',updated=? WHERE id=?",
-                    (time.time(), row["id"]),
+                    "UPDATE deliveries SET status='running',native_turn=coalesce(?,native_turn),updated=? WHERE id=?",
+                    (native_turn, time.time(), row["id"]),
                 )
 
     def clear_source(self, member_id):
@@ -745,11 +745,19 @@ class CollaborationStore:
                 (time.time(), version, row["room_id"]),
             )
 
-    def finish(self, member_id, status, error=None):
+    def finish(self, member_id, status, error=None, *, delivery_ids=None):
+        scope = ""
+        args = [status, error, time.time(), member_id]
+        if delivery_ids is not None:
+            if not delivery_ids:
+                return
+            scope = " AND id IN (" + ",".join("?" for _ in delivery_ids) + ")"
+            args.extend(delivery_ids)
         with self.db() as db:
             db.execute(
-                "UPDATE deliveries SET status=?,error=?,payload='{}',updated=? WHERE member_id=? AND status IN ('running','stopping')",
-                (status, error, time.time(), member_id),
+                "UPDATE deliveries SET status=?,error=?,payload='{}',updated=? WHERE member_id=? AND status IN ('running','stopping')"
+                + scope,
+                args,
             )
             self._release_payloads(db)
             if status in {"failed", "cancelled"}:

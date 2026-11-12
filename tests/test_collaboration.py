@@ -914,6 +914,288 @@ def test_native_history_recovers_an_uncertain_input_without_a_second_query():
     asyncio.run(run())
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("additional_reply", [False, True])
+async def test_failed_reply_projection_stays_recoverable_after_terminal(
+    monkeypatch, restart, additional_reply
+):
+    import sqlite3
+
+    from cc_remote.protocol import History, TurnBinding
+    from cc_remote.wrapper.collaboration import Collaboration
+
+    machine, transport, controller, sid, native, _title = native_named_member("codex")
+    store, room_id, member = await store_named_member(controller, "codex", sid, native)
+    ctx = _mk_ctx(sid, native)
+    ctx.engine = "codex"
+    machine.sessions[sid] = ctx
+    controller.watch(ctx, member["id"])
+    delivery = send(store, room_id)
+    events = [
+        UserMsg(msg_id="native-user", client_msg_id=delivery["id"], prompt="hello"),
+        TurnBinding(msg_id="native-user", turn_id="native-turn"),
+        AssistantMsgStart(message_id="answer", turn_id="native-turn", channel="final"),
+        Delta(message_id="answer", turn_id="native-turn", channel="final", text="recovered reply"),
+        AssistantMsgEnd(message_id="answer", turn_id="native-turn", channel="final"),
+    ]
+    if additional_reply:
+        events.extend([
+            AssistantMsgStart(message_id="second-answer", turn_id="native-turn", channel="final"),
+            Delta(message_id="second-answer", turn_id="native-turn", channel="final", text="another reply"),
+            AssistantMsgEnd(message_id="second-answer", turn_id="native-turn", channel="final"),
+        ])
+    terminal = TurnEnd(
+        turn_id="native-turn",
+        result=TurnResult(subtype="success", is_error=False, duration_ms=1),
+    )
+    events.append(terminal)
+    publish = store.publish
+    failures = 1
+
+    def fail_once(*args):
+        nonlocal failures
+        if failures:
+            failures -= 1
+            raise sqlite3.OperationalError("database is locked")
+        return publish(*args)
+
+    monkeypatch.setattr(store, "publish", fail_once)
+    for event in events:
+        await machine._emit(ctx, event)
+    assert any(isinstance(frame, TurnEnd) for frame in transport.sent)
+    assert store.delivery(delivery["id"])["status"] == "running"
+    assert [row["id"] for row in store.deliveries(room_id, active=True)] == [delivery["id"]]
+
+    if restart:
+        controller = Collaboration(machine)
+        machine._collaboration = controller
+        store = await controller.database()
+        monkeypatch.setattr(controller, "schedule_reconcile", lambda _member: None)
+        await controller.restore_observers()
+        # A terminal replay may arrive before native-history repair on restart.
+        await machine._emit(ctx, terminal)
+        assert store.delivery(delivery["id"])["status"] == "running"
+
+    machine._history_page_singleflight = AsyncMock(return_value=History(
+        session_id=sid, revision="recovered", live_seq=ctx.seq,
+        events=[event.model_dump() for event in events],
+    ))
+    machine._handle_query = AsyncMock()
+    machine._handle_steer = AsyncMock()
+    await controller.reconcile(store.member_by_id(member["id"]))
+    replies = [row for row in store.messages("owner", room_id) if row["role"] == "assistant"]
+    assert {row["text"] for row in replies} == (
+        {"recovered reply", "another reply"} if additional_reply else {"recovered reply"}
+    )
+    assert all(row["reply_to"] == ["message"] for row in replies)
+    assert store.delivery(delivery["id"])["status"] == "succeeded"
+    assert not store.deliveries(room_id, active=True)
+    await controller.reconcile(store.member_by_id(member["id"]))
+    assert len(store.messages("owner", room_id)) == 1 + len(replies)
+    machine._handle_query.assert_not_awaited()
+    machine._handle_steer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_live_seq", [False, True])
+@pytest.mark.parametrize("admission_frame", ["user_msg", "assistant_msg_end"])
+async def test_history_replay_cannot_publish_or_complete_new_live_input(
+    monkeypatch, has_live_seq, admission_frame
+):
+    from cc_remote.protocol import History, TurnBinding
+
+    machine, _transport, controller, sid, native, _title = native_named_member("codex")
+    store, room_id, member = await store_named_member(controller, "codex", sid, native)
+    ctx = _mk_ctx(sid, native)
+    ctx.engine = "codex"
+    machine.sessions[sid] = ctx
+    controller.watch(ctx, member["id"])
+    first = send(store, room_id)
+    store.consume(first["id"], "old-turn")
+    second = send(store, room_id, message_id="second", request="second")
+    events = [
+        UserMsg(msg_id="old-user", client_msg_id=first["id"], prompt="old input"),
+        TurnBinding(msg_id="old-user", turn_id="old-turn"),
+        AssistantMsgStart(message_id="old-answer", turn_id="old-turn", channel="final"),
+        Delta(message_id="old-answer", turn_id="old-turn", channel="final", text="old reply"),
+        AssistantMsgEnd(message_id="old-answer", turn_id="old-turn", channel="final"),
+        TurnEnd(turn_id="old-turn", result=TurnResult(subtype="success", is_error=False, duration_ms=1)),
+    ]
+    live_input = [
+        UserMsg(msg_id="new-user", client_msg_id=second["id"], prompt="new input"),
+        TurnBinding(msg_id="new-user", turn_id="new-turn"),
+    ]
+    history = History(
+        session_id=sid, revision="old", live_seq=ctx.seq if has_live_seq else None,
+        events=[event.model_dump() for event in events],
+    )
+    machine._history_page_singleflight = AsyncMock(return_value=history)
+    observe = controller.observe
+    admitted = False
+
+    async def admit_during_replay(context, frame, **kwargs):
+        nonlocal admitted
+        if context is not ctx and frame.type == admission_frame and not admitted:
+            admitted = True
+            for event in live_input:
+                await machine._emit(ctx, event)
+        return await observe(context, frame, **kwargs)
+
+    monkeypatch.setattr(controller, "observe", admit_during_replay)
+    await controller.reconcile(store.member_by_id(member["id"]))
+    assert admitted
+    assert store.delivery(second["id"])["status"] == "running"
+    replies = [row for row in store.messages("owner", room_id) if row["role"] == "assistant"]
+    assert all(row["reply_to"] == ["message"] for row in replies)
+
+    # A later read contains both turns. Only the old turn has a terminal.
+    history.live_seq = ctx.seq if has_live_seq else None
+    history.events.extend(event.model_dump() for event in live_input)
+    history.in_progress = True
+    await controller.reconcile(store.member_by_id(member["id"]))
+    assert store.delivery(first["id"])["status"] == "succeeded"
+    assert store.delivery(second["id"])["status"] == "running"
+    replies = [row for row in store.messages("owner", room_id) if row["role"] == "assistant"]
+    assert len(replies) == 1
+    assert replies[0]["text"] == "old reply"
+    assert replies[0]["reply_to"] == ["message"]
+
+
+def test_scoped_terminal_keeps_other_native_deliveries_running(tmp_path):
+    store = CollaborationStore(tmp_path)
+    room_id, member = create_room(store)
+    first = send(store, room_id)
+    second = send(store, room_id, message_id="second", request="second")
+    store.consume(first["id"], "old-turn")
+    store.consume(second["id"], "new-turn")
+    store.finish(member["id"], "succeeded", delivery_ids={first["id"]})
+    assert store.delivery(first["id"])["status"] == "succeeded"
+    assert store.delivery(second["id"])["status"] == "running"
+    store.finish(member["id"], "succeeded", delivery_ids=set())
+    assert store.delivery(second["id"])["status"] == "running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine,claude_checkpoint", [
+    ("claude", True), ("claude", False), ("codex", False), ("dsh", False),
+])
+async def test_native_terminal_matches_its_owner_and_preserves_a_newer_turn(engine, claude_checkpoint):
+    machine, _transport, controller, sid, native, _title = native_named_member(engine)
+    store, room_id, member = await store_named_member(controller, engine, sid, native)
+    ctx = _mk_ctx(sid, native)
+    ctx.engine = engine
+    machine.sessions[sid] = ctx
+    controller.watch(ctx, member["id"])
+    first = send(store, room_id)
+    second = send(store, room_id, message_id="second", request="second")
+    store.consume(first["id"], "old-turn")
+    store.consume(second["id"], "new-turn")
+    terminal = TurnEnd(
+        turn_id="assistant-fork" if engine == "claude" else "old-turn",
+        checkpoint_id="old-turn" if claude_checkpoint else None,
+        result=TurnResult(subtype="success", is_error=False, duration_ms=1),
+    )
+    if engine == "claude" and not claude_checkpoint:
+        terminal._changes_turn_id = "old-turn"
+    await machine._emit(ctx, terminal)
+    assert store.delivery(first["id"])["status"] == "succeeded"
+    assert store.delivery(second["id"])["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_abandoned_history_projection_keeps_the_live_text_buffer(monkeypatch):
+    from cc_remote.protocol import History, TurnBinding
+
+    machine, _transport, controller, sid, native, _title = native_named_member("codex")
+    store, room_id, member = await store_named_member(controller, "codex", sid, native)
+    ctx = _mk_ctx(sid, native)
+    ctx.engine = "codex"
+    machine.sessions[sid] = ctx
+    controller.watch(ctx, member["id"])
+    delivery = send(store, room_id)
+    store.consume(delivery["id"], "native-turn")
+    start = AssistantMsgStart(message_id="answer", turn_id="native-turn", channel="final")
+    prefix = Delta(message_id="answer", turn_id="native-turn", channel="final", text="prefix")
+    await machine._emit(ctx, start)
+    await machine._emit(ctx, prefix)
+    machine._history_page_singleflight = AsyncMock(return_value=History(
+        session_id=sid, revision="in-progress", live_seq=ctx.seq, in_progress=True,
+        events=[event.model_dump() for event in [
+            UserMsg(msg_id="native-user", client_msg_id=delivery["id"], prompt="hello"),
+            TurnBinding(msg_id="native-user", turn_id="native-turn"), start, prefix,
+        ]],
+    ))
+    observe = controller.observe
+    advanced = False
+
+    async def advance_during_replay(context, frame, **kwargs):
+        nonlocal advanced
+        result = await observe(context, frame, **kwargs)
+        if context is not ctx and frame.type == "assistant_msg_start" and not advanced:
+            advanced = True
+            await machine._emit(ctx, Delta(
+                message_id="answer", turn_id="native-turn", channel="final", text="suffix",
+            ))
+        return result
+
+    monkeypatch.setattr(controller, "observe", advance_during_replay)
+    await controller.reconcile(store.member_by_id(member["id"]))
+    assert advanced
+    await machine._emit(ctx, AssistantMsgEnd(
+        message_id="answer", turn_id="native-turn", channel="final",
+    ))
+    replies = [row for row in store.messages("owner", room_id) if row["role"] == "assistant"]
+    assert len(replies) == 1
+    assert replies[0]["text"] == "prefixsuffix"
+    assert replies[0]["reply_to"] == ["message"]
+
+
+@pytest.mark.asyncio
+async def test_native_followup_recovery_uses_its_owner_instead_of_the_original_input():
+    from cc_remote.protocol import History, TurnBinding
+
+    machine, _transport, controller, sid, native, _title = native_named_member("dsh")
+    store, room_id, member = await store_named_member(controller, "dsh", sid, native)
+    ctx = _mk_ctx(sid, native)
+    ctx.engine = "dsh"
+    machine.sessions[sid] = ctx
+    controller.watch(ctx, member["id"])
+    delivery = send(store, room_id)
+    store.consume(delivery["id"], "old-turn")
+    store.finish(member["id"], "succeeded")
+    binding = TurnBinding(
+        msg_id="followup-turn", turn_id="followup-turn", autonomous=True, continuation="subagent",
+    )
+    await machine._emit(ctx, binding)
+    assert store.delivery(delivery["id"])["status"] == "running"
+    assert store.delivery(delivery["id"])["native_turn"] == "followup-turn"
+    events = [
+        UserMsg(msg_id="old-user", client_msg_id=delivery["id"], prompt="hello"),
+        TurnBinding(msg_id="old-user", turn_id="old-turn"),
+        AssistantMsgStart(message_id="old-answer", turn_id="old-turn", channel="final"),
+        Delta(message_id="old-answer", turn_id="old-turn", channel="final", text="old reply"),
+        AssistantMsgEnd(message_id="old-answer", turn_id="old-turn", channel="final"),
+        TurnEnd(turn_id="old-turn", result=TurnResult(subtype="success", is_error=False, duration_ms=1)),
+        binding,
+        AssistantMsgStart(message_id="new-answer", turn_id="followup-turn", channel="final"),
+        Delta(message_id="new-answer", turn_id="followup-turn", channel="final", text="followup reply"),
+        AssistantMsgEnd(message_id="new-answer", turn_id="followup-turn", channel="final"),
+        TurnEnd(turn_id="followup-turn", result=TurnResult(subtype="success", is_error=False, duration_ms=1)),
+    ]
+    machine._dsh.connection = AsyncMock()
+    machine._dsh.handle_get_history = AsyncMock(return_value=History(
+        session_id=sid, revision="followup", live_seq=ctx.seq,
+        events=[event.model_dump() for event in events],
+    ))
+    await controller.reconcile(store.member_by_id(member["id"]))
+    replies = [row for row in store.messages("owner", room_id) if row["role"] == "assistant"]
+    assert len(replies) == 1
+    assert replies[0]["text"] == "followup reply"
+    assert replies[0]["reply_to"] == ["message"]
+    assert store.delivery(delivery["id"])["status"] == "succeeded"
+
+
 def test_native_preflight_rejection_updates_the_pending_room_input():
     async def run():
         machine, _transport = _mk_machine()
