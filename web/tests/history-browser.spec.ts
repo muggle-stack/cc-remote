@@ -4182,6 +4182,78 @@ test("async question summary keeps its ordinary answer visible after refresh wit
     .toHaveLength(0);
 });
 
+test("async question delivery without questions stays in the running Codex process through refresh and completion", async ({ page }, info) => {
+  const sid = "layout-parent";
+  const notice = "查到了，原生 ID 已确认，正在继续回归。";
+  const finalAnswer = "目录、显示标识与回归检查均已完成。";
+  const malformedFrames: string[] = [];
+  page.on("console", message => {
+    if (message.text().includes("dropping malformed frame")) malformedFrames.push(message.text());
+  });
+  const turns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = [];
+  const relay = await mockRightPanelRelay(page, {
+    retained: false, parentState: "running", historyReply: command => ({
+      type: "history", sid: String(command.session_id), session_id: String(command.session_id),
+      revision: turns.at(-1)?.done ? "notice-completed" : "notice-running",
+      generation: "layout-generation", detail: "summary", events: [], turns, has_more: false,
+      in_progress: turns.at(-1)?.done !== true, newest_id: turns.at(-1)?.id,
+    }),
+  });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
+  relay.emit({ type: "user_msg", sid, msg_id: "notice-user", prompt: "核对这个问题并修复" });
+  relay.emit({ type: "turn_binding", sid, msg_id: "notice-user", turn_id: "notice-task" });
+  relay.emit({ type: "state", sid, state: "running", msg_id: "notice-user" });
+  relay.emit({ type: "tool_use", sid, message_id: "notice-tool-parent", turn_id: "notice-task",
+    tool_use_id: "notice-read", tool: "shell", category: "command", input: { command: "read session" } });
+  relay.emit({ type: "tool_result", sid, turn_id: "notice-task", tool_use_id: "notice-read",
+    content: "native ID confirmed", is_error: false });
+  relay.emit({ type: "assistant_msg_start", sid, message_id: "notice-item", turn_id: "notice-task", channel: "final" });
+  relay.emit({ type: "delta", sid, message_id: "notice-item", turn_id: "notice-task", channel: "final", text: notice });
+  relay.emit({ type: "assistant_msg_end", sid, message_id: "notice-item", turn_id: "notice-task",
+    channel: "final", delivery: "async" });
+  const row = page.locator('.turn[data-turn-id="notice-user"]');
+  await expect(row.locator(".process-commentary")).toContainText(notice);
+  await expect(row.locator(".assistant-answer-segment")).toHaveCount(0);
+  await expect(row.locator(".turn-process-label")).toContainText("正在处理");
+  await expect(row.locator(".turn-working")).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "停止", exact: true })).toBeVisible();
+  await row.screenshot({ path: info.outputPath("codex-async-notice-running.png") });
+
+  turns.push({ id: "notice-user", clientMsgId: "notice-user", forkPointId: "notice-task",
+    prompt: "核对这个问题并修复", done: false, ts: Date.now(), detailEventCount: 0, detailLoaded: true,
+    blocks: [{ kind: "text", message_id: "notice-item", channel: "final",
+      text: notice, delivery: "async", done: true }],
+  });
+  await page.reload();
+  await expect(row.locator(".process-commentary")).toContainText(notice);
+  await expect(row.locator(".assistant-answer-segment")).toHaveCount(0);
+  // The Wrapper replays the exact native/browser binding after reconnect.
+  // A running snapshot alone deliberately cannot animate an arbitrary row.
+  relay.emit({ type: "turn_binding", sid, msg_id: "notice-user", turn_id: "notice-task" });
+  relay.emit({ type: "state", sid, state: "running", msg_id: "notice-user" });
+  await expect(row.locator(".turn-process-label")).toContainText("正在处理");
+  relay.emit({ type: "tool_use", sid, message_id: "notice-late-parent", turn_id: "notice-task",
+    tool_use_id: "notice-tests", tool: "shell", category: "command", input: { command: "run tests" } });
+  relay.emit({ type: "tool_result", sid, turn_id: "notice-task", tool_use_id: "notice-tests",
+    content: "passed", is_error: false });
+  await expect(row.locator(".turn-process-label")).toContainText("正在处理");
+  relay.emit({ type: "assistant_msg_start", sid, message_id: "notice-final", turn_id: "notice-task", channel: "final" });
+  relay.emit({ type: "delta", sid, message_id: "notice-final", turn_id: "notice-task", channel: "final", text: finalAnswer });
+  relay.emit({ type: "assistant_msg_end", sid, message_id: "notice-final", turn_id: "notice-task", channel: "final" });
+  turns[0] = { ...turns[0], done: true, doneTs: Date.now(), blocks: [...turns[0].blocks,
+    { kind: "text", message_id: "notice-final", channel: "final", text: finalAnswer, done: true }] };
+  relay.emit({ type: "turn_end", sid, turn_id: "notice-task",
+    result: { subtype: "success", duration_ms: 1000, is_error: false } });
+  relay.emit({ type: "state", sid, state: "idle" });
+  await expect(row.locator(".turn-working")).toHaveCount(0);
+  await expect(row.locator(".turn-process-label")).toContainText("已处理");
+  await expect(row.locator(".assistant-answer-segment")).toHaveCount(1);
+  await expect(row.locator(".assistant-answer-segment")).toHaveText(finalAnswer);
+  expect(malformedFrames).toEqual([]);
+  expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toEqual([]);
+});
+
 test("async question live delivery preserves running state and uses steer instead of approval", async ({ page }) => {
   const relay = await mockRightPanelRelay(page);
   await page.goto("/");

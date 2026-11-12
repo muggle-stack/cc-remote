@@ -24,12 +24,36 @@ import {
   activeTurnCandidateIds,
   displayActiveTurnOwnerId,
   exactActiveTurnId,
+  finalTextBlocks,
+  presentableProcessBlocks,
 } from "../src/process-blocks.ts";
 import { displayHistoryProjection } from "../src/history-recovery.ts";
 
 const blockIdentity = (block: Block): string => block.kind === "text"
   ? block.message_id
   : block.kind === "tool" ? block.tool_use_id : block.item_id;
+
+const asyncNotice: Block = {
+  kind: "text", message_id: "async-progress", channel: "final",
+  delivery: "async", text: "查到了，继续验证修复。", done: true,
+};
+const asyncQuestionBlock: Block = {
+  ...asyncNotice, message_id: "async-question", text: "发生在哪个设备？",
+  questions: [{ title: "发生在哪个设备？", options: ["Mac", "手机"] }],
+};
+const finalAnswerBlock: Block = {
+  kind: "text", message_id: "real-final", channel: "final",
+  text: "修复与验证均已完成。", done: true,
+};
+for (const engine of ["codex", "claude", "dsh"] as const) {
+  assert.deepEqual(presentableProcessBlocks([asyncNotice, asyncQuestionBlock, finalAnswerBlock], engine),
+    [asyncNotice], "a plain async notice belongs to process commentary without changing its native metadata");
+}
+assert.deepEqual(finalTextBlocks([asyncNotice, asyncQuestionBlock, finalAnswerBlock]),
+  [asyncQuestionBlock, finalAnswerBlock],
+  "only structured async questions keep a separate response entry beside real final answers");
+assert.deepEqual(finalTextBlocks([{ ...asyncNotice, questions: [] }]), [],
+  "an empty question list remains an ordinary progress notice");
 
 const pasteOne = makeComposerPaste("first pasted block", "paste-1");
 const pasteTwo = makeComposerPaste("second pasted block", "paste-2");
@@ -628,6 +652,21 @@ try {
   const event = (body: Record<string, unknown>): ServerEvent => ({
     v: 22, ts: 10, ...body,
   } as ServerEvent);
+
+  for (const block of [asyncNotice, asyncQuestionBlock, finalAnswerBlock]) {
+    const sid = `idle-repair-${block.message_id}`;
+    const turn = { id: "unfinished-turn", prompt: "check progress", done: false, blocks: [block] };
+    const repaired = reduce({ ...initialState, focusedSid: sid, runtimes: {
+      [sid]: { ...createRuntime(), state: "idle", syncReady: true, turns: [turn] },
+    } }, { type: "event", event: event({
+      type: "history", sid, session_id: sid, revision: "idle-repair-r1",
+      detail: "summary", has_more: false, in_progress: false, events: [],
+      turns: [{ ...turn, detailLoaded: false, detailEventCount: 0 }],
+    }) }).runtimes[sid].turns[0];
+    assert.equal(repaired.done, true);
+    assert.equal(!!repaired.interrupted, block.delivery === "async",
+      "an idle snapshot needs a real final answer before repairing a missing terminal as success");
+  }
 
   // A new Claude transcript can become discoverable before its temporary
   // runtime captures the native session id. Focus may load that History first.
