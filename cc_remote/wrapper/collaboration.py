@@ -980,94 +980,70 @@ class Collaboration:
                     )
                     sid = resolved
             projection = _ProjectionContext(
-                sid, member["native_sid"], member["cwd"], member["spec"]["engine"]
+                sid, member["native_sid"], member["cwd"], member["spec"]["engine"],
+                live_context=ctx, live_seq=ctx.seq if ctx else None,
             )
             self.watch(projection, member["id"])
-            read_seq = ctx.seq if ctx else None
-            command = GetHistory(
-                session_id=sid, detail="full", limit=16, cwd=member["cwd"]
-            )
-            if member["spec"]["engine"] == "dsh":
+            if projection.engine == "dsh":
                 await self.machine._dsh.connection()
-                history = await self.machine._dsh.handle_get_history(
-                    command, publish=False
+
+            async def read_page(before):
+                command = GetHistory(
+                    session_id=sid, detail="full", limit=16,
+                    cwd=member["cwd"], before=before,
                 )
-            else:
-                history = await self.machine._history_page_singleflight(command, sid)
-            if not history.authoritative or history.error:
-                return
-            projection.live_context = ctx
-            projection.live_seq = history.live_seq if history.live_seq is not None else read_seq
-            identities: dict[str, set[str]] = {}
-            for row in pending:
-                # A known native owner wins over the business input ID, which
-                # may also identify a completed predecessor of a follow-up.
-                keys = (row["native_turn"],) if row["native_turn"] else (
-                    row["id"], row["native_input_id"],
-                )
-                for identity in keys:
-                    if identity:
-                        identities.setdefault(identity, set()).add(row["id"])
-            native_owners = {
-                event["msg_id"]: event["turn_id"] for event in history.events
-                if event.get("type") == "turn_binding"
-            }
-            matching = set()
-            event_types = {
-                cls.model_fields["type"].default: cls
-                for cls in (
-                    UserMsg,
-                    TurnBinding,
-                    TurnSteered,
-                    AssistantMsgStart,
-                    Delta,
-                    AssistantMsgEnd,
-                    TurnEnd,
-                )
-            }
-            last_user = max(
-                (
-                    index
-                    for index, item in enumerate(history.events)
-                    if item.get("type") == "user_msg"
-                ),
-                default=-1,
-            )
-            for index, event in enumerate(history.events):
-                kind = event.get("type")
-                if kind in {"user_msg", "turn_steered", "turn_binding"}:
-                    keys = {event.get("msg_id"), event.get("client_msg_id")}
-                    keys.add(native_owners.get(event.get("msg_id")))
-                    if kind != "user_msg":
-                        keys.add(event.get("turn_id"))
-                    matching = set()
-                    for key in keys:
-                        matching.update(identities.get(key, ()))
-                    owner = event.get("turn_id") or event.get("msg_id")
-                    if matching and owner:
-                        identities.setdefault(owner, set()).update(matching)
-                # Claude terminal turn_id is an assistant fork point. Its
-                # checkpoint_id identifies the owning native user turn.
-                owner = (
-                    event.get("checkpoint_id")
-                    if kind == "turn_end" and projection.engine == "claude"
-                    else event.get("turn_id")
-                )
-                scope = identities.get(owner, set()) if owner else matching
-                if not scope or kind not in event_types:
-                    continue
-                if kind == "turn_end" and history.in_progress and index > last_user:
-                    continue
-                if await self.observe(
-                    projection, event_types[kind].model_validate(event),
-                    delivery_ids=frozenset(scope),
-                ) is False:
+                if projection.engine == "dsh":
+                    history = await self.machine._dsh.handle_get_history(command, publish=False)
+                else:
+                    history = await self.machine._history_page_singleflight(command, sid)
+                if history.session_id != sid:
+                    raise ValueError("原生会话历史身份不匹配。")
+                return history
+
+            identities = self.delivery_identities(pending)
+            remaining = {row["id"] for row in pending}
+            cursors = []
+            before = None
+            revision = None
+            while True:
+                if not self.projection_current(projection):
                     return
-                if (
-                    kind == "turn_end"
-                    and event.get("result", {}).get("subtype") != "steered"
-                ):
-                    matching = set()
+                history = await read_page(before)
+                if not history.authoritative or history.error:
+                    return
+                if projection.live_seq is not None and history.live_seq is not None:
+                    projection.live_seq = min(projection.live_seq, history.live_seq)
+                if revision is None:
+                    revision = history.revision
+                elif history.revision != revision:
+                    return
+                cursors.append(before)
+                for event in history.events:
+                    for key in ("msg_id", "client_msg_id", "turn_id", "checkpoint_id"):
+                        remaining.difference_update(identities.get(event.get(key), ()))
+                if not remaining or not history.has_more:
+                    break
+                older = history.oldest_id
+                if not older or older in cursors:
+                    break
+                before = older
+
+            # Retain only cursors while scanning, then replay oldest first.
+            # This also lets an older user echo bind a newer terminal page.
+            loaded_before = before
+            for cursor in reversed(cursors):
+                if not self.projection_current(projection):
+                    return
+                if cursor != loaded_before:
+                    history = await read_page(cursor)
+                    loaded_before = cursor
+                if projection.live_seq is not None and history.live_seq is not None:
+                    projection.live_seq = min(projection.live_seq, history.live_seq)
+                if (not history.authoritative or history.error
+                        or history.revision != revision):
+                    return
+                if await self.replay_history(projection, history, identities) is False:
+                    return
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1076,6 +1052,93 @@ class Collaboration:
                 member_id=member["id"],
                 error_type=type(exc).__name__,
             )
+
+    @staticmethod
+    def delivery_identities(pending):
+        identities: dict[str, set[str]] = {}
+        for row in pending:
+            # A known native owner wins over the business input ID, which
+            # may also identify a completed predecessor of a follow-up.
+            keys = (row["native_turn"],) if row["native_turn"] else (
+                row["id"], row["native_input_id"],
+            )
+            for identity in keys:
+                if identity:
+                    identities.setdefault(identity, set()).add(row["id"])
+        return identities
+
+    def projection_current(self, projection):
+        live = self.machine._ctx_for(projection.key)
+        return live is projection.live_context and (
+            live is None or projection.live_seq is None or live.seq <= projection.live_seq
+        )
+
+    async def replay_history(self, projection, history, identities):
+        events = history.events
+        if any(event.get("type") == "error" for event in events):
+            events = await self.machine._history_recovery_events(history, projection.engine)
+            if events is None:
+                return False
+        native_owners = {
+            event["msg_id"]: event["turn_id"] for event in events
+            if event.get("type") == "turn_binding"
+        }
+        matching = set()
+        event_types = {
+            cls.model_fields["type"].default: cls
+            for cls in (
+                UserMsg,
+                TurnBinding,
+                TurnSteered,
+                AssistantMsgStart,
+                Delta,
+                AssistantMsgEnd,
+                TurnEnd,
+            )
+        }
+        last_user = max(
+            (
+                index
+                for index, item in enumerate(events)
+                if item.get("type") == "user_msg"
+            ),
+            default=-1,
+        )
+        for index, event in enumerate(events):
+            kind = event.get("type")
+            if kind in {"user_msg", "turn_steered", "turn_binding"}:
+                keys = {event.get("msg_id"), event.get("client_msg_id")}
+                keys.add(native_owners.get(event.get("msg_id")))
+                if kind != "user_msg":
+                    keys.add(event.get("turn_id"))
+                matching = set()
+                for key in keys:
+                    matching.update(identities.get(key, ()))
+                owner = event.get("turn_id") or event.get("msg_id")
+                if matching and owner:
+                    identities.setdefault(owner, set()).update(matching)
+            # Claude terminal turn_id is an assistant fork point. Its
+            # checkpoint_id identifies the owning native user turn.
+            owner = (
+                event.get("checkpoint_id")
+                if kind == "turn_end" and projection.engine == "claude"
+                else event.get("turn_id")
+            )
+            scope = identities.get(owner, set()) if owner else matching
+            if not scope or kind not in event_types:
+                continue
+            if kind == "turn_end" and history.in_progress and index > last_user:
+                continue
+            if await self.observe(
+                projection, event_types[kind].model_validate(event),
+                delivery_ids=frozenset(scope),
+            ) is False:
+                return False
+            if (
+                kind == "turn_end"
+                and event.get("result", {}).get("subtype") != "steered"
+            ):
+                matching = set()
 
     async def observe(self, ctx, frame, *, delivery_ids=None):
         entry = self.members.get(id(ctx))
@@ -1087,10 +1150,7 @@ class Collaboration:
         member_id = entry[1]
         async with self.projection_locks.setdefault(member_id, asyncio.Lock()):
             if isinstance(ctx, _ProjectionContext):
-                live = self.machine._ctx_for(ctx.key)
-                if live is not ctx.live_context or (
-                    live and ctx.live_seq is not None and live.seq > ctx.live_seq
-                ):
+                if not self.projection_current(ctx):
                     return False
             # Serialize projection writes with native consumption. Live frames
             # can advance seq during I/O, then their observation runs next.
@@ -1111,9 +1171,8 @@ class Collaboration:
             if channel != "unknown":
                 item["channel"] = channel
             if kind == "delta" and item["channel"] != "thinking":
-                item["text"] = (
-                    frame.text if frame.replace else item["text"] + frame.text
-                )[: 2 * 1024 * 1024]
+                text = frame.text if frame.replace else item["text"] + frame.text
+                item["text"] = text if isinstance(ctx, _ProjectionContext) else text[: 2 * 1024 * 1024]
             while len(texts) > 32:
                 texts.popitem(last=False)
             if kind != "assistant_msg_end":

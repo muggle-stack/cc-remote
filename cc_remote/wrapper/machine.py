@@ -17239,6 +17239,39 @@ class WrapperMachine:
         self._schedule_history_refresh(
             sid, before=None, limit=limit, cwd=cwd, detail="summary")
 
+    async def _history_recovery_events(self, history: History, engine: str):
+        """Read source-complete local detail for a lossy history projection."""
+        if self._history_index is None or engine not in {"claude", "codex"}:
+            return None
+        sid = history.session_id
+        if self._history_revision(sid) != history.revision:
+            return None
+        source_path = await asyncio.to_thread(
+            self._codex_rollout_for_wire
+            if engine == "codex" else self._claude_transcript_path_for_wire,
+            sid,
+        )
+        if not source_path:
+            return None
+        source = await asyncio.to_thread(HistorySourceFingerprint.capture, source_path)
+        events = []
+        for group in group_history_events(history.events):
+            if any(row.get("type") == "error" for row in group):
+                turns = materialize_history_turns(group)
+                if len(turns) != 1:
+                    return None
+                group = await asyncio.to_thread(
+                    self._history_index.get_turn_detail,
+                    sid, engine, source, turns[0]["id"],
+                )
+                if group is None or any(row.get("type") == "error" for row in group):
+                    return None
+            events.extend(group)
+        current = await asyncio.to_thread(HistorySourceFingerprint.capture, source_path)
+        if current != source or self._history_revision(sid) != history.revision:
+            return None
+        return events
+
     async def _history_page_singleflight(self, cmd, sid: str) -> History:
         before = getattr(cmd, "before", None)
         raw_limit = getattr(cmd, "limit", None)

@@ -1196,6 +1196,236 @@ async def test_native_followup_recovery_uses_its_owner_instead_of_the_original_i
     assert store.delivery(delivery["id"])["status"] == "succeeded"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["claude", "codex"])
+@pytest.mark.parametrize("oversized", ["reply", "large_reply", "tool"])
+@pytest.mark.parametrize("detail_state", ["missing", "lossy", "changed", "complete"])
+async def test_lossy_native_history_recovers_complete_reply_or_keeps_delivery_active(
+    monkeypatch, tmp_path, engine, oversized, detail_state
+):
+    import cc_remote.wrapper.machine as machine_module
+    from cc_remote.protocol import ToolResult, ToolUse, TurnBinding
+    from cc_remote.wrapper.codex_stream import CodexHistoryWindow
+    from cc_remote.wrapper.history_store import HistoryIndexStore
+
+    machine, transport, controller, sid, native, _title = native_named_member(engine)
+    store, room_id, member = await store_named_member(controller, engine, sid, native)
+    delivery = send(store, room_id)
+    owner = "native-turn" if engine == "codex" else "native-user"
+    store.consume(delivery["id"], owner)
+    ctx = _mk_ctx(sid, native)
+    ctx.engine = engine
+    machine.sessions[sid] = ctx
+    repeats = {"reply": 15000, "large_reply": 150000, "tool": 1}
+    answer = "complete reply " * repeats[oversized]
+    events = [UserMsg(msg_id="native-user", client_msg_id=delivery["id"], prompt="hello")]
+    if engine == "codex":
+        events.append(TurnBinding(msg_id="native-user", turn_id=owner))
+    if oversized == "tool":
+        events.extend([
+            ToolUse(message_id="tool-message", tool_use_id="tool", tool="read_file", input={"text": "x" * 200000}),
+            ToolResult(tool_use_id="tool", content="x" * 200000, is_error=False),
+        ])
+    events.extend([
+        AssistantMsgStart(message_id="answer", turn_id=owner, channel="final"),
+        Delta(message_id="answer", turn_id=owner, channel="final", text=answer),
+        AssistantMsgEnd(message_id="answer", turn_id=owner, channel="final"),
+        TurnEnd(turn_id=owner if engine == "codex" else "assistant-fork", checkpoint_id="native-user" if engine == "claude" else None,
+                result=TurnResult(subtype="success", is_error=False, duration_ms=1)),
+    ])
+    source = tmp_path / "transcript.jsonl"
+    source.write_text("{}\n")
+    monkeypatch.setattr(machine_module, "transcript_path", lambda _sid: str(source))
+    monkeypatch.setattr(machine_module, "get_session_messages", lambda *_args, **_kwargs: ["source"])
+    monkeypatch.setattr(machine_module, "last_assistant_model", lambda _messages: None)
+    monkeypatch.setattr(machine_module, "translate_history", lambda *_args, **_kwargs: [event.model_copy(deep=True) for event in events])
+    if engine == "codex":
+        machine._codex_rollout_for_wire = lambda _sid: str(source)
+        monkeypatch.setattr(machine_module, "codex_history_window_info", lambda *_args, **_kwargs: CodexHistoryWindow(0, source.stat().st_size, False))
+        monkeypatch.setattr(machine_module, "codex_translate_history", lambda *_args, **_kwargs: ([event.model_copy(deep=True) for event in events], None))
+    machine.cfg.ws_max_size_bytes = 64 * 1024
+    machine._history_index = HistoryIndexStore(tmp_path / "history")
+    history = await machine._build_history_source(sid, limit=16)
+    assert history.authoritative and history.error is None
+    assert any(event["type"] == "error" for event in history.events)
+    assert not any(event["type"] == "delta" for event in history.events)
+    machine._history_page_singleflight = AsyncMock(return_value=history)
+    read_detail = machine._history_index.get_turn_detail
+    if detail_state == "missing":
+        monkeypatch.setattr(machine._history_index, "get_turn_detail", lambda *_args: None)
+    elif detail_state == "lossy":
+        monkeypatch.setattr(machine._history_index, "get_turn_detail", lambda *_args: history.events)
+    elif detail_state == "changed":
+        def append_during_read(*args):
+            detail = read_detail(*args)
+            with source.open("a") as stream:
+                stream.write("{}\n")
+            return detail
+        monkeypatch.setattr(machine._history_index, "get_turn_detail", append_during_read)
+    machine._handle_query = AsyncMock()
+    machine._handle_steer = AsyncMock()
+    machine._spawn = AsyncMock()
+    await controller.reconcile(store.member_by_id(member["id"]))
+    replies = [row for row in store.messages("owner", room_id) if row["role"] == "assistant"]
+    if detail_state == "complete":
+        assert len(replies) == 1
+        assert replies[0]["reply_to"] == ["message"]
+        assert store.delivery(delivery["id"])["status"] == "succeeded"
+    else:
+        assert not replies
+        assert store.delivery(delivery["id"])["status"] == "running"
+        assert store.deliveries(room_id, active=True)
+        monkeypatch.setattr(machine._history_index, "get_turn_detail", read_detail)
+        await controller.reconcile(store.member_by_id(member["id"]))
+        assert store.delivery(delivery["id"])["status"] == "succeeded"
+    # The room page is a bounded preview. Validate the complete persisted body.
+    with store.db() as db:
+        assert db.execute("SELECT text FROM messages WHERE role='assistant'").fetchone()[0] == answer
+    assert not transport.sent
+    machine._handle_query.assert_not_awaited()
+    machine._handle_steer.assert_not_awaited()
+    machine._spawn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bounded_frame", [False, True])
+async def test_native_recovery_pages_back_to_a_delivery_older_than_sixteen_turns(
+    monkeypatch, tmp_path, bounded_frame
+):
+    import cc_remote.wrapper.machine as machine_module
+    from cc_remote.protocol import GetHistory
+    from cc_remote.wrapper.history_store import HistoryIndexStore
+
+    machine, _transport, controller, sid, native, _title = native_named_member("claude")
+    store, room_id, member = await store_named_member(controller, "claude", sid, native)
+    delivery = send(store, room_id)
+    store.consume(delivery["id"], "native-user-0")
+    ctx = _mk_ctx(sid, native)
+    machine.sessions[sid] = ctx
+    events = []
+    for index in range(40):
+        events.extend([
+            UserMsg(msg_id=f"native-user-{index}", client_msg_id=delivery["id"] if index == 0 else None, prompt=f"question {index}"),
+            AssistantMsgStart(message_id=f"answer-{index}", turn_id=f"native-user-{index}", channel="final"),
+            Delta(message_id=f"answer-{index}", turn_id=f"native-user-{index}", channel="final", text=f"reply {index} " * 1000),
+            AssistantMsgEnd(message_id=f"answer-{index}", turn_id=f"native-user-{index}", channel="final"),
+            TurnEnd(turn_id=f"fork-{index}", checkpoint_id=f"native-user-{index}",
+                    result=TurnResult(subtype="success", is_error=False, duration_ms=1)),
+        ])
+    source = tmp_path / "transcript.jsonl"
+    source.write_text("{}\n")
+    monkeypatch.setattr(machine_module, "transcript_path", lambda _sid: str(source))
+    monkeypatch.setattr(machine_module, "get_session_messages", lambda *_args, **_kwargs: ["source"])
+    monkeypatch.setattr(machine_module, "last_assistant_model", lambda _messages: None)
+    monkeypatch.setattr(machine_module, "translate_history", lambda *_args, **_kwargs: [event.model_copy(deep=True) for event in events])
+    machine._history_index = HistoryIndexStore(tmp_path / "history")
+    if bounded_frame:
+        machine.cfg.ws_max_size_bytes = 64 * 1024
+    newest = await machine._history_page_singleflight(GetHistory(session_id=sid, limit=16), sid)
+    assert newest.has_more
+    assert not any(event.get("msg_id") == "native-user-0" for event in newest.events)
+    read_page = machine._history_page_singleflight
+    machine._history_page_singleflight = AsyncMock(side_effect=read_page)
+    machine._handle_query = AsyncMock()
+    machine._spawn = AsyncMock()
+    await controller.reconcile(store.member_by_id(member["id"]))
+    replies = [row for row in store.messages("owner", room_id) if row["role"] == "assistant"]
+    assert len(replies) == 1
+    assert replies[0]["text"] == "reply 0 " * 1000
+    assert replies[0]["reply_to"] == ["message"]
+    assert store.delivery(delivery["id"])["status"] == "succeeded"
+    assert any(call.args[0].before == newest.oldest_id for call in machine._history_page_singleflight.await_args_list)
+    machine._handle_query.assert_not_awaited()
+    machine._spawn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_older_input_alias_binds_a_terminal_on_a_newer_history_page():
+    from cc_remote.protocol import History, TurnBinding
+
+    machine, _transport, controller, sid, native, _title = native_named_member("codex")
+    store, room_id, member = await store_named_member(controller, "codex", sid, native)
+    delivery = send(store, room_id)
+    store.set_delivery(delivery["id"], "unknown")
+    newest = History(session_id=sid, revision="stable", has_more=True, oldest_id="older", events=[
+        TurnBinding(msg_id="native-turn", turn_id="native-turn").model_dump(),
+        AssistantMsgStart(message_id="answer", turn_id="native-turn", channel="final").model_dump(),
+        Delta(message_id="answer", turn_id="native-turn", channel="final", text="complete reply").model_dump(),
+        AssistantMsgEnd(message_id="answer", turn_id="native-turn", channel="final").model_dump(),
+        TurnEnd(turn_id="native-turn", result=TurnResult(subtype="success", is_error=False, duration_ms=1)).model_dump(),
+    ])
+    oldest = History(session_id=sid, revision="stable", before="older", events=[
+        UserMsg(msg_id="native-user", client_msg_id=delivery["id"], prompt="hello").model_dump(),
+        TurnBinding(msg_id="native-user", turn_id="native-turn").model_dump(),
+        TurnEnd(turn_id="native-turn", result=TurnResult(subtype="steered", is_error=False, duration_ms=1)).model_dump(),
+    ])
+
+    async def read_page(command, _sid):
+        return oldest if command.before else newest
+
+    machine._history_page_singleflight = AsyncMock(side_effect=read_page)
+    await controller.reconcile(store.member_by_id(member["id"]))
+    assert store.delivery(delivery["id"])["status"] == "succeeded"
+    replies = [row for row in store.messages("owner", room_id) if row["role"] == "assistant"]
+    assert len(replies) == 1
+    assert replies[0]["text"] == "complete reply"
+    assert replies[0]["reply_to"] == ["message"]
+    assert [call.args[0].before for call in machine._history_page_singleflight.await_args_list] == [None, "older", None]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["missing_cursor", "repeated_cursor", "revision", "error", "non_authoritative", "session"])
+async def test_invalid_history_page_boundaries_keep_recovery_eligible(boundary):
+    from cc_remote.protocol import History
+
+    machine, _transport, controller, sid, native, _title = native_named_member("claude")
+    store, room_id, member = await store_named_member(controller, "claude", sid, native)
+    delivery = send(store, room_id)
+    store.consume(delivery["id"], "not-on-these-pages")
+    newest = History(session_id=sid, revision="stable", has_more=True,
+                     oldest_id=None if boundary == "missing_cursor" else "older")
+    oldest = History(session_id="another-session" if boundary == "session" else sid, revision="different" if boundary == "revision" else "stable",
+                     before="older", has_more=True, oldest_id="older",
+                     error="read failed" if boundary == "error" else None,
+                     authoritative=boundary != "non_authoritative")
+
+    async def read_page(command, _sid):
+        return oldest if command.before else newest
+
+    machine._history_page_singleflight = AsyncMock(side_effect=read_page)
+    await controller.reconcile(store.member_by_id(member["id"]))
+    assert store.delivery(delivery["id"])["status"] == "running"
+    assert store.deliveries(room_id, active=True)
+    assert len(store.messages("owner", room_id)) == 1
+    reads = [call.args[0].before for call in machine._history_page_singleflight.await_args_list]
+    assert reads[0] is None
+    assert len(reads) <= 3
+    if boundary != "missing_cursor":
+        assert reads[1] == "older"
+
+
+@pytest.mark.asyncio
+async def test_shared_history_read_keeps_its_earlier_live_watermark():
+    from cc_remote.protocol import History
+
+    machine, _transport, controller, sid, native, _title = native_named_member("claude")
+    store, room_id, member = await store_named_member(controller, "claude", sid, native)
+    delivery = send(store, room_id)
+    store.consume(delivery["id"], "native-user")
+    ctx = _mk_ctx(sid, native)
+    ctx.seq = 5
+    machine.sessions[sid] = ctx
+    machine._history_page_singleflight = AsyncMock(return_value=History(
+        session_id=sid, revision="stale", live_seq=4, events=[
+            UserMsg(msg_id="native-user", client_msg_id=delivery["id"], prompt="hello").model_dump(),
+            TurnEnd(turn_id="fork", checkpoint_id="native-user",
+                    result=TurnResult(subtype="success", is_error=False, duration_ms=1)).model_dump(),
+        ],
+    ))
+    await controller.reconcile(store.member_by_id(member["id"]))
+    assert store.delivery(delivery["id"])["status"] == "running"
+
+
 def test_native_preflight_rejection_updates_the_pending_room_input():
     async def run():
         machine, _transport = _mk_machine()
