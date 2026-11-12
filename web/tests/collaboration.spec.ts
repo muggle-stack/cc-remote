@@ -1,0 +1,1884 @@
+import { test, expect, type Page } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import {
+  PROTOCOL_VERSION,
+  type CollaborationMemberSpec,
+} from "../src/protocol";
+
+type NativeHistory = Record<string, any> | ((command: Record<string, any>) => Record<string, any>);
+
+async function mockRooms(page: Page, nativeEngine: "claude" | "codex" = "codex") {
+  const commands: Record<string, any>[] = [];
+  let room: Record<string, any> | null = null;
+  const messages: Record<string, any>[] = [];
+  const deliveries: Record<string, any>[] = [];
+  let version = 0;
+  let pauseSendState = false;
+  let dropSend = false;
+  let pauseRoomLoads = false;
+  let catalogDelayMs = 0;
+  let pauseHistory = false;
+  let heldHistory: Record<string, any> | null = null;
+  let rejectedOperation: string | null = null;
+  let directoryEntries = 0;
+  let nativeHistory: NativeHistory = {};
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aIfsAAAAASUVORK5CYII=";
+  let emit = (_event: Record<string, any>) => {};
+  const profiles = {
+    claude: [{ id: "default", label: "Primary" }, { id: "gaia", label: "Gaia" }],
+    codex: [{ id: "iris", label: "Iris" }, { id: "primary", label: "Primary" }],
+    dsh: [{ id: "default", label: "default" }],
+  };
+  const member = (spec: CollaborationMemberSpec, index: number) => {
+    const native = spec.session_id?.replace(/^dsh@/, "") || `native-${index}`;
+    return {
+      id: `member-${index}`,
+      room_id: "room",
+      name:
+        spec.name ||
+        `${spec.engine === "dsh" ? "DSH" : spec.engine === "claude" ? "Claude" : "Codex"} · ${spec.profile_id}`,
+      spec,
+      sid: spec.engine === "dsh" ? `dsh@${native}` : native,
+      native_sid: native,
+      cwd: spec.cwd || "/tmp/project",
+      removed: false,
+    };
+  };
+  const state = (request?: string, includeRoom = true, before?: number) => {
+    const page = messages.filter(message => !before || message.seq < before).slice(-40);
+    emit({
+      type: "collaboration_state",
+      request_id: request,
+      room_id: includeRoom ? room?.id : undefined,
+      data: {
+        generation: "rooms-generation",
+        version: ++version,
+        profiles,
+        rooms: room ? [room] : [],
+        ...(room && includeRoom
+          ? { room, messages: page, deliveries, questions: [], before,
+            has_more: !!page.length && page[0].seq > 1 }
+          : {}),
+      },
+    });
+  };
+  await page.addInitScript((engine) => {
+    localStorage.setItem("cc_remote_engine", engine);
+    localStorage.setItem("cc_remote_machine", "room-machine");
+    localStorage.setItem("cc_remote_theme", "dark");
+  }, nativeEngine);
+  await page.route("**/api/**", (route) => route.fulfill({ status: 404 }));
+  await page.route("**/api/session", (route) => route.fulfill({ json: {} }));
+  await page.route("**/api/viewers/pages", (route) =>
+    route.fulfill({ json: { pages: [] } }),
+  );
+  await page.route("**/api/devices", (route) =>
+    route.fulfill({
+      json: {
+        devices: [{ machine_id: "room-machine", label: "mac2", online: true }],
+      },
+    }),
+  );
+  await page.routeWebSocket(/\/ws(?:\?|$)/, (socket) => {
+    emit = (event) =>
+      socket.send(
+        JSON.stringify({
+          v: PROTOCOL_VERSION,
+          ts: Date.now() / 1000,
+          ...event,
+        }),
+      );
+    const snapshot = (sid: string) => {
+      emit({
+        type: "snapshot",
+        sid,
+        cc_session_id: sid,
+        state: "idle",
+        tail_text: "",
+        cwd: "/tmp/project",
+        generation: "native-generation",
+      });
+      emit({ type: "replay_end", sid, to_seq: 0, truncated: false });
+    };
+    socket.onMessage((raw) => {
+      const command = JSON.parse(String(raw));
+      commands.push(command);
+      if (command.type === "hello") {
+        emit({
+          type: "btw_sync",
+          generation: "native-generation",
+          revision: 1,
+          sessions: [],
+        });
+        snapshot("parent");
+      } else if (command.type === "list_sessions") {
+        emit({
+          type: "session_list",
+          request_id: command.cmd_id,
+          engine: command.engine,
+          space: command.space,
+          sessions: [
+            {
+              session_id: "parent",
+              engine: nativeEngine,
+              space: "code",
+              summary: "原生会话",
+              cwd: "/tmp/project",
+              state: "idle",
+              last_modified: "100",
+            },
+          ],
+        });
+      } else if (command.type === "switch_session") {
+        emit({ type: "session_focus", session_id: command.session_id });
+        snapshot(command.session_id);
+      } else if (command.type === "get_history") {
+        emit({
+          type: "history",
+          session_id: command.session_id,
+          sid: command.session_id,
+          revision: "revision",
+          generation: "native-generation",
+          detail: "summary",
+          events: [],
+          turns: [],
+          has_more: false,
+          before: command.before,
+          ...(typeof nativeHistory === "function" ? nativeHistory(command) : nativeHistory),
+        });
+      } else if (command.type === "get_turn_detail") {
+        emit({ type: "turn_detail", session_id: command.session_id,
+          turn_id: command.turn_id, revision: command.revision, before: command.before,
+          authoritative: true, has_more: false, events: [
+            { type: "user_msg", sid: command.session_id, msg_id: command.turn_id, prompt: "较早的原生问题", ts: 1 },
+            { type: "assistant_msg_start", sid: command.session_id, message_id: "older-thinking", channel: "thinking", ts: 2 },
+            { type: "delta", sid: command.session_id, message_id: "older-thinking", channel: "thinking", text: "更早的原生过程详情", ts: 3 },
+            { type: "assistant_msg_end", sid: command.session_id, message_id: "older-thinking", channel: "thinking", ts: 4 },
+            { type: "turn_end", sid: command.session_id, turn_id: command.turn_id, ts: 5,
+              result: { subtype: "success", is_error: false } },
+          ] });
+      } else if (command.type === "get_file_preview") {
+        const path = command.path as string;
+        const format = path.endsWith(".wav") ? "audio" : path.endsWith(".mp4") ? "video"
+          : path.endsWith(".png") ? "image" : path.endsWith(".html") ? "html"
+            : path.endsWith(".md") ? "markdown" : "text";
+        emit({ type: "file_preview", sid: command.sid, request_id: command.request_id, path, format,
+          content: format === "html" ? "<h1>来自协作会话的 HTML</h1>" : `# 来自 ${command.sid}\n\n正文预览。`,
+          media_type: format === "image" ? "image/png" : format === "audio" ? "audio/wav" : format === "video" ? "video/mp4" : null,
+          data: format === "image" ? png : format === "audio" ? "UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=" : null,
+          media_id: format === "video" ? "a".repeat(32) : null,
+          size: 44, truncated: false, mtime_ns: "1", revision: "file-version", writable: false });
+      } else if (command.type === "get_preview_asset") {
+        emit({ type: "preview_asset", sid: command.sid, path: command.path,
+          request_id: command.request_id, preview_id: command.preview_id, media_type: "image/png", data: png });
+      } else if (command.type === "list_dir") {
+        emit({
+          type: "dir_list",
+          request_id: command.cmd_id,
+          path: command.path || "/tmp",
+          parent: "/",
+          dirs: [{ name: "project", path: "/tmp/project" },
+            ...Array.from({ length: directoryEntries }, (_, index) => ({
+              name: `folder-${index}`, path: `/tmp/folder-${index}`,
+            }))],
+        });
+      } else if (command.type === "collaboration") {
+        if (command.operation === rejectedOperation) {
+          rejectedOperation = null;
+          emit({ type: "collaboration_state", request_id: command.cmd_id,
+            room_id: room?.id, error: "原生会话重命名暂未完成，请重试。", data: {} });
+          return;
+        }
+        if (command.operation === "create") {
+          const members = command.members.map(member);
+          room = {
+            id: "room",
+            name: command.name,
+            members,
+            default_member: members[0].id,
+            revision: 1,
+            updated: 1,
+            archived: false,
+          };
+        } else if (command.operation === "add_member" && room) {
+          room.members.push(member(command.member, room.members.length));
+          room.revision++;
+        } else if (command.operation === "update" && room) {
+          room.default_member = command.default_member_id ?? room.default_member;
+          room.name = command.name ?? room.name;
+          room.archived = command.archived ?? room.archived;
+          room.revision++;
+        } else if (["remove_member", "restore_member", "rename_member"].includes(command.operation) && room) {
+          const target = room.members.find((item: Record<string, any>) => item.id === command.member_id);
+          if (command.operation === "rename_member") { target.name = command.name; target.spec.name = command.name; }
+          else target.removed = command.operation === "remove_member";
+          if (target.removed && room.default_member === target.id)
+            room.default_member = room.members.find((item: Record<string, any>) => !item.removed)?.id ?? null;
+          if (!room.default_member && !target.removed) room.default_member = target.id;
+          room.revision++;
+        } else if (command.operation === "sessions") {
+          emit({ type: "collaboration_state", request_id: command.cmd_id, data: {
+            sessions_spec: command.member,
+            sessions: command.member.engine === "dsh" ? [
+              { sid: "dsh@session-711d960d-3a17-491f-8b66-32b3a6e0a946", native_sid: "session-711d960d-3a17-491f-8b66-32b3a6e0a946", name: "资料核对", cwd: "/tmp/project", state: "idle" },
+              { sid: "dsh@session-68a304ab-22b0-40d9-9edb-b553c3a97b77", native_sid: "session-68a304ab-22b0-40d9-9edb-b553c3a97b77", name: "交叉核对", cwd: "/tmp/review", state: "idle" },
+            ] : [
+              { sid: "01a0d871-implementation", native_sid: "01a0d871-implementation", name: "代码实现", cwd: "/tmp/project", state: "idle" },
+              { sid: "01a0d15f-review", native_sid: "01a0d15f-review", name: "交叉审查", cwd: "/tmp/review", state: "running" },
+            ],
+          } });
+        } else if (command.operation === "catalog") {
+          const model = command.member.profile_id === "primary" ? "profile-model" : "native-model";
+          const response = {
+            type: "collaboration_state",
+            request_id: command.cmd_id,
+            data: {
+              catalog_spec: command.member,
+              catalog: {
+                type: "models",
+                engine: command.member.engine,
+                models: [
+                  {
+                    id: model,
+                    display_name: model === "profile-model" ? "Profile model" : "Native model",
+                    description: "",
+                    efforts: ["high", "max"],
+                    service_tiers: [{ id: "priority", name: "快速" }],
+                  },
+                ],
+                default_model: model,
+                dsh_permissions: [{ value: "ask", name: "逐次确认", description: "" }],
+                dsh_presets: [{ id: "native-agent", name: "Native Agent", available: true,
+                  description: "", is_default: false },
+                  { id: "unavailable-agent", name: "Unavailable Agent", available: false,
+                    description: "", is_default: false }],
+              },
+              permission_profiles: {
+                type: "permission_profiles",
+                profiles: [{ id: "workspace-write", allowed: true }, { id: "read-only", allowed: false }],
+              },
+            },
+          };
+          if (catalogDelayMs) setTimeout(() => emit(response), catalogDelayMs);
+          else emit(response);
+          catalogDelayMs = 0;
+        } else if (command.operation === "send" && room) {
+          if (dropSend) {
+            dropSend = false;
+            return;
+          }
+          if (messages.some((message) => message.id === command.message_id)) {
+            state(command.cmd_id);
+            return;
+          }
+          messages.push({
+            id: command.message_id,
+            seq: messages.length + 1,
+            role: "user",
+            member_id: null,
+            text: command.prompt,
+            created: 1,
+            targets: command.targets,
+            reply_to: [],
+          });
+          for (const target of command.targets.length
+            ? command.targets
+            : [room.default_member])
+            deliveries.push({
+              id: `delivery-${deliveries.length}`,
+              message_id: command.message_id,
+              member_id: target,
+              status: "running",
+              mode: "query",
+              error: null,
+              created: 1,
+              updated: 1,
+            });
+        } else if (command.operation === "stop") {
+          for (const delivery of deliveries.filter(
+            (item) => item.member_id === command.member_id,
+          ))
+            delivery.status = "cancelled";
+        }
+        if (command.operation === "send" && pauseSendState)
+          pauseSendState = false;
+        else if (!["catalog", "sessions"].includes(command.operation)
+          && !(pauseRoomLoads && ["list", "read"].includes(command.operation))) {
+          if (command.operation === "read" && command.before && pauseHistory) heldHistory = command;
+          else state(command.cmd_id, true, command.before);
+        }
+      } else if (command.type === "ping") emit({ type: "pong", n: command.n });
+      if (command.cmd_id)
+        emit({
+          type: "command_ack",
+          client_id: command.client_id,
+          cmd_id: command.cmd_id,
+        });
+    });
+  });
+  return {
+    commands,
+    setNativeHistory(value: NativeHistory) { nativeHistory = value; },
+    renameFromHarness(memberId: string, name: string) {
+      const target = room?.members.find((member: Record<string, any>) => member.id === memberId);
+      if (target) { target.name = name; target.spec.name = name; }
+      state();
+    },
+    reply(memberId: string, text: string) {
+      messages.push({ id: `answer-${messages.length}`, seq: messages.length + 1,
+        role: "assistant", member_id: memberId, text, created: 1, targets: [], reply_to: [] });
+      state();
+    },
+    seedHistory(count: number) {
+      messages.splice(0, messages.length, ...Array.from({ length: count }, (_, index) => ({
+        id: `history-${index + 1}`, seq: index + 1, role: "user", member_id: null,
+        text: `历史消息 ${index + 1}\n${"用于阅读位置校验的历史正文。".repeat(6)}`,
+        created: 1, targets: [], reply_to: [],
+      })));
+      state();
+    },
+    holdHistory() { pauseHistory = true; },
+    releaseHistory() {
+      pauseHistory = false;
+      if (heldHistory) state(heldHistory.cmd_id, true, heldHistory.before);
+      heldHistory = null;
+    },
+    failHistory() {
+      if (heldHistory) emit({ type: "collaboration_state", request_id: heldHistory.cmd_id,
+        room_id: room?.id, error: "历史读取失败", data: {} });
+      heldHistory = null;
+    },
+    emit: (event: Record<string, any>) => emit(event),
+    rejectNextOperation(operation: string) { rejectedOperation = operation; },
+    setDirectoryEntries(count: number) { directoryEntries = count; },
+    state,
+    pauseRoomLoads() {
+      pauseRoomLoads = true;
+    },
+    resumeRoomLoads() {
+      pauseRoomLoads = false;
+      state(undefined, false);
+      state();
+    },
+    pauseNextSendResponse() {
+      pauseSendState = true;
+    },
+    dropNextSend() {
+      dropSend = true;
+    },
+    delayNextCatalogResponse() {
+      catalogDelayMs = 1000;
+    },
+    finish(memberId = "member-1") {
+      for (const delivery of deliveries) delivery.status = "succeeded";
+      messages.push({
+        id: "answer",
+        seq: messages.length + 1,
+        role: "assistant",
+        member_id: memberId,
+        text: "## 已完成\n\n回归通过。",
+        created: 1,
+        targets: [],
+        reply_to: messages
+          .filter((item) => item.role === "user")
+          .map((item) => item.id),
+      });
+      state();
+    },
+  };
+}
+
+async function addNewAgent(page: Page) {
+  await page.getByRole("button", { name: "添加 Agent", exact: true }).click();
+  await page.getByRole("menu", { name: "添加 Agent", exact: true })
+    .getByRole("menuitem", { name: "新建 Agent", exact: true }).click();
+}
+
+async function createSimpleRoom(page: Page, name = "交互回归") {
+  await page.goto("/");
+  await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+  await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+  const create = page.getByRole("region", { name: "新建聊天", exact: true });
+  await create.getByLabel("聊天名称").fill(name);
+  await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "协作消息", exact: true })).toBeVisible();
+}
+
+async function selectChoice(page: Page, label: string, option: string) {
+  await page.getByRole("button", { name: label, exact: true }).click();
+  await page.getByRole("menu", { name: label, exact: true })
+    .getByRole("menuitemradio", { name: option, exact: true }).click();
+}
+
+test("collaboration file preview suppresses the dialog focus frame and restores its trigger", async ({ page, isMobile }, info) => {
+  const relay = await mockRooms(page);
+  await createSimpleRoom(page);
+  relay.reply("member-0", "查看 [claude.txt](claude.txt)。");
+  const conversation = page.getByRole("region", { name: "协作对话记录", exact: true });
+  const file = conversation.getByRole("button", { name: "在 Remote 中打开 /tmp/project/claude.txt", exact: true });
+  await expect(file).toBeVisible();
+  const beforePreview = relay.commands.length;
+  await conversation.focus();
+  if (isMobile) await file.tap();
+  else await file.click();
+  const preview = page.getByRole("dialog", { name: "文件预览", exact: true });
+  await expect(preview).toContainText("来自 native-0");
+  // The loading fallback or a touch activation can leave focus on the modal
+  // container. Keyboard modality must not draw a frame around the whole panel.
+  await preview.focus();
+  await page.keyboard.press("CapsLock");
+  await expect.poll(() => preview.evaluate(node => node.matches(":focus-visible"))).toBe(true);
+  await expect(preview).toHaveCSS("outline-style", "none");
+  const close = preview.getByRole("button", { name: "收起", exact: true });
+  await close.focus();
+  await expect(close).toHaveCSS("outline-style", "solid");
+  await expect(close).toHaveCSS("outline-width", "2px");
+  await close.press("Enter");
+  await expect(preview).toHaveCount(0);
+  await expect.poll(() => file.evaluate(node => {
+    const active = document.activeElement;
+    return active === node || active === node.closest(".collab-conversation");
+  })).toBe(true);
+  await expect(conversation).toHaveCSS("outline-style", "none");
+  await file.focus();
+  await file.press("Enter");
+  await expect(preview).toContainText("来自 native-0");
+  await page.keyboard.press("Escape");
+  await expect(preview).toHaveCount(0);
+  await expect(file).toBeFocused();
+  await expect(file).toHaveCSS("outline-style", "solid");
+  await expect(file).toHaveCSS("outline-width", "2px");
+  expect(relay.commands.slice(beforePreview).filter(command => ["query", "steer", "interrupt", "switch_session", "new_session"].includes(command.type))).toEqual([]);
+  await page.screenshot({ path: info.outputPath("file-preview-focus-restored.png") });
+});
+
+test("collaboration transcript keyboard focus leaves the reading surface unframed", async ({ page }, info) => {
+  const relay = await mockRooms(page);
+  await createSimpleRoom(page);
+  relay.reply("member-0", "协作正文保持可阅读。\n\n查看 [claude.txt](claude.txt)。");
+  const conversation = page.getByRole("region", { name: "协作对话记录", exact: true });
+  await page.getByText("协作正文保持可阅读。", { exact: true }).click();
+  await expect(conversation).toBeFocused();
+  await page.keyboard.press("CapsLock");
+  await expect.poll(() => conversation.evaluate(node => node.matches(":focus-visible"))).toBe(true);
+  await expect(conversation).toHaveCSS("outline-style", "none");
+  const mention = page.getByRole("button", { name: "点名参与者", exact: true });
+  await mention.focus();
+  await expect(mention).toHaveCSS("outline-style", "solid");
+  await expect(mention).toHaveCSS("outline-width", "2px");
+  await page.screenshot({ path: info.outputPath("transcript-without-focus-frame.png") });
+});
+
+test("collaboration Command+4 preserves native and room drafts without sending inputs", async ({ page }) => {
+  const relay = await mockRooms(page);
+  await page.addInitScript(() => Object.defineProperty(navigator, "platform", { value: "MacIntel" }));
+  await page.goto("/");
+  const native = page.locator("textarea[data-chat-composer]");
+  await expect(page.locator(".c-head .sub")).toHaveText("session parent");
+  await native.fill("原生会话草稿");
+  await page.keyboard.press("Meta+4");
+  await expect(page.locator(".collab-workspace")).toBeVisible();
+  await page.getByRole("button", { name: "切换新会话引擎" }).click();
+  const collaboration = page.getByRole("menuitem", { name: "协作", exact: true });
+  await expect(collaboration).toHaveAttribute("aria-keyshortcuts", "Meta+4 Control+4");
+  await expect(collaboration.locator("kbd")).toHaveText("⌘4");
+  await page.keyboard.press("Escape");
+  const create = page.getByRole("region", { name: "新建聊天", exact: true });
+  await create.getByLabel("聊天名称").fill("快捷切换讨论");
+  await page.keyboard.press("Meta+4");
+  await expect(create.getByLabel("聊天名称")).toHaveValue("快捷切换讨论");
+  await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+  const composer = page.getByRole("textbox", { name: "协作消息", exact: true });
+  await composer.fill("协作聊天草稿");
+  await page.keyboard.press("Meta+2");
+  await expect(native).toHaveValue("原生会话草稿");
+  await native.focus();
+  await page.keyboard.press("Control+4");
+  await expect(composer).toHaveValue("协作聊天草稿");
+  expect(relay.commands.filter(command => ["query", "steer", "interrupt", "new_session"].includes(command.type))).toEqual([]);
+  expect(relay.commands.filter(command => command.operation === "send")).toEqual([]);
+});
+
+for (const engine of ["claude", "codex"] as const) {
+  test(`collaboration shortcuts leave the hidden ${engine} session untouched`, async ({ page }) => {
+    const relay = await mockRooms(page, engine);
+    await page.addInitScript(() => Object.defineProperty(navigator, "platform", { value: "MacIntel" }));
+    await page.goto("/");
+    const native = page.locator("textarea[data-chat-composer]");
+    await expect(native).toBeEnabled();
+    await native.fill("保留原生草稿");
+    await page.keyboard.press("Meta+4");
+    const create = page.getByRole("region", { name: "新建聊天", exact: true });
+    await create.getByLabel("聊天名称").fill("快捷键隔离回归");
+    for (const key of ["Meta+Shift+E", "Control+Shift+K", "Meta+Shift+B", "Shift+Tab"]) {
+      await page.keyboard.press(key);
+    }
+    await create.getByRole("button", { name: "配置参与者 1", exact: true }).click();
+    const settings = page.getByRole("dialog", { name: "Claude · default", exact: true });
+    await settings.getByLabel("会话名称").focus();
+    await page.keyboard.press("Shift+Tab");
+    await settings.getByRole("button", { name: "关闭", exact: true }).click();
+    await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+    const composer = page.getByRole("textbox", { name: "协作消息", exact: true });
+    await composer.fill("保留协作草稿");
+    for (const key of ["Control+Shift+E", "Meta+Shift+K", "Control+Shift+B", "Shift+Tab"]) {
+      await composer.focus();
+      await page.keyboard.press(key);
+    }
+    const nativeOperations = ["open_btw", "close_btw", "get_diff", "set_perm", "set_collaboration_mode"];
+    expect.soft(relay.commands.filter(command => nativeOperations.includes(command.type))).toEqual([]);
+    await page.keyboard.press(engine === "claude" ? "Meta+1" : "Meta+2");
+    await expect(native).toHaveValue("保留原生草稿");
+    await expect(page.locator(".btw-panel")).toHaveCount(0);
+    await expect(page.locator(".right-panel-frame")).toHaveCount(0);
+    await native.focus();
+    await page.keyboard.press("Shift+Tab");
+    await expect.poll(() => relay.commands.filter(command => command.type === (
+      engine === "claude" ? "set_perm" : "set_collaboration_mode"
+    )).length).toBe(1);
+    await page.keyboard.press("Meta+Shift+E");
+    await expect.poll(() => relay.commands.filter(command => command.type === "open_btw").length).toBe(1);
+    await expect(page.locator('.btw-panel[aria-modal="true"]')).toBeVisible();
+    await page.keyboard.press("Control+4");
+    await expect(composer).toHaveValue("保留协作草稿");
+    const operationCount = relay.commands.filter(command => nativeOperations.includes(command.type)).length;
+    for (const key of ["Meta+Shift+E", "Control+Shift+K", "Shift+Tab"]) {
+      await composer.focus();
+      await page.keyboard.press(key);
+    }
+    await page.keyboard.press(engine === "claude" ? "Meta+1" : "Meta+2");
+    await expect(page.locator('.btw-panel[aria-modal="true"]')).toBeVisible();
+    expect(relay.commands.filter(command => nativeOperations.includes(command.type))).toHaveLength(operationCount);
+    expect(relay.commands.filter(command => ["query", "steer", "interrupt", "new_session"].includes(command.type))).toEqual([]);
+  });
+}
+
+for (const width of [320, 390, 1280]) {
+  test(`collaboration flat creation and responder pickers stay usable at ${width}px`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 844 });
+    const relay = await mockRooms(page);
+    await page.goto("/");
+    await page.getByRole("button", { name: "切换新会话引擎" }).click();
+    await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+    const create = page.getByRole("region", { name: "新建聊天", exact: true });
+    const name = create.getByLabel("聊天名称");
+    await name.fill("紧凑成员列表");
+    const nameStyle = await name.evaluate(node => {
+      const style = getComputedStyle(node);
+      return { fontSize: parseFloat(style.fontSize), background: style.backgroundColor,
+        borderTop: style.borderTopWidth, borderLeft: style.borderLeftWidth,
+        radius: parseFloat(style.borderRadius), height: node.getBoundingClientRect().height };
+    });
+    expect(nameStyle.fontSize).toBeGreaterThanOrEqual(14);
+    expect(nameStyle.fontSize).toBeLessThanOrEqual(16);
+    expect(nameStyle.background).not.toBe("rgba(0, 0, 0, 0)");
+    expect(nameStyle.borderTop).toBe("1px");
+    expect(nameStyle.borderLeft).toBe("1px");
+    expect(nameStyle.radius).toBeGreaterThanOrEqual(16);
+    expect(nameStyle.height).toBeLessThanOrEqual(48);
+    await expect(create.getByText("账号默认配置", { exact: true })).toHaveCount(0);
+    await expect(create.getByText("未设置项沿用账号默认配置", { exact: true })).toHaveCount(0);
+    await selectChoice(page, "选择参与者 1", "Claude · gaia");
+    for (const [index, name] of [[2, "Codex · iris"], [3, "DSH · default"]] as const) {
+      await addNewAgent(page);
+      await selectChoice(page, `选择参与者 ${index}`, name);
+    }
+    await expect(create.locator("select")).toHaveCount(0);
+    await expect(create.locator(".collab-participant")).toHaveCount(3);
+    const row = create.locator(".collab-participant").first();
+    expect(await row.evaluate(node => getComputedStyle(node).borderLeftWidth)).toBe("0px");
+    expect((await row.boundingBox())!.height).toBeLessThanOrEqual(72);
+    const identitySpacing = await row.locator(".collab-participant-identity").evaluate(node =>
+      node.getBoundingClientRect().width - node.querySelector("span")!.getBoundingClientRect().width,
+    );
+    expect.soft(identitySpacing).toBeLessThanOrEqual(36);
+    expect((await create.getByRole("button", { name: "添加 Agent", exact: true }).boundingBox())!.width)
+      .toBeLessThan(180);
+    const createBounds = (await create.boundingBox())!;
+    expect(createBounds.x).toBeGreaterThanOrEqual(12);
+    expect(createBounds.x + createBounds.width).toBeLessThanOrEqual(width - 12);
+    expect(createBounds.y).toBeGreaterThanOrEqual(0);
+    expect(createBounds.y + createBounds.height).toBeLessThanOrEqual(844);
+    const identity = create.getByRole("button", { name: "选择参与者 2", exact: true });
+    await identity.press("ArrowDown");
+    const picker = page.getByRole("menu", { name: "选择参与者 2", exact: true });
+    await expect(picker.getByRole("menuitemradio", { name: "Codex · iris", exact: true })).toBeFocused();
+    await expect(picker).toHaveAttribute("id", (await identity.getAttribute("aria-controls"))!);
+    await expect(page.locator(".collab-select-popover")).toHaveCount(1);
+    const pickerBounds = (await picker.boundingBox())!;
+    expect(pickerBounds.x).toBeGreaterThanOrEqual(8);
+    expect(pickerBounds.x + pickerBounds.width).toBeLessThanOrEqual(width - 8);
+    expect(pickerBounds.y).toBeGreaterThanOrEqual(0);
+    expect(pickerBounds.y + pickerBounds.height).toBeLessThanOrEqual(844);
+    await page.keyboard.press("End");
+    await expect(picker.getByRole("menuitemradio", { name: "DSH · default", exact: true })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(picker).toHaveCount(0);
+    await expect(identity).toBeFocused();
+    await expect(create).toBeVisible();
+    await identity.press("ArrowDown");
+    await page.keyboard.press("Tab");
+    await expect(picker).toHaveCount(0);
+    await expect(create.getByRole("button", { name: "工作目录 2", exact: true })).toBeFocused();
+    await identity.click();
+    await page.mouse.click(4, 4);
+    await expect(picker).toHaveCount(0);
+    await expect(create.getByLabel("聊天名称")).toHaveValue("紧凑成员列表");
+    await page.screenshot({ path: info.outputPath("creation.png") });
+    await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+    await page.getByRole("button", { name: "管理成员", exact: true }).click();
+    const members = page.getByRole("dialog", { name: "聊天成员", exact: true });
+    await expect.poll(() => members.locator("svg.engine-brand-icon use").evaluateAll(nodes =>
+      nodes.map(node => (node as SVGGraphicsElement).getBBox().width > 0),
+    )).toEqual([true, true]);
+    const positions = await members.locator(".collab-members > div").evaluateAll(rows =>
+      rows.map(row => ({
+        icon: row.querySelector(".engine-brand-icon")!.getBoundingClientRect().left,
+        label: row.querySelector("strong")!.getBoundingClientRect().left,
+      })),
+    );
+    expect(positions).toHaveLength(3);
+    for (const position of positions) {
+      expect.soft(position.icon).toBeCloseTo(positions[0].icon, 0);
+      expect.soft(position.label).toBeCloseTo(positions[0].label, 0);
+    }
+    await page.screenshot({ path: info.outputPath("members.png") });
+    await members.getByRole("button", { name: "关闭", exact: true }).click();
+    await page.getByRole("button", { name: "默认回复者", exact: true }).click();
+    const responder = page.getByRole("menu", { name: "默认回复者", exact: true });
+    await expect(responder.getByRole("menuitemradio", { name: "Claude · gaia", exact: true })).toHaveAttribute("aria-checked", "true");
+    const responderBounds = (await responder.boundingBox())!;
+    expect(responderBounds.x).toBeGreaterThanOrEqual(8);
+    expect(responderBounds.x + responderBounds.width).toBeLessThanOrEqual(width - 8);
+    expect(responderBounds.y).toBeGreaterThanOrEqual(0);
+    expect(responderBounds.y + responderBounds.height).toBeLessThanOrEqual(844);
+    await expect.poll(() => responder.locator("svg.engine-brand-icon use").evaluateAll(nodes =>
+      nodes.map(node => (node as SVGGraphicsElement).getBBox().width > 0),
+    )).toEqual([true, true]);
+    await page.screenshot({ path: info.outputPath("responder.png") });
+    await responder.getByRole("menuitemradio", { name: "Codex · iris", exact: true }).click();
+    const trigger = page.getByRole("button", { name: "默认回复者", exact: true });
+    await expect(trigger).toHaveText("Codex · iris");
+    await expect(trigger).toBeFocused();
+    await expect(page.locator(".collab-composer select")).toHaveCount(0);
+    const composer = page.getByRole("textbox", { name: "协作消息", exact: true });
+    await composer.fill("默认给 Codex");
+    await composer.press("Enter");
+    await expect(page.locator('.collab-activity[data-engine="codex"]')).toHaveCount(1);
+    await page.getByRole("button", { name: "点名参与者", exact: true }).click();
+    await expect(composer).toHaveValue("@");
+    await expect(composer).toBeFocused();
+    await page.getByRole("option", { name: "DSH · default", exact: true }).click();
+    await composer.press("End");
+    await composer.type("这条给 DSH");
+    await composer.press("Enter");
+    await expect(trigger).toHaveText("Codex · iris");
+    expect(relay.commands.findLast(command => command.operation === "send")!.targets).toEqual(["member-2"]);
+    expect(relay.commands.filter(command => command.operation === "update")).toHaveLength(1);
+  });
+}
+
+test("collaboration settings use account catalogs and clear overrides on identity changes", async ({ page }) => {
+  const relay = await mockRooms(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "切换新会话引擎" }).click();
+  await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+  const create = page.getByRole("region", { name: "新建聊天", exact: true });
+  await create.getByLabel("聊天名称").fill("按账号配置");
+  await create.getByRole("button", { name: "配置参与者 1", exact: true }).click();
+  let settings = page.getByRole("dialog", { name: "Claude · default", exact: true });
+  await selectChoice(page, "模型", "Native model");
+  await selectChoice(page, "权限", "Plan");
+  await settings.getByRole("button", { name: "完成", exact: true }).click();
+  await addNewAgent(page);
+  await create.getByRole("button", { name: "配置参与者 2", exact: true }).click();
+  settings = page.getByRole("dialog", { name: "Claude · default", exact: true });
+  await expect(settings.getByRole("button", { name: "模型", exact: true })).toHaveText("默认");
+  await expect(settings.getByRole("button", { name: "权限", exact: true })).toHaveText("默认");
+  await settings.getByRole("button", { name: "完成", exact: true }).click();
+  await selectChoice(page, "选择参与者 1", "Codex · iris");
+  await create.getByRole("button", { name: "配置参与者 1", exact: true }).click();
+  settings = page.getByRole("dialog", { name: "Codex · iris", exact: true });
+  await settings.getByLabel("会话名称").fill("代码检查");
+  await settings.getByRole("textbox", { name: "工作目录", exact: true }).fill("/tmp/custom");
+  const modelBeforeRead = (await settings.getByRole("button", { name: "模型", exact: true }).boundingBox())!;
+  relay.delayNextCatalogResponse();
+  await settings.getByLabel("会话名称").focus();
+  await expect(settings.getByRole("status")).toHaveText("正在读取原生配置…");
+  const modelDuringRead = (await settings.getByRole("button", { name: "模型", exact: true }).boundingBox())!;
+  expect(modelDuringRead.y).toBeCloseTo(modelBeforeRead.y, 0);
+  await selectChoice(page, "模型", "Native model");
+  await selectChoice(page, "思考强度", "max");
+  await settings.getByRole("button", { name: "执行环境", exact: true }).click();
+  const permission = page.getByRole("menu", { name: "执行环境", exact: true });
+  await expect(permission.getByRole("menuitemradio", { name: "read-only", exact: true })).toBeDisabled();
+  await permission.getByRole("menuitemradio", { name: "workspace-write", exact: true }).click();
+  await selectChoice(page, "速度", "快速");
+  await settings.getByRole("button", { name: "完成", exact: true }).click();
+  await selectChoice(page, "选择参与者 1", "Codex · primary");
+  await create.getByRole("button", { name: "配置参与者 1", exact: true }).click();
+  settings = page.getByRole("dialog", { name: "Codex · primary", exact: true });
+  await expect(settings.getByLabel("会话名称")).toHaveValue("代码检查");
+  await expect(settings.getByRole("textbox", { name: "工作目录", exact: true })).toHaveValue("/tmp/custom");
+  for (const label of ["模型", "思考强度", "执行环境", "速度"])
+    await expect(settings.getByRole("button", { name: label, exact: true })).toHaveText("默认");
+  await settings.getByRole("button", { name: "模型", exact: true }).click();
+  const model = page.getByRole("menu", { name: "模型", exact: true });
+  await expect(model.getByRole("menuitemradio", { name: "Native model", exact: true })).toHaveCount(0);
+  await model.getByRole("menuitemradio", { name: "Profile model", exact: true }).click();
+  await settings.getByRole("button", { name: "恢复默认", exact: true }).click();
+  await expect(settings.getByRole("button", { name: "模型", exact: true })).toHaveText("默认");
+  await settings.getByRole("button", { name: "完成", exact: true }).click();
+  await selectChoice(page, "选择参与者 2", "DSH · default");
+  await create.getByRole("button", { name: "配置参与者 2", exact: true }).click();
+  settings = page.getByRole("dialog", { name: "DSH · default", exact: true });
+  await selectChoice(page, "权限", "逐次确认");
+  await settings.getByRole("button", { name: "Agent Preset", exact: true }).click();
+  const preset = page.getByRole("menu", { name: "Agent Preset", exact: true });
+  await expect(preset.getByRole("menuitemradio", { name: "Unavailable Agent", exact: true })).toHaveCount(0);
+  await preset.getByRole("menuitemradio", { name: "Native Agent", exact: true }).click();
+  await expect(settings.locator("select")).toHaveCount(0);
+  await settings.getByRole("button", { name: "完成", exact: true }).click();
+  await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+  const created = relay.commands.find(command => command.operation === "create")!;
+  expect(created.members[0]).toEqual({ engine: "codex", profile_id: "primary" });
+  expect(created.members[1]).toMatchObject({ engine: "dsh", profile_id: "default", dsh_permission: "ask", dsh_agent_preset: "native-agent" });
+  expect(relay.commands.filter(command => ["query", "steer", "interrupt", "new_session"].includes(command.type))).toEqual([]);
+});
+
+test("collaboration mention button preserves the caret, selection and existing targets", async ({ page }, info) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const relay = await mockRooms(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "切换新会话引擎" }).click();
+  await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+  const create = page.getByRole("region", { name: "新建聊天", exact: true });
+  await create.getByLabel("聊天名称").fill("点名按钮回归");
+  await addNewAgent(page);
+  await selectChoice(page, "选择参与者 2", "DSH · default");
+  await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+
+  const composer = page.getByRole("textbox", { name: "协作消息", exact: true });
+  const trigger = page.getByRole("button", { name: "点名参与者", exact: true });
+  const choices = page.getByRole("listbox", { name: "点名会话", exact: true });
+  await trigger.click();
+  await expect(composer).toHaveValue("@");
+  await expect(composer).toBeFocused();
+  await expect(trigger).toHaveAttribute("aria-expanded", "true");
+  await expect(choices).toHaveAttribute("id", (await trigger.getAttribute("aria-controls"))!);
+  await page.screenshot({ path: info.outputPath("mention.png") });
+  await trigger.click();
+  await expect(composer).toHaveValue("@");
+  await composer.press("Escape");
+  await expect(choices).toHaveCount(0);
+  await trigger.click();
+  await expect(composer).toHaveValue("@");
+  await choices.getByRole("option", { name: "Claude · default", exact: true }).click();
+  await composer.press("End");
+  await page.keyboard.insertText("检查结果");
+  await composer.evaluate((node: HTMLTextAreaElement) => {
+    const start = node.value.indexOf("检查");
+    node.setSelectionRange(start, start + 2);
+  });
+  await trigger.click();
+  await expect(composer).toHaveValue("@Claude · default @结果");
+  await expect(composer).toBeFocused();
+  await choices.getByRole("option", { name: "DSH · default", exact: true }).click();
+  await expect(composer).toHaveValue("@Claude · default @DSH · default 结果");
+  await composer.press("Enter");
+  await expect.poll(() => relay.commands.findLast(command => command.operation === "send")?.targets)
+    .toEqual(["member-0", "member-1"]);
+
+  const fullDraft = "x".repeat(65536);
+  await composer.fill(fullDraft);
+  await trigger.click();
+  await expect(composer).toHaveValue(fullDraft);
+  await expect(choices).toHaveCount(0);
+});
+
+test("collaboration waits for confirmed room history before showing the empty state", async ({ page }) => {
+  const relay = await mockRooms(page);
+  relay.pauseRoomLoads();
+  await page.goto("/");
+  const selector = page.getByRole("button", { name: "切换新会话引擎", exact: true });
+  await selector.click();
+  await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+  const conversation = page.locator(".collab-conversation");
+  await expect(conversation).toBeVisible();
+  await expect(conversation.locator(".collab-primary")).toHaveCount(0);
+  await expect(conversation.getByRole("status")).toHaveText("加载会话历史…");
+  await expect(page.locator(".collab-pane .sub")).toHaveText("正在读取聊天…");
+  await expect(conversation).toHaveAttribute("aria-busy", "true");
+  relay.resumeRoomLoads();
+  await expect(conversation.getByRole("region", { name: "新建聊天", exact: true })).toBeVisible();
+  const create = page.getByRole("region", { name: "新建聊天", exact: true });
+  await create.getByLabel("聊天名称").fill("已有聊天历史");
+  await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+  await page.getByRole("textbox", { name: "协作消息", exact: true }).fill("已保存的问题");
+  await page.getByRole("textbox", { name: "协作消息", exact: true }).press("Enter");
+  await expect(conversation).toContainText("已保存的问题");
+  relay.finish("member-0");
+  await expect(conversation).toContainText("回归通过。");
+  for (const remembered of [true, false]) {
+    relay.pauseRoomLoads();
+    await selector.click();
+    await page.getByRole("menuitemradio", { name: "Codex", exact: true }).click();
+    if (!remembered) await page.evaluate(() => localStorage.removeItem("cc_remote_collaboration:room-machine"));
+    await selector.click();
+    await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+    await expect(conversation).toBeVisible();
+    await expect(conversation.locator(".collab-primary")).toHaveCount(0);
+    await expect(conversation.getByRole("status")).toHaveText("加载会话历史…");
+    relay.resumeRoomLoads();
+    await expect(page.locator(".collab-pane .sub")).toHaveText("已有聊天历史");
+    await expect(conversation).toContainText("已保存的问题");
+    await expect(conversation).toContainText("回归通过。");
+    await expect(conversation.locator(".empty")).toHaveCount(0);
+    await expect(conversation).toHaveAttribute("aria-busy", "false");
+  }
+});
+
+for (const width of [390, 980, 1280]) {
+  test(`collaboration navigation matches the native Harness sidebar at ${width}px`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 900 });
+    const relay = await mockRooms(page);
+    await page.goto("/");
+    const selector = page.getByRole("button", { name: "切换新会话引擎", exact: true });
+    await expect(selector).toBeVisible();
+    const geometry = () => page.evaluate(() => {
+      const pane = document.querySelector<HTMLElement>(".shell > .pane")!;
+      const sidebar = document.querySelector<HTMLElement>(".shell > .sessions")!;
+      const style = getComputedStyle(pane);
+      return { paneX: pane.getBoundingClientRect().x, paneWidth: pane.getBoundingClientRect().width,
+        sidebarWidth: sidebar.getBoundingClientRect().width, radius: style.borderTopLeftRadius };
+    });
+    await page.locator(".surface-head-title").click();
+    await expect(page.locator(".shell")).toHaveClass(/sidebar-open/);
+    await expect(page.locator(".shell")).not.toHaveAttribute("data-sidebar-motion");
+    const native = await geometry();
+    await page.locator(".sessions").getByRole("button", { name: "收起", exact: true }).click();
+    await selector.click();
+    await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+    const workspace = page.locator(".collab-workspace");
+    await expect(workspace).toBeVisible();
+    await expect(workspace.locator(".collab-surface")).toHaveCount(0);
+    await expect(selector).toHaveText("协作");
+    await expect(page.getByRole("button", { name: "返回普通会话", exact: true })).toHaveCount(0);
+    await selector.press("ArrowDown");
+    await expect(page.getByRole("menuitem", { name: "协作", exact: true })).toBeFocused();
+    await expect(page.getByRole("menuitem", { name: "协作", exact: true })).toHaveAttribute("aria-current", "page");
+    await page.keyboard.press("Enter");
+    await expect(workspace).toBeVisible();
+    await expect(selector).toBeFocused();
+    await selector.press("ArrowDown");
+    await page.keyboard.press("Escape");
+    await expect(selector).toBeFocused();
+    await page.locator(".surface-head-title").click();
+    await expect(workspace).toHaveClass(/sidebar-open/);
+    await expect(workspace).not.toHaveAttribute("data-sidebar-motion");
+    const collaboration = await geometry();
+    expect(collaboration.paneX).toBeCloseTo(native.paneX, 1);
+    expect(collaboration.paneWidth).toBeCloseTo(native.paneWidth, 1);
+    expect(collaboration.sidebarWidth).toBeCloseTo(native.sidebarWidth, 1);
+    expect(collaboration.radius).toBe(native.radius);
+    await page.screenshot({ path: info.outputPath("collaboration-sidebar.png") });
+    await workspace.locator(".brand").click();
+    await expect(workspace).not.toHaveClass(/sidebar-open/);
+    await expect(workspace).toBeVisible();
+    if (width < 980) {
+      await expect(workspace).not.toHaveAttribute("data-sidebar-motion");
+      const touch = (type: string, x: number, time: number) =>
+        workspace.locator(".collab-conversation").evaluate((target, point) => {
+          const position = { identifier: 1, target, clientX: point.x, clientY: 250 };
+          const event = new Event(point.type, { bubbles: true, cancelable: true });
+          const touches = point.type === "touchend" ? [] : [position];
+          Object.defineProperties(event, { touches: { value: touches }, targetTouches: { value: touches },
+            changedTouches: { value: [position] }, timeStamp: { value: point.time } });
+          target.dispatchEvent(event);
+        }, { type, x, time });
+      await touch("touchstart", 40, 1000);
+      await touch("touchmove", 220, 1200);
+      expect((await geometry()).paneX).toBeCloseTo(180, 1);
+      await touch("touchend", 260, 1400);
+      await expect(workspace).toHaveClass(/sidebar-open/);
+      await expect(workspace).not.toHaveAttribute("data-sidebar-motion");
+      await workspace.locator(".scrim-side").click({ position: { x: 20, y: 130 } });
+      await expect(workspace).not.toHaveClass(/sidebar-open/);
+    }
+    const create = page.getByRole("region", { name: "新建聊天", exact: true });
+    await create.getByLabel("聊天名称").fill("导航一致性验收");
+    await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+    await expect(workspace.locator(".sub")).toHaveText("导航一致性验收");
+    await page.getByRole("textbox", { name: "协作消息", exact: true }).fill("保留房间草稿");
+    for (const harness of ["Codex", "Claude", "DSH"]) {
+      await selector.click();
+      await page.getByRole("menuitemradio", { name: harness, exact: true }).click();
+      await expect(workspace).toHaveCount(0);
+      await expect(selector).toHaveText(harness);
+      await selector.click();
+      await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+      await expect(workspace.locator(".sub")).toHaveText("导航一致性验收");
+      await expect(page.getByRole("textbox", { name: "协作消息", exact: true })).toHaveValue("保留房间草稿");
+    }
+    const shortcut = await page.evaluate(() => navigator.platform.startsWith("Linux")
+      && !/Android|CrOS/.test(navigator.userAgent) ? "Alt+3" : "Control+3");
+    await page.keyboard.press(shortcut);
+    await expect(workspace).toHaveCount(0);
+    await expect(selector).toHaveText("DSH");
+    expect(relay.commands.filter(command => ["query", "steer", "new_session", "interrupt"].includes(command.type))).toEqual([]);
+    expect(relay.commands.filter(command => command.type === "collaboration"
+      && ["remove_member", "stop", "send"].includes(command.operation))).toEqual([]);
+  });
+}
+
+for (const width of [390, 1280]) {
+  test(`collaboration settings keep compact editable rows and return from directory at ${width}px`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 900 });
+    await mockRooms(page);
+    await page.goto("/");
+    await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+    await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+    const create = page.getByRole("region", { name: "新建聊天", exact: true });
+    await create.getByRole("button", { name: "配置参与者 1", exact: true }).click();
+    const settings = page.getByRole("dialog", { name: "Claude · default", exact: true });
+    await settings.getByLabel("会话名称", { exact: true }).fill("架构梳理");
+    await settings.getByLabel("工作目录", { exact: true }).fill("/tmp/custom");
+    const rows = settings.locator(".collab-setting-row");
+    await expect(rows).toHaveCount(2);
+    for (const row of await rows.all()) expect((await row.boundingBox())!.height).toBeLessThanOrEqual(60);
+    const directoryTrigger = settings.getByRole("button", { name: "选择工作目录", exact: true });
+    // Keep the pointer down across a fast blur/catalog response. A native tap
+    // must still open the picker if the centered settings layout changes.
+    await directoryTrigger.click({ delay: 100 });
+    const picker = page.getByRole("dialog", { name: "选择本地工作区", exact: true });
+    await picker.getByRole("button", { name: "关闭", exact: true }).click();
+    await expect(settings).toBeVisible();
+    await expect(directoryTrigger).toBeFocused();
+    await expect(settings.getByLabel("会话名称", { exact: true })).toHaveValue("架构梳理");
+    await expect(settings.getByLabel("工作目录", { exact: true })).toHaveValue("/tmp/custom");
+    if (info.project.use.hasTouch) await directoryTrigger.tap();
+    else await directoryTrigger.click();
+    await picker.getByRole("button", { name: "project", exact: true }).click();
+    await picker.getByRole("button", { name: "使用此目录", exact: true }).click();
+    await expect(settings.getByLabel("工作目录", { exact: true })).toHaveValue("/tmp/project");
+    await page.screenshot({ path: info.outputPath("settings-compact.png") });
+    await settings.getByRole("button", { name: "完成", exact: true }).click();
+    await expect(page.locator("dialog[open]")).toHaveCount(0);
+    await expect(create.getByRole("button", { name: "工作目录 1", exact: true })).toContainText("project");
+  });
+
+  test(`collaboration directory entry opens one picker and returns to creation at ${width}px`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 900 });
+    const relay = await mockRooms(page);
+    relay.setDirectoryEntries(80);
+    await page.goto("/");
+    await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+    await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+    const create = page.getByRole("region", { name: "新建聊天", exact: true });
+    const trigger = create.getByRole("button", { name: "工作目录 1", exact: true });
+    await trigger.focus();
+    await trigger.press("Enter");
+    const picker = page.getByRole("dialog", { name: "选择本地工作区", exact: true });
+    await expect(picker.getByRole("button", { name: "project", exact: true })).toBeVisible();
+    await expect(picker.getByRole("button", { name: "使用此目录", exact: true })).toBeEnabled();
+    await page.screenshot({ path: info.outputPath("directory-direct.png") });
+    await expect(page.locator("dialog[open]")).toHaveCount(1);
+    await expect(page.locator(".collab-settings-dialog")).toHaveCount(0);
+    const frame = await page.locator(".collab-directory-dialog").boundingBox();
+    const content = await picker.locator(".dp").boundingBox();
+    expect(frame!.height - content!.height).toBeLessThan(90);
+    expect(frame!.height).toBeLessThanOrEqual(868);
+    const footer = await picker.locator(".dp-foot").boundingBox();
+    expect(footer!.y + footer!.height).toBeLessThanOrEqual(frame!.y + frame!.height);
+    expect(await picker.evaluate(node => getComputedStyle(node).outlineStyle)).toBe("none");
+    expect(relay.commands.filter(command => command.operation === "catalog")).toHaveLength(0);
+    await picker.getByRole("button", { name: "关闭", exact: true }).click();
+    await expect(page.locator("dialog[open]")).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+    await trigger.click();
+    await picker.getByRole("button", { name: "project", exact: true }).click();
+    await picker.getByRole("button", { name: "使用此目录", exact: true }).click();
+    await expect(page.locator("dialog[open]")).toHaveCount(0);
+    await expect(trigger).toContainText("project");
+    await trigger.click();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("dialog[open]")).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+    expect(relay.commands.filter(command => ["query", "steer", "interrupt", "new_session"].includes(command.type))).toEqual([]);
+  });
+}
+
+for (const width of [390, 1280]) {
+  test(`collaboration room creation, native settings and working marks at ${width}px`, async ({
+    page,
+  }, info) => {
+    await page.setViewportSize({ width, height: 900 });
+    const relay = await mockRooms(page);
+    await page.goto("/");
+    const selector = page.getByRole("button", { name: "切换新会话引擎" });
+    await expect(selector).toBeVisible();
+    await selector.press("ArrowDown");
+    await expect(page.getByRole("menu")).toBeVisible();
+    await page.keyboard.press("End");
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".collab-workspace")).toBeVisible();
+    const create = page.getByRole("region", { name: "新建聊天" });
+    await create
+      .getByRole("textbox", { name: "聊天名称" })
+      .fill("接口重构讨论");
+    for (const engine of ["codex", "dsh"]) {
+      await addNewAgent(page);
+      const index = engine === "codex" ? 2 : 3;
+      await selectChoice(page, `选择参与者 ${index}`, engine === "codex" ? "Codex · iris" : "DSH · default");
+    }
+    await create.getByRole("button", { name: "配置参与者 2" }).click();
+    const settings = page.getByRole("dialog", {
+      name: "Codex · iris",
+      exact: true,
+    });
+    await expect(settings.getByRole("button", { name: "模型", exact: true })).toHaveText("默认");
+    await selectChoice(page, "模型", "Native model");
+    await selectChoice(page, "思考强度", "max");
+    await selectChoice(page, "速度", "快速");
+    await settings.getByRole("button", { name: "选择工作目录" }).click();
+    const directory = page.getByRole("dialog", {
+      name: "选择本地工作区",
+      exact: true,
+    });
+    await directory
+      .getByRole("button", { name: "project", exact: true })
+      .click();
+    await directory.getByRole("button", { name: "使用此目录" }).click();
+    await settings.getByRole("button", { name: "完成", exact: true }).click();
+    await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+    await expect(page.locator(".collab-pane .sub")).toHaveText("接口重构讨论");
+    const created = relay.commands.find(
+      (command) => command.operation === "create",
+    )!;
+    expect(created.members[1]).toMatchObject({
+      engine: "codex",
+      profile_id: "iris",
+      cwd: "/tmp/project",
+      model: "native-model",
+      effort: "max",
+      service_tier: "priority",
+    });
+    expect(created.members[0].model).toBeUndefined();
+    const composer = page.getByRole("textbox", { name: "协作消息" });
+    await composer.fill("@");
+    await page.getByRole("option", { name: "所有参与者" }).click();
+    await composer.press("End");
+    await composer.type("一起检查这份方案");
+    await composer.press("Enter");
+    await expect(page.locator(".collab-activity")).toHaveCount(3);
+    for (const row of await page.locator(".collab-activity").all()) {
+      const brand = row.locator("header > .engine-brand-icon");
+      const title = (await row.locator("strong").boundingBox())!;
+      const spark = (await row
+        .locator(".collab-working > :first-child")
+        .boundingBox())!;
+      const word = (await row.locator(".working-word").boundingBox())!;
+      expect(await brand.count()).toBe(1);
+      expect(spark.x).toBeGreaterThan(title.x + title.width);
+      expect(word.x).toBeGreaterThan(spark.x + spark.width - 1);
+    }
+    expect(
+      relay.commands.findLast((command) => command.operation === "send")!
+        .targets,
+    ).toEqual(["member-0", "member-1", "member-2"]);
+    const pane = (await page.locator(".collab-pane").boundingBox())!;
+    expect(pane.x).toBe(0);
+    expect(pane.width + pane.x).toBeLessThanOrEqual(width);
+    await expect
+      .poll(() =>
+        page
+          .locator(".working-word-layer")
+          .first()
+          .evaluate((node) => getComputedStyle(node).opacity),
+      )
+      .toBe("1");
+    await page.screenshot({
+      path: info.outputPath(`collaboration-${width}.png`),
+    });
+    const beforeProgress = relay.commands.length;
+    await page
+      .locator('.collab-activity[data-engine="codex"]')
+      .getByRole("button", { name: "查看进度 ↗" })
+      .click();
+    const progress = page.getByRole("dialog", {
+      name: "Codex · iris 的进度",
+      exact: true,
+    });
+    await expect(progress).toBeVisible();
+    relay.emit({
+      type: "user_msg",
+      sid: "native-1",
+      msg_id: "native-input",
+      prompt: "原生内部过程",
+    });
+    relay.emit({
+      type: "assistant_msg_start",
+      sid: "native-1",
+      message_id: "native-response",
+      channel: "final",
+    });
+    relay.emit({
+      type: "delta",
+      sid: "native-1",
+      message_id: "native-response",
+      channel: "final",
+      text: "正在检查文件。",
+    });
+    await expect(progress).toContainText("正在检查文件。");
+    await expect(progress.locator(".thread")).toBeVisible();
+    expect(
+      relay.commands
+        .slice(beforeProgress)
+        .some((command) =>
+          ["query", "steer", "switch_session"].includes(command.type),
+        ),
+    ).toBe(false);
+    await expect(progress.getByRole("button", { name: "刷新进度" })).toHaveCount(0);
+    await expect(progress.getByRole("button", { name: "关闭进度" })).toHaveCount(0);
+    await expect(progress.locator("footer")).toHaveCount(0);
+    await expect(progress.getByRole("button", { name: "查看原生会话", exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".collab-thread")).not.toContainText(
+      "原生内部过程",
+    );
+    relay.finish();
+    await expect(page.locator(".collab-working.active")).toHaveCount(0);
+    await expect(page.locator(".collab-activity")).toHaveCount(2);
+    await expect(page.locator(".collab-answer")).toContainText("回归通过。");
+    await page
+      .locator(".collab-answer")
+      .getByRole("button", { name: "查看原生会话 ↗", exact: true })
+      .click();
+    await expect(page.locator(".collab-workspace")).toHaveCount(0);
+    await expect
+      .poll(() =>
+        relay.commands.some(
+          (command) =>
+            command.type === "switch_session" &&
+            command.session_id === "native-1",
+        ),
+      )
+      .toBe(true);
+  });
+}
+
+test("collaboration restores mention targets across reload and supports adding an agent", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const relay = await mockRooms(page);
+  await page.goto("/");
+  const enter = async () => {
+    await page.getByRole("button", { name: "切换新会话引擎" }).click();
+    await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+  };
+  await enter();
+  const create = page.getByRole("region", { name: "新建聊天" });
+  await create.getByLabel("聊天名称").fill("讨论");
+  await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+  await page.getByRole("button", { name: "管理成员" }).click();
+  await addNewAgent(page);
+  const add = page.getByRole("dialog", { name: "添加 Agent", exact: true });
+  await selectChoice(page, "选择参与者 1", "Codex · iris");
+  await add.getByRole("button", { name: "加入聊天", exact: true }).click();
+  await expect(add).toHaveCount(0);
+  const composer = page.getByRole("textbox", { name: "协作消息" });
+  await composer.fill("@");
+  await page
+    .getByRole("listbox", { name: "点名会话" })
+    .getByRole("option", { name: "Codex · iris", exact: true })
+    .click();
+  await composer.press("End");
+  await composer.type("看看测试");
+  await page.reload();
+  await enter();
+  await expect(composer).toHaveValue("@Codex · iris 看看测试");
+  await composer.press("Enter");
+  await expect
+    .poll(
+      () =>
+        relay.commands.findLast((command) => command.operation === "send")
+          ?.targets,
+    )
+    .toEqual(["member-1"]);
+});
+
+for (const received of [false, true]) {
+  test(`collaboration recovers a pending send after reload when received=${received}`, async ({
+    page,
+  }) => {
+    const relay = await mockRooms(page);
+    const enter = async () => {
+      await page.getByRole("button", { name: "切换新会话引擎" }).click();
+      await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+    };
+    await page.goto("/");
+    await enter();
+    const create = page.getByRole("region", { name: "新建聊天" });
+    await create.getByLabel("聊天名称").fill("发送恢复");
+    await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+    const composer = page.getByRole("textbox", { name: "协作消息" });
+    await composer.fill("这条消息只执行一次");
+    if (received) relay.pauseNextSendResponse();
+    else relay.dropNextSend();
+    await composer.press("Enter");
+    await expect
+      .poll(
+        () => relay.commands.filter((item) => item.operation === "send").length,
+      )
+      .toBe(1);
+    const original = relay.commands.find((item) => item.operation === "send")!;
+    await page.reload();
+    await enter();
+    if (!received) {
+      await expect(composer).toHaveValue(original.prompt);
+      await composer.press("Enter");
+      await expect
+        .poll(
+          () =>
+            relay.commands.filter((item) => item.operation === "send").length,
+        )
+        .toBe(2);
+      expect(
+        relay.commands.findLast((item) => item.operation === "send")!
+          .message_id,
+      ).toBe(original.message_id);
+    }
+    await expect(composer).toHaveValue("");
+    await expect(page.locator(".collab-user")).toHaveCount(1);
+    expect(
+      relay.commands.filter((item) => item.operation === "send"),
+    ).toHaveLength(received ? 1 : 2);
+  });
+}
+
+test("collaboration snapshot acknowledges an accepted send after its direct response was lost", async ({
+  page,
+}) => {
+  const relay = await mockRooms(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "切换新会话引擎" }).click();
+  await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+  const create = page.getByRole("region", { name: "新建聊天" });
+  await create.getByLabel("聊天名称").fill("回执恢复");
+  await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+  const composer = page.getByRole("textbox", { name: "协作消息" });
+  await composer.fill("第一条");
+  relay.pauseNextSendResponse();
+  await composer.press("Enter");
+  await expect
+    .poll(() => relay.commands.some((item) => item.operation === "send"))
+    .toBe(true);
+  await expect(
+    page.getByRole("button", { name: "发送消息", exact: true }),
+  ).toBeDisabled();
+  relay.state();
+  await expect(composer).toHaveValue("");
+  await composer.fill("继续引导");
+  await expect(
+    page.getByRole("button", { name: "发送消息", exact: true }),
+  ).toBeEnabled();
+  await composer.press("Enter");
+  await expect(page.locator(".collab-user")).toHaveCount(2);
+});
+
+test("collaboration inline creation follows defaults without native execution", async ({ page }, info) => {
+  const relay = await mockRooms(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+  await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+  const create = page.getByRole("region", { name: "新建聊天", exact: true });
+  await expect(create).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "新建聊天", exact: true })).toHaveCount(0);
+  await expect(create.locator(".collab-participant")).toHaveCount(1);
+  await expect(create.getByRole("button", { name: "创建聊天", exact: true })).toBeDisabled();
+  await page.screenshot({ path: info.outputPath("new-chat-initial.png") });
+  await expect(page.getByRole("textbox", { name: "协作消息", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+  const harness = page.getByRole("menu", { name: "会话引擎", exact: true });
+  await expect(harness.getByRole("menuitem", { name: /协作/ })).toHaveAttribute("aria-current", "page");
+  await expect(harness.locator('svg use[href*="check"]')).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await create.getByLabel("聊天名称").fill("页面内新建");
+  await page.screenshot({ path: info.outputPath("new-chat-inline.png") });
+  await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+  await expect(page.locator(".collab-room-empty")).toHaveText("发一条消息开始讨论");
+  const threadBox = (await page.locator(".collab-conversation").boundingBox())!;
+  const emptyBox = (await page.locator(".collab-room-empty").boundingBox())!;
+  expect(Math.abs(emptyBox.y + emptyBox.height / 2 - threadBox.y - threadBox.height / 2)).toBeLessThan(24);
+  await page.screenshot({ path: info.outputPath("new-chat-created.png") });
+  expect(relay.commands.filter(command => ["query", "steer", "interrupt", "new_session"].includes(command.type))).toEqual([]);
+  expect(relay.commands.filter(command => command.operation === "send")).toEqual([]);
+  for (const label of ["点名参与者", "默认回复者"]) {
+    const button = page.getByRole("button", { name: label, exact: true });
+    expect((await button.boundingBox())!.height).toBeLessThanOrEqual(34);
+    expect(await button.evaluate(node => parseFloat(getComputedStyle(node).borderRadius))).toBeGreaterThanOrEqual(16);
+  }
+});
+
+test("collaboration same-account sessions have distinct aliases and exact mention targets", async ({ page }, info) => {
+  const relay = await mockRooms(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+  await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+  const create = page.getByRole("region", { name: "新建聊天", exact: true });
+  await create.getByLabel("聊天名称").fill("同账号两会话");
+  for (const alias of ["代码实现", "交叉审查"]) {
+    await create.getByRole("button", { name: "添加 Agent", exact: true }).click();
+    await page.getByRole("menuitem", { name: "关联已有会话", exact: true }).click();
+    const picker = page.getByRole("dialog", { name: "关联已有会话", exact: true });
+    await selectChoice(page, "选择 Harness 与账号", "Codex · primary");
+    await picker.getByRole("button", { name: new RegExp(alias) }).click();
+    await expect(picker).toHaveCount(0);
+  }
+  await create.getByRole("button", { name: "配置参与者 1", exact: true }).click();
+  await page.getByRole("dialog", { name: "Claude · default", exact: true })
+    .getByRole("button", { name: "移除参与者 1", exact: true }).click();
+  await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+  const creation = relay.commands.find(command => command.operation === "create")!;
+  expect(creation.members.map((member: CollaborationMemberSpec) => member.session_id))
+    .toEqual(["01a0d871-implementation", "01a0d15f-review"]);
+  expect(creation.members.map((member: CollaborationMemberSpec) => member.profile_id)).toEqual(["primary", "primary"]);
+  const composer = page.getByRole("textbox", { name: "协作消息", exact: true });
+  await composer.fill("@primary");
+  await expect(page.getByRole("option", { name: "所有参与者", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("option", { name: "代码实现", exact: true })).toContainText("01a0d871");
+  await expect(page.getByRole("option", { name: "交叉审查", exact: true })).toContainText("01a0d15f");
+  await page.screenshot({ path: info.outputPath("same-account-mentions.png") });
+  await page.getByRole("option", { name: "交叉审查", exact: true }).click();
+  await composer.press("End");
+  await composer.type("核对刚才的改动");
+  await expect(composer).toHaveValue("@交叉审查 核对刚才的改动");
+  await expect(page.getByRole("button", { name: "默认回复者", exact: true })).toContainText("代码实现");
+  await composer.press("Enter");
+  await expect.poll(() => relay.commands.find(command => command.operation === "send")?.targets).toEqual(["member-1"]);
+  await expect(composer).toHaveValue("");
+  await composer.fill("@交叉审查");
+  await composer.press("Enter");
+  await expect(composer).toHaveValue("@交叉审查 ");
+  await composer.type("继续核对");
+  await composer.press("Enter");
+  await expect.poll(() => relay.commands.filter(command => command.operation === "send").length).toBe(2);
+  expect(relay.commands.findLast(command => command.operation === "send")?.targets).toEqual(["member-1"]);
+});
+
+test("collaboration DSH identifiers stay distinct across selection, messages and mentions", async ({ page }, info) => {
+  const relay = await mockRooms(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+  await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+  const create = page.getByRole("region", { name: "新建聊天", exact: true });
+  await create.getByLabel("聊天名称").fill("DSH 会话标识回归");
+  await create.getByRole("button", { name: "添加 Agent", exact: true }).click();
+  await page.getByRole("menuitem", { name: "关联已有会话", exact: true }).click();
+  const picker = page.getByRole("dialog", { name: "关联已有会话", exact: true });
+  await selectChoice(page, "选择 Harness 与账号", "DSH · default");
+  await expect(picker.locator(".collab-session-list")).toContainText("711d960d");
+  await expect(picker.locator(".collab-session-list")).toContainText("68a304ab");
+  await picker.getByRole("button", { name: /资料核对/ }).click();
+  await expect(create.locator(".collab-participant").nth(1)).toContainText("711d960d");
+  await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+  expect(relay.commands.find(command => command.operation === "create")!.members[1].session_id)
+    .toBe("dsh@session-711d960d-3a17-491f-8b66-32b3a6e0a946");
+  relay.finish("member-1");
+  const metadata = page.locator('.collab-answer[data-engine="dsh"] header .collab-session-id');
+  await expect(metadata).toContainText("711d960d");
+  await expect(metadata).toHaveAttribute("title", "session-711d960d-3a17-491f-8b66-32b3a6e0a946");
+  const name = (await page.locator('.collab-answer[data-engine="dsh"] header strong').boundingBox())!;
+  const sid = (await metadata.boundingBox())!;
+  expect(sid.x).toBeGreaterThan(name.x + name.width);
+  expect(Math.abs(sid.y + sid.height / 2 - name.y - name.height / 2)).toBeLessThan(5);
+  await page.getByRole("button", { name: "管理成员", exact: true }).click();
+  const members = page.getByRole("dialog", { name: "聊天成员", exact: true });
+  await expect(members.locator('[data-member-id="member-1"]')).toContainText("711d960d");
+  await members.getByRole("button", { name: "关闭", exact: true }).click();
+  await page.getByRole("button", { name: "点名参与者", exact: true }).click();
+  const mentions = page.getByRole("listbox", { name: "点名会话", exact: true });
+  await expect(mentions).toContainText("711d960d");
+  await page.screenshot({ path: info.outputPath("dsh-session-identity.png") });
+  await mentions.getByRole("option", { name: "资料核对", exact: true }).click();
+  const composer = page.getByRole("textbox", { name: "协作消息", exact: true });
+  await composer.press("End");
+  await composer.type("继续核对");
+  await composer.press("Enter");
+  await expect.poll(() => relay.commands.find(command => command.operation === "send")?.targets).toEqual(["member-1"]);
+});
+
+test("collaboration renamed members restore the original identity without creating sessions", async ({ page }) => {
+  const relay = await mockRooms(page);
+  await createSimpleRoom(page);
+  await page.getByRole("button", { name: "管理成员", exact: true }).click();
+  const members = page.getByRole("dialog", { name: "聊天成员", exact: true });
+  await members.getByRole("button", { name: "Claude · default 的操作", exact: true }).click();
+  await page.getByRole("menuitem", { name: "重命名", exact: true }).click();
+  const rename = page.getByRole("dialog", { name: "重命名会话", exact: true });
+  relay.rejectNextOperation("rename_member");
+  await rename.getByLabel("会话名称").fill("已有会话名");
+  await rename.getByRole("button", { name: "保存", exact: true }).click();
+  await expect(rename.getByRole("alert")).toHaveText("原生会话重命名暂未完成，请重试。");
+  await rename.getByLabel("会话名称").fill("架构梳理");
+  await rename.getByRole("button", { name: "保存", exact: true }).click();
+  await expect(rename).toHaveCount(0);
+  await members.getByRole("button", { name: "架构梳理 的操作", exact: true }).click();
+  await page.getByRole("menuitem", { name: "移出聊天", exact: true }).click();
+  await expect(members.locator(".collab-members .collab-member")).toHaveCount(0);
+  await members.locator("summary").click();
+  await members.getByRole("button", { name: "恢复 架构梳理", exact: true }).click();
+  await expect(members.locator('[data-member-id="member-0"]')).toContainText("架构梳理");
+  const remove = relay.commands.find(command => command.operation === "remove_member")!;
+  const restore = relay.commands.find(command => command.operation === "restore_member")!;
+  expect(restore.member_id).toBe(remove.member_id);
+  expect(relay.commands.filter(command => command.operation === "add_member")).toEqual([]);
+  expect(relay.commands.filter(command => ["query", "steer", "interrupt", "new_session"].includes(command.type))).toEqual([]);
+  await members.getByRole("button", { name: "关闭", exact: true }).click();
+  await page.getByRole("button", { name: "点名参与者", exact: true }).click();
+  await page.getByRole("option", { name: "架构梳理", exact: true }).click();
+  const composer = page.getByRole("textbox", { name: "协作消息", exact: true });
+  await composer.press("End");
+  await composer.type("继续核对");
+  await composer.press("Enter");
+  await expect.poll(() => relay.commands.find(command => command.operation === "send")?.targets).toEqual(["member-0"]);
+});
+
+test("collaboration automatic history paging keeps the reading row and deduplicates gestures", async ({ page, browserName, isMobile }, info) => {
+  const relay = await mockRooms(page);
+  await createSimpleRoom(page);
+  relay.seedHistory(100);
+  const thread = page.getByRole("region", { name: "协作对话记录", exact: true });
+  await expect(thread.locator("[data-message-id]")).toHaveCount(40);
+  relay.holdHistory();
+  await thread.hover();
+  if (browserName === "webkit" && isMobile) { await thread.focus(); await thread.press("Home"); }
+  else await page.mouse.wheel(0, -100000);
+  await expect.poll(() => relay.commands.filter(command => command.operation === "read" && command.before === 61).length).toBe(1);
+  await expect(page.locator(".history-page-activity")).toHaveText("正在加载更早历史…");
+  const anchor = thread.locator('[data-message-id="history-61"]');
+  const offset = (await anchor.boundingBox())!.y;
+  await thread.dispatchEvent("wheel", { deltaY: -1000 });
+  relay.releaseHistory();
+  await expect(thread.locator("[data-message-id]")).toHaveCount(80);
+  await expect(page.locator(".history-page-activity")).toHaveCount(0);
+  expect(Math.abs((await anchor.boundingBox())!.y - offset)).toBeLessThanOrEqual(2);
+  expect(relay.commands.filter(command => command.operation === "read" && command.before === 61)).toHaveLength(1);
+  await page.screenshot({ path: info.outputPath("history-anchor.png") });
+});
+
+test("collaboration history failures expose a retry without an automatic request loop", async ({ page, browserName, isMobile }) => {
+  const relay = await mockRooms(page);
+  await createSimpleRoom(page);
+  relay.seedHistory(100);
+  const thread = page.getByRole("region", { name: "协作对话记录", exact: true });
+  await expect(thread.locator("[data-message-id]")).toHaveCount(40);
+  relay.holdHistory();
+  await thread.hover();
+  if (browserName === "webkit" && isMobile) { await thread.focus(); await thread.press("Home"); }
+  else await page.mouse.wheel(0, -100000);
+  await expect.poll(() => relay.commands.filter(command => command.before === 61).length).toBe(1);
+  relay.failHistory();
+  await expect(thread.getByRole("status")).toHaveText("历史读取失败");
+  await expect(page.locator(".history-page-activity")).toHaveCount(0);
+  await thread.dispatchEvent("wheel", { deltaY: -1000 });
+  expect(relay.commands.filter(command => command.before === 61)).toHaveLength(1);
+  await thread.getByRole("button", { name: "重试加载历史", exact: true }).click();
+  await expect.poll(() => relay.commands.filter(command => command.before === 61).length).toBe(2);
+  relay.releaseHistory();
+  await expect(thread.locator("[data-message-id]")).toHaveCount(80);
+  await expect(thread.locator(".collab-history-error")).toHaveCount(0);
+});
+
+test("collaboration suppresses the installed Harmony settings overlay on authenticated surfaces", async ({ page }) => {
+  await mockRooms(page);
+  await createSimpleRoom(page);
+  const adapter = readFileSync(new URL("../../harmony/entry/src/main/resources/rawfile/shell.js", import.meta.url), "utf8");
+  await page.evaluate(`${adapter}(location.origin);`);
+  const fallback = page.locator("#cc-remote-harmony-settings-fallback");
+  await expect(fallback).toHaveCount(1);
+  await expect(fallback).toBeHidden();
+  await page.keyboard.press("Control+2");
+  await expect(fallback).toBeHidden();
+  await page.evaluate(() => document.querySelector("#root")!.replaceChildren());
+  await expect(fallback).toBeVisible();
+});
+
+for (const interaction of ["touch", "keyboard"]) {
+  test(`collaboration ${interaction} scrolling at the history edge loads automatically`, async ({ page }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", error => pageErrors.push(error.message));
+    const relay = await mockRooms(page);
+    await createSimpleRoom(page);
+    relay.seedHistory(100);
+    const thread = page.getByRole("region", { name: "协作对话记录", exact: true });
+    await expect(thread.locator("[data-message-id]")).toHaveCount(40);
+    relay.holdHistory();
+    if (interaction === "touch") {
+      await thread.evaluate(node => {
+        const fire = (kind: string, y: number) => {
+          const event = new Event(kind, { bubbles: true, cancelable: true });
+          const touch = { identifier: 1, clientX: 200, clientY: y };
+          Object.defineProperty(event, "touches", { value: kind === "touchend" ? [] : [touch] });
+          Object.defineProperty(event, "changedTouches", { value: [touch] });
+          node.dispatchEvent(event);
+        };
+        fire("touchstart", 100);
+        node.scrollTop = 0;
+        fire("touchmove", 160);
+        fire("touchmove", 180);
+        fire("touchend", 180);
+      });
+    } else {
+      await thread.focus();
+      await thread.press("Home");
+    }
+    await expect.poll(() => relay.commands.filter(command => command.before === 61).length).toBe(1);
+    relay.releaseHistory();
+    await expect(thread.locator("[data-message-id]")).toHaveCount(80);
+    expect(relay.commands.filter(command => command.before === 61)).toHaveLength(1);
+    expect(pageErrors).toEqual([]);
+  });
+}
+
+for (const width of [390, 1280]) {
+  test(`collaboration aligned three-agent design stays complete at ${width}px`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 900 });
+    const relay = await mockRooms(page);
+    await page.goto("/");
+    await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+    await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+    const create = page.getByRole("region", { name: "新建聊天", exact: true });
+    await create.getByLabel("聊天名称").fill("接口重构讨论");
+    const agents = [
+      { identity: "Claude · gaia", alias: "架构梳理" },
+      { identity: "Codex · primary", alias: "代码实现" },
+      { identity: "DSH · default", alias: "资料核对" },
+    ];
+    for (const [index, agent] of agents.entries()) {
+      if (index) await addNewAgent(page);
+      await selectChoice(page, `选择参与者 ${index + 1}`, agent.identity);
+      await create.getByRole("button", { name: `配置参与者 ${index + 1}`, exact: true }).click();
+      const settings = page.getByRole("dialog", { name: agent.identity, exact: true });
+      await settings.getByLabel("会话名称").fill(agent.alias);
+      await settings.getByRole("textbox", { name: "工作目录", exact: true }).fill("/tmp/cc-remote");
+      await settings.getByRole("button", { name: "完成", exact: true }).click();
+      await expect(settings).toHaveCount(0);
+    }
+    const add = create.getByRole("button", { name: "添加 Agent", exact: true });
+    expect((await add.boundingBox())!.height).toBeLessThanOrEqual(36);
+    expect(await add.evaluate(node => parseFloat(getComputedStyle(node).borderRadius))).toBeGreaterThanOrEqual(16);
+    await page.screenshot({ path: info.outputPath("aligned-new-chat.png") });
+    await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+    await expect(page.locator(".collab-room-empty")).toBeVisible();
+    await page.screenshot({ path: info.outputPath("aligned-room-empty.png") });
+    const composer = page.getByRole("textbox", { name: "协作消息", exact: true });
+    await page.getByRole("button", { name: "点名参与者", exact: true }).click();
+    await page.getByRole("option", { name: "所有参与者", exact: true }).click();
+    await composer.press("End");
+    await composer.type("分别核对消息路由、终止状态与历史归属。");
+    await composer.press("Enter");
+    await expect(page.locator(".collab-activity")).toHaveCount(3);
+    await expect(page.locator(".collab-working.active")).toHaveCount(3);
+    for (const header of await page.locator(".collab-activity > header").all()) {
+      const name = (await header.locator("strong").boundingBox())!;
+      const sid = (await header.locator(".collab-session-id").boundingBox())!;
+      expect(sid.x).toBeGreaterThan(name.x + name.width);
+      expect(Math.abs(sid.y + sid.height / 2 - name.y - name.height / 2)).toBeLessThan(5);
+    }
+    await expect.poll(() => page.locator(".collab-working .working-word-layer.is-current").evaluateAll(nodes =>
+      nodes.every(node => getComputedStyle(node).opacity === "1"),
+    )).toBe(true);
+    await page.screenshot({ path: info.outputPath("aligned-three-harness-working.png") });
+    await page.getByRole("button", { name: "管理成员", exact: true }).click();
+    const members = page.getByRole("dialog", { name: "聊天成员", exact: true });
+    for (const agent of agents) await expect(members).toContainText(agent.alias);
+    await page.screenshot({ path: info.outputPath("aligned-members.png") });
+    await members.getByRole("button", { name: "架构梳理 的操作", exact: true }).click();
+    await expect(page.getByRole("menuitem", { name: "移出聊天", exact: true })).toBeVisible();
+    await page.screenshot({ path: info.outputPath("aligned-member-actions.png") });
+    expect(relay.commands.filter(command => ["query", "steer", "interrupt", "new_session"].includes(command.type))).toEqual([]);
+  });
+}
+
+for (const width of [390, 1280]) {
+  test(`collaboration native progress automatically pages with the native cursor at ${width}px`, async ({ page, isMobile }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const relay = await mockRooms(page);
+    await createSimpleRoom(page);
+    relay.reply("member-0", "公开结论。");
+    relay.setNativeHistory(command => {
+      const id = command.before ? "native-oldest" : "native-latest";
+      if (command.before) return {
+        detail: "summary", authoritative: true, oldest_id: id, newest_id: id,
+        has_more: false, events: [], turns: [{
+          id, prompt: "较早的原生问题", done: true, detailLoaded: false,
+          detailEventCount: 1, processDetailState: "present",
+          blocks: [{ kind: "text", message_id: `${id}-answer`, channel: "final",
+            text: "最早一页原生结论", done: true }],
+        }],
+      };
+      return {
+        detail: "full", authoritative: true, oldest_id: id, newest_id: id,
+        has_more: !command.before, in_progress: false,
+        events: [
+          { type: "user_msg", sid: "native-0", msg_id: id, prompt: id, ts: 1 },
+          { type: "assistant_msg_start", sid: "native-0", message_id: `${id}-answer`, channel: "final", ts: 2 },
+          { type: "delta", sid: "native-0", message_id: `${id}-answer`, channel: "final",
+            text: command.before ? "最早一页原生结论" : "最新的原生历史正文。\n\n".repeat(80), ts: 3 },
+          { type: "assistant_msg_end", sid: "native-0", message_id: `${id}-answer`, channel: "final", ts: 4 },
+          { type: "turn_end", sid: "native-0", turn_id: id, ts: 5,
+            result: { subtype: "success", is_error: false } },
+        ],
+      };
+    });
+    const beforeOpen = relay.commands.length;
+    await page.locator(".collab-answer").getByRole("button", { name: "查看进度 ↗", exact: true }).click();
+    const progress = page.getByRole("dialog", { name: "Claude · default 的进度", exact: true });
+    await expect(progress).toContainText("最新的原生历史正文。");
+    const thread = progress.getByRole("region", { name: "对话记录", exact: true });
+    await thread.evaluate(node => { node.scrollTop = 0; node.dispatchEvent(new Event("scroll")); });
+    if (isMobile) {
+      await thread.evaluate(node => {
+        for (const [kind, y] of [["touchstart", 100], ["touchmove", 180], ["touchend", 180]] as const) {
+          const event = new Event(kind, { bubbles: true, cancelable: true });
+          const touch = { identifier: 1, clientX: 100, clientY: y };
+          Object.defineProperty(event, "touches", { value: kind === "touchend" ? [] : [touch] });
+          Object.defineProperty(event, "changedTouches", { value: [touch] });
+          node.dispatchEvent(event);
+        }
+      });
+    } else {
+      await thread.hover();
+      await page.mouse.wheel(0, -900);
+    }
+    await expect(progress).toContainText("最早一页原生结论");
+    await expect(progress.locator(".load-more-status, .history-page-activity")).toHaveCount(0);
+    expect(relay.commands.slice(beforeOpen).filter(command => command.type === "get_history"))
+      .toEqual([
+        expect.objectContaining({ session_id: "native-0" }),
+        expect.objectContaining({ session_id: "native-0", before: "native-latest" }),
+      ]);
+    const oldest = progress.locator('[data-turn-id="native-oldest"]');
+    await oldest.locator(".turn-process-head").click();
+    await expect(oldest.locator(".turn-process-head")).toHaveAttribute("aria-busy", "false");
+    await oldest.locator(".process-reasoning summary").click();
+    await expect(oldest).toContainText("更早的原生过程详情");
+    expect(relay.commands.findLast(command => command.type === "get_turn_detail"))
+      .toMatchObject({ session_id: "native-0", turn_id: "native-oldest", revision: "revision" });
+    await page.keyboard.press("Escape");
+    await expect(progress).toHaveCount(0);
+  });
+
+  test(`collaboration page preview keeps the source member and native Viewer sandbox at ${width}px`, async ({ page, context }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const relay = await mockRooms(page);
+    const metadata: Record<string, any>[] = [];
+    const opens: Record<string, any>[] = [];
+    const site = { id: "collab-preview", machine_id: "room-machine", entry: "/report/index.html",
+      label: "协作报告", revision: "a".repeat(32), urls: [] };
+    const previewPage = { id: "b".repeat(32), site_id: site.id, machine_id: site.machine_id,
+      entry: site.entry, label: site.label, references: ["report/index.html"], turn_ids: [], available: true };
+    const grantId = "c".repeat(32);
+    let associated = false;
+    await page.route("**/api/viewers", route => route.fulfill({ json: { enabled: true, sites: [site] } }));
+    await page.route("**/api/viewers/pages", route => {
+      const body = route.request().postDataJSON();
+      metadata.push(body);
+      if (body.scope.sid === "native-1" && body.action === "resolve") associated = true;
+      return route.fulfill({ json: { pages: body.scope.sid === "native-1" && associated ? [previewPage] : [] } });
+    });
+    await page.route("**/api/viewers/open", route => {
+      opens.push(route.request().postDataJSON());
+      return route.fulfill({ json: { id: grantId, mode: "isolated", origin: "https://collab-preview.example",
+        entry: site.entry, expires_at: Date.now() / 1000 + 3600 } });
+    });
+    await page.route(`**/api/viewers/${grantId}`, route => route.fulfill({ json: { expires_at: Date.now() / 1000 + 3600 } }));
+    await context.route("https://collab-preview.example/**", route => route.fulfill({
+      contentType: "text/html; charset=utf-8", body: '<meta charset="utf-8"><h1>来自第二个原生会话的报告</h1>',
+    }));
+    await page.goto("/");
+    await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+    await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+    const create = page.getByRole("region", { name: "新建聊天", exact: true });
+    await create.getByLabel("聊天名称").fill("来源页面预览");
+    await addNewAgent(page);
+    await selectChoice(page, "选择参与者 2", "Codex · primary");
+    await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+    const beforePreview = relay.commands.length;
+    relay.reply("member-0", "没有页面的公开结论。");
+    relay.reply("member-1", "报告已完成。[报告](report/index.html)");
+    const answer = page.locator('.collab-answer[data-engine="codex"]');
+    const open = answer.getByRole("button", { name: "查看页面", exact: true });
+    await open.focus();
+    await open.press("Enter");
+    const preview = page.getByRole("dialog", { name: "页面预览", exact: true });
+    const dialogBounds = (await preview.boundingBox())!;
+    const panelBounds = (await preview.locator(".remote-viewer-panel").boundingBox())!;
+    expect(panelBounds.x).toBeGreaterThanOrEqual(dialogBounds.x);
+    expect(panelBounds.x + panelBounds.width).toBeLessThanOrEqual(dialogBounds.x + dialogBounds.width + 1);
+    await expect(preview.frameLocator("iframe").getByRole("heading", { name: "来自第二个原生会话的报告" })).toBeVisible();
+    await expect(preview.locator("iframe")).toHaveAttribute("sandbox", "allow-scripts allow-same-origin");
+    expect(metadata.filter(request => request.action === "resolve")).toEqual([
+      expect.objectContaining({ scope: { machine_id: "room-machine", sid: "native-1", engine: "codex", space: "code" },
+        paths: ["report/index.html"] }),
+    ]);
+    expect(opens).toEqual([{ machine_id: "room-machine", site_id: site.id,
+      parent_machine_id: "room-machine", sid: "native-1", entry: site.entry }]);
+    await page.mouse.click(2, 2);
+    await expect(preview).toHaveCount(0);
+    await expect(open).toBeFocused();
+    expect(relay.commands.slice(beforePreview).filter(command => ["query", "steer", "interrupt", "switch_session", "new_session"].includes(command.type))).toEqual([]);
+  });
+
+  for (const engine of ["claude", "codex", "dsh"] as const) {
+    test(`collaboration progress reuses native ${engine} history and working marks at ${width}px`, async ({ page }, info) => {
+      await page.setViewportSize({ width, height: 900 });
+      const relay = await mockRooms(page);
+      await page.goto("/");
+      await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+      await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+      const create = page.getByRole("region", { name: "新建聊天", exact: true });
+      const identity = engine === "claude" ? "Claude · default" : engine === "codex" ? "Codex · iris" : "DSH · default";
+      await selectChoice(page, "选择参与者 1", identity);
+      await create.getByLabel("聊天名称").fill("原生进度窗口回归");
+      await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+      relay.reply("member-0", "公开结论。");
+      const sid = engine === "dsh" ? "dsh@native-0" : "native-0";
+      relay.setNativeHistory({ detail: "full", authoritative: true, oldest_id: "native-turn", newest_id: "native-turn", has_more: false,
+        live_seq: 5, in_progress: false,
+        events: [
+          { type: "user_msg", sid, msg_id: "native-turn", prompt: "原生内部问题", ts: 1 },
+          { type: "assistant_msg_start", sid, message_id: "native-answer", channel: "final", ts: 2 },
+          { type: "delta", sid, message_id: "native-answer", channel: "final", text: "原生过程结论。[文件](note.md)", ts: 3 },
+          { type: "assistant_msg_end", sid, message_id: "native-answer", channel: "final", ts: 4 },
+          { type: "turn_end", sid, turn_id: "native-turn", ts: 5,
+            result: { subtype: "success", is_error: false, duration_ms: 31_000 } },
+        ] });
+      const entry = page.locator(".collab-answer").getByRole("button", { name: "查看进度 ↗", exact: true });
+      await entry.click();
+      const progress = page.getByRole("dialog", { name: `${identity} 的进度`, exact: true });
+      await expect(progress).toContainText("原生过程结论。");
+      await expect(progress.locator(".turn-done-mark")).toHaveCount(1);
+      await expect(progress.locator(".turn-working")).toHaveCount(0);
+      await expect(progress.getByText("正在恢复历史…", { exact: true })).toHaveCount(0);
+      await expect(progress.getByText("加载会话历史…", { exact: true })).toHaveCount(0);
+      await expect(progress.locator("header .collab-working, header .working-word")).toHaveCount(0);
+      await expect(progress.locator("header .engine-brand-icon")).toHaveCount(1);
+      await expect(progress.getByRole("button", { name: "刷新进度", exact: true })).toHaveCount(0);
+      await expect(progress.getByRole("button", { name: "关闭进度", exact: true })).toHaveCount(0);
+      await expect(progress.getByRole("button", { name: "查看原生会话", exact: true })).toBeVisible();
+      const box = (await progress.boundingBox())!;
+      expect(Math.abs(box.x + box.width / 2 - width / 2)).toBeLessThanOrEqual(1);
+      expect(Math.abs(box.y + box.height / 2 - 450)).toBeLessThanOrEqual(1);
+      const file = progress.getByRole("button", { name: "在 Remote 中打开 /tmp/project/note.md", exact: true });
+      await file.hover();
+      await expect(progress.getByRole("tooltip")).toHaveText("/tmp/project/note.md");
+      await file.click();
+      const preview = page.getByRole("dialog", { name: "文件预览", exact: true });
+      await expect(preview).toContainText(`来自 ${sid}`);
+      expect(relay.commands.findLast(command => command.type === "get_file_preview")).toMatchObject({ sid, path: "/tmp/project/note.md" });
+      await page.keyboard.press("Escape");
+      await expect(preview).toHaveCount(0);
+      await expect(progress).toBeVisible();
+      relay.emit({ type: "state", sid, state: "running", msg_id: "live-turn", seq: 6, ts: 6 });
+      relay.emit({ type: "user_msg", sid, msg_id: "live-turn", prompt: "继续核对", seq: 7, ts: 7 });
+      relay.emit({ type: "turn_binding", sid, msg_id: "live-turn", turn_id: "live-owner", seq: 8, ts: 8 });
+      relay.emit({ type: "assistant_msg_start", sid, message_id: "live-answer", channel: "final", seq: 9, ts: 9 });
+      relay.emit({ type: "delta", sid, message_id: "live-answer", channel: "final", text: "正在核对。", seq: 10, ts: 10 });
+      await expect(progress.locator(".turn-working .working-word")).toBeVisible();
+      await expect(progress.locator(".turn-working > :first-child")).toBeVisible();
+      const color = await progress.locator(".turn-working").evaluate(node => getComputedStyle(node).color);
+      expect(color).toBe({ claude: "rgb(219, 124, 94)", codex: "rgb(163, 172, 255)", dsh: "rgb(148, 189, 255)" }[engine]);
+      if (engine === "claude") await expect(progress.locator(".turn-working .claude-working-mark.is-alternating")).toBeVisible();
+      await progress.locator("header strong").hover();
+      await expect(progress.locator(".working-word-layer.is-current")).toHaveCSS("opacity", "1");
+      await page.screenshot({ path: info.outputPath(`native-${engine}-progress-${width}.png`) });
+      const beforeDismiss = relay.commands.length;
+      await page.mouse.click(2, 2);
+      await expect(progress).toHaveCount(0);
+      await expect(entry).toBeFocused();
+      expect(relay.commands.slice(beforeDismiss).filter(command => ["query", "steer", "interrupt", "switch_session"].includes(command.type))).toEqual([]);
+      await expect(page.locator(".collab-thread")).not.toContainText("原生内部问题");
+      await entry.click();
+      await expect(progress.locator(".turn-working .working-word")).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(progress).toHaveCount(0);
+    });
+  }
+
+  test(`collaboration previews files and media from the reply's native session at ${width}px`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 900 });
+    const relay = await mockRooms(page);
+    await page.goto("/");
+    await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+    await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+    const create = page.getByRole("region", { name: "新建聊天", exact: true });
+    await create.getByLabel("聊天名称").fill("按来源预览");
+    await addNewAgent(page);
+    await selectChoice(page, "选择参与者 2", "Codex · primary");
+    await create.getByRole("button", { name: "配置参与者 2", exact: true }).click();
+    const settings = page.getByRole("dialog", { name: "Codex · primary", exact: true });
+    await settings.getByRole("textbox", { name: "工作目录", exact: true }).fill("/tmp/other");
+    await settings.getByRole("button", { name: "完成", exact: true }).click();
+    await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+    const nativeBeforePreviews = relay.commands.length;
+    relay.reply("member-0", "[同名文件](note.md)");
+    relay.reply("member-1", "[同名文件](note.md) · [音频](sound.wav) · [视频](clip.mp4) · [图片](result.png) · [HTML](report.html)\n\n![内嵌图片](inline.png)");
+    const first = page.locator('.collab-answer[data-engine="claude"]');
+    const second = page.locator('.collab-answer[data-engine="codex"]');
+    const preview = page.getByRole("dialog", { name: "文件预览", exact: true });
+    await first.getByRole("button", { name: "在 Remote 中打开 /tmp/project/note.md", exact: true }).click();
+    await expect(preview).toContainText("来自 native-0");
+    await page.keyboard.press("Escape");
+    for (const [path, selector] of [["note.md", ".markdown-preview"], ["sound.wav", "audio"], ["clip.mp4", "video"],
+      ["result.png", ".artifact-image-stage img"], ["report.html", ".artifact-html-stage iframe"]]) {
+      await second.getByRole("button", { name: `在 Remote 中打开 /tmp/other/${path}`, exact: true }).click();
+      await expect(preview.locator(selector)).toBeVisible();
+      const request = relay.commands.findLast(command => command.type === "get_file_preview")!;
+      expect(request).toMatchObject({ sid: "native-1", path: `/tmp/other/${path}` });
+      relay.emit({ type: "file_preview", sid: "native-0", path: "/wrong/file", request_id: request.request_id,
+        format: "text", content: "错误来源内容", size: 0, mtime_ns: "1", truncated: false });
+      await expect(preview).not.toContainText("错误来源内容");
+      await page.keyboard.press("Escape");
+      await expect(preview).toHaveCount(0);
+    }
+    const inlineImage = second.getByRole("button", { name: "预览图片：内嵌图片", exact: true });
+    await expect(inlineImage).toBeVisible();
+    expect(relay.commands.filter(command => command.type === "get_preview_asset" && command.path === "/tmp/other/inline.png"))
+      .toEqual([expect.objectContaining({ sid: "native-1" })]);
+    await inlineImage.click();
+    const imagePreview = page.getByRole("dialog", { name: "内嵌图片", exact: true });
+    await expect(imagePreview.getByRole("img", { name: "内嵌图片", exact: true })).toBeVisible();
+    await expect.poll(() => imagePreview.locator("img").evaluate(node => (node as HTMLImageElement).naturalWidth)).toBe(1);
+    const imageStage = (await imagePreview.locator(".artifact-image-stage").boundingBox())!;
+    expect(imageStage.height).toBeGreaterThan(200);
+    expect(imageStage.width).toBeGreaterThan(250);
+    await imagePreview.getByRole("button", { name: "关闭预览", exact: true }).click();
+    await expect(imagePreview).toHaveCount(0);
+    const body = (await second.locator(".prose").boundingBox())!;
+    const links = (await second.locator(".collab-native-links").boundingBox())!;
+    if (width < 980) expect(links.y).toBeGreaterThanOrEqual(body.y + body.height);
+    else expect(links.y).toBeLessThan(body.y);
+    await page.screenshot({ path: info.outputPath(`file-links-${width}.png`) });
+    expect(relay.commands.slice(nativeBeforePreviews).filter(command => ["query", "steer", "interrupt", "switch_session", "new_session"].includes(command.type))).toEqual([]);
+  });
+}
+
+test("collaboration follows native renames in reply headings, mentions, responder and an unsent mention", async ({ page }) => {
+  const relay = await mockRooms(page);
+  await createSimpleRoom(page);
+  relay.reply("member-0", "公开结论。");
+  await page.getByRole("button", { name: "点名参与者", exact: true }).click();
+  await page.getByRole("option", { name: "Claude · default", exact: true }).click();
+  const composer = page.getByRole("textbox", { name: "协作消息", exact: true });
+  await composer.press("End");
+  await composer.type("核对一下");
+  relay.renameFromHarness("member-0", "原生会话新名称");
+  await expect(page.locator(".collab-answer header strong")).toHaveText("原生会话新名称");
+  await expect(composer).toHaveValue("@原生会话新名称 核对一下");
+  await expect(page.getByRole("button", { name: "默认回复者", exact: true })).toContainText("原生会话新名称");
+  await composer.press("Enter");
+  await expect.poll(() => relay.commands.findLast(command => command.operation === "send")?.targets).toEqual(["member-0"]);
+});

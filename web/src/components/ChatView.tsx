@@ -337,7 +337,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   browseMode: incomingBrowseMode = false, hasNewer: incomingHasNewer = false,
   onLoadMore, onLoadNewer, onReturnLatest, onPrefetchOlder,
   onLoadDetail, onEdit, onRewind, onReplyAsyncQuestion, asyncReplyMode, pendingReplyId, onOpenTurnDiff, onOpenArchivedDiff, onLoadFilePage, onPreviewMarkdown, onOpenFile,
-  onOpenArtifacts, onFork, forkingPointId, imageAssets, onLoadImage,
+  onOpenArtifacts, onFork, forkingPointId, imageAssets, onLoadImage, fileCwd,
   onAuthorizeImage,
   historyImageAssets, onLoadHistoryImage,
   onTextSelectionGuardChange,
@@ -394,6 +394,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   onLoadFilePage?: LoadTurnFilePage;
   onPreviewMarkdown?: (file: string) => void;
   onOpenFile?: (file: string, line?: number) => void;
+  fileCwd?: string;
   onOpenArtifacts?: () => void;
   onFork?: (forkPointId: string) => void;
   forkingPointId?: string | null;
@@ -3203,7 +3204,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
                     </Suspense>
                   : <MessageBlock text={block.text}
                     formatReplySections={engine === "claude"}
-                    done={block.done} onOpenFile={onOpenFile}
+                    done={block.done} onOpenFile={onOpenFile} fileCwd={fileCwd}
                     imageAssets={imageAssets} onLoadImage={onLoadImage}
                     onAuthorizeImage={onAuthorizeImage}
                     onPreviewImage={(src, alt) => previewImage({ kind: "data", src, alt })} />}

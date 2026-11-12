@@ -14,8 +14,9 @@ import {
 } from "./harmony-push";
 import { RightPanelPresentation, rekeyPanelScope } from "./right-panel-presentation";
 import { ArtifactReadingMemory, type ArtifactReadingState } from "./artifact-reading-state";
-import type { DshCommandInfo, FilePreview, DirectoryActionScope, ServerEvent } from "./protocol";
+import type { DshCommandInfo, FilePreview, DirectoryActionScope, ServerEvent, CollaborationMember } from "./protocol";
 const DirectoryActionSheet = lazy(() => import("./components/DirectoryActionSheet"));
+const CollaborationWorkspace = lazy(() => import("./components/CollaborationWorkspace"));
 import { resolveRelatedSession, relatedSessionTitle } from "./session-messages";
 import {
   lazy,
@@ -372,6 +373,11 @@ function catalogForEngineProfile(
 
 export default function App() {
   usePanelWidthPreference();
+  const [collaborationOpen, setCollaborationOpen] = useState(false);
+  const collaborationListenerRef = useRef<((event: ServerEvent) => boolean) | null>(null);
+  const listenCollaboration = useCallback((handler: ((event: ServerEvent) => boolean) | null) => {
+    collaborationListenerRef.current = handler;
+  }, []);
   const initialEngineRef = useRef(normalizeEngine(localStorage.getItem(ENGINE_KEY)));
   const initialSpacesRef = useRef(readEngineSpaces(localStorage, initialEngineRef.current));
   const [engine, setEngine] = useState<Engine>(initialEngineRef.current);
@@ -2315,7 +2321,8 @@ export default function App() {
   // Engine and Work/Code switches are navigation. Each surface restores the
   // session that was last open there instead of silently starting a new one.
   const toggleEngine = (nextEngine: Engine) => {
-    if (nextEngine === engine || !confirmArtifactDiscard()) return;
+    if (nextEngine === engine) return true;
+    if (!confirmArtifactDiscard()) return false;
     cancelPendingNotificationTarget();
     const nextSpace = spacesByEngineRef.current[nextEngine];
     pendingCreateRef.current = null;
@@ -2330,6 +2337,7 @@ export default function App() {
     setEngine(nextEngine);
     setSpace(nextSpace);
     if (isMobile()) setSidebarOpen(false);
+    return true;
   };
 
   const switchSpace = (next: Space) => {
@@ -2436,6 +2444,11 @@ export default function App() {
         },
         onEvent: (msg, ownership) => {
           if (!acceptsLifecycle()) return;
+          if (msg.type === "collaboration_state") {
+            collaborationListenerRef.current?.(msg);
+            return;
+          }
+          if (collaborationListenerRef.current?.(msg)) return;
           if (directoryListenerRef.current?.(msg)) return;
           rewind.onEventRef.current(msg);
           if (turnFileRequestsRef.current.accept(msg)) return;
@@ -4392,7 +4405,7 @@ export default function App() {
   // An unfocused "/" focuses the composer; a second press types normally.
   // Cmd/Ctrl+B => toggle sidebar; Cmd/Ctrl+Shift+B => open latest turn's diff.
   useEffect(() => {
-    if (!authed) return;
+    if (!authed || collaborationOpen) return;
     const hasOtherOverlay = (owner: Element | null) => [...document.querySelectorAll<HTMLElement>(
       '[role="dialog"], [aria-modal="true"], dialog[open], [role="menu"]',
     )].some(node => node !== owner && !node.closest("[inert]") && node.getClientRects().length);
@@ -4444,7 +4457,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [authed, setSidebarOpen]);
+  }, [authed, collaborationOpen, setSidebarOpen]);
 
   const setPerm = useCallback((perm: string) => {
     if (focusedEngine === "dsh" && focusedSid) wsRef.current?.sendDshControl(focusedSid, "permission", perm);
@@ -4454,7 +4467,7 @@ export default function App() {
   // Shift+Tab follows each engine's real mode control: Claude cycles permission
   // modes; Codex toggles collaboration mode without touching approvalPolicy.
   useEffect(() => {
-    if (!authed) return;
+    if (!authed || collaborationOpen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || stateRef.current.newChat) return;
       if (e.key === "Tab" && e.shiftKey) {
@@ -4476,7 +4489,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [authed, focusedSid, rt.perm, rt.collaborationMode, rt.control,
+  }, [authed, collaborationOpen, focusedSid, rt.perm, rt.collaborationMode, rt.control,
     rt.external, rt.dsh?.permissions, focusedEngine, setPerm]);
 
   const requestHistoryTurnDetail = useCallback((
@@ -5982,6 +5995,55 @@ export default function App() {
   const ambiguousActiveTurnIds = activeTurnCandidates.length > 1
     ? activeTurnCandidates : [];
 
+  if (collaborationOpen) {
+    const navigateMember = (member: CollaborationMember) => {
+      if (!member.sid || !confirmArtifactDiscard()) return;
+      cancelPendingNotificationTarget();
+      const targetEngine = member.spec.engine;
+      prepareSurfaceSwitch(targetEngine, "code", true);
+      engineRef.current = targetEngine;
+      spaceRef.current = "code";
+      setEngine(targetEngine);
+      setSpace("code");
+      focusListedSession({
+        session_id: member.sid,
+        native_session_id: member.native_sid,
+        engine: targetEngine,
+        space: "code",
+        cwd: member.cwd ?? "",
+        claude_profile_id: targetEngine === "claude" ? member.spec.profile_id : undefined,
+        codex_profile_id: targetEngine === "codex" ? member.spec.profile_id : undefined,
+      });
+      setCollaborationOpen(false);
+    };
+    return <>
+      <Suspense fallback={<div className="thread" />}>
+        <CollaborationWorkspace key={machineId} machineId={machineId} theme={theme}
+          getSessionRuntime={sid => stateRef.current.runtimes[sid]}
+          historyPageCache={historyPageCacheRef.current}
+          deviceName={remoteDevices.find(device => device.machine_id === machineId)?.label ?? machineId}
+          connected={state.connState === "connected" && state.wrapperOnline}
+          ws={wsRef.current} listen={listenCollaboration}
+          sidebar={sidebar} onEngineChange={next => {
+            if (toggleEngine(next)) setCollaborationOpen(false);
+          }} onDevice={() => setDeviceSheetOpen(true)}
+          onNavigate={navigateMember} />
+      </Suspense>
+      <DeviceSheet open={deviceSheetOpen} currentId={machineId}
+        devices={remoteDevices} pairing={devicePairing}
+        onDevices={(nextDevices, nextPairing) => {
+          setRemoteDevices(nextDevices);
+          setDevicePairing(nextPairing);
+        }}
+        onSelect={nextMachineId => {
+          cancelPendingNotificationTarget();
+          if (nextMachineId !== machineId) setMachineId(nextMachineId);
+          setDeviceSheetOpen(false);
+        }}
+        onClose={() => setDeviceSheetOpen(false)} />
+    </>;
+  }
+
   return (
     <ViewerPagesProvider scope={visibleParentSid && authed
       ? { machineId, sid: visibleParentSid, space, engine } : null} onOpen={openViewerPage}>
@@ -6171,7 +6233,8 @@ export default function App() {
             <Icon name="devices" size={18} />
             <span>{activeDevice?.label ?? machineId}</span><i />
           </button>
-          <EngineSelector engine={engine} onChange={toggleEngine} />
+          <EngineSelector engine={engine} onChange={toggleEngine}
+            onCollaboration={() => { if (confirmArtifactDiscard()) setCollaborationOpen(true); }} />
           <Suspense fallback={<span className="iconbtn" aria-hidden="true"><Icon name="dots" /></span>}><HeaderMenu
             engine={engine}
             appearance={appearance}

@@ -21,6 +21,7 @@ interface Props {
   busy?: boolean;
   error?: string | null;
   waitForInitialBrowse?: boolean;
+  embedded?: boolean;
 }
 
 interface PendingBrowse {
@@ -43,6 +44,7 @@ export function DirPicker({
   busy = false,
   error = null,
   waitForInitialBrowse = false,
+  embedded = false,
 }: Props) {
   const [manual, setManual] = useState("");
   const [pendingBrowse, setPendingBrowse] = useState<PendingBrowse | null>(
@@ -88,14 +90,14 @@ export function DirPicker({
   const visiblePath = listingPending ? pendingBrowse.path : path;
   const visibleParent = listingPending ? null : parent;
   const visibleDirs = listingPending ? [] : dirs;
-  return (
-    <div className="dp-overlay" onClick={() => { if (!busy) onClose(); }}>
-      <div className="dp" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={title}>
-        <div className="dp-head">
+  const picker = (
+      <div className="dp" onClick={(e) => e.stopPropagation()}
+        role={embedded ? undefined : "dialog"} aria-label={embedded ? undefined : title}>
+        {!embedded && <div className="dp-head">
           <span className="dp-title">{title}</span>
           <button className="iconbtn" onClick={onClose} disabled={busy}
             aria-label="关闭"><Icon name="close" /></button>
-        </div>
+        </div>}
         <div className="dp-crumbs" title={visiblePath || ""}>
           {visiblePath || "…"}
         </div>
@@ -149,6 +151,10 @@ export function DirPicker({
           </button>
         </div>
       </div>
+  );
+  return embedded ? picker : (
+    <div className="dp-overlay" onClick={() => { if (!busy) onClose(); }}>
+      {picker}
     </div>
   );
 }

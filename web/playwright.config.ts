@@ -25,7 +25,7 @@ const WEBKIT_GENERAL_EXCLUSIONS = [
 
 export default defineConfig({
   testDir: "./tests",
-  testMatch: ["history-browser.spec.ts", "image-preview.spec.ts", "svg-animation.spec.ts", "background-tasks.spec.ts", "composer-queue.spec.ts", "themes.spec.ts", "mobile-sidebar.spec.ts", "header-feedback.spec.ts", "app-updates.spec.ts"],
+  testMatch: ["history-browser.spec.ts", "image-preview.spec.ts", "svg-animation.spec.ts", "background-tasks.spec.ts", "composer-queue.spec.ts", "themes.spec.ts", "mobile-sidebar.spec.ts", "header-feedback.spec.ts", "app-updates.spec.ts", "collaboration.spec.ts"],
   fullyParallel: false,
   workers: 1,
   retries: process.env.CI ? 2 : 0,

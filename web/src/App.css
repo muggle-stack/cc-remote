@@ -618,16 +618,18 @@
 .engine-label { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
 .engine-label svg { flex: none; }
 .engine-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.engine-menu { position: fixed; z-index: 75; width: 172px; padding: 5px; border: 1px solid var(--border);
+.engine-menu { position: fixed; z-index: 75; width: 194px; padding: 5px; border: 1px solid var(--border);
   border-radius: 13px; background: var(--surface); color: var(--text); box-shadow: 0 8px 30px #0002; }
 .engine-menu-item { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px;
   padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--dim);
   font: var(--font-weight-500) 13px var(--sans); text-align: left; cursor: pointer; }
 .engine-menu-item span { flex: 1; color: var(--text); }
-.engine-menu-item[aria-checked="true"] { background: var(--accent-weak); color: var(--accent-ink); }
-.engine-menu-item[aria-checked="true"] span { color: inherit; }
+.engine-menu-item kbd { flex:none; color:var(--faint); font:11px var(--mono); }
+.engine-menu-item:is([aria-checked="true"], [aria-current="page"]) { background: var(--accent-weak); color: var(--accent-ink); }
+.engine-menu-item:is([aria-checked="true"], [aria-current="page"]) span { color: inherit; }
 .engine-menu-item:hover { background: var(--raised); }
 .engine-menu-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.collaboration-menu-divider { height:1px; background:var(--border); margin:5px 8px; }
 @media (pointer: coarse) { .engine-menu-item { min-height: 44px; } }
 .dsh-command-result { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); font-size: 12px; color: var(--dim); }
 .dsh-command-result > svg { flex: none; margin-top: 2px; }
@@ -638,3 +640,4 @@
 .cmd:disabled { cursor: default; opacity: .6; }
 
 @media(prefers-reduced-motion:reduce){ .usage-activity-spinner { animation:none; } }
+body:has(.shell) > #cc-remote-harmony-settings-fallback { display: none; }

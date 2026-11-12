@@ -28,7 +28,7 @@ export function LocalFileLink({ location, children, onOpen, id }: {
         selection.removeAllRanges(); selection.addRange(range);
       }}>{location.split(/(?<=\/)/).map((part, index) =>
         <Fragment key={index}>{part}<wbr /></Fragment>)}</span>
-    </div>, document.body)}
+    </div>, pop.anchor.current?.closest("dialog[open]") ?? document.body)}
   </>;
 }
 

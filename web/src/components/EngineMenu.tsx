@@ -5,40 +5,49 @@ import { EngineIcon, Icon } from "../icons";
 
 const engines: Engine[] = ["claude", "codex", "dsh"];
 
-export default function EngineMenu({ engine, anchor, keyboard, altShortcuts, onClose, onSelect }: {
-  engine: Engine;
+export default function EngineMenu({ engine, anchor, keyboard, altShortcuts, onClose, onSelect, onCollaboration }: {
+  engine: Engine | "collaboration";
   anchor: RefObject<HTMLButtonElement | null>;
   keyboard: boolean;
   altShortcuts: boolean;
   onClose: (restoreFocus: boolean) => void;
   onSelect: (engine: Engine, keyboard: boolean) => void;
+  onCollaboration?: (keyboard: boolean) => void;
 }) {
   const menu = useRef<HTMLDivElement>(null);
   const rect = anchor.current?.getBoundingClientRect();
+  const shortcutModifier = altShortcuts ? "Alt+" : navigator.platform.startsWith("Mac") ? "⌘" : "Ctrl+";
   useLayoutEffect(() => {
-    if (keyboard) menu.current?.querySelector<HTMLButtonElement>('[aria-checked="true"]')?.focus();
+    if (keyboard) menu.current?.querySelector<HTMLButtonElement>('[aria-checked="true"], [aria-current="page"]')?.focus();
   }, [keyboard]);
   useEffect(() => {
     const outside = (event: PointerEvent) => {
       if (!menu.current?.contains(event.target as Node) && !anchor.current?.contains(event.target as Node)) onClose(false);
     };
     const resize = () => onClose(false);
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.isComposing || event.keyCode === 229) return;
+      event.preventDefault();
+      event.stopPropagation();
+      onClose(true);
+    };
     document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", escape, true);
     window.addEventListener("resize", resize);
     return () => {
       document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("keydown", escape, true);
       window.removeEventListener("resize", resize);
     };
   }, [anchor, onClose]);
   return createPortal(<div ref={menu} className="engine-menu" role="menu" aria-label="会话引擎"
     style={{ top: (rect?.bottom ?? 0) + 8, right: Math.max(8, window.innerWidth - (rect?.right ?? 0)) }}
     onKeyDown={event => {
-      if (event.key === "Escape" || event.key === "Tab") {
-        if (event.key === "Escape") event.preventDefault();
+      if (event.key === "Tab") {
         onClose(true);
         return;
       }
-      const items = [...(menu.current?.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]') ?? [])];
+      const items = [...(menu.current?.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"], [role="menuitem"]') ?? [])];
       const index = items.indexOf(document.activeElement as HTMLButtonElement);
       let next: number;
       if (event.key === "ArrowDown") next = (index + 1) % items.length;
@@ -56,7 +65,15 @@ export default function EngineMenu({ engine, anchor, keyboard, altShortcuts, onC
       onClick={event => onSelect(value, event.detail === 0)}>
       <EngineIcon engine={value} size={18} />
       <span>{value === "dsh" ? "DSH" : value === "codex" ? "Codex" : "Claude"}</span>
-      {value === engine && <Icon name="check" size={16} />}
+      <kbd aria-hidden="true">{shortcutModifier}{engines.indexOf(value) + 1}</kbd>
     </button>)}
+    {onCollaboration && <><div className="collaboration-menu-divider" />
+      <button type="button" role="menuitem" tabIndex={-1} className="engine-menu-item"
+        aria-keyshortcuts={altShortcuts ? "Alt+4" : "Meta+4 Control+4"}
+        onClick={event => onCollaboration(event.detail === 0)}
+        aria-current={engine === "collaboration" ? "page" : undefined}>
+        <Icon name="collaboration" size={18} /><span>协作</span>
+        <kbd aria-hidden="true">{shortcutModifier}4</kbd>
+      </button></>}
   </div>, document.body);
 }

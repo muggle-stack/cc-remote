@@ -5,6 +5,7 @@ import { createContext, isValidElement, memo, useContext, useEffect,
 import { LocalFileLink, WebLink } from "./LinkPreview";
 import ReactMarkdown, { defaultUrlTransform, type Components, type UrlTransform } from "react-markdown";
 import { parseLocalFileTarget } from "../file-link";
+import { classifyPreviewTarget } from "../preview-path";
 import { RemoteViewerContext } from "../remote-viewer-context";
 import { ViewerPagesContext } from "../viewer-pages-context";
 import { isLocalViewerUrl } from "../remote-viewer";
@@ -188,6 +189,7 @@ function CopyableCodeBlock({ children }: { children?: ReactNode }) {
 
 interface MessageMarkdownContextValue {
   done?: boolean;
+  fileCwd?: string;
   imageAssets?: Record<string, InlineImageAsset>;
   onLoadImage?: (path: string) => boolean;
   onAuthorizeImage?: (
@@ -466,12 +468,15 @@ const messageUrlTransform: UrlTransform = (url, key, node) => {
 function MarkdownLink({
   href = "", children, title,
 }: ComponentPropsWithoutRef<"a">) {
-  const { onOpenFile } = useContext(MessageMarkdownContext);
+  const { onOpenFile, fileCwd } = useContext(MessageMarkdownContext);
   const openViewer = useContext(RemoteViewerContext);
   const openPage = useContext(ViewerPagesContext)?.openLink;
   const file = parseLocalFileTarget(href);
   if (file && onOpenFile) {
-    const location = file.line ? `${file.path}:${file.line}` : file.path;
+    const resolved = fileCwd && !file.path.startsWith("~/")
+      ? classifyPreviewTarget(`${fileCwd}/.cc-remote-message`, file.path) : null;
+    const path = resolved?.kind === "local" ? resolved.value : file.path;
+    const location = file.line ? `${path}:${file.line}` : path;
     return <LocalFileLink location={location}
       onOpen={() => onOpenFile(file.path, file.line)}>{children}</LocalFileLink>;
   }
@@ -533,9 +538,10 @@ const MESSAGE_MARKDOWN_COMPONENTS: Components = Object.freeze({
 // token delta is wasteful, so we hold a "shown" buffer that catches up on a
 // timer while streaming, and snaps to the full text when the block is done.
 export function MessageBlock({ text, done, onOpenFile, imageAssets,
-  onLoadImage, onAuthorizeImage, onPreviewImage, formatReplySections = false }: {
+  onLoadImage, onAuthorizeImage, onPreviewImage, fileCwd, formatReplySections = false }: {
   text: string;
   done: boolean;
+  fileCwd?: string;
   formatReplySections?: boolean;
   onOpenFile?: (path: string, line?: number) => void;
   imageAssets?: Record<string, InlineImageAsset>;
@@ -572,10 +578,11 @@ export function MessageBlock({ text, done, onOpenFile, imageAssets,
   }, []);
 
   const markdownContext = useMemo<MessageMarkdownContextValue>(() => ({
-    done, imageAssets, onLoadImage, onAuthorizeImage,
+    done, imageAssets, onLoadImage, onAuthorizeImage, fileCwd,
     onOpenFile, onPreviewImage,
   }), [
     done,
+    fileCwd,
     imageAssets,
     onAuthorizeImage,
     onLoadImage,
