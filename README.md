@@ -2,12 +2,17 @@
 
 **用手机、浏览器连接本机的 Claude Code、Codex 与 DSH。**
 
-自托管 · 多会话 · 多设备 · 实时工具过程 · Code / Work · Web / PWA / TUI
+自托管 · 多会话 · 多设备 · 实时工具过程 · Code / Work / 协作 · Web / PWA / TUI
 
 **产品版本：v5.3.24** · Wire protocol v92
 
-[English](README_en.md) · [Release 安装（推荐）](#安装与升级) · [功能对照](#引擎与功能) · [源码体验](#快速开始) ·
+[English](README_en.md) · [协作聊天室](#collaboration) · [Release 安装（推荐）](#安装与升级) · [功能对照](#引擎与功能) · [源码体验](#快速开始) ·
 [界面导览](#界面导览) · [终端工作台](#terminal-workspace) · [文档](#文档) · [更新记录](CHANGELOG_zh.md)
+
+> **协作开发分支 `feat/multi-agent-collaboration`**
+>
+> 此分支新增 Claude、Codex、DSH 多 Agent 协作聊天室，支持原生会话接入、点名回复、
+> 共享公开上下文和查看执行进度。协作功能尚未发布，体验方式和部署要求见下方协作说明。
 
 cc-remote 把本机 agent 的会话、工具过程、文件和运行控制带到远端。你可以在电脑上
 开始任务，用手机查看进度、回答询问、补充指令，再回到原来的会话继续工作。
@@ -29,6 +34,8 @@ cc-remote 把本机 agent 的会话、工具过程、文件和运行控制带到
 
 - **同时处理多个任务**：会话按目录分组，支持搜索、置顶、重命名和后台运行。
   切换页面不会停止任务；历史按需加载，工具细节展开后再读取。
+- **让多个 Agent 共同讨论。** 在协作聊天室中加入 Claude、Codex、DSH 会话，
+  通过默认回复者或 `@` 点名分配任务，并在各自的原生会话中跟进执行。
 - **跟进完整过程**：查看流式回复、引擎公开的思考摘要、计划、工具调用、命令输出、
   文件改动和审批。Claude、Codex 与 DSH 运行中均支持引导或排队；引导会补充当前任务，不会打断正在执行的工具。
 - **管理长任务**：通过 `/goal` 设置目标，查看进展并使用各引擎原生的预算与控制。
@@ -52,6 +59,57 @@ cc-remote 把本机 agent 的会话、工具过程、文件和运行控制带到
 项目、文件／链接／笔记资料库、工作模板、Artifacts，以及一次、每日、每周定时任务。
 每项工作使用独立目录，需要的材料通过附件或资料库加入。Work 的会话、资料与 Code
 分开。
+
+<a id="collaboration"></a>
+
+## 多 Agent 协作聊天室
+
+把 Claude、Codex、DSH 的原生 Code 会话加入同一个聊天室，用各账号擅长的模型讨论、
+实现和检查同一项任务。每位 Agent 对应一个真实原生会话，执行、权限和模型认证由
+所选 Harness 管理。协作层负责房间、消息投递和公开上下文的衔接。
+
+### 开始协作
+
+1. 选择设备，在右上角 Harness 菜单进入 **协作**。macOS 可用 `⌘4` 切换。
+2. 点击 **新建聊天**，填写聊天名称，选择 Harness 和账号。可以创建新 Agent，
+   也可以关联该设备上已有的 Code 会话。
+3. 按需要为新 Agent 选择工作目录、模型、思考强度、权限和速度。可选项来自对应
+   Harness 的实际能力，留空项使用原生默认配置。新会话在首次收到消息时创建。
+4. 创建聊天后，选择默认回复者，或点击 **@ 点名** 选择一个、多个会话或所有参与者。
+   同一账号的多个 session 可分别选择，菜单显示会话名称、账号、目录和短 ID。
+5. 发送消息。空闲 Agent 开始新回合，正在工作的 Agent 接收原生引导。
+   需要结束工作时，使用该 Agent 的停止操作。
+
+### 会话、上下文与文件
+
+- **共享讨论。** 被点名的 Agent 会收到用户问题和其他成员已发布的最终回复。
+  新成员首次参与时也能获取公开讨论，后续投递按成员进度补充上下文。
+  思考、工具调用和中间工作过程保存在各自原生会话。
+- **跟进执行。** 点击 **查看进度** 阅读原生历史、实时状态和工具详情，向上滚动
+  自动加载更早历史。点击 **查看原生会话**，进入对应 Harness、账号和目录中的会话。
+- **同步会话名。** 原生会话名称同步到消息头、点名菜单和默认回复者。
+  在协作中重命名也会通过原生接口保存，同一账号的不同会话由稳定成员 ID 分别路由。
+- **继续使用项目文件。** 各 Agent 按所选工作目录和原生权限读写仓库。
+  文件、目录、图片、文档、音视频与 HTML 预览复用现有文件接口，按消息来源会话定位资源。
+- **保留房间状态。** 房间、成员、公开消息和投递回执保存在所属设备 Wrapper 的
+  `collaboration.sqlite3` 中，并纳入部署快照与回滚。浏览器保留草稿和点名目标，
+  刷新后附件需重新选择。移除的成员可恢复，原生会话和房间历史继续保留。
+
+### 体验范围与部署
+
+当前协作入口位于 Web，桌面和手机使用同一套响应式界面。一个房间归属于一台设备，
+成员使用该设备上的账号和会话。Claude、Codex 支持已配置的多账号，DSH 使用该设备
+已配置的单个原生连接，同一连接可建立多个独立会话。成员绑定后，模型、权限等
+运行配置可在对应原生会话中继续调整。
+
+体验此分支时，在[源码安装步骤](#快速开始)中切换到 `feat/multi-agent-collaboration`。
+此源码使用 **wire protocol v92**，Relay、Web 和所有连接的 Wrapper 需要来自同一源码
+快照。已有部署请按仓库部署流程同步升级各层，私有状态通过部署快照保留。
+使用稳定 Release 的安装与更新方式时，功能范围以所安装 tag 为准。
+[部署流程](deploy/README.md)
+
+原生适配、运行中引导、上下文、恢复机制和已验证范围详见协作方案。
+[协作聊天室适配方案](docs/collaboration-design.md)
 
 ## 引擎与功能
 
@@ -223,7 +281,8 @@ Wrapper 主动出站连接 Relay，设备不需要开放公网入站端口。Rel
 ```bash
 git clone https://github.com/muggle-stack/cc-remote.git
 cd cc-remote
-# 要使用某个开发分支的功能，请先切到该分支，再安装和构建。
+# 体验本分支的多 Agent 协作功能。
+git switch feat/multi-agent-collaboration
 python3.13 -m venv .venv
 .venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements.lock
 # 以下命令使用 Node 24。
@@ -367,6 +426,7 @@ Code 默认权限较宽；Work 的私有目录策略不能替代独立系统用�
 | [配置、账号与数据](docs/configuration.md) | 多账号、环境变量、鉴权、队列与历史边界 |
 | [部署流程](deploy/README.md) | 不可变发布、回滚、共享控制与上线验收 |
 | [DSH 接入](docs/dsh-integration.md) | 安装配对、模式、原生控制与功能边界 |
+| [协作聊天室](docs/collaboration-design.md) | 多 Harness 原生会话、点名、公开上下文、恢复与验证范围 |
 | [Desktop 兼容修复](docs/desktop.md) | 旧 Electron 壳的页面升级、保留登录与回滚 |
 | [远程 Viewer](docs/remote-viewer.md) | 交互式静态页面、Bridge／Isolated 模式 |
 | Codex App 接入：[macOS](docs/codex-desktop-launcher.md)／[Linux](docs/codex-desktop-linux.md) | 可选桌面 App、日常 CLI 与 Wrapper 共用 daemon |

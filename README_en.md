@@ -2,12 +2,18 @@
 
 **Control Claude Code, Codex and DSH on your machine from a phone or browser.**
 
-Self-hosted · Multiple sessions and devices · Live tool activity · Code / Work · Web / PWA / TUI
+Self-hosted · Multiple sessions and devices · Live tool activity · Code / Work / Collaboration · Web / PWA / TUI
 
 **Product version: v5.3.24** · Wire protocol v92
 
-[中文](README.md) · [Release install (recommended)](#install-and-upgrade) · [Engine comparison](#engines-and-features) · [Try from source](#quick-start) ·
+[中文](README.md) · [Collaboration rooms](#collaboration) · [Release install (recommended)](#install-and-upgrade) · [Engine comparison](#engines-and-features) · [Try from source](#quick-start) ·
 [Interface tour](#interface-tour) · [Terminal workspace](#terminal-workspace) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)
+
+> **Collaboration development branch `feat/multi-agent-collaboration`**
+>
+> This branch adds multi-agent rooms for Claude, Codex and DSH, with native
+> sessions, mentions, shared public context and execution progress. The feature
+> is unreleased. See the collaboration section for usage and deployment requirements.
 
 cc-remote brings your local agent's sessions, tool activity, files and controls to
 remote clients. Start a task on your computer, check progress from your phone,
@@ -36,6 +42,9 @@ fictional. See the [interface tour](#interface-tour) for more features.
 - **Handle several tasks at once.** Group sessions by directory, search, pin,
   rename and leave them running in the background. Switching views does not stop
   a task. History is paged, with tool details loaded when expanded.
+- **Bring agents into one discussion.** Add Claude, Codex and DSH sessions to a
+  collaboration room, assign tasks through a default responder or `@` mentions,
+  and follow execution in each agent's native session.
 - **Follow the work.** Read streaming replies, engine-provided reasoning
   summaries, plans, tool calls, command output, file changes and approvals.
   Claude, Codex and DSH support steering or queueing while busy. Steering adds
@@ -68,6 +77,75 @@ presentations and research. It includes private projects, file/link/note sources
 work templates, artifacts, and one-shot, daily or weekly schedules. Each work
 item has its own directory; add material through attachments or the project
 library. Work sessions and material are separate from Code.
+
+<a id="collaboration"></a>
+
+## Multi-agent collaboration rooms
+
+Bring native Claude, Codex and DSH Code sessions into one room to discuss,
+implement and review a task with the models available to your accounts. Each
+agent maps to a real native session. Its harness owns execution, permissions
+and model authentication. The collaboration layer manages rooms, message
+delivery and shared public context.
+
+### Start a room
+
+1. Select a device and open **Collaboration** in the top-right harness menu.
+   On macOS, use `⌘4` to switch.
+2. Choose **New chat**, enter a room name, and select a harness and account.
+   Create a new agent or link an existing Code session on that device.
+3. Choose a working directory, model, reasoning effort, permissions and speed
+   as needed. Options reflect each harness's capabilities. Unset options use
+   native defaults. A new session starts when it first receives a message.
+4. Select a default responder or use the **@ mention** button to choose one or
+   several sessions, or all participants. Multiple sessions of one account can
+   be selected individually by session name, account, directory and short ID.
+5. Send a message. An idle agent starts a turn. A working agent receives native
+   steering. Use that agent's stop control when you want to end its work.
+
+### Sessions, context and files
+
+- **Share the discussion.** A selected agent receives user questions and other
+  members' published final replies. New members receive the public discussion
+  when first addressed. Later inputs add context according to each member's
+  progress. Reasoning, tool calls and intermediate activity stay in native sessions.
+- **Follow execution.** Open **View progress** for native history, live status
+  and tool details. Scrolling upward loads older history automatically.
+  **Open native session** navigates to the matching harness, account and directory.
+- **Keep session names in sync.** Native titles appear in message headers,
+  mention menus and the default responder. Renaming from collaboration saves
+  through the native rename API. Stable member IDs distinguish sessions from
+  the same account as their names change.
+- **Work with project files.** Agents read and write repositories within their
+  selected working directories and native permissions. File, directory, image,
+  document, audio, video and HTML previews use existing file APIs and resolve
+  resources against the originating session.
+- **Keep room state.** The device's Wrapper stores rooms, members, public
+  messages and delivery receipts in `collaboration.sqlite3`, included in
+  deployment snapshots and rollback. The browser retains drafts and mention
+  targets. Reselect attachments after a reload. Removed members can be restored,
+  with native sessions and room history preserved.
+
+### Availability and deployment
+
+The room interface is available on the Web with responsive desktop and mobile
+layouts. Each room belongs to one device and uses accounts and sessions on that
+device. Claude and Codex support configured account profiles. DSH uses the
+device's single configured native connection, which can host multiple sessions.
+After a member is bound, continue adjusting its model, permissions and other
+runtime settings in the native session.
+
+To try this branch, select `feat/multi-agent-collaboration` during the
+[source installation steps](#quick-start). This source uses **wire protocol v92**.
+Relay, Web and every connected Wrapper must use the same source snapshot.
+For an existing installation, follow the repository deployment procedure to
+upgrade the tiers together and preserve private state in deployment snapshots.
+Stable Release installs and updates provide the features documented at their tag.
+[Deployment procedure](deploy/README.md)
+
+The collaboration design covers native adapters, steering, context, recovery
+and the recorded validation scope. The detailed design is currently in Chinese.
+[Collaboration design](docs/collaboration-design.md)
 
 ## Engines and features
 
@@ -277,7 +355,8 @@ Prepare at least one working engine:
 ```bash
 git clone https://github.com/muggle-stack/cc-remote.git
 cd cc-remote
-# For development-branch features, check out that branch before installing/building.
+# Try the multi-agent collaboration feature from this branch.
+git switch feat/multi-agent-collaboration
 python3.13 -m venv .venv
 .venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements.lock
 # Use Node 24 for the following commands.
@@ -452,6 +531,7 @@ policy is not a replacement for separate OS users, containers or virtual machine
 | [Configuration, accounts and data](docs/configuration_en.md) | Profiles, environment variables, authentication, queues and history |
 | [Deployment procedure](deploy/README.md) | Immutable releases, rollback, shared control and acceptance |
 | [DSH integration](docs/dsh-integration.md) | Pairing, modes, native controls and capability boundaries |
+| [Collaboration rooms](docs/collaboration-design.md) | Native harness sessions, mentions, public context, recovery and validation scope |
 | [Desktop compatibility](docs/desktop.md) | Legacy Electron UI recovery, sign-in preservation and rollback |
 | [Remote Viewer](docs/remote-viewer.md) | Interactive static pages, Bridge/Isolated modes |
 | Codex App: [macOS](docs/codex-desktop-launcher.md) / [Linux](docs/codex-desktop-linux.md) | Optional App, daily CLI and Wrapper on one daemon |
