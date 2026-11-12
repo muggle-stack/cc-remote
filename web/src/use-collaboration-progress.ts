@@ -151,7 +151,9 @@ export function useCollaborationProgress({ machineId, member, ws, listen, initia
         return;
       }
       dispatch({ type: "event", event });
-      if (event.type === "history") {
+      if (event.type === "replay_start" && (event.truncated || event.rebuild)) {
+        request();
+      } else if (event.type === "history") {
         if (deadline.current) clearTimeout(deadline.current);
         setLoaded(true);
         setError(event.error ?? null);
@@ -166,6 +168,12 @@ export function useCollaborationProgress({ machineId, member, ws, listen, initia
       detailRequests.clear();
     };
   }, [cache, detailRequests, listen, request, sid]);
+
+  useEffect(() => {
+    // The shared reducer requires a newer build to confirm the first page
+    // observed after a replay gap, which may already have been in flight.
+    if (runtime.historyInvalidated && runtime.pendingHistoryCandidateBuildSeq != null) request();
+  }, [request, runtime.historyInvalidated, runtime.pendingHistoryCandidateBuildSeq]);
 
   const loadOlder = (anchorTurnId?: string) => {
     const current = stateRef.current;

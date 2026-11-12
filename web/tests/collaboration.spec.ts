@@ -1505,6 +1505,82 @@ test("collaboration suppresses the installed Harmony settings overlay on authent
   await expect(fallback).toBeVisible();
 });
 
+for (const gap of ["truncated", "rebuild"] as const) {
+  test(`collaboration progress refreshes its inspected session after a ${gap} replay gap`, async ({ page, isMobile }) => {
+    const relay = await mockRooms(page);
+    await createSimpleRoom(page);
+    relay.reply("member-0", "公开结论。");
+    let recovered = false;
+    let build = 0;
+    const generation = gap === "rebuild" ? "restarted-generation" : "native-generation";
+    relay.setNativeHistory(command => {
+      const latestId = recovered ? "native-refreshed" : "native-original";
+      const id = command.before ? "native-oldest" : latestId;
+      const latestText = recovered ? "断线后恢复的原生历史正文。\n\n".repeat(80) : "断线前的原生历史正文。";
+      const text = command.before ? "恢复后仍可加载更早的原生结论。"
+        : latestText;
+      return {
+        detail: "summary", authoritative: true,
+        revision: recovered ? "refreshed-revision" : "revision",
+        generation: recovered ? generation : "native-generation",
+        build_seq: ++build, live_seq: recovered ? 20 : 5,
+        oldest_id: id, newest_id: id, has_more: recovered && !command.before,
+        in_progress: false, events: [], turns: [{
+          id, prompt: id, done: true, detailLoaded: true,
+          blocks: [{ kind: "text", message_id: `${id}-answer`, channel: "final", text, done: true }],
+        }],
+      };
+    });
+    const beforeOpen = relay.commands.length;
+    await page.locator(".collab-answer").getByRole("button", { name: "查看进度 ↗", exact: true }).click();
+    const progress = page.getByRole("dialog", { name: "Claude · default 的进度", exact: true });
+    await expect(progress).toContainText("断线前的原生历史正文。");
+
+    relay.emit({ type: "replay_start", sid: "another-session", from_seq: 1, to_seq: 5,
+      truncated: true, generation: "native-generation" });
+    relay.emit({ type: "replay_end", sid: "another-session", to_seq: 5, truncated: true });
+    relay.emit({ type: "replay_start", sid: "native-0", from_seq: 6, to_seq: 5,
+      truncated: false, generation: "native-generation" });
+    relay.emit({ type: "replay_end", sid: "native-0", to_seq: 5, truncated: false });
+    recovered = true;
+    relay.emit({ type: "replay_start", sid: "native-0", from_seq: 16, to_seq: 20,
+      truncated: gap === "truncated", rebuild: gap === "rebuild", generation });
+    relay.emit({ type: "replay_end", sid: "native-0", to_seq: 20, truncated: gap === "truncated" });
+
+    await expect.poll(() => relay.commands.slice(beforeOpen).filter(command =>
+      command.type === "get_history" && command.session_id === "native-0" && !command.before).length).toBe(3);
+    await expect(progress).toContainText("断线后恢复的原生历史正文。");
+    await expect(progress).not.toContainText("断线前的原生历史正文。");
+    await expect(progress.getByText("正在恢复历史…", { exact: true })).toHaveCount(0);
+    await expect(progress.getByText("加载会话历史…", { exact: true })).toHaveCount(0);
+    const thread = progress.getByRole("region", { name: "对话记录", exact: true });
+    await thread.evaluate(node => { node.scrollTop = 0; node.dispatchEvent(new Event("scroll")); });
+    if (isMobile) {
+      await thread.evaluate(node => {
+        for (const [kind, y] of [["touchstart", 100], ["touchmove", 180], ["touchend", 180]] as const) {
+          const event = new Event(kind, { bubbles: true, cancelable: true });
+          const touch = { identifier: 1, clientX: 100, clientY: y };
+          Object.defineProperty(event, "touches", { value: kind === "touchend" ? [] : [touch] });
+          Object.defineProperty(event, "changedTouches", { value: [touch] });
+          node.dispatchEvent(event);
+        }
+      });
+    } else {
+      await thread.hover();
+      await page.mouse.wheel(0, -900);
+    }
+    await expect(progress).toContainText("恢复后仍可加载更早的原生结论。");
+    const commands = relay.commands.slice(beforeOpen);
+    expect(commands.filter(command => command.type === "get_history")).toEqual([
+      expect.objectContaining({ session_id: "native-0", cwd: "/tmp/project" }),
+      expect.objectContaining({ session_id: "native-0", cwd: "/tmp/project" }),
+      expect.objectContaining({ session_id: "native-0", cwd: "/tmp/project" }),
+      expect.objectContaining({ session_id: "native-0", before: "native-refreshed" }),
+    ]);
+    expect(commands.filter(command => ["query", "steer", "switch_session", "new_session"].includes(command.type))).toEqual([]);
+  });
+}
+
 for (const interaction of ["touch", "keyboard"]) {
   test(`collaboration ${interaction} scrolling at the history edge loads automatically`, async ({ page }) => {
     const pageErrors: string[] = [];
