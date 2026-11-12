@@ -1820,6 +1820,145 @@ async def test_room_stop_restores_a_cold_dsh_context(running, cold_connection):
         await runtime.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["claude", "codex"])
+@pytest.mark.parametrize("running", [False, True])
+async def test_room_stop_restores_a_cold_native_context(engine, running):
+    from types import SimpleNamespace
+
+    machine, transport, controller, sid, native, _title = native_named_member(engine)
+    store, room_id, member = await store_named_member(controller, engine, sid, native)
+    delivery = send(store, room_id)
+    store.consume(delivery["id"], "native-turn")
+    ctx = _mk_ctx(sid, native)
+    ctx.engine = engine
+    ctx.space = "code"
+    ctx.cwd = "/tmp"
+    ctx.state = "running" if running else "idle"
+    ctx.sdk = SimpleNamespace(interrupt=AsyncMock(), query=AsyncMock())
+
+    async def resume(**_options):
+        machine.sessions[ctx.key] = ctx
+        return ctx
+
+    machine._spawn = AsyncMock(side_effect=resume)
+    machine._handle_new_session = AsyncMock()
+    machine._handle_query = AsyncMock()
+    machine.focused_sid = "original"
+    command = CollaborationCommand(
+        operation="stop", room_id=room_id, member_id=member["id"],
+        cmd_id="stop", client_id="browser", owner_id="owner",
+    )
+    await machine._dispatch_incoming_command(command)
+    await machine._command_scheduler.drain()
+    result = next(frame for frame in reversed(transport.sent)
+                  if frame.type == "collaboration_state" and frame.request_id == "stop")
+    assert result.error is None
+    machine._spawn.assert_awaited_once_with(
+        resume_id=native, raise_on_failure=True, engine=engine,
+        cwd="/tmp", **{f"{engine}_profile_id": member["spec"]["profile_id"]},
+    )
+    assert ctx.sdk.interrupt.await_count == int(running)
+    assert store.delivery(delivery["id"])["status"] == "stopping"
+    assert controller.members[id(ctx)][1] == member["id"]
+    assert machine.focused_sid == "original"
+    assert not any(isinstance(frame, SessionFocus) for frame in transport.sent)
+    ctx.sdk.query.assert_not_awaited()
+    machine._handle_query.assert_not_awaited()
+    machine._handle_new_session.assert_not_awaited()
+    replay = await controller.handle(command)
+    assert replay.error is None
+    assert ctx.sdk.interrupt.await_count == int(running)
+    store.finish(member["id"], "cancelled")
+    later = send(store, room_id, message_id="later", request="later")
+    store.consume(later["id"], "later-native-turn")
+    ctx.state = "running"
+    assert (await controller.handle(command)).error is None
+    assert store.delivery(later["id"])["status"] == "running"
+    assert ctx.sdk.interrupt.await_count == int(running)
+    assert machine._spawn.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["claude", "codex"])
+@pytest.mark.parametrize("failure", ["error", "missing"])
+async def test_room_stop_reports_failed_native_recovery_and_can_retry(engine, failure):
+    from types import SimpleNamespace
+
+    machine, _transport, controller, sid, native, _title = native_named_member(engine)
+    store, room_id, member = await store_named_member(controller, engine, sid, native)
+    delivery = send(store, room_id)
+    store.consume(delivery["id"], "native-turn")
+    machine._spawn = AsyncMock(
+        side_effect=RuntimeError("native service unavailable") if failure == "error" else None,
+        return_value=None,
+    )
+    machine._handle_query = AsyncMock()
+    machine._handle_new_session = AsyncMock()
+    command = CollaborationCommand(
+        operation="stop", room_id=room_id, member_id=member["id"],
+        cmd_id="stop", client_id="browser", owner_id="owner",
+    )
+    result = await controller.handle(command)
+    assert result.error
+    assert store.delivery(delivery["id"])["status"] == "stopping"
+    assert (await controller.handle(command)).error
+    ctx = _mk_ctx(sid, native)
+    ctx.engine = engine
+    ctx.cwd = "/tmp"
+    ctx.state = "running"
+    ctx.sdk = SimpleNamespace(interrupt=AsyncMock(), query=AsyncMock())
+    machine.sessions[ctx.key] = ctx
+    assert (await controller.handle(command)).error
+    retry = await controller.handle(command.model_copy(update={"cmd_id": "retry-stop"}))
+    assert retry.error is None
+    ctx.sdk.interrupt.assert_awaited_once()
+    ctx.sdk.query.assert_not_awaited()
+    machine._handle_query.assert_not_awaited()
+    machine._handle_new_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["claude", "codex"])
+async def test_room_stop_only_cancels_queued_work_without_resuming_a_cold_session(engine):
+    machine, _transport, controller, sid, native, _title = native_named_member(engine)
+    store, room_id, member = await store_named_member(controller, engine, sid, native)
+    delivery = send(store, room_id)
+    machine._spawn = AsyncMock()
+    machine._handle_interrupt = AsyncMock()
+    result = await controller.handle(CollaborationCommand(
+        operation="stop", room_id=room_id, member_id=member["id"],
+        cmd_id="stop", client_id="browser", owner_id="owner",
+    ))
+    assert result.error is None
+    assert store.delivery(delivery["id"])["status"] == "cancelled"
+    machine._spawn.assert_not_awaited()
+    machine._handle_interrupt.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["claude", "codex"])
+async def test_room_stop_surfaces_a_native_interrupt_error(engine):
+    machine, _transport, controller, sid, native, _title = native_named_member(engine)
+    store, room_id, member = await store_named_member(controller, engine, sid, native)
+    delivery = send(store, room_id)
+    store.consume(delivery["id"], "native-turn")
+    ctx = _mk_ctx(sid, native)
+    ctx.engine = engine
+    ctx.state = "reconnecting"
+    machine.sessions[sid] = ctx
+    machine._handle_interrupt = AsyncMock(return_value=Error(
+        code="not_running", message="原生会话尚未恢复，请稍后重试。",
+    ))
+    result = await controller.handle(CollaborationCommand(
+        operation="stop", room_id=room_id, member_id=member["id"],
+        cmd_id="stop", client_id="browser", owner_id="owner",
+    ))
+    assert result.error == "原生会话尚未恢复，请稍后重试。"
+    assert store.delivery(delivery["id"])["status"] == "stopping"
+    machine._handle_interrupt.assert_awaited_once()
+
+
 def test_context_keeps_the_reply_version_that_existed_when_the_user_sent(tmp_path):
     store = CollaborationStore(tmp_path)
     room_id, member = create_room(store)

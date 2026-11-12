@@ -311,19 +311,26 @@ class Collaboration:
                 member, fresh = await asyncio.to_thread(
                     store.stop_pending, owner, cmd.cmd_id, room_id, cmd.member_id
                 )
-                if fresh and member["sid"]:
+                rows = await asyncio.to_thread(store.deliveries, room_id, active=True)
+                if member["sid"] and any(
+                    row["member_id"] == member["id"] and row["status"] == "stopping"
+                    for row in rows
+                ):
                     ctx = self.machine._ctx_for(member["sid"])
-                    if ctx is None and member["spec"]["engine"] == "dsh":
-                        _values, account = self.prepare_member(
-                            CollaborationMemberSpec.model_validate(member["spec"]),
-                            check_cwd=False,
-                        )
-                        if account != member["account_key"]:
-                            raise ValueError("参与者账号配置已变化，请核对账号后再停止。")
-                        await self.machine._dsh.connection()
-                        ctx = await self.machine._dsh.ctx(member["sid"])
-                        self.watch(ctx, member["id"])
-                    if ctx and ctx.state == "idle" and member["id"] in self.workers:
+                    if ctx is None and fresh:
+                        if member["spec"]["engine"] == "dsh":
+                            _values, account = self.prepare_member(
+                                CollaborationMemberSpec.model_validate(member["spec"]),
+                                check_cwd=False,
+                            )
+                            if account != member["account_key"]:
+                                raise ValueError("参与者账号配置已变化，请核对账号后再停止。")
+                            await self.machine._dsh.connection()
+                            ctx = await self.machine._dsh.ctx(member["sid"])
+                            self.watch(ctx, member["id"])
+                        else:
+                            ctx = await self.context(member, {"id": cmd.cmd_id})
+                    if fresh and ctx and ctx.state == "idle" and member["id"] in self.workers:
                         async with ctx.query_lock:
                             pass
                     rows = await asyncio.to_thread(
@@ -333,7 +340,9 @@ class Collaboration:
                         row["member_id"] == member["id"] and row["status"] == "stopping"
                         for row in rows
                     )
-                    if ctx and ctx.state != "idle" and stopping:
+                    if stopping and (ctx is None or (not fresh and ctx.state == "running")):
+                        raise ValueError("停止指令尚未确认送达，请恢复原生会话连接后重试停止。")
+                    if fresh and ctx and ctx.state != "idle" and stopping:
                         stop = Interrupt(
                             sid=ctx.key,
                             client_id=cmd.client_id,
@@ -341,9 +350,11 @@ class Collaboration:
                             owner_id=owner,
                         )
                         if member["spec"]["engine"] == "dsh":
-                            await self.machine._dsh.handle_interrupt(stop)
+                            result = await self.machine._dsh.handle_interrupt(stop)
                         else:
-                            await self.machine._handle_interrupt(stop)
+                            result = await self.machine._handle_interrupt(stop)
+                        if isinstance(result, Error):
+                            raise ValueError(result.message)
             elif cmd.operation == "rename_member":
                 async with self.title_lock:
                     member = await asyncio.to_thread(
