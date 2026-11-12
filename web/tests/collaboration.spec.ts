@@ -1505,14 +1505,16 @@ test("collaboration suppresses the installed Harmony settings overlay on authent
   await expect(fallback).toBeVisible();
 });
 
-for (const gap of ["truncated", "rebuild"] as const) {
-  test(`collaboration progress refreshes its inspected session after a ${gap} replay gap`, async ({ page, isMobile }) => {
+for (const recovery of ["truncated", "rebuild", "rollback", "rollback-without-sid"] as const) {
+  test(`collaboration progress refreshes its inspected session after ${recovery}`, async ({ page, isMobile }) => {
     const relay = await mockRooms(page);
     await createSimpleRoom(page);
     relay.reply("member-0", "公开结论。");
     let recovered = false;
     let build = 0;
-    const generation = gap === "rebuild" ? "restarted-generation" : "native-generation";
+    const replayGap = recovery === "truncated" || recovery === "rebuild";
+    const firstPageRequests = replayGap ? 3 : 2;
+    const generation = recovery === "rebuild" ? "restarted-generation" : "native-generation";
     relay.setNativeHistory(command => {
       const latestId = recovered ? "native-refreshed" : "native-original";
       const id = command.before ? "native-oldest" : latestId;
@@ -1538,17 +1540,27 @@ for (const gap of ["truncated", "rebuild"] as const) {
 
     relay.emit({ type: "replay_start", sid: "another-session", from_seq: 1, to_seq: 5,
       truncated: true, generation: "native-generation" });
+    relay.emit({ type: "history_invalidated", session_id: "another-session",
+      revision: "other-revision", reason: "rollback" });
     relay.emit({ type: "replay_end", sid: "another-session", to_seq: 5, truncated: true });
     relay.emit({ type: "replay_start", sid: "native-0", from_seq: 6, to_seq: 5,
       truncated: false, generation: "native-generation" });
     relay.emit({ type: "replay_end", sid: "native-0", to_seq: 5, truncated: false });
     recovered = true;
-    relay.emit({ type: "replay_start", sid: "native-0", from_seq: 16, to_seq: 20,
-      truncated: gap === "truncated", rebuild: gap === "rebuild", generation });
-    relay.emit({ type: "replay_end", sid: "native-0", to_seq: 20, truncated: gap === "truncated" });
+    if (replayGap) {
+      relay.emit({ type: "replay_start", sid: "native-0", from_seq: 16, to_seq: 20,
+        truncated: recovery === "truncated", rebuild: recovery === "rebuild", generation });
+    } else {
+      relay.emit({ type: "replay_start", sid: "native-0", from_seq: 6, to_seq: 20,
+        truncated: false, generation });
+      relay.emit({ type: "history_invalidated", session_id: "native-0",
+        ...(recovery === "rollback-without-sid" ? {} : { sid: "native-0" }),
+        revision: "refreshed-revision", reason: "rollback" });
+    }
+    relay.emit({ type: "replay_end", sid: "native-0", to_seq: 20, truncated: recovery === "truncated" });
 
     await expect.poll(() => relay.commands.slice(beforeOpen).filter(command =>
-      command.type === "get_history" && command.session_id === "native-0" && !command.before).length).toBe(3);
+      command.type === "get_history" && command.session_id === "native-0" && !command.before).length).toBe(firstPageRequests);
     await expect(progress).toContainText("断线后恢复的原生历史正文。");
     await expect(progress).not.toContainText("断线前的原生历史正文。");
     await expect(progress.getByText("正在恢复历史…", { exact: true })).toHaveCount(0);
@@ -1572,9 +1584,8 @@ for (const gap of ["truncated", "rebuild"] as const) {
     await expect(progress).toContainText("恢复后仍可加载更早的原生结论。");
     const commands = relay.commands.slice(beforeOpen);
     expect(commands.filter(command => command.type === "get_history")).toEqual([
-      expect.objectContaining({ session_id: "native-0", cwd: "/tmp/project" }),
-      expect.objectContaining({ session_id: "native-0", cwd: "/tmp/project" }),
-      expect.objectContaining({ session_id: "native-0", cwd: "/tmp/project" }),
+      ...Array.from({ length: firstPageRequests }, () =>
+        expect.objectContaining({ session_id: "native-0", cwd: "/tmp/project" })),
       expect.objectContaining({ session_id: "native-0", before: "native-refreshed" }),
     ]);
     expect(commands.filter(command => ["query", "steer", "switch_session", "new_session"].includes(command.type))).toEqual([]);

@@ -89,6 +89,7 @@ export function useCollaborationProgress({ machineId, member, ws, listen, initia
     alive.current = true;
     listen(event => {
       const eventSid = event.type === "history" || event.type === "turn_detail"
+        || event.type === "history_invalidated"
         ? event.session_id : event.sid;
       if (eventSid !== sid) return;
       if (event.type === "history" && event.before) {
@@ -151,7 +152,8 @@ export function useCollaborationProgress({ machineId, member, ws, listen, initia
         return;
       }
       dispatch({ type: "event", event });
-      if (event.type === "replay_start" && (event.truncated || event.rebuild)) {
+      if (event.type === "history_invalidated"
+          || (event.type === "replay_start" && (event.truncated || event.rebuild))) {
         request();
       } else if (event.type === "history") {
         if (deadline.current) clearTimeout(deadline.current);
