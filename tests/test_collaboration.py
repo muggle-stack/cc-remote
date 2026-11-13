@@ -998,6 +998,132 @@ async def test_failed_reply_projection_stays_recoverable_after_terminal(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["claude", "codex", "dsh"])
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("prefix_char", ["a", " "])
+async def test_overflowed_live_reply_recovers_complete_native_text_after_terminal(
+    monkeypatch, engine, restart, prefix_char
+):
+    from cc_remote.protocol import History, TurnBinding
+    from cc_remote.wrapper.collaboration import Collaboration
+
+    machine, _transport, controller, sid, native, _title = native_named_member(engine)
+    store, room_id, member = await store_named_member(controller, engine, sid, native)
+    ctx = _mk_ctx(sid, native)
+    ctx.engine = engine
+    machine.sessions[sid] = ctx
+    controller.watch(ctx, member["id"])
+    delivery = send(store, room_id)
+    owner = "native-user" if engine == "claude" else "native-turn"
+    canonical = "native-answer" if engine == "claude" else "answer"
+    prefix = prefix_char * (2 * 1024 * 1024)
+    answer = prefix + "完整结论_END"
+    events = [UserMsg(msg_id="native-user", client_msg_id=delivery["id"], prompt="hello")]
+    if engine != "claude":
+        events.append(TurnBinding(msg_id="native-user", turn_id=owner))
+    events.extend([
+        AssistantMsgStart(message_id="answer", turn_id=owner),
+        Delta(message_id="answer", turn_id=owner, text=prefix),
+        Delta(message_id="answer", turn_id=owner, text="完整结论_END"),
+        # An empty append cannot restore text already dropped from the buffer.
+        Delta(message_id="answer", turn_id=owner, text=""),
+        AssistantMsgEnd(message_id="answer", turn_id=owner, channel="final",
+                        canonical_message_id=canonical),
+        AssistantMsgStart(message_id="second-answer", turn_id=owner, channel="final"),
+        Delta(message_id="second-answer", turn_id=owner, channel="final", text="another reply"),
+        AssistantMsgEnd(message_id="second-answer", turn_id=owner, channel="final"),
+    ])
+    for event in events:
+        await machine._emit(ctx, event)
+    assert len(controller.texts[(member["id"], "answer")]["text"]) == len(prefix)
+    replies = [row for row in store.messages("owner", room_id) if row["role"] == "assistant"]
+    assert [row["text"] for row in replies] == ["another reply"]
+    terminal = TurnEnd(
+        turn_id=owner if engine != "claude" else "assistant-fork",
+        checkpoint_id=owner if engine == "claude" else None,
+        result=TurnResult(subtype="success", is_error=False, duration_ms=1),
+    )
+    await machine._emit(ctx, terminal)
+    assert store.delivery(delivery["id"])["status"] == "running"
+    assert [row["id"] for row in store.deliveries(room_id, active=True)] == [delivery["id"]]
+
+    if restart:
+        controller = Collaboration(machine)
+        machine._collaboration = controller
+        store = await controller.database()
+        monkeypatch.setattr(controller, "schedule_reconcile", lambda _member: None)
+        await controller.restore_observers()
+        await machine._emit(ctx, terminal)
+        assert store.delivery(delivery["id"])["status"] == "running"
+
+    # Native history carries the full final body and canonical message identity.
+    history_events = events[:1]
+    if engine != "claude":
+        history_events.append(TurnBinding(msg_id="native-user", turn_id=owner))
+    history_events.extend([
+        AssistantMsgStart(message_id=canonical, turn_id=owner, channel="final"),
+        Delta(message_id=canonical, turn_id=owner, channel="final", text=answer),
+        AssistantMsgEnd(message_id=canonical, turn_id=owner, channel="final"),
+        *events[-3:], terminal,
+    ])
+    history = History(session_id=sid, revision="complete", live_seq=ctx.seq,
+                      events=[event.model_dump() for event in history_events])
+    machine._history_page_singleflight = AsyncMock(return_value=history)
+    machine._dsh.connection = AsyncMock()
+    machine._dsh.handle_get_history = AsyncMock(return_value=history)
+    machine._handle_query = AsyncMock()
+    machine._handle_steer = AsyncMock()
+    machine._spawn = AsyncMock()
+    await controller.reconcile(store.member_by_id(member["id"]))
+    with store.db() as db:
+        replies = db.execute("SELECT * FROM messages WHERE role='assistant'").fetchall()
+    assert len(replies) == 2
+    recovered = next(row for row in replies if row["source"].endswith(":" + canonical))
+    assert recovered["text"] == answer
+    assert json.loads(recovered["reply_to"]) == ["message"]
+    assert store.delivery(delivery["id"])["status"] == "succeeded"
+    assert not store.deliveries(room_id, active=True)
+    assert not controller.pending_replies
+    assert not controller.recovery_pending
+    await controller.reconcile(store.member_by_id(member["id"]))
+    assert len(store.messages("owner", room_id)) == 3
+    machine._handle_query.assert_not_awaited()
+    machine._handle_steer.assert_not_awaited()
+    machine._spawn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("buffer_case", ["boundary", "replace_short", "replace_empty", "replace_overflow"])
+async def test_live_reply_buffer_boundary_and_replacement_completeness(buffer_case):
+    machine, _transport, controller, sid, native, _title = native_named_member("codex")
+    store, room_id, member = await store_named_member(controller, "codex", sid, native)
+    ctx = _mk_ctx(sid, native)
+    ctx.engine = "codex"
+    machine.sessions[sid] = ctx
+    controller.watch(ctx, member["id"])
+    delivery = send(store, room_id)
+    store.consume(delivery["id"], "native-turn")
+    limit = 2 * 1024 * 1024
+    initial = "a" * (limit if buffer_case == "boundary" else limit + 1)
+    await machine._emit(ctx, AssistantMsgStart(message_id="answer", turn_id="native-turn", channel="final"))
+    await machine._emit(ctx, Delta(message_id="answer", turn_id="native-turn", channel="final", text=initial))
+    replacements = {"replace_short": "complete replacement", "replace_empty": "", "replace_overflow": initial + "tail"}
+    if buffer_case in replacements:
+        await machine._emit(ctx, Delta(message_id="answer", turn_id="native-turn", channel="final",
+                                       text=replacements[buffer_case], replace=True))
+    await machine._emit(ctx, AssistantMsgEnd(message_id="answer", turn_id="native-turn", channel="final"))
+    await machine._emit(ctx, TurnEnd(turn_id="native-turn", result=TurnResult(subtype="success", is_error=False, duration_ms=1)))
+    overflow = buffer_case == "replace_overflow"
+    assert store.delivery(delivery["id"])["status"] == ("running" if overflow else "succeeded")
+    with store.db() as db:
+        replies = db.execute("SELECT text FROM messages WHERE role='assistant'").fetchall()
+    if overflow or buffer_case == "replace_empty":
+        assert not replies
+    else:
+        assert [row["text"] for row in replies] == [replacements.get(buffer_case, initial)]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("has_live_seq", [False, True])
 @pytest.mark.parametrize("admission_frame", ["user_msg", "assistant_msg_end"])
 async def test_history_replay_cannot_publish_or_complete_new_live_input(
@@ -1216,6 +1342,7 @@ async def test_lossy_native_history_recovers_complete_reply_or_keeps_delivery_ac
     ctx = _mk_ctx(sid, native)
     ctx.engine = engine
     machine.sessions[sid] = ctx
+    controller.watch(ctx, member["id"])
     repeats = {"reply": 15000, "large_reply": 150000, "tool": 1}
     answer = "complete reply " * repeats[oversized]
     events = [UserMsg(msg_id="native-user", client_msg_id=delivery["id"], prompt="hello")]
@@ -1233,6 +1360,11 @@ async def test_lossy_native_history_recovers_complete_reply_or_keeps_delivery_ac
         TurnEnd(turn_id=owner if engine == "codex" else "assistant-fork", checkpoint_id="native-user" if engine == "claude" else None,
                 result=TurnResult(subtype="success", is_error=False, duration_ms=1)),
     ])
+    if oversized == "large_reply":
+        for event in events:
+            await machine._emit(ctx, event.model_copy(deep=True))
+        assert store.delivery(delivery["id"])["status"] == "running"
+        assert not [row for row in store.messages("owner", room_id) if row["role"] == "assistant"]
     source = tmp_path / "transcript.jsonl"
     source.write_text("{}\n")
     monkeypatch.setattr(machine_module, "transcript_path", lambda _sid: str(source))
@@ -1265,6 +1397,7 @@ async def test_lossy_native_history_recovers_complete_reply_or_keeps_delivery_ac
     machine._handle_query = AsyncMock()
     machine._handle_steer = AsyncMock()
     machine._spawn = AsyncMock()
+    live_frames = list(transport.sent)
     await controller.reconcile(store.member_by_id(member["id"]))
     replies = [row for row in store.messages("owner", room_id) if row["role"] == "assistant"]
     if detail_state == "complete":
@@ -1281,7 +1414,7 @@ async def test_lossy_native_history_recovers_complete_reply_or_keeps_delivery_ac
     # The room page is a bounded preview. Validate the complete persisted body.
     with store.db() as db:
         assert db.execute("SELECT text FROM messages WHERE role='assistant'").fetchone()[0] == answer
-    assert not transport.sent
+    assert transport.sent == live_frames
     machine._handle_query.assert_not_awaited()
     machine._handle_steer.assert_not_awaited()
     machine._spawn.assert_not_awaited()

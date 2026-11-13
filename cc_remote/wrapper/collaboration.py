@@ -44,6 +44,7 @@ from cc_remote.protocol import (
 )
 
 log = logger("cc_remote.wrapper.collaboration")
+_LIVE_REPLY_LIMIT = 2 * 1024 * 1024
 
 
 @dataclass
@@ -1253,7 +1254,13 @@ class Collaboration:
                     item["questions"] = [question.model_dump(mode="json") for question in frame.questions]
             if kind == "delta" and item["channel"] != "thinking":
                 text = frame.text if frame.replace else item["text"] + frame.text
-                item["text"] = text if isinstance(ctx, _ProjectionContext) else text[: 2 * 1024 * 1024]
+                if isinstance(ctx, _ProjectionContext):
+                    item["text"] = text
+                else:
+                    item["truncated"] = len(text) > _LIVE_REPLY_LIMIT or (
+                        not frame.replace and item.get("truncated", False)
+                    )
+                    item["text"] = text[:_LIVE_REPLY_LIMIT]
             while len(texts) > 32:
                 texts.popitem(last=False)
             if kind != "assistant_msg_end":
@@ -1375,7 +1382,9 @@ class Collaboration:
                 if item.get("delivery") == "async"
                 else item.get("channel") == "final"
             )
-            if public_reply and (item["text"].strip() or item.get("has_questions")):
+            if public_reply and (
+                item["text"].strip() or item.get("has_questions") or item.get("truncated")
+            ):
                 message_id = item.get("canonical_id") or frame.message_id
                 source = f"{ctx.engine}:{member_id}:{message_id}"
                 question = None
@@ -1384,24 +1393,25 @@ class Collaboration:
                     question = async_question(message_id, item["questions"])
                     full_question = question_text(question["questions"])
                     text = full_question if text.strip() == question["questions"][0]["question"] else f"{text}\n\n{full_question}".strip()
-                # Mark before the write. If it raises, live terminals must leave
-                # these rows active so native history can recover the reply.
+                # Truncated buffers and failed writes remain pending until
+                # source-complete native history can recover the reply.
                 for row in running:
                     self.pending_replies.setdefault(row["id"], set()).add(source)
-                await asyncio.to_thread(
-                    self.store.publish,
-                    member_id,
-                    source,
-                    text,
-                    [row["message_id"] for row in running],
-                    **({"question": question} if question is not None else {}),
-                )
-                for row in running:
-                    pending = self.pending_replies.get(row["id"])
-                    if pending is not None:
-                        pending.discard(source)
-                        if not pending:
-                            self.pending_replies.pop(row["id"], None)
+                if not item.get("truncated"):
+                    await asyncio.to_thread(
+                        self.store.publish,
+                        member_id,
+                        source,
+                        text,
+                        [row["message_id"] for row in running],
+                        **({"question": question} if question is not None else {}),
+                    )
+                    for row in running:
+                        pending = self.pending_replies.get(row["id"])
+                        if pending is not None:
+                            pending.discard(source)
+                            if not pending:
+                                self.pending_replies.pop(row["id"], None)
         if kind == "turn_end" and frame.result.subtype != "steered":
             status = (
                 "cancelled"
