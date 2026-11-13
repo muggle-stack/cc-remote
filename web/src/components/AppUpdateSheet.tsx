@@ -97,6 +97,9 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
         <h4>更新亮点</h4><ul>{highlights.map((line, index) => <li key={index}>{line}</li>)}</ul>
       </section>}
       {reason && <p className="app-update-warning" role="status">{reason}</p>}
+      {succeeded && job.cleanup_pending && <p className="app-update-warning" role="status">
+        更新已安装，旧部署文件尚待清理。请检查安装目录中的 .retention-status.json，查看阻塞原因。
+      </p>}
       {!serverMode && needsRelay && !data?.allow_relay_update && serverUpdates && <button type="button"
         className="app-update-later app-update-server-link" onClick={() => setSelected("server")}>前往服务器更新</button>}
       {webUpdate.message && <p className="app-update-warning" role="status">{webUpdate.message}</p>}

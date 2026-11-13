@@ -10,6 +10,34 @@ import pytest
 from deploy import release_retention as retention, retention_services as reviews
 
 
+def test_user_home_specifier_only_resolves_in_that_users_own_units(tmp_path):
+    home = tmp_path.resolve()
+    unit = home / '.config/systemd/user/worker.service'
+    raw = b'[Service]\nEnvironmentFile=%h/.config/worker.env\n'
+    assert reviews.environment_files(unit, raw, home=home) == [(home / '.config/worker.env', False)]
+    with pytest.raises(ValueError):
+        reviews.environment_files(Path('/usr/lib/systemd/user/worker.service'), raw, home=home)
+
+
+@pytest.mark.parametrize('path', ['/run/systemd/generator.late/a.service',
+                                 '/run/user/1000/systemd/transient/a.service',
+                                 '/run/user/1000/systemd/generator.late/a.service'])
+def test_runtime_unit_paths_are_always_reinspected(path):
+    assert reviews.runtime_unit_root(Path(path)) is not None
+    assert reviews.runtime_unit_root(Path('/etc/systemd/system/a.service')) is None
+
+
+def test_plist_argument_with_spaces_retains_intermediate_alias_owner(tmp_path):
+    old = tmp_path.resolve() / 'old'
+    old.mkdir()
+    (old / 'payload').write_text('runtime')
+    alias = tmp_path.resolve() / 'resource with spaces'
+    alias.symlink_to(old / 'payload')
+    service = tmp_path.resolve() / 'worker.plist'
+    service.write_bytes(plistlib.dumps({'ProgramArguments': ['/usr/bin/cat', str(alias)]}))
+    assert retention.inspect_service_files({service}, [old]) == [str(old)]
+
+
 def test_dependency_matching_respects_components_and_nested_candidates():
     candidates = list(map(Path, ['/srv/build', '/srv/build/runtime', '/srv/build-copy', '/srv/other']))
     references = list(map(Path, ['/srv/build/runtime/lib/module.py', '/srv/build-copycat/file']))
@@ -49,6 +77,19 @@ def test_review_is_opt_in_and_does_not_silence_default_guard(site):
     with pytest.raises(ValueError, match='indirect service command'):
         retention.service_dependencies(context, [old])
     assert retention.service_dependencies(approve(), [old]) == []
+
+
+def test_reviewed_runtime_command_keeps_dependencies_and_detects_changed_input(site):
+    _, old, _, transient, _, _, approve = site
+    service = transient / 'legacy.service'
+    service.write_text(f'[Service]\nExecStart=/bin/sh -c "cat {old}/payload"\n')
+    context = approve()
+    assert retention.service_dependencies(context, [old]) == [str(old)]
+    service.write_text('[Service]\nExecStart=/bin/sh -c "$CHANGED"\n')
+    with pytest.raises(ValueError, match='indirect service command'):
+        retention.service_dependencies(context, [old])
+    service.unlink()
+    assert retention.service_dependencies(context, [old]) == []
 
 
 def test_review_keeps_direct_references_even_when_candidate_was_not_declared(site):

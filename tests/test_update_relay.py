@@ -10,6 +10,20 @@ from cc_remote.update import UpdateError
 from tests.test_update import _bundle, _installation
 
 
+def test_mac_administrator_retention_reads_the_wrappers_home(tmp_path, monkeypatch):
+    from pathlib import Path
+    import plistlib
+    from types import SimpleNamespace
+    home = tmp_path / 'operator'
+    agents = home / 'Library/LaunchAgents'
+    agents.mkdir(parents=True)
+    (agents / 'wrapper.plist').write_bytes(plistlib.dumps({
+        'EnvironmentVariables': {'RELAY_URL': 'wss://configured.example.test/ws'}}))
+    installation = SimpleNamespace(manifest={'os': 'darwin'}, metadata={'service_label': 'wrapper'})
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path / 'administrator')
+    assert update_relay.relay_origin(installation, home=home) == 'https://configured.example.test'
+
+
 def launch_request(command):
     if len(command) == 7 and command[:2] == ["sudo", "-n"] and command[3:5] == ["-I", "-c"]:
         return json.loads(command[-1])

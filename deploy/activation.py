@@ -42,7 +42,10 @@ def _peer_identity(peer: socket.socket, uid: int):
 def _legacy_wrapper_release(identity, release: str) -> bool:
     from cc_remote.wrapper.process_scan import process_command, process_environment_value
     args = process_command(identity)
-    if not args or args[1:] not in {(b"-m", b"cc_remote.wrapper"), (b"-s", b"-m", b"cc_remote.wrapper")}:
+    fixed = (b'-I', b'-B', os.fsencode(str(Path(release) / 'deploy/wrapper_main.py')))
+    current_fixed = (b'-I', b'-B', os.fsencode(str(Path(release).parent.parent / 'current/deploy/wrapper_main.py')))
+    if not args or args[1:] not in {(b"-m", b"cc_remote.wrapper"), (b"-s", b"-m", b"cc_remote.wrapper"),
+                                   fixed, current_fixed}:
         return False
     executable = Path(os.fsdecode(args[0]))
     if sys.platform == "darwin":

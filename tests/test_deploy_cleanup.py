@@ -57,6 +57,15 @@ def test_preview_never_moves_deletes_or_runs_acceptance(installation, monkeypatc
     assert not (root / module.JOURNAL).exists()
 
 
+def test_administrator_can_preserve_a_user_owned_installation(installation, monkeypatch):
+    root, _, _, old, inventory, _ = installation
+    owner = root.stat().st_uid
+    monkeypatch.setattr(module.os, 'geteuid', lambda: 0)
+    report = module.cleanup(inventory, apply=True, owner_uid=owner)
+    assert report['status'] == 'complete' and not old.exists()
+    assert (root / module.JOURNAL).stat().st_uid == owner
+
+
 def test_coherent_browser_markers_survive_cleanup(installation, browser_singletons):
     root, _, _, old, inventory, _ = installation
     temporary = browser_singletons(root)
@@ -65,6 +74,23 @@ def test_coherent_browser_markers_survive_cleanup(installation, browser_singleto
     assert not old.exists()
     assert {p: (p.lstat().st_ino, os.readlink(p)) for p in before} == before
     assert (temporary / 'SingletonSocket').exists()
+
+
+@pytest.mark.skipif(os.getuid() == 0, reason='needs a private user-owned browser profile')
+def test_administrator_resolves_browser_owners_temporary_directory(installation, browser_singletons, monkeypatch):
+    root, *_ = installation
+    temporary = browser_singletons(root)
+    monkeypatch.setattr(module.sys, 'platform', 'darwin')
+    monkeypatch.setattr(module.os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(module.tempfile, 'gettempdir', lambda: '/missing-administrator-temp')
+    calls = []
+    def getconf(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, str(temporary.parent) + '\n', '')
+    monkeypatch.setattr(module.subprocess, 'run', getconf)
+    assert module.browser_singleton_markers(root, []) == {root / name for name in
+                                                        ('SingletonCookie', 'SingletonLock', 'SingletonSocket')}
+    assert calls[0][-2:] == ['/usr/bin/getconf', 'DARWIN_USER_TEMP_DIR']
 
 
 @pytest.mark.parametrize('fault', [
@@ -437,6 +463,7 @@ def test_lsof_parser_preserves_space_paths_and_cwd_without_argv():
     b'p42\0\nfrtd\0n/proc/42/root (readlink: Operation not permitted)\0',
 ])
 def test_unobservable_process_record_stops_cleanup(installation, monkeypatch, record):
+    monkeypatch.setattr(module.sys, 'platform', 'darwin')
     root, _, _, old, inventory, _ = installation
     monkeypatch.setattr(module, "scan_command", lambda argv: record)
     monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/lsof")
@@ -450,12 +477,65 @@ def test_unobservable_process_record_stops_cleanup(installation, monkeypatch, re
 
 @pytest.mark.parametrize("failure", ["missing", "warning", "exit"])
 def test_incomplete_lsof_never_becomes_empty_safe_result(monkeypatch, failure):
+    def incomplete_procfs():
+        raise module.CleanupError('process files are not fully observable')
+    monkeypatch.setattr(module, 'linux_process_files', incomplete_procfs)
     monkeypatch.setattr(module.shutil, "which", lambda name: None if failure == "missing" else "/usr/bin/lsof")
     monkeypatch.setattr(module.subprocess, "run", lambda *a, **kw:
         subprocess.CompletedProcess(a, int(failure == "exit"), b'p1\0fcwd\0n/\0',
                                     b'cannot stat' if failure == "warning" else b''))
     with pytest.raises(module.CleanupError):
         module.process_references([Path("/candidate")])
+
+
+def test_linux_lsof_warning_requires_complete_alternative_scan(monkeypatch):
+    monkeypatch.setattr(module.sys, 'platform', 'linux')
+    monkeypatch.setattr(module.shutil, 'which', lambda _: '/usr/bin/lsof')
+    def command(argv):
+        if 'lsof' in argv[0]:
+            raise module.CleanupError('unrelated FUSE mount unavailable')
+        return b'42 0 worker\n'
+    monkeypatch.setattr(module, 'scan_command', command)
+    monkeypatch.setattr(module, 'linux_process_files', lambda: [(42, 'mem', Path('/candidate/mapped'))])
+    assert module.process_references([Path('/candidate')]) == {Path('/candidate'): ['pid 42: mem']}
+
+
+@pytest.mark.parametrize('persistent', [False, True])
+def test_procfs_lifecycle_race_restarts_the_complete_inventory(monkeypatch, persistent):
+    calls = []
+    def scan(proc, deadline):
+        calls.append(proc)
+        if persistent or len(calls) == 1:
+            raise module._ProcessInventoryChanged('a process execed during inspection')
+        return [(42, 'cwd', Path('/candidate'))]
+    monkeypatch.setattr(module, '_linux_process_files_once', scan)
+    if persistent:
+        with pytest.raises(module.CleanupError, match='not fully observable'):
+            module.linux_process_files()
+        assert len(calls) == 3
+    else:
+        assert module.linux_process_files() == [(42, 'cwd', Path('/candidate'))]
+        assert len(calls) == 2
+
+
+def test_linux_procfs_reads_cwd_executable_descriptors_and_mappings(tmp_path):
+    process = tmp_path / '42'
+    process.mkdir()
+    fields = ['S', *['0'] * 18, '12345']
+    (process / 'stat').write_text('42 (worker with spaces) ' + ' '.join(fields))
+    for kind in ('cwd', 'exe', 'root'):
+        (process / kind).symlink_to('/candidate/' + kind)
+    (process / 'fd').mkdir()
+    (process / 'fd/9').symlink_to('/candidate/open file (deleted)')
+    (process / 'maps').write_text('1234-5678 r--p 00000000 00:00 1 /candidate/mapped\\040file\n')
+    references = module.linux_process_files(tmp_path)
+    assert (42, 'cwd', Path('/candidate/cwd')) in references
+    assert (42, 'exe', Path('/candidate/exe')) in references
+    assert (42, '9', Path('/candidate/open file')) in references
+    assert (42, 'mem', Path('/candidate/mapped file')) in references
+    (process / 'exe').unlink()
+    with pytest.raises(module.CleanupError, match='not fully observable'):
+        module.linux_process_files(tmp_path)
 
 
 def test_check_timeout_never_discloses_private_arguments(installation, monkeypatch):

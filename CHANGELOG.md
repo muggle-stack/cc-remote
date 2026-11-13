@@ -9,6 +9,29 @@
 - Coordinate Relay, Wrapper and Web on wire protocol v92. Include the private
   collaboration database in transactional upgrade and rollback snapshots.
 
+## v5.3.26
+
+Improve deployment storage retention and multi-device history and notifications. Wire protocol v90 and Claude Agent SDK 0.2.174.
+
+- Reclaim incomplete Wrapper environments after failed or interrupted staging and retire verified obsolete deployment generations.
+- Use immutable-release Wrapper entrypoints and protect live processes, services, native account configuration and symlink dependencies during cleanup.
+- Support owner-aware administrator cleanup and show deferred retention in the update UI.
+- Retain device-scoped history projections and pagination caches when switching devices. Legacy unscoped browser caches rebuild once.
+- Keep Web Push and Harmony subscriptions bound to every authorized device for background completion and question notifications, with atomic updates and scoped revocation.
+
+See the bilingual [release notes](docs/releases/v5.3.26.md).
+
+## v5.3.25
+
+Improve Claude history recovery and native question interactions across harnesses. Wire protocol v90 and Claude Agent SDK 0.2.174.
+
+- Recover canonical Claude history after Wrapper restarts and rebuild browser caches containing stale incomplete replies or internal task notifications.
+- Group asynchronous progress notices with the working process and preserve final-answer completion boundaries.
+- Retain question input, selections, page and reading position when switching harnesses, and retire drafts after successful answers.
+- Use DSH headings for its native questions and close pointer-opened harness menus with Escape while restoring focus.
+
+See the bilingual [release notes](docs/releases/v5.3.25.md).
+
 ## v5.3.24
 
 Match session selection to the device center's soft left-edge glow. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.

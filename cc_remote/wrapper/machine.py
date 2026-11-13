@@ -9349,7 +9349,7 @@ class WrapperMachine:
         """
         rows: list[dict] = []
         if getattr(self.cfg, "codex_daemon_mode", "auto") != "auto":
-            rows = [{"profile": profile.id, "status": "disabled"}
+            rows = [{"profile": profile.id, "home": str(profile.home), "status": "disabled"}
                     for profile in self._codex_profiles]
             self._publish_codex_readiness(rows)
             return
@@ -9361,11 +9361,21 @@ class WrapperMachine:
                 error_type=type(exc).__name__,
             )
             self._publish_codex_readiness([
-                {"profile": profile.id, "status": "unavailable", "reason": "daily_cli_missing"}
+                {"profile": profile.id, "home": str(profile.home),
+                 "status": "unavailable", "reason": "daily_cli_missing"}
                 for profile in self._codex_profiles])
             return
 
         daily_cli = shutil.which("codex")
+        if (not self._codex_profiles_explicit and not os.environ.get('CODEX_BIN')
+                and codex_bin == 'codex' and daily_cli is None
+                and not any(path.exists() or path.is_symlink() for path in
+                            (profile.home / 'app-server-control/app-server-control.sock'
+                             for profile in self._codex_profiles))):
+            self._publish_codex_readiness([
+                {'profile': profile.id, 'home': str(profile.home), 'status': 'absent',
+                 'reason': 'cli_not_installed'} for profile in self._codex_profiles])
+            return
 
         async def prepare(profile: CodexProfile) -> dict:
             try:
@@ -9376,7 +9386,7 @@ class WrapperMachine:
                         self._codex_daemon_for_profile(profile),
                     )
             except Exception as exc:
-                row = {"profile": profile.id, "status": "unavailable",
+                row = {"profile": profile.id, "home": str(profile.home), "status": "unavailable",
                        "reason": "connection_failed", "error_type": type(exc).__name__}
             if row["status"] != "ready":
                 log.warning(

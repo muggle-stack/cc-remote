@@ -311,6 +311,30 @@ def test_install_report_keeps_cli_discovery_unverified_and_errors_separate(capsy
     assert "版本不一致" in output
 
 
+@pytest.mark.parametrize('installed', [False, True])
+def test_absent_engine_is_rechecked_before_acceptance(tmp_path, monkeypatch, installed):
+    monkeypatch.setattr(installer, 'process_owner_uid', lambda _: os.geteuid())
+    monkeypatch.setattr(installer, 'codex_candidates', lambda: ['/opt/codex'] if installed else [])
+    monkeypatch.delenv('CODEX_BIN', raising=False)
+    row = {'profile': 'primary', 'home': str(tmp_path), 'status': 'absent'}
+    asyncio.run(installer.refresh_configuration({'wrapper': {'pid': 42}, 'profiles': [row]}))
+    assert (row['status'] == 'absent') == (not installed)
+
+
+def test_optional_missing_codex_is_reported_without_starting_a_daemon(tmp_path, monkeypatch):
+    from cc_remote.wrapper import machine as machine_module
+    rows = []
+    machine = SimpleNamespace(cfg=SimpleNamespace(codex_daemon_mode='auto'),
+                              _codex_profiles_explicit=False,
+                              _codex_profiles=[SimpleNamespace(id='primary', home=tmp_path)],
+                              _publish_codex_readiness=rows.extend)
+    monkeypatch.setattr(machine_module, 'resolve_codex_bin', lambda: 'codex')
+    monkeypatch.setattr(machine_module.shutil, 'which', lambda _: None)
+    monkeypatch.delenv('CODEX_BIN', raising=False)
+    asyncio.run(machine_module.WrapperMachine.prepare_codex_daemons(machine))
+    assert rows == [{'profile': 'primary', 'home': str(tmp_path), 'status': 'absent', 'reason': 'cli_not_installed'}]
+
+
 @pytest.mark.parametrize("mode", ["ready", "deleted_cwd", "invalid", "hang", "swapped"])
 def test_live_config_probe_rejects_healthy_handshake_but_unusable_config(monkeypatch, mode):
     calls = []

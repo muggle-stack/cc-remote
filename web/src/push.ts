@@ -2,7 +2,7 @@ import { hasHarmonyPush, enableHarmonyPush, disableHarmonyPush } from "./harmony
 import type { RemoteNotificationMode } from "./notification-mode";
 
 export interface PushBindingTarget {
-  machineId: string;
+  machineIds: string[];
   mode: RemoteNotificationMode;
 }
 
@@ -24,7 +24,14 @@ function sameTarget(
   left: PushBindingTarget | null,
   right: PushBindingTarget | null,
 ): boolean {
-  return left?.machineId === right?.machineId && left?.mode === right?.mode;
+  if (!left || !right) return left === right;
+  return left.mode === right.mode
+    && left.machineIds.length === right.machineIds.length
+    && left.machineIds.every((machine, index) => machine === right.machineIds[index]);
+}
+
+function copyTarget(target: PushBindingTarget | null): PushBindingTarget | null {
+  return target ? { ...target, machineIds: [...target.machineIds] } : null;
 }
 
 export class PushBindingCoordinator {
@@ -51,19 +58,20 @@ export class PushBindingCoordinator {
   snapshot(): PushBindingSnapshot {
     return {
       state: this.state,
-      target: this.desired ? { ...this.desired } : null,
-      bound: this.bound ? { ...this.bound } : null,
+      target: copyTarget(this.desired),
+      bound: copyTarget(this.bound),
     };
   }
 
   isRemoteActive(machineId: string): boolean {
-    if (!this.desired || this.desired.machineId !== machineId) return false;
-    return this.bound?.machineId === machineId
-      && (this.state === "remote" || this.state === "binding");
+    return !!this.desired?.machineIds.includes(machineId)
+      && !!this.bound?.machineIds.includes(machineId);
   }
 
   async setTarget(target: PushBindingTarget | null, refresh = false): Promise<PushBindingSnapshot> {
-    this.desired = target ? { ...target } : null;
+    this.desired = target ? {
+      ...target, machineIds: [...new Set(target.machineIds)].sort(),
+    } : null;
     this.refresh ||= refresh;
     if (!this.drain) {
       this.drain = this.run().finally(() => {
@@ -81,7 +89,7 @@ export class PushBindingCoordinator {
 
   private async run(): Promise<void> {
     while (true) {
-      const target = this.desired ? { ...this.desired } : null;
+      const target = copyTarget(this.desired);
       if (sameTarget(target, this.bound) && !this.refresh) {
         this.publish(target ? "remote" : "off");
         return;
@@ -105,7 +113,7 @@ export class PushBindingCoordinator {
       if (!target) {
         if (enabled) this.bound = null;
         this.publish("off");
-      } else if (enabled || this.bound?.machineId === target.machineId) {
+      } else if (enabled || target.machineIds.every(machine => this.bound?.machineIds.includes(machine))) {
         // During a same-machine mode update the prior remote subscription still
         // delivers. Treat it as remote to avoid a duplicate local notification.
         this.publish("remote");
@@ -117,10 +125,10 @@ export class PushBindingCoordinator {
   }
 }
 
-export async function enableRemotePush(machineId: string, mode: RemoteNotificationMode = "generic"): Promise<PushBindingResult> {
+export async function enableRemotePush(machineIds: string[], mode: RemoteNotificationMode = "generic"): Promise<PushBindingResult> {
   try {
-    if (hasHarmonyPush()) return await enableHarmonyPush(machineId, mode);
-    return await (await import("./web-push.ts")).enableRemotePush(machineId, mode);
+    if (hasHarmonyPush()) return await enableHarmonyPush(machineIds, mode);
+    return await (await import("./web-push.ts")).enableRemotePush(machineIds, mode);
   } catch {
     return false;
   }

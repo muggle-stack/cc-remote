@@ -25,7 +25,7 @@ async function config(): Promise<PushConfig | null> {
 }
 
 export async function enableRemotePush(
-  machineId: string,
+  machineIds: string[],
   mode: RemoteNotificationMode = "generic",
 ): Promise<boolean> {
   if (!("serviceWorker" in navigator) || !("PushManager" in window)) return false;
@@ -47,7 +47,8 @@ export async function enableRemotePush(
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        machine_id: machineId,
+        machine_id: machineIds[0],
+        machine_ids: machineIds,
         notification_mode: mode,
         endpoint: serialized.endpoint,
         keys: serialized.keys,

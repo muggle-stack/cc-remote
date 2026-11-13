@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cc_remote.wrapper.codex_readiness import REPORT_NAME, probe_config
 from cc_remote.wrapper.codex_daemon import socket_identity
+from cc_remote.wrapper.codex_runtime import codex_candidates
 from cc_remote.wrapper.process_scan import ProcessIdentity, process_identity, process_owner_uid
 from deploy.work_registry_snapshot import resolve_wrapper_state_dir
 
@@ -36,10 +37,16 @@ async def refresh_configuration(report: dict) -> None:
     """Supplement the activation receipt with fresh, non-mutating native RPCs."""
     owner = process_owner_uid(report["wrapper"]["pid"])
     for row in report["profiles"]:
-        if row["status"] != "ready":
+        if row["status"] not in {'ready', 'absent'}:
             continue
         if owner != os.geteuid():
             row.update(status="unavailable", reason="wrong_probe_user")
+            continue
+        if row['status'] == 'absent':
+            path = Path(row.get('home', '')) / 'app-server-control/app-server-control.sock'
+            if (not Path(row.get('home', '')).is_absolute() or os.environ.get('CODEX_BIN')
+                    or codex_candidates() or path.exists() or path.is_symlink()):
+                row.update(status='unavailable', reason='daemon_changed')
             continue
         try:
             expected = str(Path(row["home"]) / "app-server-control/app-server-control.sock")
@@ -91,7 +98,7 @@ def read_receipt(path: Path, release: Path, after: float) -> dict | None:
             and after <= report["created_at"] <= time.time() + 5
             and isinstance(rows, list) and 0 < len(rows) <= 32
             and all(isinstance(row, dict) and isinstance(row.get("profile"), str)
-                    and row.get("status") in {"ready", "disabled", "unavailable"} for row in rows)
+                    and row.get("status") in {"ready", "disabled", "unavailable", "absent"} for row in rows)
             and process_identity(identity.pid) == identity
             and process_owner_uid(identity.pid) == info.st_uid
         )
@@ -116,6 +123,8 @@ def describe(report: dict) -> bool:
             print(f"Codex {profile}: {detail}")
         elif row["status"] == "disabled":
             print(f"Codex {profile}: 保留已有的关闭设置，未启用共享连接。")
+        elif row['status'] == 'absent':
+            print(f"Codex {profile}: 本机未安装，已确认无需执行共享连接检查。")
         else:
             complete = False
             print(f"Codex {profile}: {_REASONS.get(row.get('reason'), _REASONS['connection_failed'])}")

@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import time
+from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -52,6 +54,72 @@ def _subscription(
     if notification_mode is not None:
         value["notification_mode"] = notification_mode
     return value
+
+
+@pytest.mark.parametrize("engine", ["claude", "codex", "dsh"])
+def test_multi_device_push_keeps_background_completion_and_question_routes(tmp_path, engine):
+    config = _cfg(tmp_path, login_users_json=json.dumps({
+        "alice": {"password": "alice correct horse battery staple", "machines": ["device-a", "device-b"]},
+    }))
+    app = create_app(config)
+    sent = []
+
+    async def send(subscription, payload):
+        sent.append((subscription.machine_id, json.loads(payload)))
+        return 201
+
+    app.state.push_dispatcher._sender = send
+    with TestClient(app, base_url=config.public_origin) as client:
+        assert client.post("/api/login", json={
+            "username": "alice", "password": "alice correct horse battery staple",
+        }).status_code == 200
+        body = {**_subscription("device-a", "session"), "machine_ids": ["device-a", "device-b"]}
+        assert client.post("/api/push/subscribe", json=body).status_code == 200
+        assert client.post("/api/push/subscribe", json={
+            **body, "machine_ids": ["device-a", "unauthorized"],
+        }).status_code == 400
+        for machine in body["machine_ids"]:
+            context = {"engine": engine, "space": "code", "sid": "native-session", "display_name": "Task"}
+            asyncio.run(app.state.push_dispatcher.notify_turn_end(machine, outcome="success", context=context))
+            asyncio.run(app.state.push_dispatcher.notify_question(machine, context=context))
+        assert [machine for machine, _ in sent] == ["device-a", "device-a", "device-b", "device-b"]
+        assert all(payload["route"]["machine_id"] == machine for machine, payload in sent)
+        assert all(payload["route"]["engine"] == engine for _, payload in sent)
+        assert client.post("/api/push/unsubscribe", json={"endpoint": body["endpoint"]}).status_code == 200
+        assert all(not asyncio.run(app.state.push_store.for_machine(machine)) for machine in body["machine_ids"])
+        assert client.post("/api/push/subscribe", json=body).status_code == 200
+        assert client.post("/api/logout").status_code == 200
+        assert all(not asyncio.run(app.state.push_store.for_machine(machine)) for machine in body["machine_ids"])
+
+
+@pytest.mark.asyncio
+async def test_group_subscription_replacement_is_atomic_and_fences_old_deliveries(tmp_path):
+    store = PushSubscriptionStore(str(tmp_path / "push.db"))
+    original = PushSubscription("alice", "device-a", "https://push.example/test", "p", "a", "old-login", time.time() + 60)
+    await store.upsert(original, ["device-a", "device-b"])
+    with sqlite3.connect(store.path) as db:
+        db.execute("""CREATE TRIGGER reject_blocked BEFORE INSERT ON push_subscriptions
+                      WHEN NEW.machine_id='blocked' BEGIN SELECT RAISE(ABORT, 'injected'); END""")
+    with pytest.raises(sqlite3.IntegrityError):
+        await store.upsert(replace(original, session_jti="new-login"), ["device-a", "blocked"])
+    assert await store.current(original)
+    assert len(await store.for_machine("device-b")) == 1
+    replacement = replace(original, session_jti="new-login", notification_mode="session")
+    await store.upsert(replacement, ["device-a", "device-b"])
+    await store.remove_subscription(original)
+    assert await store.current(replacement)
+    sent = []
+
+    async def send(*args):
+        sent.append(args)
+        return 201
+
+    dispatcher = PushDispatcher(store, vapid_private_key="unused", vapid_subject="unused", sender=send)
+    await dispatcher._deliver(original, "stale payload")
+    assert sent == []
+    await store.remove_machine("alice", "device-a")
+    assert not await store.for_machine("device-a")
+    assert len(await store.for_machine("device-b")) == 1
 
 
 def test_push_subscription_requires_auth_and_machine_scope(tmp_path):

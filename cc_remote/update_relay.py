@@ -38,17 +38,18 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def relay_origin(installation: Installation) -> str:
+def relay_origin(installation: Installation, *, home: Path | None = None) -> str:
     if installation.manifest["os"] == "darwin":
+        home = home or Path.home()
         environment = {}
         label = installation.metadata.get("service_label", "com.muggle.cc-remote.wrapper")
-        service = Path.home() / "Library/LaunchAgents" / f"{label}.plist"
+        service = home / "Library/LaunchAgents" / f"{label}.plist"
         try:
             if service.exists():
                 environment = plistlib.loads(service.read_bytes()).get("EnvironmentVariables", {})
             value = environment.get("RELAY_URL")
             if not value:
-                path = Path(environment.get("CC_REMOTE_DEVICE_CONFIG") or Path.home() / ".cc-remote/device.json")
+                path = Path(environment.get("CC_REMOTE_DEVICE_CONFIG") or home / ".cc-remote/device.json")
                 value = json.loads(path.read_text()).get("relay_url")
         except (OSError, ValueError, AttributeError) as exc:
             raise UpdateError("cannot read this device's Relay URL; check its pairing configuration") from exc

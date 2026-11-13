@@ -183,6 +183,104 @@ async def test_store_transfer_expiry_and_versioned_removal(tmp_path):
     assert not await store.for_machine("device-b")
 
 
+@pytest.mark.parametrize("engine", ["claude", "codex", "dsh"])
+def test_native_group_binding_checks_each_device_and_clears_all_on_logout(tmp_path, credentials, engine):
+    from urllib.parse import parse_qs, urlsplit
+
+    config = cfg(tmp_path, credentials, login_users_json=json.dumps({
+        "alice": {"password": "alice correct horse battery staple", "machines": ["device-a", "device-b"]},
+    }))
+    app = server.create_app(config)
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+        return "80000000"
+
+    app.state.harmony_push_dispatcher.sender = send
+    with TestClient(app, base_url=config.public_origin) as client:
+        assert client.post("/api/login", json={
+            "username": "alice", "password": "alice correct horse battery staple",
+        }).status_code == 200
+        body = {**payload(notification_mode="session"), "machine_ids": ["device-a", "device-b"]}
+        assert client.post("/api/push/harmony/subscribe", json=body).status_code == 200
+        for invalid in [[], ["device-a", "denied"], ["device-b"], ["device-a", 7], ["device-a"] * 129]:
+            assert client.post("/api/push/harmony/subscribe", json={**body, "machine_ids": invalid}).status_code == 400
+        assert all(len(asyncio.run(app.state.harmony_push_store.for_machine(machine))) == 1
+                   for machine in body["machine_ids"])
+        for machine in body["machine_ids"]:
+            context = {"engine": engine, "space": "code", "sid": "native-session", "display_name": "Task"}
+            asyncio.run(app.state.harmony_push_dispatcher.notify_turn_end(machine, outcome="success", context=context))
+            asyncio.run(app.state.harmony_push_dispatcher.notify_question(machine, context=context))
+        routes = []
+        for message in sent:
+            uri = message["payload"]["notification"]["clickAction"]["uri"]
+            routes.append(json.loads(parse_qs(urlsplit(uri).query)["route"][0]))
+        assert [route["machine_id"] for route in routes] == ["device-a", "device-a", "device-b", "device-b"]
+        assert all(route["engine"] == engine for route in routes)
+        assert client.post("/api/logout").status_code == 200
+        assert all(not asyncio.run(app.state.harmony_push_store.for_machine(machine)) for machine in body["machine_ids"])
+
+
+def test_device_revocation_removes_only_that_devices_push_bindings(tmp_path, credentials):
+    config = cfg(tmp_path, credentials, login_users_json=json.dumps({
+        "alice": {"password": "alice correct horse battery staple", "machines": ["fixed-device"]},
+    }), push_vapid_public_key="B" + "a" * 86, push_vapid_private_key="unused", push_vapid_subject="mailto:test@example.com")
+    app = server.create_app(config)
+    grant = asyncio.run(app.state.device_store.create_pairing("alice"))
+    enrolled = asyncio.run(app.state.device_store.redeem(grant.code, label="Temporary device", platform="test", hostname="test"))
+    assert enrolled is not None
+    machine_ids = ["fixed-device", enrolled.machine_id]
+    with TestClient(app, base_url=config.public_origin) as client:
+        assert client.post("/api/login", json={
+            "username": "alice", "password": "alice correct horse battery staple",
+        }).status_code == 200
+        web = {"machine_id": "fixed-device", "machine_ids": machine_ids,
+               "endpoint": "https://push.example/test", "keys": {"p256dh": "p" * 87, "auth": "a" * 22}}
+        native = {**payload("fixed-device"), "machine_ids": machine_ids}
+        assert client.post("/api/push/subscribe", json=web).status_code == 200
+        assert client.post("/api/push/harmony/subscribe", json=native).status_code == 200
+        assert client.delete(f"/api/devices/{enrolled.machine_id}").status_code == 200
+        assert client.post("/api/push/subscribe", json=web).status_code == 400
+        assert client.post("/api/push/harmony/subscribe", json=native).status_code == 400
+        for store in [app.state.push_store, app.state.harmony_push_store]:
+            assert not asyncio.run(store.for_machine(enrolled.machine_id))
+            assert len(asyncio.run(store.for_machine("fixed-device"))) == 1
+
+
+@pytest.mark.asyncio
+async def test_native_multi_device_migration_and_failed_replacement_preserve_bindings(tmp_path):
+    path = tmp_path / "push.db"
+    original = sub()
+    with sqlite3.connect(path) as db:
+        db.execute("""CREATE TABLE harmony_push_subscriptions (
+            token TEXT PRIMARY KEY, subject TEXT NOT NULL, machine_id TEXT NOT NULL,
+            session_jti TEXT NOT NULL, expires_at REAL NOT NULL, notification_mode TEXT NOT NULL,
+            binding_id TEXT NOT NULL)""")
+        db.execute("INSERT INTO harmony_push_subscriptions VALUES (?, ?, ?, ?, ?, ?, ?)",
+                   (original.token, original.subject, original.machine_id, original.session_jti,
+                    original.expires_at, original.notification_mode, original.binding_id))
+    store = HarmonyPushStore(str(path))
+    assert await store.current(original)
+    replacement = replace(original, binding_id="group")
+    await store.upsert(replacement, ["device-a", "device-b"])
+    store = HarmonyPushStore(str(path))
+    assert await store.current(replacement)
+    assert await store.current(replace(replacement, machine_id="device-b"))
+    await store.remove_binding(original)
+    assert await store.current(replacement)
+    with sqlite3.connect(path) as db:
+        db.execute("""CREATE TRIGGER reject_blocked BEFORE INSERT ON harmony_push_subscriptions
+                      WHEN NEW.machine_id='blocked' BEGIN SELECT RAISE(ABORT, 'injected'); END""")
+    with pytest.raises(sqlite3.IntegrityError):
+        await store.upsert(replace(replacement, binding_id="failed"), ["device-a", "blocked"])
+    assert await store.current(replacement)
+    assert len(await store.for_machine("device-b")) == 1
+    await store.remove_machine("alice", "device-a")
+    assert not await store.for_machine("device-a")
+    assert len(await store.for_machine("device-b")) == 1
+
+
 @pytest.mark.asyncio
 async def test_generic_privacy_session_routes_and_logout_fence(tmp_path):
     store = HarmonyPushStore(str(tmp_path / "push.db"))

@@ -4,7 +4,7 @@
 
 Self-hosted · Multiple sessions and devices · Live tool activity · Code / Work / Collaboration · Web / PWA / TUI
 
-**Product version: v5.3.24** · Wire protocol v92
+**Product version: v5.3.26** · Wire protocol v92
 
 [中文](README.md) · [Collaboration rooms](#collaboration) · [Release install (recommended)](#install-and-upgrade) · [Engine comparison](#engines-and-features) · [Try from source](#quick-start) ·
 [Interface tour](#interface-tour) · [Terminal workspace](#terminal-workspace) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)
@@ -486,7 +486,7 @@ procedures, independent of core deployment success.
 ### Web, PWA and Desktop
 
 Web/PWA are the released graphical clients, sharing one UI across all three engines.
-The existing macOS Desktop is an experimental Electron shell; v5.3.24 does not ship a new
+The existing macOS Desktop is an experimental Electron shell; v5.3.26 does not ship a new
 Desktop installer. The compatibility repair loads the configured Relay's pages instead of
 outdated bundled assets, retaining sign-in and native integrations. `cc-remote update` updates
 Relay, Web and Wrapper, not the Electron application. See [Desktop compatibility](docs/desktop.md).

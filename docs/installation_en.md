@@ -32,13 +32,13 @@ repository, install Node, or paste tokens into service definitions.
 ### 1) Download and verify the bootstrap
 
 Confirm the version and release attestation on GitHub, then download
-`install.sh` and `SHA256SUMS` from that same release. The example uses `5.3.24`;
+`install.sh` and `SHA256SUMS` from that same release. The example uses `5.3.26`;
 first confirm that it is published, or replace it with the published tag you
 selected (without the leading `v`). This
 does not select an unpublished development-branch build:
 
 ```bash
-export CC_REMOTE_VERSION=5.3.24
+export CC_REMOTE_VERSION=5.3.26
 release_base="https://github.com/muggle-stack/cc-remote/releases/download/v${CC_REMOTE_VERSION}"
 curl -fLO "$release_base/install.sh"
 curl -fLO "$release_base/SHA256SUMS"
@@ -505,6 +505,15 @@ and prepares its environment; it **does not activate**. Use its `--help` and the
 existing installation's activation transaction. Keep the same service user and
 external configuration, snapshot private state while stopped, atomically switch
 `current`, validate, and retain the old release for rollback.
+
+When the dependency lock and Python pin match the active release, use
+`prepare_wrapper_stage.py --defer-identical` to validate the staged code with
+that verified environment. Let the activator materialize the release environment.
+Keep throwaway preflight environments in `TemporaryDirectory` scopes. Source
+jobs retain their manifests, receipts and one complete rollback set, then retire
+completed build bundles, uploads and desktop staging copies through
+`deploy/cleanup.py`. Record cleanup failures and finish their recovery using the
+original journal. Installation success and deferred cleanup are separate outcomes.
 
 Linux credentials belong in root-only `/etc/cc-remote/wrapper.env` and/or
 `/etc/cc-remote/device.env`, not a source `.env`; macOS uses installer-managed

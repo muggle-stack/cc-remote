@@ -505,9 +505,12 @@ export default function App() {
   const artifactReadingMemory = useMemo(() => ({
     machineId, entries: new Map<string, ArtifactReadingState>(),
   }), [machineId]);
-  const notificationScopeRef = useRef({ machineId, authed });
-  notificationScopeRef.current = { machineId, authed };
   const [remoteDevices, setRemoteDevices] = useState<RemoteDevice[]>([]);
+  const notificationMachineIdsKey = JSON.stringify(
+    [...new Set(remoteDevices.map(device => device.machine_id))].sort(),
+  );
+  const notificationScopeRef = useRef({ authed, machineIdsKey: notificationMachineIdsKey });
+  notificationScopeRef.current = { authed, machineIdsKey: notificationMachineIdsKey };
   const [devicesLoadState, setDevicesLoadState] = useState<
     "idle" | "loading" | "ready" | "error"
   >("idle");
@@ -557,10 +560,11 @@ export default function App() {
   const artifactDirtyRef = useRef(false);
   const [, bumpHistoryImageRevision] = useReducer((value: number) => value + 1, 0);
   const pushCoordinatorRef = useRef<PushBindingCoordinator | null>(null);
+  const harmonyBindingRevisionRef = useRef<number | null>(null);
   if (pushCoordinatorRef.current === null) {
     pushCoordinatorRef.current = new PushBindingCoordinator(async (target) => (
       target
-        ? enableRemotePush(target.machineId, target.mode)
+        ? enableRemotePush(target.machineIds, target.mode)
         : disableRemotePush()
     ));
   }
@@ -786,6 +790,7 @@ export default function App() {
     useRef<Map<string, string | null>>(new Map());
   const historyCacheEpochRef = useRef<Map<string, number>>(new Map());
   const previousMachineRef = useRef(machineId);
+  const ownsDeviceState = previousMachineRef.current === machineId;
   const notificationListRequestRef = useRef<string | null>(null);
   const notificationOriginRef = useRef<NotificationOrigin | null>(null);
   const pendingNotificationErrorRef = useRef<string | null>(null);
@@ -1009,8 +1014,6 @@ export default function App() {
       });
       pendingNotificationErrorRef.current = null;
     }
-    void import("./cache").then((module) => module.clearCache());
-    void historyPageCacheRef.current.clear();
   }, [clearForkFocusLease, clearHistoryDetailRequests, machineId]);
 
   // The focused session's runtime (turns/state/model/perm/queue/...). Falls back
@@ -1852,14 +1855,20 @@ export default function App() {
     const enabled = notificationMode !== "off"
       && (harmonyPush.available ? harmonyPush.granted
         : typeof Notification !== "undefined" && Notification.permission === "granted");
+    if (authed && enabled && devicesLoadState !== "ready") return;
+    const machineIds = JSON.parse(notificationMachineIdsKey) as string[];
+    const refreshNative = harmonyPush.available && authed
+      && harmonyBindingRevisionRef.current !== harmonyPush.revision;
+    harmonyBindingRevisionRef.current = authed && harmonyPush.available ? harmonyPush.revision : null;
     void pushCoordinatorRef.current?.setTarget(
-      authed && enabled
-        ? { machineId, mode: notificationMode }
+      authed && enabled && machineIds.length
+        ? { machineIds, mode: notificationMode }
         : null,
       // Reconcile native bindings after reload/foreground, including stored Off.
-      harmonyPush.available && authed,
+      refreshNative,
     );
-  }, [authed, machineId, notificationMode, harmonyPush.available, harmonyPush.granted, harmonyPush.revision, notificationBindingRevision]);
+  }, [authed, devicesLoadState, notificationMachineIdsKey, notificationMode,
+    harmonyPush.available, harmonyPush.granted, harmonyPush.revision, notificationBindingRevision]);
 
   useEffect(() => {
     try {
@@ -2440,7 +2449,7 @@ export default function App() {
       let seeded = { cursors: {} as Record<string, number>,
         generations: {} as Record<string, string>,
         controls: {} as Record<string, SessionControl> };
-      try { seeded = await import("./cache").then((m) => m.loadAllReplayState()); } catch { /* best-effort */ }
+      try { seeded = await import("./cache").then((m) => m.loadAllReplayState(machineId)); } catch { /* best-effort */ }
       if (cancelled) return;
       const ws = new RelayWs({
         onReloadRequired: webUpdate.check,
@@ -2866,7 +2875,7 @@ export default function App() {
               historyCacheEpochRef.current.set(
                 sid, (historyCacheEpochRef.current.get(sid) ?? 0) + 1);
               void import("./cache").then((module) =>
-                module.invalidateSessionCache(sid));
+                module.invalidateSessionCache(sid, machineId));
             }
             // The marker is deliberately tiny/replayable; the full replacement
             // is one-shot and may have been dropped by a disconnect or frame
@@ -2911,7 +2920,7 @@ export default function App() {
               historyCacheEpochRef.current.set(
                 sid, (historyCacheEpochRef.current.get(sid) ?? 0) + 1);
               void import("./cache").then((module) =>
-                module.invalidateSessionCache(sid));
+                module.invalidateSessionCache(sid, machineId));
             }
             setWorkArtifactsBySid((current) => {
               if (!(sid in current)) return current;
@@ -2955,7 +2964,7 @@ export default function App() {
               historyInvalidationsRef.current.delete(msg.session_id);
               historyInvalidationGenerationsRef.current.delete(msg.session_id);
               void import("./cache").then((module) =>
-                module.allowSessionCache(msg.session_id));
+                module.allowSessionCache(msg.session_id, machineId));
             }
           }
           let settledHistoryCausalKey: string | undefined;
@@ -4340,19 +4349,25 @@ export default function App() {
   useEffect(() => {
     const sid = rt.ccSessionId;
     const revision = rt.historyRevision;
-    if (!sid || !revision
+    if (!authed || !ownsDeviceState || !sid || !revision
         || historyInvalidationsRef.current.has(sid)
         || isHistoryRecoveryPending(state.historyRecovery, sid)) return;
+    let cancelled = false;
+    const ws = wsRef.current;
     import("./cache").then(({ saveSession }) => {
-      const live = wsRef.current?.lastSeqFor(sid) || 0;
+      if (cancelled) return;
+      const live = ws?.lastSeqFor(sid) || 0;
       saveSession(
         sid, rt.turns, live, revision,
-        wsRef.current?.generationFor(sid),
+        ws?.generationFor(sid),
         rt.control,
         rt.historyHeadKnown && !rt.hasMore && !rt.historyInvalidated,
+        machineId,
       );
     });
+    return () => { cancelled = true; };
   }, [
+    authed, machineId, ownsDeviceState,
     focusedSid, rt.turns, rt.ccSessionId, rt.historyRevision, rt.control,
     rt.historyHeadKnown, rt.hasMore, rt.historyInvalidated,
     state.historyRecovery,
@@ -4365,7 +4380,7 @@ export default function App() {
   // clears the spinner only when both cache and wrapper stay silent.
   useEffect(() => {
     const sid = focusedSid;
-    if (!sid) return;
+    if (!ownsDeviceState || !sid) return;
     let cancelled = false;
     let requestFrame: number | null = null;
     const cacheEpoch = historyCacheEpochRef.current.get(sid) ?? 0;
@@ -4377,7 +4392,7 @@ export default function App() {
         }
       });
     }
-    void import("./cache").then(({ loadSession }) => loadSession(sid)).then((cached) => {
+    void import("./cache").then(({ loadSession }) => loadSession(sid, machineId)).then((cached) => {
       const valid = !cancelled
           && cacheEpoch === (historyCacheEpochRef.current.get(sid) ?? 0)
           && !historyInvalidationsRef.current.has(sid)
@@ -4405,7 +4420,7 @@ export default function App() {
       window.clearTimeout(t);
       if (requestFrame != null) window.cancelAnimationFrame(requestFrame);
     };
-  }, [focusedSid, requestHistory, state.connState]);
+  }, [machineId, ownsDeviceState, focusedSid, requestHistory, state.connState]);
 
   // An unfocused "/" focuses the composer; a second press types normally.
   // Cmd/Ctrl+B => toggle sidebar; Cmd/Ctrl+Shift+B => open latest turn's diff.
@@ -5925,17 +5940,18 @@ export default function App() {
   };
   const updateNotificationMode = async (mode: NotificationMode): Promise<boolean> => {
     changingNotificationModeRef.current = true;
-    const scopeChanged = () => notificationScopeRef.current.machineId !== machineId
-      || notificationScopeRef.current.authed !== authed;
+    const scopeChanged = () => notificationScopeRef.current.authed !== authed;
     try {
       if (hasHarmonyPush()) {
         if (mode !== "off" && !await requestHarmonyPermission()) return false;
         if (scopeChanged()) return false;
-        const target = mode === "off" ? null : { machineId, mode };
+        const machineIds = JSON.parse(notificationMachineIdsKey) as string[];
+        if (mode !== "off" && !machineIds.length) return false;
+        const target = mode === "off" ? null : { machineIds, mode };
         const result = await pushCoordinatorRef.current?.setTarget(target, true);
         if (scopeChanged()) return false;
         if (mode === "off" ? !!harmonyPushSnapshot().error
-          : result?.bound?.mode !== mode || result?.bound?.machineId !== machineId
+          : result?.bound?.mode !== mode || result?.state !== "remote"
             || !!harmonyPushSnapshot().error) return false;
         if (mode !== "off") confirmHarmonyPermission();
       } else if (mode !== "off") {
@@ -5955,7 +5971,9 @@ export default function App() {
       return true;
     } finally {
       changingNotificationModeRef.current = false;
-      if (scopeChanged()) recheckNotificationBinding();
+      if (scopeChanged() || notificationScopeRef.current.machineIdsKey !== notificationMachineIdsKey) {
+        recheckNotificationBinding();
+      }
     }
   };
   const activeDevice = remoteDevices.find(

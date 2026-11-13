@@ -282,7 +282,8 @@ with service.open("rb") as stream:
     payload = plistlib.load(stream)
 arguments = payload.get("ProgramArguments", [])
 if (payload.get("Label") != sys.argv[3] or len(arguments) < 3
-        or arguments[1:3] != ["-m", "cc_remote.wrapper"]
+        or arguments[1:] not in (["-m", "cc_remote.wrapper"],
+                                ["-I", "-B", str(root / "current/deploy/wrapper_main.py")])
         or Path(arguments[0]).resolve() != (root / "current/.venv/bin/python").resolve()
         or Path(payload.get("WorkingDirectory", "")).resolve() != (root / "current").resolve()):
     raise SystemExit("custom root and LaunchAgent do not identify the same Wrapper")
@@ -489,8 +490,14 @@ cleanup() {
     fi
     if [ "$rollback_ready" -eq 1 ]; then
       if [ -n "$retention_generation" ]; then
+        rollback_proof=()
+        if [ -n "$previous" ] && [ "$service_was_running" -eq 1 ]; then
+          rollback_proof=(--rollback-verified)
+        elif [ -z "$previous" ] && [ "$service_was_running" -eq 0 ] && [ ! -e "$service_file" ]; then
+          rollback_proof=(--rollback-verified)
+        fi
         "$target/.venv/bin/python" "$target/deploy/release_retention.py" abort \
-          --root "$appdir" --generation "$retention_generation" || true
+          --root "$appdir" --generation "$retention_generation" "${rollback_proof[@]}" || true
       fi
       if [ "$snapshot_created" -eq 1 ]; then
         echo "ERROR: wrapper activation failed; code/service state and wrapper data were restored" >&2

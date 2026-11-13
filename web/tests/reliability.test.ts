@@ -1386,10 +1386,10 @@ assert.match(historyAppSource,
 assert.match(historyAppSource,
   /requestHistoryTurnDetail = useCallback\([\s\S]{0,120}autoLoad = false/,
   "every detail entry point must default to one bounded page");
-assert.match(cacheSource, /const CACHE_VER = 30/,
-  "Claude restart recovery must invalidate cached task-notification rows and synthetic failure clocks");
-assert.match(cacheSource, /objectStore\(STORE\)\.delete\(sessionId\)/);
-assert.match(cacheSource, /job\.epoch !== sessionEpoch\(job\.sid\)/,
+assert.match(cacheSource, /const CACHE_VER = 31/,
+  "device ownership and repaired Claude history require a fresh cache projection");
+assert.match(cacheSource, /objectStore\(STORE\)\.delete\(key\)/);
+assert.match(cacheSource, /job\.epoch !== sessionEpoch\(job\.key\)/,
   "a debounced pre-marker write must not recreate the deleted cache row");
 assert.match(autoCompactControlSource,
   /设置已应用；上下文用量将在下一次可靠读取后更新。/,
@@ -18959,8 +18959,8 @@ const bindingCoordinator = new PushBindingCoordinator(
     bindingCalls.push({ target, resolve: resolveBinding });
   }),
 );
-const bindingA = { machineId: "machine-a", mode: "generic" as const };
-const bindingB = { machineId: "machine-b", mode: "session" as const };
+const bindingA = { machineIds: ["machine-a"], mode: "generic" as const };
+const bindingB = { machineIds: ["machine-b"], mode: "session" as const };
 const bindA = bindingCoordinator.setTarget(bindingA);
 const bindB = bindingCoordinator.setTarget(bindingB);
 await Promise.resolve();
@@ -19027,17 +19027,17 @@ await Promise.resolve();
 modeCalls[0].resolve(true);
 await genericA;
 const sessionA = {
-  machineId: bindingA.machineId,
+  machineIds: bindingA.machineIds,
   mode: "session" as const,
 };
 const modeUpdate = modeCoordinator.setTarget(sessionA);
 await Promise.resolve();
 assert.equal(modeCoordinator.snapshot().state, "binding");
-assert.equal(modeCoordinator.isRemoteActive(bindingA.machineId), true,
+assert.equal(modeCoordinator.isRemoteActive(bindingA.machineIds[0]), true,
   "same-machine privacy-mode updates retain remote ownership while binding");
 modeCalls[1].resolve(false);
 await modeUpdate;
-assert.equal(modeCoordinator.isRemoteActive(bindingA.machineId), true,
+assert.equal(modeCoordinator.isRemoteActive(bindingA.machineIds[0]), true,
   "a failed same-machine update must not add a duplicate local notification");
 
 const successfulTurn = {
