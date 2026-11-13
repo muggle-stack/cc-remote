@@ -39102,7 +39102,6 @@ class WrapperMachine:
             if compact_snapshot is not None:
                 msgs, timestamps, internal_events = compact_snapshot
             else:
-                internal_events = {}
                 msgs = await asyncio.to_thread(
                     self._claude_catalog_messages,
                     profile,
@@ -39112,10 +39111,14 @@ class WrapperMachine:
                 if self._claude_config_root(profile) is None:
                     timestamps = await asyncio.to_thread(
                         transcript_timestamps, session_id)
+                    internal_events = await asyncio.to_thread(
+                        transcript_internal_user_events, session_id)
                 else:
                     assert path is not None
                     timestamps = await asyncio.to_thread(
                         transcript_timestamps, session_id, path=path)
+                    internal_events = await asyncio.to_thread(
+                        transcript_internal_user_events, session_id, path=path)
             msgs = await asyncio.to_thread(
                 recover_claude_delayed_retry_tail,
                 session_id,
