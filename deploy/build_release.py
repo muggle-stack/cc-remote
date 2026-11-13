@@ -61,6 +61,7 @@ _WRAPPER_DEPLOY = (
     "ui_update_job.py",
     "linux_service.py",
     "wrapper_exec.py",
+    "wrapper_main.py",
     "adopt_wrapper.py",
     "atomic_symlink.py",
     "check_codex_readiness.py",

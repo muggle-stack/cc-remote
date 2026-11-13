@@ -179,6 +179,7 @@ _pair_limiter = LoginRateLimiter(max_per_ip=30)
 @dataclass
 class _SessionEntry:
     expires_at: int
+    claims: SessionClaims
     revoked: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -200,17 +201,20 @@ class SessionRegistry:
             self._prune_locked(time.time())
             if claims.jti in self._entries or len(self._entries) >= self.cap:
                 return False
-            self._entries[claims.jti] = _SessionEntry(claims.expires_at)
+            self._entries[claims.jti] = _SessionEntry(claims.expires_at, claims)
             return True
 
     async def active(self, claims: SessionClaims) -> bool:
         return await self.active_id(claims.jti, claims.expires_at)
 
     async def active_id(self, jti: str, expires_at: float) -> bool:
+        return (await self.claims_for_session(jti, expires_at)) is not None
+
+    async def claims_for_session(self, jti: str, expires_at: float) -> SessionClaims | None:
         async with self._lock:
             self._prune_locked(time.time())
             entry = self._entries.get(jti)
-            return entry is not None and entry.expires_at == expires_at
+            return entry.claims if entry is not None and entry.expires_at == expires_at else None
 
     async def subscribe(self, claims: SessionClaims) -> Optional[asyncio.Event]:
         async with self._lock:
@@ -428,6 +432,21 @@ async def _claims_allow_machine(
         machine_id, _device_subject(claims))
 
 
+async def _push_machine_ids(body: object, claims: SessionClaims, devices: DeviceStore) -> list[str] | None:
+    if not isinstance(body, dict):
+        return None
+    requested = body.get("machine_ids", [body.get("machine_id")])
+    if (not isinstance(requested, list) or not 0 < len(requested) <= 128
+            or not all(isinstance(machine, str) and valid_machine_id(machine) for machine in requested)
+            or ("machine_id" in body and body["machine_id"] not in requested)):
+        return None
+    machine_ids = list(dict.fromkeys(requested))
+    for machine in machine_ids:
+        if not await _claims_allow_machine(claims, machine, devices):
+            return None
+    return machine_ids
+
+
 def _clean_device_text(value: object, *, maximum: int) -> str | None:
     if not isinstance(value, str):
         return None
@@ -572,6 +591,11 @@ def create_app(
     link_previews = LinkPreviewService()
     link_preview_limiter = LoginRateLimiter(max_per_ip=120)
     devices = device_store or DeviceStore(cfg.device_db_path)
+
+    async def push_session_active(subscription: PushSubscription | HarmonySubscription) -> bool:
+        claims = await sessions.claims_for_session(subscription.session_jti, subscription.expires_at)
+        return claims is not None and await _claims_allow_machine(claims, subscription.machine_id, devices)
+
     push_store: PushSubscriptionStore | None = None
     push_dispatcher: PushDispatcher | None = None
     if cfg.push_vapid_public_key:
@@ -580,8 +604,7 @@ def create_app(
             push_store,
             vapid_private_key=cfg.push_vapid_private_key,
             vapid_subject=cfg.push_vapid_subject,
-            session_active=lambda subscription: sessions.active_id(
-                subscription.session_jti, subscription.expires_at),
+            session_active=push_session_active,
         )
 
     harmony_store: HarmonyPushStore | None = None
@@ -594,7 +617,7 @@ def create_app(
                 harmony_store, origin=cfg.public_origin, sender=harmony_sender,
                 category=cfg.harmony_push_category,
                 test_message=cfg.harmony_push_test_message,
-                session_active=lambda sub: sessions.active_id(sub.session_jti, sub.expires_at),
+                session_active=push_session_active,
             )
         except (ValueError, OSError, sqlite3.Error):
             harmony_store = None
@@ -805,17 +828,14 @@ def create_app(
             return JSONResponse({"error": "too_large"}, status_code=413)
         except Exception:
             return JSONResponse({"error": "bad_request"}, status_code=400)
-        requested_machine = body.get("machine_id") if isinstance(body, dict) else None
-        enrolled_machine = (
-            isinstance(requested_machine, str)
-            and await devices.owned_by(
-                requested_machine, _device_subject(claims))
-        )
+        machine_ids = await _push_machine_ids(body, claims, devices)
+        if machine_ids is None:
+            return JSONResponse({"error": "invalid_subscription"}, status_code=400)
         subscription = _parse_push_subscription(
-            body, claims, enrolled_machine=enrolled_machine)
+            {**body, "machine_id": machine_ids[0]}, claims, enrolled_machine=True)
         if subscription is None:
             return JSONResponse({"error": "invalid_subscription"}, status_code=400)
-        await push_store.upsert(subscription)
+        await push_store.upsert(subscription, machine_ids)
         return JSONResponse(
             {"ok": True}, headers={"Cache-Control": "no-store"})
 
@@ -871,17 +891,15 @@ def create_app(
         if operation == "unsubscribe":
             await harmony_store.remove_token(_push_subject(claims), token)
         else:
-            machine = body.get("machine_id")
+            machine_ids = await _push_machine_ids(body, claims, devices)
             mode = body.get("notification_mode", "generic")
-            if (not isinstance(machine, str) or not valid_machine_id(machine)
-                    or not isinstance(mode, str) or mode not in {"generic", "session"}
-                    or not await _claims_allow_machine(claims, machine, devices)):
+            if (machine_ids is None or not isinstance(mode, str) or mode not in {"generic", "session"}):
                 return JSONResponse({"error": "invalid_subscription"}, status_code=400)
             try:
                 await harmony_store.upsert(HarmonySubscription(
-                    subject=_push_subject(claims), machine_id=machine, token=token,
+                    subject=_push_subject(claims), machine_id=machine_ids[0], token=token,
                     notification_mode=mode, session_jti=claims.jti, expires_at=claims.expires_at,
-                ))
+                ), machine_ids)
             except ValueError:
                 return JSONResponse({"error": "subscription_limit"}, status_code=429)
         return JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
@@ -1199,6 +1217,9 @@ def create_app(
         revoked = await devices.revoke(machine_id, _device_subject(claims))
         if not revoked:
             return JSONResponse({"error": "not_found"}, status_code=404)
+        for store in (push_store, harmony_store):
+            if store is not None:
+                await store.remove_machine(_push_subject(claims), machine_id)
         await hub.disconnect_wrapper(machine_id, reason="device revoked")
         hub.forget_wrapper_version(machine_id)
         await viewers.disconnect_machine(machine_id)

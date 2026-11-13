@@ -8,8 +8,9 @@
   <key>ProgramArguments</key>
   <array>
     <string>__CURRENT__/.venv/bin/python</string>
-    <string>-m</string>
-    <string>cc_remote.wrapper</string>
+    <string>-I</string>
+    <string>-B</string>
+    <string>__CURRENT__/deploy/wrapper_main.py</string>
   </array>
   <key>WorkingDirectory</key>
   <string>__CURRENT__</string>

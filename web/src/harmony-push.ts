@@ -65,9 +65,9 @@ export async function requestHarmonyPermission(): Promise<boolean> {
     return unavailable();
   }
 }
-export async function enableHarmonyPush(machineId: string, mode: RemoteNotificationMode): Promise<PushBindingResult> {
+export async function enableHarmonyPush(machineIds: string[], mode: RemoteNotificationMode): Promise<PushBindingResult> {
   try {
-    return await (await import("./harmony-push-client.ts")).enableHarmonyPush(machineId, mode);
+    return await (await import("./harmony-push-client.ts")).enableHarmonyPush(machineIds, mode);
   } catch {
     return unavailable();
   }

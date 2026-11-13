@@ -20,7 +20,7 @@ InaccessiblePaths=/etc/cc-remote -/path/to/cc-remote/.env
 # Prefer an absolute CLAUDE_BIN in the EnvironmentFile. PATH remains the
 # backwards-compatible fallback and is also inherited by Claude's child tools.
 Environment="PATH=/home/youruser/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-ExecStart=/path/to/cc-remote/.venv/bin/python -m cc_remote.wrapper
+ExecStart=/path/to/cc-remote/.venv/bin/python -I -B /path/to/cc-remote/deploy/wrapper_main.py
 Restart=on-failure
 RestartSec=5
 UMask=0077

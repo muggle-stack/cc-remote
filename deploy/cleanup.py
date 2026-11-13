@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import shutil
 import stat
@@ -34,12 +35,16 @@ class CleanupError(ValueError):
     pass
 
 
-def read_json(path: Path) -> tuple[dict, str]:
+class _ProcessInventoryChanged(CleanupError):
+    pass
+
+
+def read_json(path: Path, *, owner_uid: int | None = None) -> tuple[dict, str]:
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "rb") as stream:
         info = os.fstat(stream.fileno())
         if (not stat.S_ISREG(info.st_mode) or info.st_size > MAX_JSON
-                or info.st_uid not in {0, os.geteuid()} or info.st_mode & 0o022):
+                or info.st_uid not in {0, os.geteuid(), owner_uid} or info.st_mode & 0o022):
             raise CleanupError("unsafe or oversized inventory/transaction record")
         raw = stream.read(MAX_JSON + 1)
     if len(raw) > MAX_JSON:
@@ -107,17 +112,29 @@ def browser_singleton_markers(root: Path, candidates: list[Path]) -> set[Path]:
         if not stat.S_ISLNK(socket.lstat().st_mode):
             return set()
         target = socket.resolve(strict=True)
-        temporary = Path(tempfile.gettempdir()).resolve(strict=True)
+        owner = root.stat().st_uid
+        temporary = Path(tempfile.gettempdir())
+        if sys.platform == 'darwin' and os.geteuid() == 0 and owner != 0:
+            account = pwd.getpwuid(owner)
+            result = subprocess.run(['/usr/bin/sudo', '-H', '-u', account.pw_name, '--',
+                                     '/usr/bin/getconf', 'DARWIN_USER_TEMP_DIR'],
+                                    capture_output=True, text=True, timeout=5, check=True)
+            temporary = Path(result.stdout.strip())
+            if not temporary.is_absolute():
+                raise CleanupError('browser owner temporary directory is unavailable')
+        temporary = temporary.resolve(strict=True)
         if (target.name != "SingletonSocket" or target.parent == temporary
                 or not target.is_relative_to(temporary) or target.is_relative_to(root)
                 or any(overlaps(target, candidate) for candidate in candidates)):
             return set()
         info, parent = target.lstat(), target.parent.lstat()
-        owner = root.stat().st_uid
         if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != owner
                 or not stat.S_ISDIR(parent.st_mode) or parent.st_uid != owner
                 or parent.st_mode & 0o022
                 or opaque(target.parent / "SingletonCookie", r"[0-9]{1,20}") != token):
+            return set()
+        from deploy.release_retention import service_path_dependencies
+        if service_path_dependencies(socket, candidates):
             return set()
     except FileNotFoundError:
         return set()
@@ -131,8 +148,8 @@ def runtime_link_dependencies(root: Path, candidates: list[Path]) -> set[Path]:
             if stat.S_ISLNK(path.lstat().st_mode) and path not in markers}
 
 
-def load_inventory(path: Path) -> dict:
-    data, digest = read_json(path)
+def load_inventory(path: Path, *, owner_uid: int | None = None) -> dict:
+    data, digest = read_json(path, owner_uid=owner_uid)
     required = {"schema", "installation_root", "current_release", "rollback_paths",
                 "cleanup_roots", "candidates", "transactions", "checks"}
     if (data.keys() - required - {"protected_paths", "service_context"} or required - data.keys()
@@ -141,8 +158,14 @@ def load_inventory(path: Path) -> dict:
     if "service_context" in data:
         context = data["service_context"]
         if (not isinstance(context, dict) or "home" not in context
-                or context.keys() - {"home", "linux_service", "review"}):
+                or context.keys() - {"home", "linux_service", "review", "service_file", "native_configuration"}):
             raise CleanupError("invalid service discovery context")
+        if 'native_configuration' in context and not isinstance(context['native_configuration'], bool):
+            raise CleanupError('invalid native configuration discovery mode')
+        if context.get('native_configuration') and 'service_file' not in context:
+            raise CleanupError('native configuration discovery requires the Wrapper service file')
+        if 'service_file' in context:
+            absolute_path(context['service_file'])
         if not absolute_path(context["home"]).is_dir():
             raise CleanupError("service discovery HOME is unavailable")
         if "review" in context:
@@ -154,10 +177,12 @@ def load_inventory(path: Path) -> dict:
             if context["linux_service"]["home"] != context["home"]:
                 raise CleanupError("service discovery HOME differs from the service binding")
     for key in ["rollback_paths", "cleanup_roots", "candidates", "transactions", "checks"]:
-        limit = 1024 if key == 'candidates' else 128
+        limit = 1024 if key in {'candidates', 'cleanup_roots'} else 128
         if not isinstance(data[key], list) or not 0 < len(data[key]) <= limit:
             raise CleanupError(f"{key} must be a nonempty bounded list")
     root = absolute_path(data["installation_root"])
+    if owner_uid is not None and root.stat().st_uid != owner_uid:
+        raise CleanupError('inventory owner differs from installation owner')
     if os.geteuid() != 0 and root.stat().st_uid != os.geteuid():
         raise CleanupError("shared installations require root process visibility")
     current = absolute_path(data["current_release"])
@@ -201,7 +226,7 @@ def load_inventory(path: Path) -> dict:
                 or entry["field"] not in {"phase", "status"} or entry["equals"] not in COMPLETE):
             raise CleanupError("transaction requires a known completed phase/status")
         record = absolute_path(entry["path"])
-        value, checksum = read_json(record)
+        value, checksum = read_json(record, owner_uid=root.stat().st_uid)
         if value.get(entry["field"]) != entry["equals"]:
             raise CleanupError(f"unfinished or unknown transaction: {record}")
         transactions.append((record, checksum))
@@ -218,10 +243,10 @@ def check_bindings(plan: dict) -> None:
     root = plan["root"]
     if not (root / "current").is_symlink() or (root / "current").resolve(strict=True) != plan["current"]:
         raise CleanupError("active release changed or current is not a managed symlink")
-    if read_json(plan["inventory"])[1] != plan["digest"]:
+    if read_json(plan["inventory"], owner_uid=root.stat().st_uid)[1] != plan["digest"]:
         raise CleanupError("inventory changed during cleanup")
     for path, checksum in plan["transactions"]:
-        if read_json(path)[1] != checksum:
+        if read_json(path, owner_uid=root.stat().st_uid)[1] != checksum:
             raise CleanupError("transaction changed during cleanup")
     for path, expected in plan["protected_identities"].items():
         if identity(absolute_path(str(path))) != expected:
@@ -261,23 +286,108 @@ def parse_lsof(raw: bytes) -> list[tuple[int, str, Path]]:
                 raise CleanupError("process files are not fully observable")
             if name.startswith("/"):
                 references.append((pid, descriptor, Path(name.removesuffix(" (deleted)"))))
-    if pid is None:
+    if pid is None or not references:
         raise CleanupError("empty process reference inventory")
     return references
 
 
+def linux_process_files(proc: Path = Path('/proc')) -> list[tuple[int, str, Path]]:
+    deadline = time.monotonic() + 30
+    for attempt in range(3):
+        try:
+            return _linux_process_files_once(proc, deadline)
+        except _ProcessInventoryChanged:
+            if attempt == 2:
+                raise CleanupError('process files are not fully observable') from None
+            time.sleep(0.02)
+    raise AssertionError('unreachable process scan state')
+
+
+def _linux_process_files_once(proc: Path, deadline: float) -> list[tuple[int, str, Path]]:
+    """Inspect procfs when lsof cannot stat an unrelated desktop/FUSE mount.
+
+    Permission failures still stop retirement. Only vanished processes, closed
+    descriptors, zombies and kernel threads may lack their corresponding links.
+    Read mappings too, since a mapped file need not retain an open descriptor.
+    """
+    references = []
+    size = 0
+
+    def record(pid: int, kind: str, name: str) -> None:
+        nonlocal size
+        size += len(name)
+        if size > MAX_SCAN or time.monotonic() > deadline:
+            raise CleanupError('process reference scan exceeds bound')
+        if name.startswith('/'):
+            references.append((pid, kind, Path(name.removesuffix(' (deleted)'))))
+
+    processes = [p for p in proc.iterdir() if p.name.isdecimal()]
+    if not processes:
+        raise CleanupError('empty process reference inventory')
+    for process in processes:
+        if time.monotonic() > deadline:
+            raise CleanupError('process reference scan exceeds bound')
+        try:
+            if os.geteuid() != 0 and process.stat().st_uid != os.geteuid():
+                continue
+            before = (process / 'stat').read_bytes().rsplit(b') ', 1)[1].split()
+            if before[0] == b'Z' or int(before[6]) & 0x00200000:  # PF_KTHREAD
+                continue
+            pid = int(process.name)
+            for kind in ('cwd', 'exe', 'root'):
+                record(pid, kind, os.readlink(process / kind))
+            with os.scandir(process / 'fd') as descriptors:
+                for descriptor in descriptors:
+                    try:
+                        record(pid, descriptor.name, os.readlink(descriptor.path))
+                    except FileNotFoundError:
+                        pass  # the descriptor closed during observation
+            with (process / 'maps').open(errors='surrogateescape') as mappings:
+                raw = mappings.read(MAX_SCAN + 1)
+                if len(raw) > MAX_SCAN:
+                    raise CleanupError('process reference scan exceeds bound')
+                for line in raw.splitlines():
+                    fields = line.split(None, 5)
+                    if len(fields) == 6 and fields[5].startswith('/'):
+                        name = re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), fields[5].rstrip('\n'))
+                        record(pid, 'mem', name)
+            after = (process / 'stat').read_bytes().rsplit(b') ', 1)[1].split()
+            if before[19] != after[19]:
+                raise _ProcessInventoryChanged('process changed during reference inspection')
+        except FileNotFoundError:
+            # A live process whose links are unavailable is incomplete, even if
+            # procfs otherwise appears readable. Recheck its actual lifecycle.
+            try:
+                state = (process / 'stat').read_bytes().rsplit(b') ', 1)[1].split()[0]
+            except FileNotFoundError:
+                continue
+            if state != b'Z':
+                raise _ProcessInventoryChanged('process files changed during inspection') from None
+        except (PermissionError, IndexError, ValueError):
+            raise CleanupError('process files are not fully observable') from None
+    if not references:
+        raise CleanupError('empty process reference inventory')
+    return references
+
+
 def process_references(candidates: list[Path]) -> dict[Path, list[str]]:
-    lsof = shutil.which("lsof")
-    if not lsof:
-        raise CleanupError("lsof is required; process arguments alone are insufficient")
-    # User installations inspect their owner's processes; shared/system installs
-    # must run as root to cover all service users. Never silently ignore stderr.
-    argv = [lsof, "-nP", "-F0pfn"]
-    if os.geteuid() != 0:
-        argv.extend(["-a", "-u", str(os.geteuid())])
+    files = None
+    if sys.platform == 'linux':
+        try:
+            files = linux_process_files()
+        except (OSError, CleanupError):
+            pass  # lsof must independently provide a complete alternative
+    if files is None:
+        lsof = shutil.which("lsof")
+        if not lsof:
+            raise CleanupError("lsof is required; process arguments alone are insufficient")
+        argv = [lsof, "-nP", "-F0pfn"]
+        if os.geteuid() != 0:
+            argv.extend(["-a", "-u", str(os.geteuid())])
+        files = parse_lsof(scan_command(argv))
     found = {p: [] for p in candidates}
     by_name = {str(path): path for path in candidates}
-    for pid, descriptor, path in parse_lsof(scan_command(argv)):
+    for pid, descriptor, path in files:
         name = str(path)
         while name:
             if candidate := by_name.get(name):
@@ -425,6 +535,9 @@ def write_journal(path: Path, report: dict) -> None:
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "w") as stream:
+            if os.geteuid() == 0:
+                owner = path.stat() if path.exists() else path.parent.stat()
+                os.fchown(stream.fileno(), owner.st_uid, owner.st_gid)
             json.dump(report, stream, indent=2, ensure_ascii=True)
             stream.write("\n")
             stream.flush()
@@ -435,8 +548,9 @@ def write_journal(path: Path, report: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def cleanup(inventory: Path, *, apply: bool = False, lock_descriptor: int | None = None) -> dict:
-    plan = load_inventory(inventory)
+def cleanup(inventory: Path, *, apply: bool = False, lock_descriptor: int | None = None,
+            owner_uid: int | None = None) -> dict:
+    plan = load_inventory(inventory, owner_uid=owner_uid)
     journal = plan["root"] / JOURNAL
     # Share the installer's lock. A dropped control connection cannot overlap a
     # second installer/cleanup; leftover journals are inspected, never replayed.
@@ -453,7 +567,7 @@ def cleanup(inventory: Path, *, apply: bool = False, lock_descriptor: int | None
               "removed_allocated_bytes": 0}
     try:
         if journal.exists():
-            previous, _ = read_json(journal)
+            previous, _ = read_json(journal, owner_uid=plan['root'].stat().st_uid)
             if previous.get("status") not in {"complete", "deferred", "aborted"}:
                 raise CleanupError("unfinished cleanup journal; inspect original operation before retrying")
         existing = [p for p in plan["candidates"] if p.exists()]

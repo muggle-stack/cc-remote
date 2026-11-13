@@ -45,12 +45,21 @@ class HarmonyPushStore:
     def __init__(self, path: str) -> None:
         self.path = Path(path).expanduser()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        schema = """CREATE TABLE IF NOT EXISTS harmony_push_subscriptions (
+            token TEXT NOT NULL, subject TEXT NOT NULL,
+            machine_id TEXT NOT NULL, session_jti TEXT NOT NULL,
+            expires_at REAL NOT NULL, notification_mode TEXT NOT NULL,
+            binding_id TEXT NOT NULL, PRIMARY KEY (token, machine_id))"""
         with self._connect() as db:
-            db.execute("""CREATE TABLE IF NOT EXISTS harmony_push_subscriptions (
-                token TEXT PRIMARY KEY, subject TEXT NOT NULL,
-                machine_id TEXT NOT NULL, session_jti TEXT NOT NULL,
-                expires_at REAL NOT NULL, notification_mode TEXT NOT NULL,
-                binding_id TEXT NOT NULL)""")
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(schema)
+            primary_key = [row[1] for row in db.execute(
+                "PRAGMA table_info(harmony_push_subscriptions)") if row[5]]
+            if primary_key == ["token"]:
+                db.execute("ALTER TABLE harmony_push_subscriptions RENAME TO harmony_push_legacy")
+                db.execute(schema)
+                db.execute("INSERT INTO harmony_push_subscriptions SELECT * FROM harmony_push_legacy")
+                db.execute("DROP TABLE harmony_push_legacy")
             db.execute("CREATE INDEX IF NOT EXISTS harmony_push_machine "
                        "ON harmony_push_subscriptions(machine_id)")
 
@@ -59,22 +68,22 @@ class HarmonyPushStore:
         db.execute("PRAGMA journal_mode=WAL")
         return db
 
-    async def upsert(self, sub: HarmonySubscription) -> None:
+    async def upsert(self, sub: HarmonySubscription, machine_ids: list[str] | None = None) -> None:
         def write() -> None:
             with self._connect() as db:
                 db.execute("DELETE FROM harmony_push_subscriptions WHERE expires_at<=?",
                            (time.time(),))
-                # One provider token belongs to exactly one current binding.
-                # Limit persistent storage per login without evicting other users.
-                count = db.execute("SELECT count(*) FROM harmony_push_subscriptions "
+                # Bound tokens per login, independently of their device count.
+                count = db.execute("SELECT count(DISTINCT token) FROM harmony_push_subscriptions "
                                    "WHERE session_jti=? AND token<>?",
                                    (sub.session_jti, sub.token)).fetchone()[0]
                 if count >= 32:
                     raise ValueError("native push subscription limit")
-                db.execute("INSERT OR REPLACE INTO harmony_push_subscriptions "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                           (sub.token, sub.subject, sub.machine_id, sub.session_jti,
-                            sub.expires_at, sub.notification_mode, sub.binding_id))
+                db.execute("DELETE FROM harmony_push_subscriptions WHERE token=?", (sub.token,))
+                db.executemany("INSERT INTO harmony_push_subscriptions VALUES (?, ?, ?, ?, ?, ?, ?)",
+                               [(sub.token, sub.subject, machine, sub.session_jti,
+                                 sub.expires_at, sub.notification_mode, sub.binding_id)
+                                for machine in (machine_ids or [sub.machine_id])])
         await asyncio.to_thread(write)
 
     async def remove_session(self, jti: str) -> None:
@@ -84,7 +93,11 @@ class HarmonyPushStore:
         await self._delete("subject=? AND token=?", (subject, token))
 
     async def remove_binding(self, sub: HarmonySubscription) -> None:
-        await self._delete("token=? AND binding_id=?", (sub.token, sub.binding_id))
+        await self._delete("token=? AND machine_id=? AND binding_id=?",
+                           (sub.token, sub.machine_id, sub.binding_id))
+
+    async def remove_machine(self, subject: str, machine_id: str) -> None:
+        await self._delete("subject=? AND machine_id=?", (subject, machine_id))
 
     async def _delete(self, where: str, values: tuple) -> None:
         def write() -> None:
@@ -108,8 +121,8 @@ class HarmonyPushStore:
         def read() -> bool:
             with self._connect() as db:
                 return db.execute("SELECT 1 FROM harmony_push_subscriptions "
-                                  "WHERE token=? AND binding_id=? AND expires_at>?",
-                                  (sub.token, sub.binding_id, time.time())).fetchone() is not None
+                                  "WHERE token=? AND machine_id=? AND binding_id=? AND expires_at>?",
+                                  (sub.token, sub.machine_id, sub.binding_id, time.time())).fetchone() is not None
         return await asyncio.to_thread(read)
 
 

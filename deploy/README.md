@@ -173,7 +173,10 @@ relative scripts and known command launchers such as `env`/`nohup` defer cleanup
 This guard also checks executable aliases and launchd `ProgramArguments`; it
 never substitutes the updater's PATH for a service manager's inherited PATH.
 Direct absolute script arguments remain literal dependencies, including the
-installer's isolated Python `wrapper_exec.py` command. Hosts with unresolved
+installer's isolated `wrapper_main.py` entrypoint and Supervisor's
+`wrapper_exec.py` bootstrap. New systemd and LaunchAgent definitions use the
+absolute entrypoint. Upgrades recognize and convert existing module-based
+definitions. Hosts with unresolved
 indirect commands need an explicitly reviewed retention inventory; a successful
 update can therefore retain more than one previous generation. Discovery never
 executes a service or recursively crawls arbitrary external directories.
@@ -218,10 +221,15 @@ files; the review stores content fingerprints, not environment-file contents.
 
 This review is bound to all persistent service definitions, aliases, load paths,
 external environment files (including optional missing files), and declared
-inputs. A change invalidates it and defers cleanup until a fresh review. Only
-the deterministic `%p` prefix of a literal non-template systemd service is
-resolved for environment-file discovery; other dynamic inputs still defer.
-Transient services are scanned afresh. Transient login scopes cannot launch a
+inputs. A change invalidates it and defers cleanup until a fresh review.
+Environment-file discovery resolves the deterministic `%p` prefix of a literal
+non-template systemd service and `%h` in that owner's `.config/systemd/user`
+units. Other dynamic inputs still defer.
+Runtime and generated units, including user-manager generators, are scanned
+afresh. A review covers an existing indirect runtime command while its unit,
+aliases and environment inputs match the reviewed bytes. New or changed
+indirect commands require inspection. Removed runtime units leave the
+persistent review usable. Transient login scopes cannot launch a
 dormant command, so their ordinary churn does not invalidate the review; their
 path references and all running processes remain protected. Declared runtime
 aliases are resolved again on every check. The review never suppresses direct
@@ -240,6 +248,13 @@ universe into independent batches merely to fit a limit. Reports distinguish
 allocated bytes removed from the observed change in available filesystem space;
 the latter also includes concurrent activity on that filesystem.
 
+Managed Wrapper cleanup also reads the configured Codex accounts' native
+`config.toml` files. Absolute runtime paths, including dormant MCP commands and
+working directories, keep their owning releases and symlink dependencies.
+These inputs are re-read during each protection check. A newly referenced
+candidate stops retirement and restores intact quarantined artifacts. Cleanup
+reads these files without changing account configuration or starting an engine.
+
 **v4.0.10 introduces automatic retention and Linux legacy migration.**
 These take effect through its installer bundle, including upgrades initiated by
 older management CLIs. v4.0.9 and earlier do not provide these features.
@@ -250,13 +265,25 @@ existing activation transactions.
 
 `cleanup.py` ships in both role bundles. It acquires the same `.update.lock` as
 the installers, verifies the bound `current` link and completed transaction
-records, and examines process cwd/executable/open-file references with `lsof`
-plus argv references with `ps`. It also traces transitive symlink dependencies of
+records, and examines process cwd/executable/open-file references plus argv
+references with `ps`. It also traces transitive symlink dependencies of
 retained trees and live candidates, including shared venvs. Broken links,
-unreadable paths or an exceeded scan bound stop cleanup. `lsof` is required;
-missing tools, warnings and incomplete scans stop the
-operation. User-owned private installations inspect that user's processes;
+unreadable paths or an exceeded scan bound stop cleanup. Linux inspects procfs
+cwd, executable, root, descriptors and file mappings directly, with up to three
+complete scans for a process lifecycle race. It uses `lsof` as an alternative
+only when that command can independently provide a complete scan. macOS uses
+`lsof`. This handles unrelated desktop FUSE warnings while preserving process
+protection. Unavailable process data
+still stops cleanup. User-owned private installations inspect that user's processes;
 shared/system installations must run as root to cover every service user.
+
+A macOS user installation may need administrator visibility for private system
+LaunchDaemons. An administrator can run the active release's
+`deploy/release_retention.py prune --root <installation-root>` with its Python.
+The command preserves the installation owner's metadata and inspects that
+owner's launchd domain. Native Codex configuration checks execute as the Wrapper
+user. Insufficient visibility leaves a deferred result, and the update UI shows
+that old deployment files still need cleanup.
 
 Create a mode-0600 JSON inventory **outside the source repository**, from the
 actual installation and its transaction records. All paths must be absolute,

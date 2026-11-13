@@ -102,20 +102,19 @@ class PushSubscriptionStore:
                     "notification_mode TEXT NOT NULL DEFAULT 'generic'"
                 )
 
-    async def upsert(self, subscription: PushSubscription) -> None:
-        await asyncio.to_thread(self._upsert, subscription)
+    async def upsert(self, subscription: PushSubscription, machine_ids: list[str] | None = None) -> None:
+        await asyncio.to_thread(self._upsert, subscription, machine_ids or [subscription.machine_id])
 
-    def _upsert(self, subscription: PushSubscription) -> None:
+    def _upsert(self, subscription: PushSubscription, machine_ids: list[str]) -> None:
         now = time.time()
         with self._connect() as db:
-            # A browser has one PushManager subscription per origin. Moving that
-            # browser to another account or machine must transfer the endpoint,
-            # not leave duplicate deliveries attached to an older login.
+            # Replace the endpoint's complete authorized device set atomically.
+            # A new login also supersedes the previous endpoint owner.
             db.execute(
                 "DELETE FROM push_subscriptions WHERE endpoint=?",
                 (subscription.endpoint,),
             )
-            db.execute(
+            db.executemany(
                 """
                 INSERT INTO push_subscriptions
                     (subject, machine_id, endpoint, p256dh, auth, session_jti,
@@ -129,9 +128,9 @@ class PushSubscriptionStore:
                     notification_mode=excluded.notification_mode,
                     updated_at=excluded.updated_at
                 """,
-                (
+                [(
                     subscription.subject,
-                    subscription.machine_id,
+                    machine_id,
                     subscription.endpoint,
                     subscription.p256dh,
                     subscription.auth,
@@ -140,7 +139,7 @@ class PushSubscriptionStore:
                     subscription.notification_mode,
                     now,
                     now,
-                ),
+                ) for machine_id in machine_ids],
             )
 
     async def remove_endpoint(self, subject: str, endpoint: str) -> int:
@@ -165,6 +164,26 @@ class PushSubscriptionStore:
             )
             return cursor.rowcount
 
+    async def remove_machine(self, subject: str, machine_id: str) -> None:
+        def remove() -> None:
+            with self._connect() as db:
+                db.execute("DELETE FROM push_subscriptions WHERE subject=? AND machine_id=?",
+                           (subject, machine_id))
+        await asyncio.to_thread(remove)
+
+    async def current(self, subscription: PushSubscription) -> bool:
+        def read() -> bool:
+            with self._connect() as db:
+                return db.execute(
+                    "SELECT 1 FROM push_subscriptions WHERE subject=? AND machine_id=? AND endpoint=? "
+                    "AND session_jti=? AND expires_at=? AND p256dh=? AND auth=? AND notification_mode=? "
+                    "AND expires_at>?",
+                    (subscription.subject, subscription.machine_id, subscription.endpoint,
+                     subscription.session_jti, subscription.expires_at, subscription.p256dh,
+                     subscription.auth, subscription.notification_mode, time.time()),
+                ).fetchone() is not None
+        return await asyncio.to_thread(read)
+
     async def remove_subscription(self, subscription: PushSubscription) -> None:
         await asyncio.to_thread(self._remove_subscription, subscription)
 
@@ -172,8 +191,11 @@ class PushSubscriptionStore:
         with self._connect() as db:
             db.execute(
                 "DELETE FROM push_subscriptions "
-                "WHERE subject=? AND machine_id=? AND endpoint=?",
-                (subscription.subject, subscription.machine_id, subscription.endpoint),
+                "WHERE subject=? AND machine_id=? AND endpoint=? AND session_jti=? AND expires_at=? "
+                "AND p256dh=? AND auth=? AND notification_mode=?",
+                (subscription.subject, subscription.machine_id, subscription.endpoint,
+                 subscription.session_jti, subscription.expires_at, subscription.p256dh,
+                 subscription.auth, subscription.notification_mode),
             )
 
     async def for_machine(self, machine_id: str) -> list[PushSubscription]:
@@ -378,6 +400,8 @@ class PushDispatcher:
         if (self._session_active is not None
                 and not await self._session_active(subscription)):
             await self.store.remove_subscription(subscription)
+            return
+        if not await self.store.current(subscription):
             return
         status = await self._sender(subscription, payload)
         if status in {404, 410}:
