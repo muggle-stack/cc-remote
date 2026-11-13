@@ -1235,7 +1235,12 @@ test("collaboration waits for confirmed room history before showing the empty st
     await page.getByRole("menuitem", { name: "协作", exact: true }).click();
     await expect(conversation).toBeVisible();
     await expect(conversation.locator(".collab-primary")).toHaveCount(0);
-    await expect(conversation.getByRole("status")).toHaveText("加载会话历史…");
+    if (remembered) {
+      await expect(conversation.getByRole("status")).toHaveCount(0);
+      await expect(conversation).toContainText("已保存的问题");
+      await expect(conversation).toContainText("回归通过。");
+      await expect(conversation).toHaveAttribute("aria-busy", "false");
+    } else await expect(conversation.getByRole("status")).toHaveText("加载会话历史…");
     relay.resumeRoomLoads();
     await expect(page.locator(".collab-pane .sub")).toHaveText("已有聊天历史");
     await expect(conversation).toContainText("已保存的问题");

@@ -25,6 +25,7 @@ interface Props {
   header?: string | null;
   sourceLabel?: string;
   submissionError?: string | null;
+  retainDraftOnSubmit?: boolean;
   options: AskOption[];
   allowText?: boolean;
   secret?: boolean;
@@ -43,7 +44,7 @@ export function QuestionSheet(props: Props) {
 }
 
 function SingleQuestionSheet({
-  engine, question, header, sourceLabel, submissionError, options, allowText, secret, multiSelect, onAnswer, draft, planDocument,
+  engine, question, header, sourceLabel, submissionError, retainDraftOnSubmit, options, allowText, secret, multiSelect, onAnswer, draft, planDocument,
 }: Props) {
   const engineName = { claude: "Claude", codex: "Codex", dsh: "DSH" }[engine];
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -71,18 +72,25 @@ function SingleQuestionSheet({
     while (draft.store.size > 64) draft.store.delete(draft.store.keys().next().value!);
   };
   const updateText = (value: string) => { setText(value); saveDraft({ text: value }); };
+  const answerSubmitted = useRef(false);
   const answer = (value: string | string[]) => {
-    onAnswer(value);
+    if (onAnswer(value) !== false && !retainDraftOnSubmit) {
+      answerSubmitted.current = true;
+      if (draft) draft.store.delete(draft.key);
+    }
   };
   const imeSubmit = useImeSubmit<HTMLInputElement>((value) => {
     if (!value.trim()) return;
     answer(multiSelect ? [...selected, value] : value);
   });
   const preserveDraft = useRef(() => {});
-  preserveDraft.current = () => saveDraft({
-    text: imeSubmit.inputRef.current?.value ?? text,
-    scrollTop: scrollRef.current?.scrollTop ?? savedScroll.current,
-  });
+  preserveDraft.current = () => {
+    if (answerSubmitted.current) return;
+    saveDraft({
+      text: imeSubmit.inputRef.current?.value ?? text,
+      scrollTop: scrollRef.current?.scrollTop ?? savedScroll.current,
+    });
+  };
   const toggle = (label: string) => {
     const next = selected.includes(label)
       ? selected.filter((value) => value !== label) : [...selected, label];

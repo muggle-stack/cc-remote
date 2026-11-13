@@ -1186,7 +1186,7 @@ export default function CollaborationWorkspace({
     { value: "existing", label: "关联已有会话", icon: <Icon name="collaboration" size={16} /> },
   ];
 
-  const loadingRoom = !room && (!roomsLoaded || roomId !== null);
+  const loadingRoom = !room && (!roomsLoaded || roomId !== null || rooms.some(item => !item.archived));
   const roomReady = !!room && validatedRoomId === room.id;
   const loadingLabel = !connected ? "等待设备连接…"
     : error ? "聊天暂未载入" : "正在读取聊天…";
@@ -1660,6 +1660,7 @@ export default function CollaborationWorkspace({
                 return (
                   member && (
                     <QuestionSheet
+                      retainDraftOnSubmit
                       key={`${item.question.ask_id}:${questionOpening}`}
                       draft={{ key: questionKey(member.id, item.question.ask_id), store: questionDrafts.current }}
                       engine={member.spec.engine}
@@ -1719,7 +1720,7 @@ export default function CollaborationWorkspace({
                   }
                   return sent;
                 };
-                return <QuestionSheet key={`${key}:${questionOpening}`} engine={member.spec.engine}
+                return <QuestionSheet key={`${key}:${questionOpening}`} engine={member.spec.engine} retainDraftOnSubmit
                   question={question.questions[0].question} options={question.questions[0].options}
                   questions={question.questions} draft={{ key, store: questionDrafts.current }}
                   sourceLabel={questionSource(member)}
