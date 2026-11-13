@@ -2348,6 +2348,32 @@ for (const sideChat of [false, true]) {
   });
 }
 
+for (const batch of [false, true]) {
+  test(`session workspace DSH ${batch ? "batch" : "single"} questions identify their native harness`, async ({ page }) => {
+    const sid = "dsh@question-label";
+    const relay = await mockRightPanelRelay(page, { retained: false, listReply: command => {
+      if (command.engine !== "dsh") return;
+      return { type: "session_list", engine: "dsh", space: "code", request_id: String(command.cmd_id),
+        sessions: [{ session_id: sid, engine: "dsh", space: "code", summary: "DSH question", cwd: "/tmp/dsh", state: "idle" }] };
+    } });
+    await page.goto("/");
+    await expect(page.locator(".engine-name")).toHaveText("Codex");
+    await page.keyboard.press("Control+3");
+    await expect.poll(() => relay.commands.some(command =>
+      command.type === "get_history" && command.session_id === sid)).toBe(true);
+    const question = { question: "是否继续？", options: [{ label: "继续" }], allow_text: false };
+    relay.emit({ type: "ask_user", sid, seq: 1, ask_id: "dsh-question", ...question,
+      questions: batch ? [question, question] : undefined });
+    const dialog = page.getByRole("dialog", { name: "操作确认" });
+    await expect(dialog.locator(".question-dialog-title")).toContainText("DSH 想确认一下");
+    await dialog.getByRole("button", { name: "收起问题", exact: true }).click();
+    await expect(page.locator(".question-resume")).toBeVisible();
+    expect(relay.commands.some(command => command.type === "answer_question")).toBe(false);
+    relay.emit({ type: "ask_user_closed", sid, seq: 2, ask_id: "dsh-question", reason: "cancelled" });
+    await expect(page.locator(".question-resume")).toHaveCount(0);
+  });
+}
+
 test("session workspace Claude context refreshes while running and keeps its last reading silently", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, {
     retained: false, engine: "claude", parentState: "running",

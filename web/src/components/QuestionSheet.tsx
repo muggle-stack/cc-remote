@@ -42,6 +42,7 @@ export function QuestionSheet(props: Props) {
 function SingleQuestionSheet({
   engine, question, header, options, allowText, secret, multiSelect, onAnswer, draft, planDocument,
 }: Props) {
+  const engineName = { claude: "Claude", codex: "Codex", dsh: "DSH" }[engine];
   const dialogRef = useRef<HTMLDialogElement>(null);
   const headingRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -137,7 +138,7 @@ function SingleQuestionSheet({
         onKeyDown={(event) => event.stopPropagation()} data-lock-horizontal-swipe>
         <div ref={headingRef} tabIndex={-1} className="question-dialog-title">
           <EngineIcon engine={engine} size={26} />
-          <span>{engine === "claude" ? "Claude" : "Codex"} 想确认一下</span>
+          <span>{engineName} 想确认一下</span>
           <QuestionCollapseButton onPointerDown={imeSubmit.commitCompositionBeforePointerSubmit}
             onCollapse={() => {
               // Keep this component mounted: hiding the dialog does not answer,
