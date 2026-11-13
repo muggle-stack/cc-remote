@@ -1093,6 +1093,86 @@ def test_claude_resident_preload_keeps_recovered_answer_once(
     asyncio.run(go())
 
 
+@pytest.mark.parametrize("explicit_profile", [False, True])
+def test_claude_resident_preload_preserves_internal_task_notifications(
+    monkeypatch, tmp_path, explicit_profile,
+):
+    notification = (
+        "<task-notification>\n<task-id>background-job</task-id>\n"
+        "<tool-use-id>background-call</tool-use-id>\n"
+        "<status>completed</status>\n<summary>Job finished</summary>\n"
+        "</task-notification>"
+    )
+    rows = [
+        {"type": "user", "uuid": "human", "message": {
+            "role": "user", "content": "run job"}},
+        {"type": "assistant", "uuid": "start-job", "message": {
+            "role": "assistant", "content": [{
+                "type": "tool_use", "id": "background-call", "name": "Bash",
+                "input": {"command": "true", "run_in_background": True},
+            }]}},
+        {"type": "user", "uuid": "job-started", "message": {
+            "role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": "background-call",
+                "content": "Job started",
+            }]}},
+        {"type": "assistant", "uuid": "foreground-answer", "message": {
+            "role": "assistant", "stop_reason": "end_turn", "content": [
+                {"type": "text", "text": "Started."}]}},
+        {"type": "queue-operation", "operation": "enqueue", "content": notification},
+        {"type": "user", "uuid": "native-notice", "origin": {
+            "kind": "task-notification"}, "message": {
+                "role": "user", "content": notification}},
+        {"type": "assistant", "uuid": "background-answer", "message": {
+            "role": "assistant", "stop_reason": "end_turn", "content": [
+                {"type": "text", "text": "Finished."}]}},
+    ]
+    previous = None
+    for index, row in enumerate(rows):
+        if "uuid" in row:
+            row.update(parentUuid=previous, timestamp=f"2026-01-01T00:00:0{index}Z")
+            previous = row["uuid"]
+    transcript = tmp_path / "resident-notification.jsonl"
+    _write_transcript(transcript, rows)
+    messages = [_session_message(row) for row in rows if "message" in row]
+    monkeypatch.setattr(mm, "transcript_path", lambda _sid: str(transcript))
+    monkeypatch.setattr(stream_module, "transcript_path", lambda _sid: str(transcript))
+    monkeypatch.setattr(mm, "get_session_info", lambda _sid: None)
+    monkeypatch.setattr(mm, "get_session_messages", lambda *_args, **_kwargs: messages)
+    monkeypatch.setattr(mm, "translate_subagent_history", lambda *_args, **_kwargs: [])
+
+    async def go():
+        machine, _ = _mk_machine()
+        machine._history_index = HistoryIndexStore(tmp_path / "history-state")
+        monkeypatch.setattr(machine, "_claude_transcript_path", lambda *_args, **_kwargs: str(transcript))
+        monkeypatch.setattr(machine, "_claude_config_root", lambda _profile: str(tmp_path) if explicit_profile else None)
+        monkeypatch.setattr(machine, "_claude_catalog_messages", lambda *_args, **_kwargs: messages)
+        ctx = _mk_ctx("resident-notification", "resident-notification")
+        ctx.cwd = str(tmp_path)
+        await machine._load_history(ctx, ctx.session_id)
+        frames = ctx.buffer.replay_from(
+            0, cc_session_id=ctx.key, state=ctx.state,
+            generation=machine.instance_id,
+        )
+        assert [frame.prompt for frame in frames if isinstance(frame, UserMsg)] == ["run job"]
+        completion = next(frame for frame in frames if isinstance(frame, ProcessEvent)
+                          and frame.item_id == "background-job")
+        assert completion.status == "succeeded"
+        assert completion.turn_id == "human"
+        projected = materialize_history_turns([
+            frame.model_dump(mode="json", exclude_none=True) for frame in frames
+        ])
+        history = await machine._build_history(ctx.key, limit=4, detail="summary")
+        assert len(projected) == len(history.turns) == 1
+        assert projected[0]["doneTs"] == history.turns[0].doneTs
+        assert projected[0]["responseProcesses"] == [
+            summary.model_dump(exclude_none=True)
+            for summary in history.turns[0].responseProcesses
+        ]
+
+    asyncio.run(go())
+
+
 def test_claude_sdk_prompt_id_is_not_treated_as_browser_client_alias(
     monkeypatch, tmp_path,
 ):

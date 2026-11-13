@@ -1386,8 +1386,8 @@ assert.match(historyAppSource,
 assert.match(historyAppSource,
   /requestHistoryTurnDetail = useCallback\([\s\S]{0,120}autoLoad = false/,
   "every detail entry point must default to one bounded page");
-assert.match(cacheSource, /const CACHE_VER = 29/,
-  "return-link recovery must invalidate browser summaries missing native attribution");
+assert.match(cacheSource, /const CACHE_VER = 30/,
+  "Claude restart recovery must invalidate cached task-notification rows and synthetic failure clocks");
 assert.match(cacheSource, /objectStore\(STORE\)\.delete\(sessionId\)/);
 assert.match(cacheSource, /job\.epoch !== sessionEpoch\(job\.sid\)/,
   "a debounced pre-marker write must not recreate the deleted cache row");

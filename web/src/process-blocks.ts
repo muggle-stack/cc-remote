@@ -75,9 +75,11 @@ export function processBlocks(blocks: Block[]): Block[] {
     if (isSyntheticReturnReceipt(block)) return false;
     if (block.kind === "process" && block.tool === "model_refusal_fallback") return false;
     if (block.kind === "text") {
+      // Native async notices can carry phase=final_answer while the task keeps
+      // running. Only structured questions need a separate response card.
       return block.text.length > 0
-        && block.delivery !== "async"
-        && (block.channel === "thinking" || block.channel === "commentary");
+        && (block.delivery === "async" ? !block.questions?.length
+          : block.channel === "thinking" || block.channel === "commentary");
     }
     // Keep ToolUse in reducer state for result correlation and older peers,
     // while presenting the dedicated live agent lifecycle only once.
@@ -115,8 +117,8 @@ export function presentableProcessBlocks(
 export function finalTextBlocks(blocks: Block[]): TextBlock[] {
   return blocks.filter((block): block is TextBlock => block.kind === "text"
     && block.text.length > 0
-    && (block.delivery === "async"
-      || block.channel == null || block.channel === "final" || block.channel === "unknown"));
+    && (block.delivery === "async" ? !!block.questions?.length
+      : block.channel == null || block.channel === "final" || block.channel === "unknown"));
 }
 
 /** A main answer can finish before a background task or agent reports its

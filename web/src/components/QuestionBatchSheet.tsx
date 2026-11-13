@@ -25,6 +25,7 @@ export function QuestionBatchSheet({ engine, questions, draft, onSubmit }: {
   draft?: { key: string; store: Map<string, QuestionDraft> };
   onSubmit: (answers: (string | string[])[]) => boolean | void;
 }) {
+  const engineName = { claude: "Claude", codex: "Codex", dsh: "DSH" }[engine];
   const [initial] = useState(() => {
     const saved = draft?.store.get(draft.key);
     return saved?.signature === JSON.stringify(questions) ? saved : undefined;
@@ -96,6 +97,11 @@ export function QuestionBatchSheet({ engine, questions, draft, onSubmit }: {
     }, 5000);
   };
   const ime = useImeSubmit<HTMLInputElement>(navigate);
+  const preserveDraft = useRef(() => {});
+  preserveDraft.current = () => save(pagesRef.current.map((value, index) => index === page ? {
+    ...value, text: ime.inputRef.current?.value ?? value.text,
+    scrollTop: scrollRef.current?.scrollTop ?? value.scrollTop,
+  } : value));
   useEffect(() => () => { if (timer.current !== null) clearTimeout(timer.current); }, []);
   useLayoutEffect(() => {
     const dialog = dialogRef.current;
@@ -106,7 +112,10 @@ export function QuestionBatchSheet({ engine, questions, draft, onSubmit }: {
       return;
     }
     dialog.showModal();
-    return () => dialog.close();
+    return () => {
+      preserveDraft.current();
+      dialog.close();
+    };
   }, [collapsed]);
   useLayoutEffect(() => {
     if (collapsed) return;
@@ -138,7 +147,7 @@ export function QuestionBatchSheet({ engine, questions, draft, onSubmit }: {
     onCancel={event => event.preventDefault()} onKeyDown={event => event.stopPropagation()}>
     <div ref={headingRef} tabIndex={-1} className="question-dialog-title">
       <EngineIcon engine={engine} size={26} />
-      <span>{engine === "claude" ? "Claude" : "Codex"} 想确认一下</span>
+      <span>{engineName} 想确认一下</span>
       {questions.length > 1 && <span className="qa-progress" aria-live="polite"
         aria-label={`第 ${page + 1} 题，共 ${questions.length} 题`}>{page + 1} / {questions.length}</span>}
       <QuestionCollapseButton onPointerDown={ime.commitCompositionBeforePointerSubmit}

@@ -24,12 +24,36 @@ import {
   activeTurnCandidateIds,
   displayActiveTurnOwnerId,
   exactActiveTurnId,
+  finalTextBlocks,
+  presentableProcessBlocks,
 } from "../src/process-blocks.ts";
 import { displayHistoryProjection } from "../src/history-recovery.ts";
 
 const blockIdentity = (block: Block): string => block.kind === "text"
   ? block.message_id
   : block.kind === "tool" ? block.tool_use_id : block.item_id;
+
+const asyncNotice: Block = {
+  kind: "text", message_id: "async-progress", channel: "final",
+  delivery: "async", text: "查到了，继续验证修复。", done: true,
+};
+const asyncQuestionBlock: Block = {
+  ...asyncNotice, message_id: "async-question", text: "发生在哪个设备？",
+  questions: [{ title: "发生在哪个设备？", options: ["Mac", "手机"] }],
+};
+const finalAnswerBlock: Block = {
+  kind: "text", message_id: "real-final", channel: "final",
+  text: "修复与验证均已完成。", done: true,
+};
+for (const engine of ["codex", "claude", "dsh"] as const) {
+  assert.deepEqual(presentableProcessBlocks([asyncNotice, asyncQuestionBlock, finalAnswerBlock], engine),
+    [asyncNotice], "a plain async notice belongs to process commentary without changing its native metadata");
+}
+assert.deepEqual(finalTextBlocks([asyncNotice, asyncQuestionBlock, finalAnswerBlock]),
+  [asyncQuestionBlock, finalAnswerBlock],
+  "only structured async questions keep a separate response entry beside real final answers");
+assert.deepEqual(finalTextBlocks([{ ...asyncNotice, questions: [] }]), [],
+  "an empty question list remains an ordinary progress notice");
 
 const pasteOne = makeComposerPaste("first pasted block", "paste-1");
 const pasteTwo = makeComposerPaste("second pasted block", "paste-2");
@@ -628,6 +652,21 @@ try {
   const event = (body: Record<string, unknown>): ServerEvent => ({
     v: 22, ts: 10, ...body,
   } as ServerEvent);
+
+  for (const block of [asyncNotice, asyncQuestionBlock, finalAnswerBlock]) {
+    const sid = `idle-repair-${block.message_id}`;
+    const turn = { id: "unfinished-turn", prompt: "check progress", done: false, blocks: [block] };
+    const repaired = reduce({ ...initialState, focusedSid: sid, runtimes: {
+      [sid]: { ...createRuntime(), state: "idle", syncReady: true, turns: [turn] },
+    } }, { type: "event", event: event({
+      type: "history", sid, session_id: sid, revision: "idle-repair-r1",
+      detail: "summary", has_more: false, in_progress: false, events: [],
+      turns: [{ ...turn, detailLoaded: false, detailEventCount: 0 }],
+    }) }).runtimes[sid].turns[0];
+    assert.equal(repaired.done, true);
+    assert.equal(!!repaired.interrupted, block.delivery === "async",
+      "an idle snapshot needs a real final answer before repairing a missing terminal as success");
+  }
 
   // A new Claude transcript can become discoverable before its temporary
   // runtime captures the native session id. Focus may load that History first.
@@ -2367,6 +2406,118 @@ try {
   assert.equal(claudeState.runtimes[claudeSid].turns[0]
     .detailProjection?.blocks[0]?.done, false,
   "Claude terminal repair cannot close an explicitly detached background process");
+  const recoverySid = "claude-restart-history";
+  const recoveryRevision = "claude-restart-r1";
+  const recoveryGeneration = "claude-restart-g1";
+  const recoveredAnswer: Block = {
+    kind: "text", message_id: "native-completed-answer", channel: "final",
+    text: "The task finished.", done: true,
+  };
+  const recoveredTurn: Turn = {
+    id: "native-human-input", clientMsgId: "browser-human-input",
+    prompt: "run task", done: true, ts: 1_000, doneTs: 9_000,
+    durationMs: 8_000, blocks: [recoveredAnswer], detailLoaded: false,
+    detailEventCount: 2, processDetailState: "present",
+  };
+  const replayFragment: Turn = {
+    id: "replayed-envelope", prompt: "", done: true,
+    interrupted: true, error: "会话已结束，但未收到完整的终止状态。",
+    terminalSource: "idle_history_recovery", ts: 2_000, doneTs: 90_000,
+    blocks: [{
+      kind: "tool", message_id: "replayed-envelope", tool_use_id: "replayed-tool",
+      tool: "Bash", input: { command: "true" }, done: true,
+      result: { content: "finished", is_error: false },
+    }, recoveredAnswer],
+  };
+  const recoveryHistory = event({
+    type: "history", sid: recoverySid, session_id: recoverySid,
+    revision: recoveryRevision, generation: recoveryGeneration,
+    build_seq: 2, live_seq: 40, authoritative: true, detail: "summary",
+    in_progress: false, has_more: true, newest_id: recoveredTurn.id,
+    events: [], turns: [recoveredTurn],
+  });
+  const recoveryState = (turns: Turn[]) => ({
+    ...initialState, focusedSid: recoverySid,
+    sessions: [{ session_id: recoverySid, engine: "claude" as const }],
+    runtimes: { [recoverySid]: {
+      ...createRuntime(), state: "idle" as const,
+      historyRevision: recoveryRevision, historyGeneration: recoveryGeneration,
+      lastLiveSeq: 40, lastNarrativeSeq: 40, turns,
+    } },
+  });
+  for (const fragment of [
+    replayFragment,
+    { ...replayFragment, terminalSource: undefined },
+    { ...replayFragment, done: false, error: undefined, interrupted: undefined },
+  ]) {
+    const repaired = reduce(recoveryState([recoveredTurn, fragment]), {
+      type: "event", event: recoveryHistory,
+    }).runtimes[recoverySid].turns;
+    assert.equal(repaired.length, 1,
+      "an idle Claude page absorbs an unowned restart suffix with an exact native answer anchor");
+    assert.equal(repaired[0].id, recoveredTurn.id);
+    assert.equal(repaired[0].error, undefined);
+    assert.equal(!!repaired[0].interrupted, false);
+    assert.equal(repaired[0].doneTs, recoveredTurn.doneTs);
+    assert.equal(repaired[0].durationMs, recoveredTurn.durationMs);
+    assert.ok([...repaired[0].blocks, ...(repaired[0].detailProjection?.blocks ?? [])]
+      .some(block => block.kind === "tool" && block.tool_use_id === "replayed-tool"),
+    "the native process payload survives removal of its synthetic row");
+  }
+  const staleCompletedTurn: Turn = {
+    ...recoveredTurn, interrupted: true,
+    error: replayFragment.error, terminalSource: "idle_history_recovery",
+    doneTs: 90_000,
+  };
+  const repairedCompleted = reduce(recoveryState([staleCompletedTurn]), {
+    type: "event", event: recoveryHistory,
+  }).runtimes[recoverySid].turns[0];
+  assert.equal(repairedCompleted.error, undefined,
+    "an exact canonical Claude identity replaces only the browser's idle-recovery failure");
+  assert.equal(repairedCompleted.doneTs, recoveredTurn.doneTs);
+  assert.equal(repairedCompleted.terminalSource, undefined);
+
+  const unanchoredFragment: Turn = {
+    ...replayFragment, blocks: [replayFragment.blocks[0]],
+  };
+  const unanchoredRepaired = reduce(recoveryState([recoveredTurn, unanchoredFragment]), {
+    type: "event", event: recoveryHistory,
+  }).runtimes[recoverySid].turns;
+  assert.equal(unanchoredRepaired.length, 1,
+    "a completed canonical answer removes a userless suffix whose deferred process has no visible anchor");
+  const incompleteSource = {
+    ...recoveryHistory, turns: [{ ...recoveredTurn, done: false, blocks: [] }],
+  };
+  assert.equal(reduce(recoveryState([unanchoredFragment]), {
+    type: "event", event: incompleteSource,
+  }).runtimes[recoverySid].turns.length, 2,
+  "an incomplete source cannot discard an unowned partial process");
+
+  for (const unprovenHistory of [
+    { ...recoveryHistory, in_progress: true },
+    { ...recoveryHistory, live_seq: 39 },
+  ]) {
+    const retained = reduce(recoveryState([staleCompletedTurn]), {
+      type: "event", event: unprovenHistory,
+    }).runtimes[recoverySid].turns;
+    assert.equal(retained[0].error, replayFragment.error,
+      "running or live-raced Claude history cannot replace an observed fallback terminal");
+  }
+  const realFailure = reduce(recoveryState([{
+    ...staleCompletedTurn, error: "Native execution failed", terminalSource: "failed",
+  }]), { type: "event", event: recoveryHistory }).runtimes[recoverySid].turns[0];
+  assert.equal(realFailure.error, "Native execution failed",
+    "a browser recovery repair must preserve an observed native execution failure");
+
+  const ambiguousHistory = {
+    ...recoveryHistory, turns: [recoveredTurn, {
+      ...recoveredTurn, id: "another-native-input", clientMsgId: undefined,
+    }],
+  };
+  assert.equal(reduce(recoveryState([replayFragment]), {
+    type: "event", event: ambiguousHistory,
+  }).runtimes[recoverySid].turns.length, 3,
+  "a shared native answer identity cannot choose between two source turns");
 } finally {
   await reducerHarness.close();
 }

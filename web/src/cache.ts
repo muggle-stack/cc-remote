@@ -71,7 +71,9 @@ const SCHEMA = 1;
 // v27 removes Claude turns split by native isMeta recovery prompts.
 // v28 discards projections missing native cross-thread message provenance.
 // v29 rebuilds rows where a restored detail window discarded child-return links.
-const CACHE_VER = 29;
+// v30 discards Claude restart fragments and task notifications previously
+// persisted as independent user turns with synthetic failure clocks.
+const CACHE_VER = 30;
 const MAX_CACHE_SESSIONS = 64;
 const MAX_CACHE_TURNS = 100;
 const MAX_CACHE_BYTES = 2 * 1024 * 1024;

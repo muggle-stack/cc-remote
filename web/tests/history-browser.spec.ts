@@ -1684,9 +1684,18 @@ test("session workspace harness menu clears pointer focus and preserves keyboard
   await expect(select).not.toBeFocused();
   await expect(select).toHaveCSS("outline-style", "none");
   await expect(page.locator(".engine-label")).toHaveText("Claude");
+  await select.click();
+  await expect(page.getByRole("menu", { name: "会话引擎" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("menu", { name: "会话引擎" })).toHaveCount(0);
+  await expect(select).toBeFocused();
   await select.focus();
   await select.press("ArrowDown");
   const selected = page.getByRole("menuitemradio", { name: "Claude", exact: true });
+  await expect(selected).toBeFocused();
+  await selected.dispatchEvent("keydown", { key: "Escape", isComposing: true });
+  await expect(selected).toBeFocused();
+  await selected.dispatchEvent("keydown", { key: "Escape", keyCode: 229 });
   await expect(selected).toBeFocused();
   await selected.press("ArrowDown");
   await expect(page.getByRole("menuitemradio", { name: "Codex", exact: true })).toBeFocused();
@@ -2265,7 +2274,10 @@ for (const sideChat of [false, true]) {
     const dialog = page.getByRole("dialog", { name: "操作确认" });
     await expect(dialog).toBeVisible();
     await dialog.getByRole("button", { name: "保留选择", exact: true }).click();
-    await dialog.getByPlaceholder("输入回答").fill("Claude 未提交的回答");
+    const answer = dialog.getByPlaceholder("输入回答");
+    await answer.fill("Claude 原有草稿");
+    await answer.dispatchEvent("compositionstart");
+    await answer.evaluate(input => { (input as HTMLInputElement).value = "Claude 未提交的回答"; });
     const scroll = await dialog.locator(".sheet-scroll").evaluate(node => node.scrollTop);
     await page.keyboard.press("Meta+2");
     const selector = page.getByRole("button", { name: "切换新会话引擎" });
@@ -2300,6 +2312,74 @@ for (const sideChat of [false, true]) {
     await page.keyboard.press("Meta+2");
     await expect(selector).toContainText("Codex");
     await expect(dialog).toHaveCount(0);
+  });
+  test(`session workspace native question batch retains composing ${sideChat ? "side" : "main"} drafts across harness switches`, async ({ page }) => {
+    const relay = await mockRightPanelRelay(page, {
+      engine: "claude", parentState: "running", visible: sideChat, listReply: otherHarnessList,
+    });
+    await page.goto("/");
+    await expect(page.locator("textarea[data-chat-composer]")).toBeEnabled();
+    const sid = sideChat ? "btw-layout-child" : "layout-parent";
+    const questions = [
+      { question: "确认第一项", options: [{ label: "保留第一项" }], allow_text: true, multi_select: true },
+      { question: "确认第二项\n".repeat(60), options: [{ label: "保留第二项" }], allow_text: true, multi_select: true },
+    ];
+    relay.emit({ type: "ask_user", sid, seq: 1, ask_id: "composing-batch", ...questions[0], questions });
+    const dialog = page.getByRole("dialog", { name: "操作确认" });
+    await dialog.getByRole("button", { name: "保留第一项", exact: true }).click();
+    await dialog.getByRole("button", { name: "下一题", exact: true }).click();
+    await expect(dialog.locator(".qa-progress")).toHaveText("2 / 2");
+    await dialog.getByRole("button", { name: "保留第二项", exact: true }).click();
+    const answer = dialog.getByRole("textbox", { name: "输入回答" });
+    await answer.fill("第二题原有草稿");
+    const scroll = await dialog.locator(".sheet-scroll").evaluate(node => node.scrollTop);
+    await answer.dispatchEvent("compositionstart");
+    await answer.evaluate(input => { (input as HTMLInputElement).value = "中文输入中的回答"; });
+    await page.keyboard.press("Meta+2");
+    const selector = page.getByRole("button", { name: "切换新会话引擎" });
+    await expect(selector).toContainText("Codex");
+    await expect(dialog).toHaveCount(0);
+    await page.keyboard.press("Meta+1");
+    await expect(dialog.locator(".qa-progress")).toHaveText("2 / 2");
+    await expect(answer).toHaveValue("中文输入中的回答");
+    await expect(dialog.getByRole("button", { name: "保留第二项", exact: true }))
+      .toHaveAttribute("aria-pressed", "true");
+    await expect.poll(() => dialog.locator(".sheet-scroll").evaluate(node => node.scrollTop))
+      .toBeCloseTo(scroll, 0);
+    expect(relay.commands.some(command => command.type === "answer_question")).toBe(false);
+    await dialog.getByRole("button", { name: "提交回答", exact: true }).click();
+    await expect.poll(() => relay.commands.filter(command => command.type === "answer_question")
+      .map(({ sid, ask_id, answers }) => ({ sid, ask_id, answers }))).toEqual([
+      { sid, ask_id: "composing-batch", answers: [["保留第一项"], ["保留第二项", "中文输入中的回答"]] },
+    ]);
+    relay.emit({ type: "ask_user_closed", sid, seq: 2, ask_id: "composing-batch", reason: "answered" });
+    await expect(dialog).toHaveCount(0);
+  });
+}
+
+for (const batch of [false, true]) {
+  test(`session workspace DSH ${batch ? "batch" : "single"} questions identify their native harness`, async ({ page }) => {
+    const sid = "dsh@question-label";
+    const relay = await mockRightPanelRelay(page, { retained: false, listReply: command => {
+      if (command.engine !== "dsh") return;
+      return { type: "session_list", engine: "dsh", space: "code", request_id: String(command.cmd_id),
+        sessions: [{ session_id: sid, engine: "dsh", space: "code", summary: "DSH question", cwd: "/tmp/dsh", state: "idle" }] };
+    } });
+    await page.goto("/");
+    await expect(page.locator(".engine-name")).toHaveText("Codex");
+    await page.keyboard.press("Control+3");
+    await expect.poll(() => relay.commands.some(command =>
+      command.type === "get_history" && command.session_id === sid)).toBe(true);
+    const question = { question: "是否继续？", options: [{ label: "继续" }], allow_text: false };
+    relay.emit({ type: "ask_user", sid, seq: 1, ask_id: "dsh-question", ...question,
+      questions: batch ? [question, question] : undefined });
+    const dialog = page.getByRole("dialog", { name: "操作确认" });
+    await expect(dialog.locator(".question-dialog-title")).toContainText("DSH 想确认一下");
+    await dialog.getByRole("button", { name: "收起问题", exact: true }).click();
+    await expect(page.locator(".question-resume")).toBeVisible();
+    expect(relay.commands.some(command => command.type === "answer_question")).toBe(false);
+    relay.emit({ type: "ask_user_closed", sid, seq: 2, ask_id: "dsh-question", reason: "cancelled" });
+    await expect(page.locator(".question-resume")).toHaveCount(0);
   });
 }
 
@@ -4180,6 +4260,78 @@ test("async question summary keeps its ordinary answer visible after refresh wit
   await expect(page.getByText(answer, { exact: true })).toBeVisible();
   expect(relay.commands.filter((c) => ["query", "steer", "get_turn_detail"].includes(String(c.type))))
     .toHaveLength(0);
+});
+
+test("async question delivery without questions stays in the running Codex process through refresh and completion", async ({ page }, info) => {
+  const sid = "layout-parent";
+  const notice = "查到了，原生 ID 已确认，正在继续回归。";
+  const finalAnswer = "目录、显示标识与回归检查均已完成。";
+  const malformedFrames: string[] = [];
+  page.on("console", message => {
+    if (message.text().includes("dropping malformed frame")) malformedFrames.push(message.text());
+  });
+  const turns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = [];
+  const relay = await mockRightPanelRelay(page, {
+    retained: false, parentState: "running", historyReply: command => ({
+      type: "history", sid: String(command.session_id), session_id: String(command.session_id),
+      revision: turns.at(-1)?.done ? "notice-completed" : "notice-running",
+      generation: "layout-generation", detail: "summary", events: [], turns, has_more: false,
+      in_progress: turns.at(-1)?.done !== true, newest_id: turns.at(-1)?.id,
+    }),
+  });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
+  relay.emit({ type: "user_msg", sid, msg_id: "notice-user", prompt: "核对这个问题并修复" });
+  relay.emit({ type: "turn_binding", sid, msg_id: "notice-user", turn_id: "notice-task" });
+  relay.emit({ type: "state", sid, state: "running", msg_id: "notice-user" });
+  relay.emit({ type: "tool_use", sid, message_id: "notice-tool-parent", turn_id: "notice-task",
+    tool_use_id: "notice-read", tool: "shell", category: "command", input: { command: "read session" } });
+  relay.emit({ type: "tool_result", sid, turn_id: "notice-task", tool_use_id: "notice-read",
+    content: "native ID confirmed", is_error: false });
+  relay.emit({ type: "assistant_msg_start", sid, message_id: "notice-item", turn_id: "notice-task", channel: "final" });
+  relay.emit({ type: "delta", sid, message_id: "notice-item", turn_id: "notice-task", channel: "final", text: notice });
+  relay.emit({ type: "assistant_msg_end", sid, message_id: "notice-item", turn_id: "notice-task",
+    channel: "final", delivery: "async" });
+  const row = page.locator('.turn[data-turn-id="notice-user"]');
+  await expect(row.locator(".process-commentary")).toContainText(notice);
+  await expect(row.locator(".assistant-answer-segment")).toHaveCount(0);
+  await expect(row.locator(".turn-process-label")).toContainText("正在处理");
+  await expect(row.locator(".turn-working")).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "停止", exact: true })).toBeVisible();
+  await row.screenshot({ path: info.outputPath("codex-async-notice-running.png") });
+
+  turns.push({ id: "notice-user", clientMsgId: "notice-user", forkPointId: "notice-task",
+    prompt: "核对这个问题并修复", done: false, ts: Date.now(), detailEventCount: 0, detailLoaded: true,
+    blocks: [{ kind: "text", message_id: "notice-item", channel: "final",
+      text: notice, delivery: "async", done: true }],
+  });
+  await page.reload();
+  await expect(row.locator(".process-commentary")).toContainText(notice);
+  await expect(row.locator(".assistant-answer-segment")).toHaveCount(0);
+  // The Wrapper replays the exact native/browser binding after reconnect.
+  // A running snapshot alone deliberately cannot animate an arbitrary row.
+  relay.emit({ type: "turn_binding", sid, msg_id: "notice-user", turn_id: "notice-task" });
+  relay.emit({ type: "state", sid, state: "running", msg_id: "notice-user" });
+  await expect(row.locator(".turn-process-label")).toContainText("正在处理");
+  relay.emit({ type: "tool_use", sid, message_id: "notice-late-parent", turn_id: "notice-task",
+    tool_use_id: "notice-tests", tool: "shell", category: "command", input: { command: "run tests" } });
+  relay.emit({ type: "tool_result", sid, turn_id: "notice-task", tool_use_id: "notice-tests",
+    content: "passed", is_error: false });
+  await expect(row.locator(".turn-process-label")).toContainText("正在处理");
+  relay.emit({ type: "assistant_msg_start", sid, message_id: "notice-final", turn_id: "notice-task", channel: "final" });
+  relay.emit({ type: "delta", sid, message_id: "notice-final", turn_id: "notice-task", channel: "final", text: finalAnswer });
+  relay.emit({ type: "assistant_msg_end", sid, message_id: "notice-final", turn_id: "notice-task", channel: "final" });
+  turns[0] = { ...turns[0], done: true, doneTs: Date.now(), blocks: [...turns[0].blocks,
+    { kind: "text", message_id: "notice-final", channel: "final", text: finalAnswer, done: true }] };
+  relay.emit({ type: "turn_end", sid, turn_id: "notice-task",
+    result: { subtype: "success", duration_ms: 1000, is_error: false } });
+  relay.emit({ type: "state", sid, state: "idle" });
+  await expect(row.locator(".turn-working")).toHaveCount(0);
+  await expect(row.locator(".turn-process-label")).toContainText("已处理");
+  await expect(row.locator(".assistant-answer-segment")).toHaveCount(1);
+  await expect(row.locator(".assistant-answer-segment")).toHaveText(finalAnswer);
+  expect(malformedFrames).toEqual([]);
+  expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toEqual([]);
 });
 
 test("async question live delivery preserves running state and uses steer instead of approval", async ({ page }) => {
@@ -8890,6 +9042,111 @@ test("user scrolling cancels a pending turn-detail anchor", async ({ page }) => 
   await page.waitForTimeout(450);
   expect(Math.abs(await processDetailEdge(page, "start") - userOffset))
     .toBeLessThan(2);
+});
+
+test("instant session cache Claude deployment replay settles before and after refresh", async ({ page }) => {
+  const sid = "layout-parent";
+  let liveSeq = 0;
+  const source = (): PanelRelayEvent<Extract<ServerEvent, { type: "history" }>> => ({
+    type: "history", sid, session_id: sid, revision: "layout-history",
+    generation: "layout-generation", live_seq: liveSeq, authoritative: true,
+    detail: "summary", in_progress: false, has_more: true,
+    newest_id: "native-human", events: [], turns: [{
+      id: "native-human", prompt: "run task", done: true,
+      ts: 1_000, doneTs: 9_000, durationMs: 8_000, detailEventCount: 1,
+      detailLoaded: false, processDetailState: "present", blocks: [{
+        kind: "text", message_id: "native-answer", channel: "final",
+        text: "Finished task.", done: true,
+      }],
+    }],
+  });
+  const relay = await mockRightPanelRelay(page, {
+    engine: "claude", retained: false,
+    historyReply: command => ({ ...source(), request_id: String(command.cmd_id) }),
+  });
+  await page.goto("/");
+  await expect(page.getByText("Finished task.", { exact: true })).toBeVisible();
+  relay.emit({ type: "replay_start", sid, from_seq: 1, to_seq: 5,
+    truncated: false, rebuild: false, generation: "layout-generation" });
+  relay.emit({ type: "assistant_msg_start", sid, seq: 1,
+    message_id: "replayed-envelope", channel: "commentary" });
+  relay.emit({ type: "delta", sid, seq: 2, message_id: "replayed-envelope",
+    text: "Checking files", channel: "commentary" });
+  relay.emit({ type: "tool_use", sid, seq: 3, message_id: "replayed-envelope",
+    tool_use_id: "replayed-tool", tool: "Bash", input: { command: "true" } });
+  relay.emit({ type: "tool_result", sid, seq: 4,
+    tool_use_id: "replayed-tool", content: "finished", is_error: false });
+  relay.emit({ type: "assistant_msg_end", sid, seq: 5,
+    message_id: "replayed-envelope", channel: "commentary" });
+  relay.emit({ type: "replay_end", sid, to_seq: 5, truncated: false });
+  liveSeq = 5;
+  relay.emit(source());
+  await expect(page.locator('[data-turn-id="replayed-envelope"]')).toHaveCount(0);
+  await expect(page.locator('[data-turn-id="native-human"]')).toHaveCount(1);
+  await expect(page.locator(".turn-problem, .turn-failure-status")).toHaveCount(0);
+  for (let iteration = 0; iteration < 2; iteration++) {
+    await page.reload();
+    await expect(page.getByText("Finished task.", { exact: true })).toBeVisible();
+    await expect(page.locator('[data-turn-id="replayed-envelope"]')).toHaveCount(0);
+    await expect(page.locator(".turn-problem, .turn-failure-status")).toHaveCount(0);
+  }
+  expect(relay.commands.some(command => ["query", "steer", "new_session"]
+    .includes(String(command.type)))).toBe(false);
+});
+
+test("instant session cache rebuilds Claude deployment residue in real IndexedDB", async ({ page }) => {
+  await page.goto("/tests/history-browser.html");
+  const ignored = await page.evaluate(async () => {
+    const cache = await import("/src/cache.ts");
+    const { WEB_BUILD } = await import("/src/web-build.ts");
+    await cache.clearCache();
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("cc_remote_cache", 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction("sessions", "readwrite");
+      transaction.objectStore("sessions").put({
+        sid: "claude-deployment-residue", v: 29, buildId: WEB_BUILD.build_id,
+        revision: "source-r1", generation: "old-wrapper", lastSeq: 3905,
+        savedAt: Date.now(), turns: [{
+          id: "replayed-envelope", prompt: "", done: true, interrupted: true,
+          error: "会话已结束，但未收到完整的终止状态。",
+          terminalSource: "idle_history_recovery", blocks: [],
+        }],
+      }, "claude-deployment-residue");
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    });
+    database.close();
+    const session = await cache.loadSession("claude-deployment-residue");
+    const replay = await cache.loadAllReplayState();
+    cache.saveSession("claude-deployment-residue", [{
+      id: "native-human", prompt: "run task", done: true,
+      ts: 1_000, doneTs: 9_000, blocks: [{
+        kind: "text", message_id: "native-answer", text: "Finished.",
+        channel: "final", done: true,
+      }],
+    }], 42, "source-r1", "new-wrapper");
+    return { session, cursor: replay.cursors["claude-deployment-residue"] };
+  });
+  expect(ignored.session).toBeNull();
+  expect(ignored.cursor).toBeUndefined();
+  await expect.poll(() => page.evaluate(async () => {
+    const cache = await import("/src/cache.ts");
+    return (await cache.loadSession("claude-deployment-residue"))?.turns[0].id;
+  })).toBe("native-human");
+  await page.reload();
+  const restored = await page.evaluate(async () => {
+    const cache = await import("/src/cache.ts");
+    return cache.loadSession("claude-deployment-residue");
+  });
+  expect(restored?.generation).toBe("new-wrapper");
+  expect(restored?.turns).toHaveLength(1);
+  expect(restored?.turns[0].id).toBe("native-human");
+  expect(restored?.turns[0].error).toBeUndefined();
+  expect(restored?.turns[0].doneTs).toBe(9_000);
 });
 
 test("history page cache rebuilds a v1 record in real IndexedDB", async ({

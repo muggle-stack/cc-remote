@@ -91,12 +91,14 @@ async def test_recursive_scan_is_bounded_and_cancels_pending_reads(monkeypatch):
     app, c = app_client()
     count = 0
     hanging = False
+    read_started = asyncio.Event()
     cancelled = asyncio.Event()
 
     async def listing(path, **kwargs):
         nonlocal count
         count += 1
         if hanging and path != "/root":
+            read_started.set()
             try:
                 await asyncio.Future()
             finally:
@@ -112,13 +114,14 @@ async def test_recursive_scan_is_bounded_and_cancels_pending_reads(monkeypatch):
     async with app.run_test() as pilot:
         picker = DirectoryPicker(c, "/root")
         app.push_screen(picker)
-        await pilot.pause(0.6)
+        await pilot.pause()
+        await asyncio.wait_for(picker.load_worker.wait(), 5)
         assert count == 6 and "limit reached" in picker.scan_note
         hanging = True
         picker.action_refresh()
-        await pilot.pause(0.1)
+        await asyncio.wait_for(read_started.wait(), 5)
         await pilot.press("escape")
-        await asyncio.wait_for(cancelled.wait(), 1)
+        await asyncio.wait_for(cancelled.wait(), 5)
 
 
 @pytest.mark.asyncio
