@@ -59,6 +59,7 @@ class CollaborationStore:
                     id TEXT PRIMARY KEY, room_id TEXT NOT NULL REFERENCES rooms(id),
                     message_id TEXT NOT NULL REFERENCES messages(id), member_id TEXT NOT NULL REFERENCES members(id),
                     status TEXT NOT NULL, mode TEXT, sid TEXT, native_turn TEXT, native_input_id TEXT,
+                    response_owner TEXT, response_msg_id TEXT,
                     context_before INTEGER NOT NULL, context_through INTEGER NOT NULL, context_version INTEGER NOT NULL,
                     payload TEXT NOT NULL, error TEXT, created REAL NOT NULL, updated REAL NOT NULL,
                     UNIQUE(message_id,member_id)
@@ -81,6 +82,10 @@ class CollaborationStore:
                 db.execute("ALTER TABLE members ADD COLUMN pending_title TEXT")
             if "question" not in {row[1] for row in db.execute("PRAGMA table_info(messages)")}:
                 db.execute("ALTER TABLE messages ADD COLUMN question TEXT")
+            delivery_columns = {row[1] for row in db.execute("PRAGMA table_info(deliveries)")}
+            for column in ("response_owner", "response_msg_id"):
+                if column not in delivery_columns:
+                    db.execute(f"ALTER TABLE deliveries ADD COLUMN {column} TEXT")
         os.chmod(self.path, 0o600)
 
     @contextmanager
@@ -734,17 +739,49 @@ class CollaborationStore:
                 ).fetchone()
             )
 
-    def consume(self, delivery_id, native_turn=None):
+    def _steer_response(self, db, member_id, native_turn, msg_id, delivery_ids=None):
+        if delivery_ids is None:
+            previous = db.execute(
+                "SELECT deliveries.* FROM members JOIN deliveries ON deliveries.id=members.source_delivery WHERE members.id=?",
+                (member_id,),
+            ).fetchone()
+            if not previous or previous["status"] not in {"running", "stopping"}:
+                return
+            scope = "coalesce(response_owner,native_turn,id)=?"
+            identities = [previous["response_owner"] or previous["native_turn"] or previous["id"]]
+        else:
+            if not delivery_ids:
+                return
+            scope = "id IN (" + ",".join("?" for _ in delivery_ids) + ")"
+            identities = list(delivery_ids)
+        db.execute(
+            "UPDATE deliveries SET response_owner=?,response_msg_id=?,updated=? WHERE member_id=? "
+            "AND status IN ('running','stopping') AND " + scope,
+            [native_turn, msg_id, time.time(), member_id, *identities],
+        )
+
+    def steer_response(self, member_id, native_turn, msg_id, *, delivery_ids=None):
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._steer_response(db, member_id, native_turn, msg_id, delivery_ids)
+
+    def consume(self, delivery_id, native_turn=None, *, steered=False):
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT * FROM deliveries WHERE id=?", (delivery_id,)
             ).fetchone()
             if row and row["status"] in ACTIVE_DELIVERIES | {"unknown"}:
+                if steered and row["native_turn"] is None:
+                    self._steer_response(db, row["member_id"], native_turn, row["id"])
+                response_owner, response_msg_id = row["response_owner"], row["response_msg_id"]
+                if response_msg_id is None or response_msg_id == row["id"]:
+                    response_owner = native_turn or row["native_turn"] or row["id"]
+                    response_msg_id = row["id"]
                 db.execute(
                     "UPDATE deliveries SET status=CASE WHEN status='stopping' THEN status ELSE 'running' END,"
-                    "native_turn=coalesce(?,native_turn),error=NULL,updated=? WHERE id=?",
-                    (native_turn, time.time(), delivery_id),
+                    "native_turn=coalesce(?,native_turn),response_owner=?,response_msg_id=?,error=NULL,updated=? WHERE id=?",
+                    (native_turn, response_owner, response_msg_id, time.time(), delivery_id),
                 )
                 db.execute(
                     "UPDATE members SET synced_seq=max(synced_seq,?),source_delivery=? WHERE id=?",
@@ -777,8 +814,9 @@ class CollaborationStore:
                 )
             ):
                 db.execute(
-                    "UPDATE deliveries SET status='running',native_turn=coalesce(?,native_turn),updated=? WHERE id=?",
-                    (native_turn, time.time(), row["id"]),
+                    "UPDATE deliveries SET status='running',native_turn=coalesce(?,native_turn),"
+                    "response_owner=coalesce(?,native_turn),response_msg_id=id,updated=? WHERE id=?",
+                    (native_turn, native_turn, time.time(), row["id"]),
                 )
 
     def clear_source(self, member_id):
@@ -796,11 +834,12 @@ class CollaborationStore:
             if not row:
                 return
             previous = db.execute(
-                "SELECT id,text,question FROM messages WHERE source=?", (source,)
+                "SELECT id,text,question,reply_to FROM messages WHERE source=?", (source,)
             ).fetchone()
             if previous:
                 if new_only:
                     return
+                reply_to = list(dict.fromkeys([*json.loads(previous["reply_to"]), *reply_to]))
                 if question is not None and previous["question"]:
                     old_question = json.loads(previous["question"])
                     for field in ("status", "answers", "answer_delivery"):
@@ -808,7 +847,7 @@ class CollaborationStore:
                             question[field] = old_question[field]
                 if previous["text"] == text and (
                     question is None or previous["question"] == encoded(question)
-                ):
+                ) and previous["reply_to"] == encoded(reply_to):
                     return
                 message_id = previous["id"]
                 db.execute(
@@ -998,6 +1037,8 @@ class CollaborationStore:
                     "context_through",
                     "context_version",
                     "native_input_id",
+                    "response_owner",
+                    "response_msg_id",
                 }
             }
             for item in sorted(rows.values(), key=lambda row: row["created"])

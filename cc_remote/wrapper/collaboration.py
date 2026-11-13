@@ -56,6 +56,7 @@ class _ProjectionContext:
     texts: OrderedDict = field(default_factory=OrderedDict)
     live_context: object | None = None
     live_seq: int | None = None
+    steered_deliveries: frozenset[str] = frozenset()
 
 
 class Collaboration:
@@ -1068,6 +1069,13 @@ class Collaboration:
                     break
                 before = older
 
+            # Scan each input's own native segment before adding the shared
+            # response aliases, so earlier missing replies are also recovered.
+            if projection.engine == "claude":
+                for row in pending:
+                    for name in ("response_owner", "response_msg_id"):
+                        if row.get(name):
+                            identities.setdefault(row[name], set()).add(row["id"])
             # Retain only cursors while scanning, then replay oldest first.
             # This also lets an older user echo bind a newer terminal page.
             loaded_before = before
@@ -1147,6 +1155,9 @@ class Collaboration:
         for index, event in enumerate(events):
             kind = event.get("type")
             if kind in {"user_msg", "turn_steered", "turn_binding"}:
+                owner = event.get("turn_id") or event.get("msg_id")
+                if kind == "user_msg" and owner and projection.steered_deliveries:
+                    identities.setdefault(owner, set()).update(projection.steered_deliveries)
                 keys = {event.get("msg_id"), event.get("client_msg_id")}
                 keys.add(native_owners.get(event.get("msg_id")))
                 if kind != "user_msg":
@@ -1154,7 +1165,6 @@ class Collaboration:
                 matching = set()
                 for key in keys:
                     matching.update(identities.get(key, ()))
-                owner = event.get("turn_id") or event.get("msg_id")
                 if matching and owner:
                     identities.setdefault(owner, set()).update(matching)
             # Claude terminal turn_id is an assistant fork point. Its
@@ -1174,11 +1184,13 @@ class Collaboration:
                 delivery_ids=frozenset(scope),
             ) is False:
                 return False
-            if (
-                kind == "turn_end"
-                and event.get("result", {}).get("subtype") != "steered"
-            ):
-                matching = set()
+            if kind == "turn_end":
+                if event.get("result", {}).get("subtype") == "steered":
+                    if projection.engine == "claude":
+                        projection.steered_deliveries = frozenset(scope)
+                else:
+                    projection.steered_deliveries = frozenset()
+                    matching = set()
 
     async def observe(self, ctx, frame, *, delivery_ids=None):
         entry = self.members.get(id(ctx))
@@ -1329,6 +1341,12 @@ class Collaboration:
             await asyncio.to_thread(
                 self.store.resume_source, member_id, autonomous=True, native_turn=frame.turn_id
             )
+        if isinstance(ctx, _ProjectionContext) and kind == "user_msg" and ctx.steered_deliveries:
+            await asyncio.to_thread(
+                self.store.steer_response, member_id, getattr(frame, "turn_id", None) or frame.msg_id,
+                frame.client_msg_id or frame.msg_id, delivery_ids=ctx.steered_deliveries,
+            )
+            ctx.steered_deliveries = frozenset()
         rows = await asyncio.to_thread(
             self.store.deliveries, member["room_id"], active=True
         )
@@ -1363,6 +1381,7 @@ class Collaboration:
             identities = {
                 getattr(frame, name, None) for name in ("msg_id", "client_msg_id")
             } - {None}
+            consumed = False
             for row in active:
                 if (
                     row["id"] in identities
@@ -1374,9 +1393,13 @@ class Collaboration:
                         self.store.consume,
                         row["id"],
                         getattr(frame, "turn_id", None) or frame.msg_id,
+                        steered=ctx.engine == "claude" and kind == "turn_steered",
                     )
+                    consumed = True
                     if answered_question:
                         self._remember_question_status(member_id, answered_question, "answered", kind="async")
+            if ctx.engine == "claude" and kind == "turn_steered" and not consumed:
+                await asyncio.to_thread(self.store.steer_response, member_id, frame.turn_id, frame.msg_id)
             if kind == "user_msg":
                 known = await asyncio.to_thread(
                     self.store.deliveries, member["room_id"]
@@ -1387,7 +1410,8 @@ class Collaboration:
                     if (
                         row["member_id"] == member_id
                         and identities
-                        & {row["id"], row["native_turn"], row["native_input_id"]}
+                        & {row["id"], row["native_turn"], row["native_input_id"],
+                           row.get("response_owner"), row.get("response_msg_id")}
                     )
                 ]
                 if not matched or all(
@@ -1408,6 +1432,7 @@ class Collaboration:
             running = [
                 row for row in running
                 if owners & {row["id"], row["native_turn"], row["native_input_id"]}
+                or (ctx.engine == "claude" and owners & {row.get("response_owner"), row.get("response_msg_id")})
             ]
         if kind == "assistant_msg_end" and (running or (item.get("delivery") == "async" and item.get("has_questions"))):
             public_reply = (
