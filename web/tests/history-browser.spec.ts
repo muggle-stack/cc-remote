@@ -2265,7 +2265,10 @@ for (const sideChat of [false, true]) {
     const dialog = page.getByRole("dialog", { name: "操作确认" });
     await expect(dialog).toBeVisible();
     await dialog.getByRole("button", { name: "保留选择", exact: true }).click();
-    await dialog.getByPlaceholder("输入回答").fill("Claude 未提交的回答");
+    const answer = dialog.getByPlaceholder("输入回答");
+    await answer.fill("Claude 原有草稿");
+    await answer.dispatchEvent("compositionstart");
+    await answer.evaluate(input => { (input as HTMLInputElement).value = "Claude 未提交的回答"; });
     const scroll = await dialog.locator(".sheet-scroll").evaluate(node => node.scrollTop);
     await page.keyboard.press("Meta+2");
     const selector = page.getByRole("button", { name: "切换新会话引擎" });
@@ -2299,6 +2302,48 @@ for (const sideChat of [false, true]) {
     relay.emit({ type: "ask_user_closed", sid: "codex-parent", seq: 2, ask_id: "shared-ask-id" });
     await page.keyboard.press("Meta+2");
     await expect(selector).toContainText("Codex");
+    await expect(dialog).toHaveCount(0);
+  });
+  test(`session workspace native question batch retains composing ${sideChat ? "side" : "main"} drafts across harness switches`, async ({ page }) => {
+    const relay = await mockRightPanelRelay(page, {
+      engine: "claude", parentState: "running", visible: sideChat, listReply: otherHarnessList,
+    });
+    await page.goto("/");
+    await expect(page.locator("textarea[data-chat-composer]")).toBeEnabled();
+    const sid = sideChat ? "btw-layout-child" : "layout-parent";
+    const questions = [
+      { question: "确认第一项", options: [{ label: "保留第一项" }], allow_text: true, multi_select: true },
+      { question: "确认第二项\n".repeat(60), options: [{ label: "保留第二项" }], allow_text: true, multi_select: true },
+    ];
+    relay.emit({ type: "ask_user", sid, seq: 1, ask_id: "composing-batch", ...questions[0], questions });
+    const dialog = page.getByRole("dialog", { name: "操作确认" });
+    await dialog.getByRole("button", { name: "保留第一项", exact: true }).click();
+    await dialog.getByRole("button", { name: "下一题", exact: true }).click();
+    await expect(dialog.locator(".qa-progress")).toHaveText("2 / 2");
+    await dialog.getByRole("button", { name: "保留第二项", exact: true }).click();
+    const answer = dialog.getByRole("textbox", { name: "输入回答" });
+    await answer.fill("第二题原有草稿");
+    const scroll = await dialog.locator(".sheet-scroll").evaluate(node => node.scrollTop);
+    await answer.dispatchEvent("compositionstart");
+    await answer.evaluate(input => { (input as HTMLInputElement).value = "中文输入中的回答"; });
+    await page.keyboard.press("Meta+2");
+    const selector = page.getByRole("button", { name: "切换新会话引擎" });
+    await expect(selector).toContainText("Codex");
+    await expect(dialog).toHaveCount(0);
+    await page.keyboard.press("Meta+1");
+    await expect(dialog.locator(".qa-progress")).toHaveText("2 / 2");
+    await expect(answer).toHaveValue("中文输入中的回答");
+    await expect(dialog.getByRole("button", { name: "保留第二项", exact: true }))
+      .toHaveAttribute("aria-pressed", "true");
+    await expect.poll(() => dialog.locator(".sheet-scroll").evaluate(node => node.scrollTop))
+      .toBeCloseTo(scroll, 0);
+    expect(relay.commands.some(command => command.type === "answer_question")).toBe(false);
+    await dialog.getByRole("button", { name: "提交回答", exact: true }).click();
+    await expect.poll(() => relay.commands.filter(command => command.type === "answer_question")
+      .map(({ sid, ask_id, answers }) => ({ sid, ask_id, answers }))).toEqual([
+      { sid, ask_id: "composing-batch", answers: [["保留第一项"], ["保留第二项", "中文输入中的回答"]] },
+    ]);
+    relay.emit({ type: "ask_user_closed", sid, seq: 2, ask_id: "composing-batch", reason: "answered" });
     await expect(dialog).toHaveCount(0);
   });
 }

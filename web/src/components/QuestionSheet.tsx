@@ -67,13 +67,25 @@ function SingleQuestionSheet({
     while (draft.store.size > 64) draft.store.delete(draft.store.keys().next().value!);
   };
   const updateText = (value: string) => { setText(value); saveDraft({ text: value }); };
+  const answerSubmitted = useRef(false);
   const answer = (value: string | string[]) => {
-    if (onAnswer(value) !== false && draft) draft.store.delete(draft.key);
+    if (onAnswer(value) !== false) {
+      answerSubmitted.current = true;
+      if (draft) draft.store.delete(draft.key);
+    }
   };
   const imeSubmit = useImeSubmit<HTMLInputElement>((value) => {
     if (!value.trim()) return;
     answer(multiSelect ? [...selected, value] : value);
   });
+  const preserveDraft = useRef(() => {});
+  preserveDraft.current = () => {
+    if (answerSubmitted.current) return;
+    saveDraft({
+      text: imeSubmit.inputRef.current?.value ?? text,
+      scrollTop: scrollRef.current?.scrollTop ?? savedScroll.current,
+    });
+  };
   const toggle = (label: string) => {
     const next = selected.includes(label)
       ? selected.filter((value) => value !== label) : [...selected, label];
@@ -94,7 +106,10 @@ function SingleQuestionSheet({
     target?.focus({ preventScroll: true });
     focusTextOnOpen.current = false;
     if (scrollRef.current) scrollRef.current.scrollTop = savedScroll.current;
-    return () => { dialog.close(); };
+    return () => {
+      preserveDraft.current();
+      dialog.close();
+    };
   }, [imeSubmit.inputRef, collapsed]);
   useLayoutEffect(() => {
     const body = scrollRef.current;

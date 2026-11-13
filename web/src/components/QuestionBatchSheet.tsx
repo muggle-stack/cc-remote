@@ -96,6 +96,11 @@ export function QuestionBatchSheet({ engine, questions, draft, onSubmit }: {
     }, 5000);
   };
   const ime = useImeSubmit<HTMLInputElement>(navigate);
+  const preserveDraft = useRef(() => {});
+  preserveDraft.current = () => save(pagesRef.current.map((value, index) => index === page ? {
+    ...value, text: ime.inputRef.current?.value ?? value.text,
+    scrollTop: scrollRef.current?.scrollTop ?? value.scrollTop,
+  } : value));
   useEffect(() => () => { if (timer.current !== null) clearTimeout(timer.current); }, []);
   useLayoutEffect(() => {
     const dialog = dialogRef.current;
@@ -106,7 +111,10 @@ export function QuestionBatchSheet({ engine, questions, draft, onSubmit }: {
       return;
     }
     dialog.showModal();
-    return () => dialog.close();
+    return () => {
+      preserveDraft.current();
+      dialog.close();
+    };
   }, [collapsed]);
   useLayoutEffect(() => {
     if (collapsed) return;
