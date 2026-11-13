@@ -8964,6 +8964,111 @@ test("user scrolling cancels a pending turn-detail anchor", async ({ page }) => 
     .toBeLessThan(2);
 });
 
+test("instant session cache Claude deployment replay settles before and after refresh", async ({ page }) => {
+  const sid = "layout-parent";
+  let liveSeq = 0;
+  const source = (): PanelRelayEvent<Extract<ServerEvent, { type: "history" }>> => ({
+    type: "history", sid, session_id: sid, revision: "layout-history",
+    generation: "layout-generation", live_seq: liveSeq, authoritative: true,
+    detail: "summary", in_progress: false, has_more: true,
+    newest_id: "native-human", events: [], turns: [{
+      id: "native-human", prompt: "run task", done: true,
+      ts: 1_000, doneTs: 9_000, durationMs: 8_000, detailEventCount: 1,
+      detailLoaded: false, processDetailState: "present", blocks: [{
+        kind: "text", message_id: "native-answer", channel: "final",
+        text: "Finished task.", done: true,
+      }],
+    }],
+  });
+  const relay = await mockRightPanelRelay(page, {
+    engine: "claude", retained: false,
+    historyReply: command => ({ ...source(), request_id: String(command.cmd_id) }),
+  });
+  await page.goto("/");
+  await expect(page.getByText("Finished task.", { exact: true })).toBeVisible();
+  relay.emit({ type: "replay_start", sid, from_seq: 1, to_seq: 5,
+    truncated: false, rebuild: false, generation: "layout-generation" });
+  relay.emit({ type: "assistant_msg_start", sid, seq: 1,
+    message_id: "replayed-envelope", channel: "commentary" });
+  relay.emit({ type: "delta", sid, seq: 2, message_id: "replayed-envelope",
+    text: "Checking files", channel: "commentary" });
+  relay.emit({ type: "tool_use", sid, seq: 3, message_id: "replayed-envelope",
+    tool_use_id: "replayed-tool", tool: "Bash", input: { command: "true" } });
+  relay.emit({ type: "tool_result", sid, seq: 4,
+    tool_use_id: "replayed-tool", content: "finished", is_error: false });
+  relay.emit({ type: "assistant_msg_end", sid, seq: 5,
+    message_id: "replayed-envelope", channel: "commentary" });
+  relay.emit({ type: "replay_end", sid, to_seq: 5, truncated: false });
+  liveSeq = 5;
+  relay.emit(source());
+  await expect(page.locator('[data-turn-id="replayed-envelope"]')).toHaveCount(0);
+  await expect(page.locator('[data-turn-id="native-human"]')).toHaveCount(1);
+  await expect(page.locator(".turn-problem, .turn-failure-status")).toHaveCount(0);
+  for (let iteration = 0; iteration < 2; iteration++) {
+    await page.reload();
+    await expect(page.getByText("Finished task.", { exact: true })).toBeVisible();
+    await expect(page.locator('[data-turn-id="replayed-envelope"]')).toHaveCount(0);
+    await expect(page.locator(".turn-problem, .turn-failure-status")).toHaveCount(0);
+  }
+  expect(relay.commands.some(command => ["query", "steer", "new_session"]
+    .includes(String(command.type)))).toBe(false);
+});
+
+test("instant session cache rebuilds Claude deployment residue in real IndexedDB", async ({ page }) => {
+  await page.goto("/tests/history-browser.html");
+  const ignored = await page.evaluate(async () => {
+    const cache = await import("/src/cache.ts");
+    const { WEB_BUILD } = await import("/src/web-build.ts");
+    await cache.clearCache();
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("cc_remote_cache", 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction("sessions", "readwrite");
+      transaction.objectStore("sessions").put({
+        sid: "claude-deployment-residue", v: 29, buildId: WEB_BUILD.build_id,
+        revision: "source-r1", generation: "old-wrapper", lastSeq: 3905,
+        savedAt: Date.now(), turns: [{
+          id: "replayed-envelope", prompt: "", done: true, interrupted: true,
+          error: "会话已结束，但未收到完整的终止状态。",
+          terminalSource: "idle_history_recovery", blocks: [],
+        }],
+      }, "claude-deployment-residue");
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+    });
+    database.close();
+    const session = await cache.loadSession("claude-deployment-residue");
+    const replay = await cache.loadAllReplayState();
+    cache.saveSession("claude-deployment-residue", [{
+      id: "native-human", prompt: "run task", done: true,
+      ts: 1_000, doneTs: 9_000, blocks: [{
+        kind: "text", message_id: "native-answer", text: "Finished.",
+        channel: "final", done: true,
+      }],
+    }], 42, "source-r1", "new-wrapper");
+    return { session, cursor: replay.cursors["claude-deployment-residue"] };
+  });
+  expect(ignored.session).toBeNull();
+  expect(ignored.cursor).toBeUndefined();
+  await expect.poll(() => page.evaluate(async () => {
+    const cache = await import("/src/cache.ts");
+    return (await cache.loadSession("claude-deployment-residue"))?.turns[0].id;
+  })).toBe("native-human");
+  await page.reload();
+  const restored = await page.evaluate(async () => {
+    const cache = await import("/src/cache.ts");
+    return cache.loadSession("claude-deployment-residue");
+  });
+  expect(restored?.generation).toBe("new-wrapper");
+  expect(restored?.turns).toHaveLength(1);
+  expect(restored?.turns[0].id).toBe("native-human");
+  expect(restored?.turns[0].error).toBeUndefined();
+  expect(restored?.turns[0].doneTs).toBe(9_000);
+});
+
 test("history page cache rebuilds a v1 record in real IndexedDB", async ({
   page,
 }) => {

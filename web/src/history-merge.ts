@@ -569,20 +569,28 @@ export function restoreTurnInterruptionCauses(
   });
 }
 
-function isIdleHistoryRestartOrphan(turn: Turn): boolean {
+function isIdleHistoryRecovery(turn: Turn): boolean {
   return turn.done
     && turn.interrupted === true
     && turn.error === UNKNOWN_TERMINAL_ERROR
     && (turn.terminalSource == null
-      || turn.terminalSource === "idle_history_recovery")
-    && !turn.prompt
+      || turn.terminalSource === "idle_history_recovery");
+}
+
+function isUnownedReplayTurn(turn: Turn): boolean {
+  return !turn.prompt
     && !turn.clientMsgId
     && !turn.historyTurnId
     && !turn.checkpointId
     && !turn.images?.length
     && !turn.imageRefs?.length
     && !turn.files?.length
-    && turn.blocks.length > 0
+    && turn.blocks.length > 0;
+}
+
+function isIdleHistoryRestartOrphan(turn: Turn): boolean {
+  return isIdleHistoryRecovery(turn)
+    && isUnownedReplayTurn(turn)
     && turn.blocks.every((block) => block.done);
 }
 
@@ -1696,9 +1704,12 @@ export function mergeInitialHistory(
      * only when native block identities prove that row belongs to one
      * canonical turn. Disabled for cache, pagination, re-key and detail merges. */
     reconcileReplayOrphans?: boolean;
+    /** An unraced, explicitly idle Claude page can replace browser-only
+     * lost-terminal fallbacks without changing observed native failures. */
+    settledClaudeHistory?: boolean;
   } = {},
-  /** A settled Codex app-server History row owns the terminal lifecycle.
-   * This positional internal flag avoids shipping another merge-option key. */
+  /** A settled Codex app-server History row owns the native terminal lifecycle,
+   * including observed failures rather than only browser recovery fallbacks. */
   settledCodex = false,
 ): Turn[] {
   if (options.reconcileReplayOrphans) {
@@ -1968,8 +1979,10 @@ export function mergeInitialHistory(
       if (duplicateCandidates.length === 1) {
         const liveIndex = duplicateCandidates[0];
         matches[liveIndex] = authoritativeHistoryIndex;
-        if (settledCodex
-            && isIdleHistoryRestartOrphan(live[liveIndex])) {
+        const candidate = live[liveIndex];
+        if ((settledCodex && isIdleHistoryRestartOrphan(candidate))
+            || (options.settledClaudeHistory && isUnownedReplayTurn(candidate)
+              && (!candidate.done || isIdleHistoryRecovery(candidate)))) {
           // The fallback row owns no user identity. Keep History's canonical
           // row id/lifecycle and use the uniquely overlapping blocks only as
           // proof that this restart suffix is disposable.
@@ -2044,7 +2057,10 @@ export function mergeInitialHistory(
         (settledCodex || !!options.reconcileReplayOrphans)
           && isExactClosedSegment(historyTurn, liveTurn),
       );
-      if (settledCodex && sharesExactTurnAlias(historyTurn, liveTurn)) {
+      const recoveredClaudeTerminal = options.settledClaudeHistory
+        && historyTurn.done && isIdleHistoryRecovery(liveTurn);
+      if ((settledCodex || recoveredClaudeTerminal)
+          && sharesExactTurnAlias(historyTurn, liveTurn)) {
         merged[index] = restoreUnownedHistoryIdentity(
           restoreAuthoritativeLifecycle(bound, historyTurn, liveTurn),
           historyTurn,
@@ -2054,6 +2070,22 @@ export function mergeInitialHistory(
         merged[index] = bound;
       }
     } else {
+      // A middle-of-turn suffix can contain only deferred process blocks;
+      // their native owner is absent from a lightweight summary. Once Claude
+      // is explicitly idle, this unbound browser row has no user/control
+      // identity to preserve. Canonical history and its lazy detail retain
+      // the source content. Keep projections with conflicting visible anchors
+      // or independently running children until their ownership is known.
+      const unownedIdleSuffix = options.settledClaudeHistory
+        && history.at(-1)?.done === true
+        && history.at(-1)?.blocks.some(block => block.kind === "text" && block.done
+          && (block.channel ?? "final") === "final" && block.delivery !== "async")
+        && isUnownedReplayTurn(liveTurn)
+        && (!liveTurn.done || isIdleHistoryRecovery(liveTurn))
+        && !liveTurn.forkPointId && !liveTurn.liveTaskId && !liveTurn.codexTurnId
+        && liveTurn.blocks.every(block => !itemOwners.has(blockIdentity(block))
+          && !(block.kind === "process" && block.background && !block.done));
+      if (unownedIdleSuffix) continue;
       unmatched.push({ ...liveTurn, blocks: liveTurn.blocks.map((b) => ({ ...b })) });
     }
   }

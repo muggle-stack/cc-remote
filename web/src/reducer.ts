@@ -4617,6 +4617,7 @@ function reduceEvent(
           newestHistoryId: e.newest_id ?? null,
           activeOwnerId: base.liveOwner?.turnId ?? null,
           reconcileReplayOrphans: true,
+          settledClaudeHistory: settledClaudeHistory && !e.error,
         }, settledCodexHistory);
         // Pending inputs always follow consumed input. Source timestamps can
         // otherwise place a later optimistic row before an earlier native echo.
