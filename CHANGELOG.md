@@ -4,6 +4,18 @@
 
 ## Unreleased
 
+## v5.3.26
+
+Improve deployment storage retention and multi-device history and notifications. Wire protocol v90 and Claude Agent SDK 0.2.174.
+
+- Reclaim incomplete Wrapper environments after failed or interrupted staging and retire verified obsolete deployment generations.
+- Use immutable-release Wrapper entrypoints and protect live processes, services, native account configuration and symlink dependencies during cleanup.
+- Support owner-aware administrator cleanup and show deferred retention in the update UI.
+- Retain device-scoped history projections and pagination caches when switching devices. Legacy unscoped browser caches rebuild once.
+- Keep Web Push and Harmony subscriptions bound to every authorized device for background completion and question notifications, with atomic updates and scoped revocation.
+
+See the bilingual [release notes](docs/releases/v5.3.26.md).
+
 ## v5.3.25
 
 Improve Claude history recovery and native question interactions across harnesses. Wire protocol v90 and Claude Agent SDK 0.2.174.
