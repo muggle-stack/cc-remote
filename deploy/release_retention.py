@@ -40,10 +40,10 @@ def require(condition: bool, message: str) -> None:
 def read_ledger(root: Path) -> dict:
     if not (root / LEDGER).exists():
         return {"schema": 1, "phase": "committed", "generations": []}
-    data, _ = retirement.read_json(root / LEDGER)
+    data, _ = retirement.read_json(root / LEDGER, owner_uid=root.stat().st_uid)
     require(data.get("schema") == 1 and isinstance(data.get("generations"), list),
             "invalid release generation ledger")
-    require(len(data["generations"]) <= 100, "generation ledger exceeds limit; inspect retained files")
+    require(len(data["generations"]) <= 1024, "generation ledger exceeds limit; inspect retained files")
     ids = set()
     for row in data["generations"]:
         require(isinstance(row, dict) and re.fullmatch(r"[a-f0-9]{32}", row.get("id", ""))
@@ -61,6 +61,23 @@ def read_ledger(root: Path) -> dict:
     return data
 
 
+def compact_generations(data: dict) -> None:
+    """Retain surviving payload provenance without duplicating rollback claims."""
+    kept, retired = [], []
+    for row in data['generations']:
+        alive = row['phase'] == 'prepared' or any(
+            p and Path(p).exists() for p in (row['release'], row['backup'], row.get('snapshot')))
+        (kept if alive else retired).append(row)
+    known = {path for row in kept for path in row.get('artifacts', {})}
+    for row in retired:
+        previous = row['previous']
+        if previous and Path(previous).exists() and previous not in known:
+            kept.append(row)
+            known.update(row.get('artifacts', {}))
+    identities = {row['id'] for row in kept}
+    data['generations'] = [row for row in data['generations'] if row['id'] in identities]
+
+
 def begin(root: Path, release: Path, previous: str, *, role: str, home: Path,
           service: str, service_file: Path, configs: list[Path], linux_service: dict | None = None) -> str:
     root = retirement.absolute_path(str(root))
@@ -71,6 +88,7 @@ def begin(root: Path, release: Path, previous: str, *, role: str, home: Path,
     data = read_ledger(root)
     require(all(r["phase"] != "prepared" for r in data["generations"]),
             "unfinished installation record; inspect the original activation before retrying")
+    compact_generations(data)
     require(len(data["generations"]) < 100, "too many retained generations; inspect retention")
     if previous:
         old = retirement.absolute_path(previous)
@@ -135,7 +153,8 @@ def service_identity(row: dict) -> dict:
         require(live['running'] and live['pid'] > 0, 'Supervisor Wrapper is not running')
         return live
     if sys.platform == "darwin":
-        raw = command(["launchctl", "print", f"gui/{os.getuid()}/{row['service']}"])
+        uid = Path(row['home']).stat().st_uid
+        raw = command(["launchctl", "print", f"gui/{uid}/{row['service']}"])
         fields = dict(re.findall(r"^\s*(state|pid|runs) = ([^\n]+)$", raw, re.M))
         require(fields.get("state") in {"running", "active"} and int(fields.get("pid", 0)) > 0,
                 "Wrapper is not running")
@@ -159,7 +178,7 @@ def acceptance(root: Path, row: dict) -> None:
     live = service_identity(row)
     if row.get("service_identity"):
         require(live == row["service_identity"], "service restarted; retain recovery files")
-    metadata, _ = retirement.read_json(root / "installation.json")
+    metadata, _ = retirement.read_json(root / "installation.json", owner_uid=root.stat().st_uid)
     python = str(release / ".venv/bin/python")
     if row["role"] == "relay":
         origin = dotenv_values(root / ".env").get("PUBLIC_ORIGIN")
@@ -167,7 +186,8 @@ def acceptance(root: Path, row: dict) -> None:
         expected_version = manifest["product_version"]
     else:
         installation = Installation(root, release, manifest, metadata)
-        origin = relay_origin(installation)
+        origin = (relay_origin(installation, home=Path(row['home']))
+                  if sys.platform == 'darwin' and os.geteuid() == 0 else relay_origin(installation))
         expected_version = None  # A newer compatible Relay is allowed.
         home = Path(row["home"])
         if sys.platform == "darwin":
@@ -176,7 +196,9 @@ def acceptance(root: Path, row: dict) -> None:
             config = json.loads(device.read_text()) if device.exists() else {}
             machine = environment.get("CC_REMOTE_MACHINE_ID") or config.get("machine_id") or "default"
             selector = ["--plist", row["service_file"]]
-            prefix = []
+            owner = pwd.getpwuid(home.stat().st_uid)
+            prefix = (["/usr/bin/sudo", "-H", "-u", owner.pw_name, "--"]
+                      if os.geteuid() == 0 and owner.pw_uid != 0 else [])
         else:
             from deploy.work_registry_snapshot import resolve_wrapper_state_dir
             if row.get('linux_service'):
@@ -224,9 +246,19 @@ def commit(root: Path, identity: str, snapshot: str | None = None) -> None:
     acceptance(root, row)
 
 
-def abort(root: Path, identity: str) -> None:
+def abort(root: Path, identity: str, *, rollback_verified: bool = False) -> None:
     data, row = generation(root, identity)
     require(row["phase"] == "prepared", "cannot abort a committed generation")
+    if rollback_verified:
+        if row['previous']:
+            require((root / 'current').resolve(strict=True) == Path(row['previous']),
+                    'rollback has not restored the previous release')
+            row['rollback_service_identity'] = service_identity(row)
+        else:
+            require(not (root / 'current').exists() and not (root / 'current').is_symlink()
+                    and not Path(row['service_file']).exists(), 'first-install rollback is incomplete')
+            row['rollback_service_identity'] = {'state': 'absent'}
+        row['rollback_verified_at'] = time.time()
     row["phase"] = "aborted"
     data["phase"] = "committed"
     retirement.write_journal(root / LEDGER, data)
@@ -460,13 +492,18 @@ def service_path_dependencies(path: Path, candidates: list[Path]) -> set[str]:
     current = Path('/')
     links = 0
     found = set()
+    candidate_paths = set(candidates)
     while pending:
         part = pending.popleft()
         if part == '..':
             current = current.parent
             continue
         current /= part
-        found.update(str(candidate) for candidate in candidates if current.is_relative_to(candidate))
+        # Every ancestor is visited component by component. Matching the exact
+        # component retains nested candidates and intermediate symlink owners
+        # without comparing every service path against every candidate.
+        if current in candidate_paths:
+            found.add(str(current))
         try:
             info = current.lstat()
         except FileNotFoundError:
@@ -512,10 +549,68 @@ def service_files(row: dict) -> set[Path]:
 
 def service_dependencies(row: dict, candidates: list[Path]) -> list[str]:
     """Discover dependencies afresh; an explicit review never relaxes by default."""
+    try:
+        native = native_configuration_dependencies(row, candidates) if row.get('native_configuration') else []
+    except (OSError, ValueError, TypeError, KeyError, RecursionError):
+        raise ValueError('native account configuration dependencies could not be inspected') from None
     if row.get('review'):
         from deploy.retention_services import reviewed_dependencies
-        return reviewed_dependencies(row, candidates)
-    return inspect_service_files(service_files(row), candidates)
+        return sorted(set(native + reviewed_dependencies(row, candidates)))
+    return sorted(set(native + inspect_service_files(service_files(row), candidates)))
+
+
+def native_configuration_dependencies(row: dict, candidates: list[Path]) -> list[str]:
+    """Retain dormant account MCP runtimes even after their process has exited."""
+    import tomllib
+    from deploy.work_registry_snapshot import resolve_wrapper_state_dir
+
+    home = Path(row['home'])
+    if row.get('linux_service'):
+        from deploy.linux_service import environment
+        state = resolve_wrapper_state_dir(home, environment=environment(row['linux_service']))
+    elif Path(row['service_file']).suffix == '.plist':
+        state = resolve_wrapper_state_dir(home, plist=Path(row['service_file']))
+    else:
+        state = resolve_wrapper_state_dir(home, env_file=Path('/etc/cc-remote/wrapper.env'))
+    homes = {home / '.codex'}
+    report = state / 'codex-readiness.json'
+    if report.exists():
+        value, _ = retirement.read_json(report, owner_uid=home.stat().st_uid)
+        profiles = value.get('profiles')
+        require(isinstance(profiles, list) and len(profiles) <= 32
+                and all(isinstance(p, dict) for p in profiles), 'invalid native account inventory')
+        for profile in profiles:
+            if profile.get('home'):
+                path = Path(profile['home'])
+                require(path.is_absolute(), 'native account home must be absolute')
+                homes.add(path)
+    found = set()
+
+    def inspect_values(value) -> None:
+        if isinstance(value, dict):
+            for child in value.values():
+                inspect_values(child)
+        elif isinstance(value, list):
+            for child in value:
+                inspect_values(child)
+        elif isinstance(value, str) and value.startswith('/'):
+            found.update(service_path_dependencies(Path(value), candidates))
+
+    for account in homes:
+        path = account / 'config.toml'
+        found.update(service_path_dependencies(path, candidates))
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            with os.fdopen(descriptor, 'rb') as stream:
+                info = os.fstat(stream.fileno())
+                require(stat.S_ISREG(info.st_mode), 'native configuration is not a regular file')
+                raw = stream.read(4 * 1024 * 1024 + 1)
+        except FileNotFoundError:
+            continue
+        require(len(raw) <= 4 * 1024 * 1024, 'native configuration exceeds scan bound')
+        inspect_values(tomllib.loads(raw.decode('utf-8')))
+        found.update(str(p) for p in candidates if os.fsencode(p) in raw)
+    return sorted(found)
 
 
 def inspect_service_files(files: set[Path], candidates: list[Path], *,
@@ -531,6 +626,8 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
     executable_commands = set()
     search_paths = set()
     custom_namespace = False
+    candidate_names = {str(p) for p in candidates}
+    candidate_bytes = [(str(p), os.fsencode(p)) for p in candidates]
 
     def search_path(value: str) -> None:
         if reviewed_inputs is None:
@@ -591,7 +688,10 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
             for index, child in enumerate(value):
                 inspect_plist(child, 'Program' if key == 'ProgramArguments' and index == 0 else '')
         elif isinstance(value, str):
-            inspect_value(value, atomic=key in {
+            if key == 'PATH':
+                search_path(value)
+                return
+            inspect_value(value, atomic=value.startswith('/') or key in {
                 'Program', 'WorkingDirectory', 'RootDirectory', 'StandardOutPath', 'StandardErrorPath',
             })
 
@@ -625,6 +725,11 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
                 text = value.strip().decode('utf-8')
                 if key.strip() == b'EnvironmentFile':
                     continue  # exact single-filename handling below
+                if key in {b'StandardOutput', b'StandardError', b'StandardInput'}:
+                    destination = text.partition(':')
+                    if destination[0] in {'append', 'file', 'truncate'} and destination[1]:
+                        inspect_value(destination[2], atomic=True)
+                        continue
                 if key in {b'RootDirectory', b'RootImage', b'BindPaths', b'BindReadOnlyPaths',
                            b'TemporaryFileSystem'} and text:
                     custom_namespace = True
@@ -665,9 +770,8 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
                     elif reviewed_inputs is None:
                         literal_service_command(Path(executable), arguments)
                 inspect_value((value if separator else line).decode('utf-8'))
-        for candidate in candidates:
-            if str(candidate).encode() in raw or target.is_relative_to(candidate):
-                found.add(str(candidate))
+        found.update(name for name, marker in candidate_bytes if marker in raw)
+        found.update(candidate_names.intersection(map(str, [target, *target.parents])))
         return raw
 
     for path in sorted(files):
@@ -727,7 +831,7 @@ def inventory(root: Path, data: dict, row: dict) -> dict | None:
             paths.append(record["previous"])
         if record.get("snapshot"):
             paths.append(record["snapshot"])
-        if record["phase"] == "aborted":
+        if record["phase"] == "aborted" and not record.get('rollback_verified_at'):
             protected.update(p for p in paths if Path(p).exists())
         elif record["id"] != row["id"]:
             candidates.update(paths)
@@ -741,6 +845,7 @@ def inventory(root: Path, data: dict, row: dict) -> dict | None:
     if not candidates:
         return None
     service_context = {key: row[key] for key in ("home", "linux_service") if key in row}
+    service_context.update(service_file=row['service_file'], native_configuration=row['role'] == 'wrapper')
     review = root / '.retention-services.json'
     if review.exists() or review.is_symlink():
         service_context['review'] = str(review)
@@ -808,13 +913,12 @@ def prune(root: Path, descriptor: int) -> dict | None:
         return None
     path = root / INVENTORY
     retirement.write_journal(path, plan)
-    preview = retirement.cleanup(path, lock_descriptor=descriptor)
+    preview = retirement.cleanup(path, lock_descriptor=descriptor, owner_uid=root.stat().st_uid)
     print(f"Retention: checked {len(preview['candidates'])} recorded artifacts; live dependencies stay protected.")
-    result = retirement.cleanup(path, apply=True, lock_descriptor=descriptor)
+    result = retirement.cleanup(path, apply=True, lock_descriptor=descriptor, owner_uid=root.stat().st_uid)
     # Keep provenance for every surviving artifact. Completed records whose
     # payloads have all gone no longer need to accumulate indefinitely.
-    data["generations"] = [r for r in data["generations"] if r["id"] == row["id"] or any(
-        p and Path(p).exists() for p in (r["release"], r["previous"], r["backup"], r.get("snapshot")))]
+    compact_generations(data)
     retirement.write_journal(root / LEDGER, data)
     summary = record_retention(root, data, status=result['status'], report=result, before_available=before_available)
     print(f"Retention: removed {result['removed_allocated_bytes']} allocated bytes; "
@@ -837,6 +941,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--service-file", type=Path)
     parser.add_argument("--config", type=Path, action="append", default=[])
     parser.add_argument("--snapshot")
+    parser.add_argument('--rollback-verified', action='store_true')
     parser.add_argument("--linux-service", type=Path)
     args = parser.parse_args(argv)
     descriptor = None
@@ -861,7 +966,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.action == "commit":
             commit(root, args.generation, args.snapshot)
         elif args.action == "abort":
-            abort(root, args.generation)
+            abort(root, args.generation, rollback_verified=args.rollback_verified)
         else:
             prune(root, descriptor)
         return 0

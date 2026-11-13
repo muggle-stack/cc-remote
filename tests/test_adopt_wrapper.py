@@ -40,7 +40,9 @@ def test_migrated_service_keeps_custom_policy_on_subsequent_upgrade(legacy):
     root, _, service, destination = legacy
     original = service.read_text() + 'Environment="HTTPS_PROXY=http://127.0.0.1:8888"\nMemoryHigh=5G\n'
     moved = adopt_wrapper.rebase_service(original, root / "current", destination / "current", "operator")
-    assert moved == original.replace(str(root / "current"), str(destination / "current"))
+    expected = original.replace('-m cc_remote.wrapper',
+                                f'-I -B {root}/current/deploy/wrapper_main.py')
+    assert moved == expected.replace(str(root / "current"), str(destination / "current"))
     assert adopt_wrapper.rebase_service(moved, destination / "current", destination / "current", "operator") == moved
 
 

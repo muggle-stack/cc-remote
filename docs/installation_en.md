@@ -506,6 +506,15 @@ existing installation's activation transaction. Keep the same service user and
 external configuration, snapshot private state while stopped, atomically switch
 `current`, validate, and retain the old release for rollback.
 
+When the dependency lock and Python pin match the active release, use
+`prepare_wrapper_stage.py --defer-identical` to validate the staged code with
+that verified environment. Let the activator materialize the release environment.
+Keep throwaway preflight environments in `TemporaryDirectory` scopes. Source
+jobs retain their manifests, receipts and one complete rollback set, then retire
+completed build bundles, uploads and desktop staging copies through
+`deploy/cleanup.py`. Record cleanup failures and finish their recovery using the
+original journal. Installation success and deferred cleanup are separate outcomes.
+
 Linux credentials belong in root-only `/etc/cc-remote/wrapper.env` and/or
 `/etc/cc-remote/device.env`, not a source `.env`; macOS uses installer-managed
 private files under the desktop user. A self-hosted Wrapper must be activated

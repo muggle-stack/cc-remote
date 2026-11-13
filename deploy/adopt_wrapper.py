@@ -30,8 +30,10 @@ def rebase_service(text: str, current: Path, target: Path, user: str) -> str:
         elif section == "[Service]" and line and not line.startswith(("#", ";")) and "=" in line:
             key, value = line.split("=", 1)
             values.setdefault(key, []).append(value)
+    old_command = f"{current}/.venv/bin/python -m cc_remote.wrapper"
+    fixed_command = f"{current}/.venv/bin/python -I -B {current}/deploy/wrapper_main.py"
     if (values.get("User") != [user] or values.get("WorkingDirectory") != [str(current)]
-            or values.get("ExecStart") != [f"{current}/.venv/bin/python -m cc_remote.wrapper"]):
+            or values.get("ExecStart") not in ([old_command], [fixed_command])):
         raise ValueError("service identity/command does not match the requested root and user")
     env_files = values.get("EnvironmentFile", [])
     if not env_files or any(p.lstrip("-") not in {
@@ -39,6 +41,7 @@ def rebase_service(text: str, current: Path, target: Path, user: str) -> str:
     } for p in env_files):
         raise ValueError("service uses a custom environment layout; migrate it explicitly first")
     # Match path boundaries: do not rewrite a different path sharing a prefix.
+    text = text.replace('ExecStart=' + old_command, 'ExecStart=' + fixed_command)
     return re.sub(re.escape(str(current)) + r"(?=/|\s|$|[\"'])", lambda _: str(target), text)
 
 

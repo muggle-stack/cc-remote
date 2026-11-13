@@ -13,6 +13,58 @@ from deploy.install_lock import acquire_install_lock
 SERVICE_DEPENDENCIES = retention.service_dependencies
 
 
+@pytest.mark.parametrize('platform', ['linux', 'darwin'])
+def test_default_installer_templates_pass_actual_service_scanner(tmp_path, platform):
+    root = tmp_path.resolve() / 'install'
+    root.mkdir()
+    config = root / 'config'
+    config.mkdir()
+    (config / 'wrapper.env').write_text('')
+    (config / 'device.env').write_text('')
+    source = Path(retention.__file__).parent
+    if platform == 'linux':
+        text = (source / 'cc-remote-wrapper.service').read_text()
+        text = text.replace('/path/to/cc-remote', str(root)).replace('/etc/cc-remote', str(config))
+        path = root / 'wrapper.service'
+    else:
+        text = (source / 'com.muggle.cc-remote.wrapper.plist.in').read_text()
+        for name in ['CURRENT', 'HOME', 'CLAUDE_WORK_ROOT', 'CODEX_WORK_ROOT', 'LOG_DIR']:
+            text = text.replace('__' + name + '__', str(root))
+        path = root / 'wrapper.plist'
+    path.write_text(text)
+    assert retention.inspect_service_files({path}, [root / 'unused']) == []
+
+
+@pytest.mark.parametrize('kind', ['append', 'file', 'truncate'])
+def test_systemd_typed_log_paths_retain_their_release(tmp_path, kind):
+    old = tmp_path.resolve() / 'old'
+    old.mkdir()
+    unit = tmp_path.resolve() / 'worker.service'
+    unit.write_text(f'[Service]\nExecStart=/usr/bin/true\nStandardOutput={kind}:{old}/out.log\n')
+    assert retention.inspect_service_files({unit}, [old]) == [str(old)]
+
+
+def test_dormant_native_account_configuration_retains_its_runtime(tmp_path, monkeypatch):
+    from deploy import work_registry_snapshot
+    home = tmp_path.resolve()
+    state = home / 'state'
+    state.mkdir()
+    account = home / 'codex-account'
+    account.mkdir()
+    old = home / 'old'
+    old.mkdir()
+    alias = home / 'account runtime'
+    alias.symlink_to(old)
+    (state / 'codex-readiness.json').write_text(json.dumps({'profiles': [{'home': str(account)}]}))
+    config = account / 'config.toml'
+    config.write_text(f'[mcp_servers.cc_remote_tasks]\ncwd = "{alias}"\n')
+    monkeypatch.setattr(work_registry_snapshot, 'resolve_wrapper_state_dir', lambda *a, **kw: state)
+    context = {'home': str(home), 'service_file': str(home / 'wrapper.service')}
+    assert retention.native_configuration_dependencies(context, [old]) == [str(old)]
+    config.write_text('[mcp_servers.cc_remote_tasks]\ncwd = "/unrelated"\n')
+    assert retention.native_configuration_dependencies(context, [old]) == []
+
+
 @pytest.fixture
 def systemd_paths(tmp_path, monkeypatch):
     from types import SimpleNamespace
@@ -238,8 +290,41 @@ def test_three_upgrades_keep_current_and_complete_previous_recovery(fleet):
         assert not Path(row["backup"]).exists() and not Path(row["snapshot"]).exists()
 
 
+@pytest.mark.parametrize('verified', [False, True])
+def test_only_verified_recovered_failures_can_retire(fleet, verified):
+    root, service, activate = fleet
+    previous, _ = activate('first')
+    failed = root / 'releases/failed'
+    failed.mkdir()
+    (failed / 'release-manifest.json').write_bytes((previous / 'release-manifest.json').read_bytes())
+    identity = retention.begin(root, failed, str(previous), role='wrapper', home=root,
+                               service='wrapper', service_file=service, configs=[])
+    retention.abort(root, identity, rollback_verified=verified)
+    activate('second')
+    activate('third')
+    prune(root)
+    assert failed.exists() == (not verified)
+
+
+def test_fully_retired_duplicate_rollback_claims_do_not_exhaust_ledger(fleet):
+    root, service, activate = fleet
+    activate('first')
+    current, _ = activate('second')
+    data = retention.read_ledger(root)
+    for index in range(100):
+        identity = f'{index:032x}'
+        data['generations'].append({'id': identity, 'phase': 'aborted', 'previous': str(current),
+                                    'release': str(root / 'releases' / f'missing-{index}'),
+                                    'backup': str(root / retention.BACKUPS / identity), 'artifacts': {}})
+    cleanup.write_journal(root / retention.LEDGER, data)
+    activate('third')
+    assert len(retention.read_ledger(root)['generations']) == 3
+
+
 @pytest.mark.parametrize('when', ['inventory', 'preview', 'before-rename', 'quarantined', 'before-delete'])
-@pytest.mark.parametrize('kind', ['systemd', 'launchd', 'supervisor', 'environment', 'optional-environment'])
+@pytest.mark.parametrize('kind', [
+    'systemd', 'launchd', 'supervisor', 'environment', 'optional-environment', 'native-configuration',
+])
 def test_new_service_dependency_during_retirement_preserves_artifacts(fleet, tmp_path, monkeypatch, when, kind):
     import plistlib
     from deploy import linux_service
@@ -250,6 +335,8 @@ def test_new_service_dependency_during_retirement_preserves_artifacts(fleet, tmp
     current, _ = activate('third')
     units = tmp_path / 'units'
     units.mkdir()
+    if kind == 'native-configuration':
+        (root / '.codex').mkdir()
     environment = tmp_path / 'external.env'
     if kind in {'environment', 'optional-environment'}:
         (units / 'dormant.service').write_text(f'[Service]\nEnvironmentFile=-{environment}\n')
@@ -269,6 +356,7 @@ def test_new_service_dependency_during_retirement_preserves_artifacts(fleet, tmp
         data['generations'][-1]['linux_service'] = profile
         cleanup.write_journal(root / retention.LEDGER, data)
         monkeypatch.setattr(linux_service, 'trusted', lambda path: None)
+        monkeypatch.setattr(linux_service, 'environment', lambda _: {'HOME': str(root)})
     injected = False
 
     def add_reference():
@@ -281,6 +369,8 @@ def test_new_service_dependency_during_retirement_preserves_artifacts(fleet, tmp
             (units / 'late.plist').write_bytes(plistlib.dumps({'ProgramArguments': [str(old / 'payload')]}))
         elif kind == 'supervisor':
             (units / 'late.conf').write_text(f'[program:late]\ncommand={old}/payload\n')
+        elif kind == 'native-configuration':
+            (root / '.codex/config.toml').write_text(f'[mcp_servers.worker]\ncwd = "{old}"\n')
         else:
             environment.write_text(f'WORKER={old}/payload\n')
 

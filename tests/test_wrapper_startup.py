@@ -5,6 +5,8 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from cc_remote.config import WrapperConfig
 from cc_remote.wrapper import __main__ as wrapper_main
 from cc_remote.wrapper import machine as machine_module
@@ -116,7 +118,39 @@ def test_disabled_sharing_publishes_without_starting_cli(monkeypatch, tmp_path) 
     machine = WrapperMachine(cfg, _Transport())
     asyncio.run(machine.prepare_codex_daemons())
     receipt = json.loads((cfg.state_dir / "codex-readiness.json").read_text())
-    assert receipt["profiles"] == [{"profile": "primary", "status": "disabled"}]
+    assert receipt["profiles"] == [{
+        "profile": "primary", "home": str(machine._codex_profiles.default.home),
+        "status": "disabled",
+    }]
+
+
+@pytest.mark.parametrize("failure", ["resolve", "prewarm"])
+def test_unavailable_profiles_preserve_account_homes(monkeypatch, tmp_path, failure):
+    account = tmp_path / "account"
+    cfg = WrapperConfig(
+        codex_daemon_mode="auto", state_dir=tmp_path / "state",
+        codex_profiles_json=json.dumps({
+            "primary": {"label": "Primary", "home": str(account), "default": True},
+        }),
+        claude_work_root=tmp_path / "claude", codex_work_root=tmp_path / "codex",
+    )
+
+    def resolve():
+        if failure == "resolve":
+            raise RuntimeError("CLI unavailable")
+        return "/opt/codex"
+
+    async def check(*args):
+        raise RuntimeError("prewarm unavailable")
+
+    monkeypatch.setattr(machine_module, "resolve_codex_bin", resolve)
+    monkeypatch.setattr(machine_module.codex_readiness, "check_profile", check)
+    machine = WrapperMachine(cfg, _Transport())
+    asyncio.run(machine.prepare_codex_daemons())
+
+    receipt = json.loads((cfg.state_dir / "codex-readiness.json").read_text())
+    assert receipt["profiles"][0]["status"] == "unavailable"
+    assert receipt["profiles"][0]["home"] == str(account)
 
 
 def test_wrapper_entrypoint_initializes_work_before_optional_codex_probe(monkeypatch) -> None:

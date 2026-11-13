@@ -121,6 +121,79 @@ def test_changed_contract_builds_a_fresh_copy_linked_venv(
     assert stat.S_IMODE((stage / ".venv" / "bin" / "python").stat().st_mode) == 0o750
 
 
+@pytest.mark.parametrize("identical", [False, True])
+@pytest.mark.parametrize("error", [StagePreparationError, KeyboardInterrupt])
+def test_partial_environment_creation_is_removed_even_before_builder_returns(
+    tmp_path, monkeypatch, identical, error,
+):
+    old = _release_tree(tmp_path / "old", lock=b"old-lock\n")
+    stage = _release_tree(
+        tmp_path / "stage", lock=b"old-lock\n" if identical else b"changed\n"
+    )
+
+    def partial(*args, **kwargs):
+        destination = args[1] if args else kwargs["stage"] / ".venv"
+        destination.mkdir(exist_ok=True)
+        (destination / "large-partial-download").write_text("partial dependency")
+        raise error("injected failure")
+
+    helper = "_copy_existing_venv" if identical else "_build_venv"
+    monkeypatch.setattr(stage_module, helper, partial)
+    with pytest.raises(error):
+        prepare_stage(
+            old=old, stage=stage, runtimes=tmp_path / "runtimes",
+            release="release-20260901T000000Z-v45-test",
+            explicit_uv=None, defer_identical=False,
+        )
+    assert not (stage / ".venv").exists()
+    assert (old / "requirements-wrapper.lock").read_bytes() == b"old-lock\n"
+
+
+@pytest.mark.parametrize("identical", [False, True])
+def test_raced_environment_is_preserved(tmp_path, monkeypatch, identical):
+    old = _release_tree(tmp_path / "old", lock=b"old-lock\n")
+    stage = _release_tree(
+        tmp_path / "stage", lock=b"old-lock\n" if identical else b"changed\n"
+    )
+    venv = stage / ".venv"
+
+    def concurrent_preparation():
+        venv.mkdir()
+        (venv / "owned-by-other-preparation").write_text("keep")
+        return {}
+
+    monkeypatch.setattr(stage_module, "_clean_environment", concurrent_preparation)
+    with pytest.raises(FileExistsError):
+        prepare_stage(
+            old=old, stage=stage, runtimes=tmp_path / "runtimes",
+            release="release-20260901T000000Z-v45-test",
+            explicit_uv=None, defer_identical=False,
+        )
+    assert (venv / "owned-by-other-preparation").read_text() == "keep"
+
+
+def test_identical_environment_copies_into_claimed_directory(tmp_path, monkeypatch):
+    old = _release_tree(tmp_path / "old", lock=b"same\n")
+    stage = _release_tree(tmp_path / "stage", lock=b"same\n")
+    old_python = old / ".venv" / "bin" / "python"
+    old_python.parent.mkdir(parents=True)
+    old_python.write_text("#!/bin/sh\n")
+    old_python.chmod(0o755)
+    runtimes = tmp_path / "runtimes"
+    monkeypatch.setattr(
+        stage_module, "_validate_environment", lambda **_kwargs: _validated(runtimes)
+    )
+
+    payload = prepare_stage(
+        old=old, stage=stage, runtimes=runtimes,
+        release="release-20260901T000000Z-v45-test",
+        explicit_uv=None, defer_identical=False,
+    )
+
+    assert payload["strategy"] == "copy"
+    assert (stage / ".venv" / "bin" / "python").read_bytes() == old_python.read_bytes()
+
+
 def test_failed_rebuild_removes_only_the_new_incomplete_venv(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

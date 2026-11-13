@@ -198,6 +198,7 @@ def _copy_existing_venv(old: Path, destination: Path) -> None:
         source,
         destination,
         symlinks=True,
+        dirs_exist_ok=True,
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
     )
 
@@ -470,12 +471,14 @@ def prepare_stage(
     created_venv = False
     environment = _clean_environment()
     try:
+        if strategy != "reuse":
+            venv.mkdir(mode=0o700)
+            created_venv = True
         if strategy == "reuse":
             validation_python = old / ".venv" / "bin" / "python"
             validation_venv = old / ".venv"
         elif identical:
             _copy_existing_venv(old, venv)
-            created_venv = True
             validation_python = venv / "bin" / "python"
             validation_venv = venv
         else:
@@ -488,7 +491,6 @@ def prepare_stage(
                 python_pin=python_pin,
                 environment=environment,
             )
-            created_venv = True
             validation_python = venv / "bin" / "python"
             validation_venv = venv
 
@@ -522,7 +524,7 @@ def prepare_stage(
         }
         _write_manifest(stage, payload)
         return payload
-    except Exception:
+    except BaseException:
         if created_venv and venv.is_dir() and not venv.is_symlink():
             shutil.rmtree(venv)
         raise

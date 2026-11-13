@@ -25,10 +25,13 @@ def verify_install_lock(root: Path, descriptor: int) -> None:
         raise InstallLockError("invalid inherited install lock descriptor")
     opened = os.fstat(descriptor)
     expected = (root / ".update.lock").lstat()
+    owners = {os.geteuid()}
+    if os.geteuid() == 0:
+        owners.add(root.stat().st_uid)
     if (
         not stat.S_ISREG(opened.st_mode) or not stat.S_ISREG(expected.st_mode)
         or (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino)
-        or opened.st_uid != os.geteuid() or opened.st_mode & 0o022
+        or opened.st_uid not in owners or opened.st_mode & 0o022
     ):
         raise InstallLockError("install lock does not match this installation")
     try:
@@ -44,6 +47,9 @@ def acquire_install_lock(root: Path) -> int:
     descriptor = os.open(root / ".update.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         verify_install_lock(root, descriptor)
+        if os.geteuid() == 0:
+            owner = root.stat()
+            os.fchown(descriptor, owner.st_uid, owner.st_gid)
         # The service user may observe this empty lock file without being able
         # to modify it. Activation admission follows the installer's live flock,
         # not the lifetime of a browser request or an updater receipt.
