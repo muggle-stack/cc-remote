@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { PushBindingCoordinator, type PushBindingTarget, type PushBindingResult } from "../src/push.ts";
 
-const bindingA: PushBindingTarget = { machineId: "machine-a", mode: "generic" };
-const bindingB: PushBindingTarget = { machineId: "machine-b", mode: "session" };
+const bindingA: PushBindingTarget = { machineIds: ["machine-a"], mode: "generic" };
+const bindingB: PushBindingTarget = { machineIds: ["machine-b"], mode: "session" };
 const sessionA: PushBindingTarget = { ...bindingA, mode: "session" };
 
 let rejectBinding = true;
@@ -24,7 +24,7 @@ assert.deepEqual(await rejectingCoordinator.setTarget(sessionA), {
 assert.deepEqual(await rejectingCoordinator.setTarget(null), {
   state: "off", target: null, bound: bindingA,
 }, "a rejected disable exits binding without falsely clearing the confirmed subscription");
-assert.equal(rejectingCoordinator.isRemoteActive(bindingA.machineId), false);
+assert.equal(rejectingCoordinator.isRemoteActive(bindingA.machineIds[0]), false);
 rejectBinding = false;
 assert.deepEqual(await rejectingCoordinator.setTarget(null), {
   state: "off", target: null, bound: null,
@@ -54,7 +54,7 @@ applyResult = null;
 assert.deepEqual(await revokedCoordinator.setTarget(sessionA), {
   state: "local", target: sessionA, bound: null,
 }, "provider rollback must clear the old binding instead of claiming remote delivery");
-assert.equal(revokedCoordinator.isRemoteActive(bindingA.machineId), false);
+assert.equal(revokedCoordinator.isRemoteActive(bindingA.machineIds[0]), false);
 applyResult = true;
 assert.deepEqual(await revokedCoordinator.setTarget(bindingA), {
   state: "remote", target: bindingA, bound: bindingA,
@@ -79,4 +79,29 @@ assert.deepEqual(queuedAfterRevocation.snapshot(), {
   state: "remote", target: bindingA, bound: bindingA,
 });
 
-console.log("push binding failure and revocation tests passed");
+const groupCalls: (PushBindingTarget | null)[] = [];
+let groupAccepted = true;
+const groupCoordinator = new PushBindingCoordinator(async target => {
+  groupCalls.push(target);
+  return groupAccepted;
+});
+const group: PushBindingTarget = { machineIds: ["machine-a", "machine-b"], mode: "session" };
+await groupCoordinator.setTarget(group);
+await groupCoordinator.setTarget({ ...group, machineIds: ["machine-b", "machine-a", "machine-b"] });
+assert.equal(groupCalls.length, 1, "device ordering and the viewed device do not change the subscription set");
+assert.equal(groupCoordinator.isRemoteActive("machine-a"), true);
+assert.equal(groupCoordinator.isRemoteActive("machine-b"), true);
+const externalSnapshot = groupCoordinator.snapshot();
+externalSnapshot.bound?.machineIds.splice(0);
+assert.equal(groupCoordinator.isRemoteActive("machine-a"), true, "snapshots cannot mutate confirmed bindings");
+groupAccepted = false;
+await groupCoordinator.setTarget({ ...group, machineIds: [...group.machineIds, "machine-c"] });
+assert.equal(groupCoordinator.isRemoteActive("machine-a"), true, "failed expansion retains the existing remote owner");
+assert.equal(groupCoordinator.isRemoteActive("machine-b"), true);
+assert.equal(groupCoordinator.isRemoteActive("machine-c"), false);
+groupAccepted = true;
+await groupCoordinator.setTarget(null);
+assert.equal(groupCoordinator.isRemoteActive("machine-a"), false);
+assert.equal(groupCoordinator.isRemoteActive("machine-b"), false);
+
+console.log("push binding failure, device groups and revocation tests passed");

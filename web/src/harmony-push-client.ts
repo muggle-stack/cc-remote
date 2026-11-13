@@ -37,7 +37,7 @@ export async function requestHarmonyPermission(): Promise<boolean> {
     return false;
   }
 }
-export async function enableHarmonyPush(machineId: string, mode: RemoteNotificationMode): Promise<PushBindingResult> {
+export async function enableHarmonyPush(machineIds: string[], mode: RemoteNotificationMode): Promise<PushBindingResult> {
   // Do not issue another token/binding until an uncertain prior attempt is
   // revoked. The native shell also persists failed token deletion across reloads.
   let revoked = false;
@@ -58,7 +58,8 @@ export async function enableHarmonyPush(machineId: string, mode: RemoteNotificat
     // A rejected fetch is not evidence that the Relay did not commit the POST.
     cleanupPending = true;
     const response = await request("subscribe", {
-      machine_id: machineId, notification_mode: mode, token: cachedToken,
+      machine_id: machineIds[0], machine_ids: machineIds,
+      notification_mode: mode, token: cachedToken,
     });
     if (!response.ok) throw new Error("subscribe_failed");
     cleanupPending = false;

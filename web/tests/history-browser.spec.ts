@@ -632,10 +632,12 @@ type PanelRelayEvent<T = ServerEvent> = T extends ServerEvent
 async function mockRightPanelRelay(
   page: import("@playwright/test").Page,
   { visible = false, retained = true, engine = "codex", seedTurns = [], parentSid = "layout-parent",
-    secondParent = false, parentState = "idle", btwReadOnly = false, imageAssets = false, imageData, externalPreview, historyReply, listReply, capabilityReply }: {
+    secondParent = false, parentState = "idle", btwReadOnly = false, imageAssets = false, imageData, externalPreview, historyReply, listReply, capabilityReply,
+    devices = [{ machine_id: "layout-machine", label: "Layout", online: true }] }: {
     visible?: boolean;
     retained?: boolean;
-    engine?: "codex" | "claude";
+    engine?: "codex" | "claude" | "dsh";
+    devices?: { machine_id: string; label: string; online: boolean }[];
     parentSid?: string;
     seedTurns?: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]>;
     secondParent?: boolean;
@@ -644,7 +646,7 @@ async function mockRightPanelRelay(
     imageAssets?: boolean;
     imageData?: { data: string; width: number; height: number };
     externalPreview?: "allow" | "replace";
-    historyReply?: (command: Record<string, unknown>) => PanelRelayEvent<Extract<ServerEvent, { type: "history" }>> | null;
+    historyReply?: (command: Record<string, unknown>, machineId: string) => PanelRelayEvent<Extract<ServerEvent, { type: "history" }>> | null;
     listReply?: (command: Record<string, unknown>) => PanelRelayEvent | null | undefined;
     capabilityReply?: (command: Record<string, unknown>) => PanelRelayEvent | undefined;
   } = {},
@@ -671,9 +673,10 @@ async function mockRightPanelRelay(
   await page.route("**/api/session", (route) => route.fulfill({ json: {} }));
   await page.route("**/api/viewers/pages", (route) => route.fulfill({ json: { pages: [] } }));
   await page.route("**/api/devices", (route) => route.fulfill({ json: {
-    devices: [{ machine_id: "layout-machine", label: "Layout", online: true }],
+    devices,
   } }));
   await page.routeWebSocket(/\/ws(?:\?|$)/, (socket) => {
+    const machineId = new URL(socket.url()).searchParams.get("machine") ?? "default";
     emit = (message) => socket.send(JSON.stringify({
       v: PROTOCOL_VERSION, ts: Date.now() / 1000, ...message,
     }));
@@ -704,7 +707,7 @@ async function mockRightPanelRelay(
         if (response === null) return; // Allow a test to release restoration explicitly.
         if (response) { emit(response); return; }
         emit({ type: "session_list",
-          engine: command.engine === "codex" ? "codex" : "claude",
+          engine: command.engine === "codex" ? "codex" : command.engine === "dsh" ? "dsh" : "claude",
           space: command.space === "work" ? "work" : "code",
           request_id: String(command.cmd_id),
           sessions: command.space === "work" ? [] : [{ session_id: parentSid,
@@ -717,7 +720,7 @@ async function mockRightPanelRelay(
         emit({ type: "session_focus", session_id: String(command.session_id) });
         snapshot(String(command.session_id));
       } else if (command.type === "get_history") {
-        const response = historyReply ? historyReply(command) : { type: "history" as const, session_id: String(command.session_id),
+        const response = historyReply ? historyReply(command, machineId) : { type: "history" as const, session_id: String(command.session_id),
           sid: String(command.session_id),
           revision: "layout-history", generation: "layout-generation",
           detail: "summary" as const, events: [], turns: seedTurns, has_more: false };
@@ -785,6 +788,155 @@ async function mockRightPanelRelay(
   });
   return { commands, emit: (message: PanelRelayEvent) => emit(message) };
 }
+
+for (const engine of ["claude", "codex", "dsh"] as const) {
+  test(`device switching retains isolated instant session cache for ${engine}`, async ({ page }) => {
+    let holdFirstDevice = false;
+    const sid = "shared-native-session";
+    await mockRightPanelRelay(page, {
+      engine, retained: false, parentSid: sid,
+      devices: [
+        { machine_id: "layout-machine", label: "Device A", online: true },
+        { machine_id: "second-machine", label: "Device B", online: true },
+      ],
+      historyReply: (_command, machine) => holdFirstDevice && machine === "layout-machine" ? null : {
+        type: "history", session_id: sid, sid, revision: "device-history",
+        generation: "layout-generation", detail: "summary", events: [], has_more: false,
+        turns: [{ id: "native-turn", prompt: "Check device", done: true, ts: 1000,
+          blocks: [{ kind: "text", message_id: "native-answer", channel: "final",
+            text: `Cached answer from ${machine}`, done: true }] }],
+      },
+    });
+    await page.goto("/");
+    const firstAnswer = page.getByText("Cached answer from layout-machine", { exact: true });
+    await expect(firstAnswer).toBeVisible();
+    await expect.poll(() => page.evaluate(async sid => {
+      const cache = await import("/src/cache.ts");
+      return (await cache.loadSession(sid, "layout-machine"))?.turns.length;
+    }, sid)).toBe(1);
+    await page.evaluate(async ({ sid, engine }) => {
+      const cache = await import("/src/cache.ts");
+      const { HistoryPageCache } = await import("/src/history-page-cache.ts");
+      const saved = await cache.loadSession(sid, "layout-machine");
+      const pages = new HistoryPageCache();
+      await pages.putPage({ machineId: "layout-machine", sid, engine, space: "code", revision: "device-history" }, {
+        pageKey: "retained-page", turns: saved!.turns, hasOlder: false, isLatest: true,
+      });
+    }, { sid, engine });
+    const selectDevice = async (label: string) => {
+      await page.getByRole("button", { name: "设备中心", exact: true }).click();
+      await page.getByRole("dialog", { name: "设备中心" }).getByRole("button", { name: new RegExp(label) }).click();
+    };
+    await selectDevice("Device B");
+    await expect(page.getByText("Cached answer from second-machine", { exact: true })).toBeVisible();
+    await expect(firstAnswer).toHaveCount(0);
+    await expect.poll(() => page.evaluate(async sid => {
+      const cache = await import("/src/cache.ts");
+      return (await cache.loadSession(sid, "second-machine"))?.turns.length;
+    }, sid)).toBe(1);
+    holdFirstDevice = true;
+    await selectDevice("Device A");
+    await expect(firstAnswer).toBeVisible();
+    await expect(page.getByText("Cached answer from second-machine", { exact: true })).toHaveCount(0);
+    await page.evaluate(async sid => {
+      const cache = await import("/src/cache.ts");
+      for (const [machine, sequence] of [["layout-machine", 111], ["second-machine", 222]] as const) {
+        const saved = await cache.loadSession(sid, machine);
+        cache.saveSession(sid, saved!.turns, sequence, saved!.revision,
+          saved!.generation, saved!.control, saved!.historyAtStart, machine);
+      }
+    }, sid);
+    await expect.poll(() => page.evaluate(async sid => {
+      const cache = await import("/src/cache.ts");
+      return [(await cache.loadAllReplayState("layout-machine")).cursors[sid],
+        (await cache.loadAllReplayState("second-machine")).cursors[sid]];
+    }, sid)).toEqual([111, 222]);
+    const retained = await page.evaluate(async ({ sid, engine }) => {
+      const cache = await import("/src/cache.ts");
+      const { HistoryPageCache } = await import("/src/history-page-cache.ts");
+      const page = await new HistoryPageCache().getPage({
+        machineId: "layout-machine", sid, engine, space: "code", revision: "device-history",
+      }, "retained-page");
+      const first = await cache.loadSession(sid, "layout-machine");
+      const second = await cache.loadSession(sid, "second-machine");
+      await cache.invalidateSessionCache(sid, "layout-machine");
+      const invalidatedFirst = await cache.loadSession(sid, "layout-machine");
+      const keptSecond = await cache.loadSession(sid, "second-machine");
+      cache.saveSession(sid, keptSecond!.turns, 223, keptSecond!.revision,
+        keptSecond!.generation, keptSecond!.control, keptSecond!.historyAtStart, "second-machine");
+      await cache.clearCache();
+      // The coalesced writer must also stay empty beyond its 400ms deadline.
+      await new Promise(resolve => setTimeout(resolve, 450));
+      return {
+        pageRetained: !!page,
+        first: first?.turns[0].blocks[0].text,
+        second: second?.turns[0].blocks[0].text,
+        invalidatedFirst,
+        secondSurvivesInvalidation: !!keptSecond,
+        clearedSecond: await cache.loadSession(sid, "second-machine"),
+      };
+    }, { sid, engine });
+    expect(retained).toEqual({
+      first: "Cached answer from layout-machine", second: "Cached answer from second-machine",
+      pageRetained: true, invalidatedFirst: null, secondSurvivesInvalidation: true, clearedSecond: null,
+    });
+  });
+}
+
+test("device switching preserves background push bindings for every authorized device", async ({ page, browserName }) => {
+  test.skip(browserName !== "chromium", "Web Push APIs are exercised in Chromium");
+  const devices = [
+    { machine_id: "layout-machine", label: "Device A", online: true },
+    { machine_id: "second-machine", label: "Device B", online: true },
+  ];
+  await mockRightPanelRelay(page, {
+    retained: false, devices,
+  });
+  const bindings: { machine_ids: string[]; notification_mode: string }[] = [];
+  await page.addInitScript(() => {
+    localStorage.setItem("cc_remote_notification_mode", "session");
+    Object.defineProperty(Notification, "permission", { get: () => "granted" });
+    Object.defineProperty(PushManager.prototype, "getSubscription", { value: async () => ({
+      toJSON: () => ({ endpoint: "https://push.example/device-group",
+        keys: { p256dh: "p".repeat(87), auth: "a".repeat(22) } }),
+    }) });
+  });
+  await page.route("**/api/push-config", route => route.fulfill({
+    json: { enabled: true, public_key: "unused-with-existing-subscription" },
+  }));
+  await page.route("**/api/push/subscribe", route => {
+    bindings.push(route.request().postDataJSON());
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.goto("/");
+  expect(await page.evaluate(() => ({
+    permission: Notification.permission,
+    mode: localStorage.getItem("cc_remote_notification_mode"),
+    native: !!window.ccRemoteHarmonyPush,
+  }))).toEqual({ permission: "granted", mode: "session", native: false });
+  await page.evaluate(async () => {
+    await navigator.serviceWorker.register("/sw.js");
+    await navigator.serviceWorker.ready;
+  });
+  await expect.poll(() => bindings.length).toBe(1);
+  expect(bindings[0]).toMatchObject({
+    machine_ids: ["layout-machine", "second-machine"], notification_mode: "session",
+  });
+  await page.getByRole("button", { name: "设备中心", exact: true }).click();
+  await page.getByRole("dialog", { name: "设备中心" }).getByRole("button", { name: /Device B/ }).click();
+  await expect(page.getByRole("button", { name: "设备中心", exact: true })).toContainText("Device B");
+  await expect(page.locator(".c-head")).not.toContainText("设备离线");
+  expect(bindings).toHaveLength(1);
+  devices.push({ machine_id: "third-machine", label: "Device C", online: false });
+  await page.getByRole("button", { name: "设备中心", exact: true }).click();
+  await expect.poll(() => bindings.length).toBe(2);
+  expect(bindings[1].machine_ids).toEqual(["layout-machine", "second-machine", "third-machine"]);
+  await page.getByRole("button", { name: "关闭设备中心", exact: true }).click();
+  devices.splice(0, 1);
+  await page.getByRole("button", { name: "设备中心", exact: true }).click();
+  await expect.poll(() => bindings.length).toBe(3);
+  expect(bindings[2].machine_ids).toEqual(["second-machine", "third-machine"]);
+});
 
 for (const engine of ["claude", "codex"] as const) {
   for (const [width, height] of [[320, 844], [390, 844], [640, 320], [1280, 844]]) {
@@ -9369,6 +9521,7 @@ test("session cache rejects stale Claude and replay-orphan rows", async ({
   await page.goto("/tests/history-browser.html");
   const result = await page.evaluate(async () => {
     const cache = await import("/src/cache.ts");
+    const { WEB_BUILD } = await import("/src/web-build.ts");
     await cache.clearCache();
     const legacySid = "legacy-claude-prompt-alias";
     const replayOrphanSid = "completed-replay-orphan";
@@ -9554,7 +9707,7 @@ test("session cache rejects stale Claude and replay-orphan rows", async ({
         savedAt: Date.now(),
       }, missingAnswerV25Sid);
       tx.objectStore("sessions").put({
-        v: 27,
+        v: 31, buildId: WEB_BUILD.build_id, machineId: "default", sid: optimisticSteerSid,
         turns: [{
           id: "active-before-steer",
           prompt: "first prompt",
@@ -9572,7 +9725,7 @@ test("session cache rejects stale Claude and replay-orphan rows", async ({
         revision: "optimistic-steer-r1",
         generation: "optimistic-steer-g1",
         savedAt: Date.now(),
-      }, optimisticSteerSid);
+      }, cache.sessionCacheKey("default", optimisticSteerSid));
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
       tx.onabort = () => reject(tx.error);
