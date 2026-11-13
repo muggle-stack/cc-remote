@@ -1123,6 +1123,172 @@ async def test_live_reply_buffer_boundary_and_replacement_completeness(buffer_ca
         assert [row["text"] for row in replies] == [replacements.get(buffer_case, initial)]
 
 
+async def reply_buffer_fixture(engine):
+    machine, _transport, controller, sid, native, _title = native_named_member(engine)
+    store, room_id, member = await store_named_member(controller, engine, sid, native)
+    ctx = _mk_ctx(sid, native)
+    ctx.engine = engine
+    machine.sessions[sid] = ctx
+    controller.watch(ctx, member["id"])
+    other_native = "22222222-2222-4222-8222-222222222222"
+    other_sid = machine._codex_wire_sid(machine._codex_profile(None), other_native)
+    spec, account = controller.prepare_member(CollaborationMemberSpec(engine="codex", cwd="/tmp"))
+    store.mutate("owner", "add-peer", "add_member", {"room_id": room_id}, prepared_members=[
+        (spec, account, {"sid": other_sid, "native_sid": other_native, "cwd": "/tmp"}),
+    ])
+    peer = store.room("owner", room_id)["members"][-1]
+    other = _mk_ctx(other_sid, other_native)
+    other.engine = "codex"
+    machine.sessions[other_sid] = other
+    controller.watch(other, peer["id"])
+    return machine, controller, store, room_id, member, ctx, other
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["claude", "codex", "dsh"])
+@pytest.mark.parametrize("pressure", ["completed", "unfinished", "delayed_final"])
+@pytest.mark.parametrize("restart", [False, True])
+async def test_live_reply_buffer_eviction_preserves_complete_native_recovery(
+    monkeypatch, engine, pressure, restart
+):
+    from cc_remote.protocol import History
+    from cc_remote.wrapper.collaboration import Collaboration
+
+    machine, controller, store, room_id, member, ctx, other = await reply_buffer_fixture(engine)
+    delivery = send(store, room_id)
+    user = UserMsg(msg_id="native-turn", client_msg_id=delivery["id"], prompt="hello")
+    prefix, suffix = "Important beginning. ", "Conclusion."
+    answer = prefix + suffix
+    await machine._emit(ctx, user)
+    channel = "unknown" if pressure == "delayed_final" else "final"
+    await machine._emit(ctx, AssistantMsgStart(message_id="answer", turn_id="native-turn", channel=channel))
+    await machine._emit(ctx, Delta(message_id="answer", turn_id="native-turn", channel=channel,
+                                   text=answer if pressure == "delayed_final" else prefix))
+    if pressure == "delayed_final":
+        await machine._emit(ctx, AssistantMsgEnd(message_id="answer", turn_id="native-turn"))
+    for index in range(32):
+        message_id = f"peer-{index}"
+        await machine._emit(other, AssistantMsgStart(message_id=message_id, channel="commentary"))
+        await machine._emit(other, Delta(message_id=message_id, channel="commentary", text="progress"))
+        if pressure == "completed":
+            await machine._emit(other, AssistantMsgEnd(message_id=message_id, channel="commentary"))
+    if pressure != "delayed_final":
+        await machine._emit(ctx, Delta(message_id="answer", turn_id="native-turn", channel="final", text=suffix))
+    end = AssistantMsgEnd(message_id="answer", turn_id="native-turn", channel="final")
+    terminal = TurnEnd(turn_id="native-turn", checkpoint_id="native-turn" if engine == "claude" else None,
+                       result=TurnResult(subtype="success", is_error=False, duration_ms=1))
+    await machine._emit(ctx, end)
+    await machine._emit(ctx, terminal)
+    replies = [row for row in store.messages("owner", room_id) if row["role"] == "assistant"]
+    needs_recovery = pressure != "completed"
+    if needs_recovery:
+        assert not replies
+        assert store.delivery(delivery["id"])["status"] == "running"
+    else:
+        assert [row["text"] for row in replies] == [answer]
+        assert store.delivery(delivery["id"])["status"] == "succeeded"
+    assert len(controller.texts) <= 32
+    if restart:
+        controller = Collaboration(machine)
+        machine._collaboration = controller
+        store = await controller.database()
+        monkeypatch.setattr(controller, "schedule_reconcile", lambda _member: None)
+        await controller.restore_observers()
+        if needs_recovery:
+            await machine._emit(ctx, AssistantMsgStart(message_id="answer", turn_id="native-turn", channel="final"))
+            await machine._emit(ctx, Delta(message_id="answer", turn_id="native-turn", channel="final", text=suffix))
+            await machine._emit(ctx, end)
+            await machine._emit(ctx, terminal)
+            assert not [row for row in store.messages("owner", room_id) if row["role"] == "assistant"]
+            assert store.delivery(delivery["id"])["status"] == "running"
+    events = [user, AssistantMsgStart(message_id="answer", turn_id="native-turn", channel="final"),
+              Delta(message_id="answer", turn_id="native-turn", channel="final", text=answer), end, terminal]
+    history = History(session_id=ctx.key, revision="full", live_seq=ctx.seq,
+                      events=[event.model_dump() for event in events])
+    machine._history_page_singleflight = AsyncMock(return_value=history)
+    machine._dsh.connection = AsyncMock()
+    machine._dsh.handle_get_history = AsyncMock(return_value=history)
+    machine._handle_query = AsyncMock()
+    machine._handle_steer = AsyncMock()
+    machine._spawn = AsyncMock()
+    await controller.reconcile(store.member_by_id(member["id"]))
+    replies = [row for row in store.messages("owner", room_id) if row["role"] == "assistant"]
+    assert [row["text"] for row in replies] == [answer]
+    assert replies[0]["reply_to"] == ["message"]
+    assert store.delivery(delivery["id"])["status"] == "succeeded"
+    assert not store.deliveries(room_id, active=True)
+    assert not controller.pending_replies and not controller.recovery_pending
+    machine._handle_query.assert_not_awaited()
+    machine._handle_steer.assert_not_awaited()
+    machine._spawn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reply_buffer_eviction_during_publication_keeps_the_held_complete_text(monkeypatch):
+    import threading
+
+    machine, controller, store, room_id, member, ctx, other = await reply_buffer_fixture("codex")
+    delivery = send(store, room_id)
+    store.consume(delivery["id"], "native-turn")
+    await machine._emit(ctx, AssistantMsgStart(message_id="answer", turn_id="native-turn", channel="final"))
+    await machine._emit(ctx, Delta(message_id="answer", turn_id="native-turn", channel="final", text="complete reply"))
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    original = store.member_by_id
+
+    def pause_publication(member_id):
+        if member_id == member["id"]:
+            loop.call_soon_threadsafe(entered.set)
+            if not release.wait(5):
+                raise TimeoutError("publication was not released")
+        return original(member_id)
+
+    monkeypatch.setattr(store, "member_by_id", pause_publication)
+    task = asyncio.create_task(machine._emit(ctx, AssistantMsgEnd(
+        message_id="answer", turn_id="native-turn", channel="final")))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        for index in range(32):
+            message_id = f"peer-{index}"
+            await machine._emit(other, AssistantMsgStart(message_id=message_id, channel="commentary"))
+            await machine._emit(other, AssistantMsgEnd(message_id=message_id, channel="commentary"))
+        release.set()
+        await asyncio.wait_for(task, 2)
+        await machine._emit(ctx, TurnEnd(turn_id="native-turn", result=TurnResult(subtype="success", is_error=False, duration_ms=1)))
+        assert [row["text"] for row in store.messages("owner", room_id) if row["role"] == "assistant"] == ["complete reply"]
+        assert store.delivery(delivery["id"])["status"] == "succeeded"
+    finally:
+        release.set()
+        await task
+
+
+@pytest.mark.asyncio
+async def test_source_complete_history_keeps_all_unfinished_reply_buffers():
+    from cc_remote.protocol import History
+
+    machine, controller, store, room_id, member, ctx, _other = await reply_buffer_fixture("codex")
+    delivery = send(store, room_id)
+    store.consume(delivery["id"], "native-turn")
+    events = [UserMsg(msg_id="native-turn", client_msg_id=delivery["id"], prompt="hello"),
+              AssistantMsgStart(message_id="answer", turn_id="native-turn", channel="final"),
+              Delta(message_id="answer", turn_id="native-turn", channel="final", text="Important beginning. ")]
+    for index in range(32):
+        events.append(AssistantMsgStart(message_id=f"progress-{index}", turn_id="native-turn", channel="commentary"))
+    events.extend([
+        Delta(message_id="answer", turn_id="native-turn", channel="final", text="Conclusion."),
+        AssistantMsgEnd(message_id="answer", turn_id="native-turn", channel="final"),
+        TurnEnd(turn_id="native-turn", result=TurnResult(subtype="success", is_error=False, duration_ms=1)),
+    ])
+    machine._history_page_singleflight = AsyncMock(return_value=History(
+        session_id=ctx.key, revision="full", live_seq=ctx.seq,
+        events=[event.model_dump() for event in events],
+    ))
+    await controller.reconcile(store.member_by_id(member["id"]))
+    assert [row["text"] for row in store.messages("owner", room_id) if row["role"] == "assistant"] == ["Important beginning. Conclusion."]
+    assert store.delivery(delivery["id"])["status"] == "succeeded"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("has_live_seq", [False, True])
 @pytest.mark.parametrize("admission_frame", ["user_msg", "assistant_msg_end"])

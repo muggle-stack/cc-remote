@@ -71,6 +71,7 @@ class Collaboration:
         self.question_statuses: OrderedDict[tuple[str, str, str], str] = OrderedDict()
         self.pending_replies: dict[str, set[str]] = {}
         self.recovery_pending: set[str] = set()
+        self.incomplete_members: set[str] = set()
         self.projection_locks: dict[str, asyncio.Lock] = {}
         self.wake = asyncio.Event()
         self.closed = False
@@ -1253,6 +1254,7 @@ class Collaboration:
             if channel != "unknown":
                 item["channel"] = channel
             if kind == "assistant_msg_end":
+                item["ended"] = True
                 if frame.canonical_message_id:
                     item["canonical_id"] = frame.canonical_message_id
                 if frame.delivery:
@@ -1261,6 +1263,7 @@ class Collaboration:
                     item["has_questions"] = bool(frame.questions)
                     item["questions"] = [question.model_dump(mode="json") for question in frame.questions]
             if kind == "delta" and item["channel"] != "thinking":
+                item["ended"] = False
                 text = frame.text if frame.replace else item["text"] + frame.text
                 if isinstance(ctx, _ProjectionContext):
                     item["text"] = text
@@ -1270,7 +1273,23 @@ class Collaboration:
                     )
                     item["text"] = text[:_LIVE_REPLY_LIMIT]
             while len(texts) > 32:
-                texts.popitem(last=False)
+                evicted_key = next((
+                    candidate for candidate, buffer in texts.items()
+                    if candidate != key and buffer.get("ended")
+                    and buffer.get("channel") != "unknown"
+                ), None)
+                if evicted_key is None:
+                    if isinstance(ctx, _ProjectionContext):
+                        # Source-complete recovery must retain every open body.
+                        break
+                    evicted_key = next(iter(texts))
+                evicted = texts.pop(evicted_key)
+                if not isinstance(ctx, _ProjectionContext) and (
+                    not evicted.get("ended") or evicted.get("channel") == "unknown"
+                ):
+                    # Mark synchronously, before another member can observe a
+                    # terminal while this member's text has been discarded.
+                    self.incomplete_members.add(evicted_key[0])
             if kind != "assistant_msg_end":
                 return
         if kind not in {
@@ -1313,6 +1332,14 @@ class Collaboration:
         rows = await asyncio.to_thread(
             self.store.deliveries, member["room_id"], active=True
         )
+        if member_id in self.incomplete_members:
+            incomplete = {
+                row["id"] for row in rows if row["member_id"] == member_id
+                and row["status"] in {"running", "stopping"}
+            }
+            self.recovery_pending.update(incomplete)
+            if incomplete:
+                self.incomplete_members.discard(member_id)
         active = [
             row for row in rows
             if row["member_id"] == member_id
@@ -1383,8 +1410,6 @@ class Collaboration:
                 if owners & {row["id"], row["native_turn"], row["native_input_id"]}
             ]
         if kind == "assistant_msg_end" and (running or (item.get("delivery") == "async" and item.get("has_questions"))):
-            key = (member_id, frame.message_id)
-            item = texts.get(key, {})
             public_reply = (
                 item.get("has_questions", False)
                 if item.get("delivery") == "async"
@@ -1405,7 +1430,10 @@ class Collaboration:
                 # source-complete native history can recover the reply.
                 for row in running:
                     self.pending_replies.setdefault(row["id"], set()).add(source)
-                if not item.get("truncated"):
+                recovering = not isinstance(ctx, _ProjectionContext) and any(
+                    row["id"] in self.recovery_pending for row in running
+                )
+                if not item.get("truncated") and not recovering:
                     await asyncio.to_thread(
                         self.store.publish,
                         member_id,
