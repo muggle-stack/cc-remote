@@ -42,6 +42,13 @@ export function mergeRoomMessages(
   return [...byId.values()].sort((left, right) => left.seq - right.seq);
 }
 
+export function isRoomConversationMessage(message: CollaborationMessage): boolean {
+  if (message.question) return false;
+  return message.role !== "user" || !message.source
+    || !["question-answer:", "async-answer:", "native-question-answer:"]
+      .some(prefix => message.source!.startsWith(prefix));
+}
+
 export interface RoomMention {
   start: number;
   end: number;

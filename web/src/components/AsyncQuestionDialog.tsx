@@ -1,8 +1,8 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { AsyncQuestionSpec } from "../protocol";
+import type { AsyncQuestionSpec, Engine } from "../protocol";
 import type { TextBlock, Turn } from "../domain/conversation";
-import { Icon } from "../icons";
+import { EngineIcon, Icon } from "../icons";
 import { supplementalAnswerPrompt } from "../async-question-presentation";
 import { ImeSubmitGuard } from "../ime-submit";
 import type { QueryAcceptanceResult } from "../outbox";
@@ -16,8 +16,9 @@ export interface AsyncQuestionDraft {
 
 /** Nonblocking questions are not approval leases. The native dialog only owns
  * UI focus; replies still use the existing scoped query/steer outbox. */
-function AsyncQuestionDialog({ questions, initialDraft,
-  onDraftChange, onReply, pendingReply, onClose, answered, replyMode }: {
+export function AsyncQuestionDialog({ questions, initialDraft,
+  onDraftChange, onReply, pendingReply, onClose, answered, replyMode,
+  sourceLabel, engine, questionId, className }: {
   questions: AsyncQuestionSpec[];
   initialDraft?: AsyncQuestionDraft;
   onDraftChange: (draft: AsyncQuestionDraft) => void;
@@ -26,6 +27,10 @@ function AsyncQuestionDialog({ questions, initialDraft,
   onClose: () => void;
   answered: boolean;
   replyMode?: "query" | "steer";
+  sourceLabel?: string;
+  engine?: Engine;
+  questionId?: string;
+  className?: string;
 }) {
   const id = useId();
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -50,8 +55,8 @@ function AsyncQuestionDialog({ questions, initialDraft,
   const canSubmit = draft.texts.some(text => text.trim()) || draft.choices.some(Boolean);
   const replyHint = submission ? "正在确认回答是否送达，可先收起小窗。"
     : !onReply ? "当前会话暂不可写，回答草稿会保留"
-    : replyMode === "steer" ? "补充会发送给当前任务，不会中断执行"
-    : null;
+    : engine ? "回答将补充给当前任务"
+    : replyMode === "steer" ? "补充会发送给当前任务，不会中断执行" : null;
 
   useEffect(() => {
     if (!submission) return;
@@ -104,7 +109,7 @@ function AsyncQuestionDialog({ questions, initialDraft,
     return () => observer.disconnect();
   }, []);
 
-  return createPortal(<dialog className="async-question-dialog" ref={dialogRef} aria-modal="true"
+  return createPortal(<dialog className={`async-question-dialog${className ? ` ${className}` : ""}`} ref={dialogRef} aria-modal="true"
     aria-labelledby={`${id}-heading`} aria-describedby={replyHint ? `${id}-hint` : undefined}
     onCancel={(event) => { event.preventDefault(); onClose(); }}
     onKeyDown={(event) => {
@@ -159,21 +164,24 @@ function AsyncQuestionDialog({ questions, initialDraft,
       if (!answers.length) { setNotice("请填写至少一个回答。"); return; }
       sendingRef.current = true;
       setNotice("");
-      const receipt = onReply(supplementalAnswerPrompt(answers));
+      const receipt = onReply(supplementalAnswerPrompt(answers, questionId));
       sendingRef.current = !!receipt;
       setSubmission(receipt ?? undefined);
       if (!receipt) setNotice("当前会话暂不可写，回答已保留，请稍后重试。");
     }}>
       <header className="async-question-heading">
         <span id={`${id}-heading`} ref={headingRef} tabIndex={-1}>
-          <Icon name="message" size={20} />助手询问
+          {engine ? <EngineIcon engine={engine} size={22} /> : <Icon name="message" size={20} />}助手询问
         </span>
         {answered && !submission && <span className="async-question-answered">已回答</span>}
-        <button className="async-question-close" type="button" aria-label="关闭助手询问" onClick={onClose}>
+        <button className="async-question-close" type="button"
+          aria-label={engine ? "收起助手询问" : "关闭助手询问"}
+          title={engine ? "收起，稍后继续回答" : undefined} onClick={onClose}>
           <Icon name="close" size={20} />
         </button>
       </header>
       <div className="async-question-body" ref={bodyRef}>
+        {sourceLabel && <div className="async-question-source">{sourceLabel}</div>}
         {questions.map((question, index) => <fieldset key={index} disabled={!onReply || !!submission}>
           <legend><QuestionMarkdown>{question.title}</QuestionMarkdown></legend>
           {question.options?.map((option, optionIndex) => <label className="async-question-option" key={optionIndex}>

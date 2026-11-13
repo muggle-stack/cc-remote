@@ -544,6 +544,43 @@ class CollaborationStore:
                         question["error"] = delivery["error"] or "回答未送达，请重试。"
             return messages
 
+    def pending_async_questions(self, owner, room_id):
+        """Read unanswered tools independently of conversation pagination."""
+        with self.db() as db:
+            self._room(db, owner, room_id)
+            columns = ",".join(f"messages.{column}" for column in _MESSAGE_COLUMNS.split(","))
+            rows = db.execute(
+                f"SELECT {columns},d.status AS answer_status,d.error AS answer_error,a.text AS answer_prompt "
+                "FROM messages LEFT JOIN deliveries d "
+                "ON d.id=json_extract(messages.question,'$.answer_delivery') "
+                "LEFT JOIN messages a ON a.id=d.message_id "
+                "WHERE messages.room_id=? AND json_extract(messages.question,'$.kind')='async' "
+                "AND (json_extract(messages.question,'$.status') IN ('pending','submitting') "
+                "OR d.status IN ('failed','cancelled')) ORDER BY messages.seq",
+                (room_id,),
+            ).fetchall()
+            pending = []
+            for row in rows:
+                message = self.message(row)
+                status = message.pop("answer_status")
+                error = message.pop("answer_error")
+                prompt = message.pop("answer_prompt")
+                answers = match_async_answer(message["question"], prompt) if prompt else None
+                if answers:
+                    remaining = iter(answers)
+                    answer = next(remaining, None)
+                    values = []
+                    for page in message["question"]["questions"]:
+                        matched = answer and answer["question"] == page["question"]
+                        values.append(answer["answer"] if matched else "")
+                        if matched:
+                            answer = next(remaining, None)
+                    message["question"]["answers"] = values
+                if status in {"failed", "cancelled"}:
+                    message["question"].update(status="pending", error=error or "回答未送达，请重试。")
+                pending.append(message)
+            return pending
+
     def question_states(self, owner, room_id, message_ids):
         """Return receipts for questions referenced outside the visible page."""
         identities = list(dict.fromkeys(message_ids))[:128]

@@ -195,7 +195,7 @@ class Collaboration:
             ),
         }
 
-    async def snapshot(self, owner, room_id=None, *, before=None):
+    async def snapshot(self, owner, room_id=None, *, before=None, ask_id=None):
         store = await self.database()
         data = {
             "rooms": await asyncio.to_thread(store.rooms, owner),
@@ -232,7 +232,10 @@ class Collaboration:
             data["has_more"] = bool(messages and messages[0]["seq"] > 1)
             references = [reference for message in messages if message["role"] == "user"
                           for reference in message["reply_to"]]
+            if ask_id:
+                references.insert(0, ask_id)
             data["question_states"] = await asyncio.to_thread(store.question_states, owner, room_id, references)
+            data["pending_questions"] = await asyncio.to_thread(store.pending_async_questions, owner, room_id)
             data["deliveries"] = await asyncio.to_thread(
                 store.public_deliveries, room_id
             )
@@ -251,19 +254,24 @@ class Collaboration:
             question_rows = [(message["member_id"], message["question"])
                              for message in messages if message.get("question")]
             question_rows.extend((state["member_id"], state) for state in data["question_states"].values())
+            question_rows.extend((message["member_id"], message["question"])
+                                 for message in data["pending_questions"])
             for member_id, question in question_rows:
                 key = (member_id, question["kind"], question["ask_id"])
                 status = "pending" if key in pending_keys else self.question_statuses.get(key)
-                if status and not question.get("error"):
+                # An async answer can be retried after its native turn fails.
+                # Its previous receipt cannot confirm the new queued input.
+                new_async_input = question["kind"] == "async" and question["status"] == "submitting"
+                if status and not question.get("error") and not new_async_input:
                     question["status"] = status
         return data
 
     async def publish(
-        self, owner, room_id=None, *, request_id=None, to=None, before=None, error=None
+        self, owner, room_id=None, *, request_id=None, to=None, before=None, error=None, ask_id=None
     ):
         self.build_seq += 1
         version = self.build_seq
-        data = await self.snapshot(owner, room_id, before=before)
+        data = await self.snapshot(owner, room_id, before=before, ask_id=ask_id)
         data.update(generation=self.machine.instance_id, version=version)
         frame = CollaborationState(
             owner_id=owner,
@@ -446,6 +454,7 @@ class Collaboration:
                 request_id=cmd.cmd_id,
                 to=cmd.client_id,
                 before=cmd.before,
+                ask_id=cmd.ask_id if cmd.operation == "read" else None,
             )
             if cmd.operation not in {"list", "read"}:
                 self.dirty.add((owner, room_id))

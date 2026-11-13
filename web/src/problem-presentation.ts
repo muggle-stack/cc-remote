@@ -129,6 +129,8 @@ export function presentCommandProblem(
       && error.message === CODEX_PROVIDER_MISMATCH) return CODEX_PROVIDER_MISMATCH;
   if (error.code === "busy" && CODEX_METADATA_PROBLEMS.has(error.message)) return error.message;
   switch (error.code) {
+    case "collaboration_answer_failed":
+      return "回答未送达，请重试。";
     case "drain_timeout":
       return STOP_TIMEOUT_FAILURE;
     case "dsh_invalid_session":

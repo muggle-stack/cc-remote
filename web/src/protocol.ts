@@ -830,6 +830,7 @@ export interface CollaborationMessage {
   text: string; created: number; targets: string[]; reply_to: string[]; truncated?: boolean;
   attachments?: {kind: "file" | "image"; name: string}[];
   question?: CollaborationQuestion;
+  source?: string | null;
 }
 export interface CollaborationQuestion {
   kind: "native" | "async";
@@ -855,6 +856,7 @@ export interface CollaborationState extends Base {
     permission_profiles?: PermissionProfiles;
     sessions?: CollaborationSession[]; sessions_spec?: CollaborationMemberSpec;
     questions?: {member_id: string; sid: string; question: AskUser}[];
+    pending_questions?: CollaborationMessage[];
     question_states?: Record<string, Pick<CollaborationQuestion, "kind" | "ask_id" | "status"> & {
       member_id: string; error?: string;
     }>;

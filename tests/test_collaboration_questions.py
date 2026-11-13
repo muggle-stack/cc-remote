@@ -634,6 +634,50 @@ async def test_async_answer_retry_follows_the_native_delivery_outcome(outcome):
 
 
 @pytest.mark.asyncio
+async def test_pending_async_questions_survive_pagination_and_keep_exact_native_receipts():
+    machine, _transport, controller, store, room_id, member, ctx = await question_fixture("codex")
+    await publish_async_question(machine, ctx)
+    question = store.messages("owner", room_id)[0]
+    for index in range(45):
+        store.publish(member["id"], f"later-{index}", "继续处理项目。", [])
+    snapshot = await controller.snapshot("owner", room_id)
+    assert question["id"] not in [message["id"] for message in snapshot["messages"]]
+    assert [message["id"] for message in snapshot["pending_questions"]] == [question["id"]]
+    assert len(snapshot["messages"]) == 40
+    with pytest.raises(ValueError):
+        store.pending_async_questions("other-owner", room_id)
+    prompt = "补充回答：\n\n问题：选择目录 1？\n回答：项目目录"
+    store.mutate("owner", "answer", "send", {
+        "room_id": room_id, "message_id": "answer", "ask_id": question["id"],
+        "targets": [member["id"]], "prompt": prompt,
+    })
+    delivery = store.deliveries(room_id)[0]
+    assert store.pending_async_questions("owner", room_id)[0]["question"]["status"] == "submitting"
+    store.set_delivery(delivery["id"], "unknown")
+    assert store.pending_async_questions("owner", room_id)[0]["question"]["status"] == "submitting"
+    assert store.consume(delivery["id"], "native-answer-turn") == question["question"]["ask_id"]
+    assert store.pending_async_questions("owner", room_id) == []
+    for index in range(45):
+        store.publish(member["id"], f"after-answer-{index}", "后续公开回复。", [])
+    response = await controller.handle(CollaborationCommand(
+        operation="read", owner_id="owner", client_id="browser", cmd_id="receipt-read",
+        room_id=room_id, ask_id=question["id"],
+    ))
+    assert response.error is None
+    snapshot = response.data
+    assert snapshot["question_states"][question["id"]]["status"] == "answered"
+    assert len(snapshot["messages"]) == 40
+    store.set_delivery(delivery["id"], "failed", error="回答未送达")
+    pending = store.pending_async_questions("owner", room_id)
+    assert len(pending) == 1
+    assert pending[0]["question"]["status"] == "pending"
+    assert pending[0]["question"]["error"] == "回答未送达"
+    assert "answer_status" not in pending[0]
+    assert "answer_error" not in pending[0]
+    assert store.question_states("owner", room_id, [question["id"]])[question["id"]]["status"] == "pending"
+
+
+@pytest.mark.asyncio
 async def test_legacy_room_database_migrates_without_changing_existing_messages():
     (
         machine,
@@ -1070,6 +1114,10 @@ async def test_failed_native_async_answer_turn_can_be_retried_after_acceptance(o
     assert snapshot["question_states"][question["id"]]["status"] == "pending"
     store.mutate("owner", "retry", "send", {**body, "message_id": "retry"})
     assert len(store.deliveries(room_id)) == 2
+    retry = await controller.snapshot("owner", room_id)
+    assert retry["messages"][0]["question"]["status"] == "submitting"
+    assert retry["question_states"][question["id"]]["status"] == "submitting"
+    assert retry["pending_questions"][0]["question"]["status"] == "submitting"
 
 
 @pytest.mark.asyncio

@@ -34,7 +34,7 @@ import { WorkingWord } from "./WorkingWord";
 import { CollaborationReply } from "./CollaborationResources";
 import { SessionStatus } from "./SessionStatus";
 import { DirPicker } from "./DirPicker";
-import { QuestionSheet, type QuestionDraft } from "./QuestionSheet";
+import { CollaborationQuestions, type CollaborationQuestionCache } from "./CollaborationQuestions";
 import { pickFiles } from "../attachment-import";
 import { decodedSize } from "../img";
 import { PERMS } from "../data";
@@ -51,6 +51,7 @@ import {
   editRoomMentions,
   readRoomDraft,
   mergeRoomMessages,
+  isRoomConversationMessage,
   roomActiveStates,
   roomCatalogKey,
   roomDeliveryLabel,
@@ -64,7 +65,6 @@ import {
 } from "../collaboration";
 import { OlderHistoryLoadGate, isAtHistoryEdge } from "../scroll-follow";
 import { HISTORY_REQUEST_TIMEOUT_MS } from "../history-requests";
-import { supplementalAnswerPrompt } from "../async-question-presentation";
 import "./CollaborationWorkspace.css";
 const CollaborationProgress = lazy(() => import("./CollaborationProgress"));
 
@@ -85,19 +85,11 @@ export interface CollaborationWorkspaceCache {
   profiles?: Profiles;
   hasMore?: boolean;
   versions?: Map<string, { generation: string; version: number }>;
-  questionDrafts?: Map<string, QuestionDraft>;
+  questionCache?: CollaborationQuestionCache;
+  pendingQuestions?: CollaborationMessage[] | null;
   scrollTop?: number;
   scrollHeight?: number;
   following?: boolean;
-}
-
-const questionKey = (memberId: string, askId: string, kind: "native" | "async" = "native") =>
-  JSON.stringify([kind, memberId, askId]);
-
-function questionSource(member: CollaborationMember): string {
-  const identity = roomMemberIdentity(member);
-  return [member.name, member.name !== identity && identity,
-    shortRoomSessionId(member.native_sid || member.sid)].filter(Boolean).join(" · ");
 }
 
 interface Props {
@@ -230,36 +222,18 @@ export default function CollaborationWorkspace({
   const [questions, setQuestions] = useState<
     NonNullable<CollaborationState["data"]["questions"]>
   >([]);
-  const [activeQuestion, setActiveQuestion] = useState<string | null>(null);
-  const [questionOpening, setQuestionOpening] = useState(0);
-  const questionDrafts = useRef(cache.questionDrafts ?? new Map<string, QuestionDraft>());
-  const asyncAnswerRequests = useRef(new Map<string, { id: string; signature: string }>());
-  const questionRequests = useRef(new Map<string, string>());
-  const [questionErrors, setQuestionErrors] = useState(new Map<string, string>());
-  const showQuestionError = (key: string, message: string) => setQuestionErrors(current => {
-    const next = new Map(current);
-    next.set(key, message);
-    while (next.size > 64) next.delete(next.keys().next().value!);
-    return next;
+  const [pendingQuestions, setPendingQuestions] = useState<CollaborationMessage[] | null>(
+    cachedRoom ? cache.pendingQuestions ?? null : null,
+  );
+  const [questionStates, setQuestionStates] = useState<NonNullable<CollaborationState["data"]["question_states"]>>({});
+  const [questionCache] = useState<CollaborationQuestionCache>(() => cache.questionCache ?? {
+    nativeDrafts: new Map(), asyncDrafts: new Map(), seen: new Set(), submissions: new Map(),
+    deferredRooms: new Set(), attempts: new Map(), requests: new Map(), errors: new Map(),
   });
-  const openQuestion = (memberId: string, askId: string, kind: "native" | "async" = "native") => {
-    const key = questionKey(memberId, askId, kind);
-    const draft = questionDrafts.current.get(key);
-    if (draft) questionDrafts.current.set(key, { ...draft, collapsed: false });
-    setActiveQuestion(key);
-    setQuestionOpening(value => value + 1);
-  };
-  useEffect(() => {
-    setActiveQuestion(current => {
-      const nativeOpen = questions.some(item => questionKey(item.member_id, item.question.ask_id) === current);
-      const asyncOpen = messages.some(message => message.member_id && message.question?.kind === "async"
-        && (message.question.status === "pending" || message.question.status === "submitting")
-        && questionKey(message.member_id, message.question.ask_id, "async") === current);
-      if (nativeOpen || asyncOpen) return current;
-      const first = questions[0];
-      return first ? questionKey(first.member_id, first.question.ask_id) : null;
-    });
-  }, [questions, messages]);
+  const questionListener = useRef<((event: ServerEvent) => boolean) | null>(null);
+  const listenQuestions = useCallback((handler: ((event: ServerEvent) => boolean) | null) => {
+    questionListener.current = handler;
+  }, []);
   const [profiles, setProfiles] = useState<Profiles>(cache.profiles ?? {});
   const [hasMore, setHasMore] = useState(cachedRoom ? cache.hasMore ?? false : false);
   const sidebarOpen = useSyncExternalStore(
@@ -381,7 +355,8 @@ export default function CollaborationWorkspace({
       setMessages([]);
       setDeliveries([]);
       setQuestions([]);
-      setActiveQuestion(null);
+      setPendingQuestions(null);
+      setQuestionStates({});
       setError(null);
       finishHistory();
       completedHistoryBefore.current = null;
@@ -433,34 +408,11 @@ export default function CollaborationWorkspace({
     [connected, ws],
   );
 
-  const submitQuestion = (key: string, operation: "answer" | "send", values: Record<string, unknown>) => {
-    setQuestionErrors(current => {
-      const next = new Map(current);
-      next.delete(key);
-      return next;
-    });
-    const request = command(operation, values);
-    if (!request) {
-      showQuestionError(key, "回答暂未提交，请检查设备连接后重试。");
-      return false;
-    }
-    questionRequests.current.set(request, key);
-    while (questionRequests.current.size > 64)
-      questionRequests.current.delete(questionRequests.current.keys().next().value!);
-    return true;
-  };
-
   useEffect(() => {
     listen((event) => {
       if (onResourceEvent(event)) return true;
       progressListener.current?.(event);
-      if (event.type === "error" && event.request_id) {
-        const key = questionRequests.current.get(event.request_id);
-        if (key) {
-          showQuestionError(key, event.message);
-          return true;
-        }
-      }
+      if (questionListener.current?.(event)) return true;
       if (
         event.type === "error" &&
         event.request_id === pendingRef.current?.id
@@ -485,13 +437,7 @@ export default function CollaborationWorkspace({
       )
         return true;
       if (event.type !== "collaboration_state") return false;
-      const questionRequest = event.request_id && questionRequests.current.get(event.request_id);
-      if (event.request_id) questionRequests.current.delete(event.request_id);
       if (event.error) {
-        if (questionRequest) {
-          showQuestionError(questionRequest, event.error);
-          return true;
-        }
         if (event.request_id === historyRequest.current?.id) {
           finishHistory();
           setHistoryError(event.error);
@@ -663,6 +609,8 @@ export default function CollaborationWorkspace({
         }
         if (data.deliveries) setDeliveries(data.deliveries);
         if (data.questions) setQuestions(data.questions);
+        if (data.pending_questions) setPendingQuestions(data.pending_questions);
+        if (data.question_states) setQuestionStates(data.question_states);
       }
       if (
         data.rooms &&
@@ -788,10 +736,10 @@ export default function CollaborationWorkspace({
 
   useLayoutEffect(() => {
     Object.assign(cache, { rooms, roomsLoaded, room, messages, deliveries, profiles, hasMore,
-      versions: versions.current, questionDrafts: questionDrafts.current,
+      versions: versions.current, questionCache, pendingQuestions,
       scrollTop: scroll.current?.scrollTop, scrollHeight: scroll.current?.scrollHeight,
       following: following.current });
-  }, [cache, rooms, roomsLoaded, room, messages, deliveries, profiles, hasMore]);
+  }, [cache, rooms, roomsLoaded, room, messages, deliveries, profiles, hasMore, questionCache, pendingQuestions]);
 
   const activeMembers =
     room?.members?.filter((member) => !member.removed) ?? [];
@@ -1507,7 +1455,7 @@ export default function CollaborationWorkspace({
               </div>}
               {historyError && <p className="collab-history-error" role="status">{historyError}</p>}
               {!messages.length && !deliveries.length && <div className="collab-room-empty">发一条消息开始讨论</div>}
-              {messages.map((message) => {
+              {messages.filter(isRoomConversationMessage).map((message) => {
                 const member = message.member_id
                   ? lookup.get(message.member_id)
                   : null;
@@ -1536,22 +1484,7 @@ export default function CollaborationWorkspace({
                       <EngineIcon engine={member.spec.engine} size={20} />
                       <span className="collab-answer-identity">{memberHeading(member)}{memberDetail(member)}</span>
                     </header>
-                    {message.question ? (
-                      <button type="button" className="collab-question-card"
-                        data-question-id={message.id}
-                        disabled={!roomReady || message.question.status !== "pending"}
-                        onClick={() => openQuestion(member.id, message.question!.ask_id, message.question!.kind)}>
-                        <Icon name="message" size={19} />
-                        <span className="collab-question-copy">
-                          <span>{message.question.questions[0]?.question}</span>
-                          <span className="collab-muted">{message.question.status === "answered" ? "已回答"
-                            : message.question.status === "pending" ? "等待你回答"
-                            : message.question.status === "submitting" ? "正在确认回答" : "已结束"}
-                            {message.question.questions.length > 1 && ` · ${message.question.questions.length} 个问题`}</span>
-                        </span>
-                        {message.question.status === "pending" && <Icon name="chevron-right" size={16} />}
-                      </button>
-                    ) : <CollaborationReply member={member} message={message} resources={resourceAccess} />}
+                    <CollaborationReply member={member} message={message} resources={resourceAccess} />
                     {message.truncated && (
                       <p className="collab-muted">完整回复可在原生会话查看。</p>
                     )}
@@ -1655,82 +1588,14 @@ export default function CollaborationWorkspace({
                   </article>
                 );
               })}
-              {questions.filter(item => questionKey(item.member_id, item.question.ask_id) === activeQuestion).map((item) => {
-                const member = lookup.get(item.member_id);
-                return (
-                  member && (
-                    <QuestionSheet
-                      retainDraftOnSubmit
-                      key={`${item.question.ask_id}:${questionOpening}`}
-                      draft={{ key: questionKey(member.id, item.question.ask_id), store: questionDrafts.current }}
-                      engine={member.spec.engine}
-                      question={item.question.question}
-                      options={item.question.options}
-                      allowText={item.question.allow_text}
-                      multiSelect={item.question.multi_select}
-                      header={item.question.header}
-                      sourceLabel={questionSource(member)}
-                      submissionError={questionErrors.get(questionKey(member.id, item.question.ask_id))}
-                      planDocument={item.question.plan_document}
-                      secret={item.question.secret}
-                      questions={item.question.questions}
-                      onAnswers={(answers) =>
-                        submitQuestion(questionKey(member.id, item.question.ask_id), "answer", {
-                          member_id: member.id,
-                          ask_id: item.question.ask_id,
-                          answers,
-                        })
-                      }
-                      onAnswer={(answer) =>
-                        submitQuestion(questionKey(member.id, item.question.ask_id), "answer", {
-                          member_id: member.id,
-                          ask_id: item.question.ask_id,
-                          answer,
-                        })
-                      }
-                    />
-                  )
-                );
-              })}
-              {messages.filter(message => message.member_id && message.question?.kind === "async"
-                && questionKey(message.member_id, message.question.ask_id, "async") === activeQuestion).map(message => {
-                const member = lookup.get(message.member_id!);
-                const question = message.question!;
-                if (!member) return null;
-                const key = questionKey(member.id, question.ask_id, "async");
-                const submit = (answers: (string | string[])[]) => {
-                  const signature = JSON.stringify(answers);
-                  const previous = asyncAnswerRequests.current.get(message.id);
-                  const previousDelivery = previous && deliveries.find(delivery => delivery.message_id === previous.id);
-                  const failed = previousDelivery && ["failed", "cancelled"].includes(previousDelivery.status);
-                  if (previous && !failed && previous.signature !== signature) {
-                    showQuestionError(key, "先前的回答仍在确认送达，请稍后查看会话。");
-                    return false;
-                  }
-                  const id = previous && !failed ? previous.id : crypto.randomUUID();
-                  const prompt = supplementalAnswerPrompt(question.questions.map((page, index) => ({
-                    question: page.question, answer: Array.isArray(answers[index])
-                      ? answers[index].join("\n") : answers[index],
-                  })), question.ask_id);
-                  const sent = submitQuestion(key, "send", { message_id: id, ask_id: message.id, targets: [member.id], prompt });
-                  if (sent) {
-                    asyncAnswerRequests.current.set(message.id, { id, signature });
-                    while (asyncAnswerRequests.current.size > 64)
-                      asyncAnswerRequests.current.delete(asyncAnswerRequests.current.keys().next().value!);
-                  }
-                  return sent;
-                };
-                return <QuestionSheet key={`${key}:${questionOpening}`} engine={member.spec.engine} retainDraftOnSubmit
-                  question={question.questions[0].question} options={question.questions[0].options}
-                  questions={question.questions} draft={{ key, store: questionDrafts.current }}
-                  sourceLabel={questionSource(member)}
-                  submissionError={questionErrors.get(key) ?? question.error}
-                  onAnswer={answer => submit([answer])} onAnswers={submit} />;
-              })}
             </div>
           )}
         </div>
         </div>
+        {room && !creating && <CollaborationQuestions key={room.id} room={room}
+          messages={messages} deliveries={deliveries} questions={questions}
+          pendingQuestions={pendingQuestions} questionStates={questionStates}
+          ready={connected && roomReady} command={command} cache={questionCache} listen={listenQuestions} />}
         {room && !creating && !room.archived && (
           <div
             className="collab-composer"

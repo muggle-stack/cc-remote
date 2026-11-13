@@ -1038,11 +1038,3 @@
   .collab-newchat .collab-dialog-footer { flex-wrap: wrap; }
   .collab-newchat .collab-primary { margin-top: 4px; }
 }
-.collab-question-card {
-  display:flex; align-items:center; gap:12px; width:100%; max-width:760px;
-  padding:13px 15px; border:1px solid var(--border); border-radius:14px;
-  background:var(--surface); color:var(--text); font:inherit; text-align:left; cursor:pointer;
-}
-.collab-question-card:disabled { cursor:default; opacity:1; }
-.collab-question-card > svg { flex:none; color:var(--accent); }
-.collab-question-copy { display:flex; flex-direction:column; gap:5px; flex:1; min-width:0; overflow-wrap:anywhere; }

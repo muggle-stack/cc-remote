@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   editRoomMentions,
   mergeRoomMessages,
+  isRoomConversationMessage,
   readRoomDraft,
   roomCatalogKey,
   roomMemberIdentity,
@@ -20,6 +21,23 @@ const roomMembers: import("../src/protocol").CollaborationMember[] = [
   { id: "removed", room_id: "room", name: "已移出", spec: { engine: "codex", profile_id: "primary" },
     sid: "session-three", native_sid: "three", cwd: "/repo", removed: true },
 ];
+const ordinaryMessage: import("../src/protocol").CollaborationMessage = {
+  id: "ordinary", seq: 1, role: "user", member_id: null, text: "补充回答：我想继续讨论设计。",
+  created: 1, targets: [], reply_to: [],
+};
+assert.equal(isRoomConversationMessage(ordinaryMessage), true);
+for (const source of ["question-answer:question", "async-answer:member:answer", "native-question-answer:member:input"]) {
+  assert.equal(isRoomConversationMessage({ ...ordinaryMessage, source }), false);
+}
+assert.equal(isRoomConversationMessage({ ...ordinaryMessage, source: "manual-answer:1" }), true);
+assert.equal(isRoomConversationMessage({ ...ordinaryMessage, role: "assistant", text: "已收到你的回答。" }), true);
+for (const kind of ["native", "async"] as const) {
+  for (const status of ["pending", "submitting", "answered", "cancelled"] as const) {
+    assert.equal(isRoomConversationMessage({ ...ordinaryMessage, role: "assistant", question: {
+      kind, ask_id: "question", status, questions: [],
+    } }), false);
+  }
+}
 assert.equal(roomMemberIdentity(roomMembers[0]), "Codex · primary");
 assert.equal(roomMemberDescription(roomMembers[1]), "Codex · primary · repo/review · 01a0d15f");
 assert.deepEqual(roomMentionMembers(roomMembers, "primary").map(member => member.id), ["implementation", "review"]);
