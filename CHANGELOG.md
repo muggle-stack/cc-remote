@@ -4,6 +4,17 @@
 
 ## Unreleased
 
+## v5.3.25
+
+Improve Claude history recovery and native question interactions across harnesses. Wire protocol v90 and Claude Agent SDK 0.2.174.
+
+- Recover canonical Claude history after Wrapper restarts and rebuild browser caches containing stale incomplete replies or internal task notifications.
+- Group asynchronous progress notices with the working process and preserve final-answer completion boundaries.
+- Retain question input, selections, page and reading position when switching harnesses, and retire drafts after successful answers.
+- Use DSH headings for its native questions and close pointer-opened harness menus with Escape while restoring focus.
+
+See the bilingual [release notes](docs/releases/v5.3.25.md).
+
 ## v5.3.24
 
 Match session selection to the device center's soft left-edge glow. Wire protocol v90 and Claude Agent SDK 0.2.174 are unchanged.
