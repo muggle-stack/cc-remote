@@ -201,6 +201,14 @@ class Collaboration:
         }
         if room_id:
             room = await asyncio.to_thread(store.room, owner, room_id)
+            # Native callbacks need their member before pending questions are
+            # exposed, including sessions that have no room deliveries yet.
+            for member in room["members"]:
+                if member["sid"]:
+                    self.bindings[member["sid"]] = member["id"]
+                    ctx = self.machine._ctx_for(member["sid"])
+                    if ctx:
+                        self.watch(ctx, member["id"])
             await self.sync_native_titles(room)
             data["room"] = await asyncio.to_thread(store.public_room, owner, room_id)
             for member in data["room"]["members"]:

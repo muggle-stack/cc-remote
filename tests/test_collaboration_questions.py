@@ -200,6 +200,149 @@ async def test_native_question_and_answer_are_shared_and_close_on_both_surfaces(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("engine", ["claude", "codex", "dsh"])
+@pytest.mark.parametrize("operation", ["create", "add_member"])
+@pytest.mark.parametrize("outcome", ["collaboration", "native", "timeout"])
+async def test_existing_session_questions_are_observed_before_any_room_delivery(
+    engine, operation, outcome
+):
+    machine, _transport, controller, sid, native, _title = native_named_member(engine)
+    ctx = _mk_ctx(sid, native)
+    ctx.engine = engine
+    ctx.space = "code"
+    ctx.cwd = "/tmp"
+    ctx.state = "running"
+    ctx.sdk = SimpleNamespace(native_id=native)
+    machine.sessions[sid] = ctx
+    machine.focused_sid = "keep-focus"
+    machine._handle_query = AsyncMock()
+    machine._handle_steer = AsyncMock()
+    machine._spawn = AsyncMock()
+    task = asyncio.create_task(native_question(machine, ctx))
+    try:
+        async with asyncio.timeout(2):
+            while not ctx.pending_asks:
+                await asyncio.sleep(0)
+        pending = next(iter(ctx.pending_asks.values())).event
+        store = await controller.database()
+        answer_values = {"answers": ["项目目录"]} if pending.questions else {"answer": "项目目录"}
+        spec = CollaborationMemberSpec(engine=engine, session_id=sid)
+        values = {"members": [spec], "name": "Existing session"}
+        if operation == "add_member":
+            prepared = controller.prepare_member(CollaborationMemberSpec(engine=engine))
+            room_id = store.mutate("owner", "empty-room", "create", {"name": "Room"},
+                                   prepared_members=[prepared])
+            values = {"member": spec, "room_id": room_id}
+        result = await controller.handle(CollaborationCommand(
+            operation=operation, owner_id="owner", client_id="browser",
+            cmd_id="bind-existing", **values,
+        ))
+        assert result.error is None
+        room_id = result.data["room"]["id"]
+        member = next(row for row in result.data["room"]["members"] if row["sid"] == sid)
+        assert result.data["questions"][0]["question"]["ask_id"] == pending.ask_id
+        assert store.messages("owner", room_id)[0]["question"]["status"] == "pending"
+        if outcome == "collaboration":
+            result = await controller.handle(CollaborationCommand(
+                operation="answer", owner_id="owner", client_id="browser",
+                cmd_id="answer", room_id=room_id, member_id=member["id"],
+                ask_id=pending.ask_id, **answer_values,
+            ))
+            assert result.error is None
+        elif outcome == "native":
+            assert await machine._handle_answer_question(AnswerQuestion(
+                sid=sid, ask_id=pending.ask_id, **answer_values,
+            )) is None
+        else:
+            await machine._close_pending_ask(ctx, pending.ask_id, reason="timeout")
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 2)
+        messages = store.messages("owner", room_id)
+        assert messages[0]["question"]["status"] == (
+            "timeout" if outcome == "timeout" else "answered"
+        )
+        if outcome != "timeout":
+            assert messages[1]["role"] == "user"
+            assert messages[1]["reply_to"] == [messages[0]["id"]]
+            assert "项目目录" in messages[1]["text"]
+        assert not ctx.pending_asks
+        assert not store.deliveries(room_id)
+        assert controller._question_member_id(ctx) == member["id"]
+        assert controller.bindings[sid] == member["id"]
+        assert machine.focused_sid == "keep-focus"
+        machine._handle_query.assert_not_awaited()
+        machine._handle_steer.assert_not_awaited()
+        machine._spawn.assert_not_awaited()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["claude", "codex", "dsh"])
+async def test_existing_binding_can_answer_during_the_initial_title_read(monkeypatch, engine):
+    machine, _transport, controller, store, room_id, member, ctx = await question_fixture(engine)
+    controller.members.clear()
+    controller.bindings.clear()
+    task = asyncio.create_task(native_question(machine, ctx))
+    try:
+        async with asyncio.timeout(2):
+            while not ctx.pending_asks:
+                await asyncio.sleep(0)
+        pending = next(iter(ctx.pending_asks.values())).event
+        values = {"answers": ["项目目录"]} if pending.questions else {"answer": "项目目录"}
+
+        async def answer_during_read(_room):
+            assert await machine._handle_answer_question(AnswerQuestion(
+                sid=ctx.key, ask_id=pending.ask_id, **values,
+            )) is None
+
+        monkeypatch.setattr(controller, "sync_native_titles", answer_during_read)
+        snapshot = await controller.snapshot("owner", room_id)
+        await asyncio.wait_for(task, 2)
+        assert snapshot["questions"] == []
+        assert snapshot["messages"][0]["question"]["status"] == "answered"
+        assert snapshot["messages"][1]["reply_to"] == [snapshot["messages"][0]["id"]]
+        assert controller._question_member_id(ctx) == member["id"]
+        assert not store.deliveries(room_id)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["claude", "codex", "dsh"])
+async def test_cold_existing_session_binding_observes_questions_on_native_resume(engine):
+    machine, _transport, controller, sid, native, _title = native_named_member(engine)
+    machine._spawn = AsyncMock()
+    result = await controller.handle(CollaborationCommand(
+        operation="create", owner_id="owner", client_id="browser", cmd_id="create",
+        name="Cold session", members=[CollaborationMemberSpec(engine=engine, session_id=sid)],
+    ))
+    assert result.error is None
+    room_id = result.data["room"]["id"]
+    member = result.data["room"]["members"][0]
+    ctx = _mk_ctx(sid, native)
+    ctx.engine = engine
+    ctx.cwd = "/tmp"
+    ctx.sdk = SimpleNamespace(native_id=native)
+    machine.sessions[sid] = ctx
+    task = asyncio.create_task(native_question(machine, ctx))
+    try:
+        async with asyncio.timeout(2):
+            while not controller.store.messages("owner", room_id):
+                await asyncio.sleep(0)
+        question = controller.store.messages("owner", room_id)[0]
+        assert question["member_id"] == member["id"]
+        assert question["question"]["status"] == "pending"
+        assert controller._question_member_id(ctx) == member["id"]
+        assert not controller.store.deliveries(room_id)
+        machine._spawn.assert_not_awaited()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["claude", "codex", "dsh"])
 async def test_sensitive_question_answers_remain_private(engine):
     (
         machine,
