@@ -12,6 +12,8 @@ async function mockRooms(page: Page, nativeEngine: "claude" | "codex" = "codex")
   let room: Record<string, any> | null = null;
   const messages: Record<string, any>[] = [];
   const deliveries: Record<string, any>[] = [];
+  const pendingQuestions: Record<string, any>[] = [];
+  const nativeAsyncAnswers: { sid: string; prompt: string; id: string }[] = [];
   let version = 0;
   let pauseSendState = false;
   let dropSend = false;
@@ -19,7 +21,7 @@ async function mockRooms(page: Page, nativeEngine: "claude" | "codex" = "codex")
   let catalogDelayMs = 0;
   let pauseHistory = false;
   let heldHistory: Record<string, any> | null = null;
-  let rejectedOperation: string | null = null;
+  let rejectedOperation: { operation: string; message: string } | null = null;
   let directoryEntries = 0;
   let nativeHistory: NativeHistory = {};
   const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aIfsAAAAASUVORK5CYII=";
@@ -56,11 +58,32 @@ async function mockRooms(page: Page, nativeEngine: "claude" | "codex" = "codex")
         profiles,
         rooms: room ? [room] : [],
         ...(room && includeRoom
-          ? { room, messages: page, deliveries, questions: [], before,
+          ? { room, messages: page, deliveries,
+            question_states: Object.fromEntries(messages.filter(message => message.question
+              && page.some(item => item.reply_to?.includes(message.id))).map(message => [message.id, {
+                member_id: message.member_id, kind: message.question.kind,
+                ask_id: message.question.ask_id, status: message.question.status,
+              }])),
+            questions: [...pendingQuestions].sort((left, right) =>
+              room!.members.findIndex((member: Record<string, any>) => member.id === left.member_id)
+              - room!.members.findIndex((member: Record<string, any>) => member.id === right.member_id)), before,
             has_more: !!page.length && page[0].seq > 1 }
           : {}),
       },
     });
+  };
+  const finishQuestion = (memberId: string, askId: string, answers: (string | string[])[]) => {
+    const index = pendingQuestions.findIndex(item => item.member_id === memberId && item.question.ask_id === askId);
+    if (index < 0) throw new Error("Question is not pending");
+    const [item] = pendingQuestions.splice(index, 1);
+    const message = messages.find(message => message.member_id === memberId && message.question?.ask_id === askId)!;
+    message.question.status = "answered";
+    message.question.answers = answers;
+    messages.push({ id: `answer-${askId}`, seq: messages.length + 1, role: "user", member_id: null,
+      text: "补充回答：\n\n" + message.question.questions.map((question: Record<string, any>, i: number) =>
+        `问题：${question.question}\n回答：${Array.isArray(answers[i]) ? answers[i].join("\n") : answers[i]}`).join("\n\n"),
+      created: 1, targets: [], reply_to: [message.id] });
+    emit({ type: "ask_user_closed", sid: item.sid, ask_id: askId, reason: "answered" });
   };
   await page.addInitScript((engine) => {
     localStorage.setItem("cc_remote_engine", engine);
@@ -99,6 +122,8 @@ async function mockRooms(page: Page, nativeEngine: "claude" | "codex" = "codex")
         generation: "native-generation",
       });
       emit({ type: "replay_end", sid, to_seq: 0, truncated: false });
+      emit({ type: "ask_user_sync", sid });
+      for (const item of pendingQuestions.filter(item => item.sid === sid)) emit({ ...item.question, sid });
     };
     socket.onMessage((raw) => {
       const command = JSON.parse(String(raw));
@@ -127,11 +152,32 @@ async function mockRooms(page: Page, nativeEngine: "claude" | "codex" = "codex")
               state: "idle",
               last_modified: "100",
             },
+            ...(room?.members ?? []).filter((member: Record<string, any>) => member.spec.engine === command.engine).map((member: Record<string, any>) => ({
+              session_id: member.sid, native_session_id: member.native_sid, summary: member.name,
+              engine: member.spec.engine, space: "code", cwd: member.cwd, state: "idle", last_modified: "101",
+              claude_profile_id: member.spec.engine === "claude" ? member.spec.profile_id : undefined,
+              codex_profile_id: member.spec.engine === "codex" ? member.spec.profile_id : undefined,
+            })),
           ],
         });
       } else if (command.type === "switch_session") {
         emit({ type: "session_focus", session_id: command.session_id });
         snapshot(command.session_id);
+      } else if (command.type === "answer_question") {
+        const item = pendingQuestions.find(item => item.sid === command.sid && item.question.ask_id === command.ask_id)!;
+        finishQuestion(item.member_id, command.ask_id, command.answers ?? [command.answer]);
+        state();
+      } else if ((command.type === "query" || command.type === "steer") && command.prompt.startsWith("补充回答：\n\n")) {
+        const member = room?.members.find((member: Record<string, any>) => member.sid === command.sid);
+        const message = messages.find(message => message.member_id === member?.id && message.question?.kind === "async")!;
+        message.question.status = "answered";
+        nativeAsyncAnswers.push({ sid: command.sid, prompt: command.prompt, id: command.msg_id });
+        messages.push({ id: command.msg_id, seq: messages.length + 1, role: "user", member_id: null,
+          text: command.prompt, created: 1, targets: [member.id], reply_to: [message.id] });
+        emit({ type: "user_msg", sid: command.sid, msg_id: command.msg_id, client_msg_id: command.msg_id, prompt: command.prompt });
+        emit({ type: "turn_end", sid: command.sid, turn_id: command.msg_id,
+          result: { subtype: "success", is_error: false } });
+        state();
       } else if (command.type === "get_history") {
         emit({
           type: "history",
@@ -183,10 +229,10 @@ async function mockRooms(page: Page, nativeEngine: "claude" | "codex" = "codex")
             }))],
         });
       } else if (command.type === "collaboration") {
-        if (command.operation === rejectedOperation) {
-          rejectedOperation = null;
+        if (rejectedOperation && command.operation === rejectedOperation.operation) {
           emit({ type: "collaboration_state", request_id: command.cmd_id,
-            room_id: room?.id, error: "原生会话重命名暂未完成，请重试。", data: {} });
+            room_id: room?.id, error: rejectedOperation.message, data: {} });
+          rejectedOperation = null;
           return;
         }
         if (command.operation === "create") {
@@ -262,6 +308,8 @@ async function mockRooms(page: Page, nativeEngine: "claude" | "codex" = "codex")
           if (catalogDelayMs) setTimeout(() => emit(response), catalogDelayMs);
           else emit(response);
           catalogDelayMs = 0;
+        } else if (command.operation === "answer") {
+          finishQuestion(command.member_id, command.ask_id, command.answers ?? [command.answer]);
         } else if (command.operation === "send" && room) {
           if (dropSend) {
             dropSend = false;
@@ -271,6 +319,15 @@ async function mockRooms(page: Page, nativeEngine: "claude" | "codex" = "codex")
             state(command.cmd_id);
             return;
           }
+          const questionMessage = command.ask_id && messages.find(message => message.id === command.ask_id);
+          if (questionMessage) {
+            questionMessage.question.status = "answered";
+            const sid = room.members.find((member: Record<string, any>) => member.id === questionMessage.member_id).sid;
+            nativeAsyncAnswers.push({ sid, prompt: command.prompt, id: command.message_id });
+            emit({ type: "user_msg", sid, msg_id: command.message_id, client_msg_id: command.message_id, prompt: command.prompt });
+            emit({ type: "turn_end", sid, turn_id: command.message_id,
+              result: { subtype: "success", is_error: false } });
+          }
           messages.push({
             id: command.message_id,
             seq: messages.length + 1,
@@ -279,7 +336,7 @@ async function mockRooms(page: Page, nativeEngine: "claude" | "codex" = "codex")
             text: command.prompt,
             created: 1,
             targets: command.targets,
-            reply_to: [],
+            reply_to: questionMessage ? [questionMessage.id] : [],
           });
           for (const target of command.targets.length
             ? command.targets
@@ -318,6 +375,45 @@ async function mockRooms(page: Page, nativeEngine: "claude" | "codex" = "codex")
   });
   return {
     commands,
+    ask(memberId: string, batch = false, askId = `ask-${memberId}`) {
+      const target = room!.members.find((member: Record<string, any>) => member.id === memberId)!;
+      const pages = [{ question: `${target.name} 选择工作目录？`, header: "工作目录",
+        options: [{ label: "项目目录" }, { label: "临时目录" }], allow_text: true }];
+      if (batch) pages.push({ ...pages[0], question: "使用哪种验证方式？", header: "验证方式",
+        options: [{ label: "运行回归" }, { label: "只读检查" }] });
+      const question = { type: "ask_user", ask_id: askId, ...pages[0], ...(batch ? { questions: pages } : {}) };
+      pendingQuestions.push({ member_id: memberId, sid: target.sid, question });
+      messages.push({ id: `question-${memberId}`, seq: messages.length + 1, role: "assistant", member_id: memberId,
+        text: pages.map(page => page.question).join("\n"), created: 1, targets: [], reply_to: [],
+        question: { kind: "native", ask_id: question.ask_id, status: "pending", questions: pages } });
+      emit({ ...question, sid: target.sid });
+      state();
+    },
+    askAsync(memberId: string) {
+      const title = "异步确认工作目录？";
+      messages.push({ id: "async-question", seq: messages.length + 1, role: "assistant", member_id: memberId,
+        text: title, created: 1, targets: [], reply_to: [], question: {
+          kind: "async", ask_id: "native-async-question", status: "pending", questions: [{
+            question: title, options: [{ label: "项目目录" }, { label: "临时目录" }], allow_text: true,
+          }],
+        } });
+      nativeHistory = command => ({ detail: "full", authoritative: true, in_progress: false,
+        oldest_id: "question-turn", newest_id: "question-turn", events: [
+          { type: "user_msg", sid: command.session_id, msg_id: "question-turn", prompt: "请检查项目", ts: 1 },
+          { type: "assistant_msg_start", sid: command.session_id, message_id: "native-async-question", channel: "commentary", ts: 2 },
+          { type: "delta", sid: command.session_id, message_id: "native-async-question", channel: "commentary", text: title, ts: 3 },
+          { type: "assistant_msg_end", sid: command.session_id, message_id: "native-async-question", channel: "commentary",
+            delivery: "async", questions: [{ title, options: ["项目目录", "临时目录"] }], ts: 4 },
+          { type: "turn_end", sid: command.session_id, turn_id: "question-turn", ts: 5,
+            result: { subtype: "success", is_error: false } },
+          ...nativeAsyncAnswers.filter(answer => answer.sid === command.session_id).flatMap(answer => [
+            { type: "user_msg", sid: command.session_id, msg_id: answer.id, client_msg_id: answer.id, prompt: answer.prompt, ts: 6 },
+            { type: "turn_end", sid: command.session_id, turn_id: answer.id, ts: 7,
+              result: { subtype: "success", is_error: false } },
+          ]),
+        ] });
+      state();
+    },
     setNativeHistory(value: NativeHistory) { nativeHistory = value; },
     renameFromHarness(memberId: string, name: string) {
       const target = room?.members.find((member: Record<string, any>) => member.id === memberId);
@@ -349,7 +445,9 @@ async function mockRooms(page: Page, nativeEngine: "claude" | "codex" = "codex")
       heldHistory = null;
     },
     emit: (event: Record<string, any>) => emit(event),
-    rejectNextOperation(operation: string) { rejectedOperation = operation; },
+    rejectNextOperation(operation: string, message = "原生会话重命名暂未完成，请重试。") {
+      rejectedOperation = { operation, message };
+    },
     setDirectoryEntries(count: number) { directoryEntries = count; },
     state,
     pauseRoomLoads() {
@@ -408,6 +506,315 @@ async function selectChoice(page: Page, label: string, option: string) {
   await page.getByRole("button", { name: label, exact: true }).click();
   await page.getByRole("menu", { name: label, exact: true })
     .getByRole("menuitemradio", { name: option, exact: true }).click();
+}
+
+async function createQuestionRoom(page: Page, identity: string) {
+  await page.goto("/");
+  await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+  await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+  await selectChoice(page, "选择参与者 1", identity);
+  const create = page.getByRole("region", { name: "新建聊天", exact: true });
+  await create.getByLabel("聊天名称").fill("问答状态回归");
+  await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "协作消息", exact: true })).toBeVisible();
+}
+
+for (const width of [320, 390, 1280]) {
+  test(`collaboration keeps the Claude theme and three shared settings at ${width}px`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: width < 980 ? 850 : 900 });
+    const relay = await mockRooms(page);
+    await createQuestionRoom(page, "Codex · iris");
+    await expect(page.locator("html")).toHaveAttribute("data-engine", "claude");
+    await expect(page.locator(".collab-pane")).toHaveCSS("background-color", "rgb(27, 26, 23)");
+    expect(await page.evaluate(() => localStorage.getItem("cc_remote_engine"))).toBe("codex");
+    const more = page.getByRole("button", { name: "更多设置", exact: true });
+    const bounds = (await more.boundingBox())!;
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
+    await more.click();
+    const menu = page.getByRole("dialog", { name: "应用设置", exact: true });
+    await expect(menu.locator(".header-menu-items b")).toHaveText(["通知", "外观", "退出登录"]);
+    await expect(menu.getByRole("button")).toHaveCount(3);
+    await page.screenshot({ path: info.outputPath(`collaboration-settings-${width}.png`), animations: "disabled" });
+    await menu.getByRole("button", { name: /^通知/ }).click();
+    await expect(menu.getByRole("radiogroup", { name: "通知隐私模式", exact: true })).toBeVisible();
+    await menu.getByRole("radio", { name: /^关闭/ }).click();
+    await expect(menu.getByRole("radio", { name: /^关闭/ })).toHaveAttribute("aria-checked", "true");
+    await menu.getByRole("button", { name: "返回设置", exact: true }).click();
+    await menu.getByRole("button", { name: /^外观/ }).click();
+    const appearance = page.getByRole("dialog", { name: "外观", exact: true });
+    await expect(appearance.locator(".theme-picker-intro span")).toHaveText("Claude");
+    await appearance.getByRole("button", { name: "浅色", exact: true }).click();
+    await expect(page.locator(".collab-pane")).toHaveCSS("background-color", "rgb(247, 245, 239)");
+    await appearance.getByRole("button", { name: "完成", exact: true }).click();
+    await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+    await page.getByRole("menuitemradio", { name: "Codex", exact: true }).click();
+    await expect(page.locator("html")).toHaveAttribute("data-engine", "codex");
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+    await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+    await more.click();
+    await expect(menu.locator(".header-menu-items b")).toHaveText(["通知", "外观", "退出登录"]);
+    let logoutRequests = 0;
+    await page.route("**/api/logout", route => { logoutRequests++; return route.fulfill({ json: {} }); });
+    await menu.getByRole("button", { name: /^退出登录/ }).click();
+    await expect(page.getByRole("textbox", { name: "协作消息", exact: true })).toHaveCount(0);
+    await expect(page.locator(".login")).toBeVisible();
+    expect(logoutRequests).toBe(1);
+    expect(relay.commands.filter(command => ["query", "steer", "interrupt"].includes(command.type))).toEqual([]);
+  });
+}
+
+for (const width of [390, 1280]) {
+  test(`collaboration restores cached room history and reading position at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const relay = await mockRooms(page);
+    await createSimpleRoom(page, "房间缓存回归");
+    relay.seedHistory(80);
+    const conversation = page.getByRole("region", { name: "协作对话记录", exact: true });
+    await expect(page.locator('[data-message-id="history-80"]')).toBeAttached();
+    await conversation.evaluate(node => { node.scrollTop = 0; node.dispatchEvent(new Event("scroll")); });
+    await expect(page.locator('[data-message-id="history-1"]')).toBeAttached();
+    const composer = page.getByRole("textbox", { name: "协作消息", exact: true });
+    await composer.fill("保留切换前的房间草稿");
+    const top = await conversation.evaluate(node => {
+      node.scrollTop = 1200;
+      node.dispatchEvent(new Event("scroll"));
+      return node.scrollTop;
+    });
+    await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+    await page.getByRole("menuitemradio", { name: "Codex", exact: true }).click();
+    await expect(conversation).toHaveCount(0);
+    relay.pauseRoomLoads();
+    relay.reply("member-0", "切换期间的新回复");
+    await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+    await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+    await expect(page.locator('[data-message-id="history-1"]')).toBeAttached();
+    await expect(page.getByText("加载会话历史…", { exact: true })).toHaveCount(0);
+    await expect(conversation).toHaveAttribute("aria-busy", "false");
+    await expect.poll(() => conversation.evaluate(node => node.scrollTop)).toBeCloseTo(top, 0);
+    await expect(composer).toHaveValue("保留切换前的房间草稿");
+    await expect(page.getByRole("button", { name: "发送消息", exact: true })).toBeDisabled();
+    await composer.press("Enter");
+    expect(relay.commands.filter(command => command.type === "collaboration" && command.operation === "send")).toEqual([]);
+    await expect(page.getByText("切换期间的新回复", { exact: true })).toHaveCount(0);
+    relay.resumeRoomLoads();
+    await expect(page.getByText("切换期间的新回复", { exact: true })).toBeAttached();
+    await expect(page.getByRole("button", { name: "发送消息", exact: true })).toBeEnabled();
+    await expect(page.locator('[data-message-id="history-1"]')).toBeAttached();
+    expect(relay.commands.filter(command => ["query", "steer", "interrupt"].includes(command.type))).toEqual([]);
+  });
+}
+
+test("collaboration cache keeps a closed native question retired during background validation", async ({ page }) => {
+  const relay = await mockRooms(page);
+  await createQuestionRoom(page, "Codex · iris");
+  relay.ask("member-0");
+  let question = page.getByRole("dialog", { name: "操作确认", exact: true });
+  await question.getByRole("button", { name: "收起问题", exact: true }).click();
+  await page.locator('[data-message-id="question-member-0"]')
+    .getByRole("button", { name: "查看原生会话 ↗", exact: true }).click();
+  question = page.getByRole("dialog", { name: "操作确认", exact: true });
+  await question.getByRole("button", { name: "项目目录", exact: true }).click();
+  await expect(question).toHaveCount(0);
+  relay.pauseRoomLoads();
+  await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+  await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+  await expect(page.locator('[data-question-id="question-member-0"]')).toBeDisabled();
+  await expect(question).toHaveCount(0);
+  relay.resumeRoomLoads();
+  await expect(page.locator('[data-question-id="question-member-0"]')).toContainText("已回答");
+  await expect(question).toHaveCount(0);
+});
+
+for (const engine of ["claude", "codex", "dsh"] as const) {
+  for (const surface of ["collaboration", "native"]) {
+    test(`collaboration native ${engine} question stays shared when answered in ${surface}`, async ({ page }) => {
+      const relay = await mockRooms(page);
+      const label = { claude: "Claude", codex: "Codex", dsh: "DSH" }[engine];
+      const identity = engine === "codex" ? "Codex · iris" : `${label} · default`;
+      await createQuestionRoom(page, identity);
+      relay.renameFromHarness("member-0", "问答会话甲");
+      const batch = engine !== "codex";
+      relay.ask("member-0", batch);
+      let question = page.getByRole("dialog", { name: "操作确认", exact: true });
+      await expect(question).toHaveCount(1);
+      await expect(question).toContainText(`${label} 想确认一下`);
+      await expect(question.locator(".qa-source")).toContainText(`问答会话甲 · ${identity} · native-0`);
+      if (surface === "native") {
+        await question.getByRole("button", { name: "收起问题", exact: true }).click();
+        await page.locator('[data-message-id="question-member-0"]')
+          .getByRole("button", { name: "查看原生会话 ↗", exact: true }).click();
+        question = page.getByRole("dialog", { name: "操作确认", exact: true });
+        await expect(question).toHaveCount(1);
+        await expect(question).toContainText("问答会话甲 选择工作目录？");
+      }
+      await question.getByRole("button", { name: "项目目录", exact: true }).click();
+      if (batch) {
+        await question.getByRole("button", { name: "下一题", exact: false }).click();
+        await question.getByRole("button", { name: "运行回归", exact: true }).click();
+        await question.getByRole("button", { name: "提交回答", exact: true }).click();
+      }
+      await expect(page.getByRole("dialog", { name: "操作确认", exact: true })).toHaveCount(0);
+      const submitted = relay.commands.filter(command => surface === "native"
+        ? command.type === "answer_question" : command.type === "collaboration" && command.operation === "answer");
+      expect(submitted).toHaveLength(1);
+      expect(submitted[0]).toMatchObject({ ask_id: "ask-member-0",
+        ...(surface === "native" ? { sid: engine === "dsh" ? "dsh@native-0" : "native-0" } : { member_id: "member-0" }),
+        ...(batch ? { answers: ["项目目录", "运行回归"] } : { answer: "项目目录" }),
+      });
+      if (surface === "collaboration") {
+        await expect(page.locator('[data-question-id="question-member-0"]')).toContainText("已回答");
+        await page.locator('[data-message-id="question-member-0"]')
+          .getByRole("button", { name: "查看原生会话 ↗", exact: true }).click();
+        await expect(page.getByRole("textbox", { name: "协作消息", exact: true })).toHaveCount(0);
+        await expect(page.getByRole("dialog", { name: "操作确认", exact: true })).toHaveCount(0);
+      }
+      await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+      await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+      await expect(page.locator('[data-question-id="question-member-0"]')).toContainText("已回答");
+      await expect(page.locator(".collab-user")).toContainText("回答：项目目录");
+      await expect(page.getByRole("dialog", { name: "操作确认", exact: true })).toHaveCount(0);
+    });
+  }
+}
+
+test("collaboration concurrent questions keep one dialog and identify every native session", async ({ page }, info) => {
+  const relay = await mockRooms(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+  await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+  await addNewAgent(page);
+  await selectChoice(page, "选择参与者 2", "Codex · iris");
+  await addNewAgent(page);
+  await selectChoice(page, "选择参与者 3", "DSH · default");
+  const create = page.getByRole("region", { name: "新建聊天", exact: true });
+  await create.getByLabel("聊天名称").fill("并发问答");
+  await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+  relay.ask("member-1");
+  const question = page.getByRole("dialog", { name: "操作确认", exact: true });
+  await expect(question.locator(".qa-source")).toContainText("Codex · iris");
+  relay.ask("member-0");
+  relay.ask("member-2", true);
+  await expect(page.locator(".question-dialog")).toHaveCount(1);
+  await expect(question.locator(".qa-source")).toContainText("Codex · iris");
+  await question.getByRole("button", { name: "项目目录", exact: true }).click();
+  await expect(question.locator(".qa-source")).toContainText("Claude · default");
+  await question.getByRole("button", { name: "临时目录", exact: true }).click();
+  await expect(question.locator(".qa-source")).toHaveText("DSH · default · native-2");
+  await expect(question).toContainText("DSH 想确认一下");
+  await expect(page.locator(".question-dialog")).toHaveCount(1);
+  const bounds = (await question.boundingBox())!;
+  expect(bounds.x).toBeGreaterThanOrEqual(0);
+  expect(bounds.y).toBeGreaterThanOrEqual(0);
+  expect(bounds.x + bounds.width).toBeLessThanOrEqual(page.viewportSize()!.width + 1);
+  expect(bounds.y + bounds.height).toBeLessThanOrEqual(page.viewportSize()!.height + 1);
+  await page.screenshot({ path: info.outputPath("concurrent-dsh-question.png"), animations: "disabled" });
+});
+
+for (const batch of [false, true]) {
+  test(`collaboration question keeps its ${batch ? "batch" : "single"} answer after a failed submission`, async ({ page }) => {
+    const relay = await mockRooms(page);
+    await createQuestionRoom(page, "DSH · default");
+    relay.ask("member-0", batch);
+    const question = page.getByRole("dialog", { name: "操作确认", exact: true });
+    relay.rejectNextOperation("answer", "房间回答记录尚未确认，请重试提交。");
+    await question.getByRole("button", { name: "项目目录", exact: true }).click();
+    if (batch) {
+      await question.getByRole("button", { name: "下一题", exact: false }).click();
+      await question.getByRole("button", { name: "运行回归", exact: true }).click();
+      await question.getByRole("button", { name: "提交回答", exact: true }).click();
+    }
+    await expect(question.getByRole("alert")).toHaveText("房间回答记录尚未确认，请重试提交。");
+    await expect(question).toBeVisible();
+    if (batch) {
+      await expect(question.getByRole("button", { name: "运行回归", exact: true })).toHaveAttribute("aria-pressed", "true");
+      await question.getByRole("button", { name: "提交回答", exact: true }).click();
+    } else await question.getByRole("button", { name: "项目目录", exact: true }).click();
+    await expect(question).toHaveCount(0);
+    await expect(page.locator('[data-question-id="question-member-0"]')).toContainText("已回答");
+    const submitted = relay.commands.filter(command => command.type === "collaboration" && command.operation === "answer");
+    expect(submitted).toHaveLength(2);
+    expect(submitted[0].ask_id).toBe(submitted[1].ask_id);
+  });
+}
+
+test("collaboration same-account questions with equal native IDs stay scoped to their sessions", async ({ page }) => {
+  const relay = await mockRooms(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+  await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+  await selectChoice(page, "选择参与者 1", "DSH · default");
+  await addNewAgent(page);
+  await selectChoice(page, "选择参与者 2", "DSH · default");
+  const create = page.getByRole("region", { name: "新建聊天", exact: true });
+  await create.getByLabel("聊天名称").fill("同账号多会话提问");
+  await create.getByRole("button", { name: "创建聊天", exact: true }).click();
+  relay.renameFromHarness("member-0", "会话甲");
+  relay.renameFromHarness("member-1", "会话乙");
+  relay.ask("member-1", false, "same-native-question");
+  const question = page.getByRole("dialog", { name: "操作确认", exact: true });
+  await expect(question.locator(".qa-source")).toContainText("会话乙 · DSH · default · native-1");
+  relay.ask("member-0", false, "same-native-question");
+  await expect(question.locator(".qa-source")).toContainText("会话乙 · DSH · default · native-1");
+  await question.getByRole("button", { name: "项目目录", exact: true }).click();
+  await expect(page.locator('[data-question-id="question-member-1"]')).toContainText("已回答");
+  await expect(page.locator('[data-question-id="question-member-0"]')).toContainText("等待你回答");
+  await expect(question.locator(".qa-source")).toContainText("会话甲 · DSH · default · native-0");
+});
+
+for (const surface of ["collaboration", "native"]) {
+  test(`collaboration async question answers synchronize with ${surface}`, async ({ page }) => {
+    const relay = await mockRooms(page);
+    await createQuestionRoom(page, "Codex · iris");
+    relay.askAsync("member-0");
+    const article = page.locator('[data-message-id="async-question"]');
+    if (surface === "collaboration") {
+      await article.locator(".collab-question-card").click();
+      const question = page.getByRole("dialog", { name: "操作确认", exact: true });
+      await expect(question.locator(".qa-source")).toContainText("Codex · iris");
+      await question.getByRole("button", { name: "项目目录", exact: true }).click();
+      await question.getByRole("button", { name: "提交回答", exact: true }).click();
+      await expect(article.locator(".collab-question-card")).toContainText("已回答");
+      expect(relay.commands.findLast(command => command.type === "collaboration" && command.operation === "send"))
+        .toMatchObject({ ask_id: "async-question", targets: ["member-0"],
+          prompt: '补充回答：\n\n问题 ID："native-async-question"\n\n问题：异步确认工作目录？\n回答：项目目录' });
+    }
+    await article.getByRole("button", { name: "查看原生会话 ↗", exact: true }).click();
+    await expect(page.locator(".async-question-card")).toBeVisible();
+    if (surface === "native") {
+      await page.locator(".async-question-card").click();
+      const dialog = page.getByRole("dialog", { name: "助手询问", exact: true });
+      await dialog.getByRole("radio", { name: "项目目录", exact: true }).check();
+      await dialog.getByRole("button", { name: /发送回答/ }).click();
+      await expect(dialog).toHaveCount(0);
+    }
+    await expect(page.locator(".async-question-entry-state")).toContainText("已回答");
+    await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
+    await page.getByRole("menuitem", { name: "协作", exact: true }).click();
+    await expect(page.locator('[data-question-id="async-question"]')).toContainText("已回答");
+    await expect(page.locator(".collab-user")).toContainText("回答：项目目录");
+  });
+}
+
+for (const kind of ["native", "async"]) {
+  test(`collaboration ${kind} question receipt updates beyond the latest history page`, async ({ page }) => {
+    const relay = await mockRooms(page);
+    await createQuestionRoom(page, "Codex · iris");
+    if (kind === "async") {
+      relay.askAsync("member-0");
+      await page.locator('[data-question-id="async-question"]').click();
+    } else relay.ask("member-0");
+    const question = page.getByRole("dialog", { name: "操作确认", exact: true });
+    await expect(question).toBeVisible();
+    for (let index = 0; index < 45; index++) relay.reply("member-0", `后续公开消息 ${index + 1}`);
+    await expect(page.locator('[data-message-id="answer-45"]')).toBeAttached();
+    await question.getByRole("button", { name: "项目目录", exact: true }).click();
+    if (kind === "async") await question.getByRole("button", { name: "提交回答", exact: true }).click();
+    await expect(question).toHaveCount(0);
+    await expect(page.locator(`[data-question-id="${kind === "async" ? "async-question" : "question-member-0"}"]`))
+      .toContainText("已回答");
+  });
 }
 
 test("collaboration file preview suppresses the dialog focus frame and restores its trigger", async ({ page, isMobile }, info) => {
@@ -1946,8 +2353,7 @@ for (const width of [390, 1280]) {
     await expect(imagePreview).toHaveCount(0);
     const body = (await second.locator(".prose").boundingBox())!;
     const links = (await second.locator(".collab-native-links").boundingBox())!;
-    if (width < 980) expect(links.y).toBeGreaterThanOrEqual(body.y + body.height);
-    else expect(links.y).toBeLessThan(body.y);
+    expect(links.y).toBeGreaterThanOrEqual(body.y + body.height);
     await page.screenshot({ path: info.outputPath(`file-links-${width}.png`) });
     expect(relay.commands.slice(nativeBeforePreviews).filter(command => ["query", "steer", "interrupt", "switch_session", "new_session"].includes(command.type))).toEqual([]);
   });

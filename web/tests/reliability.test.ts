@@ -18783,8 +18783,11 @@ assert.match(headerMenuSource,
   /engine === "codex" && <button[\s\S]*使用活动/,
   "account activity must be a Codex-only header-menu action");
 assert.match(appSource,
-  /<HeaderMenu[\s\S]*engine=\{engine\}[\s\S]*onOpenUsageActivity=\{openUsageActivity\}/,
-  "the app must wire the selected engine and activity opener into the menu");
+  /const themeEngine = collaborationOpen \? "claude" : engine;/,
+  "collaboration uses Claude appearance while native surfaces keep their selected engine");
+assert.match(appSource,
+  /<HeaderMenu[\s\S]*engine=\{themeEngine\}[\s\S]*onOpenUsageActivity=\{openUsageActivity\}/,
+  "the app must wire the visible appearance engine and activity opener into the menu");
 assert.match(appSource,
   /usageActivityOpen && engine === "codex" && <Suspense[\s\S]{0,120}<UsageActivitySheet/,
   "the activity sheet must fail closed when the selected surface is Claude");

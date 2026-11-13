@@ -19,12 +19,15 @@ function complete(question: AskQuestion, page: PageDraft): boolean {
   return answer.length > 0 && (!Array.isArray(answer) || answer.length <= 5);
 }
 
-export function QuestionBatchSheet({ engine, questions, draft, onSubmit }: {
+export function QuestionBatchSheet({ engine, questions, draft, onSubmit, sourceLabel, submissionError }: {
   engine: Engine;
   questions: AskQuestion[];
   draft?: { key: string; store: Map<string, QuestionDraft> };
+  sourceLabel?: string;
+  submissionError?: string | null;
   onSubmit: (answers: (string | string[])[]) => boolean | void;
 }) {
+  const engineName = { claude: "Claude", codex: "Codex", dsh: "DSH" }[engine];
   const [initial] = useState(() => {
     const saved = draft?.store.get(draft.key);
     return saved?.signature === JSON.stringify(questions) ? saved : undefined;
@@ -96,7 +99,19 @@ export function QuestionBatchSheet({ engine, questions, draft, onSubmit }: {
     }, 5000);
   };
   const ime = useImeSubmit<HTMLInputElement>(navigate);
+  const preserveDraft = useRef(() => {});
+  preserveDraft.current = () => save(pagesRef.current.map((value, index) => index === page ? {
+    ...value, text: ime.inputRef.current?.value ?? value.text,
+    scrollTop: scrollRef.current?.scrollTop ?? value.scrollTop,
+  } : value));
   useEffect(() => () => { if (timer.current !== null) clearTimeout(timer.current); }, []);
+  useEffect(() => {
+    if (!submissionError) return;
+    if (timer.current !== null) clearTimeout(timer.current);
+    pendingRef.current = false;
+    setPending(false);
+    setError(submissionError);
+  }, [submissionError]);
   useLayoutEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
@@ -106,7 +121,10 @@ export function QuestionBatchSheet({ engine, questions, draft, onSubmit }: {
       return;
     }
     dialog.showModal();
-    return () => dialog.close();
+    return () => {
+      preserveDraft.current();
+      dialog.close();
+    };
   }, [collapsed]);
   useLayoutEffect(() => {
     if (collapsed) return;
@@ -138,7 +156,7 @@ export function QuestionBatchSheet({ engine, questions, draft, onSubmit }: {
     onCancel={event => event.preventDefault()} onKeyDown={event => event.stopPropagation()}>
     <div ref={headingRef} tabIndex={-1} className="question-dialog-title">
       <EngineIcon engine={engine} size={26} />
-      <span>{engine === "claude" ? "Claude" : "Codex"} 想确认一下</span>
+      <span>{engineName} 想确认一下</span>
       {questions.length > 1 && <span className="qa-progress" aria-live="polite"
         aria-label={`第 ${page + 1} 题，共 ${questions.length} 题`}>{page + 1} / {questions.length}</span>}
       <QuestionCollapseButton onPointerDown={ime.commitCompositionBeforePointerSubmit}
@@ -157,6 +175,7 @@ export function QuestionBatchSheet({ engine, questions, draft, onSubmit }: {
       const scrollTop = scrollRef.current?.scrollTop ?? 0;
       if (scrollTop !== pagesRef.current[page].scrollTop) update({ scrollTop });
     }}>
+      {sourceLabel && <div className="qa-source">{sourceLabel}</div>}
       {(question.header || question.multi_select) && <div className="qa-page-meta">
         <span>{question.header}</span>{question.multi_select && <span>可多选</span>}
       </div>}
@@ -191,7 +210,7 @@ export function QuestionBatchSheet({ engine, questions, draft, onSubmit }: {
             event.preventDefault(); direction.current = "next"; ime.requestSubmit();
           }} />
       </div>}
-      {error && <div className="qa-submit-error" role="status">{error}</div>}
+      {error && <div className="qa-submit-error" role={submissionError ? "alert" : "status"}>{error}</div>}
     </div>
     <div className="qa-footer">
       {questions.length > 1 && <button className="qa-previous" disabled={page === 0 || pending}
@@ -208,7 +227,7 @@ export function QuestionBatchSheet({ engine, questions, draft, onSubmit }: {
     </div>
   </dialog>;
   return <>
-    {collapsed && <QuestionResume engine={engine} buttonRef={resumeRef}
+    {collapsed && <QuestionResume engine={engine} sourceLabel={sourceLabel} buttonRef={resumeRef}
       page={page + 1} total={questions.length} pending={pending} onResume={() => {
         save(pagesRef.current, page, false); setCollapsed(false);
       }} />}

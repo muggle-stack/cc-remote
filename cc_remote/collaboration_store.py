@@ -12,9 +12,10 @@ import time
 from uuid import uuid4
 
 from cc_remote.collaboration import ACTIVE_DELIVERIES, MAX_ROOM_CONTEXT
+from cc_remote.collaboration_questions import answer_text, match_async_answer, native_question, question_text
 
 _MESSAGE_COLUMNS = (
-    "id,room_id,seq,role,member_id,text,targets,source,reply_to,created,attachments"
+    "id,room_id,seq,role,member_id,text,targets,source,reply_to,created,attachments,question"
 )
 
 
@@ -78,6 +79,8 @@ class CollaborationStore:
             """)
             if "pending_title" not in {row[1] for row in db.execute("PRAGMA table_info(members)")}:
                 db.execute("ALTER TABLE members ADD COLUMN pending_title TEXT")
+            if "question" not in {row[1] for row in db.execute("PRAGMA table_info(messages)")}:
+                db.execute("ALTER TABLE messages ADD COLUMN question TEXT")
         os.chmod(self.path, 0o600)
 
     @contextmanager
@@ -150,6 +153,7 @@ class CollaborationStore:
         source=None,
         reply_to=(),
         payload=None,
+        question=None,
     ):
         seq = db.execute(
             "SELECT coalesce(max(seq),0)+1 FROM messages WHERE room_id=?", (room_id,)
@@ -163,8 +167,8 @@ class CollaborationStore:
             for index, _image in enumerate(payload.get("images") or [])
         ]
         db.execute(
-            "INSERT INTO messages(id,room_id,seq,role,member_id,text,targets,source,reply_to,created,payload,attachments) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO messages(id,room_id,seq,role,member_id,text,targets,source,reply_to,created,payload,attachments,question) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 message_id,
                 room_id,
@@ -178,6 +182,7 @@ class CollaborationStore:
                 time.time(),
                 encoded(payload),
                 encoded(attachments),
+                encoded(question) if question is not None else None,
             ),
         )
         return seq
@@ -333,6 +338,24 @@ class CollaborationStore:
                     selected = [self._member(db, room_id, target) for target in targets]
                     if any(member["removed"] for member in selected):
                         raise ValueError("所选参与者已经退出聊天。")
+                    question_row = None
+                    if body.get("ask_id"):
+                        question_row = db.execute(
+                            "SELECT * FROM messages WHERE id=? AND room_id=? AND member_id=?",
+                            (body["ask_id"], room_id, targets[0]),
+                        ).fetchone()
+                        question = json.loads(question_row["question"]) if question_row and question_row["question"] else None
+                        if (len(targets) != 1 or not question or question["kind"] != "async"
+                                or not match_async_answer(question, body.get("prompt") or "")):
+                            raise ValueError("回答与当前成员的问题不匹配。")
+                        previous_answer = db.execute(
+                            "SELECT status FROM deliveries WHERE id=?", (question.get("answer_delivery"),)
+                        ).fetchone()
+                        retryable = previous_answer and previous_answer["status"] in {"failed", "cancelled"}
+                        if question["status"] == "answered" and not retryable:
+                            raise ValueError("该问题已经回答。")
+                        if previous_answer and previous_answer["status"] not in {"failed", "cancelled"}:
+                            raise ValueError("先前的回答仍在确认送达，请稍后查看会话。")
                     active_count = db.execute(
                         "SELECT count(*) FROM deliveries WHERE status IN ('queued','preparing','submitting','accepted','running','stopping','unknown')"
                     ).fetchone()[0]
@@ -352,17 +375,20 @@ class CollaborationStore:
                         body.get("prompt") or "",
                         targets=targets,
                         payload=payload,
+                        source=f"async-answer:{targets[0]}:{body['message_id']}" if question_row else None,
+                        reply_to=[question_row["id"]] if question_row else [],
                     )
                     db.execute(
                         "UPDATE messages SET input_fingerprint=? WHERE id=?",
                         (fingerprint, body["message_id"]),
                     )
                     for member in selected:
+                        delivery_id = str(uuid4())
                         db.execute(
                             "INSERT INTO deliveries(id,room_id,message_id,member_id,status,context_before,context_through,context_version,payload,created,updated) "
                             "VALUES(?,?,?,?,'queued',?,?,?,?,?,?)",
                             (
-                                str(uuid4()),
+                                delivery_id,
                                 room_id,
                                 body["message_id"],
                                 member["id"],
@@ -374,6 +400,10 @@ class CollaborationStore:
                                 time.time(),
                             ),
                         )
+                        if question_row:
+                            question.update(status="submitting", answer_delivery=delivery_id)
+                            db.execute("UPDATE messages SET question=? WHERE id=?",
+                                       (encoded(question), question_row["id"]))
                 else:
                     raise ValueError("未知聊天室操作。")
                 db.execute(
@@ -455,6 +485,9 @@ class CollaborationStore:
         result["targets"] = json.loads(result["targets"])
         result["reply_to"] = json.loads(result["reply_to"])
         result["attachments"] = json.loads(result["attachments"])
+        question = result.pop("question", None)
+        if question is not None:
+            result["question"] = json.loads(question)
         result.pop("payload", None)
         return result
 
@@ -495,7 +528,44 @@ class CollaborationStore:
                 f"SELECT {columns} FROM messages WHERE room_id=? AND seq<? ORDER BY seq DESC LIMIT ?",
                 (room_id, before or 2**62, limit),
             ).fetchall()
-            return [self.message(row) for row in reversed(rows)]
+            messages = [self.message(row) for row in reversed(rows)]
+            for message in messages:
+                question = message.get("question")
+                if question and question.get("answer_delivery"):
+                    delivery = db.execute("SELECT status,error FROM deliveries WHERE id=?",
+                                          (question["answer_delivery"],)).fetchone()
+                    if delivery and delivery["status"] in {"failed", "cancelled"}:
+                        question["status"] = "pending"
+                        question["error"] = delivery["error"] or "回答未送达，请重试。"
+            return messages
+
+    def question_states(self, owner, room_id, message_ids):
+        """Return receipts for questions referenced outside the visible page."""
+        identities = list(dict.fromkeys(message_ids))[:128]
+        if not identities:
+            return {}
+        with self.db() as db:
+            self._room(db, owner, room_id)
+            rows = db.execute(
+                "SELECT id,member_id,question FROM messages WHERE room_id=? "
+                "AND question IS NOT NULL AND id IN ("
+                + ",".join("?" for _ in identities) + ")",
+                (room_id, *identities),
+            )
+            states = {}
+            for row in rows:
+                question = json.loads(row["question"])
+                state = {key: question[key] for key in ("kind", "ask_id", "status")}
+                state["member_id"] = row["member_id"]
+                if question.get("answer_delivery"):
+                    delivery = db.execute(
+                        "SELECT status,error FROM deliveries WHERE id=?",
+                        (question["answer_delivery"],),
+                    ).fetchone()
+                    if delivery and delivery["status"] in {"failed", "cancelled"}:
+                        state.update(status="pending", error=delivery["error"] or "回答未送达，请重试。")
+                states[row["id"]] = state
+            return states
 
     def context(self, delivery):
         with self.db() as db:
@@ -650,10 +720,13 @@ class CollaborationStore:
             ).fetchone()
             if member["removed"]:
                 return None
-            before = min(member["synced_seq"], row["context_through"] - 1)
+            message = db.execute("SELECT source FROM messages WHERE id=?", (row["message_id"],)).fetchone()
+            native_answer = bool(message["source"] and message["source"].startswith("async-answer:"))
+            through = member["synced_seq"] if native_answer else row["context_through"]
+            before = through if native_answer else min(member["synced_seq"], through - 1)
             db.execute(
-                "UPDATE deliveries SET status='submitting',context_before=?,mode=?,error=NULL,updated=? WHERE id=?",
-                (before, mode, time.time(), delivery_id),
+                "UPDATE deliveries SET status='submitting',context_before=?,context_through=?,mode=?,error=NULL,updated=? WHERE id=?",
+                (before, through, mode, time.time(), delivery_id),
             )
             return dict(
                 db.execute(
@@ -663,6 +736,7 @@ class CollaborationStore:
 
     def consume(self, delivery_id, native_turn=None):
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT * FROM deliveries WHERE id=?", (delivery_id,)
             ).fetchone()
@@ -676,6 +750,17 @@ class CollaborationStore:
                     "UPDATE members SET synced_seq=max(synced_seq,?),source_delivery=? WHERE id=?",
                     (row["context_through"], row["id"], row["member_id"]),
                 )
+                message = db.execute("SELECT source,reply_to,text FROM messages WHERE id=?",
+                                     (row["message_id"],)).fetchone()
+                if message["source"] and message["source"].startswith("async-answer:"):
+                    question_id = json.loads(message["reply_to"])[0]
+                    question_row = db.execute("SELECT question FROM messages WHERE id=?", (question_id,)).fetchone()
+                    question = json.loads(question_row["question"])
+                    answers = match_async_answer(question, message["text"])
+                    if answers:
+                        question.update(status="answered", answers=[item["answer"] for item in answers])
+                        db.execute("UPDATE messages SET question=? WHERE id=?", (encoded(question), question_id))
+                        return question["ask_id"]
 
     def resume_source(self, member_id, identities=(), *, autonomous=False, native_turn=None):
         with self.db() as db:
@@ -702,7 +787,7 @@ class CollaborationStore:
                 "UPDATE members SET source_delivery=NULL WHERE id=?", (member_id,)
             )
 
-    def publish(self, member_id, source, text, reply_to):
+    def publish(self, member_id, source, text, reply_to, *, question=None, new_only=False):
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
@@ -711,15 +796,24 @@ class CollaborationStore:
             if not row:
                 return
             previous = db.execute(
-                "SELECT id,text FROM messages WHERE source=?", (source,)
+                "SELECT id,text,question FROM messages WHERE source=?", (source,)
             ).fetchone()
             if previous:
-                if previous["text"] == text:
+                if new_only:
+                    return
+                if question is not None and previous["question"]:
+                    old_question = json.loads(previous["question"])
+                    for field in ("status", "answers", "answer_delivery"):
+                        if field in old_question:
+                            question[field] = old_question[field]
+                if previous["text"] == text and (
+                    question is None or previous["question"] == encoded(question)
+                ):
                     return
                 message_id = previous["id"]
                 db.execute(
-                    "UPDATE messages SET text=?,reply_to=? WHERE source=?",
-                    (text, encoded(reply_to), source),
+                    "UPDATE messages SET text=?,reply_to=?,question=coalesce(?,question) WHERE source=?",
+                    (text, encoded(reply_to), encoded(question) if question is not None else None, source),
                 )
             else:
                 message_id = str(uuid4())
@@ -732,6 +826,7 @@ class CollaborationStore:
                     member_id=member_id,
                     source=source,
                     reply_to=reply_to,
+                    question=question,
                 )
             version = db.execute(
                 "SELECT context_version+1 FROM rooms WHERE id=?", (row["room_id"],)
@@ -744,6 +839,86 @@ class CollaborationStore:
                 "UPDATE rooms SET updated=?,context_version=? WHERE id=?",
                 (time.time(), version, row["room_id"]),
             )
+
+    def record_native_question(self, member_id, event):
+        question = native_question(event)
+        source = f"question:{member_id}:{event.ask_id}"
+        self.publish(member_id, source, question_text(question["questions"]), [],
+                     question=question, new_only=True)
+
+    def record_question_answer(self, member_id, event, answer):
+        self.record_native_question(member_id, event)
+        answers = answer if event.questions else [answer]
+        source = f"question:{member_id}:{event.ask_id}"
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM messages WHERE source=?", (source,)).fetchone()
+            if row is None:
+                return
+            question = json.loads(row["question"])
+            public_answers = ["已提交私密回答" if page.get("secret") else value
+                              for page, value in zip(question["questions"], answers, strict=True)]
+            if question["status"] == "answered":
+                if question.get("answers") != public_answers:
+                    raise ValueError("该问题已经收到其他回答。")
+                return
+            self._message(db, row["room_id"], str(uuid4()), "user",
+                          answer_text(question["questions"], public_answers),
+                          source=f"question-answer:{row['id']}", reply_to=[row["id"]])
+            question.update(status="answered", answers=public_answers)
+            db.execute("UPDATE messages SET question=? WHERE id=?", (encoded(question), row["id"]))
+            db.execute("UPDATE rooms SET updated=? WHERE id=?", (time.time(), row["room_id"]))
+
+    def close_question(self, member_id, ask_id, reason):
+        if reason == "answered":
+            return
+        with self.db() as db:
+            source = f"question:{member_id}:{ask_id}"
+            row = db.execute("SELECT id,question FROM messages WHERE source=?", (source,)).fetchone()
+            if row is None:
+                return
+            question = json.loads(row["question"])
+            if question["status"] != "pending":
+                return
+            question["status"] = reason
+            db.execute("UPDATE messages SET question=? WHERE id=?", (encoded(question), row["id"]))
+
+    def record_async_answer(self, member_id, prompt, native_input_id):
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            candidates = []
+            for row in db.execute(
+                "SELECT * FROM messages WHERE member_id=? AND question IS NOT NULL "
+                "AND json_extract(question,'$.kind')='async'",
+                (member_id,),
+            ):
+                question = json.loads(row["question"])
+                answers = match_async_answer(question, prompt)
+                if answers:
+                    candidates.append((row, question, answers))
+            if len(candidates) != 1:
+                return
+            row, question, answers = candidates[0]
+            previous_delivery = db.execute(
+                "SELECT id,status FROM deliveries WHERE id=?", (question.get("answer_delivery"),)
+            ).fetchone()
+            retryable = previous_delivery and previous_delivery["status"] in {"failed", "cancelled"}
+            if question["status"] == "answered" and not retryable:
+                return
+            if previous_delivery and previous_delivery["status"] in {"queued", "preparing"}:
+                db.execute(
+                    "UPDATE deliveries SET status='cancelled',error=?,updated=? WHERE id=?",
+                    ("问题已在原生会话回答。", time.time(), previous_delivery["id"]),
+                )
+                self._release_payloads(db)
+            source = f"native-question-answer:{member_id}:{native_input_id}"
+            if not db.execute("SELECT 1 FROM messages WHERE source=?", (source,)).fetchone():
+                self._message(db, row["room_id"], str(uuid4()), "user", prompt,
+                              source=source, reply_to=[row["id"]])
+            question.update(status="answered", answers=[item["answer"] for item in answers], answer_delivery=None)
+            db.execute("UPDATE messages SET question=? WHERE id=?", (encoded(question), row["id"]))
+            db.execute("UPDATE rooms SET updated=? WHERE id=?", (time.time(), row["room_id"]))
+            return question["ask_id"]
 
     def finish(self, member_id, status, error=None, *, delivery_ids=None):
         scope = ""

@@ -34,7 +34,7 @@ import { WorkingWord } from "./WorkingWord";
 import { CollaborationReply } from "./CollaborationResources";
 import { SessionStatus } from "./SessionStatus";
 import { DirPicker } from "./DirPicker";
-import { QuestionSheet } from "./QuestionSheet";
+import { QuestionSheet, type QuestionDraft } from "./QuestionSheet";
 import { pickFiles } from "../attachment-import";
 import { decodedSize } from "../img";
 import { PERMS } from "../data";
@@ -64,6 +64,7 @@ import {
 } from "../collaboration";
 import { OlderHistoryLoadGate, isAtHistoryEdge } from "../scroll-follow";
 import { HISTORY_REQUEST_TIMEOUT_MS } from "../history-requests";
+import { supplementalAnswerPrompt } from "../async-question-presentation";
 import "./CollaborationWorkspace.css";
 const CollaborationProgress = lazy(() => import("./CollaborationProgress"));
 
@@ -75,10 +76,36 @@ type Editor = {
   roomId?: string;
 };
 
+export interface CollaborationWorkspaceCache {
+  rooms?: CollaborationRoom[];
+  roomsLoaded?: boolean;
+  room?: CollaborationRoom | null;
+  messages?: CollaborationMessage[];
+  deliveries?: CollaborationDelivery[];
+  profiles?: Profiles;
+  hasMore?: boolean;
+  versions?: Map<string, { generation: string; version: number }>;
+  questionDrafts?: Map<string, QuestionDraft>;
+  scrollTop?: number;
+  scrollHeight?: number;
+  following?: boolean;
+}
+
+const questionKey = (memberId: string, askId: string, kind: "native" | "async" = "native") =>
+  JSON.stringify([kind, memberId, askId]);
+
+function questionSource(member: CollaborationMember): string {
+  const identity = roomMemberIdentity(member);
+  return [member.name, member.name !== identity && identity,
+    shortRoomSessionId(member.native_sid || member.sid)].filter(Boolean).join(" · ");
+}
+
 interface Props {
   machineId: string;
   theme: "light" | "dark";
   deviceName: string;
+  headerMenu: ReactNode;
+  cache: CollaborationWorkspaceCache;
   connected: boolean;
   ws: RelayWs | null;
   listen: (handler: ((event: ServerEvent) => boolean) | null) => void;
@@ -172,6 +199,8 @@ export default function CollaborationWorkspace({
   machineId,
   theme,
   deviceName,
+  headerMenu,
+  cache,
   connected,
   ws,
   listen,
@@ -182,24 +211,57 @@ export default function CollaborationWorkspace({
   getSessionRuntime,
   historyPageCache,
 }: Props) {
-  const [rooms, setRooms] = useState<CollaborationRoom[]>([]);
-  const [roomsLoaded, setRoomsLoaded] = useState(false);
+  const [rooms, setRooms] = useState<CollaborationRoom[]>(cache.rooms ?? []);
+  const [roomsLoaded, setRoomsLoaded] = useState(cache.roomsLoaded ?? false);
   const [roomId, setRoomId] = useState<string | null>(() =>
     localStorage.getItem(`cc_remote_collaboration:${machineId}`),
   );
   const roomIdRef = useRef(roomId);
-  const [room, setRoom] = useState<CollaborationRoom | null>(null);
-  const [messages, setMessages] = useState<CollaborationMessage[]>([]);
+  const cachedRoom = cache.room?.id === roomId ? cache.room : null;
+  const [room, setRoom] = useState<CollaborationRoom | null>(cachedRoom);
+  const [messages, setMessages] = useState<CollaborationMessage[]>(cachedRoom ? cache.messages ?? [] : []);
+  const [validatedRoomId, setValidatedRoomId] = useState<string | null>(null);
+  const validatedRoomRef = useRef<string | null>(null);
   const { access: resourceAccess, onEvent: onResourceEvent, preview: resourcePreview } =
     useCollaborationResources(machineId, ws, theme, room?.members?.filter(member =>
       !member.removed || messages.some(message => message.member_id === member.id),
     ) ?? []);
-  const [deliveries, setDeliveries] = useState<CollaborationDelivery[]>([]);
+  const [deliveries, setDeliveries] = useState<CollaborationDelivery[]>(cachedRoom ? cache.deliveries ?? [] : []);
   const [questions, setQuestions] = useState<
     NonNullable<CollaborationState["data"]["questions"]>
   >([]);
-  const [profiles, setProfiles] = useState<Profiles>({});
-  const [hasMore, setHasMore] = useState(false);
+  const [activeQuestion, setActiveQuestion] = useState<string | null>(null);
+  const [questionOpening, setQuestionOpening] = useState(0);
+  const questionDrafts = useRef(cache.questionDrafts ?? new Map<string, QuestionDraft>());
+  const asyncAnswerRequests = useRef(new Map<string, { id: string; signature: string }>());
+  const questionRequests = useRef(new Map<string, string>());
+  const [questionErrors, setQuestionErrors] = useState(new Map<string, string>());
+  const showQuestionError = (key: string, message: string) => setQuestionErrors(current => {
+    const next = new Map(current);
+    next.set(key, message);
+    while (next.size > 64) next.delete(next.keys().next().value!);
+    return next;
+  });
+  const openQuestion = (memberId: string, askId: string, kind: "native" | "async" = "native") => {
+    const key = questionKey(memberId, askId, kind);
+    const draft = questionDrafts.current.get(key);
+    if (draft) questionDrafts.current.set(key, { ...draft, collapsed: false });
+    setActiveQuestion(key);
+    setQuestionOpening(value => value + 1);
+  };
+  useEffect(() => {
+    setActiveQuestion(current => {
+      const nativeOpen = questions.some(item => questionKey(item.member_id, item.question.ask_id) === current);
+      const asyncOpen = messages.some(message => message.member_id && message.question?.kind === "async"
+        && (message.question.status === "pending" || message.question.status === "submitting")
+        && questionKey(message.member_id, message.question.ask_id, "async") === current);
+      if (nativeOpen || asyncOpen) return current;
+      const first = questions[0];
+      return first ? questionKey(first.member_id, first.question.ask_id) : null;
+    });
+  }, [questions, messages]);
+  const [profiles, setProfiles] = useState<Profiles>(cache.profiles ?? {});
+  const [hasMore, setHasMore] = useState(cachedRoom ? cache.hasMore ?? false : false);
   const sidebarOpen = useSyncExternalStore(
     sidebar.subscribe,
     sidebar.getSnapshot,
@@ -253,7 +315,7 @@ export default function CollaborationWorkspace({
     attachments?: (QueryImg | QueryFile)[];
   } | null>(null);
   const versions = useRef(
-    new Map<string, { generation: string; version: number }>(),
+    cache.versions ?? new Map<string, { generation: string; version: number }>(),
   );
   const listVersion = useRef<{ generation: string; version: number } | null>(
     null,
@@ -277,10 +339,11 @@ export default function CollaborationWorkspace({
   const pendingSelection = useRef<number | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const scroll = useRef<HTMLDivElement>(null);
-  const following = useRef(true);
+  const following = useRef(cachedRoom ? cache.following ?? true : true);
   const restoreAnchor = useRef<{
     height: number; top: number; messageId?: string; offset?: number;
-  } | null>(null);
+  } | null>(cachedRoom && cache.scrollHeight
+    ? { height: cache.scrollHeight, top: cache.scrollTop ?? 0 } : null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const historyRequest = useRef<{
@@ -311,11 +374,14 @@ export default function CollaborationWorkspace({
   const chooseRoom = useCallback(
     (id: string | null) => {
       roomIdRef.current = id;
+      validatedRoomRef.current = null;
+      setValidatedRoomId(null);
       setRoomId(id);
       setRoom(null);
       setMessages([]);
       setDeliveries([]);
       setQuestions([]);
+      setActiveQuestion(null);
       setError(null);
       finishHistory();
       completedHistoryBefore.current = null;
@@ -346,6 +412,11 @@ export default function CollaborationWorkspace({
         setError("设备连接恢复后即可继续操作。");
         return null;
       }
+      if (roomIdRef.current && validatedRoomRef.current !== roomIdRef.current
+          && !["list", "read", "catalog", "sessions", "create"].includes(operation)) {
+        setError("正在同步聊天室，请稍后重试。");
+        return null;
+      }
       const id = ws.sendCollaboration({
         operation,
         room_id: roomIdRef.current,
@@ -362,10 +433,34 @@ export default function CollaborationWorkspace({
     [connected, ws],
   );
 
+  const submitQuestion = (key: string, operation: "answer" | "send", values: Record<string, unknown>) => {
+    setQuestionErrors(current => {
+      const next = new Map(current);
+      next.delete(key);
+      return next;
+    });
+    const request = command(operation, values);
+    if (!request) {
+      showQuestionError(key, "回答暂未提交，请检查设备连接后重试。");
+      return false;
+    }
+    questionRequests.current.set(request, key);
+    while (questionRequests.current.size > 64)
+      questionRequests.current.delete(questionRequests.current.keys().next().value!);
+    return true;
+  };
+
   useEffect(() => {
     listen((event) => {
       if (onResourceEvent(event)) return true;
       progressListener.current?.(event);
+      if (event.type === "error" && event.request_id) {
+        const key = questionRequests.current.get(event.request_id);
+        if (key) {
+          showQuestionError(key, event.message);
+          return true;
+        }
+      }
       if (
         event.type === "error" &&
         event.request_id === pendingRef.current?.id
@@ -390,7 +485,13 @@ export default function CollaborationWorkspace({
       )
         return true;
       if (event.type !== "collaboration_state") return false;
+      const questionRequest = event.request_id && questionRequests.current.get(event.request_id);
+      if (event.request_id) questionRequests.current.delete(event.request_id);
       if (event.error) {
+        if (questionRequest) {
+          showQuestionError(questionRequest, event.error);
+          return true;
+        }
         if (event.request_id === historyRequest.current?.id) {
           finishHistory();
           setHistoryError(event.error);
@@ -521,6 +622,8 @@ export default function CollaborationWorkspace({
         )
           return true;
         versions.current.set(data.room.id, version);
+        validatedRoomRef.current = data.room.id;
+        setValidatedRoomId(data.room.id);
         if (previous?.generation !== version.generation) completedHistoryBefore.current = null;
         const pendingId = draftMessageId.current;
         if (
@@ -537,17 +640,24 @@ export default function CollaborationWorkspace({
           localStorage.removeItem(draftKey);
         }
         setRoom((current) =>
-          current && current.revision > data.room!.revision
+          previous?.generation === version.generation && current && current.revision > data.room!.revision
             ? current
             : data.room!,
         );
         if (data.messages) {
-          setMessages((current) =>
-            mergeRoomMessages(
+          setMessages((current) => {
+            const merged = mergeRoomMessages(
               previous?.generation === version.generation ? current : [],
               data.messages!,
-            ),
-          );
+            );
+            return merged.map(message => {
+              const state = data.question_states?.[message.id];
+              const question = message.question;
+              if (!state || !question || state.member_id !== message.member_id
+                  || state.kind !== question.kind || state.ask_id !== question.ask_id) return message;
+              return { ...message, question: { ...question, status: state.status, error: state.error } };
+            });
+          });
           if (data.before || !messages.length || previous?.generation !== version.generation)
             setHasMore(!!data.has_more);
         }
@@ -578,6 +688,8 @@ export default function CollaborationWorkspace({
   ]);
 
   useEffect(() => {
+    validatedRoomRef.current = null;
+    setValidatedRoomId(null);
     if (!connected) return;
     command("list");
     if (roomIdRef.current) command("read");
@@ -673,6 +785,13 @@ export default function CollaborationWorkspace({
       element.scrollTop = element.scrollHeight;
     if (element) lastScrollTop.current = element.scrollTop;
   }, [messages, deliveries, roomId, creating]);
+
+  useLayoutEffect(() => {
+    Object.assign(cache, { rooms, roomsLoaded, room, messages, deliveries, profiles, hasMore,
+      versions: versions.current, questionDrafts: questionDrafts.current,
+      scrollTop: scroll.current?.scrollTop, scrollHeight: scroll.current?.scrollHeight,
+      following: following.current });
+  }, [cache, rooms, roomsLoaded, room, messages, deliveries, profiles, hasMore]);
 
   const activeMembers =
     room?.members?.filter((member) => !member.removed) ?? [];
@@ -803,6 +922,8 @@ export default function CollaborationWorkspace({
 
   const send = () => {
     if (
+      !connected ||
+      validatedRoomRef.current !== roomIdRef.current ||
       pending ||
       importing ||
       missingAttachments > 0 ||
@@ -1066,6 +1187,7 @@ export default function CollaborationWorkspace({
   ];
 
   const loadingRoom = !room && (!roomsLoaded || roomId !== null);
+  const roomReady = !!room && validatedRoomId === room.id;
   const loadingLabel = !connected ? "等待设备连接…"
     : error ? "聊天暂未载入" : "正在读取聊天…";
 
@@ -1283,6 +1405,7 @@ export default function CollaborationWorkspace({
             </button>
           )}
           <EngineSelector engine="collaboration" onChange={onEngineChange} />
+          {headerMenu}
         </header>
         {error && (
           <div className="collab-error" role="alert">
@@ -1314,6 +1437,9 @@ export default function CollaborationWorkspace({
             const el = event.currentTarget;
             following.current =
               el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+            cache.scrollTop = el.scrollTop;
+            cache.scrollHeight = el.scrollHeight;
+            cache.following = following.current;
             const movingUp = el.scrollTop < lastScrollTop.current - .5;
             lastScrollTop.current = el.scrollTop;
             if (movingUp && isAtHistoryEdge(el))
@@ -1410,7 +1536,22 @@ export default function CollaborationWorkspace({
                       <EngineIcon engine={member.spec.engine} size={20} />
                       <span className="collab-answer-identity">{memberHeading(member)}{memberDetail(member)}</span>
                     </header>
-                    <CollaborationReply member={member} message={message} resources={resourceAccess} />
+                    {message.question ? (
+                      <button type="button" className="collab-question-card"
+                        data-question-id={message.id}
+                        disabled={!roomReady || message.question.status !== "pending"}
+                        onClick={() => openQuestion(member.id, message.question!.ask_id, message.question!.kind)}>
+                        <Icon name="message" size={19} />
+                        <span className="collab-question-copy">
+                          <span>{message.question.questions[0]?.question}</span>
+                          <span className="collab-muted">{message.question.status === "answered" ? "已回答"
+                            : message.question.status === "pending" ? "等待你回答"
+                            : message.question.status === "submitting" ? "正在确认回答" : "已结束"}
+                            {message.question.questions.length > 1 && ` · ${message.question.questions.length} 个问题`}</span>
+                        </span>
+                        {message.question.status === "pending" && <Icon name="chevron-right" size={16} />}
+                      </button>
+                    ) : <CollaborationReply member={member} message={message} resources={resourceAccess} />}
                     {message.truncated && (
                       <p className="collab-muted">完整回复可在原生会话查看。</p>
                     )}
@@ -1514,29 +1655,33 @@ export default function CollaborationWorkspace({
                   </article>
                 );
               })}
-              {questions.map((item) => {
+              {questions.filter(item => questionKey(item.member_id, item.question.ask_id) === activeQuestion).map((item) => {
                 const member = lookup.get(item.member_id);
                 return (
                   member && (
                     <QuestionSheet
-                      key={item.question.ask_id}
+                      key={`${item.question.ask_id}:${questionOpening}`}
+                      draft={{ key: questionKey(member.id, item.question.ask_id), store: questionDrafts.current }}
                       engine={member.spec.engine}
                       question={item.question.question}
                       options={item.question.options}
                       allowText={item.question.allow_text}
                       multiSelect={item.question.multi_select}
-                      header={member.name}
+                      header={item.question.header}
+                      sourceLabel={questionSource(member)}
+                      submissionError={questionErrors.get(questionKey(member.id, item.question.ask_id))}
+                      planDocument={item.question.plan_document}
                       secret={item.question.secret}
                       questions={item.question.questions}
                       onAnswers={(answers) =>
-                        !!command("answer", {
+                        submitQuestion(questionKey(member.id, item.question.ask_id), "answer", {
                           member_id: member.id,
                           ask_id: item.question.ask_id,
                           answers,
                         })
                       }
                       onAnswer={(answer) =>
-                        !!command("answer", {
+                        submitQuestion(questionKey(member.id, item.question.ask_id), "answer", {
                           member_id: member.id,
                           ask_id: item.question.ask_id,
                           answer,
@@ -1545,6 +1690,41 @@ export default function CollaborationWorkspace({
                     />
                   )
                 );
+              })}
+              {messages.filter(message => message.member_id && message.question?.kind === "async"
+                && questionKey(message.member_id, message.question.ask_id, "async") === activeQuestion).map(message => {
+                const member = lookup.get(message.member_id!);
+                const question = message.question!;
+                if (!member) return null;
+                const key = questionKey(member.id, question.ask_id, "async");
+                const submit = (answers: (string | string[])[]) => {
+                  const signature = JSON.stringify(answers);
+                  const previous = asyncAnswerRequests.current.get(message.id);
+                  const previousDelivery = previous && deliveries.find(delivery => delivery.message_id === previous.id);
+                  const failed = previousDelivery && ["failed", "cancelled"].includes(previousDelivery.status);
+                  if (previous && !failed && previous.signature !== signature) {
+                    showQuestionError(key, "先前的回答仍在确认送达，请稍后查看会话。");
+                    return false;
+                  }
+                  const id = previous && !failed ? previous.id : crypto.randomUUID();
+                  const prompt = supplementalAnswerPrompt(question.questions.map((page, index) => ({
+                    question: page.question, answer: Array.isArray(answers[index])
+                      ? answers[index].join("\n") : answers[index],
+                  })), question.ask_id);
+                  const sent = submitQuestion(key, "send", { message_id: id, ask_id: message.id, targets: [member.id], prompt });
+                  if (sent) {
+                    asyncAnswerRequests.current.set(message.id, { id, signature });
+                    while (asyncAnswerRequests.current.size > 64)
+                      asyncAnswerRequests.current.delete(asyncAnswerRequests.current.keys().next().value!);
+                  }
+                  return sent;
+                };
+                return <QuestionSheet key={`${key}:${questionOpening}`} engine={member.spec.engine}
+                  question={question.questions[0].question} options={question.questions[0].options}
+                  questions={question.questions} draft={{ key, store: questionDrafts.current }}
+                  sourceLabel={questionSource(member)}
+                  submissionError={questionErrors.get(key) ?? question.error}
+                  onAnswer={answer => submit([answer])} onAnswers={submit} />;
               })}
             </div>
           )}
@@ -1699,6 +1879,7 @@ export default function CollaborationWorkspace({
                 aria-label="发送消息"
                 disabled={
                   !connected ||
+                  !roomReady ||
                   !!pending ||
                   importing ||
                   missingAttachments > 0 ||
@@ -1727,7 +1908,7 @@ export default function CollaborationWorkspace({
                 </button>
               )}
               <CollaborationSelect label="默认回复者" className="collab-responder"
-                value={room.default_member ?? ""} disabled={!connected || !!pending}
+                value={room.default_member ?? ""} disabled={!connected || !roomReady || !!pending}
                 options={activeMembers.map(member => ({
                   value: member.id, label: member.name,
                   description: roomMemberDescription(member),

@@ -103,12 +103,22 @@ delivery and shared public context.
 5. Send a message. An idle agent starts a turn. A working agent receives native
    steering. Use that agent's stop control when you want to end its work.
 
+The room uses Claude's appearance preferences. Its top-right menu contains
+notifications, appearance and logout.
+
 ### Sessions, context and files
 
 - **Share the discussion.** A selected agent receives user questions and other
   members' published final replies. New members receive the public discussion
   when first addressed. Later inputs add context according to each member's
   progress. Reasoning, tool calls and intermediate activity stay in native sessions.
+- **Answer agent questions.** Native tool questions and your answers become room
+  records. Other members receive new Q&A on their next room input or steering
+  message. The room and native views share pending questions. Answering in either
+  view closes both, and asynchronous question cards show the answered receipt.
+  Concurrent questions appear one at a time with member, account and session ID.
+  Secret prompts and answers stay in the native interaction. The room records
+  only their submission status.
 - **Follow execution.** Open **View progress** for native history, live status
   and tool details. Scrolling upward loads older history automatically.
   **Open native session** navigates to the matching harness, account and directory.
@@ -123,7 +133,9 @@ delivery and shared public context.
 - **Keep room state.** The device's Wrapper stores rooms, members, public
   messages and delivery receipts in `collaboration.sqlite3`, included in
   deployment snapshots and rollback. The browser retains drafts and mention
-  targets. Reselect attachments after a reload. Removed members can be restored,
+  targets. Returning from another harness restores the room, loaded messages
+  and reading position immediately, then validates state in the background.
+  Reselect attachments after a reload. Removed members can be restored,
   with native sessions and room history preserved.
 
 ### Availability and deployment

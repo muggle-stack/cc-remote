@@ -23,6 +23,8 @@ interface Props {
   question: string;
   planDocument?: string | null;
   header?: string | null;
+  sourceLabel?: string;
+  submissionError?: string | null;
   options: AskOption[];
   allowText?: boolean;
   secret?: boolean;
@@ -35,13 +37,15 @@ interface Props {
 
 export function QuestionSheet(props: Props) {
   return props.questions?.length ? <QuestionBatchSheet key={JSON.stringify(props.questions)}
-    engine={props.engine} questions={props.questions} draft={props.draft}
+    engine={props.engine} questions={props.questions} draft={props.draft} sourceLabel={props.sourceLabel}
+    submissionError={props.submissionError}
     onSubmit={props.onAnswers ?? (() => false)} /> : <SingleQuestionSheet {...props} />;
 }
 
 function SingleQuestionSheet({
-  engine, question, header, options, allowText, secret, multiSelect, onAnswer, draft, planDocument,
+  engine, question, header, sourceLabel, submissionError, options, allowText, secret, multiSelect, onAnswer, draft, planDocument,
 }: Props) {
+  const engineName = { claude: "Claude", codex: "Codex", dsh: "DSH" }[engine];
   const dialogRef = useRef<HTMLDialogElement>(null);
   const headingRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -68,11 +72,16 @@ function SingleQuestionSheet({
   };
   const updateText = (value: string) => { setText(value); saveDraft({ text: value }); };
   const answer = (value: string | string[]) => {
-    if (onAnswer(value) !== false && draft) draft.store.delete(draft.key);
+    onAnswer(value);
   };
   const imeSubmit = useImeSubmit<HTMLInputElement>((value) => {
     if (!value.trim()) return;
     answer(multiSelect ? [...selected, value] : value);
+  });
+  const preserveDraft = useRef(() => {});
+  preserveDraft.current = () => saveDraft({
+    text: imeSubmit.inputRef.current?.value ?? text,
+    scrollTop: scrollRef.current?.scrollTop ?? savedScroll.current,
   });
   const toggle = (label: string) => {
     const next = selected.includes(label)
@@ -94,7 +103,10 @@ function SingleQuestionSheet({
     target?.focus({ preventScroll: true });
     focusTextOnOpen.current = false;
     if (scrollRef.current) scrollRef.current.scrollTop = savedScroll.current;
-    return () => { dialog.close(); };
+    return () => {
+      preserveDraft.current();
+      dialog.close();
+    };
   }, [imeSubmit.inputRef, collapsed]);
   useLayoutEffect(() => {
     const body = scrollRef.current;
@@ -122,7 +134,7 @@ function SingleQuestionSheet({
         onKeyDown={(event) => event.stopPropagation()} data-lock-horizontal-swipe>
         <div ref={headingRef} tabIndex={-1} className="question-dialog-title">
           <EngineIcon engine={engine} size={26} />
-          <span>{engine === "claude" ? "Claude" : "Codex"} 想确认一下</span>
+          <span>{engineName} 想确认一下</span>
           <QuestionCollapseButton onPointerDown={imeSubmit.commitCompositionBeforePointerSubmit}
             onCollapse={() => {
               // Keep this component mounted: hiding the dialog does not answer,
@@ -140,6 +152,8 @@ function SingleQuestionSheet({
           savedScroll.current = scrollRef.current?.scrollTop ?? savedScroll.current;
           saveDraft({});
         }}>
+          {sourceLabel && <div className="qa-source">{sourceLabel}</div>}
+          {submissionError && <p className="qa-submit-error" role="alert">{submissionError}</p>}
           {header && <div className="qa-header">{header}</div>}
           <div className="qa-question">{question}</div>
           {planDocument != null && <div className="plan-approval">
@@ -209,7 +223,7 @@ function SingleQuestionSheet({
       </dialog>
   );
   return <>
-    {collapsed && <QuestionResume engine={engine} buttonRef={resumeRef} onResume={() => {
+    {collapsed && <QuestionResume engine={engine} sourceLabel={sourceLabel} buttonRef={resumeRef} onResume={() => {
       saveDraft({ collapsed: false }); setCollapsed(false);
     }} />}
     {typeof document === "undefined" ? content : createPortal(content, document.body)}

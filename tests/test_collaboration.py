@@ -1550,7 +1550,7 @@ async def test_native_async_progress_stays_out_of_public_replies(tmp_path, sourc
         # A later channel promotion may omit the earlier delivery metadata.
         await machine._emit(ctx, AssistantMsgEnd(message_id="notice", turn_id="task", channel="final"))
         assert store.delivery(delivery["id"])["status"] == "running"
-        expected = [text] if has_questions else []
+        expected = ["Which directory?\n- Here\n- Other"] if has_questions else []
         assert [row["text"] for row in store.messages("owner", room_id) if row["role"] == "assistant"] == expected
         for frame in translator.feed({"method": "item/completed", "params": {
             "threadId": "thread", "turnId": "task", "item": {
@@ -1582,7 +1582,7 @@ async def test_native_async_progress_stays_out_of_public_replies(tmp_path, sourc
         ))
         await controller.reconcile(store.member_by_id(member["id"]))
     replies = [row for row in store.messages("owner", room_id) if row["role"] == "assistant"]
-    assert [row["text"] for row in replies] == ([text, "Done"] if has_questions else ["Done"])
+    assert [row["text"] for row in replies] == (["Which directory?\n- Here\n- Other", "Done"] if has_questions else ["Done"])
     assert store.delivery(delivery["id"])["status"] == "succeeded"
 
 

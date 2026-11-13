@@ -26224,6 +26224,10 @@ class WrapperMachine:
                     reason=reason,
                     answer=answer,
                 ))
+        try:
+            await self._collaboration.record_question_closed(ctx, ask_id, reason)
+        except Exception as exc:
+            log.warning("collaboration question close deferred", error_type=type(exc).__name__)
         return state
 
     async def _close_pending_ask(
@@ -26354,6 +26358,8 @@ class WrapperMachine:
     ) -> str | list[str] | list[str | list[str]]:
         """Run one question while the caller owns ``ctx.ask_lock``."""
         service_client = getattr(ctx.sdk, "client", None)
+        cached_answer = None
+        has_cached_answer = False
         if ask_id is None and hasattr(service_client, "description"):
             from cc_remote.claude_service.client import callback_identity
 
@@ -26375,7 +26381,8 @@ class WrapperMachine:
                 ask_id = "ask-" + hashlib.sha256(stable.encode()).hexdigest()[:32]
                 cached = await service_client.call("question_answer", {"ask_id": ask_id})
                 if cached["found"]:
-                    return cached["answer"]
+                    cached_answer = cached["answer"]
+                    has_cached_answer = True
         # ask_id is an identity, not a downstream sequence.  Consuming next_seq
         # here would leave an invisible hole before _emit assigns AskUser.seq;
         # reconnect replay would then appear to have lost a frame.
@@ -26395,6 +26402,17 @@ class WrapperMachine:
             questions=questions,
             to=to,
         )
+        if has_cached_answer:
+            # The native service can remember an answer before the room write
+            # commits. Repair that projection before completing the callback.
+            try:
+                collaboration = getattr(self, "_collaboration", None)
+                if collaboration is not None:
+                    await collaboration.record_question_answer(ctx, event, cached_answer)
+            except Exception as exc:
+                log.warning("collaboration cached answer projection deferred", error_type=type(exc).__name__)
+            else:
+                return cached_answer
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(0.0, timeout)
         fut: asyncio.Future[PendingAskResolution] = loop.create_future()
@@ -26426,6 +26444,10 @@ class WrapperMachine:
                 registered = True
                 self._mark_claude_activity(ctx)
                 await self._emit_locked(ctx, event.model_copy(deep=True))
+            try:
+                await self._collaboration.record_question(ctx, state.event)
+            except Exception as exc:
+                log.warning("collaboration question projection deferred", error_type=type(exc).__name__)
             log.info(
                 "ask_user emitted",
                 sid=ctx.session_id,
@@ -26841,11 +26863,15 @@ class WrapperMachine:
                 except (ConnectionError, RuntimeError, TimeoutError):
                     return await reject_locked(ERR_INTERNAL, "回答尚未送达会话，请稍后重试。")
 
+            try:
+                collaboration = getattr(self, "_collaboration", None)
+                if collaboration is not None:
+                    await collaboration.record_question_answer(ctx, state.event, normalized)
+            except Exception as exc:
+                log.warning("collaboration question answer pending", error_type=type(exc).__name__)
+                return await reject_locked(ERR_INTERNAL, "房间回答记录尚未确认，请重试提交。")
             await self._close_pending_ask_locked(
-                ctx,
-                cmd.ask_id,
-                reason="answered",
-                answer=normalized,
+                ctx, cmd.ask_id, reason="answered", answer=normalized,
             )
             log.info("ask_user answered", ask_id=cmd.ask_id)
             return None

@@ -3,18 +3,35 @@ import type { Turn } from "./domain/conversation";
 
 export interface SupplementalAnswer { question: string; answer: string }
 
-export function supplementalAnswerPrompt(answers: SupplementalAnswer[]): string {
-  return `补充回答：\n\n${answers.map(({ question, answer }) =>
+export function supplementalAnswerPrompt(answers: SupplementalAnswer[], questionId?: string): string {
+  const reference = questionId ? `问题 ID：${JSON.stringify(questionId)}\n\n` : "";
+  return `补充回答：\n\n${reference}${answers.map(({ question, answer }) =>
     `问题：${question}\n回答：${answer}`).join("\n\n")}`;
+}
+
+function answerBody(prompt: string): { body: string; questionId?: string } | null {
+  const prefix = "补充回答：\n\n";
+  if (!prompt.startsWith(prefix)) return null;
+  const body = prompt.slice(prefix.length);
+  if (!body.startsWith("问题 ID：")) return { body };
+  const end = body.indexOf("\n\n");
+  if (end < 0) return null;
+  try {
+    const questionId: unknown = JSON.parse(body.slice("问题 ID：".length, end));
+    if (typeof questionId !== "string" || !questionId || questionId.length > 128) return null;
+    return { body: body.slice(end + 2), questionId };
+  } catch {
+    return null;
+  }
 }
 
 /** The envelope already contains the question context needed by the bubble.
  * Parse the complete format, without requiring an earlier history page. This
  * is only formatting: it does not prove which native question was answered. */
-function replyEnvelope(prompt: string): SupplementalAnswer[] | null {
-  const prefix = "补充回答：\n\n问题：";
-  if (!prompt.startsWith(prefix)) return null;
-  const parts = prompt.slice(prefix.length).split("\n\n问题：");
+function replyEnvelope(prompt: string) {
+  const envelope = answerBody(prompt);
+  if (!envelope?.body.startsWith("问题：")) return null;
+  const parts = envelope.body.slice("问题：".length).split("\n\n问题：");
   if (parts.length > 16) return null;
   const answers: SupplementalAnswer[] = [];
   for (const part of parts) {
@@ -25,13 +42,14 @@ function replyEnvelope(prompt: string): SupplementalAnswer[] | null {
     if (!question.trim() || !answer || answer !== answer.trim()) return null;
     answers.push({ question, answer });
   }
-  return supplementalAnswerPrompt(answers) === prompt ? answers : null;
+  return supplementalAnswerPrompt(answers, envelope.questionId) === prompt
+    ? { ...envelope, answers } : null;
 }
 
 /** Only an exact, unambiguous preceding native question can receive an
  * answered receipt. Matching must remain independent of bubble formatting. */
-function matchReply(prompt: string, questions: AsyncQuestionSpec[]): SupplementalAnswer[] | null {
-  let rest = prompt.slice("补充回答：\n\n".length);
+function matchReply(prompt: string, questions: AsyncQuestionSpec[], questionId?: string): SupplementalAnswer[] | null {
+  let rest = answerBody(prompt)?.body ?? "";
   const answers: SupplementalAnswer[] = [];
   let next = 0;
   while (rest) {
@@ -49,7 +67,7 @@ function matchReply(prompt: string, questions: AsyncQuestionSpec[]): Supplementa
     rest = end === body.length ? "" : body.slice(end + 2);
     next = index + 1;
   }
-  return answers.length && supplementalAnswerPrompt(answers) === prompt ? answers : null;
+  return answers.length && supplementalAnswerPrompt(answers, questionId) === prompt ? answers : null;
 }
 
 export function presentAsyncQuestionReplies(turns: readonly Turn[], pendingReplyId?: string | null) {
@@ -62,10 +80,11 @@ export function presentAsyncQuestionReplies(turns: readonly Turn[], pendingReply
   for (const turn of turns) {
     const envelope = !turn.detailReasons?.includes("prompt_truncated")
       ? replyEnvelope(turn.prompt) : null;
-    if (envelope) replies.set(turn.id, envelope);
+    if (envelope) replies.set(turn.id, envelope.answers);
     if (turn.prompt.startsWith("补充回答：\n\n")) {
       const matches = [...candidates].flatMap(([messageId, questions]) => {
-        const answers = matchReply(turn.prompt, questions);
+        if (envelope?.questionId && envelope.questionId !== messageId) return [];
+        const answers = matchReply(turn.prompt, questions, envelope?.questionId);
         return answers ? [{ messageId, answers }] : [];
       });
       if (matches.length === 1) {

@@ -84,6 +84,21 @@ const independentQuestion: Turn = { ...nativeQuestion, id: "independent-question
 const ambiguous = presentAsyncQuestionReplies([nativeQuestion, independentQuestion, nativeReply]);
 assert.deepEqual(ambiguous.replies.get(nativeReply.id), replyOnly.replies.get(nativeReply.id));
 assert.equal(ambiguous.answered.size, 0, "distinct native questions with equal titles remain ambiguous");
+const referencedReply: Turn = { ...nativeReply, prompt: supplementalAnswerPrompt([
+  { question: "用的什么手势？", answer: "三指拖拽\n第二行也要保留" },
+], "question-message") };
+const referenced = presentAsyncQuestionReplies([nativeQuestion, independentQuestion, referencedReply]);
+assert.deepEqual([...referenced.answered], ["question-message"],
+  "an explicit collaboration reference answers exactly one native question with a repeated title");
+assert.deepEqual(referenced.replies.get(nativeReply.id), replyOnly.replies.get(nativeReply.id),
+  "the native bubble renders referenced replies with the existing question and answer layout");
+assert.deepEqual(presentAsyncQuestionReplies([referencedReply]).replies.get(nativeReply.id),
+  referenced.replies.get(nativeReply.id), "referenced answer formatting survives refresh and pagination");
+assert.equal(presentAsyncQuestionReplies([nativeQuestion, { ...referencedReply,
+  prompt: referencedReply.prompt.replace('"question-message"', '"missing-question"') }]).answered.size, 0,
+  "an unknown reference cannot fall back to matching an unrelated question by title");
+assert.equal(presentAsyncQuestionReplies([nativeQuestion, referencedReply], nativeReply.id).answered.size, 0,
+  "referenced replies also wait for native acceptance");
 assert.equal(presentAsyncQuestionReplies([nativeQuestion, { ...nativeReply, error: "rejected" }]).answered.size, 0);
 assert.equal(presentAsyncQuestionReplies([nativeQuestion, { ...nativeReply,
   prompt: "补充回答：\n\n问题：其他问题\n回答：保留原文" }]).answered.size, 0,

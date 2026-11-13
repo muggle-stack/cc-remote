@@ -829,6 +829,16 @@ export interface CollaborationMessage {
   id: string; seq: number; role: "user" | "assistant"; member_id: string | null;
   text: string; created: number; targets: string[]; reply_to: string[]; truncated?: boolean;
   attachments?: {kind: "file" | "image"; name: string}[];
+  question?: CollaborationQuestion;
+}
+export interface CollaborationQuestion {
+  kind: "native" | "async";
+  ask_id: string;
+  status: "pending" | "submitting" | "answered" | "cancelled" | "timeout" | "superseded";
+  questions: AskQuestion[];
+  answers?: (string | string[])[];
+  answer_delivery?: string;
+  error?: string;
 }
 export interface CollaborationDelivery {
   id: string; message_id: string; member_id: string; status: string;
@@ -845,6 +855,9 @@ export interface CollaborationState extends Base {
     permission_profiles?: PermissionProfiles;
     sessions?: CollaborationSession[]; sessions_spec?: CollaborationMemberSpec;
     questions?: {member_id: string; sid: string; question: AskUser}[];
+    question_states?: Record<string, Pick<CollaborationQuestion, "kind" | "ask_id" | "status"> & {
+      member_id: string; error?: string;
+    }>;
   };
 }
 export interface CollaborationCommand extends Base {

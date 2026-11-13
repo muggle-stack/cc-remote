@@ -14,6 +14,7 @@ from uuid import NAMESPACE_URL, uuid5
 from cc_remote.attachments import validate_attachments
 from cc_remote.collaboration import CollaborationMemberSpec, shared_prompt
 from cc_remote.collaboration_store import CollaborationStore
+from cc_remote.collaboration_questions import async_question, question_text
 from cc_remote.log import logger
 from cc_remote.protocol import (
     AnswerQuestion,
@@ -66,6 +67,7 @@ class Collaboration:
         self.workers: dict[str, asyncio.Task] = {}
         self.members: dict[int, tuple[weakref.ReferenceType, str]] = {}
         self.texts: OrderedDict[tuple[str, str], dict] = OrderedDict()
+        self.question_statuses: OrderedDict[tuple[str, str, str], str] = OrderedDict()
         self.pending_replies: dict[str, set[str]] = {}
         self.recovery_pending: set[str] = set()
         self.projection_locks: dict[str, asyncio.Lock] = {}
@@ -200,6 +202,11 @@ class Collaboration:
             room = await asyncio.to_thread(store.room, owner, room_id)
             await self.sync_native_titles(room)
             data["room"] = await asyncio.to_thread(store.public_room, owner, room_id)
+            for member in data["room"]["members"]:
+                ctx = self.machine._ctx_for(member["sid"]) if member["sid"] else None
+                if ctx:
+                    for pending in tuple(ctx.pending_asks.values()):
+                        await asyncio.to_thread(store.record_native_question, member["id"], pending.event)
             messages = await asyncio.to_thread(
                 store.messages, owner, room_id, before=before
             )
@@ -212,22 +219,32 @@ class Collaboration:
             data["messages"] = messages
             data["before"] = before
             data["has_more"] = bool(messages and messages[0]["seq"] > 1)
+            references = [reference for message in messages if message["role"] == "user"
+                          for reference in message["reply_to"]]
+            data["question_states"] = await asyncio.to_thread(store.question_states, owner, room_id, references)
             data["deliveries"] = await asyncio.to_thread(
                 store.public_deliveries, room_id
             )
+            # Sample callback ownership after the asynchronous database reads.
+            # A completed read must not reopen a question answered meanwhile.
             questions = []
+            pending_keys = set()
             for member in data["room"]["members"]:
                 ctx = self.machine._ctx_for(member["sid"]) if member["sid"] else None
                 if ctx:
-                    questions.extend(
-                        {
-                            "member_id": member["id"],
-                            "sid": ctx.key,
-                            "question": pending.event.model_dump(mode="json"),
-                        }
-                        for pending in ctx.pending_asks.values()
-                    )
+                    for pending in ctx.pending_asks.values():
+                        pending_keys.add((member["id"], "native", pending.event.ask_id))
+                        questions.append({"member_id": member["id"], "sid": ctx.key,
+                                          "question": pending.event.model_dump(mode="json")})
             data["questions"] = questions
+            question_rows = [(message["member_id"], message["question"])
+                             for message in messages if message.get("question")]
+            question_rows.extend((state["member_id"], state) for state in data["question_states"].values())
+            for member_id, question in question_rows:
+                key = (member_id, question["kind"], question["ask_id"])
+                status = "pending" if key in pending_keys else self.question_statuses.get(key)
+                if status and not question.get("error"):
+                    question["status"] = status
         return data
 
     async def publish(
@@ -841,7 +858,9 @@ class Collaboration:
                 return
             room = await asyncio.to_thread(store.room, owner, member["room_id"])
             messages, current = await asyncio.to_thread(store.context, delivery)
-            prompt = shared_prompt(room, member, messages, current)
+            # Native asynchronous answers keep the same envelope as the
+            # Harness UI, so its history can confirm the answered question.
+            prompt = current["text"] if (current.get("source") or "").startswith("async-answer:") else shared_prompt(room, member, messages, current)
             payload = await asyncio.to_thread(store.payload, delivery["message_id"])
             values = dict(
                 sid=ctx.key,
@@ -1167,6 +1186,49 @@ class Collaboration:
             # can advance seq during I/O, then their observation runs next.
             await self._observe(ctx, frame, member_id, delivery_ids=delivery_ids)
 
+    def _question_member_id(self, ctx):
+        entry = self.members.get(id(ctx))
+        return entry[1] if entry and entry[0]() is ctx else self.bindings.get(ctx.key)
+
+    def _remember_question_status(self, member_id, ask_id, status, *, kind="native"):
+        key = (member_id, kind, ask_id)
+        self.question_statuses[key] = status
+        self.question_statuses.move_to_end(key)
+        while len(self.question_statuses) > 128:
+            self.question_statuses.popitem(last=False)
+
+    async def record_question(self, ctx, event):
+        member_id = self._question_member_id(ctx)
+        if self.store is not None and member_id:
+            await asyncio.to_thread(self.store.record_native_question, member_id, event)
+            pending = ctx.pending_asks.get(event.ask_id)
+            if pending and pending.event is event:
+                self._remember_question_status(member_id, event.ask_id, "pending")
+            member = await asyncio.to_thread(self.store.member_by_id, member_id)
+            owner = await asyncio.to_thread(self.store.owner, member["room_id"])
+            self.dirty.add((owner, member["room_id"]))
+            self.wake.set()
+
+    async def record_question_answer(self, ctx, event, answer):
+        member_id = self._question_member_id(ctx)
+        if self.store is not None and member_id:
+            await asyncio.to_thread(self.store.record_question_answer, member_id, event, answer)
+            self._remember_question_status(member_id, event.ask_id, "answered")
+            member = await asyncio.to_thread(self.store.member_by_id, member_id)
+            owner = await asyncio.to_thread(self.store.owner, member["room_id"])
+            self.dirty.add((owner, member["room_id"]))
+            self.wake.set()
+
+    async def record_question_closed(self, ctx, ask_id, reason):
+        member_id = self._question_member_id(ctx)
+        if self.store is not None and member_id:
+            await asyncio.to_thread(self.store.close_question, member_id, ask_id, reason)
+            self._remember_question_status(member_id, ask_id, reason)
+            member = await asyncio.to_thread(self.store.member_by_id, member_id)
+            owner = await asyncio.to_thread(self.store.owner, member["room_id"])
+            self.dirty.add((owner, member["room_id"]))
+            self.wake.set()
+
     async def _observe(self, ctx, frame, member_id, *, delivery_ids=None):
         kind = frame.type
         texts = ctx.texts if isinstance(ctx, _ProjectionContext) else self.texts
@@ -1188,6 +1250,7 @@ class Collaboration:
                     item["delivery"] = frame.delivery
                 if frame.questions is not None:
                     item["has_questions"] = bool(frame.questions)
+                    item["questions"] = [question.model_dump(mode="json") for question in frame.questions]
             if kind == "delta" and item["channel"] != "thinking":
                 text = frame.text if frame.replace else item["text"] + frame.text
                 item["text"] = text if isinstance(ctx, _ProjectionContext) else text[: 2 * 1024 * 1024]
@@ -1218,6 +1281,10 @@ class Collaboration:
             or member["native_sid"] != self.native_id(ctx)
         ):
             await self.bind(member_id, ctx)
+        if kind == "ask_user":
+            await asyncio.to_thread(self.store.record_native_question, member_id, frame)
+        elif kind == "ask_user_closed":
+            await asyncio.to_thread(self.store.close_question, member_id, frame.ask_id, frame.reason)
         if kind == "state" and getattr(frame, "continuation", False):
             await asyncio.to_thread(self.store.resume_source, member_id, [frame.msg_id])
         if (
@@ -1261,11 +1328,13 @@ class Collaboration:
                     or row["native_turn"]
                     and row["native_turn"] in identities
                 ):
-                    await asyncio.to_thread(
+                    answered_question = await asyncio.to_thread(
                         self.store.consume,
                         row["id"],
                         getattr(frame, "turn_id", None) or frame.msg_id,
                     )
+                    if answered_question:
+                        self._remember_question_status(member_id, answered_question, "answered", kind="async")
             if kind == "user_msg":
                 known = await asyncio.to_thread(
                     self.store.deliveries, member["room_id"]
@@ -1283,6 +1352,10 @@ class Collaboration:
                     row["status"] in {"failed", "cancelled"} for row in matched
                 ):
                     await asyncio.to_thread(self.store.clear_source, member_id)
+                if frame.prompt.startswith("补充回答：\n\n"):
+                    answered_question = await asyncio.to_thread(self.store.record_async_answer, member_id, frame.prompt, frame.msg_id)
+                    if answered_question:
+                        self._remember_question_status(member_id, answered_question, "answered", kind="async")
         running = [row for row in active if row["status"] in {"running", "stopping"}]
         owners = (
             {frame.checkpoint_id, frame._changes_turn_id}
@@ -1294,7 +1367,7 @@ class Collaboration:
                 row for row in running
                 if owners & {row["id"], row["native_turn"], row["native_input_id"]}
             ]
-        if kind == "assistant_msg_end" and running:
+        if kind == "assistant_msg_end" and (running or (item.get("delivery") == "async" and item.get("has_questions"))):
             key = (member_id, frame.message_id)
             item = texts.get(key, {})
             public_reply = (
@@ -1302,9 +1375,15 @@ class Collaboration:
                 if item.get("delivery") == "async"
                 else item.get("channel") == "final"
             )
-            if public_reply and item["text"].strip():
+            if public_reply and (item["text"].strip() or item.get("has_questions")):
                 message_id = item.get("canonical_id") or frame.message_id
                 source = f"{ctx.engine}:{member_id}:{message_id}"
+                question = None
+                text = item["text"]
+                if item.get("delivery") == "async" and item.get("questions"):
+                    question = async_question(message_id, item["questions"])
+                    full_question = question_text(question["questions"])
+                    text = full_question if text.strip() == question["questions"][0]["question"] else f"{text}\n\n{full_question}".strip()
                 # Mark before the write. If it raises, live terminals must leave
                 # these rows active so native history can recover the reply.
                 for row in running:
@@ -1313,8 +1392,9 @@ class Collaboration:
                     self.store.publish,
                     member_id,
                     source,
-                    item["text"],
+                    text,
                     [row["message_id"] for row in running],
+                    **({"question": question} if question is not None else {}),
                 )
                 for row in running:
                     pending = self.pending_replies.get(row["id"])

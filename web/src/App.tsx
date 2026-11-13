@@ -17,6 +17,7 @@ import { ArtifactReadingMemory, type ArtifactReadingState } from "./artifact-rea
 import type { DshCommandInfo, FilePreview, DirectoryActionScope, ServerEvent, CollaborationMember } from "./protocol";
 const DirectoryActionSheet = lazy(() => import("./components/DirectoryActionSheet"));
 const CollaborationWorkspace = lazy(() => import("./components/CollaborationWorkspace"));
+import type { CollaborationWorkspaceCache } from "./components/CollaborationWorkspace";
 import { resolveRelatedSession, relatedSessionTitle } from "./session-messages";
 import {
   lazy,
@@ -374,6 +375,7 @@ function catalogForEngineProfile(
 export default function App() {
   usePanelWidthPreference();
   const [collaborationOpen, setCollaborationOpen] = useState(false);
+  const collaborationCachesRef = useRef(new Map<string, CollaborationWorkspaceCache>());
   const collaborationListenerRef = useRef<((event: ServerEvent) => boolean) | null>(null);
   const listenCollaboration = useCallback((handler: ((event: ServerEvent) => boolean) | null) => {
     collaborationListenerRef.current = handler;
@@ -381,12 +383,16 @@ export default function App() {
   const initialEngineRef = useRef(normalizeEngine(localStorage.getItem(ENGINE_KEY)));
   const initialSpacesRef = useRef(readEngineSpaces(localStorage, initialEngineRef.current));
   const [engine, setEngine] = useState<Engine>(initialEngineRef.current);
-  const appearance = useTheme(engine);
+  const themeEngine = collaborationOpen ? "claude" : engine;
+  const appearance = useTheme(themeEngine);
   const { mode: theme, selectTheme } = appearance;
   const { boldText, setBoldText } = useBoldText();
   const [space, setSpace] = useState<Space>(initialSpacesRef.current[initialEngineRef.current]);
   const spacesByEngineRef = useRef<Record<Engine, Space>>(initialSpacesRef.current);
   const [authed, setAuthed] = useState(false);
+  useEffect(() => {
+    if (!authed) collaborationCachesRef.current.clear();
+  }, [authed]);
   const changingNotificationModeRef = useRef(false);
   const [notificationBindingRevision, recheckNotificationBinding] = useReducer((value: number) => value + 1, 0);
   const [harmonyPush, setHarmonyPush] = useState(harmonyPushSnapshot);
@@ -2015,7 +2021,6 @@ export default function App() {
     }
   }, []);
   useEffect(() => {
-    document.documentElement.setAttribute("data-engine", engine);
     localStorage.setItem(ENGINE_KEY, engine);
     wsRef.current?.setSurface(engine, space);
     wsRef.current?.sendListSessions(engine, space);
@@ -5878,6 +5883,7 @@ export default function App() {
       try { localStorage.removeItem(MANUAL_UNREAD_STORAGE); } catch { /* Private browsing. */ }
       await import("./cache").then((module) => module.clearCache());
       await historyPageCacheRef.current.clear();
+      collaborationCachesRef.current.clear();
       wsRef.current?.stop();
       pendingCreateRef.current = null;
       createRequestsRef.current.clear();
@@ -5995,7 +6001,32 @@ export default function App() {
   const ambiguousActiveTurnIds = activeTurnCandidates.length > 1
     ? activeTurnCandidates : [];
 
+  const headerMenu = <Suspense fallback={<span className="iconbtn" aria-hidden="true"><Icon name="dots" /></span>}>
+    <HeaderMenu engine={themeEngine} appearance={appearance}
+      boldText={boldText} onBoldText={setBoldText}
+      onOpenUpdates={collaborationOpen ? undefined : () => setAppUpdateOpen(true)} currentVersion={WEB_BUILD.version}
+      updateAvailable={!!webUpdate.id || newerVersion(appUpdates.data?.latest?.version, appUpdates.data?.current)
+        || newerVersion(serverUpdates.data?.latest?.version, serverUpdates.data?.current)}
+      notificationMode={notificationMode} notificationBinding={pushBinding.state}
+      notificationAvailable={harmonyPush.available || typeof Notification !== "undefined"}
+      notificationNative={harmonyPush.available} notificationError={harmonyPush.error}
+      onNotificationMode={updateNotificationMode}
+      onOpenDshTools={!collaborationOpen && engine === "dsh" && focusedSid
+        ? () => setDshPanel({ sid: focusedSid, scope: activeScopeKey, selection: { kind: "subagents" } }) : undefined}
+      onOpenUsageActivity={openUsageActivity}
+      onOpenBtw={!collaborationOpen && btwPanelKey && !archivedBrowse ? () => openBtw() : undefined}
+      onOpenViewer={!collaborationOpen && visibleParentSid ? () => openViewer() : undefined}
+      onOpenArtifacts={!collaborationOpen && visibleParentSid && state.wrapperOnline ? () => openSessionArtifacts() : undefined}
+      onOpenFiles={!collaborationOpen && visibleParentSid && !archivedBrowse && state.wrapperOnline ? () => openFiles() : undefined}
+      onLogout={() => void logout()} />
+  </Suspense>;
+
   if (collaborationOpen) {
+    const cache = collaborationCachesRef.current.get(machineId) ?? {};
+    collaborationCachesRef.current.delete(machineId);
+    collaborationCachesRef.current.set(machineId, cache);
+    while (collaborationCachesRef.current.size > 8)
+      collaborationCachesRef.current.delete(collaborationCachesRef.current.keys().next().value!);
     const navigateMember = (member: CollaborationMember) => {
       if (!member.sid || !confirmArtifactDiscard()) return;
       cancelPendingNotificationTarget();
@@ -6019,6 +6050,8 @@ export default function App() {
     return <>
       <Suspense fallback={<div className="thread" />}>
         <CollaborationWorkspace key={machineId} machineId={machineId} theme={theme}
+          cache={cache}
+          headerMenu={headerMenu}
           getSessionRuntime={sid => stateRef.current.runtimes[sid]}
           historyPageCache={historyPageCacheRef.current}
           deviceName={remoteDevices.find(device => device.machine_id === machineId)?.label ?? machineId}
@@ -6235,27 +6268,7 @@ export default function App() {
           </button>
           <EngineSelector engine={engine} onChange={toggleEngine}
             onCollaboration={() => { if (confirmArtifactDiscard()) setCollaborationOpen(true); }} />
-          <Suspense fallback={<span className="iconbtn" aria-hidden="true"><Icon name="dots" /></span>}><HeaderMenu
-            engine={engine}
-            appearance={appearance}
-            boldText={boldText} onBoldText={setBoldText}
-            onOpenUpdates={() => setAppUpdateOpen(true)} currentVersion={WEB_BUILD.version}
-            updateAvailable={!!webUpdate.id || newerVersion(appUpdates.data?.latest?.version, appUpdates.data?.current)
-              || newerVersion(serverUpdates.data?.latest?.version, serverUpdates.data?.current)}
-            notificationMode={notificationMode}
-            notificationBinding={pushBinding.state}
-            notificationAvailable={harmonyPush.available || typeof Notification !== "undefined"}
-            notificationNative={harmonyPush.available}
-            notificationError={harmonyPush.error}
-            onNotificationMode={updateNotificationMode}
-            onOpenDshTools={engine === "dsh" && focusedSid ? () => setDshPanel({ sid: focusedSid, scope: activeScopeKey, selection: { kind: "subagents" } }) : undefined}
-            onOpenUsageActivity={openUsageActivity}
-            onOpenBtw={btwPanelKey && !archivedBrowse ? () => openBtw() : undefined}
-            onOpenViewer={visibleParentSid ? () => openViewer() : undefined}
-            onOpenArtifacts={visibleParentSid && state.wrapperOnline ? () => openSessionArtifacts() : undefined}
-            onOpenFiles={visibleParentSid && !archivedBrowse && state.wrapperOnline ? () => openFiles() : undefined}
-            onLogout={() => void logout()}
-          /></Suspense>
+          {headerMenu}
         </header>
         {appUpdateOpen && <Suspense fallback={null}><AppUpdateSheet updates={appUpdates} serverUpdates={serverUpdates}
           deviceName={activeDevice?.label ?? machineId} webUpdate={webUpdate}
