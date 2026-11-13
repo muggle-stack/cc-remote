@@ -1892,6 +1892,7 @@ function finishTurnFromIdleHistory(turn: Turn, doneTs: number): void {
   const completedFinal = turn.blocks.some((block) =>
     block.kind === "text"
     && block.channel === "final"
+    && block.delivery !== "async"
     && block.done
     && block.text.trim().length > 0);
   const allBlocksClosed = turn.blocks.every((block) => block.done);
