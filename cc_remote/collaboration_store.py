@@ -672,6 +672,16 @@ class CollaborationStore:
         self, delivery_id, status, *, mode=None, native_turn=None, error=None
     ):
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = db.execute("SELECT status,error FROM deliveries WHERE id=?", (delivery_id,)).fetchone()
+            if current and current["status"] == "stopping":
+                if status == "queued":
+                    status = "cancelled"
+                elif status in ACTIVE_DELIVERIES | {"unknown"}:
+                    error = error or (
+                        "原生输入状态待核对。" if status == "unknown" else current["error"]
+                    )
+                    status = "stopping"
             db.execute(
                 "UPDATE deliveries SET status=?,mode=coalesce(?,mode),native_turn=coalesce(?,native_turn),error=?,updated=? WHERE id=? AND status NOT IN ('succeeded','failed','cancelled')",
                 (status, mode, native_turn, error, time.time(), delivery_id),
@@ -1002,7 +1012,9 @@ class CollaborationStore:
                 (time.time(), member_id),
             )
             db.execute(
-                "UPDATE deliveries SET status='stopping',updated=? WHERE member_id=? AND status IN ('submitting','accepted','running')",
+                "UPDATE deliveries SET status='stopping',"
+                "error=CASE WHEN status='unknown' THEN coalesce(error,'原生输入状态待核对。') ELSE error END,"
+                "updated=? WHERE member_id=? AND status IN ('submitting','accepted','running','unknown')",
                 (time.time(), member_id),
             )
             self._release_payloads(db)

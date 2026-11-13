@@ -340,6 +340,26 @@ class Collaboration:
                     store.stop_pending, owner, cmd.cmd_id, room_id, cmd.member_id
                 )
                 rows = await asyncio.to_thread(store.deliveries, room_id, active=True)
+                target_ids = {row["id"] for row in rows if row["member_id"] == member["id"]}
+                worker = self.workers.get(member["id"])
+                stopping_ids = {
+                    row["id"] for row in rows if row["member_id"] == member["id"]
+                    and row["status"] == "stopping"
+                }
+                if fresh and worker is not None and stopping_ids:
+                    caller = asyncio.current_task()
+                    if worker is caller:
+                        raise ValueError("本次输入仍在提交，尚未确认停止。")
+                    try:
+                        # The worker owns admission beyond can_submit(),
+                        # including its wait for the native query lock.
+                        await asyncio.shield(worker)
+                    except asyncio.CancelledError:
+                        if not worker.cancelled() or (caller is not None and caller.cancelling()):
+                            raise
+                        raise ValueError("投递已中断，请核对原生输入状态后重试停止。") from None
+                    member = await asyncio.to_thread(store.member_by_id, member["id"])
+                    rows = await asyncio.to_thread(store.deliveries, room_id, active=True)
                 if member["sid"] and any(
                     row["member_id"] == member["id"] and row["status"] == "stopping"
                     for row in rows
@@ -358,9 +378,6 @@ class Collaboration:
                             self.watch(ctx, member["id"])
                         else:
                             ctx = await self.context(member, {"id": cmd.cmd_id})
-                    if fresh and ctx and ctx.state == "idle" and member["id"] in self.workers:
-                        async with ctx.query_lock:
-                            pass
                     rows = await asyncio.to_thread(
                         store.deliveries, room_id, active=True
                     )
@@ -383,6 +400,15 @@ class Collaboration:
                             result = await self.machine._handle_interrupt(stop)
                         if isinstance(result, Error):
                             raise ValueError(result.message)
+                rows = await asyncio.to_thread(store.deliveries, room_id, active=True)
+                if any(
+                    row["id"] in target_ids and (
+                        row["status"] == "unknown"
+                        or row["status"] == "stopping" and row["error"]
+                    )
+                    for row in rows
+                ):
+                    raise ValueError("原生输入状态尚未确认，请核对后重试停止。")
             elif cmd.operation == "rename_member":
                 async with self.title_lock:
                     member = await asyncio.to_thread(
