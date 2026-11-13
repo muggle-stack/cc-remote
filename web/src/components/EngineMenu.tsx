@@ -23,18 +23,25 @@ export default function EngineMenu({ engine, anchor, keyboard, altShortcuts, onC
       if (!menu.current?.contains(event.target as Node) && !anchor.current?.contains(event.target as Node)) onClose(false);
     };
     const resize = () => onClose(false);
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.isComposing || event.keyCode === 229) return;
+      event.preventDefault();
+      event.stopPropagation();
+      onClose(true);
+    };
     document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", escape, true);
     window.addEventListener("resize", resize);
     return () => {
       document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("keydown", escape, true);
       window.removeEventListener("resize", resize);
     };
   }, [anchor, onClose]);
   return createPortal(<div ref={menu} className="engine-menu" role="menu" aria-label="会话引擎"
     style={{ top: (rect?.bottom ?? 0) + 8, right: Math.max(8, window.innerWidth - (rect?.right ?? 0)) }}
     onKeyDown={event => {
-      if (event.key === "Escape" || event.key === "Tab") {
-        if (event.key === "Escape") event.preventDefault();
+      if (event.key === "Tab") {
         onClose(true);
         return;
       }

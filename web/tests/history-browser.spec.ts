@@ -1684,9 +1684,18 @@ test("session workspace harness menu clears pointer focus and preserves keyboard
   await expect(select).not.toBeFocused();
   await expect(select).toHaveCSS("outline-style", "none");
   await expect(page.locator(".engine-label")).toHaveText("Claude");
+  await select.click();
+  await expect(page.getByRole("menu", { name: "会话引擎" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("menu", { name: "会话引擎" })).toHaveCount(0);
+  await expect(select).toBeFocused();
   await select.focus();
   await select.press("ArrowDown");
   const selected = page.getByRole("menuitemradio", { name: "Claude", exact: true });
+  await expect(selected).toBeFocused();
+  await selected.dispatchEvent("keydown", { key: "Escape", isComposing: true });
+  await expect(selected).toBeFocused();
+  await selected.dispatchEvent("keydown", { key: "Escape", keyCode: 229 });
   await expect(selected).toBeFocused();
   await selected.press("ArrowDown");
   await expect(page.getByRole("menuitemradio", { name: "Codex", exact: true })).toBeFocused();
