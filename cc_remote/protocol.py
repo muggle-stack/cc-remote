@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 93
+PROTOCOL_VERSION = 94
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -1000,6 +1000,7 @@ class AssistantMsgEnd(_Base):
     # history/reconnect and may be answered while the native turn keeps running.
     delivery: Optional[Literal["async"]] = None
     questions: Optional[list[AsyncQuestionSpec]] = Field(default=None, max_length=16)
+    notification_context: Optional[TurnNotificationContext] = None
 
     @model_validator(mode="after")
     def bounded_async_questions(self):
@@ -1189,8 +1190,8 @@ class TurnResult(BaseModel):
 class TurnNotificationContext(BaseModel):
     """Realtime-only presentation metadata for completion and question notifications.
 
-    The wrapper strips this field before buffering a TurnEnd or AskUser, so
-    reconnect and history replay cannot notify again for an old event.
+    The wrapper strips this field before buffering completion or question
+    events, so reconnect and history replay cannot notify for an old event.
     """
     model_config = ConfigDict(extra="forbid")
     engine: Engine

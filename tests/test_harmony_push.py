@@ -365,3 +365,28 @@ async def test_question_push_uses_native_notification_route(tmp_path):
     assert notice["foregroundShow"] is True
     assert "question-session" in notice["clickAction"]["uri"]
     assert "private contents" not in json.dumps(sent)
+
+
+@pytest.mark.asyncio
+async def test_async_question_push_preserves_harmony_route_and_codex_title(tmp_path):
+    store = HarmonyPushStore(str(tmp_path / "push.db"))
+    await store.upsert(sub(notification_mode="session"))
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+        return "80000000"
+
+    async def active(_):
+        return True
+
+    dispatcher = HarmonyPushDispatcher(store, origin="https://remote.example", sender=send,
+                                       session_active=active)
+    await dispatcher.notify_question("device-a", context={
+        "engine": "codex", "space": "code", "sid": "async-session",
+        "async_question": True, "question": "private contents"})
+    notice = sent[0]["payload"]["notification"]
+    assert notice["body"] == "Codex 想确认一下"
+    assert notice["foregroundShow"] is True
+    assert "async-session" in notice["clickAction"]["uri"]
+    assert "private contents" not in json.dumps(sent)

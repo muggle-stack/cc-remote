@@ -2993,12 +2993,20 @@ test("transient BTW reconnect notice does not permanently disable the composer",
   await expect(panel.locator(".btw-readonly-notice")).toHaveCount(0);
 });
 
-async function openAsyncQuestion(page: import("@playwright/test").Page, index = 0) {
-  // The scroll-to-bottom affordance can cover the middle of the last row in a
-  // narrow BTW pane. Use the card's leading icon hit area, just like a user tap.
-  await page.locator(".async-question-card").nth(index).click({ position: { x: 24, y: 24 } });
-  const dialog = page.getByRole("dialog", { name: "助手询问", exact: true });
+async function openAsyncQuestion(page: import("@playwright/test").Page, index?: number) {
+  const dialog = page.getByRole("dialog", { name: "Codex 想确认一下", exact: true });
+  const resume = page.locator(".question-resume").filter({ hasText: /等待你回答|回答提交中/ });
+  await expect.poll(async () => await dialog.isVisible() || await resume.isVisible()).toBe(true);
+  if (!await dialog.isVisible()) await resume.click();
   await expect(dialog).toBeVisible();
+  if (index !== undefined) {
+    const progress = dialog.locator(".qa-progress");
+    let current = Number((await progress.textContent())?.split("/")[0].trim() ?? "1") - 1;
+    while (current !== index) {
+      await dialog.getByRole("button", { name: current < index ? "下一题" : "上一题" }).click();
+      current += current < index ? 1 : -1;
+    }
+  }
   return dialog;
 }
 
@@ -3010,47 +3018,36 @@ const ASYNC_HISTORY_TURN = {
   id: "async-user", prompt: "继续修复", done: true, detailLoaded: true,
   forkPointId: "async-task", blocks: [{ kind: "text", message_id: "async-item",
     text: "在哪个设备发生？用的是什么手势？", channel: "final", done: true,
-    delivery: "async", questions: ASYNC_QUESTIONS }],
+    delivery: "async", questions: [ASYNC_QUESTIONS[1]] }],
 };
 
 const TEST_GENERATED_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j6RkAAAAASUVORK5CYII=";
 
-test("async question compact styling shows each question once on desktop and mobile", async ({ page }, testInfo) => {
-  const title = "这几次恢复，是你在板子失联后手动重启或断电的吗？失联前是否也有主动重启或改 IP？这能帮助区分程序触发的故障与外部操作。";
+test("async question compact styling matches the shared dialog on desktop and mobile", async ({ page }, testInfo) => {
+  const title = "这几次恢复，是你在板子失联后手动重启或断电的吗？失联前是否主动重启或改 IP？";
   await mockRightPanelRelay(page, { seedTurns: [{
     ...ASYNC_HISTORY_TURN, blocks: [{ ...ASYNC_HISTORY_TURN.blocks[0],
       text: title, questions: [{ title, options: null }] }],
   }] });
   await page.goto("/");
-  const entry = page.locator(".async-question-card");
-  await expect(entry).toBeVisible();
-  expect((await entry.boundingBox())!.height).toBeLessThan(110);
-  await expect(page.getByRole("dialog", { name: "助手询问" })).toHaveCount(0);
-  const card = await openAsyncQuestion(page);
-  await expect(card).toBeVisible();
-  const metrics = await card.evaluate((node) => ({
-    width: node.getBoundingClientRect().width,
-    height: node.getBoundingClientRect().height,
-    overflow: node.scrollWidth - node.clientWidth,
-    weight: Number(getComputedStyle(node.querySelector("legend")!).fontWeight),
-  }));
-  expect(metrics.width).toBeLessThanOrEqual(560);
-  expect(metrics.height).toBeLessThan(page.viewportSize()!.height);
-  expect(metrics.overflow).toBeLessThanOrEqual(1);
-  expect(metrics.weight).toBeLessThan(600);
-  expect(await card.evaluate(node => parseFloat(getComputedStyle(node).borderRadius))).toBeGreaterThanOrEqual(28);
-  await expect(card).toHaveCSS("border-top-width", "1px");
-  await card.getByLabel("你的回答", { exact: true }).fill("三指拖拽");
+  const dialog = await openAsyncQuestion(page);
+  await expect(page.locator(".async-question-card")).toHaveCount(0);
+  await expect(dialog.locator(".engine-brand-icon.codex")).toHaveCount(1);
+  await expect(dialog.getByText(title, { exact: true })).toHaveCount(1);
+  const bounds = (await dialog.boundingBox())!;
+  expect(bounds.width).toBeLessThanOrEqual(560);
+  expect(bounds.y).toBeGreaterThanOrEqual(0);
+  expect(bounds.y + bounds.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+  expect(await dialog.evaluate(node => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1);
+  await expect(dialog).toHaveCSS("border-radius", "24px");
+  await expect(dialog.getByRole("textbox")).not.toBeFocused();
+  await dialog.getByRole("textbox").fill("三指拖拽");
   await page.screenshot({ path: testInfo.outputPath("async-question-compact.png") });
   await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
   await page.screenshot({ path: testInfo.outputPath("async-question-compact-dark.png") });
-  await expect(card.getByText(title, { exact: true })).toHaveCount(1);
-  await expect(card.locator("details, .async-question-source, .async-question-original")).toHaveCount(0);
-  await expect(card).not.toContainText("原始提问");
-  await expect(card).not.toContainText("发送后将开始新一轮对话");
-  await expect(card.locator(".async-question-footer .async-question-hint")).toHaveCount(0);
-  expect(await card.getAttribute("aria-describedby")).toBeNull();
-  await expect(card.getByLabel("你的回答", { exact: true })).toHaveValue("三指拖拽");
+  await expect(dialog.locator("details, .async-question-source, .async-question-original")).toHaveCount(0);
+  await expect(dialog.locator(".async-question-hint")).toHaveCount(0);
+  await expect(dialog.getByRole("textbox")).toHaveValue("三指拖拽");
 });
 
 test("active process text shimmers and readable tool output settles without replaying animation", async ({ page }, info) => {
@@ -3764,50 +3761,29 @@ test("turn regressions daemon update keeps its cause across native history refre
   expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toHaveLength(0);
 });
 
-test("async question first layout keeps optional notes visible with vertical choices and a separate send button", async ({ page }, testInfo) => {
-  const title = "按这版目标开始可行性设计？先确认目标，再逐项验证哪些能做到。";
+test("async question first layout uses rounded cards and preserves a postponed answer", async ({ page }, testInfo) => {
+  const title = "按这版目标开始可行性设计？";
   const relay = await mockRightPanelRelay(page, { seedTurns: [{
     ...ASYNC_HISTORY_TURN, blocks: [{ ...ASYNC_HISTORY_TURN.blocks[0], text: title,
       questions: [{ title, options: ["确认，按这版做可行性设计", "需要调整，我补充说明"] }] }],
   }] });
   await page.goto("/");
-  const card = await openAsyncQuestion(page);
-  await expect(card).toBeVisible();
-  await expect(card.getByRole("textbox")).toBeVisible();
-  await expect(card.getByRole("textbox")).toHaveValue("");
-  await expect(card.getByRole("textbox")).not.toBeFocused();
-  await expect(card.locator(".async-question-notes")).toHaveCount(0);
-  const send = card.getByRole("button", { name: "发送回答", exact: true });
-  await expect(send).toBeEnabled();
-  await expect(send).toHaveCSS("border-top-left-radius", "999px");
-  await expect(card.locator(".async-question-option").first()).toHaveCSS("border-top-left-radius", "999px");
-  await expect(card.locator(".async-question-composer .async-question-send")).toHaveCount(0);
-  const options = card.locator(".async-question-option");
-  const first = await options.nth(0).boundingBox();
-  const second = await options.nth(1).boundingBox();
-  expect(second!.y).toBeGreaterThanOrEqual(first!.y + first!.height);
-  await page.screenshot({ path: testInfo.outputPath("async-question-first-layout.png") });
-  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
-  await page.screenshot({ path: testInfo.outputPath("async-question-first-layout-dark.png") });
-  expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
-  await card.getByRole("radio", { name: "需要调整，我补充说明" }).check();
-  await expect(card.getByRole("textbox")).toBeVisible();
-  // The editor is always visible. Changing a choice neither submits nor steals
-  // focus, and does not discard text that will override the selected option.
-  await expect(card.getByRole("textbox")).not.toBeFocused();
-  expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
-  await card.getByRole("textbox").fill("需要先验证续航。\n不要直接加工。");
-  await card.getByRole("radio", { name: "确认，按这版做可行性设计" }).check();
-  await expect(card.getByRole("textbox")).toBeVisible();
-  await card.getByRole("button", { name: "稍后回答", exact: true }).click();
+  const dialog = await openAsyncQuestion(page);
+  await expect(dialog.getByRole("textbox")).not.toBeFocused();
+  await expect(dialog.getByRole("radio").first()).toBeChecked();
+  await expect(dialog.locator(".async-question-option").first()).toHaveCSS("border-radius", "12px");
+  await expect(dialog.locator(".async-question-option-check")).toHaveCount(0);
+  await dialog.getByRole("radio").nth(1).check();
+  await dialog.getByRole("textbox").fill("需要先验证续航。\n不要直接加工。");
+  await expect(dialog.getByRole("radio").nth(1)).not.toBeChecked();
+  await dialog.getByRole("button", { name: "稍后回答" }).click();
+  await expect(page.locator(".question-resume")).toContainText("等待你回答");
   await openAsyncQuestion(page);
-  await expect(card.getByRole("radio", { name: "确认，按这版做可行性设计" })).toBeChecked();
-  await expect(card.getByRole("textbox")).toHaveValue("需要先验证续航。\n不要直接加工。");
-  await card.getByRole("button", { name: "发送回答", exact: true }).click();
+  await expect(dialog.getByRole("textbox")).toHaveValue("需要先验证续航。\n不要直接加工。");
+  await page.screenshot({ path: testInfo.outputPath("async-question-first-layout.png") });
+  await dialog.getByRole("button", { name: "提交回答" }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
-  const query = relay.commands.find(c => c.type === "query")!;
-  expect(query.prompt).toContain("回答：需要先验证续航。\n不要直接加工。");
-  expect(query.prompt).not.toContain("回答：确认");
+  expect(relay.commands.find(c => c.type === "query")?.prompt).toContain("回答：需要先验证续航。\n不要直接加工。");
 });
 
 test("async question option presses avoid native tap flashes and retain rounded keyboard focus", async ({ page, isMobile }, testInfo) => {
@@ -3823,7 +3799,7 @@ test("async question option presses avoid native tap flashes and retain rounded 
   for (const target of [option, radio]) {
     await expect(target).toHaveCSS("-webkit-tap-highlight-color", "rgba(0, 0, 0, 0)");
   }
-  await expect(option).toHaveCSS("border-top-left-radius", "999px");
+  await expect(option).toHaveCSS("border-top-left-radius", "12px");
   const box = (await radio.boundingBox())!;
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
@@ -3844,16 +3820,16 @@ test("async question option presses avoid native tap flashes and retain rounded 
   // exposes a visible focus ring following the option's rounded shape.
   // Mobile Safari need not focus a radio when tapped. Start the keyboard path
   // from a known control and tab to the selected option on both platforms.
-  await dialog.getByRole("button", { name: "关闭助手询问" }).focus();
+  await dialog.getByRole("button", { name: "忽略当前问题" }).focus();
   await page.keyboard.press("Tab");
   await expect(radio).toBeFocused();
   await expect(option).toHaveCSS("outline-style", "solid");
   await expect(option).toHaveCSS("outline-width", "2px");
-  await expect(option).toHaveCSS("border-top-left-radius", "999px");
+  await expect(option).toHaveCSS("border-top-left-radius", "12px");
   expect(relay.commands.filter(c => ["query", "steer", "answer_question", "interrupt"].includes(String(c.type))))
     .toHaveLength(0);
   // The visible textarea remains optional; an option-only answer still sends.
-  await dialog.getByRole("button", { name: "发送回答" }).click();
+  await dialog.getByRole("button", { name: "提交回答" }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
   expect(relay.commands.find(c => c.type === "query")?.prompt).toBe("补充回答：\n\n问题：在哪个设备发生？\n回答：手机");
 });
@@ -4010,107 +3986,125 @@ test("generated image uses full reply width and remains visible through process 
   await page.screenshot({ path: testInfo.outputPath("generated-image-wide.png") });
 });
 
-test("async question answered presentation survives refresh without rewriting or hiding the user reply", async ({ page }, testInfo) => {
-  const prompt = "补充回答：\n\n问题：在哪个设备发生？\n回答：Mac 浏览器\n\n问题：用的是什么手势？\n回答：三指拖拽\n拖到页面下方";
+test("async question answered presentation preserves the prompt disclosure through refresh", async ({ page }, testInfo) => {
+  const prompt = "补充回答：\n\n问题：用的是什么手势？\n回答：三指拖拽\n拖到页面下方";
   const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN, {
     id: "supplemental-reply", prompt, done: false, blocks: [],
   }] });
   await page.goto("/");
   for (let i = 0; i < 2; i++) {
     if (i) await page.reload();
-    const entry = page.locator(".async-question-card");
-    const card = page.getByRole("dialog", { name: "助手询问", exact: true });
-    await expect(entry).toContainText("已回答");
-    await expect(card.getByRole("textbox")).toHaveCount(0);
     const answer = page.locator(".supplemental-answer");
     await expect(answer).toContainText("三指拖拽\n拖到页面下方");
+    await expect(page.locator(".async-question-card, .question-resume, .async-question-dialog")).toHaveCount(0);
     await expect(answer.locator("details")).not.toHaveAttribute("open");
+    await answer.getByText("查看问题", { exact: true }).click();
+    await expect(answer.getByText("用的是什么手势？", { exact: true })).toBeVisible();
     await answer.locator("summary").click();
-    await expect(answer.getByText("在哪个设备发生？", { exact: true })).toBeVisible();
-    await answer.locator("summary").click();
-    if (i === 1) await page.screenshot({ path: testInfo.outputPath("async-question-answered.png") });
-    await openAsyncQuestion(page);
-    await expect(card.getByRole("textbox")).toHaveCount(2);
-    await card.getByLabel("你的回答", { exact: true }).fill("还没有发送的补充草稿");
-    await card.getByRole("button", { name: "稍后回答", exact: true }).click();
-    const reopen = entry;
-    await expect(card).toHaveCount(0);
-    await expect(card.getByRole("textbox")).toHaveCount(0);
-    await reopen.click();
-    await expect(card.getByLabel("你的回答", { exact: true })).toHaveValue("还没有发送的补充草稿");
-    await card.getByRole("button", { name: "关闭助手询问" }).click();
+    if (i) await page.screenshot({ path: testInfo.outputPath("async-question-answered.png") });
   }
   expect(relay.commands.filter(c => ["query", "steer", "interrupt", "get_turn_detail"].includes(String(c.type)))).toHaveLength(0);
 });
 
-test("async question replay after compaction keeps one answered card in its original row", async ({ page }) => {
-  const prompt = "补充回答：\n\n问题：用的是什么手势？\n回答：已经退出";
-  const turns = [ASYNC_HISTORY_TURN, {
-    id: "answered-steer", prompt, done: false, blocks: [],
+test("async question replay after compaction keeps one prompt disclosure and no duplicate pending question", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN, {
+    id: "answered-steer", prompt: "补充回答：\n\n问题：用的是什么手势？\n回答：已经退出", done: false, blocks: [],
   }, {
     ...ASYNC_HISTORY_TURN, id: "compacted-continuation", prompt: "", done: false,
     blocks: [...ASYNC_HISTORY_TURN.blocks, {
-      kind: "text", message_id: "after-compaction-answer", channel: "final",
-      text: "收到，继续执行。", done: true,
+      kind: "text", message_id: "after-compaction-answer", channel: "final", text: "收到，继续执行。", done: true,
     }],
-  }];
-  const relay = await mockRightPanelRelay(page, { seedTurns: turns });
+  }] });
   await page.goto("/");
-  for (let attempt = 0; attempt < 2; attempt++) {
-    if (attempt) await page.reload();
-    const cards = page.locator(".async-question-card");
-    await expect(cards).toHaveCount(1);
-    await expect(cards).toContainText("已回答");
-    await expect(page.locator('[data-turn-id="async-user"] .async-question-card'))
-      .toHaveCount(1);
-    await expect(page.locator('[data-turn-id="compacted-continuation"] .async-question-card'))
-      .toHaveCount(0);
+  for (let i = 0; i < 2; i++) {
+    if (i) await page.reload();
     await expect(page.locator(".supplemental-answer")).toContainText("已经退出");
     await expect(page.getByText("收到，继续执行。", { exact: true })).toBeVisible();
-    const dialog = await openAsyncQuestion(page);
-    await expect(dialog.locator(".async-question-answered")).toHaveText("已回答");
-    await dialog.getByRole("button", { name: "关闭助手询问" }).click();
+    await expect(page.locator(".async-question-card, .question-resume, .async-question-dialog")).toHaveCount(0);
   }
-  expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type))))
-    .toHaveLength(0);
+  expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toHaveLength(0);
 });
 
-test("async question unanswered draft and choices survive repeated collapse without sending", async ({ page }) => {
+test("async question unanswered drafts navigate freely and survive repeated postponement", async ({ page }, info) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [{ ...ASYNC_HISTORY_TURN,
+    blocks: [{ ...ASYNC_HISTORY_TURN.blocks[0], questions: ASYNC_QUESTIONS }],
+  }] });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  await expect(dialog.locator(".qa-progress")).toHaveText("1 / 2");
+  await dialog.getByRole("radio", { name: "手机", exact: true }).check();
+  await dialog.getByRole("button", { name: "下一题" }).click();
+  await expect(dialog.getByRole("button", { name: "提交回答" })).toBeDisabled();
+  await dialog.getByRole("button", { name: "上一题" }).click();
+  await expect(dialog.getByRole("radio", { name: "手机", exact: true })).toBeChecked();
+  await dialog.getByRole("button", { name: "下一题" }).click();
+  await dialog.getByRole("textbox").fill("选区手柄\n这是保留的草稿");
+  const navigation = (await dialog.locator(".async-question-navigation").boundingBox())!;
+  const actions = (await dialog.locator(".async-question-footer-actions").boundingBox())!;
+  if (info.project.name.includes("webkit")) expect(actions.y).toBeGreaterThanOrEqual(navigation.y + navigation.height);
+  for (let i = 0; i < 2; i++) {
+    await dialog.getByRole("button", { name: "稍后回答" }).click();
+    await expect(page.locator(".question-resume")).toContainText("2 / 2");
+    await openAsyncQuestion(page);
+    await expect(dialog.getByRole("textbox")).toHaveValue("选区手柄\n这是保留的草稿");
+  }
+  await page.screenshot({ path: info.outputPath("async-question-navigation.png") });
+  expect(relay.commands.filter(c => ["query", "steer", "answer_question", "interrupt"].includes(String(c.type)))).toHaveLength(0);
+});
+
+test("async question dismiss removes its waiting entry across refresh without answering", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
   await page.goto("/");
-  const card = await openAsyncQuestion(page);
-  await expect(card).not.toContainText("发送后将开始新一轮对话");
-  await card.getByLabel("手机", { exact: true }).check();
-  await card.getByLabel("你的回答", { exact: true }).fill("选区手柄\n这是保留的草稿");
-  for (let i = 0; i < 2; i++) {
-    await card.getByRole("button", { name: "稍后回答", exact: true }).click();
-    await expect(card.getByRole("textbox")).toHaveCount(0);
-    await expect(page.locator(".async-question-card")).toContainText("待回答");
-    await openAsyncQuestion(page);
-    await expect(card.getByLabel("手机", { exact: true })).toBeChecked();
-    await expect(card.getByLabel("你的回答", { exact: true })).toHaveValue("选区手柄\n这是保留的草稿");
-  }
-  expect(relay.commands.filter(c => ["query", "steer", "answer_question", "interrupt"].includes(String(c.type))))
-    .toHaveLength(0);
+  const dialog = await openAsyncQuestion(page);
+  await dialog.getByRole("textbox").fill("这一题不回答");
+  await dialog.getByRole("button", { name: "忽略当前问题" }).click();
+  await expect(page.locator(".async-question-dialog, .question-resume, .async-question-card")).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByText("session layout-p", { exact: true })).toBeAttached();
+  await expect.poll(() => relay.commands.filter(c => c.type === "get_history").length).toBeGreaterThanOrEqual(2);
+  await expect(page.locator(".async-question-dialog, .question-resume, .async-question-card")).toHaveCount(0);
+  expect(relay.commands.filter(c => ["query", "steer", "answer_question", "interrupt"].includes(String(c.type)))).toHaveLength(0);
 });
 
-test("async question dialog keeps independent drafts and restores keyboard focus", async ({ page }, testInfo) => {
+test("async question can answer the next page first and retire only that accepted question", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [{ ...ASYNC_HISTORY_TURN,
+    blocks: [{ ...ASYNC_HISTORY_TURN.blocks[0], questions: ASYNC_QUESTIONS }],
+  }] });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  await dialog.getByRole("button", { name: "下一题" }).click();
+  await dialog.getByRole("textbox").fill("三指拖拽");
+  await dialog.getByRole("button", { name: "提交回答" }).click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
+  const query = relay.commands.find(c => c.type === "query")!;
+  expect(query.prompt).toBe("补充回答：\n\n问题：用的是什么手势？\n回答：三指拖拽");
+  relay.emit({ type: "user_msg", sid: String(query.sid), msg_id: String(query.msg_id), prompt: String(query.prompt) });
+  await expect(dialog.locator("legend")).toHaveText("在哪个设备发生？");
+  await expect(dialog.locator(".qa-progress")).toHaveCount(0);
+  await expect(page.locator(".supplemental-answer")).toContainText("三指拖拽");
+  await expect(page.locator(".async-question-card")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "忽略当前问题" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toHaveCount(0);
+  await page.locator(".supplemental-answer summary").click();
+  await expect(page.locator(".supplemental-answer-context")).toContainText("用的是什么手势？");
+});
+
+test("async question dialog keeps independent drafts across native messages and traps keyboard focus", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { seedTurns: [{ ...ASYNC_HISTORY_TURN,
     blocks: [ASYNC_HISTORY_TURN.blocks[0], { ...ASYNC_HISTORY_TURN.blocks[0], message_id: "other-question" }],
   }] });
   await page.goto("/");
   const dialog = await openAsyncQuestion(page);
-  await dialog.getByLabel("你的回答", { exact: true }).fill("第一个问题的草稿");
+  await dialog.getByRole("textbox").fill("第一个问题的草稿");
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
-  if (testInfo.project.name === "chromium") await expect(page.locator(".async-question-card").first()).toBeFocused();
+  await expect(page.locator(".question-resume")).toBeFocused();
   await openAsyncQuestion(page, 1);
-  await expect(dialog.getByLabel("你的回答", { exact: true })).toHaveValue("");
-  await dialog.getByLabel("你的回答", { exact: true }).fill("第二个问题的草稿");
-  await dialog.getByRole("button", { name: "关闭助手询问" }).click();
-  await openAsyncQuestion(page);
-  await expect(dialog.getByLabel("你的回答", { exact: true })).toHaveValue("第一个问题的草稿");
-  // The native modal owns focus; tabbing cannot activate the main composer.
+  await expect(dialog.getByRole("textbox")).toHaveValue("");
+  await dialog.getByRole("textbox").fill("第二个问题的草稿");
+  await dialog.getByRole("button", { name: "上一题" }).click();
+  await expect(dialog.getByRole("textbox")).toHaveValue("第一个问题的草稿");
   for (let i = 0; i < 9; i++) {
     await page.keyboard.press("Tab");
     expect(await dialog.evaluate(node => node.contains(document.activeElement))).toBe(true);
@@ -4121,7 +4115,9 @@ test("async question dialog keeps independent drafts and restores keyboard focus
 });
 
 test("async question dialog fits a keyboard-sized viewport without moving into a side panel", async ({ page }, testInfo) => {
-  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
+  const relay = await mockRightPanelRelay(page, { seedTurns: [{ ...ASYNC_HISTORY_TURN, blocks: [{ ...ASYNC_HISTORY_TURN.blocks[0],
+    questions: [{ title: "请说明发生问题时的具体操作、网络和设备情况。".repeat(24), options: null }],
+  }] }] });
   await page.goto("/");
   const dialog = await openAsyncQuestion(page);
   await dialog.getByLabel("你的回答", { exact: true }).fill("保留输入中的草稿");
@@ -4141,8 +4137,8 @@ test("async question dialog fits a keyboard-sized viewport without moving into a
   expect(await dialog.evaluate(node => node.parentElement === document.body)).toBe(true);
   const box = (await dialog.boundingBox())!;
   expect(Math.abs(box.x + box.width / 2 - page.viewportSize()!.width / 2)).toBeLessThan(2);
-  await expect(dialog.getByRole("button", { name: "发送回答" })).toBeInViewport();
-  await expect(dialog.getByRole("button", { name: "关闭助手询问" })).toBeInViewport();
+  await expect(dialog.getByRole("button", { name: "提交回答" })).toBeInViewport();
+  await expect(dialog.getByRole("button", { name: "稍后回答" })).toBeInViewport();
   const body = dialog.locator(".async-question-body");
   expect(await body.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
   await expect(dialog.getByLabel("你的回答", { exact: true })).toBeInViewport({ ratio: 1 });
@@ -4166,7 +4162,7 @@ test("async question dialog omits raw source previews and preserves its draft on
   await expect(dialog.locator("details, .async-question-source, .async-question-original")).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: "在 Remote 中打开 /tmp/proposal.md" })).toHaveCount(0);
   await dialog.getByLabel("你的回答", { exact: true }).fill("保留的回答草稿");
-  await dialog.getByRole("button", { name: "关闭助手询问" }).click();
+  await dialog.getByRole("button", { name: "稍后回答" }).click();
   await expect(dialog).toHaveCount(0);
   await openAsyncQuestion(page);
   await expect(dialog.getByLabel("你的回答", { exact: true })).toHaveValue("保留的回答草稿");
@@ -4186,30 +4182,32 @@ test("async question dialog survives source row virtualization without losing it
   // the normal scroll ownership path so the old reader anchor can be released.
   await page.locator(".thread").dispatchEvent("wheel", { deltaY: -1000 });
   await pauseOutputAndScrollToHistoryStart(page);
-  await expect(page.locator(".async-question-card")).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   await expect(dialog).toBeVisible();
   await expect(dialog.getByLabel("你的回答", { exact: true })).toHaveValue("虚拟列表外也要保留");
-  await dialog.getByRole("button", { name: "发送回答" }).click();
+  await dialog.getByRole("button", { name: "提交回答" }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
   expect(relay.commands.find(c => c.type === "query")?.prompt).toContain("虚拟列表外也要保留");
   expect(relay.commands.find(c => c.type === "query")?.sid).toBe("layout-parent");
 });
 
-test("async question dialog closes on a session switch and never leaks drafts", async ({ page }) => {
+test("async question dialog switches sessions with independently retained drafts", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN], secondParent: true });
   await page.goto("/");
   const dialog = await openAsyncQuestion(page);
-  await dialog.getByLabel("你的回答", { exact: true }).fill("只属于当前会话的草稿");
-  // Drive an explicit navigation intent through the real sidebar handler.
-  // Unsolicited remote focus frames are correctly ignored by the WS client.
+  await dialog.getByRole("textbox").fill("只属于当前会话的草稿");
+  await dialog.getByRole("button", { name: "稍后回答" }).click();
   await page.getByText("Second parent", { exact: true }).evaluate(node => (node as HTMLElement).click());
   await expect(page.getByText("session layout-o", { exact: true })).toBeAttached();
-  await expect(dialog).toHaveCount(0);
   await openAsyncQuestion(page);
-  await expect(dialog.getByLabel("你的回答", { exact: true })).toHaveValue("");
+  await expect(dialog.getByRole("textbox")).toHaveValue("");
+  await dialog.getByRole("textbox").fill("第二个会话的草稿");
+  await dialog.getByRole("button", { name: "稍后回答" }).click();
+  await page.getByText("Layout parent", { exact: true }).evaluate(node => (node as HTMLElement).click());
+  await openAsyncQuestion(page);
+  await expect(dialog.getByRole("textbox")).toHaveValue("只属于当前会话的草稿");
   expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toHaveLength(0);
 });
-
 test("async question dialog retains an IME draft when control becomes read-only", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
   await page.goto("/");
@@ -4227,7 +4225,7 @@ test("async question dialog retains an IME draft when control becomes read-only"
   await expect(input).toHaveValue("三指拖拽的补充");
   await expect(dialog).toContainText("当前会话暂不可写，回答草稿会保留");
   expect(await dialog.getAttribute("aria-describedby")).toBeTruthy();
-  await expect(dialog.getByRole("button", { name: "发送回答" })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "提交回答" })).toBeDisabled();
   await dialog.getByRole("button", { name: "稍后回答" }).click();
   await openAsyncQuestion(page);
   await expect(input).toHaveValue("三指拖拽的补充");
@@ -4463,36 +4461,27 @@ test("external preview replacement stops automatic grant retries and allows a fr
   expect(relay.commands.filter(c => c.type === "get_file_preview")).toHaveLength(4);
 });
 
-test("async question history restores a nonblocking card and replies through the scoped query outbox", async ({ page }) => {
+test("async question history restores the nonblocking dialog and confirms only its scoped answer", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
   await page.goto("/");
-  const entry = page.locator(".async-question-card");
-  const card = page.getByRole("dialog", { name: "助手询问", exact: true });
-  await expect(entry).toBeVisible();
-  await expect(page.getByRole("dialog", { name: "操作确认" })).toHaveCount(0);
-  // This is server-backed History, not a local pendingQuestion or replay ring.
-  await page.reload();
-  await expect(entry).toBeVisible();
   await openAsyncQuestion(page);
-  await expect(card).not.toContainText("发送后将开始新一轮对话");
-  await expect(card.getByLabel("Mac", { exact: true })).toBeChecked();
-  await expect(card.getByLabel("其他回答（填写后替代选项）")).toBeVisible();
-  await card.getByLabel("其他回答（填写后替代选项）").fill("Mac 浏览器");
-  await card.getByLabel("你的回答", { exact: true }).fill("三指拖拽");
-  await card.getByLabel("你的回答", { exact: true }).press("Shift+Enter");
-  expect(relay.commands.filter((c) => c.type === "query")).toHaveLength(0);
-  await card.getByRole("button", { name: "发送回答" }).click();
-  await expect.poll(() => relay.commands.filter((c) => c.type === "query").length).toBe(1);
-  const query = relay.commands.find((c) => c.type === "query")!;
+  await page.reload();
+  const dialog = await openAsyncQuestion(page);
+  await expect(page.getByRole("dialog", { name: "操作确认" })).toHaveCount(0);
+  await dialog.getByRole("textbox").fill("三指拖拽");
+  await dialog.getByRole("textbox").press("Shift+Enter");
+  expect(relay.commands.filter(c => c.type === "query")).toHaveLength(0);
+  await dialog.getByRole("button", { name: "提交回答" }).click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
+  const query = relay.commands.find(c => c.type === "query")!;
   expect(query.sid).toBe("layout-parent");
-  expect(query.prompt).toContain("回答：Mac 浏览器");
   expect(query.prompt).toContain("回答：三指拖拽");
-  expect(relay.commands.filter((c) => ["interrupt", "answer_question", "steer"].includes(String(c.type))))
-    .toHaveLength(0);
-  await expect(card.getByRole("button", { name: "等待确认" })).toBeDisabled();
-  await expect(entry).toContainText("待回答");
+  await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
   relay.emit({ type: "user_msg", sid: String(query.sid), msg_id: String(query.msg_id), prompt: String(query.prompt) });
-  await expect(card).toHaveCount(0);
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".async-question-card, .question-resume")).toHaveCount(0);
+  await expect(page.locator(".supplemental-answer")).toContainText("查看问题");
+  expect(relay.commands.filter(c => ["interrupt", "answer_question", "steer"].includes(String(c.type)))).toHaveLength(0);
 });
 
 test("async question summary keeps its ordinary answer visible after refresh without detail loading", async ({ page }) => {
@@ -4506,10 +4495,12 @@ test("async question summary keeps its ordinary answer visible after refresh wit
     }],
   }] });
   await page.goto("/");
-  await expect(page.locator(".async-question-card")).toHaveCount(1);
+  await openAsyncQuestion(page);
+  await page.getByRole("button", { name: "稍后回答", exact: true }).click();
   await expect(page.getByText(answer, { exact: true })).toBeVisible();
   await page.reload();
-  await expect(page.locator(".async-question-card")).toHaveCount(1);
+  await openAsyncQuestion(page);
+  await page.getByRole("button", { name: "稍后回答", exact: true }).click();
   await expect(page.getByText(answer, { exact: true })).toHaveCount(1);
   await expect(page.getByText(answer, { exact: true })).toBeVisible();
   expect(relay.commands.filter((c) => ["query", "steer", "get_turn_detail"].includes(String(c.type))))
@@ -4601,10 +4592,10 @@ test("async question live delivery preserves running state and uses steer instea
   relay.emit({ type: "delta", sid, message_id: "async-item", turn_id: "async-task", channel: "final", text: "在哪个设备发生？" });
   for (let i = 0; i < 2; i++) relay.emit({ type: "assistant_msg_end", sid,
     message_id: "async-item", turn_id: "async-task", channel: "final",
-    delivery: "async", questions: ASYNC_QUESTIONS });
+    delivery: "async", questions: [ASYNC_QUESTIONS[1]] });
   const card = await openAsyncQuestion(page);
   await expect(card).toHaveCount(1);
-  await expect(card).toContainText("补充会发送给当前任务，不会中断执行");
+  await expect(card.locator(".async-question-hint")).toHaveCount(0);
   await expect(card).not.toContainText("发送后将开始新一轮对话");
   await card.getByLabel("你的回答", { exact: true }).fill("三指拖拽");
   await card.getByLabel("你的回答", { exact: true }).press("Enter");
@@ -4704,7 +4695,7 @@ test("async question keyboard sends with Enter, keeps Shift+Enter newlines and d
   expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
   await input.press("Escape");
   await expect(dialog).toHaveCount(0);
-  await expect(page.locator(".async-question-card")).toContainText("待回答");
+  await expect(page.locator(".question-resume")).toBeVisible();
   await openAsyncQuestion(page);
   await expect(input).toHaveValue("第一行\n第二行");
   await input.press("Enter");
@@ -4759,12 +4750,12 @@ test("async question completion updates reply mode while preserving a collapsed 
   relay.emit({ type: "assistant_msg_end", sid, message_id: "async-item", turn_id: "async-task", channel: "final",
     delivery: "async", questions: [{ title: "用的是什么手势？", options: null }] });
   const card = await openAsyncQuestion(page);
-  await expect(card).toContainText("补充会发送给当前任务，不会中断执行");
+  await expect(card.locator(".async-question-hint")).toHaveCount(0);
   await card.getByLabel("你的回答", { exact: true }).fill("三指拖拽");
   await card.getByRole("button", { name: "稍后回答", exact: true }).click();
   relay.emit({ type: "turn_end", sid, turn_id: "async-task", result: { subtype: "success", is_error: false } });
   relay.emit({ type: "state", sid, state: "idle" });
-  await expect(page.locator(".async-question-card")).toBeVisible();
+  await expect(page.locator(".question-resume")).toBeVisible();
   await expect(card.getByRole("textbox")).toHaveCount(0);
   await openAsyncQuestion(page);
   await expect(card.getByLabel("你的回答", { exact: true })).toHaveValue("三指拖拽");
@@ -4772,7 +4763,7 @@ test("async question completion updates reply mode while preserving a collapsed 
   await expect(card.locator(".async-question-footer .async-question-hint")).toHaveCount(0);
   expect(await card.getAttribute("aria-describedby")).toBeNull();
   await expect(card).not.toContainText("不会中断执行");
-  await card.getByRole("button", { name: "发送回答" }).click();
+  await card.getByRole("button", { name: "提交回答" }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
   expect(relay.commands.filter(c => ["steer", "interrupt", "answer_question"].includes(String(c.type)))).toHaveLength(0);
   await expect(card.getByRole("button", { name: "等待确认" })).toBeDisabled();
@@ -4785,7 +4776,7 @@ test("async question completion updates reply mode while preserving a collapsed 
   const query = relay.commands.find(c => c.type === "query")!;
   relay.emit({ type: "user_msg", sid, msg_id: String(query.msg_id), prompt: String(query.prompt) });
   await expect(card).toHaveCount(0);
-  await expect(page.locator(".async-question-card")).toContainText("已回答");
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   expect(relay.commands.filter(c => c.type === "query")).toHaveLength(1);
 });
 
@@ -4795,7 +4786,7 @@ test("async question rejected at turn completion keeps the answer and retries th
   const dialog = await openAsyncQuestion(page);
   const sid = "layout-parent";
   relay.emit({ type: "state", sid, state: "running" });
-  await expect(dialog).toContainText("补充会发送给当前任务");
+  await expect(dialog.locator(".async-question-hint")).toHaveCount(0);
   const input = dialog.getByLabel("你的回答", { exact: true });
   await input.fill("项目在这台设备的工作目录里");
   await input.press("Enter");
@@ -4806,14 +4797,14 @@ test("async question rejected at turn completion keeps the answer and retries th
   relay.emit({ type: "error", sid, msg_id: "different-answer", code: "not_steerable", message: "unrelated" });
   await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
   await expect(input).toHaveValue("项目在这台设备的工作目录里");
-  await expect(page.locator(".async-question-card")).toContainText("待回答");
+  await expect(dialog).toBeVisible();
   relay.emit({ type: "state", sid, state: "idle" });
   relay.emit({ type: "error", sid, msg_id: String(steer.msg_id), code: "not_steerable",
     message: "Codex 任务已结束，本次引导未发送。" });
   await expect(dialog.getByRole("status")).toHaveText("当前任务已结束，本次引导未发送。请重试以开始新一轮对话。");
   await expect(input).toBeEnabled();
   await expect(input).toHaveValue("项目在这台设备的工作目录里");
-  await expect(page.locator(".async-question-card")).toContainText("待回答");
+  await expect(dialog).toBeVisible();
   await input.press("Enter");
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
   const query = relay.commands.find(c => c.type === "query")!;
@@ -4823,7 +4814,7 @@ test("async question rejected at turn completion keeps the answer and retries th
   await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
   relay.emit({ type: "user_msg", sid, msg_id: String(query.msg_id), prompt: String(query.prompt) });
   await expect(dialog).toHaveCount(0);
-  await expect(page.locator(".async-question-card")).toContainText("已回答");
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   expect(relay.commands.filter(c => c.type === "steer")).toHaveLength(1);
   expect(relay.commands.filter(c => c.type === "interrupt")).toHaveLength(0);
 });
@@ -4833,7 +4824,7 @@ test("async question acceptance recovered from history closes the reopened pendi
   await page.goto("/");
   const dialog = await openAsyncQuestion(page);
   await dialog.getByLabel("你的回答", { exact: true }).fill("保留到确认收到");
-  await dialog.getByRole("button", { name: "发送回答" }).click();
+  await dialog.getByRole("button", { name: "提交回答" }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
   const query = relay.commands.find(c => c.type === "query")!;
   await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
@@ -4846,7 +4837,7 @@ test("async question acceptance recovered from history closes the reopened pendi
     turns: [ASYNC_HISTORY_TURN, { id: "native-recovered-reply", clientMsgId: String(query.msg_id),
       prompt: String(query.prompt), done: false, blocks: [] }] });
   await expect(dialog).toHaveCount(0);
-  await expect(page.locator(".async-question-card")).toContainText("已回答");
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   expect(relay.commands.filter(c => c.type === "query")).toHaveLength(1);
 });
 
@@ -4855,20 +4846,20 @@ test("async question unknown steer outcome keeps the draft and prevents duplicat
   await page.goto("/");
   const dialog = await openAsyncQuestion(page);
   relay.emit({ type: "state", sid: "layout-parent", state: "running" });
-  await expect(dialog).toContainText("补充会发送给当前任务");
+  await expect(dialog.locator(".async-question-hint")).toHaveCount(0);
   await dialog.getByLabel("你的回答", { exact: true }).fill("只发一次");
-  await dialog.getByRole("button", { name: "发送回答" }).click();
+  await dialog.getByRole("button", { name: "提交回答" }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "steer").length).toBe(1);
   const steer = relay.commands.find(c => c.type === "steer")!;
   relay.emit({ type: "error", sid: "layout-parent", msg_id: String(steer.msg_id),
     code: "steer_outcome_unknown", message: "private transport detail" });
   await expect(dialog.getByRole("status")).toHaveText("引导已发出，尚未确认是否生效。请先查看后续结果。");
   await expect(dialog.getByLabel("你的回答", { exact: true })).toHaveValue("只发一次");
-  await expect(dialog.getByRole("button", { name: "发送回答" })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "提交回答" })).toBeDisabled();
   await dialog.getByRole("form").evaluate((form: HTMLFormElement) => form.requestSubmit());
   await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
   await openAsyncQuestion(page);
-  await expect(dialog.getByRole("button", { name: "发送回答" })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "提交回答" })).toBeDisabled();
   expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(1);
 });
 
@@ -4884,7 +4875,7 @@ test("async question does not mistake a queued submission for a confirmed answer
   await input.press("Enter");
   await expect(dialog.getByRole("status")).toHaveText("当前会话暂不可写，回答已保留，请稍后重试。");
   await expect(input).toHaveValue("这条回答不能被替换或重复排队");
-  await expect(page.locator(".async-question-card")).toContainText("待回答");
+  await expect(dialog).toBeVisible();
   expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
 });
 
@@ -4897,14 +4888,15 @@ test("async question from a hidden side chat never steals the main view", async 
   relay.emit({ type: "assistant_msg_start", sid, message_id: "async-item", channel: "final" });
   relay.emit({ type: "delta", sid, message_id: "async-item", channel: "final", text: "在哪个设备发生？" });
   relay.emit({ type: "assistant_msg_end", sid, message_id: "async-item", channel: "final",
-    delivery: "async", questions: ASYNC_QUESTIONS });
-  await expect(page.locator(".async-question-card")).toHaveCount(0);
+    delivery: "async", questions: [ASYNC_QUESTIONS[1]] });
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   await expect(page.locator(".btw-panel")).toHaveCount(0);
   await page.keyboard.press("Control+Shift+k");
-  await expect(page.locator(".btw-panel .async-question-card")).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Codex 想确认一下", exact: true })).toBeVisible();
   const card = await openAsyncQuestion(page);
   await expect(card).toBeVisible();
-  await card.getByRole("button", { name: "发送回答" }).click();
+  await card.getByRole("textbox").fill("手机");
+  await card.getByRole("button", { name: "提交回答" }).click();
   await expect.poll(() => relay.commands.filter((c) => c.type === "steer").length).toBe(1);
   expect(relay.commands.find((c) => c.type === "steer")?.sid).toBe(sid);
 });
@@ -4932,13 +4924,13 @@ for (const sideChat of [false, true]) {
         relay.emit({ type: "delta", sid: "btw-layout-child", message_id,
           text: "需要补充信息", channel: "final", seq: seq++ });
         relay.emit({ type: "assistant_msg_end", sid: "btw-layout-child", message_id,
-          channel: "final", delivery: "async", questions: ASYNC_QUESTIONS, seq: seq++ });
+          channel: "final", delivery: "async", questions: [ASYNC_QUESTIONS[1]], seq: seq++ });
       }
       relay.emit({ type: "state", sid: "btw-layout-child", state: "idle", seq: seq++ });
     }
-    const entries = page.locator(".async-question-card");
-    await expect(entries).toHaveCount(2);
+    await expect(page.locator(".async-question-card")).toHaveCount(0);
     const dialog = await openAsyncQuestion(page);
+    await dialog.getByRole("textbox").fill("只发第一条回答");
     await dialog.getByRole("form").evaluate((form: HTMLFormElement) => {
       form.requestSubmit();
       form.requestSubmit();
@@ -4948,7 +4940,7 @@ for (const sideChat of [false, true]) {
     await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
     await expect(dialog).toHaveCount(0);
     await openAsyncQuestion(page, 1);
-    await expect(dialog.getByRole("button", { name: "发送回答" })).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: "提交回答" })).toBeDisabled();
     await dialog.getByRole("form").evaluate((form: HTMLFormElement) => form.requestSubmit());
     expect(relay.commands.filter(c => c.type === "query")).toHaveLength(1);
     const query = relay.commands.find((c) => c.type === "query")!;
@@ -4956,7 +4948,9 @@ for (const sideChat of [false, true]) {
     expect(query.delivery).not.toBe("replace");
     expect(relay.commands.some((c) => c.type === "interrupt")).toBe(false);
     relay.emit({ type: "user_msg", sid: String(query.sid), msg_id: String(query.msg_id), prompt: String(query.prompt) });
-    await expect(dialog.getByRole("button", { name: "发送回答" })).toBeEnabled();
+    await expect(dialog.getByRole("textbox")).toBeEnabled();
+    await dialog.getByRole("textbox").fill("第二条回答的草稿");
+    await expect(dialog.getByRole("button", { name: "提交回答" })).toBeEnabled();
     await expect(dialog).toBeVisible(); // The first question's late receipt cannot close the second.
   });
 }

@@ -64,6 +64,7 @@ class RelayHub:
         self._on_live_turn_end = on_live_turn_end
         self._on_live_ask_user = on_live_ask_user
         self._event_tasks: set[asyncio.Task[None]] = set()
+        self._question_notifications: OrderedDict[tuple, None] = OrderedDict()
         # Preserve the original attributes as the default-machine fast path and
         # test/integration compatibility surface.
         self._wrapper_ws: Optional[WebSocket] = None
@@ -382,14 +383,25 @@ class RelayHub:
             await self._broadcast(msg, machine_id)
         # Replay is routed to one client via ``to`` and must never generate a
         # second notification. Only a new live completion or question reaches it.
+        question = (msg.type == "ask_user" or (msg.type == "assistant_msg_end"
+                    and getattr(msg, "delivery", None) == "async"
+                    and bool(getattr(msg, "questions", None))))
         notification_hook = (self._on_live_turn_end if msg.type == "turn_end"
-                             else self._on_live_ask_user if msg.type == "ask_user" else None)
+                             else self._on_live_ask_user if question else None)
         if (
             not to
             and not owner_id
             and getattr(msg, "notification_context", None) is not None
             and notification_hook is not None
         ):
+            if question:
+                key = (machine_id, msg.sid, msg.type,
+                       getattr(msg, "ask_id", None) or getattr(msg, "message_id", None))
+                if key in self._question_notifications:
+                    return
+                self._question_notifications[key] = None
+                if len(self._question_notifications) > 1024:
+                    self._question_notifications.popitem(last=False)
             task = asyncio.create_task(notification_hook(machine_id, msg))
             self._event_tasks.add(task)
             task.add_done_callback(self._event_task_done)

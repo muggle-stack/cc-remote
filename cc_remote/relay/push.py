@@ -291,17 +291,22 @@ def _session_payload(
     )
     return {
         "title": display_name or f"{engine_label} 会话",
-        "body": _SESSION_BODIES[outcome].format(engine=engine_label),
+        "body": ("Codex 想确认一下" if outcome == "question"
+                 and context.get("async_question") and engine == "codex"
+                 else _SESSION_BODIES[outcome].format(engine=engine_label)),
         "tag": tag,
         "url": f"/#notification={encoded_route}",
         "route": route,
     }
 
 
-def _generic_payload(outcome: PushOutcome, tag: str) -> dict[str, object]:
+def _generic_payload(outcome: PushOutcome, tag: str,
+                     context: Mapping[str, object] | None = None) -> dict[str, object]:
+    async_question = (outcome == "question" and context is not None
+                      and context.get("async_question") and context.get("engine") == "codex")
     return {
-        "title": "cc-remote",
-        "body": _PUSH_BODIES[outcome],
+        "title": "Codex 想确认一下" if async_question else "cc-remote",
+        "body": "远程会话有一个问题待回答" if async_question else _PUSH_BODIES[outcome],
         "tag": tag,
         "url": "/",
     }
@@ -368,7 +373,7 @@ class PushDispatcher:
         # notification without exposing machine/session ids in generic mode.
         tag = f"cc-remote-{'question' if outcome == 'question' else 'turn'}-{secrets.token_hex(8)}"
         subscriptions = await self.store.for_machine(machine_id)
-        generic = _generic_payload(outcome, tag)
+        generic = _generic_payload(outcome, tag, context)
         session = _session_payload(machine_id, outcome, tag, context)
         results = await asyncio.gather(
             *(

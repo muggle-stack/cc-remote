@@ -95,15 +95,12 @@ import { mergeDetailWithLiveTail } from "../history-merge";
 import { presentAsyncQuestionReplies } from "../async-question-presentation";
 import { bookmarkedReadingNode, captureReadingBookmark, captureReadingPosition, readingPositionDelta, type ReadingPosition } from "../reading-position";
 import type { ChatReadingState } from "../chat-reading-memory";
-import type { QueryAcceptanceResult } from "../outbox";
 import type { DshApiClient } from "../dsh-api";
 import { DshRecommendation } from "./DshRecommendations";
 import { recommendationTurn, useDshRecommendations } from "../dsh-recommendations";
 
 const SessionMessageLinks = lazy(() => import("./SessionMessageLinks"));
 const DshProducedFiles = lazy(() => import("./DshProducedFiles"));
-const AsyncQuestionCard = lazy(() => import("./AsyncQuestionCard"));
-const AsyncQuestionHost = lazy(() => import("./AsyncQuestionDialog"));
 const PagePreviewLinks = lazy(() => import("./PagePreviewLinks").then((module) => ({ default: module.PagePreviewLinks })));
 
 const WHEEL_GESTURE_IDLE_MS = 180;
@@ -336,7 +333,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   historyCursor: incomingHistoryCursor = null,
   browseMode: incomingBrowseMode = false, hasNewer: incomingHasNewer = false,
   onLoadMore, onLoadNewer, onReturnLatest, onPrefetchOlder,
-  onLoadDetail, onEdit, onRewind, onReplyAsyncQuestion, asyncReplyMode, pendingReplyId, onOpenTurnDiff, onOpenArchivedDiff, onLoadFilePage, onPreviewMarkdown, onOpenFile,
+  onLoadDetail, onEdit, onRewind, pendingReplyId, onOpenTurnDiff, onOpenArchivedDiff, onLoadFilePage, onPreviewMarkdown, onOpenFile,
   onOpenArtifacts, onFork, forkingPointId, imageAssets, onLoadImage,
   onAuthorizeImage,
   historyImageAssets, onLoadHistoryImage,
@@ -385,8 +382,6 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   ) => boolean;
   onEdit?: (prompt: string) => void;
   onRewind?: (turn: Turn) => void;
-  onReplyAsyncQuestion?: (prompt: string) => Promise<QueryAcceptanceResult> | null;
-  asyncReplyMode?: "query" | "steer";
   pendingReplyId?: string | null;
   onGetDiff?: (file: string) => void;
   onOpenTurnDiff?: (files: string[], diff: string) => void;
@@ -579,11 +574,6 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
     windowEpoch: historyWindowEpoch,
   } = scopedPresentedHistory;
   const supplemental = useMemo(() => presentAsyncQuestionReplies(turns, pendingReplyId), [turns, pendingReplyId]);
-  const asyncQuestionScope = JSON.stringify([historyScopeKey ?? "", sid]);
-  const [openAsyncQuestion, setOpenAsyncQuestion] = useState<{
-    scope: string; messageId: string | null;
-  } | null>(null);
-  useLayoutEffect(() => { setOpenAsyncQuestion(null); }, [asyncQuestionScope]);
   turnImagePreviewCacheRef.current.update(sid, turns);
 
   useLayoutEffect(() => {
@@ -2957,8 +2947,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
             const activeTimeline = activeProcess
               || foregroundProcessItems.some((block) => !block.done);
             const finalBlocks = finalTextBlocks(t.blocks).filter(block =>
-              block.delivery !== "async" || !block.questions?.length
-                || supplemental.questionOwners.get(block.message_id) === t.id);
+              block.delivery !== "async" || !block.questions?.length);
             const generatedImages = generatedOutputImages(timelineBlocks);
             const modelNotices = modelFallbackNotices(timelineBlocks);
             const narrative = assistantContinuations(timelineBlocks, finalBlocks, engine, t.responseProcesses);
@@ -3192,21 +3181,12 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
             const renderAnswer = (block: TextBlock) => (
               <div key={block.stream_message_id ?? block.message_id} className="assistant-answer-segment"
                 data-message-id={block.message_id} data-stream-message-id={block.stream_message_id}>
-                {block.delivery === "async" && block.questions?.length
-                  ? <Suspense fallback={<span className="async-question-hint">助手询问…</span>}>
-                      <AsyncQuestionCard questions={block.questions}
-                        answered={supplemental.answered.has(block.message_id)}
-                        onOpen={() => {
-                          pauseOutputFollow();
-                          setOpenAsyncQuestion({ scope: asyncQuestionScope, messageId: block.message_id });
-                        }} />
-                    </Suspense>
-                  : <MessageBlock text={block.text}
-                    formatReplySections={engine === "claude"}
-                    done={block.done} onOpenFile={onOpenFile}
-                    imageAssets={imageAssets} onLoadImage={onLoadImage}
-                    onAuthorizeImage={onAuthorizeImage}
-                    onPreviewImage={(src, alt) => previewImage({ kind: "data", src, alt })} />}
+                <MessageBlock text={block.text}
+                  formatReplySections={engine === "claude"}
+                  done={block.done} onOpenFile={onOpenFile}
+                  imageAssets={imageAssets} onLoadImage={onLoadImage}
+                  onAuthorizeImage={onAuthorizeImage}
+                  onPreviewImage={(src, alt) => previewImage({ kind: "data", src, alt })} />
               </div>
             );
             const historyImagesReady = !!t.imageRefs?.length
@@ -3426,13 +3406,6 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
           </div>
         )}
       </div>
-      {openAsyncQuestion?.scope === asyncQuestionScope && <Suspense fallback={null}>
-        <AsyncQuestionHost key={asyncQuestionScope}
-          messageId={openAsyncQuestion.messageId}
-          turns={turns} answeredMessageIds={supplemental.answered}
-          replyMode={asyncReplyMode} onReply={onReplyAsyncQuestion}
-          onClose={() => setOpenAsyncQuestion(q => q ? { ...q, messageId: null } : null)} />
-      </Suspense>}
       {zoom && <ChatImageLightbox key={sid ?? ""} selection={zoom}
         imageAssets={imageAssets} historyImageAssets={historyImageAssets}
         onLoadImage={onLoadImage} onLoadHistoryImage={onLoadHistoryImage}

@@ -646,3 +646,32 @@ def test_only_live_public_questions_trigger_question_push_hook():
         assert len(notified) == 1 and notified[0][0] == "device"
 
     asyncio.run(run())
+
+
+def test_async_question_push_is_live_public_deduplicated_and_machine_scoped():
+    from cc_remote.protocol import AssistantMsgEnd
+
+    async def run():
+        notified = []
+
+        async def on_question(machine_id, message):
+            notified.append((machine_id, message.message_id))
+
+        hub = RelayHub(SimpleNamespace(), on_live_ask_user=on_question)
+        event = AssistantMsgEnd(sid="session", message_id="question", delivery="async",
+                                questions=[{"title": "private question"}])
+        context = TurnNotificationContext(engine="codex", space="code")
+        await hub._on_wrapper_msg(event, "device")
+        live = event.model_copy(update={"notification_context": context})
+        await hub._on_wrapper_msg(live.model_copy(update={"to": "replay"}), "device")
+        await hub._on_wrapper_msg(live.model_copy(update={"owner_id": "owner"}), "device")
+        await hub._on_wrapper_msg(live.model_copy(update={"questions": None}), "device")
+        await asyncio.sleep(0)
+        assert notified == []
+        await hub._on_wrapper_msg(live, "device")
+        await hub._on_wrapper_msg(live, "device")
+        await hub._on_wrapper_msg(live, "other-device")
+        await asyncio.sleep(0)
+        assert notified == [("device", "question"), ("other-device", "question")]
+
+    asyncio.run(run())

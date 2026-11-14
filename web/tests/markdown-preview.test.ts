@@ -25,6 +25,7 @@ import {
 } from "../src/mermaid.ts";
 import type { ServerEvent } from "../src/protocol.ts";
 import type { Turn } from "../src/domain/conversation.ts";
+import { AsyncQuestionStore } from "../src/async-question-state.ts";
 import { presentAsyncQuestionReplies, supplementalAnswerPrompt } from "../src/async-question-presentation.ts";
 import { MARKDOWN_HTML_README } from "./fixtures/markdown-html.ts";
 import { previewImageDimension } from "../src/markdown-preview-html.ts";
@@ -118,6 +119,50 @@ for (const prompt of [
 assert.equal(presentAsyncQuestionReplies([{ ...nativeReply,
   detailReasons: ["prompt_truncated"] }]).replies.size, 0,
 "a truncated summary cannot masquerade as a complete answer envelope");
+
+assert.deepEqual([...presentation.answeredQuestions.get("question-message")!], [1],
+  "answering the second page leaves the first page pending");
+const bothAnswered = presentAsyncQuestionReplies([nativeQuestion, nativeReply, {
+  ...nativeReply, id: "answer-first", prompt: supplementalAnswerPrompt([
+    { question: "在哪个设备？", answer: "Mac" },
+  ]),
+}]);
+assert.deepEqual([...bothAnswered.answeredQuestions.get("question-message")!].sort(), [0, 1]);
+
+const originalSessionStorage = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
+const questionStorage = new Map<string, string>();
+Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: {
+  getItem: (key: string) => questionStorage.get(key) ?? null,
+  setItem: (key: string, value: string) => questionStorage.set(key, value),
+  removeItem: (key: string) => questionStorage.delete(key),
+} });
+try {
+  const store = new AsyncQuestionStore();
+  const scope = JSON.stringify(["device-a", "codex", "session"]);
+  const entry = { key: JSON.stringify(["question-message", 0]), messageId: "question-message", index: 0,
+    question: { title: "private question", options: ["Mac", "Phone"] } };
+  const session = store.get(scope);
+  assert.equal(store.hasDrafts, false);
+  store.saveDraft(scope, entry, { choice: null, text: "private answer", scrollTop: 48 });
+  assert.equal(store.hasDrafts, true);
+  assert.equal(store.draft(scope, entry).text, "private answer");
+  assert.equal(store.draft(scope, { ...entry, question: { title: "updated question" } }).text, "",
+    "changed native metadata cannot reuse a previous question's answer draft");
+  assert.equal(store.draft("other-device", entry).text, "");
+  assert.equal(store.draft("other-session", entry).text, "");
+  store.retire(scope, entry.key);
+  assert.equal(store.hasDrafts, false);
+  assert.equal(new AsyncQuestionStore().get(scope).retired.has(entry.key), true,
+    "ignored and accepted question ids survive page reloads");
+  assert.doesNotMatch(JSON.stringify([...questionStorage]), /private question|private answer/);
+  assert.equal(store.get("other-device").retired.has(entry.key), false);
+  store.clear();
+  assert.equal(store.isCurrent(scope, session), false, "late receipts cannot repopulate a logged-out store");
+  assert.equal(new AsyncQuestionStore().get(scope).retired.has(entry.key), false);
+} finally {
+  if (originalSessionStorage) Object.defineProperty(globalThis, "sessionStorage", originalSessionStorage);
+  else Reflect.deleteProperty(globalThis, "sessionStorage");
+}
 
 assert.deepEqual(classifyPreviewTarget("docs/README.md", "./img/a.png"), {
   kind: "local", value: "docs/img/a.png",

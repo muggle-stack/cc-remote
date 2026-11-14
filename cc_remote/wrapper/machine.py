@@ -143,7 +143,7 @@ from cc_remote.protocol import (
     ConversationTurn, CodexTerminalFence, History, TurnDetail, AgentDetail,
     HistoryImage,
     HistoryInvalidated, ArtifactInvalidated, AskQuestion, AskUser, AskUserSync,
-    AskUserClosed,
+    AskUserClosed, AssistantMsgEnd,
     BackgroundProcessItem, BackgroundProcessSync,
     GoalState, CompletionState, ReplayStart, ReplayEnd, Snapshot, StateEvent,
     State, TakeoverState, SessionControl,
@@ -10912,7 +10912,10 @@ class WrapperMachine:
                     "Codex plan terminal could not be persisted",
                     session_id=msg.sid,
                 )
-        if isinstance(msg, AskUser):
+        async_question = (isinstance(msg, AssistantMsgEnd)
+                          and ctx.engine == "codex"
+                          and msg.delivery == "async" and bool(msg.questions))
+        if isinstance(msg, (AskUser, AssistantMsgEnd)):
             msg.notification_context = None
         if isinstance(msg, TurnEnd):
             # The replayable object is deliberately notification-free. Only a
@@ -10942,7 +10945,7 @@ class WrapperMachine:
             msg.model_copy(update={
                 "notification_context": self._notification_context(ctx),
             })
-            if isinstance(msg, AskUser) or (isinstance(msg, TurnEnd)
+            if isinstance(msg, AskUser) or async_question or (isinstance(msg, TurnEnd)
                 and not (ctx.engine == "dsh" and msg.result.subtype == "steered"))
             else msg
         )

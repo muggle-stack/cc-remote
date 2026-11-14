@@ -216,7 +216,7 @@ class HarmonyPushDispatcher:
     async def _notify(self, machine_id: str, *, outcome: PushOutcome,
                       context: Mapping[str, object] | None = None) -> None:
         subs = await self.store.for_machine(machine_id)
-        generic = _generic_payload(outcome, "")
+        generic = _generic_payload(outcome, "", context)
         session = _session_payload(machine_id, outcome, "", context)
         results = await asyncio.gather(*(
             self._deliver(sub, session if sub.notification_mode == "session"

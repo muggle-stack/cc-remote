@@ -1,3 +1,5 @@
+import AsyncQuestionHost from "./AsyncQuestionDialog";
+import { AsyncQuestionStore } from "../async-question-state";
 import { PanelFrame, PanelExpandButton } from "./RightPanelPresentation";
 import { RightPanelPresentation } from "../right-panel-presentation";
 import {
@@ -98,6 +100,7 @@ interface Props {
   draftKey: string;
   draftStore: ComposerDraftStore;
   questionDrafts?: Map<string, QuestionDraft>;
+  asyncQuestions?: AsyncQuestionStore;
   questionErrorRevision?: string | number;
   unconfirmedQueued: PendingQuery[];
   unconfirmedReplaceable: PendingQuery[];
@@ -140,6 +143,7 @@ interface Props {
  * session's current focus.
  */
 export function BtwPanel(p: Props) {
+  const [questionStore] = useState(() => p.asyncQuestions ?? new AsyncQuestionStore());
   const { expanded } = useContext(RightPanelPresentation);
   const draftKeyRef = useRef(p.draftKey);
   const [draft, setDraft] = useState<ComposerDraft>(
@@ -575,14 +579,7 @@ export function BtwPanel(p: Props) {
                 imageAssets={p.imageAssets}
                 onLoadImage={p.onLoadImage}
                 onAuthorizeImage={p.onAuthorizeImage}
-                asyncReplyMode={runtimeState === "running" ? "steer"
-                  : runtimeState === "idle" ? "query" : undefined}
                 pendingReplyId={p.rt?.acceptancePending}
-                onReplyAsyncQuestion={p.engine !== "codex" || !p.sid
-                  || acceptancePending
-                  || (p.rt?.control ? sessionControlLocksInput(p.rt.control) : p.rt?.external)
-                  || (runtimeState !== "idle" && runtimeState !== "running")
-                  ? undefined : p.onReplyAsyncQuestion}
                 ambiguousActiveTurnIds={activeTurnCandidates.length > 1
                   ? activeTurnCandidates : []} />}
       </div>
@@ -618,6 +615,14 @@ export function BtwPanel(p: Props) {
           }}
         />
       )}
+      {p.engine === "codex" && p.sid && <AsyncQuestionHost key={p.draftKey}
+        scope={p.draftKey} store={questionStore} turns={turns}
+        pendingReplyId={p.rt?.acceptancePending}
+        enabled={!p.rt?.loading && !p.rt?.pendingQuestion && !awaitingFirstChat}
+        onReply={acceptancePending
+          || (p.rt?.control ? sessionControlLocksInput(p.rt.control) : p.rt?.external)
+          || (runtimeState !== "idle" && runtimeState !== "running")
+          ? undefined : p.onReplyAsyncQuestion} />}
       <div className="btw-composer">
         {lockReason && <div className="btw-readonly-notice" role="status">{lockReason}</div>}
         {notice && <div className="btw-composer-notice">{notice}</div>}
