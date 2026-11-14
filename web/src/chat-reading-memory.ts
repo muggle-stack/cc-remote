@@ -19,6 +19,7 @@ interface SavedView {
   position: ChatReadingState;
   revision: string | null;
   generation: string | null;
+  /** Explicit history, or a fallback if a live bookmark leaves the runtime. */
   browse: HistoryBrowseProjection | null;
 }
 
@@ -40,9 +41,25 @@ export class ChatReadingMemory {
 
   read(key: string, runtime: SessionRuntime): SavedView | undefined {
     const view = this.views.get(key);
-    return !runtime.historyInvalidated
-      && view?.revision === runtime.historyRevision
-      && view?.generation === runtime.historyGeneration ? view : undefined;
+    if (!view || runtime.historyInvalidated
+        || view.revision !== runtime.historyRevision
+        || view.generation !== runtime.historyGeneration) return;
+    if (view.position.browsing) return view;
+    const matches = runtime.turns.filter(turn =>
+      [turn.id, turn.clientMsgId, turn.historyTurnId].includes(view.position.turnId));
+    if (matches.length !== 1) {
+      return view.browse ? {
+        ...view, position: { ...view.position, browsing: true },
+      } : undefined;
+    }
+    // Pausing output is still a live reading position. Restore against the
+    // current row so tools, completion and working marks keep updating.
+    const position = { ...view.position, turnId: matches[0].id };
+    const size = position.sizes[view.position.turnId];
+    if (position.turnId !== view.position.turnId && size != null) {
+      position.sizes = { ...position.sizes, [position.turnId]: size };
+    }
+    return { ...view, position, browse: null };
   }
 }
 
@@ -83,9 +100,8 @@ export function useChatReadingMemory(
     initialReadingState: valid ? saved.position : undefined,
     onReadingStateSave: (position: ChatReadingState | null) => {
       if (!available || !sid || runtime.historyInvalidated) return;
-      // The newest summary page may be rebased while we are away. Preserve
-      // the displayed window as well as its bookmark, otherwise an older row
-      // can move behind the new head and no scroll offset can restore it.
+      // Keep a bounded fallback if the newest page drops the bookmarked row
+      // while away. Its existence does not change a live bookmark into browse.
       const window = position && runtime.historyRevision
         ? position.browsing && browse?.sid === sid ? browse : createHistoryBrowse({
           scopeKey: pageScopeKey, sid, revision: runtime.historyRevision,
@@ -94,7 +110,7 @@ export function useChatReadingMemory(
           hasOlder: !!runtime.hasMore, olderCursor: runtime.oldestId ?? null,
         }).projection : null;
       memory.current.save(key, position ? {
-        position: { ...position, browsing: !!window },
+        position,
         revision: runtime.historyRevision, generation: runtime.historyGeneration,
         browse: window,
       } : null);

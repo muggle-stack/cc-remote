@@ -159,6 +159,101 @@ test("navigation reading isolates identical session ids on different devices", a
   await expect.poll(() => navigationReadingAnchor(page)).toEqual(before);
 });
 
+for (const engine of ["claude", "codex", "dsh"] as const) {
+  test(`navigation reading keeps a live ${engine} session current across harness switches`, async ({ page }, testInfo) => {
+    test.setTimeout(60_000);
+    const shortcut = { claude: "Meta+1", codex: "Meta+2", dsh: "Meta+3" };
+    const other = engine === "claude" ? "codex" : "claude";
+    for (const gap of [1, 20, 60]) {
+      for (const backgroundOutput of [false, true]) {
+        await page.goto(`/tests/history-browser.html?reading-navigation=1&live-reading=1&engine=${engine}`);
+        const viewport = page.locator(".thread");
+        const liveTurn = page.locator(`[data-turn-id="${engine}-3"]`);
+        await expect(liveTurn.locator(".turn-working")).toBeVisible();
+        await waitForScrollIdle(page);
+        await viewport.evaluate((node, distance) => {
+          node.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -distance }));
+          node.scrollTop = node.scrollHeight - node.clientHeight - distance;
+          node.dispatchEvent(new Event("scroll"));
+        }, gap);
+        await page.waitForTimeout(350);
+        const before = await navigationReadingAnchor(page);
+        await page.keyboard.press(shortcut[other]);
+        await expect(page.getByTestId("surface")).toHaveText(`device-a:code:${other}`);
+        if (backgroundOutput) await page.getByRole("button", { name: "Background output" }).click();
+        await page.keyboard.press(shortcut[engine]);
+        await expect(page.getByTestId("surface")).toHaveText(`device-a:code:${engine}`);
+        await expect(page.getByTestId("browse-id")).toHaveText("latest");
+        await expect(liveTurn.locator(".turn-working")).toHaveCount(1);
+        await expect(liveTurn.locator(".turn-process-label")).toHaveText(/^正在处理/);
+        await expect.poll(() => navigationReadingAnchor(page)).toEqual(before);
+        if (backgroundOutput) await expect(liveTurn).toContainText("正在调用 2 个工具");
+
+        // One downward gesture must resume following, including at a clamped
+        // edge where the browser has no further physical distance to scroll.
+        if (isMobileWebKitProject(testInfo.project.name)) {
+          await dispatchTouchGesture(page, -120);
+          await viewport.evaluate(node => {
+            node.scrollTop = node.scrollHeight;
+            node.dispatchEvent(new Event("scroll"));
+          });
+        } else {
+          await viewport.hover();
+          await page.mouse.wheel(0, 1_600);
+        }
+        await expect(page.locator(".scroll-bottom-btn")).toHaveCount(0);
+        await expect(liveTurn.locator(".turn-working")).toBeVisible();
+        await expect.poll(() => viewport.evaluate(node =>
+          node.scrollHeight - node.clientHeight - node.scrollTop)).toBeLessThan(3);
+      }
+    }
+
+    // A real terminal received while away must be visible on return too.
+    await page.locator(".thread").evaluate(node => {
+      node.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -20 }));
+      node.scrollTop -= 20;
+      node.dispatchEvent(new Event("scroll"));
+    });
+    await page.waitForTimeout(350);
+    await page.keyboard.press(shortcut[other]);
+    await page.getByRole("button", { name: "Complete task" }).click();
+    await page.keyboard.press(shortcut[engine]);
+    await expect(page.getByTestId("browse-id")).toHaveText("latest");
+    await expect(page.locator(".turn-working")).toHaveCount(0);
+    await expect(page.locator(`[data-turn-id="${engine}-3"] .turn-process-label`)).toHaveText(/^已处理/);
+  });
+}
+
+test("navigation reading restores its saved window when the live bookmark was evicted", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?reading-navigation=1&rebase-reading=1");
+  const before = await navigateReadingToMiddle(page);
+  await page.keyboard.press("Meta+1");
+  await page.getByRole("button", { name: "Replace latest window" }).click();
+  await page.keyboard.press("Meta+2");
+  await expect(page.getByTestId("browse-id")).not.toHaveText("latest");
+  await expect.poll(() => navigationReadingAnchor(page)).toEqual(before);
+  await page.getByRole("button", { name: "回到最新", exact: true }).click();
+  await expect(page.getByTestId("browse-id")).toHaveText("latest");
+  await expect(page.locator('[data-turn-id="new-head-3"]')).toBeVisible();
+});
+
+test("navigation reading releases its departure bookmark after new scroll input", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?reading-navigation=1&rebase-reading=1");
+  await navigateReadingToMiddle(page);
+  await page.keyboard.press("Meta+1");
+  await page.keyboard.press("Meta+2");
+  await expect(page.getByTestId("browse-id")).toHaveText("latest");
+  await page.locator(".thread").evaluate(node => {
+    node.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: 1_000 }));
+    node.scrollTop = node.scrollHeight;
+    node.dispatchEvent(new Event("scroll"));
+  });
+  await page.waitForTimeout(350);
+  await page.getByRole("button", { name: "Replace latest window" }).click();
+  await expect(page.getByTestId("browse-id")).toHaveText("latest");
+  await expect(page.locator('[data-turn-id="new-head-3"]')).toBeVisible();
+});
+
 test("turn regressions keyboard scrolling leaves the live tail and resumes at bottom", async ({ page, isMobile }) => {
   test.skip(isMobile, "Physical desktop keyboard scrolling");
   await page.goto("/tests/history-browser.html?turn-regressions=1");
@@ -654,6 +749,7 @@ async function mockRightPanelRelay(
 ) {
   const btwSid = "btw-layout-child";
   const commands: Record<string, unknown>[] = [];
+  const connections: string[] = [];
   const allowedReads = new Set<string>();
   let emit: (message: PanelRelayEvent) => void = () => {
     throw new Error("layout relay has not connected");
@@ -677,6 +773,7 @@ async function mockRightPanelRelay(
     devices,
   } }));
   await page.routeWebSocket(/\/ws(?:\?|$)/, (socket) => {
+    connections.push(socket.url());
     const machineId = new URL(socket.url()).searchParams.get("machine") ?? "default";
     const machineParentSid = sessionIdForMachine?.(machineId) ?? parentSid;
     emit = (message) => socket.send(JSON.stringify({
@@ -788,8 +885,37 @@ async function mockRightPanelRelay(
         client_id: String(command.client_id), cmd_id: String(command.cmd_id) });
     });
   });
-  return { commands, emit: (message: PanelRelayEvent) => emit(message) };
+  return { commands, connections, emit: (message: PanelRelayEvent) => emit(message) };
 }
+
+test("device return paints only authorized content after initial device discovery", async ({ page }) => {
+  const devices = [{ machine_id: "layout-machine", label: "Authorized device", online: true }];
+  const relay = await mockRightPanelRelay(page, {
+    retained: false, devices,
+    historyReply: command => ({ type: "history", session_id: String(command.session_id),
+      sid: String(command.session_id), revision: "authorized-history", generation: "layout-generation",
+      detail: "summary", events: [], has_more: false,
+      turns: [{ id: "authorized-turn", prompt: "Check authorized device", done: true,
+        blocks: [{ kind: "text", message_id: "authorized-answer", channel: "final",
+          text: "Answer from the authorized device", done: true }] }] }),
+  });
+  await page.addInitScript(() => localStorage.removeItem("cc_remote_machine"));
+  const pending: import("@playwright/test").Route[] = [];
+  const holdDevices = (route: import("@playwright/test").Route) => { pending.push(route); };
+  await page.route("**/api/devices", holdDevices);
+  await page.goto("/");
+  await expect.poll(() => pending.length).toBeGreaterThan(0);
+  await page.evaluate(async () => {
+    const cache = await import("/src/cache.ts");
+    await cache.loadAllReplayState("default");
+  });
+  expect(relay.connections).toHaveLength(0);
+  await page.unroute("**/api/devices", holdDevices);
+  for (const route of pending) await route.fulfill({ json: { devices } });
+  await expect(page.getByText("Answer from the authorized device", { exact: true })).toBeVisible();
+  expect(relay.connections.map(url => new URL(url).searchParams.get("machine")))
+    .toEqual(["layout-machine"]);
+});
 
 for (const engine of ["claude", "codex", "dsh"] as const) {
   test(`device switching retains isolated instant session cache for ${engine}`, async ({ page }) => {
@@ -3065,7 +3191,10 @@ test("async question paginated history joins the live inventory and keeps indepe
   const query = relay.commands.find(command => command.type === "query")!;
   expect(query.sid).toBe(sid);
   expect(query.prompt).toBe("补充回答：\n\n问题：历史问题需要补充什么？\n回答：从历史分页回答");
+  await expect(dialog).toHaveCount(0);
   relay.emit({ type: "user_msg", sid, msg_id: String(query.msg_id), prompt: String(query.prompt) });
+  await expect(dialog).toHaveCount(0);
+  await openAsyncQuestion(page);
   await expect(dialog.locator("legend")).toHaveText("当前任务需要补充什么？");
   await expect(dialog.getByRole("textbox")).toHaveValue("实时问题的草稿");
   await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
@@ -3921,8 +4050,17 @@ test("async question first layout uses rounded cards and preserves a postponed a
   await expect(dialog.locator(".async-question-option").first()).toHaveCSS("border-radius", "12px");
   await expect(dialog.locator(".async-question-option-check")).toHaveCount(0);
   await dialog.getByRole("radio").nth(1).check();
-  await dialog.getByRole("textbox").fill("需要先验证续航。\n不要直接加工。");
+  await dialog.getByRole("textbox").focus();
+  await expect(dialog.getByRole("textbox")).toHaveValue("");
+  await expect(dialog.locator(".async-question-option.selected")).toHaveCount(0);
   await expect(dialog.getByRole("radio").nth(1)).not.toBeChecked();
+  await expect(dialog.getByRole("button", { name: "提交回答" })).toBeDisabled();
+  expect(relay.commands.filter(command => ["query", "steer"].includes(String(command.type)))).toHaveLength(0);
+  await dialog.getByRole("radio").nth(1).check();
+  await dialog.getByRole("textbox").click();
+  await expect(dialog.locator(".async-question-option.selected")).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "提交回答" })).toBeDisabled();
+  await dialog.getByRole("textbox").fill("需要先验证续航。\n不要直接加工。");
   await dialog.getByRole("button", { name: "稍后回答" }).click();
   await expect(page.locator(".question-resume")).toContainText("等待你回答");
   await openAsyncQuestion(page);
@@ -4001,8 +4139,9 @@ test("async question keyboard reaches unselected options after editing and reope
   await expect(second).toBeChecked();
   await page.keyboard.press("Tab");
   await expect(input).toBeFocused();
+  await expect(second).not.toBeChecked();
   await page.keyboard.press("Shift+Tab");
-  await expect(second).toBeFocused();
+  await expect(first).toBeFocused();
   await input.fill("清空前的回答");
   await input.fill("");
   await input.press("Shift+Tab");
@@ -4269,6 +4408,10 @@ test("async question can answer the next page first and retire only that accepte
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
   const query = relay.commands.find(c => c.type === "query")!;
   expect(query.prompt).toBe("补充回答：\n\n问题：用的是什么手势？\n回答：三指拖拽");
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toContainText("等待你回答");
+  await openAsyncQuestion(page);
+  await expect(dialog.locator("legend")).toHaveText("在哪个设备发生？");
   relay.emit({ type: "user_msg", sid: String(query.sid), msg_id: String(query.msg_id), prompt: String(query.prompt) });
   await expect(dialog.locator("legend")).toHaveText("在哪个设备发生？");
   await expect(dialog.locator(".qa-progress")).toHaveCount(0);
@@ -4652,7 +4795,7 @@ test("external preview replacement stops automatic grant retries and allows a fr
   expect(relay.commands.filter(c => c.type === "get_file_preview")).toHaveLength(4);
 });
 
-test("async question history restores the nonblocking dialog and confirms only its scoped answer", async ({ page }) => {
+test("async question submits close immediately without a pending reminder", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
   await page.goto("/");
   await openAsyncQuestion(page);
@@ -4667,7 +4810,9 @@ test("async question history restores the nonblocking dialog and confirms only i
   const query = relay.commands.find(c => c.type === "query")!;
   expect(query.sid).toBe("layout-parent");
   expect(query.prompt).toContain("回答：三指拖拽");
-  await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toHaveCount(0);
+  await expect(page.getByText("回答提交中…", { exact: true })).toHaveCount(0);
   relay.emit({ type: "user_msg", sid: String(query.sid), msg_id: String(query.msg_id), prompt: String(query.prompt) });
   await expect(dialog).toHaveCount(0);
   await expect(page.locator(".async-question-card, .question-resume")).toHaveCount(0);
@@ -4892,7 +5037,8 @@ test("async question keyboard sends with Enter, keeps Shift+Enter newlines and d
   await input.press("Enter");
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
   const query = relay.commands.find(c => c.type === "query")!;
-  await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   relay.emit({ type: "user_msg", sid: String(query.sid), msg_id: String(query.msg_id), prompt: String(query.prompt) });
   await expect(dialog).toHaveCount(0);
   expect(query.prompt).toContain("回答：第一行\n第二行");
@@ -4957,13 +5103,8 @@ test("async question completion updates reply mode while preserving a collapsed 
   await card.getByRole("button", { name: "提交回答" }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
   expect(relay.commands.filter(c => ["steer", "interrupt", "answer_question"].includes(String(c.type)))).toHaveLength(0);
-  await expect(card.getByRole("button", { name: "等待确认" })).toBeDisabled();
-  await card.getByRole("button", { name: "稍后回答", exact: true }).click();
-  await expect(card.getByRole("textbox")).toHaveCount(0);
-  // Submission locks input until native acceptance, not the view-only toggle.
-  await openAsyncQuestion(page);
-  await expect(card.getByRole("textbox")).toBeVisible();
-  await expect(card.getByRole("textbox")).toBeDisabled();
+  await expect(card).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   const query = relay.commands.find(c => c.type === "query")!;
   relay.emit({ type: "user_msg", sid, msg_id: String(query.msg_id), prompt: String(query.prompt) });
   await expect(card).toHaveCount(0);
@@ -4986,13 +5127,13 @@ test("async question rejected at turn completion keeps the answer and retries th
   // A transport ACK and another message's rejection are not this answer's result.
   relay.emit({ type: "command_ack", client_id: String(steer.client_id), cmd_id: String(steer.cmd_id) });
   relay.emit({ type: "error", sid, msg_id: "different-answer", code: "not_steerable", message: "unrelated" });
-  await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
-  await expect(input).toHaveValue("项目在这台设备的工作目录里");
-  await expect(dialog).toBeVisible();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   relay.emit({ type: "state", sid, state: "idle" });
   relay.emit({ type: "error", sid, msg_id: String(steer.msg_id), code: "not_steerable",
     message: "Codex 任务已结束，本次引导未发送。" });
-  await expect(dialog.getByRole("status")).toHaveText("当前任务已结束，本次引导未发送。请重试以开始新一轮对话。");
+  await expect(page.locator(".header-feedback")).toContainText("操作未完成");
+  await openAsyncQuestion(page);
   await expect(input).toBeEnabled();
   await expect(input).toHaveValue("项目在这台设备的工作目录里");
   await expect(dialog).toBeVisible();
@@ -5002,7 +5143,8 @@ test("async question rejected at turn completion keeps the answer and retries th
   expect(query.prompt).toBe(steer.prompt);
   expect(query.msg_id).not.toBe(steer.msg_id);
   relay.emit({ type: "error", sid, msg_id: String(steer.msg_id), code: "not_steerable", message: "late old rejection" });
-  await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   relay.emit({ type: "user_msg", sid, msg_id: String(query.msg_id), prompt: String(query.prompt) });
   await expect(dialog).toHaveCount(0);
   await expect(page.locator(".question-resume")).toHaveCount(0);
@@ -5010,18 +5152,24 @@ test("async question rejected at turn completion keeps the answer and retries th
   expect(relay.commands.filter(c => c.type === "interrupt")).toHaveLength(0);
 });
 
-test("async question acceptance recovered from history closes the reopened pending editor", async ({ page }) => {
-  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
+test("async question hidden submission survives session switches and accepts recovered history", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN], secondParent: true });
   await page.goto("/");
   const dialog = await openAsyncQuestion(page);
   await dialog.getByLabel("你的回答", { exact: true }).fill("保留到确认收到");
   await dialog.getByRole("button", { name: "提交回答" }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
   const query = relay.commands.find(c => c.type === "query")!;
-  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toHaveCount(0);
+  await page.getByText("Second parent", { exact: true }).evaluate(node => (node as HTMLElement).click());
+  await expect(page.getByText("session layout-o", { exact: true })).toBeAttached();
   await openAsyncQuestion(page);
-  await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
-  await expect(dialog.getByLabel("你的回答", { exact: true })).toHaveValue("保留到确认收到");
+  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  await page.getByText("Layout parent", { exact: true }).evaluate(node => (node as HTMLElement).click());
+  await expect(page.getByText("session layout-p", { exact: true })).toBeAttached();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   relay.emit({ type: "history", sid: "layout-parent", session_id: "layout-parent",
     revision: "layout-history", generation: "layout-generation", detail: "summary",
     events: [], has_more: false, authoritative: true, in_progress: true,
@@ -5042,9 +5190,12 @@ test("async question unknown steer outcome keeps the draft and prevents duplicat
   await dialog.getByRole("button", { name: "提交回答" }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "steer").length).toBe(1);
   const steer = relay.commands.find(c => c.type === "steer")!;
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   relay.emit({ type: "error", sid: "layout-parent", msg_id: String(steer.msg_id),
     code: "steer_outcome_unknown", message: "private transport detail" });
-  await expect(dialog.getByRole("status")).toHaveText("引导已发出，尚未确认是否生效。请先查看后续结果。");
+  await expect(page.locator(".header-feedback")).toContainText("操作未完成");
+  await openAsyncQuestion(page);
   await expect(dialog.getByLabel("你的回答", { exact: true })).toHaveValue("只发一次");
   await expect(dialog.getByRole("button", { name: "提交回答" })).toBeDisabled();
   await dialog.getByRole("form").evaluate((form: HTMLFormElement) => form.requestSubmit());
@@ -5127,10 +5278,8 @@ for (const sideChat of [false, true]) {
       form.requestSubmit();
     });
     await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
-    await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
-    await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
     await expect(dialog).toHaveCount(0);
-    await openAsyncQuestion(page, 1);
+    await openAsyncQuestion(page);
     await expect(dialog.getByRole("button", { name: "提交回答" })).toBeDisabled();
     await dialog.getByRole("form").evaluate((form: HTMLFormElement) => form.requestSubmit());
     expect(relay.commands.filter(c => c.type === "query")).toHaveLength(1);
