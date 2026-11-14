@@ -40,7 +40,7 @@ const REASONS: Record<string, string> = {
   job_unknown: "原升级进程已无法确认，需要检查安装状态后再继续。",
   relay_unconfirmed: "服务器更新暂未确认，设备尚未开始安装，可以继续使用。重试会核对原服务器任务，不会重复安装。",
   rolled_back: "更新未完成，已恢复原版本，可以继续使用或重试更新。",
-  worker_exited: "更新进程已退出，原版本运行正常，可以重新更新。",
+  worker_exited: "更新进程已退出，可以重新发起更新。",
   recovering: "正在核对原安装记录并恢复服务。",
   installer_running: "更新控制进程已退出，独立安装器仍在继续，正在等待安装结果。",
   recovery_required: "自动恢复尚未完成，原安装记录已保留。可以重新核对恢复结果。",

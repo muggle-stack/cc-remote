@@ -23,6 +23,7 @@ from cc_remote.update_errors import DownloadError
 from cc_remote.update_download import DownloadCache
 
 SUDOERS_DIRECTORY = Path("/etc/sudoers.d")
+DOWNLOAD_PHASES = frozenset({'preparing', 'downloading', 'waiting_network', 'validating'})
 
 
 def require_job_manager(system: str) -> None:
@@ -206,7 +207,42 @@ def spawn_worker(root: Path, value, account, store: UpdateJobs, identity: str, g
             store.save({**current, "phase": "unknown", "reason": "launch_unknown"})
 
 
+def os_job_pending(value, account, state: dict) -> bool | None:
+    """A missing process may still have an OS-managed restart queued."""
+    generation = state.get('recovery_generation', 0)
+    if type(generation) is not int or generation < 0:
+        raise UpdateError('invalid update recovery generation')
+    label = f"cc-remote-ui-update-{job_id(state['id'])}" + (f'-recovery-{generation}' if generation else '')
+    system = value.manifest['os']
+    command = (['/bin/launchctl', 'print', f'gui/{account.pw_uid}/{label}'] if system == 'darwin' else
+               ['/usr/bin/systemctl', 'show', f'{label}.service', '--all',
+                '--property=LoadState,ActiveState,SubState,Job'])
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if len(result.stdout) > 16384:
+        return None
+    if system == 'darwin':
+        if result.returncode == 0:
+            return True
+        if result.returncode == 113 and f'Could not find service "{label}"' in result.stderr:
+            return False
+        return None
+    fields = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+    if fields.get('Job') != '0':
+        return None  # Retain queued work and unknown manager responses.
+    if (fields.get('LoadState') == 'not-found' and fields.get('ActiveState') == 'inactive'
+            and fields.get('SubState') == 'dead'):
+        return False
+    if result.returncode or fields.get('LoadState') != 'loaded':
+        return None
+    return fields.get('ActiveState') not in {'inactive', 'failed'}
+
+
 def cancel(root: Path, identity: str) -> dict | None:
+    from cc_remote import activation
+
     installation(root)
     store = UpdateJobs(root)
     with store.lock(blocking=True):
@@ -218,7 +254,9 @@ def cancel(root: Path, identity: str) -> dict | None:
             store.cancel_unstarted(identity)
             return None
         if state["phase"] in {"submitting", "preparing", "downloading", "waiting_network", "validating", "waiting"}:
-            if not state.get("worker_pid") and not state.get("attempt_started"):
+            departed_download = (state['phase'] in DOWNLOAD_PHASES and not worker_alive(state)
+                                 and not activation.install_locked(root) and activation.receipt(root, identity) is None)
+            if (not state.get("worker_pid") and not state.get("attempt_started")) or departed_download:
                 # Fence a delayed OS launch under the same lock its worker must
                 # acquire before accepting installation work.
                 store.save({**state, "phase": "cancelled", "reason": None, "cancel_requested": True})
@@ -287,10 +325,20 @@ def reconcile(root: Path, identity: str, *, explicit: bool = False) -> dict:
             return public_job(state)
         record = activation.receipt(root, identity)
         if (record is None and type(state.get('worker_pid')) is int
-                and state['phase'] in {'preparing', 'downloading', 'waiting_network', 'validating'}):
-            # launchd/systemd restarts this same controller after a crash. An
-            # observation arriving first must not mark its download terminal.
-            return public_job(state)
+                and state['phase'] in DOWNLOAD_PHASES):
+            if os_job_pending(value, account, state) is not False:
+                return public_job(state)
+            # Transient systemd jobs disappear after reboot. No installer was
+            # accepted, so settle this receipt and allow a cache-backed retry.
+            cancelled = state.get('cancel_requested') or not store.policy()['enabled']
+            store.save({**state, 'phase': 'cancelled' if cancelled else 'failed',
+                        'reason': None if cancelled else 'worker_exited'})
+            if cancelled:
+                try:
+                    prune_download_cache(root, version=state['version'])
+                except (OSError, ValueError):
+                    print('Cancelled update cache cleanup deferred for inspection.', file=sys.stderr, flush=True)
+            return public_job(store.state(identity))
         policy = store.policy()
         prior = activation.receipt(root) if value.role == "relay" and record is None else None
         probe = record or ({"role": "relay", "origin": (prior or {}).get("origin") or "https://" + value.metadata["domain"]}
@@ -420,7 +468,7 @@ def run(root: Path, identity: str) -> None:
             return
         resumed = bool(state.get("attempt_started")) or state["phase"] not in {"submitting", "unknown"} or bool(state.get("worker_pid"))
         from cc_remote import activation
-        download_resume = (state["phase"] in {"preparing", "downloading", "waiting_network", "validating"}
+        download_resume = (state["phase"] in DOWNLOAD_PHASES
                            and activation.receipt(root, identity) is None)
         from cc_remote.wrapper.process_scan import process_identity
         identity_info = process_identity(os.getpid())
