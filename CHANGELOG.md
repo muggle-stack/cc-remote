@@ -4,6 +4,17 @@
 
 ## Unreleased
 
+## v5.3.28
+
+Improve managed upgrades and interrupted-download recovery. Wire protocol v93 and Claude Agent SDK 0.2.174.
+
+- Upgrade newer releases across chat-protocol versions through the independent maintenance channel, with durable offline device requests.
+- Resume interrupted downloads, verify complete archives and reuse bounded download caches across retries.
+- Retire abandoned extraction directories and settle downloads whose OS jobs have ended, preserving usable cached bytes for retries.
+- Preserve cancellation intent through status polling, timeouts and reconnects, with desktop and mobile waiting states.
+
+See the bilingual [release notes](docs/releases/v5.3.28.md), including the one-time transition for older updaters.
+
 ## v5.3.27
 
 Improve device restoration, notification navigation and Claude model-fallback interaction. Wire protocol v93 and Claude Agent SDK 0.2.174.
