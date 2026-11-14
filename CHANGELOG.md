@@ -4,11 +4,15 @@
 
 ## Unreleased
 
-Wire protocol v93.
+## v5.3.27
+
+Improve device restoration, notification navigation and Claude model-fallback interaction. Wire protocol v93 and Claude Agent SDK 0.2.174.
 
 - Restore device-scoped session views immediately when switching devices and center generated-image loading text.
 - Revalidate notification targets after transient connection failures and deduplicate repeated notification clicks.
 - Add native Claude model-fallback confirmation with collapsible pending requests, account-scoped automatic-switch opt-in, and live model recovery.
+
+See the bilingual [release notes](docs/releases/v5.3.27.md), including the coordinated protocol and Claude session-service upgrade requirements.
 
 ## v5.3.26
 
