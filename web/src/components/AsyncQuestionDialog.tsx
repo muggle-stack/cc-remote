@@ -250,6 +250,14 @@ export default function AsyncQuestionHost({ scope, store, turns, historyTurns, p
   const page = current ? pending.indexOf(current) : 0;
   useLayoutEffect(() => {
     if (!enabled) return;
+    // Accepted answers from another client also retire this client's saved
+    // draft, even when its editor has already disappeared.
+    for (const [messageId, indices] of presentation.answeredQuestions) {
+      for (const index of indices) {
+        const key = JSON.stringify([messageId, index]);
+        if (session.drafts.has(key)) store.retire(scope, key);
+      }
+    }
     const fresh = pending.some(entry => !session.seen.has(entry.key));
     session.seen = new Set(pending.map(entry => entry.key));
     if (current && session.activeKey !== current.key) {
@@ -264,7 +272,7 @@ export default function AsyncQuestionHost({ scope, store, turns, historyTurns, p
       const frame = requestAnimationFrame(() => resumeRef.current?.focus({ preventScroll: true }));
       return () => cancelAnimationFrame(frame);
     }
-  }, [enabled, pending, current, session]);
+  }, [enabled, pending, current, session, presentation, scope, store]);
   if (!enabled || !current) return null;
   if (session.collapsed) return <QuestionResume engine="codex" buttonRef={resumeRef}
     page={page + 1} total={pending.length} pending={session.submissions.has(current.key)}

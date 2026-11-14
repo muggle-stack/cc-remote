@@ -3107,6 +3107,69 @@ test("async question paginated history recognizes accepted answers from the newe
   await expect(page.locator(".async-question-dialog, .question-resume")).toHaveCount(0);
 });
 
+for (const collapsed of [false, true]) {
+  test(`async question external answer clears ${collapsed ? "collapsed" : "open"} drafts before web update`, async ({ page }) => {
+    const relay = await mockRightPanelRelay(page, { retained: false, seedTurns: [ASYNC_HISTORY_TURN] });
+    const next = { build_id: "f".repeat(64), version: "5.3.7", protocol: PROTOCOL_VERSION };
+    await page.route("**/cc-remote-build.json?*", route => route.fulfill({ json: next }));
+    await page.route("**/healthz?*", route => route.fulfill({ json: next }));
+    await page.goto("/");
+    const dialog = await openAsyncQuestion(page);
+    await dialog.getByRole("textbox").fill("本端尚未发送的回答");
+    if (collapsed) await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+    relay.emit({ type: "user_msg", sid: "layout-parent", msg_id: "external-answer",
+      prompt: "补充回答：\n\n问题：用的是什么手势？\n回答：另一端已确认" });
+    await expect(page.locator(".async-question-dialog, .question-resume")).toHaveCount(0);
+    await expect(page.locator(".supplemental-answer")).toContainText("另一端已确认");
+    await page.getByRole("button", { name: "状态详情：有更新", exact: true }).click();
+    await page.getByRole("button", { name: "查看更新", exact: true }).click();
+    let navigations = 0;
+    page.on("framenavigated", frame => { if (frame === page.mainFrame()) navigations++; });
+    await page.getByRole("button", { name: "刷新页面", exact: true }).click();
+    await expect.poll(() => navigations).toBe(1);
+    expect(relay.commands.filter(command => ["query", "steer", "answer_question"].includes(String(command.type)))).toHaveLength(0);
+  });
+}
+
+test("async question external answers retire matching drafts while other answers still protect web updates", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { retained: false, seedTurns: [{ ...ASYNC_HISTORY_TURN,
+    blocks: [{ ...ASYNC_HISTORY_TURN.blocks[0], questions: ASYNC_QUESTIONS }],
+  }] });
+  const next = { build_id: "f".repeat(64), version: "5.3.7", protocol: PROTOCOL_VERSION };
+  await page.route("**/cc-remote-build.json?*", route => route.fulfill({ json: next }));
+  await page.route("**/healthz?*", route => route.fulfill({ json: next }));
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  await dialog.getByRole("textbox").fill("第一题的本地草稿");
+  await dialog.getByRole("button", { name: "下一题", exact: true }).click();
+  await dialog.getByRole("textbox").fill("第二题还未提交的回答");
+  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  relay.emit({ type: "user_msg", sid: "layout-parent", msg_id: "external-answer",
+    prompt: "补充回答：\n\n问题：在哪个设备发生？\n回答：手机" });
+  await expect(page.locator(".supplemental-answer")).toContainText("手机");
+  await openAsyncQuestion(page);
+  await expect(dialog.locator("legend")).toHaveText("用的是什么手势？");
+  await expect(dialog.getByRole("textbox")).toHaveValue("第二题还未提交的回答");
+  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  const status = page.getByRole("button", { name: "状态详情：有更新", exact: true });
+  await status.click();
+  await page.getByRole("button", { name: "查看更新", exact: true }).click();
+  await page.getByRole("button", { name: "刷新页面", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "检查更新", exact: true }))
+    .toContainText("还有未发送的内容或正在导入的附件");
+  await page.getByRole("button", { name: "收起更新窗口", exact: true }).click();
+  await openAsyncQuestion(page);
+  await dialog.getByRole("textbox").fill("");
+  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  await status.click();
+  await page.getByRole("button", { name: "查看更新", exact: true }).click();
+  let navigations = 0;
+  page.on("framenavigated", frame => { if (frame === page.mainFrame()) navigations++; });
+  await page.getByRole("button", { name: "刷新页面", exact: true }).click();
+  await expect.poll(() => navigations).toBe(1);
+  expect(relay.commands.filter(command => ["query", "steer", "answer_question"].includes(String(command.type)))).toHaveLength(0);
+});
+
 test("async question compact styling matches the shared dialog on desktop and mobile", async ({ page }, testInfo) => {
   const title = "这几次恢复，是你在板子失联后手动重启或断电的吗？失联前是否主动重启或改 IP？";
   await mockRightPanelRelay(page, { seedTurns: [{
