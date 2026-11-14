@@ -167,7 +167,7 @@ import {
   parseNotificationFragment,
 } from "../src/notification-route.ts";
 import {
-  resolveNotificationNavigation,
+  NotificationClickGate, resolveNotificationNavigation,
 } from "../src/notification-navigation.ts";
 import {
   PushBindingCoordinator,
@@ -18530,8 +18530,8 @@ assert.match(appSource, /sendSetModelTo\(sid, model\)/,
   "BTW model changes must never follow focusedSid");
 assert.match(appSource, /sendSetEffortTo\(sid, effort\)/,
   "BTW effort changes must never follow focusedSid");
-assert.match(appSource, /if \(latest && latest\.session_id !== state\.focusedSid\) \{\s*dispatch\(\{ type: "exit_new_chat" \}\)/,
-  "restored focus must replace the temporary new-session page");
+assert.match(appSource, /if \(latest && \(latest\.session_id !== state\.focusedSid \|\| resumeRequired\)\) \{\s*dispatch\(\{ type: "exit_new_chat" \}\)/,
+  "validated focus must replace the temporary draft even when its cached sid is already painted");
 assert.match(appSource, /<HeaderMenu[\s\S]*notificationMode=\{notificationMode\}/,
   "authenticated header actions must be grouped behind the three-dot menu");
 assert.doesNotMatch(appSource, /className="iconbtn header-theme"/,
@@ -18839,6 +18839,22 @@ const notificationRoute = {
   space: "work" as const,
 };
 const notificationUrl = encodeNotificationRoute(notificationRoute);
+function testNotificationClickDeduplication() {
+  const notificationClicks = new NotificationClickGate();
+  assert.equal(notificationClicks.take(notificationRoute, "turn-1", 100), true);
+  assert.equal(notificationClicks.take(notificationRoute, "turn-1", 200), false,
+    "redelivery of a system notification must not restart navigation");
+  assert.equal(notificationClicks.take(notificationRoute, "turn-2", 200), true,
+    "a later notification for the same session is a distinct click");
+  assert.equal(notificationClicks.take(notificationRoute, undefined, 200), true);
+  assert.equal(notificationClicks.take(notificationRoute, undefined, 300), false);
+  assert.equal(notificationClicks.take(notificationRoute, undefined, 6000), true,
+    "legacy notifications without an identity are deduplicated only briefly");
+  notificationClicks.forget(notificationRoute);
+  assert.equal(notificationClicks.take(notificationRoute, "turn-1", 7000), true,
+    "a failed navigation can be retried after connectivity recovers");
+}
+testNotificationClickDeduplication();
 assert.match(notificationUrl, /^\/#notification=/);
 assert.deepEqual(
   parseNotificationFragment(new URL(notificationUrl, "https://remote.example").hash),

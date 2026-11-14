@@ -69,6 +69,7 @@ self.addEventListener("notificationclick", (event) => {
       existing.postMessage({
         type: "cc-remote-notification",
         route: event.notification.data?.route,
+        notification_id: event.notification.tag,
       });
       return existing.focus();
     }));

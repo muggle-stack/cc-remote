@@ -177,6 +177,57 @@ try {
   assert.throws(() => compiler.specifier("https://evil.example/module.js", base), /未登记/);
   const { initialState, reduce, createRuntime } = await reducerHarness.ssrLoadModule("/src/reducer.ts");
   {
+    const { DeviceViewCache } = await reducerHarness.ssrLoadModule("/src/device-view-cache.ts");
+    const cache = new DeviceViewCache();
+    const sid = "same-native-session";
+    const stateFor = (machine: string) => ({
+      ...initialState, connState: "connected", wrapperOnline: true,
+      sessions: [{ session_id: sid, engine: "codex", space: "code", summary: machine }],
+      focusedSid: sid,
+      runtimes: { [sid]: { ...createRuntime(), syncReady: true,
+        historyRevision: "revision", historyGeneration: "generation", historyHeadKnown: true,
+        pendingQuestion: { ask_id: "old-question" },
+        queue: [{ msg_id: "old-query", prompt: "private queued payload" }],
+        turns: [{ id: "turn", prompt: "Question", done: true, ts: 1,
+          blocks: [{ kind: "text", message_id: "answer", done: true, text: machine }] }],
+      } },
+    });
+    cache.remember("mac", "codex", "code", stateFor("Mac answer"));
+    cache.remember("vps", "codex", "code", stateFor("VPS answer"));
+    const view = cache.get("mac", "codex", "code");
+    assert.equal(view.turns[0].blocks[0].text, "Mac answer");
+    assert.equal(JSON.stringify(view).includes("private queued payload"), false);
+    const restored = reduce(stateFor("VPS answer"), { type: "restore_device_view", view });
+    assert.equal(restored.runtimes[sid].turns[0].blocks[0].text, "Mac answer");
+    assert.equal(restored.runtimes[sid].syncReady, false);
+    assert.equal(restored.wrapperOnline, false);
+    assert.equal(restored.runtimes[sid].pendingQuestion, null);
+    assert.deepEqual(restored.runtimes[sid].queue, []);
+    cache.acceptSessionList("mac", "codex", "code", [{
+      session_id: sid, engine: "codex", space: "code", summary: "Renamed Mac session",
+    }]);
+    assert.equal(cache.sessionLists("mac")["code:codex"][0].summary, "Renamed Mac session");
+    cache.invalidateSession("mac", sid);
+    assert.equal(cache.get("mac", "codex", "code"), undefined);
+    assert.equal(cache.get("vps", "codex", "code").turns[0].blocks[0].text, "VPS answer");
+    cache.remember("mac", "codex", "code", stateFor("Mac answer"));
+    cache.acceptSessionList("mac", "codex", "code", []);
+    assert.equal(cache.get("mac", "codex", "code"), undefined);
+    cache.remember("mac", "codex", "code", stateFor("Mac answer"));
+    cache.retainMachines(["vps"]);
+    assert.equal(cache.get("mac", "codex", "code"), undefined);
+    assert.ok(cache.get("vps", "codex", "code"));
+    cache.clear();
+    assert.equal(cache.get("vps", "codex", "code"), undefined);
+    const invalidated = stateFor("Invalidated answer");
+    invalidated.runtimes[sid].historyInvalidated = true;
+    cache.remember("mac", "codex", "code", invalidated);
+    assert.equal(cache.get("mac", "codex", "code"), undefined);
+    for (let i = 0; i < 65; i++) cache.remember(`device-${i}`, "codex", "code", stateFor(String(i)));
+    assert.equal(cache.get("device-0", "codex", "code"), undefined);
+    assert.ok(cache.get("device-64", "codex", "code"));
+  }
+  {
     const preview = { file: "/tmp/README.md", sid: "claude", requestId: "preview-1", kind: "md", loading: true };
     let state = { ...initialState, focusedSid: "claude", artifact: preview };
     state = reduce(state, { type: "restore_session_list", sessions: [] });

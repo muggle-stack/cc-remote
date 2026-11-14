@@ -1,0 +1,49 @@
+.question-dialog.model-fallback-dialog { padding:24px; }
+.fallback-identity { display:flex; align-items:center; gap:12px; }
+.fallback-identity > svg { flex:none; color:var(--accent); }
+.fallback-session { display:grid; gap:4px; min-width:0; }
+.fallback-session strong { font-size:18px; font-weight:var(--font-weight-600);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fallback-session > span { font-size:12px; color:var(--dim); overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap; }
+.fallback-collapse { display:inline-flex; align-items:center; gap:5px; margin-left:auto;
+  flex:none; min-height:36px; border:0; padding:4px 6px; border-radius:8px;
+  background:transparent; color:var(--text); font:inherit; font-size:13px; cursor:pointer; }
+.fallback-collapse:hover { background:var(--accent-weak); }
+.fallback-body { overflow:auto; min-height:0; }
+.fallback-body h2 { margin:22px 0 8px; font-size:22px; line-height:1.4; outline:none; }
+.fallback-body > p { margin:0; color:var(--dim); font-size:14px; }
+.fallback-models { display:grid; grid-template-columns:minmax(0,1fr) 34px minmax(0,1fr);
+  align-items:end; gap:12px; margin:20px 0 16px; text-align:center; }
+.fallback-models > div { display:grid; gap:8px; min-width:0; }
+.fallback-models > div > span { font-size:12px; color:var(--dim); }
+.fallback-models strong { display:flex; align-items:center; justify-content:center;
+  min-height:40px; padding:8px 10px; border-radius:10px; background:var(--bg);
+  font-size:16px; line-height:1.35; font-weight:var(--font-weight-600); overflow-wrap:anywhere; }
+.fallback-models > div:last-child strong { color:var(--accent-text,var(--accent));
+  background:var(--accent-weak); border:1px solid var(--accent-line); }
+.fallback-arrow { align-self:end; padding-bottom:8px; font-size:26px; }
+.fallback-automatic { display:flex; align-items:center; gap:10px; min-height:36px;
+  width:fit-content; font-size:14px; cursor:pointer; }
+.fallback-automatic input { width:18px; height:18px; margin:0; accent-color:var(--accent); }
+.fallback-actions { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-top:18px; }
+.fallback-actions button { min-height:42px; padding:10px 12px; border:1px solid var(--border);
+  border-radius:11px; background:transparent; color:var(--text); font:inherit;
+  font-size:14px; font-weight:var(--font-weight-600); cursor:pointer; }
+.fallback-actions button:hover { background:var(--accent-weak); }
+.fallback-actions .primary { border-color:var(--accent); background:var(--accent); color:var(--on-accent,#fff); }
+.fallback-actions button:disabled { opacity:.5; cursor:default; }
+.fallback-resume { height:44px; min-height:44px; padding:6px 12px; line-height:20px; }
+.fallback-resume .qa-resume-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fallback-resume .qa-resume-action { background:var(--accent); color:var(--on-accent,#fff);
+  flex:none; padding:4px 14px; line-height:20px; border-radius:9px; }
+@media (max-width:600px) {
+  .question-dialog.model-fallback-dialog { padding:22px; }
+  .fallback-actions { grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+  .fallback-actions .fallback-edit { grid-column:1 / -1; grid-row:2; }
+  .fallback-actions button { min-height:44px; }
+  .fallback-models { gap:6px; grid-template-columns:minmax(0,1fr) 24px minmax(0,1fr); }
+  .fallback-resume { gap:8px; }
+  .fallback-resume strong { max-width:35%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .fallback-resume .qa-resume-label { font-size:12px; }
+}

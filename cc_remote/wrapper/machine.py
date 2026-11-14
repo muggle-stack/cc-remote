@@ -191,7 +191,7 @@ from cc_remote.wrapper.claude_client_messages import (
     ClaudeClientMessageStore,
     ClaudeClientMessageStoreError,
 )
-from cc_remote.wrapper.claude_model_fallback import model_fallback_event
+from cc_remote.wrapper.claude_model_fallback import model_fallback_event, model_fallback_timestamp
 from cc_remote.wrapper.turn_changes import (
     TurnChangeArchive, TurnChangeTracker, change_summary, project_turn_changes,
     turn_change_event_data, MAX_DIFF,
@@ -6593,6 +6593,10 @@ class WrapperMachine:
             lambda tool, tool_input, permission_context:
             self._on_claude_tool_permission(
                 ctx, tool, tool_input, permission_context))
+        sdk.user_dialog_callback = (
+            lambda request_id, payload: self._on_claude_model_fallback_dialog(
+                ctx, request_id, payload))
+        ctx.claude_model_fallback_probe = None
         sdk.background_message_callback = (
             lambda message, turn_id: self._on_claude_background_message(
                 ctx, message, turn_id))
@@ -10926,9 +10930,13 @@ class WrapperMachine:
                 )
         if is_downstream(msg):
             msg.seq = ctx.next_seq()
+            buffered = msg
+            if isinstance(msg, AskUser) and msg.model_fallback is not None:
+                buffered = msg.model_copy(update={"model_fallback": msg.model_fallback.model_copy(
+                    update={"original_prompt": None})})
             if ctx.btw:
-                self._btw_history(ctx).observe(msg)
-            ctx.buffer.append(msg)
+                self._btw_history(ctx).observe(buffered)
+            ctx.buffer.append(buffered)
         self._observe_active_turn_binding(ctx, msg)
         live = (
             msg.model_copy(update={
@@ -12901,6 +12909,12 @@ class WrapperMachine:
                             route_id=getattr(cmd, "route_id", None),
                         ))
                     if ctx.engine == "claude" and not ctx.btw:
+                        fallback_notice = self._current_claude_fallback_notice(ctx)
+                        if fallback_notice is not None:
+                            await self.transport.send(fallback_notice.model_copy(deep=True, update={
+                                "to": cmd.client_id, "sid": sid,
+                                "route_id": getattr(cmd, "route_id", None),
+                            }))
                         for rate_limit in await self._claude_rate_limit_snapshot(
                             ctx
                         ):
@@ -22523,6 +22537,8 @@ class WrapperMachine:
                         return event
             else:
                 usage = await ctx.sdk.get_context_usage()
+            if ctx.engine == "claude" and context_source == "control":
+                await self._reconcile_claude_context_fallback(ctx, usage)
             work_fields: dict[str, int | float] = {}
             if ctx.space == "work" and ctx.work_id:
                 raw_key = "used_tokens" if ctx.engine == "codex" else "totalTokens"
@@ -23005,20 +23021,126 @@ class WrapperMachine:
         # The sole SDK reader applies the model change in source order. Do not
         # overwrite a newer explicit user selection while this callback waits.
         fallback = (event.input or {}).get("fallback_model")
-        if ((event.input or {}).get("scope") == "session"
-                and fallback == getattr(ctx.sdk, "model", None)):
-            if ctx.announced_model != fallback:
-                ctx.announced_model = fallback
-                await self._emit(ctx, Model(model=fallback))
-            await self._persist_claude_session_controls(ctx)
+        if (event.input or {}).get("scope") == "session":
+            async with ctx.emit_lock:
+                current = (fallback == getattr(ctx.sdk, "model", None)
+                           and getattr(message, "_cc_model_revision", None)
+                           == getattr(ctx.sdk, "_model_revision", None))
+                if current and ctx.announced_model != fallback:
+                    ctx.announced_model = fallback
+                    await self._emit_locked(ctx, Model(model=fallback))
+            if current:
+                await self._persist_claude_session_controls(ctx)
         if event.item_id not in ctx.claude_model_fallback_notices:
             if len(ctx.claude_model_fallback_notices) >= 64:
                 ctx.claude_model_fallback_notices.clear()
             ctx.claude_model_fallback_notices.add(event.item_id)
-            await self._emit(ctx, Notice(
+            timestamp = model_fallback_timestamp(message.data)
+            if timestamp is None and event.input["scope"] == "session":
+                # A journal replay can omit the native timestamp. Recover it
+                # from the transcript instead of calling reconnect the switch.
+                await self._restore_claude_fallback_notice(ctx)
+            recovered = self._current_claude_fallback_notice(ctx)
+            detail = (recovered.detail if timestamp is None and recovered is not None
+                      and recovered.message == event.summary else None)
+            notice = Notice(
                 notice_id=event.item_id, severity="warning", category="runtime",
                 title="模型已回退", message=event.summary,
-            ))
+                detail=detail or (f"切换时间 {timestamp}" if timestamp else
+                    "检测时间 " + time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())),
+            )
+            if event.input["scope"] == "session":
+                ctx.claude_model_fallback_notice = notice
+                ctx.claude_model_fallback_model = fallback
+            await self._emit(ctx, notice)
+
+    @staticmethod
+    def _current_claude_fallback_notice(ctx: SessionContext) -> Notice | None:
+        if same_claude_model_selection(_session_model(ctx), ctx.claude_model_fallback_model):
+            return ctx.claude_model_fallback_notice
+        return None
+
+    async def _reconcile_claude_context_fallback(self, ctx: SessionContext, usage: dict) -> None:
+        """Repair a missed live switch only with matching native fallback proof.
+
+        A provider's model id alone cannot replace a chosen Claude alias. This
+        narrow recovery requires both a fresh native control reading and the
+        main-thread transcript's exact original-to-fallback transition.
+        """
+        from cc_remote.wrapper.claude_controls import last_model_fallback
+
+        sdk = ctx.sdk
+        observed = valid_claude_alias(usage.get("model"))
+        if not isinstance(sdk, SdkHandle) or not observed or not ctx.session_id:
+            return
+        async with sdk._control_request_lock:
+            current = valid_claude_alias(sdk.model)
+            if not current or same_claude_model_selection(current, observed):
+                return
+            path = self._claude_transcript_path(self._claude_profile_for_ctx(ctx), ctx.session_id)
+            if path is None:
+                return
+            try:
+                info = await asyncio.to_thread(os.stat, path, follow_symlinks=False)
+                probe = (sdk._model_revision, current, observed,
+                         info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+                if ctx.claude_model_fallback_probe == probe:
+                    return
+                latest = await asyncio.to_thread(last_model_fallback, path, self.cfg.history_source_max_bytes)
+            except (OSError, ValueError):
+                return
+            ctx.claude_model_fallback_probe = probe
+            if latest is None or ctx.sdk is not sdk or sdk._model_revision != probe[0]:
+                return
+            event, timestamp = latest
+            if (not same_claude_model_selection(current, event.input["original_model"])
+                    or not same_claude_model_selection(observed, event.input["fallback_model"])):
+                return
+            recent = sdk._last_recent_context_usage
+            sdk.model = observed
+            sdk._model_revision += 1
+            sdk.invalidate_context_usage_cache()
+            sdk._record_context_usage(usage, update_model=True)
+            sdk._last_recent_context_usage = recent
+            revision = sdk._model_revision
+        await self._persist_claude_session_controls(ctx)
+        async with ctx.emit_lock:
+            if ctx.sdk is not sdk or sdk._model_revision != revision:
+                return
+            ctx.announced_model = observed
+            await self._emit_locked(ctx, Model(model=observed))
+            ctx.claude_model_fallback_model = observed
+            ctx.claude_model_fallback_notice = Notice(
+                notice_id=event.item_id, severity="warning", category="runtime",
+                title="模型已回退", message=event.summary,
+                detail=f"切换时间 {timestamp}" if timestamp else None,
+            )
+            await self._emit_locked(ctx, ctx.claude_model_fallback_notice.model_copy(deep=True))
+
+    async def _restore_claude_fallback_notice(self, ctx: SessionContext) -> None:
+        from cc_remote.wrapper.claude_controls import last_model_fallback
+
+        if not ctx.session_id:
+            return
+        path = self._claude_transcript_path(self._claude_profile_for_ctx(ctx), ctx.session_id)
+        if path is None:
+            return
+        try:
+            latest = await asyncio.to_thread(last_model_fallback, path, self.cfg.history_source_max_bytes)
+        except (OSError, ValueError):
+            return
+        if latest is None:
+            return
+        event, timestamp = latest
+        model = event.input["fallback_model"]
+        if not same_claude_model_selection(_session_model(ctx), model):
+            return
+        ctx.claude_model_fallback_model = model
+        ctx.claude_model_fallback_notice = Notice(
+            notice_id=event.item_id, severity="warning", category="runtime",
+            title="模型已回退", message=event.summary,
+            detail=f"切换时间 {timestamp}" if timestamp else None,
+        )
 
     async def _on_claude_background_message(
         self, ctx: SessionContext, message, turn_id: str | None,
@@ -26142,6 +26264,37 @@ class WrapperMachine:
 
     # ---- ask_user MCP tool (agent asks the user a multiple-choice question) ----
 
+    async def _on_claude_model_fallback_dialog(
+        self, ctx: SessionContext, request_id: str, payload: dict,
+    ) -> dict:
+        from cc_remote.protocol import ModelFallbackPrompt
+
+        if not isinstance(payload, dict):
+            return {"behavior": "cancelled"}
+        try:
+            metadata = getattr(ctx.sdk, "service_turn_metadata", None) or {}
+            prompt = metadata.get("prompt")
+            fallback = ModelFallbackPrompt(
+                original_model=payload.get("originalModel"),
+                fallback_model=payload.get("fallbackModel"),
+                turn_id=ctx.active_msg_id,
+                original_prompt=prompt if isinstance(prompt, str) else None,
+            )
+        except (TypeError, ValueError):
+            return {"behavior": "cancelled"}
+        try:
+            answer = await self._on_ask(
+                ctx, "是否允许模型回退？", [
+                    {"label": "同意回退"}, {"label": "拒绝回退"},
+                    {"label": "编辑提问"}, {"label": "同意回退并记住"},
+                ], model_fallback=fallback,
+            )
+        except AskUnavailable:
+            return {"behavior": "cancelled"}
+        choice = {"同意回退": "retry_fallback", "同意回退并记住": "retry_fallback",
+                  "编辑提问": "edit_prompt"}.get(answer, "cancelled")
+        return {"behavior": "completed", "result": choice}
+
     async def _close_pending_ask_locked(
         self,
         ctx: SessionContext,
@@ -26277,6 +26430,7 @@ class WrapperMachine:
         timeout: float = 30 * 60,
         ask_id: str | None = None,
         to: str | None = None,
+        model_fallback=None,
     ) -> str | list[str]:
         """Called by THIS ctx's in-process MCP server when the agent invokes
         `ask_user`. Emits AskUser on the ctx and blocks until AnswerQuestion.
@@ -26295,6 +26449,7 @@ class WrapperMachine:
                 timeout=timeout,
                 ask_id=ask_id,
                 to=to,
+                model_fallback=model_fallback,
             )
 
     async def _on_ask_locked(
@@ -26312,6 +26467,7 @@ class WrapperMachine:
         ask_id: str | None = None,
         to: str | None = None,
         questions: list[AskQuestion] | None = None,
+        model_fallback=None,
     ) -> str | list[str] | list[str | list[str]]:
         """Run one question while the caller owns ``ctx.ask_lock``."""
         service_client = getattr(ctx.sdk, "client", None)
@@ -26354,6 +26510,7 @@ class WrapperMachine:
             multi_select=multi_select,
             plan_document=plan_document,
             questions=questions,
+            model_fallback=model_fallback,
             to=to,
         )
         loop = asyncio.get_running_loop()
@@ -26794,6 +26951,12 @@ class WrapperMachine:
                 return await reject_locked(ERR_BAD_PROMPT, str(exc))
 
             service_client = getattr(ctx.sdk, "client", None)
+            if state.event.model_fallback is not None and normalized == "同意回退并记住":
+                try:
+                    await ctx.sdk.allow_automatic_model_fallback()
+                except Exception as exc:
+                    log.warning("Claude fallback preference not applied", error_type=type(exc).__name__)
+                    return await reject_locked(ERR_INTERNAL, "自动切换设置尚未保存，请重试。")
             if hasattr(service_client, "description"):
                 try:
                     await service_client.call("remember_answer", {
@@ -29227,6 +29390,10 @@ class WrapperMachine:
                 model_event = Model(model=model)
                 await self._emit(ctx, model_event)
                 cached_responses.append(model_event)
+            fallback_notice = self._current_claude_fallback_notice(ctx)
+            if fallback_notice is not None:
+                await self._emit(ctx, fallback_notice.model_copy(deep=True))
+                cached_responses.append(fallback_notice)
             effort = _session_effort(ctx)
             if effort:
                 ctx.announced_effort = effort
@@ -38651,6 +38818,8 @@ class WrapperMachine:
                 await self._emit(ctx, _codex_speed_event(ctx.sdk.service_tier))
             else:
                 await self._publish_claude_auto_compact(ctx, force=True)
+        if engine == "claude" and resume_id:
+            await self._restore_claude_fallback_notice(ctx)
         log.info("session spawned", resume=resume_id, cwd=target_cwd, key=key,
                  resident=len(self.sessions))
         if engine == "claude" and broker_handle is None:

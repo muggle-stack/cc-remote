@@ -1,11 +1,12 @@
 import ReactMarkdown from "react-markdown";
 import { useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { AskOption, AskQuestion, Engine } from "../protocol";
+import type { AskOption, AskQuestion, Engine, ModelFallbackPrompt } from "../protocol";
 import { EngineIcon } from "../icons";
 import { useImeSubmit } from "../use-ime-submit";
 import { QuestionBatchSheet } from "./QuestionBatchSheet";
 import { QuestionCollapseButton, QuestionResume } from "./QuestionPresentation";
+import { ModelFallbackSheet } from "./ModelFallbackSheet";
 import "./QuestionSheet.css";
 
 export interface QuestionDraft {
@@ -29,11 +30,18 @@ interface Props {
   multiSelect?: boolean;
   questions?: AskQuestion[] | null;
   draft?: { key: string; store: Map<string, QuestionDraft> };
+  modelFallback?: ModelFallbackPrompt | null;
+  sessionLabel?: string;
+  accountLabel?: string;
+  errorRevision?: string | number;
   onAnswer: (answer: string | string[]) => boolean | void;
   onAnswers?: (answers: (string | string[])[]) => boolean | void;
 }
 
 export function QuestionSheet(props: Props) {
+  if (props.modelFallback) return <ModelFallbackSheet fallback={props.modelFallback}
+    draft={props.draft} sessionLabel={props.sessionLabel} accountLabel={props.accountLabel}
+    errorRevision={props.errorRevision} onAnswer={props.onAnswer} />;
   return props.questions?.length ? <QuestionBatchSheet key={JSON.stringify(props.questions)}
     engine={props.engine} questions={props.questions} draft={props.draft}
     onSubmit={props.onAnswers ?? (() => false)} /> : <SingleQuestionSheet {...props} />;

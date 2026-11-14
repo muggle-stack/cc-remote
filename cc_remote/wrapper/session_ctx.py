@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 from uuid import uuid4
 
-from cc_remote.protocol import AskUser, BackgroundProcessItem, State
+from cc_remote.protocol import AskUser, BackgroundProcessItem, Notice, State
 from cc_remote.wrapper.ringbuffer import RingBuffer
 from cc_remote.wrapper.btw_history import BtwHistory
 from cc_remote.wrapper.sdk import SdkHandle
@@ -126,6 +126,9 @@ class SessionContext:
     # native UUID while ``key`` is namespaced when multiple profiles exist.
     claude_profile_id: Optional[str] = None
     claude_model_fallback_notices: set[str] = field(default_factory=set)
+    claude_model_fallback_notice: Notice | None = None
+    claude_model_fallback_model: str | None = None
+    claude_model_fallback_probe: tuple[object, ...] | None = None
     turn_change_tracker: TurnChangeTracker | None = None
     # Codex's complete local account boundary. ``session_id`` remains the
     # native app-server UUID while ``key`` is the browser-facing routing id

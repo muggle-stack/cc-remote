@@ -75,7 +75,7 @@ const SCHEMA = 1;
 // persisted as independent user turns with synthetic failure clocks.
 // v31 scopes replay and projections by device. Older rows lack device ownership.
 const CACHE_VER = 31;
-const MAX_CACHE_SESSIONS = 64;
+export const MAX_CACHE_SESSIONS = 64;
 const MAX_CACHE_TURNS = 100;
 const MAX_CACHE_BYTES = 2 * 1024 * 1024;
 const CACHE_PROMPT_CHARS = 128 * 1024;
