@@ -88,14 +88,18 @@ class DeviceUpdateQueue:
                                (machine, identity, json.dumps(value)))
             return value
 
-    def observe(self, machine: str, value: dict) -> None:
+    def observe(self, machine: str, value: dict) -> dict | None:
         identity = value.get("id")
         if not isinstance(identity, str):
             return
         prior = self.job(machine, identity)
         if prior is None or prior["version"] != value.get("version"):
             return
-        self.save(machine, {**prior, **public_job(value), "delivered": True})
+        observed = {**prior, **public_job(value), "delivered": True}
+        if prior.get('cancel_requested') and value.get('phase') not in TERMINAL:
+            observed['cancel_requested'] = True
+        self.save(machine, observed)
+        return observed
 
     def cancel(self, machine: str, identity: str) -> dict | None:
         value = self.job(machine, identity)

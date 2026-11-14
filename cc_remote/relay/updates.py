@@ -84,19 +84,25 @@ class UpdateRelay:
             state = await asyncio.to_thread(self.queue.job, machine, command['job_id'])
             if state:
                 return {'ok': True, 'job_id': state['id'], 'receipt': 'found', 'job': public_job(state)}
+        # Only the device's raw flag acknowledges a forwarded cancellation.
+        current = result.get('job')
+        if isinstance(current, dict):
+            observed = await asyncio.to_thread(self.queue.observe, machine, current)
+            if observed:
+                result = {**result, 'job': public_job(observed)}
         if operation in {"status", "check"}:
             await asyncio.to_thread(self.queue.remember, machine, result)
             queued = await asyncio.to_thread(self.queue.active, machine)
-            current = result.get('job')
-            if queued and queued["phase"] not in TERMINAL and (not current or current.get('id') != queued['id']):
-                # A start can time out while the maintenance socket remains
+            if queued and queued["phase"] not in TERMINAL and (
+                not current or current.get('id') != queued['id']
+                or (queued.get('cancel_requested') and not current.get('cancel_requested'))
+            ):
+                # A start or cancellation can time out while the socket remains
                 # connected. Only a previously accepted intent is forwarded,
                 # retaining its exact identity and the device's durable fence.
                 reply = await self._forward_intent(machine, queued)
-                if not current or current.get('phase') in TERMINAL:
+                if not current or current.get('id') == queued['id'] or current.get('phase') in TERMINAL:
                     result = {**result, 'job': reply.get('job')}
-        if isinstance(result.get("job"), dict):
-            await asyncio.to_thread(self.queue.observe, machine, result["job"])
         return {**result, "online": True}
 
     async def _forward_intent(self, machine: str, state: dict) -> dict:
@@ -114,9 +120,12 @@ class UpdateRelay:
         if cancel and result.get('ok') is True and result.get('job') is None:
             result = {**result, 'job': {**public_job(state), 'phase': 'cancelled', 'reason': None}}
         if isinstance(result.get('job'), dict):
-            await asyncio.to_thread(self.queue.observe, machine, result['job'])
+            observed = await asyncio.to_thread(self.queue.observe, machine, result['job'])
+            if observed:
+                result = {**result, 'job': public_job(observed)}
         elif result.get('ok') is False:
-            state = {**state, 'phase': 'blocked', 'reason': result.get('reason'), 'updated_at': time.time()}
+            state = {**state, 'phase': 'unknown' if cancel else 'blocked', 'delivered': True,
+                     'reason': result.get('reason'), 'updated_at': time.time()}
             await asyncio.to_thread(self.queue.save, machine, state)
             result = {**result, 'job': public_job(state)}
         return result
