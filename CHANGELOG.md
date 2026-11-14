@@ -4,8 +4,17 @@
 
 ## Unreleased
 
-- Align Codex asynchronous questions with the shared question dialog, with per-question dismissal, drafts, navigation and answer provenance.
-- Deliver live Codex asynchronous-question notifications through Web Push and Harmony Push. Wire protocol v94.
+## v5.3.29
+
+Unify Codex asynchronous questions and connect live question notifications. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Use the shared rounded question dialog with the Codex icon and heading across desktop and mobile.
+- Support per-question dismissal, postponement, independent drafts and navigation, with the question disclosure retained in submitted replies.
+- Include loaded history pages alongside live questions and reconcile answers received from other clients.
+- Keep page updates available after empty or externally answered drafts and restore keyboard access to unselected options.
+- Deliver live asynchronous-question notifications through Web Push and Harmony Push with device-scoped privacy and deduplication.
+
+See the bilingual [release notes](docs/releases/v5.3.29.md).
 
 ## v5.3.28
 
