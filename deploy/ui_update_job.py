@@ -15,12 +15,15 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from cc_remote.update import (UpdateError, UpdateOutcomeUnknown, host_platform, latest_version, read_installation,
+from cc_remote.update import (UpdateError, UpdateOutcomeUnknown, host_platform, read_installation,
                               release_repository, update, version_tuple)
 from cc_remote.update_jobs import (JOBS, POLICY, UpdateJobs, failure_reason,
-                                   helper_path, job_id, public_job, write_json)
+                                   helper_path, job_id, public_job, worker_alive, write_json)
+from cc_remote.update_errors import DownloadError
+from cc_remote.update_download import DownloadCache
 
 SUDOERS_DIRECTORY = Path("/etc/sudoers.d")
+DOWNLOAD_PHASES = frozenset({'preparing', 'downloading', 'waiting_network', 'validating'})
 
 
 def require_job_manager(system: str) -> None:
@@ -81,7 +84,7 @@ def configure(root: Path, *, enabled: bool, allow_relay: bool = False,
             entry = root / "current/deploy/ui_update_job.py"
             command = [str(root / "current/.venv/bin/python"), "-I", "-B", str(entry), "--root", str(root)]
             content = ('#!/bin/sh\n# cc-remote restricted UI update launcher.\n'
-                       'case "$1:$#" in start:3|cancel:2|reconcile:2|observe:2) ;; *) exit 2 ;; esac\n'
+                       'case "$1:$#" in start:3|cancel:2|reconcile:2|observe:2|prune_cache:2) ;; *) exit 2 ;; esac\n'
                        'exec ' + shlex.join(command) + ' "$@"\n')
             if helper.exists() and not helper.read_text().startswith('#!/bin/sh\n# cc-remote restricted UI update launcher.\n'):
                 raise UpdateError("unrelated update launcher already exists")
@@ -140,11 +143,18 @@ def launch(root: Path, identity: str, version: str) -> dict:
             if existing["version"] != version:
                 raise UpdateError("update request identity was reused")
             return public_job(existing)
+        cancelled = store.cancellation(identity)
+        if cancelled is not None:
+            store.save({'schema': 1, 'id': identity, 'version': version,
+                        'previous': value.manifest['product_version'], 'phase': 'cancelled', 'reason': None,
+                        'created_at': cancelled['created_at']})
+            return public_job(store.state(identity))
         require_job_manager(value.manifest["os"])
         if version_tuple(version) <= version_tuple(value.manifest["product_version"]):
             raise UpdateError("selected update is not newer")
-        if latest_version(policy["repository"]) != version:
-            raise UpdateError("selected release changed; check for updates again")
+        # The confirmed exact version is validated against the fixed release
+        # source by the OS worker. Submission remains available during a
+        # catalog outage and a later release cannot replace the chosen target.
         state, created = store.create(identity, version, value.manifest["product_version"])
         if not created:
             return public_job(state)
@@ -197,36 +207,92 @@ def spawn_worker(root: Path, value, account, store: UpdateJobs, identity: str, g
             store.save({**current, "phase": "unknown", "reason": "launch_unknown"})
 
 
-def cancel(root: Path, identity: str) -> dict:
+def os_job_pending(value, account, state: dict) -> bool | None:
+    """A missing process may still have an OS-managed restart queued."""
+    generation = state.get('recovery_generation', 0)
+    if type(generation) is not int or generation < 0:
+        raise UpdateError('invalid update recovery generation')
+    label = f"cc-remote-ui-update-{job_id(state['id'])}" + (f'-recovery-{generation}' if generation else '')
+    system = value.manifest['os']
+    command = (['/bin/launchctl', 'print', f'gui/{account.pw_uid}/{label}'] if system == 'darwin' else
+               ['/usr/bin/systemctl', 'show', f'{label}.service', '--all',
+                '--property=LoadState,ActiveState,SubState,Job'])
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if len(result.stdout) > 16384:
+        return None
+    if system == 'darwin':
+        if result.returncode == 0:
+            return True
+        if result.returncode == 113 and f'Could not find service "{label}"' in result.stderr:
+            return False
+        return None
+    fields = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+    if fields.get('Job') != '0':
+        return None  # Retain queued work and unknown manager responses.
+    if (fields.get('LoadState') == 'not-found' and fields.get('ActiveState') == 'inactive'
+            and fields.get('SubState') == 'dead'):
+        return False
+    if result.returncode or fields.get('LoadState') != 'loaded':
+        return None
+    return fields.get('ActiveState') not in {'inactive', 'failed'}
+
+
+def cancel(root: Path, identity: str) -> dict | None:
+    from cc_remote import activation
+
     installation(root)
     store = UpdateJobs(root)
     with store.lock(blocking=True):
-        state = store.state(identity)
-        if state["phase"] in {"submitting", "preparing", "downloading", "validating", "waiting"}:
-            if not state.get("worker_pid") and not state.get("attempt_started"):
+        try:
+            state = store.state(identity)
+        except FileNotFoundError:
+            # An in-flight start may arrive after this cancellation. Persist a
+            # fence under the same lock before acknowledging an absent job.
+            store.cancel_unstarted(identity)
+            return None
+        if state["phase"] in {"submitting", "preparing", "downloading", "waiting_network", "validating", "waiting"}:
+            departed_download = (state['phase'] in DOWNLOAD_PHASES and not worker_alive(state)
+                                 and not activation.install_locked(root) and activation.receipt(root, identity) is None)
+            if (not state.get("worker_pid") and not state.get("attempt_started")) or departed_download:
                 # Fence a delayed OS launch under the same lock its worker must
                 # acquire before accepting installation work.
                 store.save({**state, "phase": "cancelled", "reason": None, "cancel_requested": True})
             else:
                 store.save({**state, "cancel_requested": True})
-        return public_job(store.state(identity))
+        result = public_job(store.state(identity))
+    if result["phase"] == "cancelled":
+        try:
+            prune_download_cache(root, version=result["version"])
+        except (OSError, ValueError):
+            print("Cancelled update cache cleanup deferred for inspection.", file=sys.stderr, flush=True)
+    return result
 
 
-def worker_alive(state: dict) -> bool:
-    from cc_remote.wrapper.process_scan import process_identity
-    pid = state.get("worker_pid")
-    if type(pid) is not int or pid < 1:
-        return False
-    identity = process_identity(pid)
-    if identity is not None:
-        return identity.start_ticks == state.get("worker_start")
+def prune_download_cache(root: Path, *, version: str | None = None) -> dict:
+    """Retire expired downloads only while no installation can use them."""
+    from deploy.install_lock import acquire_install_lock, InstallLockError
+    installation(root)
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+        descriptor = acquire_install_lock(root)
+    except InstallLockError:
+        return {"deferred": True}
+    try:
+        cache = DownloadCache(root)
+        if version is None:
+            cache.prune(blocking=False)
+        else:
+            version_tuple(version)
+            cache.discard_version(version, blocking=False)
+    except BlockingIOError:
+        # A curl inherited the cache lock from a departed controller. Let its
+        # original OS worker restart instead of holding the installation lock.
+        return {"deferred": True}
+    finally:
+        os.close(descriptor)
+    return {"deferred": False}
 
 
 def reconcile(root: Path, identity: str, *, explicit: bool = False) -> dict:
@@ -258,6 +324,21 @@ def reconcile(root: Path, identity: str, *, explicit: bool = False) -> dict:
         if activation.install_locked(root):
             return public_job(state)
         record = activation.receipt(root, identity)
+        if (record is None and type(state.get('worker_pid')) is int
+                and state['phase'] in DOWNLOAD_PHASES):
+            if os_job_pending(value, account, state) is not False:
+                return public_job(state)
+            # Transient systemd jobs disappear after reboot. No installer was
+            # accepted, so settle this receipt and allow a cache-backed retry.
+            cancelled = state.get('cancel_requested') or not store.policy()['enabled']
+            store.save({**state, 'phase': 'cancelled' if cancelled else 'failed',
+                        'reason': None if cancelled else 'worker_exited'})
+            if cancelled:
+                try:
+                    prune_download_cache(root, version=state['version'])
+                except (OSError, ValueError):
+                    print('Cancelled update cache cleanup deferred for inspection.', file=sys.stderr, flush=True)
+            return public_job(store.state(identity))
         policy = store.policy()
         prior = activation.receipt(root) if value.role == "relay" and record is None else None
         probe = record or ({"role": "relay", "origin": (prior or {}).get("origin") or "https://" + value.metadata["domain"]}
@@ -353,6 +434,27 @@ def resume_original(root: Path, identity: str) -> None:
     reconcile(root, identity)
 
 
+def install_with_download_recovery(root: Path, state: dict, policy: dict, progress) -> None:
+    """Retry only pre-install downloads, retaining one checksum-bound partial."""
+    delay = 5
+    while True:
+        try:
+            update(role=policy["role"], target_version=state["version"], check=False,
+                   allow_protocol_change=True,
+                   allow_relay_update=policy["allow_relay_update"], progress=progress)
+            return
+        except DownloadError as exc:
+            if not exc.transient:
+                raise
+            progress("waiting_network")
+            print("Download interrupted; waiting to resume the same release after reconnecting.", flush=True)
+            # Recheck cancellation/policy during backoff without a browser.
+            for _ in range(delay):
+                time.sleep(1)
+                progress("waiting_network")
+            delay = min(delay * 2, 60)
+
+
 def run(root: Path, identity: str) -> None:
     value, account = installation(root)
     store = UpdateJobs(root)
@@ -365,13 +467,16 @@ def run(root: Path, identity: str) -> None:
         if worker_alive(state):
             return
         resumed = bool(state.get("attempt_started")) or state["phase"] not in {"submitting", "unknown"} or bool(state.get("worker_pid"))
+        from cc_remote import activation
+        download_resume = (state["phase"] in DOWNLOAD_PHASES
+                           and activation.receipt(root, identity) is None)
         from cc_remote.wrapper.process_scan import process_identity
         identity_info = process_identity(os.getpid())
         if identity_info is None:
             raise UpdateError("cannot identify update worker")
         store.save({**state, "phase": state["phase"] if resumed else "preparing", "attempt_started": True, "worker_pid": os.getpid(),
                     "worker_start": identity_info.start_ticks})
-    if resumed:
+    if resumed and not download_resume:
         resume_original(root, identity)
         return
     policy = store.policy()
@@ -389,7 +494,7 @@ def run(root: Path, identity: str) -> None:
             if current["phase"] in {"succeeded", "failed", "blocked", "cancelled"}:
                 return  # The shared installer already committed its outcome.
             if (current.get("cancel_requested") or not store.policy()["enabled"]) and current["phase"] in {
-                "preparing", "downloading", "validating", "waiting",
+                "preparing", "downloading", "waiting_network", "validating", "waiting",
             }:
                 raise Cancelled("update cancelled before activation")
             store.save({**current, "phase": "validating" if phase == "ready" else phase})
@@ -397,8 +502,7 @@ def run(root: Path, identity: str) -> None:
     try:
         if not policy["enabled"]:
             raise Cancelled("UI updates were disabled")
-        update(role=value.role, target_version=state["version"], check=False,
-               allow_relay_update=policy["allow_relay_update"], progress=progress)
+        install_with_download_recovery(root, state, policy, progress)
         from deploy.release_retention import STATUS
         try:
             from cc_remote.update_jobs import read_json
@@ -408,6 +512,10 @@ def run(root: Path, identity: str) -> None:
             deferred = True
         outcome = {"phase": "succeeded", "reason": None, "cleanup_pending": deferred}
     except Cancelled:
+        try:
+            prune_download_cache(root, version=state["version"])
+        except (OSError, ValueError):
+            print("Cancelled download cache cleanup deferred until the installation lock is available.", flush=True)
         outcome = {"phase": "cancelled", "reason": None}
     except UpdateOutcomeUnknown as exc:
         # The upstream receipt remains authoritative and the next attempt will
@@ -464,7 +572,7 @@ def main() -> int:
     start = sub.add_parser("start")
     start.add_argument("id")
     start.add_argument("version")
-    for action in ("run", "cancel", "reconcile", "observe"):
+    for action in ("run", "cancel", "reconcile", "observe", "prune_cache"):
         sub.add_parser(action).add_argument("id")
     recovery = sub.add_parser("recover")
     recovery.add_argument("id")
@@ -476,6 +584,10 @@ def main() -> int:
             return 0
         if args.action == "recover":
             recover(args.root, args.id, args.generation)
+            return 0
+        if args.action == "prune_cache":
+            job_id(args.id)
+            print(json.dumps({"ok": True, **prune_download_cache(args.root)}))
             return 0
         value = (launch(args.root, args.id, args.version) if args.action == "start" else
                  reconcile(args.root, args.id, explicit=args.action == "reconcile") if args.action in {"reconcile", "observe"} else cancel(args.root, args.id))

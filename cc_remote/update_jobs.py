@@ -17,7 +17,7 @@ from cc_remote.update import UpdateError, version_tuple
 POLICY = "ui-update-policy.json"
 JOBS = "ui-update-jobs"
 TERMINAL = frozenset({"succeeded", "failed", "cancelled", "blocked"})
-PHASES = frozenset({"submitting", "preparing", "downloading", "validating", "waiting",
+PHASES = frozenset({"submitting", "preparing", "downloading", "waiting_network", "validating", "waiting",
                    "updating_relay", "installing", "verifying", "unknown", *TERMINAL})
 MAX_JOBS = 1024
 
@@ -26,6 +26,23 @@ def job_id(value: object) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{32}", value):
         raise UpdateError("invalid update request identity")
     return value
+
+
+def worker_alive(state: dict) -> bool:
+    from cc_remote.wrapper.process_scan import process_identity
+    pid = state.get("worker_pid")
+    if type(pid) is not int or pid < 1:
+        return False
+    identity = process_identity(pid)
+    if identity is not None:
+        return identity.start_ticks == state.get("worker_start")
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def helper_path(root: Path) -> Path:
@@ -117,6 +134,28 @@ class UpdateJobs:
         value = {**value, "updated_at": time.time()}
         write_json(self.folder / f"{job_id(value['id'])}.json", value)
 
+    def check_capacity(self, identity: str) -> None:
+        records = {path.name[:32] for path in self.folder.iterdir()
+                   if re.fullmatch(r"[0-9a-f]{32}(?:\.cancel)?\.json", path.name)}
+        if identity not in records and len(records) >= MAX_JOBS:
+            raise UpdateError("update receipt limit reached; administrator maintenance required")
+
+    def cancellation(self, identity: str) -> dict | None:
+        try:
+            value = read_json(self.folder / f"{job_id(identity)}.cancel.json", self.owner)
+        except FileNotFoundError:
+            return None
+        if value.get('schema') != 1 or value.get('id') != identity:
+            raise UpdateError('invalid update cancellation receipt')
+        return value
+
+    def cancel_unstarted(self, identity: str) -> None:
+        self.validate_folder()
+        self.check_capacity(job_id(identity))
+        if self.cancellation(identity) is None:
+            write_json(self.folder / f'{identity}.cancel.json',
+                       {'schema': 1, 'id': identity, 'created_at': time.time()})
+
     @contextmanager
     def lock(self, *, blocking: bool = False):
         self.validate_folder()
@@ -145,8 +184,7 @@ class UpdateJobs:
         active = self.active()
         if active and active["phase"] not in TERMINAL:
             raise UpdateError("another update is already pending")
-        if sum(1 for _ in self.folder.glob("[0-9a-f]" * 32 + ".json")) >= MAX_JOBS:
-            raise UpdateError("update receipt limit reached; administrator maintenance required")
+        self.check_capacity(identity)
         value = {"schema": 1, "id": identity, "version": version, "previous": current,
                  "phase": "submitting", "created_at": time.time(), "reason": None}
         self.save(value)

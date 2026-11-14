@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { AppUpdateClient, appUpdateFeedback, newerVersion, parseAppUpdate, parseUpdateJob,
+import { AppUpdateClient, appUpdateFeedback, currentUpdateJob, newerVersion, parseAppUpdate, parseUpdateJob,
   UpdateIntentStore, updateReason, releaseHighlights, parseUpdateReceipt, preferServerUpdate } from "../src/app-updates.ts";
 
 assert(newerVersion("5.10.0", "5.9.99"));
@@ -13,7 +13,16 @@ assert(!("secret" in parseUpdateJob(job)!));
 const state = parseAppUpdate({ managed: true, enabled: true, current: "5.3.14", busy_count: 2,
   latest: { version: "5.3.15", notes: "更新内容" }, job });
 assert.equal(appUpdateFeedback(state)?.label, "等待更新");
+for (const [phase, label] of [["waiting_network", "等待网络"], ["waiting_device", "等待上线"]] as const) {
+  const paused = parseAppUpdate({ ...state, online: false, job: { ...job, phase } });
+  assert.equal(paused.online, false);
+  assert.equal(paused.maintenance, false);
+  assert.equal(appUpdateFeedback(paused)?.label, label);
+}
 assert.equal(appUpdateFeedback({ ...state, job: null })?.label, "有更新");
+const adopted = { ...state, current: '5.3.15', job: { ...state.job!, phase: 'blocked' as const, reason: 'protocol_change' } };
+assert.equal(currentUpdateJob(adopted), null);
+assert.equal(appUpdateFeedback(adopted), undefined);
 assert.equal(appUpdateFeedback({ ...state, latest: null, job: { ...state.job!, phase: "succeeded", updated_at: 1 } }, 500_000), undefined);
 assert.match(updateReason("unknown secret"), /更新没有完成/);
 

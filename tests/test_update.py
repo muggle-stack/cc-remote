@@ -134,6 +134,23 @@ def test_update_downloads_verified_bundle_and_preserves_install_identity(tmp_pat
     assert calls[0][1:] == expected
 
 
+@pytest.mark.parametrize("version", ["4.0.0", "4.0.1"])
+def test_cache_cleanup_failure_preserves_a_verified_install_result(tmp_path, monkeypatch, capsys, version):
+    from cc_remote.update_download import DownloadCache
+
+    installation = _installation(tmp_path, monkeypatch)
+    mirror, _, _ = _bundle(tmp_path, installation)
+    monkeypatch.setenv("CC_REMOTE_RELEASE_BASE_URL", mirror.as_uri())
+
+    def unavailable_cache(*_args):
+        raise PermissionError("fixture cleanup denied")
+
+    monkeypatch.setattr(DownloadCache, "discard_version", unavailable_cache)
+    assert main(["update", "--version", version]) == 0
+    assert updater.read_installation(installation.root, "darwin", "arm64").manifest["product_version"] == version
+    assert "cached package cleanup deferred" in capsys.readouterr().err
+
+
 def test_check_never_downloads_locks_or_activates(tmp_path, monkeypatch, capsys):
     installation = _installation(tmp_path, monkeypatch)
     before = sorted(installation.root.iterdir())
@@ -285,13 +302,14 @@ def test_changed_installation_is_not_activated_after_download(tmp_path, monkeypa
     assert (installation.root / "current").resolve() == installation.release
 
 
-def test_protocol_change_requires_explicit_coordinated_upgrade(tmp_path, monkeypatch):
-    installation = _installation(tmp_path, monkeypatch)
-    mirror, marker, _ = _bundle(tmp_path, installation, changes={"protocol_version": 73})
+@pytest.mark.parametrize("role,system", [("wrapper", "darwin"), ("wrapper", "linux"), ("relay", "linux")])
+def test_newer_release_upgrades_protocol_without_an_extra_flag(tmp_path, monkeypatch, role, system):
+    installation = _installation(tmp_path, monkeypatch, role=role, system=system)
+    installation.manifest["protocol_version"] = 90
+    (installation.release / "release-manifest.json").write_text(json.dumps(installation.manifest))
+    mirror, marker, _ = _bundle(tmp_path, installation, changes={"protocol_version": 93})
     monkeypatch.setenv("CC_REMOTE_RELEASE_BASE_URL", mirror.as_uri())
-    assert main(["update", "--version", "4.0.1"]) == 1
-    assert not marker.exists()
-    monkeypatch.setattr(update_relay, "relay_release", lambda _: {"version": "4.0.1", "protocol": 73})
+    assert main(["update", "--version", "4.0.1"]) == 0
     assert main(["update", "--version", "4.0.1", "--allow-protocol-change"]) == 0
     assert len(json.loads(marker.read_text())) == 1
 
@@ -312,6 +330,26 @@ def test_installer_failure_is_not_retried_or_reported_as_success(tmp_path, monke
     assert main(["update", "--version", "4.0.1"]) == 1
     assert len(json.loads(marker.read_text())) == 1
     assert (installation.root / "current").resolve() == installation.release
+
+
+def test_installer_retry_reuses_verified_archive_and_discards_extraction(tmp_path, monkeypatch):
+    from cc_remote import update_download
+    installation = _installation(tmp_path, monkeypatch)
+    mirror, marker, _ = _bundle(tmp_path, installation, fail=True)
+    monkeypatch.setenv("CC_REMOTE_RELEASE_BASE_URL", mirror.as_uri())
+    native_download = update_download.download_file
+    downloads = []
+    def download(url, *args, **kwargs):
+        downloads.append(url)
+        return native_download(url, *args, **kwargs)
+    monkeypatch.setattr(update_download, 'download_file', download)
+    assert main(['update', '--version', '4.0.1']) == 1
+    assert main(['update', '--version', '4.0.1']) == 1
+    assert len(downloads) == 2  # One checksum file and one archive across both attempts.
+    calls = json.loads(marker.read_text())
+    assert len(calls) == 2
+    assert all(not Path(call[0]).exists() for call in calls)
+    assert len(list((installation.root / 'download-cache').glob('*.tar.gz'))) == 1
 
 
 def test_interrupt_waits_for_installer_rollback_instead_of_killing_it(monkeypatch):

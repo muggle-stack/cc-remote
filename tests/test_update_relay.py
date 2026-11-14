@@ -213,7 +213,7 @@ def test_current_device_still_checks_upstream_and_check_mode_never_runs_ssh(tmp_
     assert main(["update", "--check", "--version", "4.0.0", "--relay-ssh", "relay"]) == 0
     assert set(installation.root.iterdir()) == before
     monkeypatch.setattr(update_relay.RelayUpdate, "_verify_host", lambda _: (_ for _ in ()).throw(UpdateError("need SSH")))
-    assert main(["update", "--version", "4.0.0"]) == 1
+    assert main(["update", "--version", "4.0.0"]) == 0
 
 
 @pytest.mark.parametrize("target", ["-oProxyCommand=bad", "host;touch /tmp/no", "user@host\ncmd", "ssh://host"])

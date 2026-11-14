@@ -660,7 +660,7 @@ def create_app(
         lambda req: _request_origin_allowed(req, cfg),
     )
     app.state.viewers = viewers
-    updates = UpdateRelay()
+    updates = UpdateRelay(devices)
     update_limiter = LoginRateLimiter(max_per_ip=180)
     app.state.updates = updates
     app.state.server_updates = server_updates

@@ -9,6 +9,16 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 
 
+class UpdateError(ValueError):
+    pass
+
+
+class DownloadError(UpdateError):
+    def __init__(self, message: str, *, transient: bool = False):
+        super().__init__(message)
+        self.transient = transient
+
+
 def read_with_retry(open_request, request, *, timeout: int, limit: int) -> bytes:
     """Bounded retries for read-only metadata; never retry authentication errors."""
     for attempt in range(3):
@@ -66,6 +76,7 @@ def download_reason(code: int, http_status: str) -> str:
         5: "proxy DNS lookup failed; check your proxy hostname and DNS",
         6: "DNS lookup failed; check your DNS/network configuration",
         7: "connection failed; check your network, proxy, firewall and server address",
+        18: "download was interrupted before all bytes arrived; it can resume after reconnecting",
         23: "cannot write the downloaded file; check disk space and directory permissions",
         28: "connection timed out; check your network, proxy and server availability",
         35: "TLS handshake failed; check your network, proxy and the server's HTTPS configuration",
