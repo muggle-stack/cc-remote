@@ -4,6 +4,18 @@
 
 ## Unreleased
 
+## v5.3.30
+
+Fix device selection and live reading restoration, and improve Codex question submission. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Bind chat connections to the authorized selected device, including Default while offline.
+- Restore paused live reading across Claude, Codex and DSH switches with current tools, processing status and working marks.
+- Wait for bookmarked message rows to mount and retain saved history windows when a live row is evicted.
+- Close Codex question dialogs immediately after submission while retaining delivery confirmation and failed-answer drafts.
+- Clear the selected option when the custom answer gains focus.
+
+See the bilingual [release notes](docs/releases/v5.3.30.md).
+
 ## v5.3.29
 
 Unify Codex asynchronous questions and connect live question notifications. Wire protocol v94 and Claude Agent SDK 0.2.174.
