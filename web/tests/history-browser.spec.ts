@@ -654,6 +654,7 @@ async function mockRightPanelRelay(
 ) {
   const btwSid = "btw-layout-child";
   const commands: Record<string, unknown>[] = [];
+  const connections: string[] = [];
   const allowedReads = new Set<string>();
   let emit: (message: PanelRelayEvent) => void = () => {
     throw new Error("layout relay has not connected");
@@ -677,6 +678,7 @@ async function mockRightPanelRelay(
     devices,
   } }));
   await page.routeWebSocket(/\/ws(?:\?|$)/, (socket) => {
+    connections.push(socket.url());
     const machineId = new URL(socket.url()).searchParams.get("machine") ?? "default";
     const machineParentSid = sessionIdForMachine?.(machineId) ?? parentSid;
     emit = (message) => socket.send(JSON.stringify({
@@ -788,8 +790,37 @@ async function mockRightPanelRelay(
         client_id: String(command.client_id), cmd_id: String(command.cmd_id) });
     });
   });
-  return { commands, emit: (message: PanelRelayEvent) => emit(message) };
+  return { commands, connections, emit: (message: PanelRelayEvent) => emit(message) };
 }
+
+test("device return paints only authorized content after initial device discovery", async ({ page }) => {
+  const devices = [{ machine_id: "layout-machine", label: "Authorized device", online: true }];
+  const relay = await mockRightPanelRelay(page, {
+    retained: false, devices,
+    historyReply: command => ({ type: "history", session_id: String(command.session_id),
+      sid: String(command.session_id), revision: "authorized-history", generation: "layout-generation",
+      detail: "summary", events: [], has_more: false,
+      turns: [{ id: "authorized-turn", prompt: "Check authorized device", done: true,
+        blocks: [{ kind: "text", message_id: "authorized-answer", channel: "final",
+          text: "Answer from the authorized device", done: true }] }] }),
+  });
+  await page.addInitScript(() => localStorage.removeItem("cc_remote_machine"));
+  const pending: import("@playwright/test").Route[] = [];
+  const holdDevices = (route: import("@playwright/test").Route) => { pending.push(route); };
+  await page.route("**/api/devices", holdDevices);
+  await page.goto("/");
+  await expect.poll(() => pending.length).toBeGreaterThan(0);
+  await page.evaluate(async () => {
+    const cache = await import("/src/cache.ts");
+    await cache.loadAllReplayState("default");
+  });
+  expect(relay.connections).toHaveLength(0);
+  await page.unroute("**/api/devices", holdDevices);
+  for (const route of pending) await route.fulfill({ json: { devices } });
+  await expect(page.getByText("Answer from the authorized device", { exact: true })).toBeVisible();
+  expect(relay.connections.map(url => new URL(url).searchParams.get("machine")))
+    .toEqual(["layout-machine"]);
+});
 
 for (const engine of ["claude", "codex", "dsh"] as const) {
   test(`device switching retains isolated instant session cache for ${engine}`, async ({ page }) => {
@@ -3921,8 +3952,17 @@ test("async question first layout uses rounded cards and preserves a postponed a
   await expect(dialog.locator(".async-question-option").first()).toHaveCSS("border-radius", "12px");
   await expect(dialog.locator(".async-question-option-check")).toHaveCount(0);
   await dialog.getByRole("radio").nth(1).check();
-  await dialog.getByRole("textbox").fill("需要先验证续航。\n不要直接加工。");
+  await dialog.getByRole("textbox").focus();
+  await expect(dialog.getByRole("textbox")).toHaveValue("");
+  await expect(dialog.locator(".async-question-option.selected")).toHaveCount(0);
   await expect(dialog.getByRole("radio").nth(1)).not.toBeChecked();
+  await expect(dialog.getByRole("button", { name: "提交回答" })).toBeDisabled();
+  expect(relay.commands.filter(command => ["query", "steer"].includes(String(command.type)))).toHaveLength(0);
+  await dialog.getByRole("radio").nth(1).check();
+  await dialog.getByRole("textbox").click();
+  await expect(dialog.locator(".async-question-option.selected")).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "提交回答" })).toBeDisabled();
+  await dialog.getByRole("textbox").fill("需要先验证续航。\n不要直接加工。");
   await dialog.getByRole("button", { name: "稍后回答" }).click();
   await expect(page.locator(".question-resume")).toContainText("等待你回答");
   await openAsyncQuestion(page);
@@ -4001,8 +4041,9 @@ test("async question keyboard reaches unselected options after editing and reope
   await expect(second).toBeChecked();
   await page.keyboard.press("Tab");
   await expect(input).toBeFocused();
+  await expect(second).not.toBeChecked();
   await page.keyboard.press("Shift+Tab");
-  await expect(second).toBeFocused();
+  await expect(first).toBeFocused();
   await input.fill("清空前的回答");
   await input.fill("");
   await input.press("Shift+Tab");

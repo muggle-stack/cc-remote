@@ -499,6 +499,7 @@ export default function App() {
     machineId, entries: new Map<string, ArtifactReadingState>(),
   }), [machineId]);
   const [remoteDevices, setRemoteDevices] = useState<RemoteDevice[]>([]);
+  const hasSelectedDevice = remoteDevices.some(device => device.machine_id === machineId);
   const notificationMachineIdsKey = JSON.stringify(
     [...new Set(remoteDevices.map(device => device.machine_id))].sort(),
   );
@@ -2452,7 +2453,7 @@ export default function App() {
 
   // WebSocket lifecycle
   useEffect(() => {
-    if (!authed) return;
+    if (!authed || !hasSelectedDevice) return;
     const historyRequests = historyRequestsRef.current;
     const turnFileRequests = turnFileRequestsRef.current;
     const contextRequestLaunches = contextRequestLaunchesRef.current;
@@ -4252,6 +4253,7 @@ export default function App() {
     asyncQuestions,
     dshApi,
     authed,
+    hasSelectedDevice,
     webUpdate.check,
     clearForkFocusLease,
     clearHistoryDetailRequests,

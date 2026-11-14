@@ -180,6 +180,7 @@ function AsyncQuestionDialog({ entry, initialDraft, page, total, onDraftChange,
           <div className="async-question-composer">
             <textarea ref={editorRef} id={`${id}-answer`} name="answer" rows={2}
               value={draft.text} maxLength={8192} placeholder="或输入其他回答…"
+              onFocus={() => updateDraft({ ...draftRef.current, choice: null })}
               onChange={event => updateDraft({ ...draftRef.current, text: event.target.value,
                 choice: event.target.value ? null : draftRef.current.choice })}
               onKeyDown={event => {

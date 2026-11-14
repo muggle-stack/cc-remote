@@ -264,7 +264,8 @@ export class RelayWs {
     this.clientId = stableTabClientId();
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
     const url = new URL(`${proto}//${window.location.host}/ws`);
-    if (machineId !== "default") url.searchParams.set("machine", machineId);
+    // Keep Default explicit while its Wrapper is offline.
+    url.searchParams.set("machine", machineId);
     this.url = url.toString();
     this.surfaceEpochByScope[
       sessionScopeKey(machineId, this.activeEngine, this.activeSpace)
