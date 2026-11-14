@@ -3023,6 +3023,90 @@ const ASYNC_HISTORY_TURN = {
 
 const TEST_GENERATED_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j6RkAAAAASUVORK5CYII=";
 
+test("async question paginated history joins the live inventory and keeps independent drafts", async ({ page }, testInfo) => {
+  const sid = "layout-parent";
+  const olderQuestion = { ...ASYNC_HISTORY_TURN, id: "older-question", ts: 1000,
+    blocks: [{ ...ASYNC_HISTORY_TURN.blocks[0], message_id: "older-question-item",
+      questions: [{ title: "历史问题需要补充什么？" }] }] };
+  const latestTurns = Array.from({ length: 4 }, (_, index) => ({
+    id: "latest-" + index, prompt: "最近的用户消息 " + index, done: true, ts: 2000 + index * 1000,
+    blocks: [{ kind: "text" as const, message_id: "latest-answer-" + index,
+      channel: "final" as const, done: true, text: "最近的消息内容。\n\n".repeat(40),
+      ...(index === 3 ? { delivery: "async" as const,
+        questions: [{ title: "当前任务需要补充什么？" }] } : {}) }],
+  }));
+  const base = { type: "history" as const, session_id: sid, sid,
+    revision: "layout-history", generation: "layout-generation", detail: "summary" as const, events: [] };
+  const relay = await mockRightPanelRelay(page, { retained: false, historyReply: command => ({
+    ...base, request_id: String(command.cmd_id),
+    ...(command.before ? { before: String(command.before), turns: [olderQuestion],
+      oldest_id: olderQuestion.id, newest_id: olderQuestion.id, has_more: false }
+      : { turns: latestTurns, oldest_id: "latest-0", newest_id: "latest-3", has_more: true }),
+  }) });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  await expect(dialog.locator("legend")).toHaveText("当前任务需要补充什么？");
+  await dialog.getByRole("textbox").fill("实时问题的草稿");
+  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  await scrollThreadToEdge(page, "start", testInfo.project.name);
+  await expect.poll(() => relay.commands.filter(command => command.type === "get_history" && command.before).length).toBe(1);
+  await expect(page.locator(".question-resume")).toContainText("2 / 2");
+  await openAsyncQuestion(page);
+  await expect(dialog.getByRole("textbox")).toHaveValue("实时问题的草稿");
+  await dialog.getByRole("button", { name: "上一题", exact: true }).click();
+  await expect(dialog.locator("legend")).toHaveText("历史问题需要补充什么？");
+  await dialog.getByRole("textbox").fill("从历史分页回答");
+  await dialog.getByRole("button", { name: "下一题", exact: true }).click();
+  await expect(dialog.getByRole("textbox")).toHaveValue("实时问题的草稿");
+  await dialog.getByRole("button", { name: "上一题", exact: true }).click();
+  await expect(dialog.getByRole("textbox")).toHaveValue("从历史分页回答");
+  await dialog.getByRole("button", { name: "提交回答", exact: true }).click();
+  await expect.poll(() => relay.commands.filter(command => command.type === "query").length).toBe(1);
+  const query = relay.commands.find(command => command.type === "query")!;
+  expect(query.sid).toBe(sid);
+  expect(query.prompt).toBe("补充回答：\n\n问题：历史问题需要补充什么？\n回答：从历史分页回答");
+  relay.emit({ type: "user_msg", sid, msg_id: String(query.msg_id), prompt: String(query.prompt) });
+  await expect(dialog.locator("legend")).toHaveText("当前任务需要补充什么？");
+  await expect(dialog.getByRole("textbox")).toHaveValue("实时问题的草稿");
+  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  await page.getByRole("button", { name: "回到最新", exact: true }).click();
+  await expect(page.locator('[data-turn-id="older-question"]')).toHaveCount(0);
+  await openAsyncQuestion(page);
+  await expect(dialog.locator("legend")).toHaveText("当前任务需要补充什么？");
+  await expect(dialog.getByRole("textbox")).toHaveValue("实时问题的草稿");
+});
+
+test("async question paginated history recognizes accepted answers from the newer runtime", async ({ page }, testInfo) => {
+  const sid = "layout-parent";
+  const olderQuestion = { ...ASYNC_HISTORY_TURN, id: "older-question",
+    blocks: [{ ...ASYNC_HISTORY_TURN.blocks[0], message_id: "older-question-item", questions: [
+      { title: "已经回答的历史问题？" }, { title: "还未回答的历史问题？" },
+    ] }] };
+  const latestTurns = Array.from({ length: 4 }, (_, index) => ({
+    id: "latest-" + index,
+    prompt: index === 3 ? "补充回答：\n\n问题：已经回答的历史问题？\n回答：已经确认"
+      : "最近的用户消息 " + index,
+    done: true, blocks: [{ kind: "text" as const, message_id: "latest-answer-" + index,
+      channel: "final" as const, done: true, text: "最近的消息内容。\n\n".repeat(40) }],
+  }));
+  const base = { type: "history" as const, session_id: sid, sid,
+    revision: "layout-history", generation: "layout-generation", detail: "summary" as const, events: [] };
+  await mockRightPanelRelay(page, { retained: false, historyReply: command => ({
+    ...base, request_id: String(command.cmd_id),
+    ...(command.before ? { before: String(command.before), turns: [olderQuestion],
+      oldest_id: olderQuestion.id, newest_id: olderQuestion.id, has_more: false }
+      : { turns: latestTurns, oldest_id: "latest-0", newest_id: "latest-3", has_more: true }),
+  }) });
+  await page.goto("/");
+  await expect(page.locator('[data-turn-id="latest-3"]')).toBeAttached();
+  await scrollThreadToEdge(page, "start", testInfo.project.name);
+  const dialog = await openAsyncQuestion(page);
+  await expect(dialog.locator("legend")).toHaveText("还未回答的历史问题？");
+  await expect(dialog.locator(".qa-progress")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "忽略当前问题", exact: true }).click();
+  await expect(page.locator(".async-question-dialog, .question-resume")).toHaveCount(0);
+});
+
 test("async question compact styling matches the shared dialog on desktop and mobile", async ({ page }, testInfo) => {
   const title = "这几次恢复，是你在板子失联后手动重启或断电的吗？失联前是否主动重启或改 IP？";
   await mockRightPanelRelay(page, { seedTurns: [{

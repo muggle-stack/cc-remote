@@ -4,6 +4,7 @@ import type { Turn } from "../domain/conversation";
 import { EngineIcon, Icon } from "../icons";
 import { presentAsyncQuestionReplies, supplementalAnswerPrompt } from "../async-question-presentation";
 import { AsyncQuestionStore, type AsyncQuestionDraft, type AsyncQuestionEntry } from "../async-question-state";
+import { mergeHistoryPageCopies } from "../history-merge";
 import { ImeSubmitGuard } from "../ime-submit";
 import type { QueryAcceptanceResult } from "../outbox";
 import { presentCommandProblem } from "../problem-presentation";
@@ -210,11 +211,12 @@ function AsyncQuestionDialog({ entry, initialDraft, page, total, onDraftChange,
 
 /** This host lives beside the composer, outside virtualized history. Its
  * device/session-scoped store also survives navigation and native receipts. */
-export default function AsyncQuestionHost({ scope, store, turns, pendingReplyId,
+export default function AsyncQuestionHost({ scope, store, turns, historyTurns, pendingReplyId,
   onReply, enabled = true }: {
   scope: string;
   store: AsyncQuestionStore;
   turns: readonly Turn[];
+  historyTurns?: readonly Turn[];
   pendingReplyId?: string | null;
   onReply?: (prompt: string) => Promise<QueryAcceptanceResult> | null;
   enabled?: boolean;
@@ -225,10 +227,15 @@ export default function AsyncQuestionHost({ scope, store, turns, pendingReplyId,
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const resumeRef = useRef<HTMLButtonElement>(null);
   const focusResume = useRef(false);
-  const presentation = useMemo(() => presentAsyncQuestionReplies(turns, pendingReplyId), [turns, pendingReplyId]);
+  // Browse pages supply older questions while the newest runtime keeps live
+  // questions and accepted replies available outside the visible history page.
+  const questionTurns = useMemo(() => historyTurns && historyTurns !== turns
+    ? mergeHistoryPageCopies([...historyTurns, ...turns], "first").filter((turn): turn is Turn => turn !== null)
+    : turns, [turns, historyTurns]);
+  const presentation = useMemo(() => presentAsyncQuestionReplies(questionTurns, pendingReplyId), [questionTurns, pendingReplyId]);
   const entries = useMemo(() => {
     const unique = new Map<string, AsyncQuestionEntry>();
-    for (const turn of turns) for (const block of turn.blocks) {
+    for (const turn of questionTurns) for (const block of turn.blocks) {
       if (block.kind !== "text" || block.delivery !== "async") continue;
       block.questions?.forEach((question, index) => {
         if (presentation.answeredQuestions.get(block.message_id)?.has(index)) return;
@@ -237,7 +244,7 @@ export default function AsyncQuestionHost({ scope, store, turns, pendingReplyId,
       });
     }
     return [...unique.values()];
-  }, [turns, presentation]);
+  }, [questionTurns, presentation]);
   const pending = entries.filter(entry => !session.retired.has(entry.key));
   const current = pending.find(entry => entry.key === session.activeKey) ?? pending[0];
   const page = current ? pending.indexOf(current) : 0;

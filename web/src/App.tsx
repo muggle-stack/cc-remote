@@ -6614,6 +6614,7 @@ export default function App() {
             {focusedEngine === "codex" && focusedSid && <Suspense fallback={null}>
               <AsyncQuestionHost key={focusedComposerDraftKey}
                 scope={focusedComposerDraftKey} store={asyncQuestions} turns={rt.turns}
+                historyTurns={historyView.turns}
                 pendingReplyId={rt.acceptancePending}
                 enabled={!archivedBrowse && !rt.loading && !historyView.recovering
                   && !rt.pendingQuestion && !activeBtwQuestionVisible}
