@@ -3981,6 +3981,50 @@ test("async question option presses avoid native tap flashes and retain rounded 
   expect(relay.commands.find(c => c.type === "query")?.prompt).toBe("补充回答：\n\n问题：在哪个设备发生？\n回答：手机");
 });
 
+test("async question keyboard reaches unselected options after editing and reopening", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { retained: false, seedTurns: [{
+    ...ASYNC_HISTORY_TURN, blocks: [{ ...ASYNC_HISTORY_TURN.blocks[0], questions: [ASYNC_QUESTIONS[0]] }],
+  }] });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  const input = dialog.getByRole("textbox");
+  const first = dialog.getByRole("radio").first();
+  const second = dialog.getByRole("radio").nth(1);
+  await input.fill("自定义回答");
+  await expect(first).not.toBeChecked();
+  await expect(second).not.toBeChecked();
+  await input.press("Shift+Tab");
+  await expect(first).toBeFocused();
+  await expect(first).not.toBeChecked();
+  await expect(input).toHaveValue("自定义回答");
+  await page.keyboard.press("ArrowDown");
+  await expect(second).toBeChecked();
+  await page.keyboard.press("Tab");
+  await expect(input).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(second).toBeFocused();
+  await input.fill("清空前的回答");
+  await input.fill("");
+  await input.press("Shift+Tab");
+  await expect(first).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(input).toBeFocused();
+  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  await openAsyncQuestion(page);
+  const close = dialog.getByRole("button", { name: "忽略当前问题", exact: true });
+  await close.focus();
+  await page.keyboard.press("Tab");
+  await expect(first).toBeFocused();
+  await expect(first).not.toBeChecked();
+  await expect(second).not.toBeChecked();
+  await page.keyboard.press("Shift+Tab");
+  await expect(close).toBeFocused();
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Space");
+  await expect(first).toBeChecked();
+  expect(relay.commands.filter(command => ["query", "steer", "answer_question", "interrupt"].includes(String(command.type)))).toHaveLength(0);
+});
+
 test("generated image canonical summary survives refresh and loads original without detail", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { imageAssets: true, seedTurns: [{
     id: "image-user", prompt: "画一张图", done: true, detailLoaded: false,

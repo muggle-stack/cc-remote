@@ -103,10 +103,13 @@ function AsyncQuestionDialog({ entry, initialDraft, page, total, onDraftChange,
     onKeyDown={event => {
       event.stopPropagation();
       if (event.key === "Tab" && !event.altKey && !event.ctrlKey && !event.metaKey) {
-        const focusable = [...event.currentTarget.querySelectorAll<HTMLElement>(
+        const controls = [...event.currentTarget.querySelectorAll<HTMLElement>(
           'button:not(:disabled), textarea:not(:disabled), input:not(:disabled), summary, a[href]',
-        )].filter(node => node.getClientRects().length > 0
-          && (!(node instanceof HTMLInputElement) || node.type !== "radio" || node.checked));
+        )].filter(node => node.getClientRects().length > 0);
+        // Keep one tab stop in the radio group before or after a selection.
+        const radio = controls.find(node => node.matches('input[type="radio"]:checked'))
+          ?? controls.find(node => node.matches('input[type="radio"]'));
+        const focusable = controls.filter(node => !node.matches('input[type="radio"]') || node === radio);
         if (focusable.length) {
           event.preventDefault();
           const current = focusable.indexOf(document.activeElement as HTMLElement);
