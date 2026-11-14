@@ -535,3 +535,35 @@ def test_live_ask_has_notification_context_without_replay_or_question_content():
         assert replay.notification_context is None
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("engine,structured", [("codex", True), ("codex", False), ("claude", True)])
+def test_async_question_notification_context_is_live_codex_only(engine, structured):
+    from cc_remote.protocol import AssistantMsgEnd
+
+    async def run():
+        machine, transport = _mk_machine()
+        ctx = _mk_ctx(key="async-notify", session_id="async-notify")
+        ctx.engine = engine
+        machine._remember_notification_title(ctx.key, "Code session")
+        event = AssistantMsgEnd(
+            message_id="question-item", delivery="async",
+            questions=[{"title": "private question", "options": ["private option"]}]
+            if structured else None,
+        )
+        await machine._emit_locked(ctx, event)
+        live = transport.sent[-1]
+        if engine == "codex" and structured:
+            assert live.notification_context.engine == "codex"
+            assert live.notification_context.display_name == "Code session"
+            assert "private" not in live.notification_context.model_dump_json()
+            assert deserialize(serialize(live)).notification_context == live.notification_context
+        else:
+            assert live.notification_context is None
+        assert event.notification_context is None
+        replay = next(frame for frame in ctx.buffer.replay_from(
+            0, cc_session_id=ctx.session_id, state="running") if isinstance(frame, AssistantMsgEnd))
+        assert replay.notification_context is None
+        assert not any(frame.type in {"ask_user", "turn_end"} for frame in transport.sent)
+
+    asyncio.run(run())

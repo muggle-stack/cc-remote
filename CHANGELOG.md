@@ -4,6 +4,9 @@
 
 ## Unreleased
 
+- Align Codex asynchronous questions with the shared question dialog, with per-question dismissal, drafts, navigation and answer provenance.
+- Deliver live Codex asynchronous-question notifications through Web Push and Harmony Push. Wire protocol v94.
+
 ## v5.3.28
 
 Improve managed upgrades and interrupted-download recovery. Wire protocol v93 and Claude Agent SDK 0.2.174.

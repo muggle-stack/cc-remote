@@ -1,98 +1,90 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { AsyncQuestionSpec } from "../protocol";
-import type { TextBlock, Turn } from "../domain/conversation";
-import { Icon } from "../icons";
-import { supplementalAnswerPrompt } from "../async-question-presentation";
+import type { Turn } from "../domain/conversation";
+import { EngineIcon, Icon } from "../icons";
+import { presentAsyncQuestionReplies, supplementalAnswerPrompt } from "../async-question-presentation";
+import { AsyncQuestionStore, type AsyncQuestionDraft, type AsyncQuestionEntry } from "../async-question-state";
+import { mergeHistoryPageCopies } from "../history-merge";
 import { ImeSubmitGuard } from "../ime-submit";
 import type { QueryAcceptanceResult } from "../outbox";
 import { presentCommandProblem } from "../problem-presentation";
+import { QuestionResume } from "./QuestionPresentation";
 import QuestionMarkdown from "./QuestionMarkdown";
+import "./QuestionSheet.css";
 
-export interface AsyncQuestionDraft {
-  choices: (string | null)[];
-  texts: string[];
-}
-
-/** Nonblocking questions are not approval leases. The native dialog only owns
- * UI focus; replies still use the existing scoped query/steer outbox. */
-function AsyncQuestionDialog({ questions, initialDraft,
-  onDraftChange, onReply, pendingReply, onClose, answered, replyMode }: {
-  questions: AsyncQuestionSpec[];
-  initialDraft?: AsyncQuestionDraft;
+/** Async replies remain ordinary scoped query/steer input. Closing this
+ * presentation never answers a native approval or interrupts the running turn. */
+function AsyncQuestionDialog({ entry, initialDraft, page, total, onDraftChange,
+  onReply, pendingReply, onDismiss, onLater, onNavigate }: {
+  entry: AsyncQuestionEntry;
+  initialDraft: AsyncQuestionDraft;
+  page: number;
+  total: number;
   onDraftChange: (draft: AsyncQuestionDraft) => void;
   onReply?: (prompt: string) => Promise<QueryAcceptanceResult> | null;
   pendingReply?: Promise<QueryAcceptanceResult>;
-  onClose: () => void;
-  answered: boolean;
-  replyMode?: "query" | "steer";
+  onDismiss: () => void;
+  onLater: () => void;
+  onNavigate: (direction: -1 | 1) => void;
 }) {
   const id = useId();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLSpanElement>(null);
+  const editorRef = useRef<HTMLTextAreaElement>(null);
   const backdropPressRef = useRef(false);
   const sendingRef = useRef(!!pendingReply);
   const [submission, setSubmission] = useState(pendingReply);
   const imeRef = useRef(new ImeSubmitGuard());
   const [notice, setNotice] = useState("");
-  const [draft, setDraft] = useState<AsyncQuestionDraft>(() => initialDraft ?? {
-    choices: questions.map(q => q.options?.[0] ?? null),
-    texts: questions.map(() => ""),
-  });
+  const [draft, setDraft] = useState(initialDraft);
   const draftRef = useRef(draft);
+  const initialScroll = useRef(initialDraft.scrollTop);
   const updateDraft = (next: AsyncQuestionDraft) => {
     draftRef.current = next;
     setDraft(next);
     onDraftChange(next);
     setNotice("");
   };
-  const canSubmit = draft.texts.some(text => text.trim()) || draft.choices.some(Boolean);
-  const replyHint = submission ? "正在确认回答是否送达，可先收起小窗。"
-    : !onReply ? "当前会话暂不可写，回答草稿会保留"
-    : replyMode === "steer" ? "补充会发送给当前任务，不会中断执行"
-    : null;
+  const saveDraft = () => onDraftChange({ ...draftRef.current,
+    text: editorRef.current?.value ?? draftRef.current.text,
+    scrollTop: bodyRef.current?.scrollTop ?? draftRef.current.scrollTop });
+  const canSubmit = !!(draft.text.trim() || draft.choice);
+  const replyHint = notice ? null : submission ? "正在确认回答是否送达。"
+    : !onReply ? "当前会话暂不可写，回答草稿会保留。" : null;
 
   useEffect(() => {
     if (!submission) return;
     let current = true;
-    void submission.then((result) => {
-      // A late receipt belongs only to this question's current opening. It
-      // must not close a different question or a newly focused session.
-      if (!current) return;
-      if (result.accepted) onClose();
-      else {
-        sendingRef.current = false;
-        setSubmission(undefined);
-        setNotice(presentCommandProblem(result.error));
-      }
+    void submission.then(result => {
+      if (!current || result.accepted) return;
+      sendingRef.current = false;
+      setSubmission(undefined);
+      setNotice(presentCommandProblem(result.error));
     }, () => {
       if (current) setNotice("暂未确认回答是否送达，请先查看后续消息，避免重复发送。");
     });
     return () => { current = false; };
-  }, [submission, onClose]);
+  }, [submission]);
 
   useLayoutEffect(() => {
     const dialog = dialogRef.current;
     if (!dialog) return;
     dialog.showModal();
-    // Opening a question must not summon the mobile keyboard or submit the
-    // preselected first answer. The browser traps focus and restores it on close.
     headingRef.current?.focus({ preventScroll: true });
+    if (bodyRef.current) bodyRef.current.scrollTop = initialScroll.current;
     return () => { dialog.close(); };
   }, []);
 
   useLayoutEffect(() => {
     const body = bodyRef.current;
     if (!body) return;
-    // The visual viewport may shrink after textarea focus. Keep its editor
-    // within the scrolling body, without scrolling the conversation beneath.
     const observer = new ResizeObserver(() => {
       const active = document.activeElement;
       if (!(active instanceof HTMLTextAreaElement) || !body.contains(active)) return;
       const viewport = body.getBoundingClientRect();
       const editor = active.getBoundingClientRect();
-      if (editor.height > viewport.height) return; // Native caret scrolling owns oversized editors.
+      if (editor.height > viewport.height) return;
       const margin = Math.min(4, (viewport.height - editor.height) / 2);
       if (editor.bottom > viewport.bottom - margin) {
         body.scrollTop += Math.ceil(editor.bottom - viewport.bottom + margin);
@@ -104,18 +96,20 @@ function AsyncQuestionDialog({ questions, initialDraft,
     return () => observer.disconnect();
   }, []);
 
-  return createPortal(<dialog className="async-question-dialog" ref={dialogRef} aria-modal="true"
+  return createPortal(<dialog className="question-dialog question-batch async-question-dialog"
+    ref={dialogRef} aria-modal="true" data-lock-horizontal-swipe
     aria-labelledby={`${id}-heading`} aria-describedby={replyHint ? `${id}-hint` : undefined}
-    onCancel={(event) => { event.preventDefault(); onClose(); }}
-    onKeyDown={(event) => {
+    onCancel={event => { event.preventDefault(); saveDraft(); onLater(); }}
+    onKeyDown={event => {
       event.stopPropagation();
       if (event.key === "Tab" && !event.altKey && !event.ctrlKey && !event.metaKey) {
-        // Native modality makes the page inert, but browsers can still tab to
-        // their chrome. Keep the explicit keyboard loop within this window.
-        const focusable = [...event.currentTarget.querySelectorAll<HTMLElement>(
+        const controls = [...event.currentTarget.querySelectorAll<HTMLElement>(
           'button:not(:disabled), textarea:not(:disabled), input:not(:disabled), summary, a[href]',
-        )].filter(node => node.getClientRects().length > 0
-          && (!(node instanceof HTMLInputElement) || node.type !== "radio" || node.checked));
+        )].filter(node => node.getClientRects().length > 0);
+        // Keep one tab stop in the radio group before or after a selection.
+        const radio = controls.find(node => node.matches('input[type="radio"]:checked'))
+          ?? controls.find(node => node.matches('input[type="radio"]'));
+        const focusable = controls.filter(node => !node.matches('input[type="radio"]') || node === radio);
         if (focusable.length) {
           event.preventDefault();
           const current = focusable.indexOf(document.activeElement as HTMLElement);
@@ -125,147 +119,192 @@ function AsyncQuestionDialog({ questions, initialDraft,
         }
       }
       if (event.key === "Escape" && (imeRef.current.shouldCommitBeforeButtonSubmit()
-          || event.nativeEvent.isComposing || event.keyCode === 229)) {
-        event.preventDefault();
-      }
+          || event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault();
     }}
     onCompositionStart={() => imeRef.current.startComposition()}
     onCompositionEnd={() => imeRef.current.endComposition()}
-    onPointerDown={(event) => {
+    onPointerDown={event => {
       event.stopPropagation();
       backdropPressRef.current = event.target === event.currentTarget;
     }}
-    onClick={(event) => {
+    onClick={event => {
       event.stopPropagation();
       if (backdropPressRef.current && event.target === event.currentTarget) {
         const rect = event.currentTarget.getBoundingClientRect();
         if (event.clientX < rect.left || event.clientX > rect.right
-            || event.clientY < rect.top || event.clientY > rect.bottom) onClose();
+            || event.clientY < rect.top || event.clientY > rect.bottom) {
+          saveDraft(); onLater();
+        }
       }
       backdropPressRef.current = false;
     }}>
-    <form aria-label="助手的补充问题" onSubmit={(event) => {
+    <form aria-label="Codex 的补充问题" onSubmit={event => {
       event.preventDefault();
       event.stopPropagation();
       if (!onReply || sendingRef.current || !dialogRef.current?.open) return;
-      // Keyboard and pointer submits share the same current DOM values and
-      // duplicate-send guard, including answers to multiple questions.
       const data = new FormData(event.currentTarget);
-      const answers = questions.flatMap((question, index) => {
-        const answer = String(data.get(`text-${index}`) ?? "").trim()
-          || String(data.get(`option-${index}`) ?? "").trim();
-        return answer ? [{ question: question.title, answer }] : [];
-      });
-      if (!answers.length) { setNotice("请填写至少一个回答。"); return; }
+      const answer = String(data.get("answer") ?? "").trim()
+        || String(data.get("option") ?? "").trim();
+      if (!answer) { setNotice("请填写回答或选择一个选项。"); return; }
+      saveDraft();
       sendingRef.current = true;
       setNotice("");
-      const receipt = onReply(supplementalAnswerPrompt(answers));
+      const receipt = onReply(supplementalAnswerPrompt([{ question: entry.question.title, answer }]));
       sendingRef.current = !!receipt;
       setSubmission(receipt ?? undefined);
       if (!receipt) setNotice("当前会话暂不可写，回答已保留，请稍后重试。");
     }}>
       <header className="async-question-heading">
         <span id={`${id}-heading`} ref={headingRef} tabIndex={-1}>
-          <Icon name="message" size={20} />助手询问
+          <EngineIcon engine="codex" size={26} />Codex 想确认一下
         </span>
-        {answered && !submission && <span className="async-question-answered">已回答</span>}
-        <button className="async-question-close" type="button" aria-label="关闭助手询问" onClick={onClose}>
-          <Icon name="close" size={20} />
-        </button>
+        {total > 1 && <span className="qa-progress" aria-live="polite"
+          aria-label={`第 ${page + 1} 题，共 ${total} 题`}>{page + 1} / {total}</span>}
+        <button className="async-question-close" type="button" aria-label="忽略当前问题"
+          title="忽略当前问题" onClick={onDismiss}><Icon name="close" size={20} /></button>
       </header>
-      <div className="async-question-body" ref={bodyRef}>
-        {questions.map((question, index) => <fieldset key={index} disabled={!onReply || !!submission}>
-          <legend><QuestionMarkdown>{question.title}</QuestionMarkdown></legend>
-          {question.options?.map((option, optionIndex) => <label className="async-question-option" key={optionIndex}>
-            <input type="radio" name={`option-${index}`} value={option}
-              checked={draft.choices[index] === option}
-              onChange={() => updateDraft({
-                ...draftRef.current,
-                choices: draftRef.current.choices.map((value, i) => i === index ? option : value),
-              })} />
-            <span><QuestionMarkdown>{option}</QuestionMarkdown></span><span className="async-question-option-check" aria-hidden="true"><Icon name="check" size={18} /></span>
-          </label>)}
-          <label className="async-question-label-hidden" htmlFor={`${id}-${index}`}>
-            {question.options?.length ? "其他回答（填写后替代选项）" : "你的回答"}
+      <div className="async-question-body" ref={bodyRef} onScroll={saveDraft}>
+        <fieldset disabled={!onReply || !!submission}>
+          <legend><QuestionMarkdown>{entry.question.title}</QuestionMarkdown></legend>
+          <div className="qa-options">
+            {entry.question.options?.map((option, index) => <label
+              className={`qa-opt async-question-option${draft.choice === option ? " selected" : ""}`} key={index}>
+              <input type="radio" name="option" value={option} checked={draft.choice === option}
+                onChange={() => updateDraft({ ...draftRef.current, choice: option, text: "" })} />
+              <span className="qa-opt-label"><QuestionMarkdown>{option}</QuestionMarkdown></span>
+            </label>)}
+          </div>
+          <label className="async-question-label-hidden" htmlFor={`${id}-answer`}>
+            {entry.question.options?.length ? "其他回答（填写后替代选项）" : "你的回答"}
           </label>
           <div className="async-question-composer">
-            <textarea id={`${id}-${index}`} name={`text-${index}`} rows={3}
-              value={draft.texts[index] ?? ""}
-              onChange={(event) => updateDraft({ ...draftRef.current,
-                texts: draftRef.current.texts.map((value, i) => i === index ? event.target.value : value),
-              })}
-              onKeyDown={(event) => {
+            <textarea ref={editorRef} id={`${id}-answer`} name="answer" rows={2}
+              value={draft.text} maxLength={8192} placeholder="或输入其他回答…"
+              onChange={event => updateDraft({ ...draftRef.current, text: event.target.value,
+                choice: event.target.value ? null : draftRef.current.choice })}
+              onKeyDown={event => {
                 if (!imeRef.current.shouldSubmitKey({ key: event.key, shiftKey: event.shiftKey,
                   isComposing: event.nativeEvent.isComposing, keyCode: event.keyCode })) return;
                 event.preventDefault();
                 if (!event.repeat) event.currentTarget.form?.requestSubmit();
-              }}
-              maxLength={8192} placeholder="补充一点信息…" />
+              }} />
           </div>
-        </fieldset>)}
+        </fieldset>
       </div>
       <footer className="async-question-footer">
-        {replyHint && <span id={`${id}-hint`} className={`async-question-hint${onReply && replyMode === "steer" ? " running" : ""}`}>
-          {replyHint}
-        </span>}
+        {total > 1 && <nav className="async-question-navigation" aria-label="切换待回答问题">
+          <button type="button" className="qa-previous" disabled={page === 0}
+            onClick={() => { saveDraft(); onNavigate(-1); }}><span aria-hidden="true">‹</span>上一题</button>
+          <button type="button" className="qa-previous" disabled={page === total - 1}
+            onClick={() => { saveDraft(); onNavigate(1); }}>下一题<span aria-hidden="true">›</span></button>
+        </nav>}
         <div className="async-question-footer-actions">
-          <button className="async-question-later" type="button" onClick={onClose}>稍后回答</button>
+          <button className="async-question-later" type="button"
+            onClick={() => { saveDraft(); onLater(); }}>稍后回答</button>
           <button className="async-question-send" type="submit" disabled={!onReply || !canSubmit || !!submission}>
-            {submission ? "等待确认" : "发送回答"}<Icon name="send" size={16} />
+            {submission ? "等待确认" : "提交回答"}
           </button>
         </div>
+        {replyHint && <p id={`${id}-hint`} className="async-question-hint" role="status">{replyHint}</p>}
         {notice && <p className="async-question-notice" role="status">{notice}</p>}
       </footer>
     </form>
   </dialog>, document.body);
 }
 
-/** Keep the editor and a bounded draft cache outside virtualized history rows.
- * The host is lazy-loaded on the first click and keyed by device/session scope. */
-export default function AsyncQuestionHost({ messageId, turns, answeredMessageIds,
-  onReply, onClose, replyMode }: {
-  messageId: string | null;
+/** This host lives beside the composer, outside virtualized history. Its
+ * device/session-scoped store also survives navigation and native receipts. */
+export default function AsyncQuestionHost({ scope, store, turns, historyTurns, pendingReplyId,
+  onReply, enabled = true }: {
+  scope: string;
+  store: AsyncQuestionStore;
   turns: readonly Turn[];
-  answeredMessageIds: ReadonlySet<string>;
+  historyTurns?: readonly Turn[];
+  pendingReplyId?: string | null;
   onReply?: (prompt: string) => Promise<QueryAcceptanceResult> | null;
-  onClose: () => void;
-  replyMode?: "query" | "steer";
+  enabled?: boolean;
 }) {
-  const drafts = useRef(new Map<string, { signature: string; draft: AsyncQuestionDraft }>());
-  const submissions = useRef(new Map<string, Promise<QueryAcceptanceResult>>());
-  const turn = messageId ? turns.find(t => t.blocks.some(block => block.kind === "text"
-    && block.delivery === "async" && block.message_id === messageId)) : undefined;
-  const block = turn?.blocks.find((b): b is TextBlock => b.kind === "text"
-    && b.delivery === "async" && b.message_id === messageId);
-  const available = !!block?.questions?.length;
+  const session = store.get(scope);
+  const [, refresh] = useReducer(value => value + 1, 0);
+  const mounted = useRef(false);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const resumeRef = useRef<HTMLButtonElement>(null);
+  const focusResume = useRef(false);
+  // Browse pages supply older questions while the newest runtime keeps live
+  // questions and accepted replies available outside the visible history page.
+  const questionTurns = useMemo(() => historyTurns && historyTurns !== turns
+    ? mergeHistoryPageCopies([...historyTurns, ...turns], "first").filter((turn): turn is Turn => turn !== null)
+    : turns, [turns, historyTurns]);
+  const presentation = useMemo(() => presentAsyncQuestionReplies(questionTurns, pendingReplyId), [questionTurns, pendingReplyId]);
+  const entries = useMemo(() => {
+    const unique = new Map<string, AsyncQuestionEntry>();
+    for (const turn of questionTurns) for (const block of turn.blocks) {
+      if (block.kind !== "text" || block.delivery !== "async") continue;
+      block.questions?.forEach((question, index) => {
+        if (presentation.answeredQuestions.get(block.message_id)?.has(index)) return;
+        const key = JSON.stringify([block.message_id, index]);
+        if (!unique.has(key)) unique.set(key, { key, question });
+      });
+    }
+    return [...unique.values()];
+  }, [questionTurns, presentation]);
+  const pending = entries.filter(entry => !session.retired.has(entry.key));
+  const current = pending.find(entry => entry.key === session.activeKey) ?? pending[0];
+  const page = current ? pending.indexOf(current) : 0;
   useLayoutEffect(() => {
-    // A removed history item must not reopen itself if a later page restores it.
-    if (messageId && !available) onClose();
-  }, [messageId, available, onClose]);
-  if (!turn || !block?.questions?.length) return null;
-  const signature = JSON.stringify(block.questions);
-  const questionKey = `${block.message_id}:${signature}`;
-  const stored = drafts.current.get(block.message_id);
-  return <AsyncQuestionDialog key={questionKey}
-    questions={block.questions}
-    initialDraft={stored?.signature === signature ? stored.draft : undefined}
-    answered={answeredMessageIds.has(block.message_id)}
-    replyMode={replyMode} onClose={onClose}
-    pendingReply={submissions.current.get(questionKey)}
-    onReply={onReply && ((prompt) => {
-      const existing = submissions.current.get(questionKey);
+    if (!enabled) return;
+    // Accepted answers from another client also retire this client's saved
+    // draft, even when its editor has already disappeared.
+    for (const [messageId, indices] of presentation.answeredQuestions) {
+      for (const index of indices) {
+        const key = JSON.stringify([messageId, index]);
+        if (session.drafts.has(key)) store.retire(scope, key);
+      }
+    }
+    const fresh = pending.some(entry => !session.seen.has(entry.key));
+    session.seen = new Set(pending.map(entry => entry.key));
+    if (current && session.activeKey !== current.key) {
+      session.activeKey = current.key;
+      if (fresh) session.collapsed = false;
+      refresh();
+    }
+    if (session.collapsed && focusResume.current) {
+      focusResume.current = false;
+      // WebKit restores the dialog's old focus after close(). Run after that
+      // restoration so keyboard users land on the new continuation control.
+      const frame = requestAnimationFrame(() => resumeRef.current?.focus({ preventScroll: true }));
+      return () => cancelAnimationFrame(frame);
+    }
+  }, [enabled, pending, current, session, presentation, scope, store]);
+  if (!enabled || !current) return null;
+  if (session.collapsed) return <QuestionResume engine="codex" buttonRef={resumeRef}
+    page={page + 1} total={pending.length} pending={session.submissions.has(current.key)}
+    onResume={() => { session.collapsed = false; refresh(); }} />;
+  return <AsyncQuestionDialog key={JSON.stringify([current.key, current.question])} entry={current}
+    initialDraft={store.draft(scope, current)} page={page} total={pending.length}
+    pendingReply={session.submissions.get(current.key)}
+    onDraftChange={draft => store.saveDraft(scope, current, draft)}
+    onDismiss={() => {
+      store.retire(scope, current.key);
+      session.activeKey = pending.find(entry => entry.key !== current.key)?.key ?? null;
+      session.collapsed = true;
+      focusResume.current = true;
+      refresh();
+    }}
+    onLater={() => { session.collapsed = true; focusResume.current = true; refresh(); }}
+    onNavigate={direction => { session.activeKey = pending[page + direction].key; refresh(); }}
+    onReply={onReply && (prompt => {
+      const existing = session.submissions.get(current.key);
       if (existing) return existing;
       const receipt = onReply(prompt);
       if (!receipt) return null;
-      submissions.current.set(questionKey, receipt);
-      void receipt.then(() => {
-        if (submissions.current.get(questionKey) === receipt) submissions.current.delete(questionKey);
-      }, () => { /* An unknown outcome stays locked, including after reopening. */ });
+      session.submissions.set(current.key, receipt);
+      void receipt.then(result => {
+        if (!store.isCurrent(scope, session)) return;
+        session.submissions.delete(current.key);
+        if (result.accepted) store.retire(scope, current.key);
+        if (mounted.current) refresh();
+      }, () => { /* An unknown outcome stays locked after collapse or navigation. */ });
       return receipt;
-    })}
-    onDraftChange={(draft) => {
-      drafts.current.delete(block.message_id);
-      drafts.current.set(block.message_id, { signature, draft });
-      if (drafts.current.size > 32) drafts.current.delete(drafts.current.keys().next().value!);
-    }} />;
+    })} />;
 }

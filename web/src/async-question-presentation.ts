@@ -59,6 +59,7 @@ export function presentAsyncQuestionReplies(turns: readonly Turn[], pendingReply
   const questionOwners = new Map<string, string>();
   const replies = new Map<string, SupplementalAnswer[]>();
   const answered = new Set<string>();
+  const answeredQuestions = new Map<string, Set<number>>();
   for (const turn of turns) {
     const envelope = !turn.detailReasons?.includes("prompt_truncated")
       ? replyEnvelope(turn.prompt) : null;
@@ -72,6 +73,16 @@ export function presentAsyncQuestionReplies(turns: readonly Turn[], pendingReply
         if (!turn.error && !turn.interrupted && (!pendingReplyId
             || (turn.id !== pendingReplyId && turn.clientMsgId !== pendingReplyId))) {
           answered.add(matches[0].messageId);
+          const { messageId, answers } = matches[0];
+          const indices = answeredQuestions.get(messageId) ?? new Set<number>();
+          candidates.get(messageId)!.forEach((question, index, questions) => {
+            const matching = answers.filter(answer => answer.question === question.title);
+            // Equal titles cannot identify one selected occurrence after a
+            // reload. Retire them only when the whole group was answered.
+            if (matching.length > 0 && matching.length === questions.filter(
+              candidate => candidate.title === question.title).length) indices.add(index);
+          });
+          answeredQuestions.set(messageId, indices);
         }
       }
     }
@@ -83,5 +94,5 @@ export function presentAsyncQuestionReplies(turns: readonly Turn[], pendingReply
       }
     }
   }
-  return { replies, answered, questionOwners };
+  return { replies, answered, answeredQuestions, questionOwners };
 }

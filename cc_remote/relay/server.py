@@ -633,10 +633,14 @@ def create_app(
         )
         if context is not None:
             context["sid"] = getattr(msg, "sid", None)
+            if (getattr(msg, "type", None) == "assistant_msg_end"
+                    and getattr(msg, "delivery", None) == "async"
+                    and getattr(msg, "questions", None)):
+                context["async_question"] = True
         # One provider's outage must not prevent delivery through the other.
         await asyncio.gather(*(
             (dispatcher.notify_question(machine_id, context=context)
-             if getattr(msg, "type", None) == "ask_user"
+             if getattr(msg, "type", None) in {"ask_user", "assistant_msg_end"}
              else dispatcher.notify_turn_end(
                  machine_id, outcome=_turn_push_outcome(result), context=context))
             for dispatcher in (push_dispatcher, harmony_dispatcher)

@@ -4,6 +4,9 @@
 
 ## 未发布
 
+- Codex 异步提问统一为共享提问弹窗，支持逐题忽略、草稿、翻题及回答溯源。
+- 接入 Codex 异步提问的 Web Push 和 Harmony Push 实时通知。Wire protocol v94。
+
 ## v5.3.28
 
 优化托管安装的升级与下载中断恢复。通信协议为 v93，Claude Agent SDK 版本为 0.2.174。

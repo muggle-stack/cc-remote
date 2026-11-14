@@ -1,4 +1,5 @@
-import { QuestionNotificationGate, questionNotificationPresentation } from "./question-notification";
+import { AsyncQuestionStore } from "./async-question-state";
+import { QuestionNotificationGate, questionNotificationId, questionNotificationPresentation } from "./question-notification";
 import { SessionStatus } from "./components/SessionStatus";
 import { canSubmitSteer } from "./pending-steers";
 import { useWebUpdate } from "./use-web-update";
@@ -74,6 +75,7 @@ import {
   resolveNewChatLocalDefaults,
 } from "./new-chat-selection";
 const NewChatView = lazy(() => import("./components/NewChatView").then(m => ({ default: m.NewChatView })));
+const AsyncQuestionHost = lazy(() => import("./components/AsyncQuestionDialog"));
 const QuestionSheet = lazy(() => import("./components/QuestionSheet").then(
   m => ({ default: m.QuestionSheet })));
 const WorkDashboardSheet = lazy(() => import("./components/WorkDashboardSheet").then(m => ({ default: m.WorkDashboardSheet })));
@@ -557,6 +559,7 @@ export default function App() {
   const composerDraftsRef = useRef(new ComposerDraftStore());
   const btwDraftsRef = useRef(new ComposerDraftStore());
   const questionDraftsRef = useRef(new Map<string, QuestionDraft>());
+  const [asyncQuestions] = useState(() => new AsyncQuestionStore());
   const artifactDirtyRef = useRef(false);
   const [, bumpHistoryImageRevision] = useReducer((value: number) => value + 1, 0);
   const pushCoordinatorRef = useRef<PushBindingCoordinator | null>(null);
@@ -573,7 +576,7 @@ export default function App() {
   const wsRef = useRef<RelayWs | null>(null);
   const webUpdate = useWebUpdate(authed, state.connState, () => {
     if (artifactDirtyRef.current) return "Markdown 有未保存的修改，请先保存或放弃修改，再更新页面。";
-    if (composerDraftsRef.current.hasDrafts || btwDraftsRef.current.hasDrafts
+    if (asyncQuestions.hasDrafts || composerDraftsRef.current.hasDrafts || btwDraftsRef.current.hasDrafts
         || [...questionDraftsRef.current.values()].some(draft =>
           draft.text || draft.selected.length || draft.pages?.some(page => page.text || page.selected.length))) {
       return "还有未发送的内容或正在导入的附件，请先发送或自行保存并清空，再更新页面。";
@@ -3838,14 +3841,16 @@ export default function App() {
           if (msg.type === "engine_capabilities") {
             acceptSkillCatalog(msg);
           }
-          if (msg.type === "ask_user" && questionNotificationsRef.current.take(machineId, msg, {
+          if ((msg.type === "ask_user" || msg.type === "assistant_msg_end")
+              && questionNotificationsRef.current.take(machineId, msg, {
             sid: stateRef.current.focusedSid, engine: engineRef.current,
             space: spaceRef.current, hidden: document.hidden,
           })) {
             const mode = readNotificationMode(localStorage);
             // System notifications have one owner: remote Push when bound,
             // otherwise this live-page fallback. Never add an in-app toast.
-            const remoteWillNotify = !msg.to && !!pushCoordinatorRef.current?.isRemoteActive(machineId);
+            const remoteWillNotify = !msg.to && !msg.owner_id
+              && !!pushCoordinatorRef.current?.isRemoteActive(machineId);
             if (mode !== "off" && !remoteWillNotify && typeof Notification !== "undefined"
                 && Notification.permission === "granted") {
               const notice = questionNotificationPresentation(msg, mode);
@@ -3855,7 +3860,7 @@ export default function App() {
               } : null;
               void navigator.serviceWorker?.ready.then(registration => registration.showNotification(notice.title, {
                 body: notice.body, icon: "/icon-192.png", badge: "/favicon.svg",
-                tag: `question-${machineId}-${msg.sid}-${msg.ask_id}`,
+                tag: `question-${machineId}-${msg.sid}-${questionNotificationId(msg)}`,
                 data: { url: route ? encodeNotificationRoute(route) : "/", route },
               })).catch(() => undefined);
             }
@@ -4141,6 +4146,7 @@ export default function App() {
           setBtwOpeningByParentSid({});
           btwDraftsRef.current.clear();
           questionDraftsRef.current.clear();
+          asyncQuestions.clear();
           setCenteredBtwScopes([]);
           setForkingPointId(null);
           setForkWorktreeSession(null);
@@ -4243,6 +4249,7 @@ export default function App() {
     };
   }, [
     acceptSkillCatalog,
+    asyncQuestions,
     dshApi,
     authed,
     webUpdate.check,
@@ -6002,6 +6009,7 @@ export default function App() {
       composerDraftsRef.current.clear();
       btwDraftsRef.current.clear();
       questionDraftsRef.current.clear();
+      asyncQuestions.clear();
       setCenteredBtwScopes([]);
       setCreateError(null);
       setForkingPointId(null);
@@ -6452,21 +6460,7 @@ export default function App() {
                 if (turn.checkpointId) rewind.open({ checkpointId: turn.checkpointId,
                   prompt: turn.prompt || "", ts: turn.ts });
               } : undefined}
-              asyncReplyMode={rt.state === "running" ? "steer"
-                : rt.state === "idle" ? "query" : undefined}
               pendingReplyId={rt.acceptancePending}
-              onReplyAsyncQuestion={focusedEngine !== "codex"
-                || historyView.recovering || !state.wrapperOnline
-                || state.connState !== "connected"
-                || focusedSession?.tag === "archived"
-                || (rt.control ? sessionControlLocksInput(rt.control) : rt.external)
-                || rt.acceptancePending || (rt.state !== "idle" && rt.state !== "running")
-                ? undefined : (prompt) => {
-                  const current = stateRef.current;
-                  if (!focusedSid || current.focusedSid !== focusedSid
-                      || previousMachineRef.current !== machineId) return null;
-                  return replyAsyncQuestion(focusedSid, prompt, sendQuery, sendSteer);
-                }}
               onGetDiff={historyView.recovering ? undefined : getDiff}
               onOpenTurnDiff={historyView.recovering
                 ? undefined : openTurnDiff}
@@ -6616,6 +6610,27 @@ export default function App() {
               />
               </Suspense>
             )}
+
+            {focusedEngine === "codex" && focusedSid && <Suspense fallback={null}>
+              <AsyncQuestionHost key={focusedComposerDraftKey}
+                scope={focusedComposerDraftKey} store={asyncQuestions} turns={rt.turns}
+                historyTurns={historyView.turns}
+                pendingReplyId={rt.acceptancePending}
+                enabled={!archivedBrowse && !rt.loading && !historyView.recovering
+                  && !rt.pendingQuestion && !activeBtwQuestionVisible}
+                onReply={historyView.recovering || !state.wrapperOnline
+                  || state.connState !== "connected"
+                  || focusedSession?.tag === "archived"
+                  || (rt.control ? sessionControlLocksInput(rt.control) : rt.external)
+                  || rt.acceptancePending || (rt.state !== "idle" && rt.state !== "running")
+                  ? undefined : (prompt) => {
+                    const current = stateRef.current;
+                    if (!focusedSid || current.focusedSid !== focusedSid
+                        || previousMachineRef.current !== machineId) return null;
+                    return replyAsyncQuestion(focusedSid, prompt, sendQuery, sendSteer);
+                  }}
+              />
+            </Suspense>}
 
             <Composer maintenance={appUpdates.maintenance}
           dsh={rt.dsh}
@@ -6897,6 +6912,7 @@ export default function App() {
             onRequestModels={requestFocusedModels}
             draftKey={activeBtwDraftKey} draftStore={btwDraftsRef.current}
             questionDrafts={questionDraftsRef.current}
+            asyncQuestions={asyncQuestions}
             unconfirmedQueued={unconfirmedQueued}
             unconfirmedReplaceable={btwUnconfirmedReplaceable}
             queueCapacity={queueCapacity}

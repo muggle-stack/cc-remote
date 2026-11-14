@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { QuestionNotificationGate, questionNotificationPresentation } from "../src/question-notification.ts";
-import { PROTOCOL_VERSION, type AskUser } from "../src/protocol.ts";
+import { PROTOCOL_VERSION, type AskUser, type AssistantMsgEnd } from "../src/protocol.ts";
 
 const ask: AskUser = {
   v: PROTOCOL_VERSION, type: "ask_user", sid: "profile@session", ask_id: "ask-1", ts: 1,
@@ -29,3 +29,26 @@ assert.equal(questionNotificationPresentation({ ...ask, notification_context: {
   ...ask.notification_context!, parent_session_id: "parent",
 } }, "session").sessionId, "parent");
 console.log("question notification checks passed");
+
+const asyncQuestion: AssistantMsgEnd = {
+  v: PROTOCOL_VERSION, type: "assistant_msg_end", sid: "async-session", ts: 2,
+  message_id: "question-item", delivery: "async", questions: [{ title: "private question" }],
+  notification_context: { engine: "codex", space: "code", display_name: "Code session" },
+};
+assert.equal(gate.take("machine", asyncQuestion, view), true);
+assert.equal(gate.take("machine", asyncQuestion, view), false, "repeated native items notify once");
+assert.equal(gate.take("other-machine", asyncQuestion, view), true);
+assert.equal(gate.take("machine", { ...asyncQuestion, message_id: "replay", to: "client" }, view), false);
+assert.equal(gate.take("machine", { ...asyncQuestion, message_id: "history", notification_context: null }, view), false);
+assert.equal(gate.take("machine", { ...asyncQuestion, message_id: "plain", questions: null }, view), false);
+assert.equal(gate.take("machine", { ...asyncQuestion, message_id: "owner", owner_id: "owner" }, view), true,
+  "owner-private side chats can use this authenticated page's local notification");
+assert.equal(gate.take("machine", { ...asyncQuestion, message_id: "focused" }, {
+  ...view, engine: "codex", sid: "async-session",
+}), false);
+const asyncGeneric = questionNotificationPresentation(asyncQuestion, "generic");
+assert.equal(asyncGeneric.title, "Codex 想确认一下");
+assert.doesNotMatch(JSON.stringify(asyncGeneric), /private|Code session|async-session/);
+const asyncNamed = questionNotificationPresentation(asyncQuestion, "session");
+assert.equal(asyncNamed.body, "Codex 想确认一下");
+assert.equal(asyncNamed.sessionId, "async-session");

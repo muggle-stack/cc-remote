@@ -497,3 +497,50 @@ def test_question_push_privacy_and_machine_scope(tmp_path):
         assert "do not expose" not in json.dumps(sent)
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("notification_mode", ["generic", "session"])
+def test_live_async_question_reaches_push_with_private_content_omitted(tmp_path, notification_mode):
+    from cc_remote.protocol import AssistantMsgEnd, TurnNotificationContext, serialize
+
+    config = _cfg(tmp_path)
+    app = create_app(config)
+    sent = []
+
+    async def send(subscription, payload):
+        sent.append(json.loads(payload))
+        return 201
+
+    app.state.push_dispatcher._sender = send
+    with TestClient(app, base_url=config.public_origin) as client:
+        assert client.post("/api/login", json={"password": config.login_password}).status_code == 200
+        assert client.post("/api/push/subscribe", json=_subscription(
+            "default", notification_mode)).status_code == 200
+        with client.websocket_connect("/ws", headers={
+            "Authorization": f"Bearer {config.wrapper_token}",
+        }) as wrapper:
+            from cc_remote.protocol import Hello
+            wrapper.send_text(serialize(Hello(role="wrapper", machine_id="default")))
+            wrapper.send_text(serialize(AssistantMsgEnd(
+                sid="async-session", message_id="question-item", delivery="async",
+                questions=[{"title": "private question", "options": ["private option"]}],
+                notification_context=TurnNotificationContext(
+                    engine="codex", space="code", display_name="Code session"),
+            )))
+            for _ in range(100):
+                if sent:
+                    break
+                time.sleep(0.01)
+    assert len(sent) == 1
+    payload = sent[0]
+    assert "private" not in json.dumps(payload)
+    if notification_mode == "generic":
+        assert payload["title"] == "Codex 想确认一下"
+        assert payload["body"] == "远程会话有一个问题待回答"
+        assert "route" not in payload
+        assert "async-session" not in json.dumps(payload)
+    else:
+        assert payload["title"] == "Code session"
+        assert payload["body"] == "Codex 想确认一下"
+        assert payload["route"] == {
+            "machine_id": "default", "session_id": "async-session", "engine": "codex", "space": "code"}
