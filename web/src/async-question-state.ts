@@ -84,7 +84,9 @@ export class AsyncQuestionStore {
   }
 
   get hasDrafts(): boolean {
-    return [...this.sessions.values()].some(session => session.drafts.size > 0);
+    return [...this.sessions.values()].some(session =>
+      [...session.drafts.values()].some(({ value }) =>
+        Boolean(value.text.trim() || value.choice?.trim())));
   }
 
   isCurrent(scope: string, session: QuestionSession): boolean {

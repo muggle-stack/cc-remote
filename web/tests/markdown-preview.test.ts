@@ -143,9 +143,25 @@ try {
     question: { title: "private question", options: ["Mac", "Phone"] } };
   const session = store.get(scope);
   assert.equal(store.hasDrafts, false);
+  store.saveDraft(scope, entry, { choice: null, text: "", scrollTop: 48 });
+  assert.equal(store.hasDrafts, false,
+    "postponing an empty question or retaining its scroll position must allow page updates");
+  assert.equal(store.draft(scope, entry).scrollTop, 48,
+    "empty drafts can still restore their presentation state");
+  store.saveDraft(scope, entry, { choice: null, text: " \n\t ", scrollTop: 48 });
+  assert.equal(store.hasDrafts, false, "whitespace-only answers are empty");
+  store.saveDraft(scope, entry, { choice: "Mac", text: "", scrollTop: 48 });
+  assert.equal(store.hasDrafts, true, "a selected answer must be protected during page updates");
   store.saveDraft(scope, entry, { choice: null, text: "private answer", scrollTop: 48 });
   assert.equal(store.hasDrafts, true);
   assert.equal(store.draft(scope, entry).text, "private answer");
+  store.saveDraft(scope, entry, { choice: null, text: "", scrollTop: 48 });
+  assert.equal(store.hasDrafts, false, "clearing a typed answer must allow page updates again");
+  store.saveDraft("other-session", entry, { choice: null, text: "other answer", scrollTop: 0 });
+  assert.equal(store.hasDrafts, true, "an empty current draft must not hide another session's answer");
+  store.retire("other-session", entry.key);
+  assert.equal(store.hasDrafts, false);
+  store.saveDraft(scope, entry, { choice: null, text: "private answer", scrollTop: 48 });
   assert.equal(store.draft(scope, { ...entry, question: { title: "updated question" } }).text, "",
     "changed native metadata cannot reuse a previous question's answer draft");
   assert.equal(store.draft("other-device", entry).text, "");
