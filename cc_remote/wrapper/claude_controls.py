@@ -23,6 +23,7 @@ from cc_remote.wrapper import claude_catalog
 from cc_remote.protocol import (
     MAX_AUTO_COMPACT_TOKENS,
     MIN_AUTO_COMPACT_TOKENS,
+    ProcessEvent,
 )
 
 
@@ -684,6 +685,25 @@ def _bounded_jsonl(path: str, max_bytes: int):
                 continue
             if isinstance(row, dict):
                 yield row
+
+
+def last_model_fallback(path: str, max_bytes: int) -> tuple[ProcessEvent, str | None] | None:
+    """Recover the current main-thread fallback without trusting response text."""
+    from cc_remote.wrapper.claude_model_fallback import model_fallback_event, model_fallback_timestamp
+
+    latest = None
+    for row in _bounded_jsonl(path, max_bytes):
+        event = model_fallback_event(row)
+        if event is not None and event.input["scope"] == "session":
+            latest = event, model_fallback_timestamp(row)
+        elif (latest is not None and row.get("type") == "assistant"
+              and not row.get("isSidechain") and not row.get("parentToolUseId")
+              and not row.get("parentToolUseID") and not row.get("parent_tool_use_id")):
+            message = row.get("message")
+            model = valid_claude_alias(message.get("model")) if isinstance(message, dict) else None
+            if model and model.removesuffix("[1m]") != latest[0].input["fallback_model"].removesuffix("[1m]"):
+                latest = None
+    return latest
 
 
 def last_completed_assistant_controls(

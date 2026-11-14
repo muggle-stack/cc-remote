@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import asyncio
+import json
+from collections.abc import Awaitable, Callable
 
 from claude_agent_sdk import ClaudeAgentOptions
 from claude_agent_sdk._internal.transport import subprocess_cli as _sdk_cli
@@ -9,8 +12,109 @@ from claude_agent_sdk._internal.transport import subprocess_cli as _sdk_cli
 from cc_remote.wrapper.child_env import claude_sdk_process_env
 
 
+UserDialogCallback = Callable[[str, dict], Awaitable[dict]]
+FALLBACK_DIALOG_KIND = "refusal_fallback_prompt"
+
+
+class UserDialogCLITransport(_sdk_cli.SubprocessCLITransport):
+    """Bridge the native dialog control channel missing from pinned SDK 0.2.174.
+
+    Dialogs use the existing stdout reader and serialized stdin writer. Their
+    waiters must run separately so a pending human choice never blocks native
+    cancellation, ordinary SDK controls, or another session's stream.
+    """
+
+    def __init__(self, *args, on_user_dialog: UserDialogCallback | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.on_user_dialog = on_user_dialog
+        self.dialog_tasks: dict[str, asyncio.Task] = {}
+        self.dialog_responses: dict[str, dict | None] = {}
+
+    def _remember_dialog_response(self, request_id: str, response: dict | None) -> None:
+        self.dialog_responses[request_id] = response
+        if len(self.dialog_responses) > 64:
+            self.dialog_responses.pop(next(iter(self.dialog_responses)))
+
+    async def write(self, data: str) -> None:
+        if self.on_user_dialog is not None and '"initialize"' in data:
+            message = json.loads(data)
+            request = message.get("request", {})
+            if message.get("type") == "control_request" and request.get("subtype") == "initialize":
+                kinds = request.setdefault("supportedDialogKinds", [])
+                if FALLBACK_DIALOG_KIND not in kinds:
+                    kinds.append(FALLBACK_DIALOG_KIND)
+                data = json.dumps(message) + "\n"
+        await super().write(data)
+
+    async def _answer_dialog(self, request_id: str, payload: dict) -> None:
+        try:
+            result = await self.on_user_dialog(request_id, payload)
+            if (not isinstance(result, dict) or result.get("behavior") != "completed"
+                    or result.get("result") not in {"retry_fallback", "edit_prompt", "cancelled"}):
+                result = {"behavior": "cancelled"}
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            result = {"behavior": "cancelled"}
+        try:
+            response = {
+                "type": "control_response",
+                "response": {"subtype": "success", "request_id": request_id,
+                             "response": result},
+            }
+            await self.write(json.dumps(response) + "\n")
+            self._remember_dialog_response(request_id, response)
+        except Exception:
+            # A closing native child owns the terminal outcome. Never retry a
+            # dialog response into a replacement child or replay a model query.
+            pass
+        finally:
+            self.dialog_tasks.pop(request_id, None)
+
+    async def _read_messages_impl(self):
+        try:
+            async for message in super()._read_messages_impl():
+                request_id = message.get("request_id")
+                request = message.get("request", {})
+                if (self.on_user_dialog is not None and message.get("type") == "control_request"
+                        and request.get("subtype") == "request_user_dialog"
+                        and request.get("dialog_kind") == FALLBACK_DIALOG_KIND):
+                    if request_id in self.dialog_responses:
+                        response = self.dialog_responses[request_id]
+                        if response is not None:
+                            await self.write(json.dumps(response) + "\n")
+                        continue
+                    if request_id not in self.dialog_tasks:
+                        self.dialog_tasks[request_id] = asyncio.create_task(
+                            self._answer_dialog(request_id, request.get("payload", {})))
+                    continue
+                if message.get("type") == "control_cancel_request":
+                    task = self.dialog_tasks.pop(request_id, None)
+                    if task is not None or request_id in self.dialog_responses:
+                        self._remember_dialog_response(request_id, None)
+                    if task is not None:
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                        continue
+                yield message
+        finally:
+            await self._cancel_dialogs()
+
+    async def _cancel_dialogs(self) -> None:
+        tasks = list(self.dialog_tasks.values())
+        self.dialog_tasks.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def close(self) -> None:
+        await self._cancel_dialogs()
+        await super().close()
+
+
 class AccountIsolatedSubprocessCLITransport(
-    _sdk_cli.SubprocessCLITransport,
+    UserDialogCLITransport,
 ):
     """Spawn one Claude child without inherited account selectors.
 
@@ -134,6 +238,7 @@ class AccountIsolatedSubprocessCLITransport(
 
 def account_isolated_transport(
     options: ClaudeAgentOptions,
+    *, on_user_dialog: UserDialogCallback | None = None,
 ) -> AccountIsolatedSubprocessCLITransport:
     """Construct the pinned custom transport with SDK permission wiring."""
     if options.session_store is not None:
@@ -150,4 +255,15 @@ def account_isolated_transport(
     return AccountIsolatedSubprocessCLITransport(
         prompt="",
         options=configured,
+        on_user_dialog=on_user_dialog,
     )
+
+
+def user_dialog_transport(
+    options: ClaudeAgentOptions, on_user_dialog: UserDialogCallback, *, isolated: bool = False,
+) -> UserDialogCLITransport:
+    if isolated:
+        return account_isolated_transport(options, on_user_dialog=on_user_dialog)
+    configured = (replace(options, permission_prompt_tool_name="stdio")
+                  if options.can_use_tool else options)
+    return UserDialogCLITransport(prompt="", options=configured, on_user_dialog=on_user_dialog)

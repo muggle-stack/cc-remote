@@ -54,7 +54,7 @@ export default defineConfig({
     },
     {
       name: "chromium-android-history",
-      grep: /history prefetch|live append follows mixed tool/,
+      grep: /history prefetch|live append follows mixed tool|device return paints|notification click|Claude model fallback/,
       use: { ...devices["Pixel 7"] },
     },
     {

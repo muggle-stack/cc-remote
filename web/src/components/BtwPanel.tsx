@@ -98,6 +98,7 @@ interface Props {
   draftKey: string;
   draftStore: ComposerDraftStore;
   questionDrafts?: Map<string, QuestionDraft>;
+  questionErrorRevision?: string | number;
   unconfirmedQueued: PendingQuery[];
   unconfirmedReplaceable: PendingQuery[];
   queueCapacity: QueueCapacity;
@@ -593,6 +594,9 @@ export function BtwPanel(p: Props) {
             store: p.questionDrafts,
           } : undefined}
           engine={p.engine}
+          modelFallback={p.rt.pendingQuestion.model_fallback}
+          errorRevision={p.questionErrorRevision}
+          sessionLabel="侧边聊天"
           header={p.rt.pendingQuestion.header}
           question={p.rt.pendingQuestion.question}
           options={p.rt.pendingQuestion.options}
@@ -606,7 +610,11 @@ export function BtwPanel(p: Props) {
           }}
           onAnswer={(answer) => {
             const question = p.rt?.pendingQuestion;
-            return question ? p.onAnswerQuestion(question.ask_id, answer) : false;
+            if (!question || p.onAnswerQuestion(question.ask_id, answer) === false) return false;
+            if (answer === "编辑提问" && question.model_fallback?.original_prompt != null) {
+              updateDraft(current => ({ ...current, input: question.model_fallback!.original_prompt! }));
+            }
+            return true;
           }}
         />
       )}

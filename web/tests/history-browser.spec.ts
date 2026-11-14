@@ -633,12 +633,13 @@ async function mockRightPanelRelay(
   page: import("@playwright/test").Page,
   { visible = false, retained = true, engine = "codex", seedTurns = [], parentSid = "layout-parent",
     secondParent = false, parentState = "idle", btwReadOnly = false, imageAssets = false, imageData, externalPreview, historyReply, listReply, capabilityReply,
-    devices = [{ machine_id: "layout-machine", label: "Layout", online: true }] }: {
+    devices = [{ machine_id: "layout-machine", label: "Layout", online: true }], sessionIdForMachine }: {
     visible?: boolean;
     retained?: boolean;
     engine?: "codex" | "claude" | "dsh";
     devices?: { machine_id: string; label: string; online: boolean }[];
     parentSid?: string;
+    sessionIdForMachine?: (machineId: string) => string;
     seedTurns?: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]>;
     secondParent?: boolean;
     parentState?: "idle" | "running";
@@ -647,7 +648,7 @@ async function mockRightPanelRelay(
     imageData?: { data: string; width: number; height: number };
     externalPreview?: "allow" | "replace";
     historyReply?: (command: Record<string, unknown>, machineId: string) => PanelRelayEvent<Extract<ServerEvent, { type: "history" }>> | null;
-    listReply?: (command: Record<string, unknown>) => PanelRelayEvent | null | undefined;
+    listReply?: (command: Record<string, unknown>, machineId: string) => PanelRelayEvent | null | undefined;
     capabilityReply?: (command: Record<string, unknown>) => PanelRelayEvent | undefined;
   } = {},
 ) {
@@ -677,6 +678,7 @@ async function mockRightPanelRelay(
   } }));
   await page.routeWebSocket(/\/ws(?:\?|$)/, (socket) => {
     const machineId = new URL(socket.url()).searchParams.get("machine") ?? "default";
+    const machineParentSid = sessionIdForMachine?.(machineId) ?? parentSid;
     emit = (message) => socket.send(JSON.stringify({
       v: PROTOCOL_VERSION, ts: Date.now() / 1000, ...message,
     }));
@@ -701,16 +703,16 @@ async function mockRightPanelRelay(
         emit({ type: "btw_sync", generation: "layout-generation", revision: 1,
           sessions: retained ? [{ btw_sid: btwSid, parent_sid: parentSid,
             engine, created_at: 1, state: "running" }] : [] });
-        snapshot(parentSid);
+        snapshot(machineParentSid);
       } else if (command.type === "list_sessions") {
-        const response = listReply?.(command);
+        const response = listReply?.(command, machineId);
         if (response === null) return; // Allow a test to release restoration explicitly.
         if (response) { emit(response); return; }
         emit({ type: "session_list",
           engine: command.engine === "codex" ? "codex" : command.engine === "dsh" ? "dsh" : "claude",
           space: command.space === "work" ? "work" : "code",
           request_id: String(command.cmd_id),
-          sessions: command.space === "work" ? [] : [{ session_id: parentSid,
+          sessions: command.space === "work" ? [] : [{ session_id: machineParentSid,
             engine, space: "code", summary: "Layout parent",
             cwd: "/tmp/layout", state: parentState, last_modified: "100" },
           ...(secondParent ? [{ session_id: "layout-other", engine,
@@ -880,6 +882,106 @@ for (const engine of ["claude", "codex", "dsh"] as const) {
       first: "Cached answer from layout-machine", second: "Cached answer from second-machine",
       pageRetained: true, invalidatedFirst: null, secondSurvivesInvalidation: true, clearedSecond: null,
     });
+  });
+}
+
+for (const engine of ["claude", "codex", "dsh"] as const) {
+  test(`device return paints cached ${engine} before the catalog or history replies`, async ({ page }) => {
+    let holdReturningDevice = false;
+    const relay = await mockRightPanelRelay(page, {
+      engine, retained: false,
+      sessionIdForMachine: machine => `${machine}-native-session`,
+      devices: [
+        { machine_id: "layout-machine", label: "Mac", online: true },
+        { machine_id: "second-machine", label: "VPS", online: true },
+      ],
+      listReply: (_command, machine) => holdReturningDevice && machine === "layout-machine" ? null : undefined,
+      historyReply: (command, machine) => holdReturningDevice && machine === "layout-machine" ? null : {
+        type: "history", session_id: String(command.session_id), sid: String(command.session_id),
+        revision: "instant-device-history", generation: "layout-generation",
+        detail: "summary", events: [], has_more: false,
+        turns: [{ id: "native-turn", prompt: "Check device", done: true, ts: 1000,
+          blocks: [{ kind: "text", message_id: "native-answer", channel: "final",
+            text: `Remembered answer from ${machine}`, done: true }] }],
+      },
+    });
+    const selectDevice = async (label: string) => {
+      await page.getByRole("button", { name: "设备中心", exact: true }).click();
+      await page.getByRole("dialog", { name: "设备中心" }).getByRole("button", { name: new RegExp(label) }).click();
+    };
+    await page.goto("/");
+    const macAnswer = page.getByText("Remembered answer from layout-machine", { exact: true });
+    await expect(macAnswer).toBeVisible();
+    await expect.poll(() => page.evaluate(async () => {
+      const cache = await import("/src/cache.ts");
+      return (await cache.loadSession("layout-machine-native-session", "layout-machine"))?.turns.length;
+    })).toBe(1);
+    await selectDevice("VPS");
+    await expect(page.getByText("Remembered answer from second-machine", { exact: true })).toBeVisible();
+    await page.evaluate(() => {
+      document.documentElement.dataset.deviceReturnSpinner = "0";
+      document.documentElement.dataset.deviceReturnWrongMachine = "0";
+      const transaction = IDBDatabase.prototype.transaction;
+      IDBDatabase.prototype.transaction = function (storeNames, mode, options) {
+        if (this.name === "cc_remote_cache" && mode === "readonly") {
+          throw new DOMException("IndexedDB paused for the return-view regression", "InvalidStateError");
+        }
+        return transaction.call(this, storeNames, mode, options);
+      };
+      new MutationObserver(() => {
+        if (localStorage.getItem("cc_remote_machine") === "layout-machine") {
+          if (document.querySelector(".empty .spinner")) {
+            document.documentElement.dataset.deviceReturnSpinner = "1";
+          }
+          if (document.body.textContent?.includes("Remembered answer from second-machine")) {
+            document.documentElement.dataset.deviceReturnWrongMachine = "1";
+          }
+        }
+      }).observe(document.body, { childList: true, subtree: true });
+    });
+    holdReturningDevice = true;
+    const returningCommandsStart = relay.commands.length;
+    await selectDevice("Mac");
+    await expect(macAnswer).toBeVisible({ timeout: 250 });
+    await expect(page.getByText("Remembered answer from second-machine", { exact: true })).toHaveCount(0);
+    await expect(page.locator(".empty .spinner")).toHaveCount(0);
+    expect(await page.locator("html").getAttribute("data-device-return-spinner")).toBe("0");
+    expect(await page.locator("html").getAttribute("data-device-return-wrong-machine")).toBe("0");
+    expect(relay.commands.some(command => command.type === "query" || command.type === "new_session")).toBe(false);
+    await expect.poll(() => relay.commands.slice(returningCommandsStart).some(command =>
+      command.type === "list_sessions" && command.engine === engine && command.space === "code")).toBe(true);
+    const listRequest = relay.commands.slice(returningCommandsStart).findLast(command =>
+      command.type === "list_sessions" && command.engine === engine && command.space === "code")!;
+    relay.emit({ type: "session_list", engine, space: "code", request_id: String(listRequest.cmd_id),
+      sessions: [{ session_id: "layout-machine-native-session", engine, space: "code",
+        summary: "Current Mac session", cwd: "/tmp/layout", state: "idle" }] });
+    await expect.poll(() => relay.commands.slice(returningCommandsStart).some(command =>
+      command.type === "get_history" && command.session_id === "layout-machine-native-session")).toBe(true);
+    relay.emit({ type: "history", session_id: "layout-machine-native-session", sid: "layout-machine-native-session",
+      revision: "instant-device-history", generation: "layout-generation",
+      detail: "summary", events: [], has_more: false,
+      turns: [{ id: "native-turn", prompt: "Check device", done: true, ts: 1000,
+        blocks: [{ kind: "text", message_id: "native-answer", channel: "final",
+          text: "Updated Mac answer after revalidation", done: true }] }] });
+    await expect(page.getByText("Updated Mac answer after revalidation", { exact: true })).toBeVisible();
+    await expect(macAnswer).toHaveCount(0);
+    const previousLists = relay.commands.filter(command => command.type === "list_sessions").length;
+    relay.emit({ type: "session_list_invalidated", engine, space: "code" });
+    await expect.poll(() => relay.commands.filter(command => command.type === "list_sessions").length).toBeGreaterThan(previousLists);
+    const replacementList = relay.commands.findLast(command =>
+      command.type === "list_sessions" && command.engine === engine && command.space === "code")!;
+    relay.emit({ type: "session_list", engine, space: "code", request_id: String(replacementList.cmd_id),
+      sessions: [{ session_id: "replacement-native-session", engine, space: "code",
+        summary: "Replacement session", cwd: "/tmp/layout", state: "idle" }] });
+    await expect.poll(() => relay.commands.some(command =>
+      command.type === "get_history" && command.session_id === "replacement-native-session")).toBe(true);
+    relay.emit({ type: "history", session_id: "replacement-native-session", sid: "replacement-native-session",
+      revision: "replacement-history", generation: "layout-generation", detail: "summary", events: [], has_more: false,
+      turns: [{ id: "replacement-turn", prompt: "Replacement question", done: true, ts: 1000,
+        blocks: [{ kind: "text", message_id: "replacement-answer", channel: "final",
+          text: "Replacement session from the live catalog", done: true }] }] });
+    await expect(page.getByText("Replacement session from the live catalog", { exact: true })).toBeVisible();
+    await expect(page.getByText("Updated Mac answer after revalidation", { exact: true })).toHaveCount(0);
   });
 }
 
@@ -10016,6 +10118,19 @@ test("Mermaid cached remount paints the final size and isolates duplicate SVG re
 
 test("generated image and Markdown image reserve known geometry throughout decoding", async ({ page }) => {
   await page.goto("/tests/history-browser.html?media-layout=1&geometry=1");
+  const placeholder = page.locator(".generated-image-frame .process-image-placeholder");
+  await expect(placeholder).toHaveText("正在加载图片…");
+  await expect(placeholder.locator("svg")).toHaveCount(0);
+  const loadingTextPosition = await placeholder.evaluate(node => {
+    const frame = node.getBoundingClientRect();
+    const text = node.querySelector("span")!.getBoundingClientRect();
+    return {
+      horizontal: Math.abs((text.left + text.right - frame.left - frame.right) / 2),
+      vertical: Math.abs((text.top + text.bottom - frame.top - frame.bottom) / 2),
+    };
+  });
+  expect(loadingTextPosition.horizontal).toBeLessThan(1);
+  expect(loadingTextPosition.vertical).toBeLessThan(1);
   const measure = () => page.evaluate(() => ({
     frames: [...document.querySelectorAll(".message-image-frame,.generated-image-frame")].map((node) => node.getBoundingClientRect().height),
     text: document.querySelector('[data-testid="below-images"]')!.getBoundingClientRect().top,
@@ -16399,3 +16514,200 @@ test(`turn regressions Claude cold history keeps response headers through expand
   expect(relay.commands.some(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toBe(false);
 });
 }
+
+for (const choice of ["同意回退", "拒绝回退", "编辑提问"] as const) {
+test(`Claude model fallback ${choice} uses the native pending dialog on desktop and mobile`, async ({ page }, testInfo) => {
+  const relay = await mockRightPanelRelay(page, { engine: "claude", parentState: "running" });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(command => command.type === "switch_session")).toBe(true);
+  await expect(page.locator(".composer textarea")).toBeVisible();
+  const ask = {
+    type: "ask_user" as const, sid: "layout-parent", ask_id: "native-fallback", seq: 1,
+    question: "是否允许模型回退？", options: ["同意回退", "拒绝回退", "编辑提问", "同意回退并记住"].map(label => ({ label })),
+    model_fallback: { original_model: "claude-opus-5-6", fallback_model: "claude-opus-5-5",
+      turn_id: "original-turn", original_prompt: "分析这个仓库，并保留原模型重试" },
+  };
+  relay.emit(ask);
+  const dialog = page.getByRole("dialog", { name: "是否允许模型回退？" });
+  await expect(dialog).toBeVisible();
+  await expect(page.locator(".hstat")).toHaveText("待确认");
+  await expect(dialog.getByText("Opus 5.6", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Opus 5.5", { exact: true })).toBeVisible();
+  const automatic = dialog.getByRole("checkbox", { name: "以后自动切换" });
+  await expect(automatic).not.toBeChecked();
+  const box = (await dialog.boundingBox())!;
+  const viewport = page.viewportSize()!;
+  expect(Math.abs(box.x + box.width / 2 - viewport.width / 2)).toBeLessThan(2);
+  expect(Math.abs(box.y + box.height / 2 - viewport.height / 2)).toBeLessThan(2);
+  await page.screenshot({ path: testInfo.outputPath("model-fallback-open.png") });
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  await page.screenshot({ path: testInfo.outputPath("model-fallback-dark.png") });
+  await automatic.check();
+  await dialog.getByRole("button", { name: "收起回退确认", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  const resume = page.getByRole("button", { name: /等待确认模型切换.*处理/ });
+  await expect(resume).toBeVisible();
+  await page.setViewportSize({ width: 320, height: 740 });
+  expect((await resume.boundingBox())!.height).toBeLessThanOrEqual(48);
+  expect(await resume.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+  await page.setViewportSize(viewport);
+  expect(relay.commands.filter(command => command.type === "answer_question")).toHaveLength(0);
+  await page.screenshot({ path: testInfo.outputPath("model-fallback-collapsed.png") });
+  await resume.click();
+  await expect(automatic).toBeChecked();
+  if (choice !== "同意回退") await automatic.uncheck();
+  await dialog.getByRole("button", { name: choice, exact: true }).click();
+  await expect.poll(() => relay.commands.filter(command => command.type === "answer_question").length).toBe(1);
+  const answer = relay.commands.find(command => command.type === "answer_question")!;
+  expect(answer.sid).toBe("layout-parent");
+  expect(answer.answer).toBe(choice === "同意回退" ? "同意回退并记住" : choice);
+  await expect(dialog).toBeVisible(); // Only the native close retires the pending request.
+  relay.emit({ type: "ask_user_closed", sid: "layout-parent", seq: 2,
+    ask_id: "native-fallback", reason: "answered" });
+  await expect(dialog).toBeHidden();
+  if (choice === "编辑提问") {
+    await expect(page.locator(".composer textarea")).toHaveValue(ask.model_fallback.original_prompt);
+  }
+  if (choice === "同意回退") {
+    relay.emit({ type: "model", sid: "layout-parent", seq: 3, model: "claude-opus-5-5" });
+    relay.emit({ type: "notice", sid: "layout-parent", seq: 4, notice_id: "model-fallback:native-event",
+      severity: "warning", category: "runtime", title: "模型已回退",
+      message: "claude-opus-5-6 → claude-opus-5-5。原模型拒绝响应，已切换备用模型。",
+      detail: "切换时间 2026-11-14T01:00:00Z" });
+    await expect(page.getByTitle("选择模型", { exact: true })).toContainText("claude-opus-5-5");
+    await expect(page.locator(".header-feedback")).toHaveText("模型已回退");
+    await page.locator(".header-feedback").click();
+    const details = page.getByRole("dialog", { name: "状态详情" });
+    await expect(details).toContainText("claude-opus-5-6 → claude-opus-5-5");
+    await expect(details).toContainText("切换时间 2026-11-14T01:00:00Z");
+    await page.keyboard.press("Escape");
+  }
+  expect(relay.commands.some(command => ["query", "steer", "interrupt", "set_model"].includes(String(command.type)))).toBe(false);
+});
+}
+
+test("notification click refreshes stale device validation and keeps the current session intact", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page);
+  let unavailable = true;
+  let reads = 0;
+  await page.route("**/api/devices", async route => {
+    reads += 1;
+    if (unavailable) return route.fulfill({ status: 503, body: "unavailable" });
+    return route.fulfill({ json: { devices: [{ machine_id: "layout-machine", label: "Layout", online: true }] } });
+  });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(command => command.type === "switch_session")).toBe(true);
+  await expect(page.locator(".composer textarea")).toBeVisible();
+  await expect.poll(() => reads).toBeGreaterThan(0);
+  const focusBefore = relay.commands.filter(command => command.type === "switch_session").length;
+  const readsBefore = reads;
+  unavailable = false;
+  await page.evaluate(() => navigator.serviceWorker.dispatchEvent(new MessageEvent("message", { data: {
+    type: "cc-remote-notification", notification_id: "completed-turn",
+    route: { machine_id: "layout-machine", session_id: "layout-parent", engine: "codex", space: "code" },
+  } })));
+  await expect.poll(() => reads).toBeGreaterThan(readsBefore);
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem("cc_remote_notification_target"))).toBeNull();
+  expect(relay.commands.filter(command => command.type === "switch_session")).toHaveLength(focusBefore);
+  await expect(page.locator(".header-feedback").filter({ hasText: "操作未完成" })).toHaveCount(0);
+  const afterFirst = reads;
+  await page.evaluate(() => navigator.serviceWorker.dispatchEvent(new MessageEvent("message", { data: {
+    type: "cc-remote-notification", notification_id: "completed-turn",
+    route: { machine_id: "layout-machine", session_id: "layout-parent", engine: "codex", space: "code" },
+  } })));
+  await page.waitForTimeout(100);
+  expect(reads).toBe(afterFirst);
+  expect(relay.commands.some(command => ["query", "steer", "interrupt"].includes(String(command.type)))).toBe(false);
+});
+
+test("notification click retries a transient device outage and consumes the retained cold route", async ({ page }) => {
+  await mockRightPanelRelay(page);
+  let reads = 0;
+  await page.route("**/api/devices", async route => {
+    reads += 1;
+    if (reads <= 2) return route.fulfill({ status: 503, body: "unavailable" });
+    return route.fulfill({ json: { devices: [{ machine_id: "layout-machine", label: "Layout", online: true }] } });
+  });
+  await page.addInitScript(() => {
+    if (!sessionStorage.getItem("notification-fixture-captured")) {
+      sessionStorage.setItem("notification-fixture-captured", "1");
+      sessionStorage.setItem("cc_remote_notification_target", JSON.stringify({
+        machine_id: "layout-machine", session_id: "layout-parent", engine: "codex", space: "code",
+      }));
+    }
+  });
+  await page.goto("/");
+  await expect.poll(() => reads).toBeGreaterThan(2);
+  await expect(page.locator(".composer textarea")).toBeVisible();
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem("cc_remote_notification_target"))).toBeNull();
+  await expect(page.locator(".header-feedback").filter({ hasText: "操作未完成" })).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator(".composer textarea")).toBeVisible();
+  await expect(page.locator(".header-feedback").filter({ hasText: "操作未完成" })).toHaveCount(0);
+});
+
+test("notification click can retry the same notification after a failed validation", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page);
+  let unavailable = true;
+  await page.route("**/api/devices", async route => {
+    if (unavailable) return route.fulfill({ status: 503, body: "unavailable" });
+    return route.fulfill({ json: { devices: [{ machine_id: "layout-machine", label: "Layout", online: true }] } });
+  });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(command => command.type === "switch_session")).toBe(true);
+  const clickNotification = () => page.evaluate(() => navigator.serviceWorker.dispatchEvent(new MessageEvent("message", {
+    data: { type: "cc-remote-notification", notification_id: "retryable-turn",
+      route: { machine_id: "layout-machine", session_id: "layout-parent", engine: "codex", space: "code" } },
+  })));
+  await clickNotification();
+  await expect(page.locator(".header-feedback")).toHaveText("操作未完成");
+  await page.locator(".header-feedback").click();
+  await page.getByRole("button", { name: "知道了", exact: true }).click();
+  unavailable = false;
+  await clickNotification();
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem("cc_remote_notification_target"))).toBeNull();
+  await expect(page.locator(".header-feedback").filter({ hasText: "操作未完成" })).toHaveCount(0);
+});
+
+test("notification click resumes a cached session when returning from another device", async ({ page }) => {
+  let holdReturningDevice = false;
+  const relay = await mockRightPanelRelay(page, {
+    retained: false,
+    devices: [
+      { machine_id: "layout-machine", label: "Mac", online: true },
+      { machine_id: "second-machine", label: "VPS", online: true },
+    ],
+    sessionIdForMachine: machine => `${machine}-session`,
+    listReply: (_command, machine) => holdReturningDevice && machine === "layout-machine" ? null : undefined,
+    historyReply: (command, machine) => ({
+      type: "history", session_id: String(command.session_id), sid: String(command.session_id),
+      revision: "notification-cache", generation: "layout-generation", detail: "summary", has_more: false,
+      events: [], turns: [{ id: "remembered-turn", prompt: "Check device", done: true,
+        blocks: [{ kind: "text", message_id: "remembered-answer", channel: "final",
+          text: `Cached answer from ${machine}`, done: true }] }],
+    }),
+  });
+  await page.goto("/");
+  await expect(page.getByText("Cached answer from layout-machine", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "设备中心", exact: true }).click();
+  await page.getByRole("dialog", { name: "设备中心" }).getByRole("button", { name: /VPS/ }).click();
+  await expect(page.getByText("Cached answer from second-machine", { exact: true })).toBeVisible();
+  holdReturningDevice = true;
+  const start = relay.commands.length;
+  await page.evaluate(() => navigator.serviceWorker.dispatchEvent(new MessageEvent("message", { data: {
+    type: "cc-remote-notification", notification_id: "mac-cached-turn",
+    route: { machine_id: "layout-machine", session_id: "layout-machine-session", engine: "codex", space: "code" },
+  } })));
+  await expect(page.getByText("Cached answer from layout-machine", { exact: true })).toBeVisible();
+  await expect.poll(() => relay.commands.slice(start).some(command =>
+    command.type === "list_sessions" && command.engine === "codex" && command.space === "code")).toBe(true);
+  const request = relay.commands.slice(start).findLast(command =>
+    command.type === "list_sessions" && command.engine === "codex" && command.space === "code")!;
+  relay.emit({ type: "session_list", engine: "codex", space: "code", request_id: String(request.cmd_id),
+    sessions: [{ session_id: "layout-machine-session", engine: "codex", space: "code",
+      summary: "Restored Mac session", cwd: "/tmp/layout", state: "idle" }] });
+  await expect.poll(() => relay.commands.slice(start).filter(command => command.type === "switch_session"
+    && command.session_id === "layout-machine-session").length).toBe(1);
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem("cc_remote_notification_target"))).toBeNull();
+  expect(relay.commands.some(command => ["query", "steer", "interrupt"].includes(String(command.type)))).toBe(false);
+});

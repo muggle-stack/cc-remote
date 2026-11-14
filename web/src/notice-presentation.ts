@@ -23,6 +23,10 @@ function isOfficialNotice(notice: Notice): boolean {
 export function conversationNotices(notices: Notice[]): Notice[] {
   return notices.filter((notice) => !isOfficialNotice(notice)
     && !(notice.notice_id.startsWith("compact-") && notice.severity === "info")).map((notice) => {
+    if (notice.notice_id.startsWith("model-fallback:")) {
+      return { ...notice, title: "模型已回退", message: cleanProductText(notice.message),
+        detail: notice.detail ? cleanProductText(notice.detail) : null };
+    }
     if (notice.notice_id.startsWith("schedule-")) {
       if (notice.severity === "warning") {
         const retrying = notice.title.includes("重试");

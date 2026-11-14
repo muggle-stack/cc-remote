@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 90
+PROTOCOL_VERSION = 93
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -3127,6 +3127,16 @@ class AskQuestion(BaseModel):
         return self
 
 
+class ModelFallbackPrompt(BaseModel):
+    """Native Claude confirmation, kept only with the pending interaction."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    original_model: str = Field(max_length=128, pattern=r"^claude-[a-zA-Z0-9._-]{1,100}(?:\[1m\])?$")
+    fallback_model: str = Field(max_length=128, pattern=r"^claude-[a-zA-Z0-9._-]{1,100}(?:\[1m\])?$")
+    turn_id: Optional[WireId] = None
+    original_prompt: Optional[str] = Field(default=None, max_length=2 * 1024 * 1024)
+
+
 class AskUser(_Base, AskQuestion):
     """One pending interaction. A batch is answered atomically in page order.
 
@@ -3138,6 +3148,7 @@ class AskUser(_Base, AskQuestion):
     # Live-only, stripped before journal/ring storage and pending-question sync.
     notification_context: Optional[TurnNotificationContext] = None
     ask_id: WireId
+    model_fallback: Optional[ModelFallbackPrompt] = None
     questions: Optional[list[AskQuestion]] = Field(
         default=None, min_length=1, max_length=ASK_QUESTION_MAX_COUNT)
 

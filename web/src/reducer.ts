@@ -3,6 +3,7 @@ import {
   type SteerAcceptanceKind,
 } from "./pending-steers";
 import type { DshState, DshPreset, DshPermissionOption, DshCommandResult } from "./protocol";
+import type { DeviceView } from "./device-view-cache";
 import { isSyntheticReturnReceipt } from "./agent-returns";
 import { reduceWithRetainedArtifacts } from "./artifact-retention";
 // Turn/block state model for the chat UI.
@@ -18,7 +19,7 @@ import { reduceWithRetainedArtifacts } from "./artifact-retention";
 // session_focus, wrapper_reconnected, diff_report, ...) are global.
 import type { ConnState, EventOwnership } from "./ws";
 import type {
-  ServerEvent, SessionInfo, State, ContextReport, StatusReport, AskQuestion,
+  ServerEvent, SessionInfo, State, ContextReport, StatusReport, AskQuestion, ModelFallbackPrompt,
   RateLimitResetResult, ThreadGoal, ClaudePlan,
   QueryImg, QueryFile, DirEntry, AssistantChannel, ProcessStatus,
   CollaborationModeName, Notice, RateLimitUpdate,
@@ -352,7 +353,8 @@ export interface SessionRuntime {
   takeoverPending: boolean;
   takeoverMessage: string | null;
   ccSessionId?: string;
-  pendingQuestion: (AskQuestion & { ask_id: string; questions?: AskQuestion[] | null }) | null;
+  pendingQuestion: (AskQuestion & { ask_id: string; questions?: AskQuestion[] | null;
+    model_fallback?: ModelFallbackPrompt | null }) | null;
   contextReport: ContextReport | null;
   // Last usable native reading, or the latest billing reading until native
   // context has arrived. Transient refresh failures must not clear the ring.
@@ -538,6 +540,7 @@ export function createRuntime(): SessionRuntime {
 
 export type Action =
   | { type: "reset" }
+  | { type: "restore_device_view"; view: DeviceView }
   | { type: "event"; event: ServerEvent; ownership?: EventOwnership }
   | { type: "query_sent"; concurrent?: boolean; sid: string; prompt: string; msg_id: string; images?: QueryImg[]; files?: QueryFile[]; ts: number }
   | { type: "steer_sent"; concurrent?: boolean; sid: string; prompt: string; msg_id: string; images?: QueryImg[]; files?: QueryFile[]; ts: number }
@@ -2519,6 +2522,20 @@ function commandBanner(state: AppState, banner: string) {
 
 function reduceCurrent(state: AppState, action: Action): AppState {
   switch (action.type) {
+    case "restore_device_view": {
+      const view = action.view;
+      const restored = {
+        ...reduceCurrent(state, { type: "reset" }),
+        ...view.metadata,
+        sessions: view.sessions,
+        focusedSid: view.sid,
+      };
+      return reduceCurrent(restored, {
+        type: "hydrate_cache", sid: view.sid, turns: view.turns,
+        revision: view.revision, generation: view.generation,
+        historyAtStart: view.historyAtStart,
+      });
+    }
     case "reset":
       return {
         ...initialState,
@@ -5871,7 +5888,7 @@ function reduceEvent(
       // user's answer) can retire a restored question during normal operation.
       return patch(state, e.sid, (rt) => { rt.pendingQuestion = null; });
     case "ask_user":
-      return patch(state, e.sid, (rt) => { rt.pendingQuestion = { ask_id: e.ask_id, header: e.header, question: e.question, options: e.options, allow_text: e.allow_text, secret: e.secret, multi_select: e.multi_select, questions: e.questions, plan_document: e.plan_document }; });
+      return patch(state, e.sid, (rt) => { rt.pendingQuestion = { ask_id: e.ask_id, header: e.header, question: e.question, options: e.options, allow_text: e.allow_text, secret: e.secret, multi_select: e.multi_select, questions: e.questions, plan_document: e.plan_document, model_fallback: e.model_fallback }; });
     case "ask_user_closed":
       return patch(state, e.sid, (rt) => {
         if (rt.pendingQuestion?.ask_id === e.ask_id) {
