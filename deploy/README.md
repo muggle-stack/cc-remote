@@ -51,9 +51,11 @@ drain first; daemon readiness alone does not prove an old child was adopted.
 If the local service protocol or pinned SDK changes, stage first and defer the
 service's own restart until native work and pending callbacks have finished.
 
-Activate a coordinated protocol change in the order documented by the current
-protocol note below: stop incompatible old Wrappers, activate Relay + Web as one
-transaction, then activate/start every Wrapper and hard-refresh clients. Use the
+Relay + Web activate as one transaction. Newer product versions can cross chat
+protocol versions through the independent schema-1 maintenance channel. Devices
+can catch up individually, including after their chat link becomes incompatible.
+An offline device with previously verified update permission can retain a
+device-scoped update intent at the Relay until it returns. Use the
 repository installers' immutable `releases/` plus atomic `current` switch; never
 overlay the live tree with `rsync --delete`. If Wrapper state requires a schema
 snapshot, create it while the Wrapper is stopped and keep it with the previous
@@ -383,13 +385,14 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
   registered installs carrying non-secret `installation.json` metadata, downloads
   and validates one stable role bundle, then calls its existing role installer.
   `--check` performs no activation; `--version` selects an exact published version.
-  Both roles on one host require `--role`. Protocol changes require a coordinated
-  maintenance window and `--allow-protocol-change`. SDK/service-contract changes
+  Both roles on one host require `--role`. Protocol changes are accepted for newer
+  releases. `--allow-protocol-change` remains a compatibility option. SDK/service-contract changes
   defer to the Claude service migration procedure. The installer inherits the
   update lock so a disconnected caller cannot accidentally start a second update.
   The command must run outside the managed Wrapper/Relay process tree. Device
-  updates first verify the paired Relay; an already-current compatible Relay is
-  skipped. Otherwise `--relay-ssh` selects an existing administrator's SSH target
+  updates inspect the paired Relay. An already-current Relay is skipped. A
+  currently unreachable Relay, or a device without upstream update permission,
+  allows independent local installation. `--relay-ssh` selects an existing administrator's SSH target
   (saved in private `update.json`). After verifying its managed domain, an OS-owned
   systemd job invokes the remote role installer. The private upstream transaction
   records that exact job before launch. The client sends a stdlib-only guarded
@@ -399,7 +402,8 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
   unit permits submission; intent is persisted before calling systemd. An existing
   receipt without a unit remains unknown, including after reboot. Older pending
   client records without this contract still require explicit reconciliation.
-  Never delete a receipt to force another launch. Public readiness precedes device activation. Pairing
+  Never delete a receipt to force another launch. A submitted upstream transaction
+  must have a verified outcome before its associated device attempt proceeds. Pairing
   credentials do not authorize this operation. Other devices update individually.
   The new Wrapper role installer repeats upstream verification before stopping
   the local service, covering the first upgrade launched by v4.0.1's older
@@ -544,11 +548,11 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
   migration transaction, restores matching pre-release data before an older
   wrapper is restarted, and verifies both engines' Work ownership backfills.
 
-Protocol v93 is a coordinated upgrade: publish freshly built Relay/Web and
-Wrapper artifacts from the same tagged commit. The strict protocol gate is
-intentional and mixed protocol versions will not communicate. `setup-vps.sh`
-rejects a missing or mismatched web build manifest. Stop the wrapper first;
-activate the v93 relay/web release; then start the v93 wrapper.
+Publish Relay/Web and Wrapper artifacts from the same tagged commit. The strict
+chat gate requires matching protocol versions. The maintenance channel remains
+available while devices catch up to the server. `setup-vps.sh` verifies that its
+Web build matches the Relay. Protocol v93 uses this same flow. Activate Relay/Web
+together, upgrade each Wrapper through maintenance, then reload Web/PWA clients.
 
 The wrapper installer treats local Work data and versioned private control state
 as part of the release

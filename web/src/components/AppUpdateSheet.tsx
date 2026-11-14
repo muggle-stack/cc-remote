@@ -2,7 +2,7 @@ import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { Icon } from "../icons";
 import { WEB_BUILD } from "../web-build";
-import { newerVersion, preferServerUpdate, UPDATE_LABELS, UPDATE_TERMINAL, updateReason, releaseHighlights } from "../app-updates";
+import { currentUpdateJob, newerVersion, preferServerUpdate, UPDATE_LABELS, UPDATE_TERMINAL, updateReason, releaseHighlights } from "../app-updates";
 import type { AppUpdatesController } from "../use-app-updates";
 import { CenteredSheet } from "./CenteredSheet";
 import "./AppUpdateSheet.css";
@@ -18,7 +18,7 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
   const updates = serverMode ? serverUpdates! : deviceUpdates;
   const targetName = serverMode ? "服务器" : deviceName;
   const { data, error, checking, changing, pending, pendingStatus } = updates;
-  const job = data?.job;
+  const job = currentUpdateJob(data);
   const active = !!job && !UPDATE_TERMINAL.has(job.phase);
   const recovering = updates.maintenance && !active;
   const uncertain = active && job.phase === "unknown";
@@ -26,9 +26,9 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
   const target = active ? job.version : pending?.version ?? data?.latest?.version ?? job?.version;
   const relayVersion = serverUpdates?.data?.relay_version ?? deviceUpdates.data?.relay_version;
   const needsRelay = !serverMode && newerVersion(target, relayVersion);
-  const blocked = data?.reason || (needsRelay && !data?.allow_relay_update ? "relay_permission" : null);
+  const blocked = data?.reason;
   const canInstall = !!data?.enabled && available && !blocked && !active && !recovering && !checking && !changing;
-  const canCancel = active && ["submitting", "preparing", "downloading", "validating", "waiting"].includes(job.phase);
+  const canCancel = active && ["submitting", "preparing", "downloading", "waiting_network", "waiting_device", "validating", "waiting"].includes(job.phase);
   const readyPage = !!webUpdate.version && !active && !recovering && !pending;
   const succeeded = job?.phase === "succeeded";
   const retryPending = !!pending && pendingStatus !== "unconfirmed";
@@ -46,7 +46,9 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
     { label: "服务器", current: relayVersion, icon: "globe" as const },
     { label: "当前页面", current: WEB_BUILD.version, icon: "code" as const },
   ];
-  const step = !serverMode && active && ["installing", "verifying"].includes(job.phase) ? 1 : 0;
+  const includeRelay = !serverMode && !!data?.allow_relay_update;
+  const steps = serverMode ? ["服务器", "当前页面"] : includeRelay ? ["服务器", deviceName, "当前页面"] : [deviceName, "当前页面"];
+  const step = includeRelay && active && ["installing", "verifying"].includes(job.phase) ? 1 : 0;
   const highlights = releaseHighlights(data?.latest?.notes ?? "");
   return <CenteredSheet open label="检查更新" onClose={onClose} header={false}
     className="app-update-sheet" maxWidth={510} maxHeight={760} minimumHeight={360}>
@@ -72,19 +74,22 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
           : data?.current ? `${targetName} v${data.current}` : "正在读取设备与服务器版本…"}</p>
       </div>
       {active ? <section className="app-update-progress" aria-label="更新进度">
-        {!uncertain && job.phase !== "waiting" && <div className="app-update-progress-track" aria-hidden="true"><i /></div>}
+        {!uncertain && !["waiting", "waiting_network", "waiting_device"].includes(job.phase) && <div className="app-update-progress-track" aria-hidden="true"><i /></div>}
         <ol className="app-update-steps">
-          {(serverMode ? ["服务器", "当前页面"] : ["服务器", deviceName, "当前页面"]).map((label, index, steps) => {
-            const done = !uncertain && (index < step || (!serverMode && index === 0 && !needsRelay));
+          {steps.map((label, index) => {
+            const done = !uncertain && (includeRelay && index === 0 ? !needsRelay : index < step);
             const current = !uncertain && index === step && !done;
             return <li key={index} className={done ? "done" : current ? "current" : ""}>
               <span className="app-update-step-icon">{done && <Icon name="check" size={14} />}</span>
               <span>{label}</span><small>{index === steps.length - 1 ? "待更新后检查" : done ? "已就绪" : uncertain ? "待确认"
-                : current ? serverMode || index === 1 ? job.phase === "verifying" ? "验证中" : job.phase === "installing" ? "安装中" : "准备中" : job.phase === "updating_relay" ? "更新中" : "准备中" : "等待中"}</small>
+                : includeRelay && index === 0 && index < step ? "待单独更新"
+                : current ? serverMode || !includeRelay || index === 1 ? job.phase === "verifying" ? "验证中" : job.phase === "installing" ? "安装中" : "准备中" : job.phase === "updating_relay" ? "更新中" : "准备中" : "等待中"}</small>
             </li>;
           })}
         </ol>
-        <p className="app-update-progress-copy">{job.phase === "waiting" ? "仅等待会受更新影响的操作结束，例如排队消息或尚未完成的提交。可独立运行的任务会继续。"
+        <p className="app-update-progress-copy">{job.phase === "waiting_network" ? "下载进度已保存，网络恢复后会自动续传。关闭窗口也会继续等待。"
+          : job.phase === "waiting_device" ? "更新请求已保存，设备上线后会继续。服务器可以先完成更新。"
+          : job.phase === "waiting" ? "仅等待会受更新影响的操作结束，例如排队消息或尚未完成的提交。可独立运行的任务会继续。"
           : uncertain ? "正在核实原更新任务，请勿重复安装。" : "短暂断线时更新仍会继续，完成后自动重连。"}</p>
         {job.cancel_requested && <p className="app-update-help">正在等待安全取消。</p>}
       </section> : <section aria-label="更新范围" className="app-update-versions">
@@ -97,6 +102,7 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
         <h4>更新亮点</h4><ul>{highlights.map((line, index) => <li key={index}>{line}</li>)}</ul>
       </section>}
       {reason && <p className="app-update-warning" role="status">{reason}</p>}
+      {!active && data?.online === false && <p className="app-update-help">设备当前离线，确认后会保存更新请求，等待设备上线执行。</p>}
       {succeeded && job.cleanup_pending && <p className="app-update-warning" role="status">
         更新已安装，旧部署文件尚待清理。请检查安装目录中的 .retention-status.json，查看阻塞原因。
       </p>}

@@ -113,7 +113,9 @@ export function useAppUpdates(enabled: boolean, machine: string, open: boolean, 
         const job = parseUpdateJob(raw.job);
         if (!job || job.id !== submitted.id || job.version !== submitted.version) throw new Error("outcome_pending");
         clearIntent();
-        if (snapshot) reconcile({ ...snapshot, job });
+        if (snapshot && (!snapshot.job || snapshot.job.id === job.id || UPDATE_TERMINAL.has(snapshot.job.phase))) {
+          reconcile({ ...snapshot, job });
+        }
       } catch (reason) {
         // These responses are produced before a durable launch is accepted.
         // Timeouts, disconnects and permission changes retain the original id.

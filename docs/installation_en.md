@@ -131,24 +131,25 @@ independent terminal or SSH connection:
 
 ```bash
 cc-remote update --check   # No bundle download or service restart
-cc-remote update           # Check/update the Relay first, then this device
+cc-remote update           # Update this device and use an existing authorized Relay route when configured
 ```
 
 Use `--version` to select an exact published version; downgrades are refused.
 If both roles are installed, select `--role relay` or `--role wrapper`.
 Linux requests `sudo` and retains the original Wrapper service user; macOS runs
-as the desktop user. Device updates check their paired Relay first. An up-to-date,
-compatible Relay is skipped; otherwise Relay + Web are updated and publicly
-health-checked before local activation. Other devices update separately and skip
-the already-updated Relay.
+as the desktop user. Newer releases can cross chat-protocol versions. Device
+updates inspect their paired Relay and use an existing authorized SSH route to
+update it when configured. Devices can install independently when the Relay is
+temporarily unreachable or they lack server-update permission. Server and device
+maintenance remain available while their chat versions catch up.
 
 For the first upstream upgrade, run `cc-remote update --relay-ssh operator@relay-host`
 (an SSH config alias is also supported). The target is saved for subsequent
 updates. This SSH account needs noninteractive sudo access to the managed updater
 and systemd. Linux uses the original Wrapper user's SSH identity. Pairing tokens
-never grant server administration, and private keys are not copied. Missing access
-or an unverifiable Relay stops local activation. The server runs an independent
-systemd job; after a lost connection, the next invocation checks the same recorded
+never grant server administration, and private keys are not copied. A submitted
+server transaction is verified before its associated device attempt proceeds.
+The server runs an independent systemd job. After a lost connection, the next invocation checks the same recorded
 `upstream-update.json` transaction instead of launching another. Inspect the
 recorded unit's logs and rollback report on failure.
 
@@ -207,12 +208,21 @@ updater. Unresolved indirect service commands, such as shell strings or Python
 module invocations, retain additional generations and require an explicitly
 reviewed cleanup inventory. v4.0.9 and earlier do not clean up automatically.
 
-A wire-protocol change stops by default. Arrange a maintenance window on every
-machine, pin the same `--version`, and add `--allow-protocol-change` in the order
-specified by the deployment guide. This updates Relay before the current device;
-the remaining devices still need updating during the maintenance window. The Web
-device list and conversation show incompatible device/server versions. Reload
-Web/PWA clients afterwards.
+The maintenance channel has a separate stable schema, so an incompatible chat
+link can still check, start and observe updates. Pin an exact `--version` when
+needed. `--allow-protocol-change` remains a compatibility option. Reload Web/PWA
+clients after updating. Installed older updaters keep their original behavior.
+To adopt this flow once, run the verified new Release's `install.sh` directly, or
+use the old CLI's `--allow-protocol-change` option from an independent terminal.
+
+The CLI and in-app updater share `download-cache/` under the installation root.
+Downloads bind their source, version, platform and SHA-256, allowing verified
+archives and interrupted Range transfers to be reused across attempts. Complete
+files are hashed again before use. Success and cancellation remove their cached
+files. Failed attempts retain at most 512 MiB and eight entries for 24 hours.
+Enabled maintenance checks expired entries hourly and subsequent updates also
+sweep them. Extraction directories retain their worker's process identity, so
+departed workers' staging is reclaimed under the installation lock.
 
 v4.0.0 and earlier do not install this command. Upgrade once using the procedure
 below to a release that includes it. Unregistered source trees and image rebuilds

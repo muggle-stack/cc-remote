@@ -1,5 +1,5 @@
 /** Device-scoped maintenance HTTP; deliberately independent of chat protocol. */
-export type UpdatePhase = "submitting" | "preparing" | "downloading" | "validating" | "waiting"
+export type UpdatePhase = "submitting" | "preparing" | "downloading" | "waiting_network" | "waiting_device" | "validating" | "waiting"
   | "updating_relay" | "installing" | "verifying" | "unknown" | "succeeded" | "failed" | "blocked" | "cancelled";
 export interface UpdateJob {
   id: string; version: string; previous: string; phase: UpdatePhase; reason?: string | null;
@@ -11,12 +11,14 @@ export interface AppUpdateState {
   managed: boolean; enabled: boolean; current?: string; relay_version?: string;
   reason?: string | null; busy_count: number; allow_relay_update?: boolean;
   latest?: { version: string; notes: string } | null; job: UpdateJob | null;
+  online?: boolean;
 }
 export const UPDATE_TERMINAL = new Set<UpdatePhase>(["succeeded", "failed", "blocked", "cancelled"]);
-const PHASES = new Set<UpdatePhase>(["submitting", "preparing", "downloading", "validating", "waiting",
+const PHASES = new Set<UpdatePhase>(["submitting", "preparing", "downloading", "waiting_network", "waiting_device", "validating", "waiting",
   "updating_relay", "installing", "verifying", "unknown", ...UPDATE_TERMINAL]);
 export const UPDATE_LABELS: Record<UpdatePhase, string> = {
   submitting: "正在启动更新", preparing: "准备更新", downloading: "下载更新包", validating: "校验更新包",
+  waiting_network: "等待网络恢复", waiting_device: "等待设备上线",
   waiting: "等待安全更新", updating_relay: "检查并更新服务器", installing: "安装设备更新",
   verifying: "验证更新结果", unknown: "更新结果待确认", succeeded: "更新完成", failed: "更新未完成",
   blocked: "更新需要处理", cancelled: "更新已取消",
@@ -28,7 +30,7 @@ const REASONS: Record<string, string> = {
   server_forbidden: "当前账号仅有设备访问权限，服务器更新需要具有全部设备权限的管理员账号。",
   control_unavailable: "设备的更新配置与本地控制连接不一致，需要检查安装配置。",
   permission_required: "设备尚未获得所需的升级权限，请先由管理员完成配置。",
-  protocol_change: "这个版本需要协调服务器和全部设备的协议升级，请安排统一升级。",
+  protocol_change: "当前更新器需要先完成一次升级。新版本支持通过独立维护通道跨协议更新。",
   service_migration: "这个版本涉及 Claude 服务迁移，需要完成现有任务后统一升级。",
   relay_permission: "服务器也需要升级，但尚未为当前设备授权服务器升级。",
   device_unavailable: "设备未连接更新服务，或尚未安装支持应用内更新的版本。",
@@ -79,6 +81,14 @@ export function newerVersion(target: string | undefined, current: string | undef
   for (let i = 0; i < 3; i++) { if (a[i] !== b[i]) return a[i] > b[i]; }
   return false;
 }
+
+export function currentUpdateJob(state: AppUpdateState | null | undefined): UpdateJob | null {
+  const job = state?.job;
+  const current = state?.current;
+  if (job && UPDATE_TERMINAL.has(job.phase) && job.phase !== "succeeded"
+    && validVersion(current) && !newerVersion(job.version, current)) return null;
+  return job ?? null;
+}
 /** A running device job keeps its own view; server work survives device switches. */
 export function preferServerUpdate(device: AppUpdateState | null, server: AppUpdateState | null,
   devicePending: boolean, serverPending: boolean): boolean {
@@ -105,6 +115,7 @@ export function parseAppUpdate(raw: unknown): AppUpdateState {
   const latest = value.latest as Record<string, unknown> | undefined;
   const job = parseUpdateJob(value.job);
   return { managed: value.managed === true, enabled: value.enabled === true,
+    online: typeof value.online === "boolean" ? value.online : undefined,
     maintenance: typeof value.maintenance === "boolean" ? value.maintenance
       : !!job && ["updating_relay", "installing", "verifying", "unknown"].includes(job.phase),
     current: validVersion(value.current) ? value.current : undefined,
@@ -154,9 +165,9 @@ export class AppUpdateClient {
 }
 
 export function appUpdateFeedback(state: AppUpdateState | null, now = Date.now(), subject = "设备") {
-  const job = state?.job;
+  const job = currentUpdateJob(state);
   if (job && (!UPDATE_TERMINAL.has(job.phase) || (job.updated_at && now / 1000 - job.updated_at < 300))) {
-    return { id: `maintenance:${job.id}:${job.phase}`, label: ({ waiting: "等待更新", unknown: "待确认", succeeded: "已更新", failed: "更新失败", blocked: "需处理", cancelled: "已取消" } as Partial<Record<UpdatePhase, string>>)[job.phase] ?? "正在更新",
+    return { id: `maintenance:${job.id}:${job.phase}`, label: ({ waiting: "等待更新", waiting_network: "等待网络", waiting_device: "等待上线", unknown: "待确认", succeeded: "已更新", failed: "更新失败", blocked: "需处理", cancelled: "已取消" } as Partial<Record<UpdatePhase, string>>)[job.phase] ?? "正在更新",
       tone: (job.phase === "succeeded" ? "success" : ["failed", "blocked", "unknown"].includes(job.phase)
         ? "warning" : "info") as "success" | "warning" | "info",
       message: updateReason(job.reason) || (job.phase === "waiting" ? "等待会受更新影响的操作结束，可独立运行的任务不受影响。"

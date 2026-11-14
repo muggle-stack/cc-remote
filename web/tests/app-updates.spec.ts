@@ -8,6 +8,66 @@ async function open(page: Page) {
   await expect(page.getByRole("dialog", { name: "检查更新", exact: true })).toBeVisible();
 }
 
+for (const phase of ["waiting_network", "waiting_device"] as const) {
+  test(`application update ${phase} preserves its task and supports cancellation`, async ({ page }) => {
+    let job: Record<string, unknown> | null = null;
+    const starts: string[] = [];
+    await page.route("**/api/updates/*", async route => {
+      const body = route.request().postDataJSON();
+      if (body?.op === "start") {
+        starts.push(body.job_id);
+        job = { id: body.job_id, version: body.version, previous: base.current, phase };
+        await route.fulfill({ json: { ok: true, job } });
+      } else if (body?.op === "cancel") {
+        job = { ...job, phase: "cancelled" };
+        await route.fulfill({ json: { ok: true, job } });
+      } else await route.fulfill({ json: { ...base, online: phase !== "waiting_device", maintenance: false, job } });
+    });
+    await page.goto(url); await open(page);
+    await page.getByRole("button", { name: "就绪后更新", exact: true }).click();
+    const heading = phase === "waiting_network" ? "等待网络恢复" : "等待设备上线";
+    await expect(page.getByRole("heading", { name: heading })).toBeVisible();
+    await page.reload(); await open(page);
+    await expect(page.getByRole("heading", { name: heading })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "输入消息" })).toBeEnabled();
+    expect(starts).toHaveLength(1);
+    await page.getByRole("button", { name: "取消更新", exact: true }).click();
+    await expect(page.getByRole("button", { name: "就绪后更新", exact: true })).toBeEnabled();
+  });
+}
+
+test("device upgrade is available while an older server has separate update authorization", async ({ page }) => {
+  await page.route("**/api/updates/*", route => route.fulfill({ json: {
+    ...base, allow_relay_update: false, relay_version: "5.3.13", online: false,
+  } }));
+  await page.goto(url); await open(page);
+  await expect(page.getByRole("button", { name: "就绪后更新", exact: true })).toBeEnabled();
+  await expect(page.getByText("设备当前离线，确认后会保存更新请求，等待设备上线执行。", { exact: true })).toBeVisible();
+});
+
+test("independent device progress does not claim to update its server", async ({ page }) => {
+  await page.route("**/api/updates/*", route => route.fulfill({ json: {
+    ...base, allow_relay_update: false, relay_version: "5.3.13",
+    job: { id: 'a'.repeat(32), previous: base.current, version: base.latest.version, phase: 'installing' },
+  } }));
+  await page.goto(url); await open(page);
+  const steps = page.locator('.app-update-steps');
+  await expect(steps.locator('li')).toHaveCount(2);
+  await expect(steps.locator('li').first()).toContainText('安装中');
+  await expect(steps).not.toContainText('服务器');
+});
+
+test("adopting the new updater clears an older protocol-blocked status", async ({ page }) => {
+  await page.route("**/api/updates/*", route => route.fulfill({ json: {
+    ...base, current: base.latest.version, busy_count: 0,
+    job: { id: 'a'.repeat(32), previous: base.current, version: base.latest.version,
+      phase: 'blocked', reason: 'protocol_change' },
+  } }));
+  await page.goto(url); await open(page);
+  await expect(page.getByRole('heading', { name: '已是最新版本', exact: true })).toBeVisible();
+  await expect(page.locator('.app-update-warning')).toHaveCount(0);
+});
+
 test("application updates preserve drafts, reattach to one job and fit mobile", async ({ page }, info) => {
   let job: Record<string, unknown> | null = null;
   const starts: string[] = [];

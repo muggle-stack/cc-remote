@@ -102,7 +102,7 @@ RuntimeMaxSec=100
 
 
 def dispatch(root: Path, request: dict, uid: int) -> dict:
-    from deploy.ui_update_job import cancel, installation, launch, reconcile
+    from deploy.ui_update_job import cancel, installation, launch, prune_download_cache, reconcile
     installation_value, account = installation(root)
     policy = UpdateJobs(root).policy()
     if (uid not in {0, account.pw_uid} or policy['uid'] != account.pw_uid
@@ -111,11 +111,13 @@ def dispatch(root: Path, request: dict, uid: int) -> dict:
     if not isinstance(request, dict):
         raise ValueError('invalid update request')
     operation = request.get('op')
-    if operation not in {'start', 'cancel', 'reconcile', 'observe'}:
+    if operation not in {'start', 'cancel', 'reconcile', 'observe', 'prune_cache'}:
         raise ValueError('invalid update request')
     if set(request) != ({'op', 'id', 'version'} if operation == 'start' else {'op', 'id'}):
         raise ValueError('invalid update request')
     identity = job_id(request['id'])
+    if operation == 'prune_cache':
+        return {'ok': True, **prune_download_cache(root)}
     result = (launch(root, identity, request['version']) if operation == 'start' else
               cancel(root, identity) if operation == 'cancel' else
               reconcile(root, identity, explicit=operation == 'reconcile'))

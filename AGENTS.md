@@ -113,9 +113,12 @@ attachment and optional App-control MCP tools are separate user choices.
 - **Protocol version gate**: current wire protocol v93 is declared by
   `PROTOCOL_VERSION` in both `protocol.py` and `web/src/protocol.ts`.
   `deserialize` hard-rejects a version mismatch, and
-  `_Base` is `extra="forbid"`, so ANY protocol change must be deployed to all
-  three tiers together (wrapper + relay + web) and the relay restarted — the
-  relay imports `protocol.py` and drops frames it can't parse.
+  `_Base` is `extra="forbid"`, so chat requires compatible Wrapper, Relay and Web
+  versions. Relay and Web activate together. The schema-1 maintenance channel
+  stays available across chat-protocol mismatches, allowing devices to upgrade
+  independently and reconnect afterwards. Newer releases are eligible for
+  upgrade without an extra protocol opt-in. Keep SDK-service lifetime and
+  actual activation admission separate from chat compatibility.
 - **Device scope is an authorization boundary**: one relay can serve multiple
   wrappers. Every browser command, event, push subscription, and pairing token
   is scoped by `machine_id`; a credential for one enrolled device must never be

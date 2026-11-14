@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     command.add_argument("--relay-ssh", help="SSH alias or user@host for Relay upgrades (saved after verification)")
     command.add_argument(
         "--allow-protocol-change", action="store_true",
-        help="activate a protocol change during a coordinated multi-machine upgrade",
+        help="compatibility option; newer releases support protocol upgrades automatically",
     )
     args = parser.parse_args(argv)
     if args.command == "ui-updates":

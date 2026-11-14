@@ -51,7 +51,6 @@ def managed(tmp_path, monkeypatch):
     (root / "installation.json").write_text(json.dumps({"schema": 1, "role": "wrapper", "user": user.pw_name}))
     monkeypatch.setattr(launcher, "host_platform", lambda: ("darwin", "arm64"))
     monkeypatch.setattr(device_updates, "host_platform", lambda: ("darwin", "arm64"))
-    monkeypatch.setattr(launcher, "latest_version", lambda repo: "4.0.1")
     monkeypatch.setenv("CC_REMOTE_GITHUB_REPOSITORY", "fixture/releases")
     launcher.configure(root, enabled=True, control_socket=Path("/tmp/fixture-ui-update.sock"))
     return root, release, UpdateJobs(root)
@@ -155,7 +154,7 @@ async def test_receipt_read_failures_are_not_reported_as_absence(managed, fault)
 
 @pytest.mark.parametrize("identity,version", [
     ("../../escape", "4.0.1"), (IDENTITY, "4.0.1; touch /tmp/oops"),
-    (IDENTITY, "4.0.1-beta"), (IDENTITY, "4.0.0"), (IDENTITY, "4.0.2"),
+    (IDENTITY, "4.0.1-beta"), (IDENTITY, "4.0.0"),
 ])
 def test_launcher_rejects_unapproved_versions_and_paths(managed, monkeypatch, identity, version):
     root, _, store = managed
@@ -569,7 +568,8 @@ def test_browser_update_api_enforces_auth_origin_scope_and_strict_commands(tmp_p
         assert client.get("/api/updates/device-b").status_code == 403
         assert client.post("/api/updates/device-a", json={"op": "check"}).status_code == 403
         headers = {"Origin": cfg.public_origin}
-        for request in [{"op": "shell", "argv": ["rm"]}, {"op": "start", "job_id": IDENTITY, "version": "4.0.1", "argv": []},
+        for request in [{"op": "shell", "argv": ["rm"]}, {"op": "prune_cache", "job_id": IDENTITY},
+                        {"op": "start", "job_id": IDENTITY, "version": "4.0.1", "argv": []},
                         {"op": "start", "job_id": "../escape", "version": "4.0.1"},
                         {"op": "lookup", "job_id": "../escape"}, {"op": "lookup", "job_id": IDENTITY, "version": "4.0.1"}]:
             assert client.post("/api/updates/device-a", json=request, headers=headers).status_code == 400
@@ -888,3 +888,117 @@ def test_disabling_permission_during_download_stops_before_activation(managed, m
     monkeypatch.setattr(launcher, 'update', update)
     launcher.run(root, IDENTITY)
     assert store.active()['phase'] == 'cancelled'
+
+
+def test_interrupted_download_waits_and_recovers_without_a_browser(managed, monkeypatch):
+    from cc_remote.update_errors import DownloadError
+    root, _, store = managed
+    prepare_worker(store, monkeypatch)
+    calls = []
+    waiting = []
+    def update(**kwargs):
+        calls.append(kwargs)
+        assert kwargs['allow_protocol_change'] is True
+        if len(calls) == 1:
+            kwargs['progress']('downloading')
+            raise DownloadError('network interrupted', transient=True)
+        assert store.active()['phase'] == 'waiting_network'
+        kwargs['progress']('downloading')
+        kwargs['progress']('verifying')
+    monkeypatch.setattr(launcher, 'update', update)
+    monkeypatch.setattr(launcher.time, 'sleep', lambda _: waiting.append(store.active()['phase']))
+    launcher.run(root, IDENTITY)
+    assert len(calls) == 2 and set(waiting) == {'waiting_network'}
+    assert store.active()['phase'] == 'succeeded'
+
+
+def test_network_wait_can_be_cancelled_before_another_attempt(managed, monkeypatch):
+    from cc_remote.update_errors import DownloadError
+    root, _, store = managed
+    prepare_worker(store, monkeypatch)
+    calls = []
+    def update(**kwargs):
+        calls.append(True)
+        kwargs['progress']('downloading')
+        raise DownloadError('offline', transient=True)
+    monkeypatch.setattr(launcher, 'update', update)
+    monkeypatch.setattr(launcher.time, 'sleep', lambda _: launcher.cancel(root, IDENTITY))
+    launcher.run(root, IDENTITY)
+    assert len(calls) == 1
+    assert store.active()['phase'] == 'cancelled'
+
+
+def test_os_restarted_download_worker_resumes_only_before_activation(managed, monkeypatch):
+    root, _, store = managed
+    prepare_worker(store, monkeypatch)
+    store.save({**store.active(), 'phase': 'waiting_network', 'attempt_started': True,
+                'worker_pid': 12345, 'worker_start': 99})
+    calls = []
+    monkeypatch.setattr(launcher, 'update', lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(launcher, 'resume_original', lambda *_: pytest.fail('download has no installer to recover'))
+    launcher.run(root, IDENTITY)
+    assert len(calls) == 1
+    assert calls[0]['target_version'] == '4.0.1'
+    assert store.active()['phase'] == 'succeeded'
+
+
+@pytest.mark.parametrize('phase', ['preparing', 'downloading', 'waiting_network', 'validating'])
+def test_observation_before_os_restart_keeps_the_original_download_pending(managed, monkeypatch, phase):
+    root, release, store = managed
+    state, _ = store.create(IDENTITY, '4.0.1', '4.0.0')
+    store.save({**state, 'phase': phase, 'attempt_started': True, 'original_release': str(release),
+                'worker_pid': 12345, 'worker_start': 99})
+    monkeypatch.setattr(launcher, 'worker_alive', lambda _: False)
+    monkeypatch.setattr(launcher, 'spawn_worker', lambda *_: pytest.fail('the original OS job owns this download'))
+    assert launcher.reconcile(root, IDENTITY)['phase'] == phase
+    assert store.active()['worker_pid'] == 12345
+
+
+def test_confirmed_update_can_launch_while_catalog_network_is_unavailable(managed, monkeypatch):
+    root, _, _ = managed
+    monkeypatch.setattr(updater, 'latest_version', lambda _: pytest.fail('launch must not depend on catalog connectivity'))
+    calls = []
+    monkeypatch.setattr(launcher.subprocess, 'run', lambda argv, **kw: calls.append(argv) or SimpleNamespace(returncode=0))
+    assert launcher.launch(root, IDENTITY, '4.0.1')['version'] == '4.0.1'
+    assert len(calls) == 1
+
+
+def test_periodic_download_cleanup_defers_to_an_active_installer(managed, monkeypatch):
+    from cc_remote.update_download import DownloadCache
+    root, _, _ = managed
+    cache = DownloadCache(root)
+    key, binding = cache.identity('https://example.test/cc-remote-wrapper-v4.0.1-darwin-arm64.tar.gz',
+                                  'cc-remote-wrapper-v4.0.1-darwin-arm64.tar.gz', 'a' * 64)
+    with cache.lock():
+        cache._write(key, binding)
+    receipt = cache.folder / f'{key}.json'
+    value = json.loads(receipt.read_text())
+    receipt.write_text(json.dumps({**value, 'accessed_at': 1}))
+    with updater.update_lock(root):
+        assert launcher.prune_download_cache(root) == {'deferred': True}
+        assert receipt.exists()
+    assert launcher.prune_download_cache(root) == {'deferred': False}
+    assert not receipt.exists()
+
+
+@pytest.mark.parametrize('version', [None, '4.0.1'])
+def test_download_cleanup_does_not_hold_the_installation_lock_waiting_for_curl(managed, version):
+    from cc_remote.update_download import DownloadCache
+
+    root, _, _ = managed
+    with DownloadCache(root).lock():
+        assert launcher.prune_download_cache(root, version=version) == {'deferred': True}
+        with updater.update_lock(root):
+            pass
+
+
+def test_cancellation_before_a_delayed_start_is_durable_and_never_launches(managed, monkeypatch):
+    root, _, store = managed
+    monkeypatch.setattr(launcher.subprocess, 'run', lambda *a, **kw: pytest.fail('cancelled start must not submit an OS job'))
+    assert launcher.cancel(root, IDENTITY) is None
+    assert store.cancellation(IDENTITY)['id'] == IDENTITY
+    # A different active update keeps its own receipt and focus.
+    other, _ = store.create('b' * 32, '4.0.1', '4.0.0')
+    assert launcher.launch(root, IDENTITY, '4.0.1')['phase'] == 'cancelled'
+    assert launcher.launch(root, IDENTITY, '4.0.1')['phase'] == 'cancelled'
+    assert store.active()['id'] == other['id']
