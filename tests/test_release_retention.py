@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import plistlib
 
 import pytest
 
@@ -11,6 +12,111 @@ from deploy import cleanup, release_retention as retention
 from deploy.install_lock import acquire_install_lock
 
 SERVICE_DEPENDENCIES = retention.service_dependencies
+
+
+@pytest.fixture(params=['environment-file', 'environment', 'plist'])
+def timezone_service(tmp_path, request):
+    root = tmp_path.resolve()
+
+    def write(environment):
+        if request.param == 'plist':
+            path = root / 'timezone.plist'
+            path.write_bytes(plistlib.dumps({
+                'ProgramArguments': ['/usr/bin/true'], 'EnvironmentVariables': environment,
+            }))
+        else:
+            path = root / 'timezone.service'
+            if request.param == 'environment-file':
+                env = root / 'timezone.env'
+                env.write_text(''.join(f'{key}={json.dumps(value)}\n'
+                                       for key, value in environment.items()))
+                settings = f'EnvironmentFile={env}\n'
+            else:
+                settings = ''.join(f'Environment={json.dumps(f"{key}={value}")}\n'
+                                   for key, value in environment.items())
+            path.write_text('[Service]\nExecStart=/usr/bin/true\n' + settings)
+        return path
+
+    return write
+
+
+@pytest.mark.parametrize('timezone', [
+    'America/Los_Angeles', ':America/Los_Angeles', 'Etc/GMT+8',
+    'EST5EDT,M3.2.0/2,M11.1.0/2', '<-02>+2<-01>,M3.5.0/-1,M10.5.0/0', '', 'UTC0',
+])
+def test_timezone_configuration_allows_service_inspection(tmp_path, timezone_service, timezone):
+    unit = timezone_service({'TZ': timezone})
+    assert retention.inspect_service_files({unit}, [tmp_path.resolve() / 'unused']) == []
+
+
+@pytest.mark.parametrize('reference', ['absolute', 'colon-absolute', 'default-zone', 'custom-zone', 'posix-rules'])
+def test_timezone_files_retain_their_release(tmp_path, monkeypatch, timezone_service, reference):
+    root = tmp_path.resolve()
+    old = root / 'old release'
+    old.mkdir()
+    payload = old / 'timezone data'
+    payload.write_text('installed timezone bytes')
+    if reference == 'absolute':
+        environment = {'TZ': str(payload)}
+    elif reference == 'colon-absolute':
+        alias = root / 'timezone alias'
+        alias.symlink_to(payload)
+        environment = {'TZ': ':' + str(alias)}
+    else:
+        directory = root / 'zoneinfo'
+        name = 'posixrules' if reference == 'posix-rules' else 'America/Los_Angeles'
+        alias = directory / name
+        alias.parent.mkdir(parents=True)
+        alias.symlink_to(payload)
+        environment = {'TZ': 'EST5EDT' if reference == 'posix-rules' else name}
+        if reference == 'default-zone':
+            monkeypatch.setattr(retention, 'DEFAULT_TZDIR', directory)
+        else:
+            environment['TZDIR'] = str(directory)
+    unit = timezone_service(environment)
+    assert retention.inspect_service_files({unit}, [old]) == [str(old)]
+    reviewed = {unit: unit.read_bytes()}
+    if unit.suffix == '.service' and (root / 'timezone.env').exists():
+        env = root / 'timezone.env'
+        reviewed[env] = env.read_bytes()
+    assert retention.inspect_service_files(set(reviewed), [old], reviewed_inputs=reviewed) == [str(old)]
+
+
+def test_empty_timezone_directory_uses_system_zoneinfo(tmp_path, monkeypatch, timezone_service):
+    root = tmp_path.resolve()
+    old = root / 'old'
+    old.mkdir()
+    payload = old / 'timezone'
+    payload.write_text('installed timezone bytes')
+    directory = root / 'zoneinfo'
+    alias = directory / 'America/Los_Angeles'
+    alias.parent.mkdir(parents=True)
+    alias.symlink_to(payload)
+    monkeypatch.setattr(retention, 'DEFAULT_TZDIR', directory)
+    unit = timezone_service({'TZ': 'America/Los_Angeles', 'TZDIR': ''})
+    assert retention.inspect_service_files({unit}, [old]) == [str(old)]
+
+
+def test_timezone_inspection_keeps_unrelated_relative_paths_strict(tmp_path, timezone_service):
+    unit = timezone_service({'TZ': 'America/Los_Angeles', 'CONFIG': 'relative/path'})
+    with pytest.raises(ValueError, match='ambiguous service paths'):
+        retention.inspect_service_files({unit}, [tmp_path.resolve() / 'unused'])
+
+
+@pytest.mark.parametrize('directory', ['relative/zoneinfo', 'zoneinfo', '${TZ_ROOT}/zoneinfo'])
+def test_unresolved_timezone_directory_defers_retirement(tmp_path, timezone_service, directory):
+    unit = timezone_service({'TZ': 'America/Los_Angeles', 'TZDIR': directory})
+    with pytest.raises(ValueError, match='explicit retention inventory'):
+        retention.inspect_service_files({unit}, [tmp_path.resolve() / 'unused'])
+
+
+@pytest.mark.parametrize('variable', ['TZ', 'TZDIR'])
+def test_inherited_timezone_requires_review(tmp_path, variable):
+    unit = tmp_path.resolve() / 'timezone.service'
+    unit.write_text(f'[Service]\nExecStart=/usr/bin/true\nPassEnvironment={variable}\n')
+    with pytest.raises(ValueError, match='inherited service timezone'):
+        retention.inspect_service_files({unit}, [])
+    assert retention.inspect_service_files({unit}, [], reviewed_inputs={unit: unit.read_bytes()}) == []
 
 
 @pytest.mark.parametrize('platform', ['linux', 'darwin'])
@@ -264,6 +370,41 @@ def prune(root):
         return retention.prune(root, fd)
     finally:
         os.close(fd)
+
+
+@pytest.mark.parametrize('appears_during_cleanup', [False, True])
+def test_timezone_retirement_revalidates_file_aliases(fleet, tmp_path, monkeypatch, appears_during_cleanup):
+    root, _, activate = fleet
+    old, _ = activate('first')
+    activate('second')
+    activate('third')
+    units = tmp_path / 'units'
+    units.mkdir()
+    directory = tmp_path / 'zoneinfo'
+    alias = directory / 'America/Los_Angeles'
+    alias.parent.mkdir(parents=True)
+    env = tmp_path / 'timezone.env'
+    env.write_text(f'TZ=America/Los_Angeles\nTZDIR={directory}\n')
+    (units / 'timezone.service').write_text(f'[Service]\nEnvironmentFile={env}\n')
+    monkeypatch.setattr(retention, 'service_roots', lambda row: [units])
+    monkeypatch.setattr(retention, 'service_dependencies', SERVICE_DEPENDENCIES)
+    checks = 0
+
+    def acceptance(plan):
+        nonlocal checks
+        checks += 1
+        if appears_during_cleanup and checks == 2:
+            alias.symlink_to(old / 'payload')
+
+    monkeypatch.setattr(cleanup, 'run_checks', acceptance)
+    if appears_during_cleanup:
+        with pytest.raises((cleanup.CleanupError, OSError)):
+            prune(root)
+        assert checks == 2 and old.is_dir()
+        assert not list(root.rglob('.cc-remote-retired-*'))
+    else:
+        assert prune(root)['status'] == 'complete'
+        assert not old.exists()
 
 
 def test_three_upgrades_keep_current_and_complete_previous_recovery(fleet):

@@ -30,6 +30,7 @@ LEDGER = ".release-generations.json"
 BACKUPS = "rollback-config"
 INVENTORY = ".release-cleanup.json"
 STATUS = ".retention-status.json"
+DEFAULT_TZDIR = Path('/usr/share/zoneinfo')
 
 
 def require(condition: bool, message: str) -> None:
@@ -625,6 +626,8 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
     paths_seen = set()
     executable_commands = set()
     search_paths = set()
+    timezone_names = set()
+    timezone_directories = {DEFAULT_TZDIR}
     custom_namespace = False
     candidate_names = {str(p) for p in candidates}
     candidate_bytes = [(str(p), os.fsencode(p)) for p in candidates]
@@ -671,6 +674,18 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
         for path in literal_paths(value, atomic=atomic):
             protect(path)
 
+    def inspect_timezone(key: str, value: str) -> None:
+        # Resolve named zones and POSIX rules through zoneinfo, preserving
+        # file dependencies and every literal TZDIR override across services.
+        if key == 'TZ':
+            name = value.removeprefix(':')
+            if name:
+                timezone_names.update((name, 'posixrules'))
+        elif value:
+            for directory in literal_paths(value, atomic=True):
+                timezone_directories.add(directory)
+                protect(directory)
+
     def inspect_plist(value, key: str = '') -> None:
         if isinstance(value, dict):
             if 'Program' in value or 'ProgramArguments' in value:
@@ -683,6 +698,10 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
                 if reviewed_inputs is None:
                     literal_service_command(Path(executable), arguments[1:])
             for child_key, child in value.items():
+                if key == 'EnvironmentVariables' and child_key in {'TZ', 'TZDIR'}:
+                    require(isinstance(child, str), 'invalid service timezone environment')
+                    inspect_timezone(child_key, child)
+                    continue
                 inspect_plist(child, child_key)
         elif isinstance(value, list):
             for index, child in enumerate(value):
@@ -733,8 +752,12 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
                 if key in {b'RootDirectory', b'RootImage', b'BindPaths', b'BindReadOnlyPaths',
                            b'TemporaryFileSystem'} and text:
                     custom_namespace = True
-                if key == b'PassEnvironment' and 'PATH' in shlex.split(text):
-                    custom_namespace = True
+                if key == b'PassEnvironment':
+                    inherited = set(shlex.split(text))
+                    if 'PATH' in inherited:
+                        custom_namespace = True
+                    require(reviewed_inputs is not None or inherited.isdisjoint({'TZ', 'TZDIR'}),
+                            'inherited service timezone requires explicit retention inventory')
                 if key == b'ExecSearchPath':
                     if text:  # keep a superset across resets and drop-ins
                         search_path(text)
@@ -746,10 +769,20 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
                     for word in words:
                         search_path(word)
                     continue
+                if key in {b'TZ', b'TZDIR'}:
+                    words = shlex.split(text)
+                    require(reviewed_inputs is not None or len(words) <= 1,
+                            'ambiguous service timezone requires explicit retention inventory')
+                    for word in words:
+                        inspect_timezone(key.decode(), word)
+                    continue
                 if key == b'Environment':
                     for assignment in shlex.split(text):
                         if assignment.startswith('PATH='):
                             search_path(assignment.removeprefix('PATH='))
+                        elif assignment.startswith(('TZ=', 'TZDIR=')):
+                            name, _, timezone = assignment.partition('=')
+                            inspect_timezone(name, timezone)
                         else:
                             inspect_value(assignment)
                     continue
@@ -786,6 +819,9 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
             raise
         except ValueError as exc:
             raise ValueError(f"{path}: {exc}") from exc
+    for name in timezone_names:
+        for directory in timezone_directories:
+            inspect_value(str(directory / name), atomic=True)
     if executable_commands:
         require(reviewed_inputs is not None or not custom_namespace,
                 'custom service executable namespace requires explicit retention inventory')
