@@ -284,6 +284,35 @@ try {
   assert.equal(memory.read("key-4", runtime), undefined, "bottom following removes the bookmark");
   memory.clear();
   assert.equal(memory.read("key-3", runtime), undefined, "logout clears navigation memory");
+  const liveSaved = { ...saved, position: {
+    ...position, browsing: false, sizes: { [position.turnId]: 1_200 },
+  } };
+  memory.save("live-reading", liveSaved);
+  const liveRuntime = { ...runtime, turns: [{ id: position.turnId, done: false, blocks: [] }] };
+  const liveRestored = memory.read("live-reading", liveRuntime)!;
+  assert.equal(liveRestored.browse, null, "a retained live row restores its bookmark against current runtime data");
+  assert.equal(liveRestored.position.browsing, false);
+  assert.equal(liveRestored.position.scrollTop, position.scrollTop);
+  const rebound = memory.read("live-reading", { ...runtime,
+    turns: [{ id: "canonical-row", clientMsgId: position.turnId, done: false, blocks: [] }],
+  })!;
+  assert.equal(rebound.position.turnId, "canonical-row", "native identity binding keeps the live bookmark attached");
+  assert.equal(rebound.position.sizes["canonical-row"], 1_200);
+  assert.equal(rebound.position.browsing, false);
+  const evicted = memory.read("live-reading", runtime)!;
+  assert.equal(evicted.browse, projection, "a missing live row still has a bounded saved window");
+  assert.equal(evicted.position.browsing, true);
+  const ambiguous = memory.read("live-reading", { ...runtime, turns: [
+    { id: "canonical-a", clientMsgId: position.turnId, done: false, blocks: [] },
+    { id: "canonical-b", historyTurnId: position.turnId, done: false, blocks: [] },
+  ] })!;
+  assert.equal(ambiguous.browse, projection, "colliding aliases retain the original reading window");
+  memory.save("unavailable-reading", { ...liveSaved, browse: null });
+  assert.equal(memory.read("unavailable-reading", runtime), undefined,
+    "a missing bookmark without a saved window leaves the current view usable");
+  memory.save("history-reading", saved);
+  assert.equal(memory.read("history-reading", liveRuntime), saved,
+    "an explicitly browsed historical window retains its own reading lifetime");
   const beforeRestore = { ...initialState, focusedSid: "session", runtimes: { session: runtime } };
   const restoreAction = { type: "restore_history_browse", projection: { ...projection, viewId: "returned-view", windowEpoch: 1 } };
   const restored = reduce(beforeRestore, restoreAction);

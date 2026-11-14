@@ -1878,7 +1878,9 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
     if (saved.browsing && !browseMode) return;
     const turn = turnNodeRefs.current.get(saved.turnId);
     if (!turn) {
-      if (loading) return;
+      // The initial fallback mounts only four rows. Keep an available bookmark
+      // pending until the virtualizer's retained range mounts its actual row.
+      if (loading || turns.some(candidate => candidate.id === saved.turnId)) return;
       pendingReadingRestoreRef.current = undefined;
       syncScrollState(controllerRef.current!.pause(readScrollMetrics(el)));
       return;

@@ -7,7 +7,6 @@ import { AsyncQuestionStore, type AsyncQuestionDraft, type AsyncQuestionEntry } 
 import { mergeHistoryPageCopies } from "../history-merge";
 import { ImeSubmitGuard } from "../ime-submit";
 import type { QueryAcceptanceResult } from "../outbox";
-import { presentCommandProblem } from "../problem-presentation";
 import { QuestionResume } from "./QuestionPresentation";
 import QuestionMarkdown from "./QuestionMarkdown";
 import "./QuestionSheet.css";
@@ -15,14 +14,13 @@ import "./QuestionSheet.css";
 /** Async replies remain ordinary scoped query/steer input. Closing this
  * presentation never answers a native approval or interrupts the running turn. */
 function AsyncQuestionDialog({ entry, initialDraft, page, total, onDraftChange,
-  onReply, pendingReply, onDismiss, onLater, onNavigate }: {
+  onReply, onDismiss, onLater, onNavigate }: {
   entry: AsyncQuestionEntry;
   initialDraft: AsyncQuestionDraft;
   page: number;
   total: number;
   onDraftChange: (draft: AsyncQuestionDraft) => void;
   onReply?: (prompt: string) => Promise<QueryAcceptanceResult> | null;
-  pendingReply?: Promise<QueryAcceptanceResult>;
   onDismiss: () => void;
   onLater: () => void;
   onNavigate: (direction: -1 | 1) => void;
@@ -33,8 +31,7 @@ function AsyncQuestionDialog({ entry, initialDraft, page, total, onDraftChange,
   const headingRef = useRef<HTMLSpanElement>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const backdropPressRef = useRef(false);
-  const sendingRef = useRef(!!pendingReply);
-  const [submission, setSubmission] = useState(pendingReply);
+  const sendingRef = useRef(false);
   const imeRef = useRef(new ImeSubmitGuard());
   const [notice, setNotice] = useState("");
   const [draft, setDraft] = useState(initialDraft);
@@ -50,22 +47,7 @@ function AsyncQuestionDialog({ entry, initialDraft, page, total, onDraftChange,
     text: editorRef.current?.value ?? draftRef.current.text,
     scrollTop: bodyRef.current?.scrollTop ?? draftRef.current.scrollTop });
   const canSubmit = !!(draft.text.trim() || draft.choice);
-  const replyHint = notice ? null : submission ? "正在确认回答是否送达。"
-    : !onReply ? "当前会话暂不可写，回答草稿会保留。" : null;
-
-  useEffect(() => {
-    if (!submission) return;
-    let current = true;
-    void submission.then(result => {
-      if (!current || result.accepted) return;
-      sendingRef.current = false;
-      setSubmission(undefined);
-      setNotice(presentCommandProblem(result.error));
-    }, () => {
-      if (current) setNotice("暂未确认回答是否送达，请先查看后续消息，避免重复发送。");
-    });
-    return () => { current = false; };
-  }, [submission]);
+  const replyHint = !notice && !onReply ? "当前会话暂不可写，回答草稿会保留。" : null;
 
   useLayoutEffect(() => {
     const dialog = dialogRef.current;
@@ -151,7 +133,6 @@ function AsyncQuestionDialog({ entry, initialDraft, page, total, onDraftChange,
       setNotice("");
       const receipt = onReply(supplementalAnswerPrompt([{ question: entry.question.title, answer }]));
       sendingRef.current = !!receipt;
-      setSubmission(receipt ?? undefined);
       if (!receipt) setNotice("当前会话暂不可写，回答已保留，请稍后重试。");
     }}>
       <header className="async-question-heading">
@@ -164,7 +145,7 @@ function AsyncQuestionDialog({ entry, initialDraft, page, total, onDraftChange,
           title="忽略当前问题" onClick={onDismiss}><Icon name="close" size={20} /></button>
       </header>
       <div className="async-question-body" ref={bodyRef} onScroll={saveDraft}>
-        <fieldset disabled={!onReply || !!submission}>
+        <fieldset disabled={!onReply}>
           <legend><QuestionMarkdown>{entry.question.title}</QuestionMarkdown></legend>
           <div className="qa-options">
             {entry.question.options?.map((option, index) => <label
@@ -202,8 +183,8 @@ function AsyncQuestionDialog({ entry, initialDraft, page, total, onDraftChange,
         <div className="async-question-footer-actions">
           <button className="async-question-later" type="button"
             onClick={() => { saveDraft(); onLater(); }}>稍后回答</button>
-          <button className="async-question-send" type="submit" disabled={!onReply || !canSubmit || !!submission}>
-            {submission ? "等待确认" : "提交回答"}
+          <button className="async-question-send" type="submit" disabled={!onReply || !canSubmit}>
+            提交回答
           </button>
         </div>
         {replyHint && <p id={`${id}-hint`} className="async-question-hint" role="status">{replyHint}</p>}
@@ -249,7 +230,10 @@ export default function AsyncQuestionHost({ scope, store, turns, historyTurns, p
     }
     return [...unique.values()];
   }, [questionTurns, presentation]);
-  const pending = entries.filter(entry => !session.retired.has(entry.key));
+  // Submitted questions leave the UI immediately. Keep their drafts and
+  // receipts until native acceptance so rejected answers can still be retried.
+  const pending = entries.filter(entry => !session.retired.has(entry.key)
+    && !session.submissions.has(entry.key));
   const current = pending.find(entry => entry.key === session.activeKey) ?? pending[0];
   const page = current ? pending.indexOf(current) : 0;
   useLayoutEffect(() => {
@@ -279,11 +263,10 @@ export default function AsyncQuestionHost({ scope, store, turns, historyTurns, p
   }, [enabled, pending, current, session, presentation, scope, store]);
   if (!enabled || !current) return null;
   if (session.collapsed) return <QuestionResume engine="codex" buttonRef={resumeRef}
-    page={page + 1} total={pending.length} pending={session.submissions.has(current.key)}
+    page={page + 1} total={pending.length}
     onResume={() => { session.collapsed = false; refresh(); }} />;
   return <AsyncQuestionDialog key={JSON.stringify([current.key, current.question])} entry={current}
     initialDraft={store.draft(scope, current)} page={page} total={pending.length}
-    pendingReply={session.submissions.get(current.key)}
     onDraftChange={draft => store.saveDraft(scope, current, draft)}
     onDismiss={() => {
       store.retire(scope, current.key);
@@ -300,6 +283,9 @@ export default function AsyncQuestionHost({ scope, store, turns, historyTurns, p
       const receipt = onReply(prompt);
       if (!receipt) return null;
       session.submissions.set(current.key, receipt);
+      session.collapsed = true;
+      focusResume.current = true;
+      refresh();
       void receipt.then(result => {
         if (!store.isCurrent(scope, session)) return;
         session.submissions.delete(current.key);
