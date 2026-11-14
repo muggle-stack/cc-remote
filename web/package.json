@@ -1,7 +1,7 @@
 {
   "name": "web",
   "private": true,
-  "version": "5.3.30",
+  "version": "5.3.31",
   "author": "muggle",
   "license": "MIT",
   "type": "module",

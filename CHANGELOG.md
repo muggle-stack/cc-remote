@@ -4,6 +4,17 @@
 
 ## Unreleased
 
+## v5.3.31
+
+Fix timezone environment parsing that could defer old deployment cleanup after a successful upgrade. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Accept geographic and POSIX timezone values in systemd and launchd service environments.
+- Track TZDIR, timezone files, zoneinfo aliases and posixrules as retention dependencies.
+- Recheck timezone dependencies during cleanup and restore quarantined generations when a new reference appears.
+- Require explicit inventories for unresolved timezone directories and inherited timezone settings.
+
+See the bilingual [release notes](docs/releases/v5.3.31.md).
+
 ## v5.3.30
 
 Fix device selection and live reading restoration, and improve Codex question submission. Wire protocol v94 and Claude Agent SDK 0.2.174.
