@@ -35,7 +35,6 @@ def managed_server(tmp_path, monkeypatch):
     current = updater.read_installation(root, "linux", "arm64")
     monkeypatch.setattr(launcher, "installation", lambda _: (current, account))
     monkeypatch.setattr(launcher, "require_job_manager", lambda _: None)
-    monkeypatch.setattr(launcher, "latest_version", lambda _: "4.0.1")
     monkeypatch.setattr(broker, "install", lambda *_: None)
     for module in (launcher, installation_updates, server_updates):
         monkeypatch.setattr(module, "host_platform", lambda: ("linux", "arm64"))

@@ -311,28 +311,35 @@ class RelayUpdate:
                 if not self.allow_update:
                     raise UpdateOutcomeUnknown("previous upstream update is unresolved; administrator inspection is required")
                 self._resolve(transaction)
-        info = self.inspect()
+        try:
+            info = self.inspect()
+        except UpdateError:
+            print("Relay is currently unreachable; installing this device independently. "
+                  "Maintenance will reconnect when the server returns.", flush=True)
+            return
         if version_tuple(info["version"]) >= version_tuple(version):
             if info["protocol"] != protocol:
-                raise UpdateError("Relay is newer but incompatible with the selected device release; select a matching release")
+                print("Relay uses a different chat protocol; maintenance remains available for further upgrades.", flush=True)
             print("Relay is already current; updating this device only.", flush=True)
             self.save_settings()
             return
-        if not self.allow_update:
-            raise UpdateError("upstream upgrade is not authorized for this UI update")
-        if info["protocol"] != protocol and not allow_protocol_change:
-            raise UpdateError("Relay protocol changes; arrange the device upgrades and repeat with --allow-protocol-change")
-        if not self.target and sys.stdin.isatty():
+        if self.allow_update and not self.target and sys.stdin.isatty():
             try:
-                self.target = _ssh_target(input("Relay needs updating. Existing SSH admin host (user@host or alias): ").strip())
-            except (EOFError, KeyboardInterrupt) as exc:
-                raise UpdateError("Relay update cancelled; no local service was changed") from exc
+                entered = input("Relay update SSH host (leave empty to update this device independently): ").strip()
+                if entered:
+                    self.target = _ssh_target(entered)
+            except EOFError:
+                pass
+        if not self.allow_update or not self.target:
+            print("Relay also has an update available; installing this device independently. "
+                  "Use server maintenance to update the Relay.", flush=True)
+            return
         self._verify_host()
         self.save_settings()
         unit = f"cc-remote-update-{uuid.uuid4().hex}"
         transaction = {"unit": unit, "origin": self.origin, "ssh": self.target,
                        "version": version, "protocol": protocol, "complete": False,
-                       "launch_receipt": 1, "allow_protocol_change": allow_protocol_change}
+                       "launch_receipt": 1, "allow_protocol_change": True}
         self._write_transaction(transaction)
         print(f"Updating Relay first; independent server transaction: {unit}", flush=True)
         self._resolve(transaction, submit=True)
@@ -394,8 +401,6 @@ def installer_main(argv: list[str] | None = None) -> int:
             from cc_remote.update import _claude_contract
             if old["os"] != "linux" or _claude_contract(previous) != _claude_contract(args.bundle):
                 raise UpdateError("migration requires a compatible Claude SDK/service contract")
-        if old["protocol_version"] != target["protocol_version"] and not args.allow_protocol_change:
-            raise UpdateError("protocol changes; coordinate all devices and use --allow-protocol-change")
         metadata = {"schema": 1, "role": "wrapper", "user": args.user}
         if args.service_label:
             metadata["service_label"] = args.service_label
@@ -409,7 +414,7 @@ def installer_main(argv: list[str] | None = None) -> int:
         relay.allow_update = os.environ.get("CC_REMOTE_UI_ALLOW_RELAY_UPDATE") != "0"
         relay.ensure(
             target["product_version"], target["protocol_version"],
-            allow_protocol_change=args.allow_protocol_change,
+            allow_protocol_change=True,
         )
     except (OSError, ValueError, UpdateError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

@@ -112,7 +112,7 @@ def install_cli(root: Path, destination: Path, *, role: str, user: str | None = 
             raise ValueError("configured UI update helper is missing or unrelated")
         command = [str(root / "current/.venv/bin/python"), "-I", "-B",
                    str(root / "current/deploy/ui_update_job.py"), "--root", str(root)]
-        _atomic_file(helper, (marker + 'case "$1:$#" in start:3|cancel:2|reconcile:2|observe:2) ;; *) exit 2 ;; esac\n'
+        _atomic_file(helper, (marker + 'case "$1:$#" in start:3|cancel:2|reconcile:2|observe:2|prune_cache:2) ;; *) exit 2 ;; esac\n'
                              + 'exec ' + shlex.join(command) + ' "$@"\n').encode(), 0o755)
         import pwd
         from deploy.ui_update_broker import install

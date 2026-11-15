@@ -13,7 +13,7 @@ class Socket {
   onmessage: ((event: { data: string }) => void) | null = null;
   onclose: ((event: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
-  constructor() { Socket.instances.push(this); }
+  constructor(readonly url: string) { Socket.instances.push(this); }
   send(raw: string) { this.sent.push(raw); }
   close() { this.readyState = 3; }
   receive(frame: Record<string, unknown>) {
@@ -28,6 +28,17 @@ Object.assign(globalThis, {
   window: { location: { protocol: "http:", host: "relay.test" } }, WebSocket: Socket,
   sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
 });
+for (const machineId of [undefined, "default", "secondary-device"]) {
+  const relay = new RelayWs({ onEvent: () => {}, onConnState: () => {} }, machineId);
+  relay.start();
+  const socket = Socket.instances.at(-1)!;
+  try {
+    assert.equal(socket.url, `ws://relay.test/ws?machine=${machineId ?? "default"}`,
+      "an offline device must retain its explicit route instead of selecting another device");
+    socket.onopen?.();
+    assert.equal(JSON.parse(socket.sent[0]).machine_id, machineId ?? "default");
+  } finally { relay.stop(); }
+}
 for (const code of ["update_in_progress", "busy"]) {
   let state: AppState = { ...initialState, focusedSid: "update-a" };
   let notices = 0;

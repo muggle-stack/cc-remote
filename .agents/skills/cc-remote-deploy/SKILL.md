@@ -69,6 +69,13 @@ v4.0.9 and earlier do not contain that behavior. Inspect their retention result
 rather than duplicating it with another script. Unknown/source/manual backups still need the explicit
 reviewed inventory. A deferred cleanup does not authorize deleting its files.
 
+For fresh source uploads, use the registered workspace procedure in the retention
+guide and pass `CC_REMOTE_DEPLOY_STAGE` to the installer. The installation-scoped
+maintenance job retries deferred cleanup after live references are released.
+On macOS, `cc-remote cleanup --authorize-system-scan` authorizes only the fixed
+read-only system plist helper, leaving deletion in the desktop user's cleanup
+transaction. Preserve an unresolved staging or cleanup journal for recovery.
+
 ## Codex CLI sharing is an acceptance check
 
 For every enabled Codex **Code** account, follow

@@ -1,3 +1,5 @@
+import AsyncQuestionHost from "./AsyncQuestionDialog";
+import { AsyncQuestionStore } from "../async-question-state";
 import { PanelFrame, PanelExpandButton } from "./RightPanelPresentation";
 import { RightPanelPresentation } from "../right-panel-presentation";
 import {
@@ -98,6 +100,8 @@ interface Props {
   draftKey: string;
   draftStore: ComposerDraftStore;
   questionDrafts?: Map<string, QuestionDraft>;
+  asyncQuestions?: AsyncQuestionStore;
+  questionErrorRevision?: string | number;
   unconfirmedQueued: PendingQuery[];
   unconfirmedReplaceable: PendingQuery[];
   queueCapacity: QueueCapacity;
@@ -139,6 +143,7 @@ interface Props {
  * session's current focus.
  */
 export function BtwPanel(p: Props) {
+  const [questionStore] = useState(() => p.asyncQuestions ?? new AsyncQuestionStore());
   const { expanded } = useContext(RightPanelPresentation);
   const draftKeyRef = useRef(p.draftKey);
   const [draft, setDraft] = useState<ComposerDraft>(
@@ -574,14 +579,7 @@ export function BtwPanel(p: Props) {
                 imageAssets={p.imageAssets}
                 onLoadImage={p.onLoadImage}
                 onAuthorizeImage={p.onAuthorizeImage}
-                asyncReplyMode={runtimeState === "running" ? "steer"
-                  : runtimeState === "idle" ? "query" : undefined}
                 pendingReplyId={p.rt?.acceptancePending}
-                onReplyAsyncQuestion={p.engine !== "codex" || !p.sid
-                  || acceptancePending
-                  || (p.rt?.control ? sessionControlLocksInput(p.rt.control) : p.rt?.external)
-                  || (runtimeState !== "idle" && runtimeState !== "running")
-                  ? undefined : p.onReplyAsyncQuestion}
                 ambiguousActiveTurnIds={activeTurnCandidates.length > 1
                   ? activeTurnCandidates : []} />}
       </div>
@@ -593,6 +591,9 @@ export function BtwPanel(p: Props) {
             store: p.questionDrafts,
           } : undefined}
           engine={p.engine}
+          modelFallback={p.rt.pendingQuestion.model_fallback}
+          errorRevision={p.questionErrorRevision}
+          sessionLabel="侧边聊天"
           header={p.rt.pendingQuestion.header}
           question={p.rt.pendingQuestion.question}
           options={p.rt.pendingQuestion.options}
@@ -606,10 +607,22 @@ export function BtwPanel(p: Props) {
           }}
           onAnswer={(answer) => {
             const question = p.rt?.pendingQuestion;
-            return question ? p.onAnswerQuestion(question.ask_id, answer) : false;
+            if (!question || p.onAnswerQuestion(question.ask_id, answer) === false) return false;
+            if (answer === "编辑提问" && question.model_fallback?.original_prompt != null) {
+              updateDraft(current => ({ ...current, input: question.model_fallback!.original_prompt! }));
+            }
+            return true;
           }}
         />
       )}
+      {p.engine === "codex" && p.sid && <AsyncQuestionHost key={p.draftKey}
+        scope={p.draftKey} store={questionStore} turns={turns}
+        pendingReplyId={p.rt?.acceptancePending}
+        enabled={!p.rt?.loading && !p.rt?.pendingQuestion && !awaitingFirstChat}
+        onReply={acceptancePending
+          || (p.rt?.control ? sessionControlLocksInput(p.rt.control) : p.rt?.external)
+          || (runtimeState !== "idle" && runtimeState !== "running")
+          ? undefined : p.onReplyAsyncQuestion} />}
       <div className="btw-composer">
         {lockReason && <div className="btw-readonly-notice" role="status">{lockReason}</div>}
         {notice && <div className="btw-composer-notice">{notice}</div>}

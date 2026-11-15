@@ -32,7 +32,7 @@ from tests.test_multisession import _mk_ctx, _mk_machine
 class _FakeClaudeClient:
     created = []
 
-    def __init__(self, options):
+    def __init__(self, options, transport=None):
         self.options = options
         self._query = self
         self.fail_permission = False

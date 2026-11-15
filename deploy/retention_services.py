@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import os
 from pathlib import Path
+import pwd
 import re
 import stat
 import sys
@@ -18,6 +19,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from deploy import cleanup, release_retention as retention
+from deploy.macos_service_scan import read_service_bytes
 
 REVIEW = '.retention-services.json'
 TRANSIENT = Path('/run/systemd/transient')
@@ -66,7 +68,7 @@ def observe(path: Path) -> tuple[dict, bytes, list[Path]]:
         return {**value, 'kind': 'masked'}, b'', references
     retention.require(stat.S_ISREG(info.st_mode) and info.st_size <= 4 * 1024 * 1024,
                       f'service inventory file is not a bounded regular file: {path}')
-    raw = current.read_bytes()
+    raw = read_service_bytes(current)
     return {**value, 'kind': 'file', 'sha256': hashlib.sha256(raw).hexdigest(),
             'mode': stat.S_IMODE(info.st_mode), 'uid': info.st_uid}, raw, references
 
@@ -159,6 +161,48 @@ def referenced_candidates(references: set[Path] | list[Path], candidates: list[P
     return found
 
 
+def managed_service_changes(root: Path, context: dict, previous: dict, current: dict) -> bool:
+    """Recognize exact installer-produced additions without approving other edits."""
+    if (not isinstance(previous, dict) or not isinstance(previous.get('roots'), list)
+            or not all(isinstance(p, str) for p in previous['roots'])
+            or not isinstance(previous.get('files'), dict)):
+        return False
+    roots = [p for p in previous['roots'] if runtime_unit_root(Path(p)) is None]
+    if sorted(roots) != current['roots']:
+        return False
+    before = {name: record for name, record in previous.get('files', {}).items()
+              if runtime_unit_root(Path(name)) is None}
+    after = current['files']
+    changed = {name for name in before.keys() | after.keys() if before.get(name) != after.get(name)}
+    if not changed:
+        return True  # Older reviews included generator/runtime files now read afresh.
+    try:
+        metadata, _ = cleanup.read_json(root / 'installation.json', owner_uid=root.stat().st_uid)
+        from deploy.retention_job import service_files as retention_files
+        expected = retention_files(root, Path(context['home']), sys.platform)
+        if sys.platform == 'linux':
+            from deploy.ui_update_broker import service_files as update_files
+            account = pwd.getpwnam(metadata['user'] if metadata['role'] == 'wrapper' else 'ccremote')
+            expected.update({path: raw.encode() for path, raw in update_files(root, account).items()})
+        aliases = {path.parent / folder / path.name: path for path in expected
+                   for folder in ('sockets.target.wants', 'timers.target.wants')
+                   if path.suffix == ('.socket' if folder.startswith('sockets') else '.timer')}
+        for name in changed:
+            path = Path(name)
+            target = aliases.get(path, path)
+            record = after.get(name, {})
+            if (target not in expected or record.get('kind') != 'file'
+                    or record.get('resolved') != str(target) or record.get('uid') != root.stat().st_uid
+                    or record.get('mode') != (0o600 if sys.platform == 'darwin' else 0o644)
+                    or record.get('sha256') != hashlib.sha256(expected[target]).hexdigest()):
+                return False
+            if any(Path(link) != path for link, _ in record.get('links', [])):
+                return False
+        return True
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 def reviewed_dependencies(context: dict, candidates: list[Path]) -> list[str]:
     path = cleanup.absolute_path(context['review'])
     root = path.parent
@@ -176,7 +220,8 @@ def reviewed_dependencies(context: dict, candidates: list[Path]) -> list[str]:
                           and all(isinstance(p, str) and Path(p).is_absolute() for p in value[key]),
                           'invalid reviewed dependency paths')
     observation, transient, references, inputs = snapshot(context, value['extra_files'], candidates)
-    retention.require(observation == value.get('snapshot'),
+    retention.require(observation == value.get('snapshot') or managed_service_changes(
+        root, context, value.get('snapshot', {}), observation),
                       'service configuration changed; inspect and renew the service review')
     found = referenced_candidates(references, candidates)
     found.update(retention.inspect_service_files(set(inputs), candidates, reviewed_inputs=inputs))
@@ -192,7 +237,11 @@ def reviewed_dependencies(context: dict, candidates: list[Path]) -> list[str]:
         if not scope:
             records, references, inputs = observe_inputs([item], Path(context['home']), candidates)
             found.update(referenced_candidates(references, candidates))
-            approved = value.get('runtime_inputs', {})
+            # Earlier reviews fingerprinted generated units in snapshot.files.
+            # Carry that exact-byte approval forward while reading them afresh.
+            approved = {name: record for name, record in value.get('snapshot', {}).get('files', {}).items()
+                        if runtime_unit_root(Path(name)) is not None}
+            approved.update(value.get('runtime_inputs', {}))
             if all(record == approved.get(name) for name, record in records.items()):
                 found.update(retention.inspect_service_files(set(inputs), candidates, reviewed_inputs=inputs))
             else:

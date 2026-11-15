@@ -981,12 +981,22 @@ activation_committed=1
 if [ -n "$retention_generation" ]; then
   if "$target/.venv/bin/python" "$target/deploy/release_retention.py" commit \
       --root "$appdir" --generation "$retention_generation" --snapshot "$rollback_snapshot"; then
-    "$target/.venv/bin/python" "$target/deploy/release_retention.py" prune --root "$appdir" || \
+    if [ -n "${CC_REMOTE_DEPLOY_STAGE:-}" ]; then
+      "$target/.venv/bin/python" "$target/deploy/retention_staging.py" finish \
+        --root "$appdir" --stage "$CC_REMOTE_DEPLOY_STAGE" || \
+        echo "WARNING: Deployment staging still needs its activation outcome verified."
+    fi
+    scan_args=(prune --root "$appdir")
+    if [ "$system" = darwin ]; then scan_args+=(--authorize-system-scan); fi
+    "$target/.venv/bin/python" "$target/deploy/release_retention.py" "${scan_args[@]}" || \
       echo "WARNING: Older backups retained; inspect the retention report before cleanup."
   else
     echo "WARNING: Installed, but retention acceptance is incomplete; all backups retained."
   fi
 fi
+
+"$target/.venv/bin/python" "$target/deploy/retention_job.py" install --root "$appdir" || \
+  echo "WARNING: Deferred cleanup scheduling needs attention; use cc-remote cleanup to retry."
 
 echo
 echo "Wrapper v$version installed from $git_sha."

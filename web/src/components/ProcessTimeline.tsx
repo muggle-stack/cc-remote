@@ -329,7 +329,6 @@ function ProcessImagePreview({
       {generated ? <span className="generated-image-frame" style={{ aspectRatio: ratio }}>
         {src ? <img src={src} alt="" width={width} height={height} />
           : <span className="process-image-placeholder">
-              <Icon name="read" size={16} />
               <span>{asset?.status === "error" ? "图片加载失败 · 点击重试"
                 : !canLoad ? "生成的图片暂不可用" : "正在加载图片…"}</span>
             </span>}

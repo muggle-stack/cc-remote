@@ -152,7 +152,7 @@ def load_inventory(path: Path, *, owner_uid: int | None = None) -> dict:
     data, digest = read_json(path, owner_uid=owner_uid)
     required = {"schema", "installation_root", "current_release", "rollback_paths",
                 "cleanup_roots", "candidates", "transactions", "checks"}
-    if (data.keys() - required - {"protected_paths", "service_context"} or required - data.keys()
+    if (data.keys() - required - {"protected_paths", "service_context", "candidate_identities"} or required - data.keys()
             or data["schema"] != 1):
         raise CleanupError("invalid cleanup inventory schema")
     if "service_context" in data:
@@ -189,7 +189,24 @@ def load_inventory(path: Path, *, owner_uid: int | None = None) -> dict:
     if current.parent != root / "releases":
         raise CleanupError("current release must be a direct child of installation releases")
     rollback = [absolute_path(p) for p in data["rollback_paths"]]
-    if sum(p.parent == root / "releases" for p in rollback) != 1 or current in rollback:
+    previous_count = sum(p.parent == root / 'releases' for p in rollback)
+    if previous_count == 0:
+        # A first installation can retire its own completed staging workspace.
+        # The immutable activation ledger must prove there never was a rollback
+        # release, and its bytes remain fenced throughout cleanup.
+        ledger_path = root / '.release-generations.json'
+        require_transaction = {'path': str(ledger_path), 'field': 'phase', 'equals': 'committed'}
+        if require_transaction not in data['transactions']:
+            raise CleanupError('first-install cleanup requires its committed generation ledger')
+        ledger, _ = read_json(ledger_path, owner_uid=root.stat().st_uid)
+        rows = ledger.get('generations', [])
+        if (len(rows) != 1 or rows[0].get('phase') != 'committed' or rows[0].get('previous')
+                or rows[0].get('release') != str(current)
+                or set(map(str, rollback)) != {p for p in (rows[0].get('backup'), rows[0].get('snapshot')) if p}):
+            raise CleanupError('first-install cleanup has no unique proven recovery set')
+    elif previous_count != 1:
+        raise CleanupError('inventory must retain exactly one previous release and its rollback files')
+    if current in rollback:
         raise CleanupError("inventory must retain exactly one previous release and its rollback files")
     protected = data.get("protected_paths", [])
     if not isinstance(protected, list) or len(protected) > 128:
@@ -210,6 +227,11 @@ def load_inventory(path: Path, *, owner_uid: int | None = None) -> dict:
     for p in candidates:
         if p.parent not in roots or any(p != q and overlaps(p, q) for q in candidates):
             raise CleanupError("candidates must be non-overlapping direct children of cleanup roots")
+    identities = data.get('candidate_identities', {})
+    if (not isinstance(identities, dict) or not identities.keys() <= {str(p) for p in candidates}
+            or any(not isinstance(value, list) or len(value) != 2
+                   or not all(type(part) is int and part >= 0 for part in value) for value in identities.values())):
+        raise CleanupError('invalid registered candidate identities')
     for check in data["checks"]:
         if (not isinstance(check, dict) or set(check) != {"name", "argv", "cwd"}
                 or not isinstance(check["name"], str) or not check["name"]
@@ -495,11 +517,13 @@ def protections(plan: dict, paths: list[Path]) -> dict[Path, list[str]]:
                 found[candidate].append("symlink dependency of retained artifact")
     if context := plan.get("service_context"):
         from deploy.release_retention import service_dependencies
+        from deploy.macos_service_scan import service_scan
         # Rediscover load paths, definitions, environment files and aliases, not
         # just files from the initial inventory. Include both original and
         # quarantined names. Abort on new dependencies so all intact artifacts
         # can be restored together, including a newly needed runtime closure.
-        dependencies = service_dependencies(context, list(found))
+        with service_scan(plan['root']):
+            dependencies = service_dependencies(context, list(found))
         if any(not any(overlaps(Path(p), kept) for kept in plan["protected"]) for p in dependencies):
             raise CleanupError("service dependencies changed; regenerate the cleanup inventory")
     return {p: found[p] for p in paths}
@@ -579,6 +603,9 @@ def cleanup(inventory: Path, *, apply: bool = False, lock_descriptor: int | None
                 row["state"] = "deferred"
             elif path.exists():
                 row["identity"] = list(identity(path))
+                expected = plan.get('candidate_identities', {}).get(str(path))
+                if expected is not None and row['identity'] != expected:
+                    raise CleanupError('registered candidate was replaced since activation')
                 row["allocated_bytes"] = sum(info.st_blocks * 512 for _, info in artifact_entries(path))
             report["candidates"].append(row)
         if not apply:

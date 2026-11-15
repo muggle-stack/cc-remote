@@ -53,7 +53,8 @@ export function headerNoticeItem(notice: Notice, scope: string): HeaderFeedbackI
   const preserveRuntimeCopy = notice.category === "runtime" && !rollback
     && notice.severity === "warning" && !/^(schedule-|compact-)/.test(notice.notice_id);
   const success = info && (rollback || schedule);
-  const label = notice.notice_id.startsWith("checkpoint-") ? "回滚受限"
+  const label = notice.notice_id.startsWith("model-fallback:") ? "模型已回退"
+    : notice.notice_id.startsWith("checkpoint-") ? "回滚受限"
     : rollback ? info ? "已撤销" : "操作未完成"
     : schedule ? info ? "任务已完成" : "任务未完成"
     : notice.notice_id.startsWith("compact-") ? "压缩未完成"

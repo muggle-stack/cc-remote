@@ -30,10 +30,7 @@ def unit_argument(value: str, *, expand_environment: bool = True) -> str:
     return '"' + (escaped.replace('$', '$$') if expand_environment else escaped) + '"'
 
 
-def install(root: Path, account) -> None:
-    from deploy.install_cli import _atomic_file
-    from deploy.linux_service import trusted
-    trusted(UNIT_DIRECTORY)
+def service_files(root: Path, account) -> dict[Path, str]:
     name = helper_path(root).name
     group = grp.getgrgid(account.pw_gid).gr_name
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", group):
@@ -70,9 +67,18 @@ PrivateTmp=yes
 UMask=0077
 RuntimeMaxSec=100
 '''
+    return {UNIT_DIRECTORY / (name + '.socket'): socket_unit,
+            UNIT_DIRECTORY / (name + '@.service'): service_unit}
+
+
+def install(root: Path, account) -> None:
+    from deploy.install_cli import _atomic_file
+    from deploy.linux_service import trusted
+    trusted(UNIT_DIRECTORY)
+    name = helper_path(root).name
+    marker = '# cc-remote restricted UI update broker\n'
     original = {}
-    paths = {UNIT_DIRECTORY / (name + '.socket'): socket_unit,
-             UNIT_DIRECTORY / (name + '@.service'): service_unit}
+    paths = service_files(root, account)
     for path in paths:
         if path.is_symlink() or path.exists() and not path.read_text().startswith(marker):
             raise ValueError("unrelated update broker unit already exists")
@@ -102,7 +108,7 @@ RuntimeMaxSec=100
 
 
 def dispatch(root: Path, request: dict, uid: int) -> dict:
-    from deploy.ui_update_job import cancel, installation, launch, reconcile
+    from deploy.ui_update_job import cancel, installation, launch, prune_download_cache, reconcile
     installation_value, account = installation(root)
     policy = UpdateJobs(root).policy()
     if (uid not in {0, account.pw_uid} or policy['uid'] != account.pw_uid
@@ -111,11 +117,13 @@ def dispatch(root: Path, request: dict, uid: int) -> dict:
     if not isinstance(request, dict):
         raise ValueError('invalid update request')
     operation = request.get('op')
-    if operation not in {'start', 'cancel', 'reconcile', 'observe'}:
+    if operation not in {'start', 'cancel', 'reconcile', 'observe', 'prune_cache'}:
         raise ValueError('invalid update request')
     if set(request) != ({'op', 'id', 'version'} if operation == 'start' else {'op', 'id'}):
         raise ValueError('invalid update request')
     identity = job_id(request['id'])
+    if operation == 'prune_cache':
+        return {'ok': True, **prune_download_cache(root)}
     result = (launch(root, identity, request['version']) if operation == 'start' else
               cancel(root, identity) if operation == 'cancel' else
               reconcile(root, identity, explicit=operation == 'reconcile'))

@@ -10,6 +10,33 @@ export interface NotificationOrigin {
   sid: string | null;
 }
 
+/** A notification can be delivered again when its existing PWA gains focus. */
+export class NotificationClickGate {
+  private readonly seen = new Map<string, { route: string; time: number }>();
+
+  take(target: NotificationRoute, notificationId?: unknown, now = Date.now()): boolean {
+    const identity = typeof notificationId === "string" && notificationId.length <= 512
+      ? notificationId : "";
+    const route = JSON.stringify(target);
+    const key = JSON.stringify([route, identity]);
+    const previous = this.seen.get(key);
+    if (previous !== undefined && now - previous.time < (identity ? 86_400_000 : 5_000)) {
+      return false;
+    }
+    this.seen.delete(key);
+    this.seen.set(key, { route, time: now });
+    if (this.seen.size > 64) this.seen.delete(this.seen.keys().next().value!);
+    return true;
+  }
+
+  forget(target: NotificationRoute): void {
+    const route = JSON.stringify(target);
+    for (const [key, entry] of this.seen) {
+      if (entry.route === route) this.seen.delete(key);
+    }
+  }
+}
+
 interface ResolveNotificationNavigationOptions {
   target: NotificationRoute;
   origin: NotificationOrigin | null;

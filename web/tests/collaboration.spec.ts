@@ -403,6 +403,20 @@ async function mockRooms(page: Page, nativeEngine: "claude" | "codex" = "codex")
       emit({ ...question, sid: target.sid });
       state();
     },
+    askFallback(memberId: string) {
+      const target = room!.members.find((member: Record<string, any>) => member.id === memberId)!;
+      const question = { type: "ask_user", ask_id: `fallback-${memberId}`,
+        question: "是否允许模型回退？", allow_text: false,
+        options: ["拒绝回退", "编辑提问", "同意回退", "同意回退并记住"].map(label => ({ label })),
+        model_fallback: { original_model: "claude-opus-5-5", fallback_model: "claude-opus-5",
+          turn_id: "fallback-turn", original_prompt: "请继续检查部署脚本。" } };
+      pendingQuestions.push({ member_id: memberId, sid: target.sid, question });
+      messages.push({ id: `question-${memberId}`, seq: messages.length + 1, role: "assistant", member_id: memberId,
+        text: question.question, created: 1, targets: [], reply_to: [],
+        question: { kind: "native", ask_id: question.ask_id, status: "pending", questions: [question] } });
+      emit({ ...question, sid: target.sid });
+      state();
+    },
     askAsync(memberId: string, batch = false, id = "async-question", nativeId = `native-${id}`) {
       const title = "异步确认工作目录？";
       const questions = [{ title, options: ["项目目录", "临时目录"] }];
@@ -798,6 +812,32 @@ for (const batch of [false, true]) {
   });
 }
 
+for (const choice of ["拒绝回退", "编辑提问", "同意回退"]) {
+  test(`collaboration Claude model fallback routes ${choice} to its member`, async ({ page }) => {
+    const relay = await mockRooms(page);
+    await createQuestionRoom(page, "Claude · gaia");
+    const composer = page.getByRole("textbox", { name: "协作消息", exact: true });
+    await composer.fill("尚未发送的草稿");
+    relay.askFallback("member-0");
+    const dialog = page.getByRole("dialog", { name: "是否允许模型回退？", exact: true });
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText("Opus 5.5");
+    await expect(dialog).toContainText("Claude · gaia");
+    await dialog.getByRole("button", { name: "收起回退确认", exact: true }).click();
+    await page.getByRole("button", { name: /等待确认模型切换/ }).click();
+    if (choice === "同意回退") await dialog.getByRole("checkbox", { name: "以后自动切换" }).check();
+    await dialog.getByRole("button", { name: choice, exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    const answers = relay.commands.filter(command => command.operation === "answer");
+    expect(answers).toHaveLength(1);
+    expect(answers[0]).toMatchObject({ member_id: "member-0", ask_id: "fallback-member-0",
+      answer: choice === "同意回退" ? "同意回退并记住" : choice });
+    if (choice === "编辑提问") await expect(composer).toHaveValue("@Claude · gaia 请继续检查部署脚本。");
+    else await expect(composer).toHaveValue("尚未发送的草稿");
+    expect(relay.commands.filter(command => command.operation === "send")).toHaveLength(0);
+  });
+}
+
 test("collaboration same-account questions with equal native IDs stay scoped to their sessions", async ({ page }) => {
   const relay = await mockRooms(page);
   await page.goto("/");
@@ -827,27 +867,27 @@ for (const surface of ["collaboration", "native"]) {
     const relay = await mockRooms(page);
     await createQuestionRoom(page, "Codex · iris");
     relay.askAsync("member-0");
-    let dialog = page.getByRole("dialog", { name: "助手询问", exact: true });
+    let dialog = page.getByRole("dialog", { name: "Codex 想确认一下", exact: true });
     await expect(dialog).toBeVisible();
     await expect(dialog.locator(".async-question-source")).toContainText("Codex · iris");
     if (surface === "collaboration") {
       await dialog.getByRole("radio", { name: "项目目录", exact: true }).check();
-      await dialog.getByRole("button", { name: /发送回答/ }).click();
+      await dialog.getByRole("button", { name: "提交回答", exact: true }).click();
       await expect(dialog).toHaveCount(0);
       expect(relay.commands.findLast(command => command.type === "collaboration" && command.operation === "send"))
         .toMatchObject({ ask_id: "async-question", targets: ["member-0"],
           prompt: '补充回答：\n\n问题 ID："native-async-question"\n\n问题：异步确认工作目录？\n回答：项目目录' });
     } else await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
     await openQuestionSession(page);
-    await expect(page.locator(".async-question-card")).toBeVisible();
     if (surface === "native") {
-      await page.locator(".async-question-card").click();
-      dialog = page.getByRole("dialog", { name: "助手询问", exact: true });
+      dialog = page.getByRole("dialog", { name: "Codex 想确认一下", exact: true });
+      await expect(dialog).toBeVisible();
       await dialog.getByRole("radio", { name: "项目目录", exact: true }).check();
-      await dialog.getByRole("button", { name: /发送回答/ }).click();
+      await dialog.getByRole("button", { name: "提交回答", exact: true }).click();
       await expect(dialog).toHaveCount(0);
     }
-    await expect(page.locator(".async-question-entry-state")).toContainText("已回答");
+    await expect(page.locator(".async-question-card")).toHaveCount(0);
+    await expect(page.locator(".supplemental-answer-context")).toContainText("查看问题");
     await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
     await page.getByRole("menuitem", { name: "协作", exact: true }).click();
     await expect(page.locator('[data-question-id="async-question"]')).toHaveCount(0);
@@ -861,7 +901,7 @@ test("collaboration async question stays outside the transcript and resumes abov
   await createQuestionRoom(page, "Codex · iris");
   relay.reply("member-0", "我继续检查项目，稍后补充结果。");
   relay.askAsync("member-0");
-  const dialog = page.getByRole("dialog", { name: "助手询问", exact: true });
+  const dialog = page.getByRole("dialog", { name: "Codex 想确认一下", exact: true });
   await expect(dialog).toBeVisible();
   await expect(page.locator('.collab-thread [data-message-id="async-question"]')).toHaveCount(0);
   await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
@@ -871,7 +911,7 @@ test("collaboration async question stays outside the transcript and resumes abov
   await page.getByRole("textbox", { name: "协作消息", exact: true }).fill("继续检查");
   await resume.click();
   await dialog.getByRole("radio", { name: "项目目录", exact: true }).check();
-  await dialog.getByRole("button", { name: /发送回答/ }).click();
+  await dialog.getByRole("button", { name: "提交回答", exact: true }).click();
   await expect(dialog).toHaveCount(0);
   await expect(resume).toHaveCount(0);
   await expect(page.locator(".collab-thread")).not.toContainText("补充回答");
@@ -889,7 +929,7 @@ for (const width of [390, 1280]) {
     await page.getByRole("button", { name: "发送消息", exact: true }).click();
     relay.renameFromHarness("member-0", "接口检查");
     relay.askAsync("member-0", true);
-    const dialog = page.getByRole("dialog", { name: "助手询问", exact: true });
+    const dialog = page.getByRole("dialog", { name: "Codex 想确认一下", exact: true });
     await expect(dialog.locator("fieldset")).toHaveCount(2);
     await expect(dialog.getByText("验收需要截图吗？", { exact: true })).toBeVisible();
     await expect(dialog.getByRole("button", { name: /下一题/ })).toHaveCount(0);
@@ -915,7 +955,7 @@ for (const width of [390, 1280]) {
     await resume.click();
     await dialog.getByRole("radio", { name: "临时目录", exact: true }).check();
     await dialog.getByRole("radio", { name: "暂时不用", exact: true }).check();
-    await dialog.getByRole("button", { name: /发送回答/ }).click();
+    await dialog.getByRole("button", { name: "提交回答", exact: true }).click();
     await expect(dialog).toHaveCount(0);
     await expect(resume).toHaveCount(0);
     relay.reply("member-0", "收到，我先在临时目录检查，完成后说明结果。");
@@ -930,17 +970,15 @@ test("collaboration async question waits for native consumption beyond queue and
   await createQuestionRoom(page, "Codex · iris");
   relay.holdAsyncAnswers();
   relay.askAsync("member-0", true);
-  const dialog = page.getByRole("dialog", { name: "助手询问", exact: true });
+  const dialog = page.getByRole("dialog", { name: "Codex 想确认一下", exact: true });
   await dialog.getByRole("textbox").first().fill("检查现有项目，保留工作目录。");
-  await dialog.getByRole("button", { name: /发送回答/ }).click();
-  await expect(dialog.getByRole("button", { name: /等待确认/ })).toBeDisabled();
-  await expect(dialog).toContainText("正在确认回答是否送达");
-  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  await dialog.getByRole("button", { name: "提交回答", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
   const resume = page.locator(".collab-question-entry");
   await expect(resume).toContainText("回答确认中");
   await resume.click();
   await expect(dialog.getByRole("textbox").first()).toHaveValue("检查现有项目，保留工作目录。");
-  await expect(dialog.getByRole("button", { name: /等待确认/ })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "提交回答", exact: true })).toBeDisabled();
   expect(relay.commands.filter(command => command.operation === "send")).toHaveLength(1);
   relay.releaseAsyncAnswers();
   await expect(dialog).toHaveCount(0);
@@ -954,18 +992,19 @@ for (const failure of ["command", "delivery"]) {
     relay.askAsync("member-0", true);
     if (failure === "command") relay.rejectNextOperation("send", "回答未送达，请重试。");
     else relay.holdAsyncAnswers();
-    const dialog = page.getByRole("dialog", { name: "助手询问", exact: true });
+    const dialog = page.getByRole("dialog", { name: "Codex 想确认一下", exact: true });
     await dialog.getByRole("textbox").first().fill("保留这份回答草稿");
     await dialog.getByRole("radio", { name: "暂时不用", exact: true }).check();
-    await dialog.getByRole("button", { name: /发送回答/ }).click();
+    await dialog.getByRole("button", { name: "提交回答", exact: true }).click();
     if (failure === "delivery") {
-      await expect(dialog.getByRole("button", { name: /等待确认/ })).toBeDisabled();
+      await expect(dialog).toHaveCount(0);
       relay.failAsyncAnswer();
     }
+    await page.locator(".collab-question-entry").click();
     await expect(dialog.getByRole("status")).toContainText("回答未送达");
     await expect(dialog.getByRole("textbox").first()).toHaveValue("保留这份回答草稿");
     await expect(dialog.getByRole("radio", { name: "暂时不用", exact: true })).toBeChecked();
-    await dialog.getByRole("button", { name: /发送回答/ }).click();
+    await dialog.getByRole("button", { name: "提交回答", exact: true }).click();
     if (failure === "delivery") relay.releaseAsyncAnswers();
     await expect(dialog).toHaveCount(0);
     const sends = relay.commands.filter(command => command.operation === "send");
@@ -980,7 +1019,7 @@ test("collaboration async question keeps its draft and receipt when switching ha
   const relay = await mockRooms(page);
   await createQuestionRoom(page, "Codex · iris");
   relay.askAsync("member-0");
-  const dialog = page.getByRole("dialog", { name: "助手询问", exact: true });
+  const dialog = page.getByRole("dialog", { name: "Codex 想确认一下", exact: true });
   await dialog.getByRole("textbox").fill("切换后继续回答");
   await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
   await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
@@ -991,9 +1030,8 @@ test("collaboration async question keeps its draft and receipt when switching ha
   await page.locator(".collab-question-entry").click();
   await expect(dialog.getByRole("textbox")).toHaveValue("切换后继续回答");
   relay.holdAsyncAnswers();
-  await dialog.getByRole("button", { name: /发送回答/ }).click();
-  await expect(dialog.getByRole("button", { name: /等待确认/ })).toBeDisabled();
-  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  await dialog.getByRole("button", { name: "提交回答", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
   await openQuestionSession(page);
   relay.releaseAsyncAnswers();
   await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
@@ -1008,17 +1046,19 @@ test("collaboration async question reload recovers an old pending tool and an in
   await createQuestionRoom(page, "Codex · iris");
   relay.holdAsyncAnswers();
   relay.askAsync("member-0");
-  const dialog = page.getByRole("dialog", { name: "助手询问", exact: true });
+  const dialog = page.getByRole("dialog", { name: "Codex 想确认一下", exact: true });
   await dialog.getByRole("textbox").fill("刷新后保留原回答");
-  await dialog.getByRole("button", { name: /发送回答/ }).click();
-  await expect(dialog.getByRole("button", { name: /等待确认/ })).toBeDisabled();
+  await dialog.getByRole("button", { name: "提交回答", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
   for (let index = 0; index < 45; index++) relay.reply("member-0", `后续公开消息 ${index + 1}`);
   await page.reload();
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
   await page.getByRole("button", { name: "切换新会话引擎", exact: true }).click();
   await page.getByRole("menuitem", { name: "协作", exact: true }).click();
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole("textbox")).toHaveValue("刷新后保留原回答");
-  await expect(dialog.getByRole("button", { name: /等待确认/ })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "提交回答", exact: true })).toBeDisabled();
   expect(relay.commands.filter(command => command.operation === "send")).toHaveLength(1);
   relay.releaseAsyncAnswers();
   await expect(dialog).toHaveCount(0);
@@ -1030,10 +1070,10 @@ test("collaboration async question retries a dropped frame using one input ident
   await createQuestionRoom(page, "Codex · iris");
   relay.askAsync("member-0");
   relay.dropNextSend();
-  const dialog = page.getByRole("dialog", { name: "助手询问", exact: true });
-  await dialog.getByRole("button", { name: /发送回答/ }).click();
-  await expect(dialog.getByRole("button", { name: /等待确认/ })).toBeDisabled();
+  const dialog = page.getByRole("dialog", { name: "Codex 想确认一下", exact: true });
+  await dialog.getByRole("button", { name: "提交回答", exact: true }).click();
   await expect(dialog).toHaveCount(0, { timeout: 12000 });
+  await expect(page.locator(".collab-question-entry")).toHaveCount(0, { timeout: 12000 });
   const sends = relay.commands.filter(command => command.operation === "send");
   expect(sends.length).toBeGreaterThanOrEqual(2);
   expect(new Set(sends.map(command => command.message_id)).size).toBe(1);
@@ -1044,17 +1084,16 @@ test("collaboration async question retry uses the current tool receipt after old
   const relay = await mockRooms(page);
   await createQuestionRoom(page, "Codex · iris");
   relay.askAsync("member-0");
-  const dialog = page.getByRole("dialog", { name: "助手询问", exact: true });
-  await dialog.getByRole("button", { name: /发送回答/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Codex 想确认一下", exact: true });
+  await dialog.getByRole("button", { name: "提交回答", exact: true }).click();
   await expect(dialog).toHaveCount(0);
   for (let index = 0; index < 45; index++) relay.reply("member-0", `后续公开消息 ${index + 1}`);
   relay.failAnsweredAsync();
   await page.locator(".collab-question-entry").click();
   await dialog.getByRole("textbox").fill("重试时的新回答");
   relay.holdAsyncAnswers();
-  await dialog.getByRole("button", { name: /发送回答/ }).click();
-  await expect(dialog.getByRole("button", { name: /等待确认/ })).toBeDisabled();
-  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  await dialog.getByRole("button", { name: "提交回答", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
   await expect(page.locator(".collab-question-entry")).toContainText("回答确认中");
   relay.releaseAsyncAnswers();
   await expect(page.locator(".collab-questions")).toHaveCount(0);
@@ -1064,10 +1103,10 @@ test("collaboration async question observes an answer queued from another browse
   const relay = await mockRooms(page);
   await createQuestionRoom(page, "Codex · iris");
   relay.askAsync("member-0");
-  const dialog = page.getByRole("dialog", { name: "助手询问", exact: true });
+  const dialog = page.getByRole("dialog", { name: "Codex 想确认一下", exact: true });
   await dialog.getByRole("textbox").fill("本地尚未提交的草稿");
   relay.queueAsyncFromAnotherBrowser();
-  await expect(dialog.getByRole("button", { name: /等待确认/ })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "提交回答", exact: true })).toBeDisabled();
   await expect(dialog.getByRole("textbox")).toHaveValue("另一端提交的回答");
   expect(relay.commands.filter(command => command.operation === "send")).toHaveLength(0);
   relay.releaseAsyncAnswers();
@@ -1090,13 +1129,12 @@ test("collaboration async question scopes identical native IDs and ignores a lat
   relay.renameFromHarness("member-1", "交叉审查");
   relay.holdAsyncAnswers();
   relay.askAsync("member-1", false, "review-question", "same-native-id");
-  const dialog = page.getByRole("dialog", { name: "助手询问", exact: true });
+  const dialog = page.getByRole("dialog", { name: "Codex 想确认一下", exact: true });
   await expect(dialog.locator(".async-question-source")).toContainText("交叉审查 · Codex · primary · native-1");
   relay.askAsync("member-0", false, "implementation-question", "same-native-id");
   await dialog.getByRole("textbox").fill("请检查现有改动");
-  await dialog.getByRole("button", { name: /发送回答/ }).click();
-  await expect(dialog.getByRole("button", { name: /等待确认/ })).toBeDisabled();
-  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  await dialog.getByRole("button", { name: "提交回答", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
   await page.getByRole("button", { name: /接口实现.*继续回答/ }).click();
   await expect(dialog.locator(".async-question-source")).toContainText("接口实现 · Codex · primary · native-0");
   await dialog.getByRole("textbox").fill("只处理接口实现");
@@ -1104,7 +1142,7 @@ test("collaboration async question scopes identical native IDs and ignores a lat
   await expect(page.locator(".collab-question-entry")).toHaveCount(0);
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole("textbox")).toHaveValue("只处理接口实现");
-  await dialog.getByRole("button", { name: /发送回答/ }).click();
+  await dialog.getByRole("button", { name: "提交回答", exact: true }).click();
   await expect(dialog).toHaveCount(0);
   const sends = relay.commands.filter(command => command.operation === "send");
   expect(sends.map(command => command.targets)).toEqual([["member-1"], ["member-0"]]);
@@ -1126,12 +1164,12 @@ test("collaboration async question collapse keeps all three harnesses available 
   await create.getByLabel("聊天名称").fill("三个 Harness 同时提问");
   await create.getByRole("button", { name: "创建聊天", exact: true }).click();
   relay.askAsync("member-1", true);
-  const asyncDialog = page.getByRole("dialog", { name: "助手询问", exact: true });
+  const asyncDialog = page.getByRole("dialog", { name: "Codex 想确认一下", exact: true });
   await expect(asyncDialog).toBeVisible();
   await asyncDialog.getByRole("textbox").first().fill("稍后回答 Codex");
   relay.ask("member-0", true);
   relay.ask("member-2", true);
-  await asyncDialog.getByRole("button", { name: "收起助手询问", exact: true }).click();
+  await asyncDialog.getByRole("button", { name: "收起问题", exact: true }).click();
   await expect(page.locator(".question-dialog, .async-question-dialog")).toHaveCount(0);
   await expect(page.locator(".collab-question-entry")).toHaveCount(3);
   expect(relay.commands.filter(command => command.operation === "stop"
@@ -1155,7 +1193,7 @@ test("collaboration async question collapse keeps all three harnesses available 
   await expect(nativeDialog).toHaveCount(0);
   await page.getByRole("button", { name: /Codex · primary.*继续回答/ }).click();
   await expect(asyncDialog.getByRole("textbox").first()).toHaveValue("稍后回答 Codex");
-  await asyncDialog.getByRole("button", { name: /发送回答/ }).click();
+  await asyncDialog.getByRole("button", { name: "提交回答", exact: true }).click();
   await expect(asyncDialog).toHaveCount(0);
   await expect(page.locator(".collab-questions")).toHaveCount(0);
   expect(relay.commands.filter(command => command.operation === "answer" || command.operation === "send")
@@ -1169,13 +1207,13 @@ for (const kind of ["native", "async"]) {
     await createQuestionRoom(page, "Codex · iris");
     if (kind === "async") relay.askAsync("member-0");
     else relay.ask("member-0");
-    const question = page.getByRole("dialog", { name: kind === "async" ? "助手询问" : "操作确认", exact: true });
+    const question = page.getByRole("dialog", { name: kind === "async" ? "Codex 想确认一下" : "操作确认", exact: true });
     await expect(question).toBeVisible();
     for (let index = 0; index < 45; index++) relay.reply("member-0", `后续公开消息 ${index + 1}`);
     await expect(page.locator('[data-message-id="answer-45"]')).toBeAttached();
     if (kind === "async") {
       await question.getByRole("radio", { name: "项目目录", exact: true }).check();
-      await question.getByRole("button", { name: /发送回答/ }).click();
+      await question.getByRole("button", { name: "提交回答", exact: true }).click();
     } else await question.getByRole("button", { name: "项目目录", exact: true }).click();
     await expect(question).toHaveCount(0);
     await expect(page.locator(".collab-questions")).toHaveCount(0);

@@ -25,11 +25,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from deploy import cleanup as retirement
 from deploy.install_lock import LOCK_FD_ENV, acquire_install_lock, verify_install_lock
 from deploy.release_manifest import load_manifest
+from deploy.macos_service_scan import read_service_bytes, service_scan
 
 LEDGER = ".release-generations.json"
 BACKUPS = "rollback-config"
 INVENTORY = ".release-cleanup.json"
 STATUS = ".retention-status.json"
+DEFAULT_TZDIR = Path('/usr/share/zoneinfo')
+SYSTEMD_DIRECTORIES = {b'RuntimeDirectory': Path('/run'), b'StateDirectory': Path('/var/lib'),
+                       b'CacheDirectory': Path('/var/cache'), b'LogsDirectory': Path('/var/log'),
+                       b'ConfigurationDirectory': Path('/etc')}
+SYSTEMD_SYSTEM_ROOTS = tuple(map(Path, ('/etc/systemd/system', '/run/systemd',
+                                      '/usr/local/lib/systemd/system', '/usr/lib/systemd/system',
+                                      '/lib/systemd/system')))
 
 
 def require(condition: bool, message: str) -> None:
@@ -88,6 +96,10 @@ def begin(root: Path, release: Path, previous: str, *, role: str, home: Path,
     data = read_ledger(root)
     require(all(r["phase"] != "prepared" for r in data["generations"]),
             "unfinished installation record; inspect the original activation before retrying")
+    stage = os.environ.get('CC_REMOTE_DEPLOY_STAGE')
+    if stage:
+        from deploy.retention_staging import check_available
+        check_available(root, retirement.absolute_path(stage))
     compact_generations(data)
     require(len(data["generations"]) < 100, "too many retained generations; inspect retention")
     if previous:
@@ -130,6 +142,9 @@ def begin(root: Path, release: Path, previous: str, *, role: str, home: Path,
     for path in [release, backup, *([Path(previous)] if previous else [])]:
         row["artifacts"][str(path)] = list(retirement.identity(path))
     retirement.write_journal(root / LEDGER, data)
+    if stage:
+        from deploy.retention_staging import bind
+        bind(root, retirement.absolute_path(stage), identity)
     return identity
 
 
@@ -229,7 +244,19 @@ def acceptance(root: Path, row: dict) -> None:
     require(service_identity(row) == live, "service is unstable; retain recovery files")
 
 
-def commit(root: Path, identity: str, snapshot: str | None = None) -> None:
+def wait_for_acceptance(root: Path, row: dict, wait: float) -> None:
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            acceptance(root, row)
+            return
+        except ValueError as error:
+            if str(error) != 'updated Wrapper has not reconnected' or time.monotonic() >= deadline:
+                raise
+            time.sleep(min(1, max(0, deadline - time.monotonic())))
+
+
+def commit(root: Path, identity: str, snapshot: str | None = None, *, wait: float = 0) -> None:
     data, row = generation(root, identity)
     require(row["phase"] == "prepared", "activation already finalized; inspect instead of repeating")
     require((root / "current").resolve(strict=True) == Path(row["release"]), "activation not current")
@@ -243,7 +270,7 @@ def commit(root: Path, identity: str, snapshot: str | None = None) -> None:
     retirement.write_journal(root / LEDGER, data)
     # A failed check leaves the committed installation and all recovery files
     # intact. It is not a reason to roll back a healthy, already registered app.
-    acceptance(root, row)
+    wait_for_acceptance(root, row, wait)
 
 
 def abort(root: Path, identity: str, *, rollback_verified: bool = False) -> None:
@@ -432,6 +459,19 @@ def executable_search_paths(value: str) -> list[Path]:
     return paths
 
 
+def systemd_directory_paths(key: bytes, value: str, path: Path) -> set[Path]:
+    """Resolve system-manager directory directives without treating names as argv."""
+    names = shlex.split(value)
+    if not names:
+        return set()  # Empty assignments reset this directive.
+    require(any(path.is_relative_to(root) for root in SYSTEMD_SYSTEM_ROOTS),
+            'service manager directory environment requires explicit retention inventory')
+    require(all(name and not name.startswith('/') and '..' not in Path(name).parts
+                and re.fullmatch(r'[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*', name)
+                for name in names), 'dynamic service directory requires explicit retention inventory')
+    return {SYSTEMD_DIRECTORIES[key] / name for name in names}
+
+
 def systemd_executable_paths() -> list[Path]:
     # systemd.service(5): bare Exec* filenames use the installed systemd's
     # compile-time search path, which is not necessarily the updater's PATH.
@@ -549,14 +589,27 @@ def service_files(row: dict) -> set[Path]:
 
 def service_dependencies(row: dict, candidates: list[Path]) -> list[str]:
     """Discover dependencies afresh; an explicit review never relaxes by default."""
-    try:
-        native = native_configuration_dependencies(row, candidates) if row.get('native_configuration') else []
-    except (OSError, ValueError, TypeError, KeyError, RecursionError):
-        raise ValueError('native account configuration dependencies could not be inspected') from None
-    if row.get('review'):
-        from deploy.retention_services import reviewed_dependencies
-        return sorted(set(native + reviewed_dependencies(row, candidates)))
-    return sorted(set(native + inspect_service_files(service_files(row), candidates)))
+    for attempt in range(3):
+        try:
+            native = native_configuration_dependencies(row, candidates) if row.get('native_configuration') else []
+        except (OSError, ValueError, TypeError, KeyError, RecursionError):
+            raise ValueError('native account configuration dependencies could not be inspected') from None
+        try:
+            if row.get('review'):
+                from deploy.retention_services import reviewed_dependencies
+                services = reviewed_dependencies(row, candidates)
+            else:
+                services = inspect_service_files(service_files(row), candidates)
+            return sorted(set(native + services))
+        except FileNotFoundError as error:
+            # User-manager teardown can remove a generated file or its ancestor
+            # after discovery. Rebuild the entire observation, including native
+            # inputs. Persistent/broken inputs still stop cleanup.
+            runtime = sys.platform == 'linux' and re.fullmatch(
+                r'/run/(?:user/[0-9]+(?:/.*)?|systemd(?:/.*)?)', str(error.filename or ''))
+            if not runtime or attempt == 2:
+                raise
+    raise AssertionError('service discovery retries exhausted')
 
 
 def native_configuration_dependencies(row: dict, candidates: list[Path]) -> list[str]:
@@ -625,6 +678,8 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
     paths_seen = set()
     executable_commands = set()
     search_paths = set()
+    timezone_names = set()
+    timezone_directories = {DEFAULT_TZDIR}
     custom_namespace = False
     candidate_names = {str(p) for p in candidates}
     candidate_bytes = [(str(p), os.fsencode(p)) for p in candidates]
@@ -671,6 +726,18 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
         for path in literal_paths(value, atomic=atomic):
             protect(path)
 
+    def inspect_timezone(key: str, value: str) -> None:
+        # Resolve named zones and POSIX rules through zoneinfo, preserving
+        # file dependencies and every literal TZDIR override across services.
+        if key == 'TZ':
+            name = value.removeprefix(':')
+            if name:
+                timezone_names.update((name, 'posixrules'))
+        elif value:
+            for directory in literal_paths(value, atomic=True):
+                timezone_directories.add(directory)
+                protect(directory)
+
     def inspect_plist(value, key: str = '') -> None:
         if isinstance(value, dict):
             if 'Program' in value or 'ProgramArguments' in value:
@@ -683,6 +750,10 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
                 if reviewed_inputs is None:
                     literal_service_command(Path(executable), arguments[1:])
             for child_key, child in value.items():
+                if key == 'EnvironmentVariables' and child_key in {'TZ', 'TZDIR'}:
+                    require(isinstance(child, str), 'invalid service timezone environment')
+                    inspect_timezone(child_key, child)
+                    continue
                 inspect_plist(child, child_key)
         elif isinstance(value, list):
             for index, child in enumerate(value):
@@ -706,7 +777,7 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
             total += info.st_size
             require(stat.S_ISREG(info.st_mode) and info.st_size <= 4 * 1024 * 1024
                     and total <= 32 * 1024 * 1024, "service dependency scan incomplete or oversized")
-            raw = path.read_bytes()
+            raw = read_service_bytes(target)
         else:
             # The snapshot has already fingerprinted these bounded inputs and
             # retained all aliases, including reviewed missing/masked units.
@@ -723,6 +794,16 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
                 key, separator, value = line.partition(b'=')
                 key = key.strip()
                 text = value.strip().decode('utf-8')
+                if key in {b'RuntimeDirectory', b'StateDirectory', b'CacheDirectory',
+                           b'LogsDirectory', b'ConfigurationDirectory'}:
+                    try:
+                        for directory in systemd_directory_paths(key, text, path):
+                            protect(directory)
+                    except ValueError:
+                        if reviewed_inputs is None:
+                            raise
+                        inspect_value(text)
+                    continue
                 if key.strip() == b'EnvironmentFile':
                     continue  # exact single-filename handling below
                 if key in {b'StandardOutput', b'StandardError', b'StandardInput'}:
@@ -733,8 +814,12 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
                 if key in {b'RootDirectory', b'RootImage', b'BindPaths', b'BindReadOnlyPaths',
                            b'TemporaryFileSystem'} and text:
                     custom_namespace = True
-                if key == b'PassEnvironment' and 'PATH' in shlex.split(text):
-                    custom_namespace = True
+                if key == b'PassEnvironment':
+                    inherited = set(shlex.split(text))
+                    if 'PATH' in inherited:
+                        custom_namespace = True
+                    require(reviewed_inputs is not None or inherited.isdisjoint({'TZ', 'TZDIR'}),
+                            'inherited service timezone requires explicit retention inventory')
                 if key == b'ExecSearchPath':
                     if text:  # keep a superset across resets and drop-ins
                         search_path(text)
@@ -746,10 +831,20 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
                     for word in words:
                         search_path(word)
                     continue
+                if key in {b'TZ', b'TZDIR'}:
+                    words = shlex.split(text)
+                    require(reviewed_inputs is not None or len(words) <= 1,
+                            'ambiguous service timezone requires explicit retention inventory')
+                    for word in words:
+                        inspect_timezone(key.decode(), word)
+                    continue
                 if key == b'Environment':
                     for assignment in shlex.split(text):
                         if assignment.startswith('PATH='):
                             search_path(assignment.removeprefix('PATH='))
+                        elif assignment.startswith(('TZ=', 'TZDIR=')):
+                            name, _, timezone = assignment.partition('=')
+                            inspect_timezone(name, timezone)
                         else:
                             inspect_value(assignment)
                     continue
@@ -786,6 +881,9 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
             raise
         except ValueError as exc:
             raise ValueError(f"{path}: {exc}") from exc
+    for name in timezone_names:
+        for directory in timezone_directories:
+            inspect_value(str(directory / name), atomic=True)
     if executable_commands:
         require(reviewed_inputs is not None or not custom_namespace,
                 'custom service executable namespace requires explicit retention inventory')
@@ -816,12 +914,12 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
 def inventory(root: Path, data: dict, row: dict) -> dict | None:
     require(all(r["phase"] != "prepared" for r in data["generations"]),
             "unfinished activation; cleanup deferred")
-    if not row["previous"]:
-        return None
-    previous = retirement.absolute_path(row["previous"])
-    require(previous.parent == root / "releases",
-            "legacy rollback is outside the managed root; retain it for manual migration acceptance")
-    rollback = [str(previous), row["backup"]]
+    rollback = [row['backup']]
+    if row['previous']:
+        previous = retirement.absolute_path(row['previous'])
+        require(previous.parent == root / 'releases',
+                'legacy rollback is outside the managed root; retain it for manual migration acceptance')
+        rollback.insert(0, str(previous))
     if row.get("snapshot"):
         rollback.append(row["snapshot"])
     candidates, protected = set(), set()
@@ -842,6 +940,13 @@ def inventory(root: Path, data: dict, row: dict) -> dict | None:
                       if candidate in r.get("artifacts", {})]
         require(bool(identities) and all(i == list(retirement.identity(Path(candidate))) for i in identities),
                 "recorded artifact was replaced; cleanup requires inspection")
+    from deploy import retention_staging as stages
+    stage_candidates, stage_protected = stages.inventory(root)
+    candidates.update(map(str, stage_candidates))
+    protected.update(map(str, stage_protected))
+    stage_names = set(map(str, stage_candidates))
+    stage_identities = {item['path']: item['identity'] for item in stages.records(root)['stages']
+                        if item['path'] in stage_names}
     if not candidates:
         return None
     service_context = {key: row[key] for key in ("home", "linux_service") if key in row}
@@ -856,12 +961,17 @@ def inventory(root: Path, data: dict, row: dict) -> dict | None:
     python = str(Path(row["release"]) / ".venv/bin/python")
     check = [python, "-B", str(Path(row["release"]) / "deploy/release_retention.py"),
              "verify", "--root", str(root), "--generation", row["id"]]
+    transactions = [{"path": str(root / LEDGER), "field": "phase", "equals": "committed"}]
+    if stage_candidates:
+        transactions.append({'path': str(root / stages.REGISTRY), 'field': 'phase', 'equals': 'committed'})
+    roots = [str(root / name) for name in ('releases', BACKUPS, 'rollback-data') if (root / name).is_dir()]
+    roots.extend(str(path) for path in sorted({p.parent for p in stage_candidates}))
     return {"schema": 1, "installation_root": str(root), "current_release": row["release"],
             "rollback_paths": rollback, "protected_paths": sorted(protected),
             "service_context": service_context,
-            "cleanup_roots": [str(root / name) for name in ("releases", BACKUPS, "rollback-data")
-                              if (root / name).is_dir()], "candidates": sorted(candidates),
-            "transactions": [{"path": str(root / LEDGER), "field": "phase", "equals": "committed"}],
+            "cleanup_roots": roots, "candidates": sorted(candidates),
+            'candidate_identities': stage_identities,
+            "transactions": transactions,
             "checks": [{"name": "live release, service, public health and native config",
                         "argv": check, "cwd": row["home"]}]}
 
@@ -876,21 +986,50 @@ def record_retention(root: Path, data: dict, *, status: str, report: dict | None
     known = {p for row in data['generations'] for p in (row['release'], row['previous']) if p}
     untracked = sorted(str(p) for p in (root / 'releases').iterdir() if p.is_dir() and str(p) not in known)
     after = available_bytes(root)
+    from deploy.retention_staging import records
+    pending_stages = sum(row['phase'] == 'prepared' and Path(row['path']).exists()
+                         for row in records(root)['stages'])
+    if pending_stages and status == 'complete':
+        status = 'deferred'
+        reason = 'deployment staging awaits its activation outcome'
     result = {'schema': 1, 'checked_at': time.time(), 'status': status,
               'current_release': str((root / 'current').resolve()),
               'removed_count': sum(r['state'] == 'removed' for r in (report or {}).get('candidates', [])),
               'removed_allocated_bytes': (report or {}).get('removed_allocated_bytes', 0),
               'available_bytes_after': after,
               'available_change_bytes': after - before_available if before_available is not None else None,
+              'pending_stages': pending_stages,
               'retained_dependencies': [r for r in (report or {}).get('candidates', []) if r['state'] == 'deferred'],
               'untracked_release_count': len(untracked), 'untracked_releases': untracked[:1024]}
     if reason:
         result['reason'] = reason
+    result['reason_code'] = retention_reason(result)
     retirement.write_journal(root / STATUS, result)
+    from deploy.retention_job import publish_status
+    publish_status(root, result)
     return result
 
 
-def prune(root: Path, descriptor: int) -> dict | None:
+def retention_reason(result: dict) -> str:
+    if result.get('status') == 'complete':
+        return 'complete'
+    if result.get('retained_dependencies') and not result.get('reason'):
+        return 'dependencies'
+    reason = str(result.get('reason', '')).lower()
+    if 'system service scan' in reason or 'system service scanner' in reason:
+        return 'macos_scan_authorization'
+    if 'permission' in reason or 'administrator' in reason:
+        return 'permission_required'
+    if 'has not reconnected' in reason:
+        return 'waiting_connection'
+    if 'deployment staging' in reason:
+        return 'waiting_staging'
+    if 'service configuration changed' in reason or 'explicit retention inventory' in reason:
+        return 'review_required'
+    return 'verification_required'
+
+
+def prune(root: Path, descriptor: int, *, wait: float = 0) -> dict | None:
     data = read_ledger(root)
     before_available = available_bytes(root)
     current = str((root / "current").resolve(strict=True))
@@ -902,10 +1041,12 @@ def prune(root: Path, descriptor: int) -> dict | None:
     # exact release again; the retirement checks below freeze that new identity.
     fresh_row = {k: v for k, v in row.items() if k != "service_identity"}
     before = service_identity(row)
-    acceptance(root, fresh_row)
+    wait_for_acceptance(root, fresh_row, wait)
     require(service_identity(row) == before, "service changed during retention preflight")
     row["service_identity"] = before
     retirement.write_journal(root / LEDGER, data)
+    from deploy.retention_staging import retire_finished
+    retire_finished(root, data)
     plan = inventory(root, data, row)
     if plan is None:
         record_retention(root, data, status='complete', before_available=before_available)
@@ -919,6 +1060,8 @@ def prune(root: Path, descriptor: int) -> dict | None:
     # Keep provenance for every surviving artifact. Completed records whose
     # payloads have all gone no longer need to accumulate indefinitely.
     compact_generations(data)
+    from deploy.retention_staging import compact
+    compact(root)
     retirement.write_journal(root / LEDGER, data)
     summary = record_retention(root, data, status=result['status'], report=result, before_available=before_available)
     print(f"Retention: removed {result['removed_allocated_bytes']} allocated bytes; "
@@ -943,6 +1086,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--snapshot")
     parser.add_argument('--rollback-verified', action='store_true')
     parser.add_argument("--linux-service", type=Path)
+    parser.add_argument('--authorize-system-scan', action='store_true')
+    parser.add_argument('--wait', type=float, default=30)
     args = parser.parse_args(argv)
     descriptor = None
     try:
@@ -964,11 +1109,12 @@ def main(argv: list[str] | None = None) -> int:
                         service=args.service, service_file=args.service_file, configs=args.config,
                         linux_service=json.loads(args.linux_service.read_text()) if args.linux_service else None))
         elif args.action == "commit":
-            commit(root, args.generation, args.snapshot)
+            commit(root, args.generation, args.snapshot, wait=min(60, max(0, args.wait)))
         elif args.action == "abort":
             abort(root, args.generation, rollback_verified=args.rollback_verified)
         else:
-            prune(root, descriptor)
+            with service_scan(root, authorize=args.authorize_system_scan):
+                prune(root, descriptor, wait=min(60, max(0, args.wait)))
         return 0
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         if descriptor is not None and args.action == 'prune':

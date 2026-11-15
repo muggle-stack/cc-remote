@@ -73,6 +73,16 @@ try {
   assert.equal(limited.message, checkpoint.message, "the popover preserves the reason and conversation rollback availability");
   assert.equal(limited.noticeId, checkpoint.notice_id);
   assert.notEqual(limited.id, headerNoticeItem(checkpoint, "b").id);
+  const fallback = { ...base, notice_id: "model-fallback:native-event", title: "模型已回退",
+    message: "claude-opus-5-6 → claude-opus-5-5。原模型拒绝响应，已切换备用模型。",
+    detail: "切换时间 2026-11-14T01:00:00Z" } as Notice;
+  const fallbackFeedback = headerNoticeItem(fallback, "a");
+  assert.equal(fallbackFeedback.label, "模型已回退");
+  assert.equal(fallbackFeedback.message, fallback.message);
+  assert.equal(fallbackFeedback.detail, fallback.detail);
+  const { conversationNotices } = await harness.ssrLoadModule("/src/notice-presentation.ts");
+  assert.deepEqual(conversationNotices([fallback]), [fallback],
+    "side chats preserve native fallback models and switch time too");
 
   let state = reduce(initialState, { type: "command_error", detail: "操作未完成，请稍后重试。" });
   const first = state.bannerRevision;

@@ -255,6 +255,48 @@ def test_current_turn_replay_keeps_and_compacts_retained_live_deltas():
     assert frames[-1].type == "replay_end"
 
 
+@pytest.mark.parametrize("replay", ["current_turn", "bounded"])
+@pytest.mark.parametrize(("deltas", "expected_runs"), [
+    ([("prefix", False), ("prefix-full", True)],
+     [("prefix", False, 3), ("prefix-full", True, 4)]),
+    ([("prefix", False), ("prefix-full", True), (" tail", False), ("!", False)],
+     [("prefix", False, 3), ("prefix-full tail!", True, 6)]),
+    ([("prefix", False), ("first replacement", True), ("", True), ("tail", False)],
+     [("prefix", False, 3), ("first replacement", True, 4), ("tail", True, 6)]),
+    ([("prefix", False), ("x" * (64 * 1024), True), ("tail", False)],
+     [("prefix", False, 3), ("x" * (64 * 1024), True, 4), ("tail", False, 5)]),
+])
+def test_compacted_replay_preserves_replacement_boundaries(replay, deltas, expected_runs):
+    ring = RingBuffer(len(deltas) + 1, 1_000_000)
+    ring.append(UserMsg(seq=1, msg_id="user", prompt="check"))
+    ring.append(TurnBinding(seq=2, msg_id="user", turn_id="native"))
+    for seq, (text, replace) in enumerate(deltas, 3):
+        ring.append(Delta(seq=seq, message_id="answer", turn_id="native",
+                          channel="final", text=text, replace=replace))
+    assert ring.head_seq == 2
+    retained = [message.model_dump() for _, message in ring._buf]
+
+    if replay == "current_turn":
+        frames = ring.current_turn_replay(
+            generation="g", message_id="user", boundary_seq=2)
+    else:
+        frames = ring.replay_from_bounded(
+            0, max_events=100, max_bytes=1_000_000, generation="g")
+
+    assert frames[0].truncated is True
+    assert frames[-1].to_seq == ring.tail_seq
+    compacted = [frame for frame in frames if isinstance(frame, Delta)]
+    assert [(frame.text, frame.replace, frame.seq) for frame in compacted] == expected_runs
+    original_text = ""
+    for text, replace in deltas:
+        original_text = text if replace else original_text + text
+    replayed_text = ""
+    for frame in compacted:
+        replayed_text = frame.text if frame.replace else replayed_text + frame.text
+    assert replayed_text == original_text
+    assert [message.model_dump() for _, message in ring._buf] == retained
+
+
 # ---- emit routing (sid = the context's browser routing key) ----
 
 def test_emit_routes_by_temp_key_before_capture_then_real_sid():
@@ -533,5 +575,37 @@ def test_live_ask_has_notification_context_without_replay_or_question_content():
         replay = next(frame for frame in ctx.buffer.replay_from(
             0, cc_session_id=ctx.session_id, state="running") if isinstance(frame, AskUser))
         assert replay.notification_context is None
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("engine,structured", [("codex", True), ("codex", False), ("claude", True)])
+def test_async_question_notification_context_is_live_codex_only(engine, structured):
+    from cc_remote.protocol import AssistantMsgEnd
+
+    async def run():
+        machine, transport = _mk_machine()
+        ctx = _mk_ctx(key="async-notify", session_id="async-notify")
+        ctx.engine = engine
+        machine._remember_notification_title(ctx.key, "Code session")
+        event = AssistantMsgEnd(
+            message_id="question-item", delivery="async",
+            questions=[{"title": "private question", "options": ["private option"]}]
+            if structured else None,
+        )
+        await machine._emit_locked(ctx, event)
+        live = transport.sent[-1]
+        if engine == "codex" and structured:
+            assert live.notification_context.engine == "codex"
+            assert live.notification_context.display_name == "Code session"
+            assert "private" not in live.notification_context.model_dump_json()
+            assert deserialize(serialize(live)).notification_context == live.notification_context
+        else:
+            assert live.notification_context is None
+        assert event.notification_context is None
+        replay = next(frame for frame in ctx.buffer.replay_from(
+            0, cc_session_id=ctx.session_id, state="running") if isinstance(frame, AssistantMsgEnd))
+        assert replay.notification_context is None
+        assert not any(frame.type in {"ask_user", "turn_end"} for frame in transport.sent)
 
     asyncio.run(run())

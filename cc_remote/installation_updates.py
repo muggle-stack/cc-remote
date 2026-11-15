@@ -5,6 +5,7 @@ import asyncio
 import json
 from pathlib import Path
 import subprocess
+import time
 from urllib.request import Request, urlopen
 
 from cc_remote.update import UpdateError, host_platform, read_installation, release_repository, version_tuple
@@ -81,7 +82,7 @@ class InstallationUpdates:
     def invoke(self, operation: str, identity: str, version: str | None = None) -> dict:
         store = self.store()
         policy = store.policy()
-        if not policy["enabled"] and operation not in {"cancel", "reconcile", "observe"}:
+        if not policy["enabled"] and operation not in {"cancel", "reconcile", "observe", "prune_cache"}:
             raise UpdateError("UI updates are disabled")
         job_id(identity)
         if version is not None:
@@ -158,8 +159,15 @@ class InstallationUpdates:
 
     async def _recover_pending(self):
         from cc_remote import activation
-        from deploy.ui_update_job import worker_alive
+        from cc_remote.update_jobs import worker_alive
+        cache_checked_at = time.monotonic() - 3600
         while True:
+            if time.monotonic() - cache_checked_at >= 3600:
+                cache_checked_at = time.monotonic()
+                try:
+                    await asyncio.to_thread(self.invoke, "prune_cache", "0" * 32)
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    pass
             try:
                 state = self.store().active()
                 if state and state["phase"] not in TERMINAL:

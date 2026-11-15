@@ -98,6 +98,56 @@ def test_codex_agent_phase_and_public_reasoning_are_separate():
     assert "ENCRYPTED_REASONING_MUST_NOT_CROSS" not in wire
 
 
+@pytest.mark.parametrize("phase", ["commentary", "final_answer"])
+def test_codex_complete_message_replaces_incomplete_stream(phase):
+    translator = CodexStreamTranslator(8_000)
+    prefix = "回复前半句"
+    full_text = prefix + "，以及完整的后半句。"
+    translator.feed({"method": "item/started", "params": {
+        "item": {"type": "agentMessage", "id": "answer", "phase": phase},
+    }})
+    translator.feed({"method": "item/agentMessage/delta", "params": {
+        "itemId": "answer", "delta": prefix,
+    }})
+    events = translator.feed({"method": "item/completed", "params": {
+        "item": {"type": "agentMessage", "id": "answer", "phase": phase,
+                 "text": full_text},
+    }})
+    text_events = [event for event in events if isinstance(event, Delta)]
+    assert len(text_events) == 1
+    assert text_events[0].replace is True
+    assert text_events[0].text == full_text
+    assert events[-1].type == "assistant_msg_end"
+    repeated = translator.feed({"method": "item/completed", "params": {
+        "item": {"type": "agentMessage", "id": "answer", "phase": phase,
+                 "text": full_text},
+    }})
+    assert not any(isinstance(event, Delta) for event in repeated)
+
+
+def test_codex_complete_message_verifies_content_without_repeating_intact_stream():
+    translator = CodexStreamTranslator(8_000)
+    translator.feed({"method": "item/agentMessage/delta", "params": {
+        "itemId": "intact", "delta": "完整",
+    }})
+    translator.feed({"method": "item/agentMessage/delta", "params": {
+        "itemId": "intact", "delta": "回复",
+    }})
+    intact = translator.feed({"method": "item/completed", "params": {
+        "item": {"type": "agentMessage", "id": "intact", "text": "完整回复"},
+    }})
+    assert not any(isinstance(event, Delta) for event in intact)
+
+    translator.feed({"method": "item/agentMessage/delta", "params": {
+        "itemId": "corrected", "delta": "ababa",
+    }})
+    corrected = translator.feed({"method": "item/completed", "params": {
+        "item": {"type": "agentMessage", "id": "corrected", "text": "abcba"},
+    }})
+    assert any(isinstance(event, Delta) and event.replace and event.text == "abcba"
+               for event in corrected)
+
+
 def test_codex_completed_plan_becomes_final_answer_without_agent_message():
     translator = CodexStreamTranslator(8_000)
     events = _feed(translator, [

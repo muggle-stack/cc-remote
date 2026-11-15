@@ -120,7 +120,7 @@ def options_payload(options) -> dict:
 
 class RemoteClient:
     def __init__(self, socket_path, *, options, metadata, isolated=False,
-                 previous_owner_identity=None):
+                 previous_owner_identity=None, user_dialog_callback=None):
         self.connection = Connection(socket_path)
         self.options = options
         self.metadata = metadata
@@ -139,6 +139,7 @@ class RemoteClient:
         self.ready = asyncio.Event()
         self.owner_identity = None
         self.previous_owner_identity = previous_owner_identity
+        self.user_dialog_callback = user_dialog_callback
 
     async def connect(self) -> None:
         await self.connection.connect()
@@ -180,6 +181,7 @@ class RemoteClient:
                 "options": payload,
                 "metadata": self.metadata,
                 "isolated": self.isolated,
+                "supported_dialog_kinds": ["refusal_fallback_prompt"] if self.user_dialog_callback else [],
                 "fork": self.options.fork_session,
                 "session": worker_id,
                 "strict_session": bool(hello.get("strict_controller_leases")),
@@ -295,6 +297,8 @@ class RemoteClient:
                                 call["name"], call["input"], decode_sdk(call["context"])))
                         elif call["kind"] == "mcp":
                             value = await self._mcp(call["name"], call["message"])
+                        elif call["kind"] == "user_dialog" and self.user_dialog_callback is not None:
+                            value = await self.user_dialog_callback(call["request_id"], call["payload"])
                         else:
                             raise ValueError("unknown Claude callback")
                         handled = True

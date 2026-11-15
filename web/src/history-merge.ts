@@ -1392,6 +1392,7 @@ export function mergeAuthoritativeTurnDetail(
   summary: Turn,
   detail: Turn,
   canonicalTurns?: readonly Turn[],
+  preferCanonicalFinals = false,
 ): Turn {
   // The summary owns lifecycle and ordering, but an already-loaded detail page
   // owns the complete payload for an exact native message. In particular, a
@@ -1409,6 +1410,19 @@ export function mergeAuthoritativeTurnDetail(
   }
   const merged = mergeTurn(summary, detail, false, "second", false, false,
     isExactClosedSegment(canonical, detail));
+  // An in-flight detail read can retain a short final-message prefix and then
+  // be marked done by the live terminal. A later complete canonical summary
+  // owns that exact final body. Only explicitly shortened summaries keep the
+  // older expanded body; process pages still retain their own payloads.
+  if (preferCanonicalFinals && index >= 0 && canonical.done
+      && !canonical.detailReasons?.includes("answer_truncated")) {
+    const finals = new Map(canonical.blocks.filter(isFinalTextBlock)
+      .filter(block => block.done).map(block => [block.message_id, block]));
+    merged.blocks = merged.blocks.map(block => {
+      const final = block.kind === "text" && finals.get(block.message_id);
+      return final ? { ...block, text: final.text } : block;
+    });
+  }
   return {
     ...merged,
     id: summary.id,
