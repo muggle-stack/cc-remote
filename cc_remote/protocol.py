@@ -29,7 +29,7 @@ from cc_remote.attachments import (
 )
 from cc_remote.collaboration import CollaborationMemberSpec, MAX_ROOM_MESSAGE
 
-PROTOCOL_VERSION = 92
+PROTOCOL_VERSION = 95
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -1001,6 +1001,7 @@ class AssistantMsgEnd(_Base):
     # history/reconnect and may be answered while the native turn keeps running.
     delivery: Optional[Literal["async"]] = None
     questions: Optional[list[AsyncQuestionSpec]] = Field(default=None, max_length=16)
+    notification_context: Optional[TurnNotificationContext] = None
 
     @model_validator(mode="after")
     def bounded_async_questions(self):
@@ -1190,8 +1191,8 @@ class TurnResult(BaseModel):
 class TurnNotificationContext(BaseModel):
     """Realtime-only presentation metadata for completion and question notifications.
 
-    The wrapper strips this field before buffering a TurnEnd or AskUser, so
-    reconnect and history replay cannot notify again for an old event.
+    The wrapper strips this field before buffering completion or question
+    events, so reconnect and history replay cannot notify for an old event.
     """
     model_config = ConfigDict(extra="forbid")
     engine: Engine
@@ -3129,6 +3130,16 @@ class AskQuestion(BaseModel):
         return self
 
 
+class ModelFallbackPrompt(BaseModel):
+    """Native Claude confirmation, kept only with the pending interaction."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    original_model: str = Field(max_length=128, pattern=r"^claude-[a-zA-Z0-9._-]{1,100}(?:\[1m\])?$")
+    fallback_model: str = Field(max_length=128, pattern=r"^claude-[a-zA-Z0-9._-]{1,100}(?:\[1m\])?$")
+    turn_id: Optional[WireId] = None
+    original_prompt: Optional[str] = Field(default=None, max_length=2 * 1024 * 1024)
+
+
 class AskUser(_Base, AskQuestion):
     """One pending interaction. A batch is answered atomically in page order.
 
@@ -3140,6 +3151,7 @@ class AskUser(_Base, AskQuestion):
     # Live-only, stripped before journal/ring storage and pending-question sync.
     notification_context: Optional[TurnNotificationContext] = None
     ask_id: WireId
+    model_fallback: Optional[ModelFallbackPrompt] = None
     questions: Optional[list[AskQuestion]] = Field(
         default=None, min_length=1, max_length=ASK_QUESTION_MAX_COUNT)
 

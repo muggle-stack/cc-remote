@@ -1595,7 +1595,18 @@ export default function CollaborationWorkspace({
         {room && !creating && <CollaborationQuestions key={room.id} room={room}
           messages={messages} deliveries={deliveries} questions={questions}
           pendingQuestions={pendingQuestions} questionStates={questionStates}
-          ready={connected && roomReady} command={command} cache={questionCache} listen={listenQuestions} />}
+          ready={connected && roomReady} command={command} cache={questionCache} listen={listenQuestions}
+          onEditPrompt={(member, prompt) => {
+            const mention = `@${member.name}`;
+            const nextText = `${mention} ${prompt}`;
+            const nextMentions = [{ start: 0, end: mention.length, memberIds: [member.id] }];
+            setText(nextText);
+            setMentions(nextMentions);
+            setMentionQuery(null);
+            draftMessageId.current = undefined;
+            saveDraft({ text: nextText, mentions: nextMentions,
+              attachmentCount: Math.max(missingAttachments, images.length + files.length) });
+          }} />}
         {room && !creating && !room.archived && (
           <div
             className="collab-composer"

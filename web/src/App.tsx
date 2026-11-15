@@ -1,4 +1,5 @@
-import { QuestionNotificationGate, questionNotificationPresentation } from "./question-notification";
+import { AsyncQuestionStore } from "./async-question-state";
+import { QuestionNotificationGate, questionNotificationId, questionNotificationPresentation } from "./question-notification";
 import { SessionStatus } from "./components/SessionStatus";
 import { canSubmitSteer } from "./pending-steers";
 import { useWebUpdate } from "./use-web-update";
@@ -24,12 +25,14 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useReducer,
   useRef,
   useState,
 } from "react";
 import { RelayWs, sessionScopeKey, type EventOwnership } from "./ws";
+import { DeviceViewCache } from "./device-view-cache";
 import type { QueryAcceptanceResult } from "./outbox";
 import { RemoteViewerContext, useRemoteViewerLinks } from "./remote-viewer-context";
 import { ViewerPagesProvider } from "./components/ViewerPagesProvider";
@@ -74,6 +77,7 @@ import {
   resolveNewChatLocalDefaults,
 } from "./new-chat-selection";
 const NewChatView = lazy(() => import("./components/NewChatView").then(m => ({ default: m.NewChatView })));
+const AsyncQuestionHost = lazy(() => import("./components/AsyncQuestionDialog"));
 const QuestionSheet = lazy(() => import("./components/QuestionSheet").then(
   m => ({ default: m.QuestionSheet })));
 const WorkDashboardSheet = lazy(() => import("./components/WorkDashboardSheet").then(m => ({ default: m.WorkDashboardSheet })));
@@ -184,6 +188,7 @@ import {
   type NotificationRoute,
 } from "./notification-route";
 import {
+  NotificationClickGate,
   resolveNotificationNavigation,
   type NotificationOrigin,
 } from "./notification-navigation";
@@ -506,6 +511,7 @@ export default function App() {
     machineId, entries: new Map<string, ArtifactReadingState>(),
   }), [machineId]);
   const [remoteDevices, setRemoteDevices] = useState<RemoteDevice[]>([]);
+  const hasSelectedDevice = remoteDevices.some(device => device.machine_id === machineId);
   const notificationMachineIdsKey = JSON.stringify(
     [...new Set(remoteDevices.map(device => device.machine_id))].sort(),
   );
@@ -530,8 +536,17 @@ export default function App() {
       return captured;
     }
   });
+  const pendingNotificationTargetRef = useRef(pendingNotificationTarget);
+  pendingNotificationTargetRef.current = pendingNotificationTarget;
   const [notificationListRevision, bumpNotificationListRevision] = useReducer(
     (value: number) => value + 1, 0);
+  const refreshDevicesRef = useRef<(() => Promise<RemoteDevice[] | null>) | null>(null);
+  const notificationClicksRef = useRef(new NotificationClickGate());
+  const [notificationDevices, setNotificationDevices] = useState<{
+    target: NotificationRoute;
+    ids: string[];
+    status: "ready" | "error";
+  } | null>(null);
   const [devicePairing, setDevicePairing] = useState<PairingState>({
     enabled: false, expires_at: null,
   });
@@ -557,6 +572,7 @@ export default function App() {
   const composerDraftsRef = useRef(new ComposerDraftStore());
   const btwDraftsRef = useRef(new ComposerDraftStore());
   const questionDraftsRef = useRef(new Map<string, QuestionDraft>());
+  const [asyncQuestions] = useState(() => new AsyncQuestionStore());
   const artifactDirtyRef = useRef(false);
   const [, bumpHistoryImageRevision] = useReducer((value: number) => value + 1, 0);
   const pushCoordinatorRef = useRef<PushBindingCoordinator | null>(null);
@@ -573,7 +589,7 @@ export default function App() {
   const wsRef = useRef<RelayWs | null>(null);
   const webUpdate = useWebUpdate(authed, state.connState, () => {
     if (artifactDirtyRef.current) return "Markdown 有未保存的修改，请先保存或放弃修改，再更新页面。";
-    if (composerDraftsRef.current.hasDrafts || btwDraftsRef.current.hasDrafts
+    if (asyncQuestions.hasDrafts || composerDraftsRef.current.hasDrafts || btwDraftsRef.current.hasDrafts
         || [...questionDraftsRef.current.values()].some(draft =>
           draft.text || draft.selected.length || draft.pages?.some(page => page.text || page.selected.length))) {
       return "还有未发送的内容或正在导入的附件，请先发送或自行保存并清空，再更新页面。";
@@ -763,6 +779,10 @@ export default function App() {
     useRef<PendingSessionMigration | null>(null);
   const sessionListsBySurfaceRef = useRef<Record<string, SessionInfo[]>>({});
   const historySessionListsRef = useRef<Record<string, SessionInfo[]>>({});
+  const deviceViewsRef = useRef(new DeviceViewCache());
+  useLayoutEffect(() => {
+    if (!authed) deviceViewsRef.current.clear();
+  }, [authed]);
   const findMessageSession = (id: string) => resolveRelatedSession(id, focusedSid,
     [...state.sessions, ...Object.values(sessionListsBySurfaceRef.current).flat()]);
   // Cached lists are paint-only during a surface switch. A surface may choose
@@ -772,7 +792,9 @@ export default function App() {
   const deferredStatusRefreshRef = useRef<Set<string>>(new Set());
   const prefetchedSurfacesRef = useRef<Set<string>>(new Set());
   const lastFocusBySurfaceRef = useRef<Record<string, string>>({});
-  const preferredSurfaceFocusRef = useRef<{ key: string; sid: string } | null>(null);
+  const preferredSurfaceFocusRef = useRef<{
+    key: string; sid: string; resumeRequired?: boolean;
+  } | null>(null);
   const activeBtwByParentRef = useRef<Map<
     string, { requestId: string; sid: string }
   >>(new Map());
@@ -910,6 +932,7 @@ export default function App() {
     setTerminalHistoryRepairEpoch((value) => value + 1);
   }, []);
   const cancelPendingNotificationTarget = useCallback(() => {
+    pendingNotificationTargetRef.current = null;
     setPendingNotificationTarget(null);
     notificationListRequestRef.current = null;
     notificationOriginRef.current = null;
@@ -942,9 +965,20 @@ export default function App() {
     setMigrateError(null);
   }, [migrateCreating, migrateSession, state.sessions]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const previous = previousMachineRef.current;
     if (previous === machineId) return;
+    const departing = stateRef.current;
+    const departingSession = departing.sessions.find(
+      session => session.session_id === departing.focusedSid);
+    if (authed && remoteDevices.some(device => device.machine_id === previous)) {
+      deviceViewsRef.current.remember(previous,
+        departingSession?.engine === "codex" || departingSession?.engine === "dsh"
+          ? departingSession.engine : "claude",
+        departingSession?.space === "work" ? "work" : "code", departing);
+    }
+    const restored = deviceViewsRef.current.get(
+      machineId, engineRef.current, spaceRef.current);
     previousMachineRef.current = machineId;
     panelViewsBySurfaceRef.current.clear();
     localStorage.setItem(MACHINE_KEY, machineId);
@@ -969,9 +1003,13 @@ export default function App() {
       goalDismissMigrationByRequestRef.current,
     );
     planProgressCacheRef.current.reset();
-    sessionListsBySurfaceRef.current = {};
-    historySessionListsRef.current = {};
-    preferredSurfaceFocusRef.current = null;
+    sessionListsBySurfaceRef.current = deviceViewsRef.current.sessionLists(machineId);
+    historySessionListsRef.current = { ...sessionListsBySurfaceRef.current };
+    preferredSurfaceFocusRef.current = restored ? {
+      key: sessionScopeKey(machineId, engineRef.current, spaceRef.current),
+      sid: restored.sid,
+      resumeRequired: true,
+    } : null;
     authoritativeSurfaceListsRef.current.clear();
     notificationListRequestRef.current = null;
     setRestoringSurfaceScope(null);
@@ -1006,7 +1044,9 @@ export default function App() {
     historyImageAssetsRef.current.clear();
     bumpInlineImageRevision();
     bumpHistoryImageRevision();
-    dispatch({ type: "reset" });
+    dispatch(restored
+      ? { type: "restore_device_view", view: restored }
+      : { type: "reset" });
     if (pendingNotificationErrorRef.current) {
       dispatch({
         type: "command_error",
@@ -1014,7 +1054,7 @@ export default function App() {
       });
       pendingNotificationErrorRef.current = null;
     }
-  }, [clearForkFocusLease, clearHistoryDetailRequests, machineId]);
+  }, [authed, clearForkFocusLease, clearHistoryDetailRequests, machineId, remoteDevices]);
 
   // The focused session's runtime (turns/state/model/perm/queue/...). Falls back
   // to an empty runtime before any session is focused.
@@ -1784,14 +1824,17 @@ export default function App() {
     }
     setDevicesLoadState("loading");
     let cancelled = false;
-    const refreshDevices = () => void fetch("/api/devices", {
-      credentials: "same-origin", cache: "no-store",
-    }).then(async (response) => response.ok ? response.json() : null)
-      .then((payload) => {
-        if (cancelled) return;
+    const refreshDevices = async (): Promise<RemoteDevice[] | null> => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 5000);
+      try {
+        const response = await fetch("/api/devices", {
+          credentials: "same-origin", cache: "no-store", signal: controller.signal,
+        });
+        const payload = response.ok ? await response.json() : null;
         if (!payload || !Array.isArray(payload.devices)) {
-          setDevicesLoadState("error");
-          return;
+          if (!cancelled) setDevicesLoadState("error");
+          return null;
         }
         const validDevices: RemoteDevice[] = (payload.devices as unknown[]).filter((value: unknown): value is RemoteDevice => {
           if (!value || typeof value !== "object") return false;
@@ -1800,20 +1843,59 @@ export default function App() {
             && /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/.test(item.machine_id)
             && typeof item.label === "string" && typeof item.online === "boolean";
         });
+        // An in-flight notification verification still owns this fresh HTTP
+        // result when a WebSocket/machine transition replaces the poll effect.
+        if (cancelled) return validDevices;
         const available = validDevices.map((device) => device.machine_id);
+        deviceViewsRef.current.retainMachines(available);
         setRemoteDevices(validDevices);
         setDevicesLoadState("ready");
         setDevicePairing(payload.pairing ?? { enabled: false, expires_at: null });
         if (available.length && !available.includes(machineId)) {
           setMachineId(available[0]);
         }
-      }).catch(() => {
+        return validDevices;
+      } catch {
         if (!cancelled) setDevicesLoadState("error");
-      });
-    refreshDevices();
-    const timer = window.setInterval(refreshDevices, 15000);
-    return () => { cancelled = true; window.clearInterval(timer); };
+        return null;
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    };
+    refreshDevicesRef.current = refreshDevices;
+    void refreshDevices();
+    const timer = window.setInterval(() => void refreshDevices(), 15000);
+    return () => {
+      cancelled = true;
+      refreshDevicesRef.current = null;
+      window.clearInterval(timer);
+    };
   }, [authed, machineId, state.connState, state.wrapperOnline]);
+
+  useEffect(() => {
+    const target = pendingNotificationTarget;
+    if (!target || !authed) return;
+    let cancelled = false;
+    const verify = async () => {
+      // A click validates its own device snapshot. A failed earlier poll, or a
+      // later background poll, cannot decide this navigation's authorization.
+      for (const delay of [0, 300, 1000]) {
+        if (delay) await new Promise(resolve => window.setTimeout(resolve, delay));
+        if (cancelled) return;
+        const devices = await refreshDevicesRef.current?.();
+        if (cancelled) return;
+        if (devices) {
+          setNotificationDevices({
+            target, ids: devices.map(device => device.machine_id), status: "ready",
+          });
+          return;
+        }
+      }
+      setNotificationDevices({ target, ids: [], status: "error" });
+    };
+    void verify();
+    return () => { cancelled = true; };
+  }, [authed, pendingNotificationTarget]);
 
   useEffect(() => {
     const onMessage = (event: MessageEvent | CustomEvent) => {
@@ -1824,6 +1906,10 @@ export default function App() {
       if (event.data?.type !== "cc-remote-notification") return;
       const target = parseNotificationRoute(event.data.route);
       if (!target) return;
+      if (!notificationClicksRef.current.take(target, event.data.notification_id)) return;
+      const pending = pendingNotificationTargetRef.current;
+      if (pending && encodeNotificationRoute(pending) === encodeNotificationRoute(target)) return;
+      pendingNotificationTargetRef.current = target;
       notificationListRequestRef.current = null;
       notificationOriginRef.current = null;
       try { storeNotificationTarget(sessionStorage, target); }
@@ -1909,6 +1995,7 @@ export default function App() {
     return scope;
   }, [machineId]);
   const invalidateHistoryPageScopes = useCallback((sid: string) => {
+    deviceViewsRef.current.invalidateSession(machineId, sid);
     historyPrefetchRef.current?.clear();
     const scopes = new Map<string, HistoryPageCacheSessionScope>();
     for (const scope of historyPageScopesRef.current.values()) {
@@ -2114,6 +2201,8 @@ export default function App() {
     currentSpace: Space,
   ) => {
     if (focusedSid && !state.newChat) {
+      deviceViewsRef.current.remember(
+        machineId, currentEngine, currentSpace, stateRef.current);
       lastFocusBySurfaceRef.current[
         sessionScopeKey(machineId, currentEngine, currentSpace)
       ] = focusedSid;
@@ -2249,8 +2338,10 @@ export default function App() {
     const navigation = resolveNotificationNavigation({
       target,
       origin: notificationOriginRef.current,
-      deviceState: devicesLoadState,
-      authorizedMachineIds: remoteDevices.map((device) => device.machine_id),
+      deviceState: notificationDevices?.target === target
+        ? notificationDevices.status : "loading",
+      authorizedMachineIds: notificationDevices?.target === target
+        ? notificationDevices.ids : [],
       machineId,
       engine,
       space,
@@ -2260,6 +2351,7 @@ export default function App() {
     });
     if (navigation.kind === "wait") return;
     if (navigation.kind === "fail") {
+      notificationClicksRef.current.forget(target);
       const detail = navigation.reason === "devices_unavailable"
         ? "无法验证通知对应的设备，当前会话没有切换。"
         : navigation.reason === "device_missing"
@@ -2314,22 +2406,26 @@ export default function App() {
       setSpace(navigation.space);
       return;
     }
+    const alreadyFocused = didInitFocusRef.current
+      && state.focusedSid === navigation.session.session_id && !state.newChat;
     didInitFocusRef.current = true;
-    focusListedSession(navigation.session);
+    if (!alreadyFocused) {
+      focusListedSession(navigation.session);
+    }
     cancelPendingNotificationTarget();
   }, [
     authed,
     cancelPendingNotificationTarget,
-    devicesLoadState,
     engine,
     focusListedSession,
     machineId,
     notificationListRevision,
+    notificationDevices,
     pendingNotificationTarget,
     prepareSurfaceSwitch,
-    remoteDevices,
     space,
     state.focusedSid,
+    state.newChat,
   ]);
 
   // Engine and Work/Code switches are navigation. Each surface restores the
@@ -2370,7 +2466,7 @@ export default function App() {
 
   // WebSocket lifecycle
   useEffect(() => {
-    if (!authed) return;
+    if (!authed || !hasSelectedDevice) return;
     const historyRequests = historyRequestsRef.current;
     const turnFileRequests = turnFileRequestsRef.current;
     const contextRequestLaunches = contextRequestLaunchesRef.current;
@@ -3714,6 +3810,8 @@ export default function App() {
             ] = normalizedListedSessions;
             ws.setSessionEngines(normalizedListedSessions);
             sessionListsBySurfaceRef.current[surfaceKey] = normalizedListedSessions;
+            deviceViewsRef.current.acceptSessionList(
+              machineId, msg.engine, listedSpace, normalizedListedSessions);
             authoritativeSurfaceListsRef.current.add(surfaceKey);
             bumpNotificationListRevision();
             prefetchedSurfacesRef.current.add(surfaceKey);
@@ -3762,14 +3860,16 @@ export default function App() {
           if (msg.type === "engine_capabilities") {
             acceptSkillCatalog(msg);
           }
-          if (msg.type === "ask_user" && questionNotificationsRef.current.take(machineId, msg, {
+          if ((msg.type === "ask_user" || msg.type === "assistant_msg_end")
+              && questionNotificationsRef.current.take(machineId, msg, {
             sid: stateRef.current.focusedSid, engine: engineRef.current,
             space: spaceRef.current, hidden: document.hidden,
           })) {
             const mode = readNotificationMode(localStorage);
             // System notifications have one owner: remote Push when bound,
             // otherwise this live-page fallback. Never add an in-app toast.
-            const remoteWillNotify = !msg.to && !!pushCoordinatorRef.current?.isRemoteActive(machineId);
+            const remoteWillNotify = !msg.to && !msg.owner_id
+              && !!pushCoordinatorRef.current?.isRemoteActive(machineId);
             if (mode !== "off" && !remoteWillNotify && typeof Notification !== "undefined"
                 && Notification.permission === "granted") {
               const notice = questionNotificationPresentation(msg, mode);
@@ -3779,7 +3879,7 @@ export default function App() {
               } : null;
               void navigator.serviceWorker?.ready.then(registration => registration.showNotification(notice.title, {
                 body: notice.body, icon: "/icon-192.png", badge: "/favicon.svg",
-                tag: `question-${machineId}-${msg.sid}-${msg.ask_id}`,
+                tag: `question-${machineId}-${msg.sid}-${questionNotificationId(msg)}`,
                 data: { url: route ? encodeNotificationRoute(route) : "/", route },
               })).catch(() => undefined);
             }
@@ -4065,6 +4165,7 @@ export default function App() {
           setBtwOpeningByParentSid({});
           btwDraftsRef.current.clear();
           questionDraftsRef.current.clear();
+          asyncQuestions.clear();
           setCenteredBtwScopes([]);
           setForkingPointId(null);
           setForkWorktreeSession(null);
@@ -4134,6 +4235,7 @@ export default function App() {
       }, machineId);
       effectWs = ws;
       ws.setSurface(engineRef.current, spaceRef.current);
+      ws.setFocusedSid(stateRef.current.focusedSid, engineRef.current, spaceRef.current);
       // Seed both transport and reducer watermarks before Hello. This prevents
       // an older replay/snapshot from reviving a lock already superseded in the
       // last authoritative control snapshot.
@@ -4166,8 +4268,10 @@ export default function App() {
     };
   }, [
     acceptSkillCatalog,
+    asyncQuestions,
     dshApi,
     authed,
+    hasSelectedDevice,
     webUpdate.check,
     clearForkFocusLease,
     clearHistoryDetailRequests,
@@ -4238,10 +4342,14 @@ export default function App() {
           && (session.engine ?? "claude") === engineRef.current
         ))
       : undefined;
+    const resumeRequired = preferredSurfaceFocusRef.current?.key === focusScopeKey
+      && preferredSurfaceFocusRef.current.resumeRequired === true;
     preferredSurfaceFocusRef.current = null;
     const latest = preferred ?? selectSurfaceSession(state.sessions);
     didInitFocusRef.current = true;
-    if (latest && latest.session_id !== state.focusedSid) {
+    // A device view has painted before its new transport could resume it.
+    // Warm surface switches already resumed their session synchronously.
+    if (latest && (latest.session_id !== state.focusedSid || resumeRequired)) {
       dispatch({ type: "exit_new_chat" });
       dispatch({ type: "focus_session", sid: latest.session_id });
       const latestEngine = (latest.engine as "claude" | "codex" | "dsh") || engineRef.current;
@@ -4270,7 +4378,7 @@ export default function App() {
   // restore the exact view without relying on whichever list row happens to be
   // newest at that moment.
   useEffect(() => {
-    if (!focusedSid || state.newChat) return;
+    if (!ownsDeviceState || !focusedSid || state.newChat) return;
     const selected = state.sessions.find((session) => session.session_id === focusedSid);
     if (!selected) return;
     const selectedEngine = (selected.engine as Engine | undefined) ?? engine;
@@ -4278,7 +4386,7 @@ export default function App() {
     lastFocusBySurfaceRef.current[
       sessionScopeKey(machineId, selectedEngine, selectedSpace)
     ] = focusedSid;
-  }, [focusedSid, state.newChat, state.sessions, engine, machineId]);
+  }, [focusedSid, ownsDeviceState, state.newChat, state.sessions, engine, machineId]);
 
   // Warm the cwd/account-scoped Skill catalog when a session becomes usable.
   // Composer completion then reads memory synchronously; an expired entry stays
@@ -5922,6 +6030,7 @@ export default function App() {
       composerDraftsRef.current.clear();
       btwDraftsRef.current.clear();
       questionDraftsRef.current.clear();
+      asyncQuestions.clear();
       setCenteredBtwScopes([]);
       setCreateError(null);
       setForkingPointId(null);
@@ -6265,7 +6374,8 @@ export default function App() {
             onDismissNotice={(noticeId) => {
               if (focusedSid) dispatch({ type: "dismiss_notice", sid: focusedSid, noticeId });
             }} />
-          <SessionStatus state={dshConnectionError ? "reconnecting" : effectiveState} />
+          <SessionStatus state={dshConnectionError ? "reconnecting" : effectiveState}
+            awaitingConfirmation={!!rt.pendingQuestion?.model_fallback} />
           {space === "code" && focusedEngine !== "dsh" && (
             focusedSid && !state.newChat && !archivedBrowse ? (
               <TerminalControl control={rt.control} engine={focusedEngine}
@@ -6428,21 +6538,7 @@ export default function App() {
                 if (turn.checkpointId) rewind.open({ checkpointId: turn.checkpointId,
                   prompt: turn.prompt || "", ts: turn.ts });
               } : undefined}
-              asyncReplyMode={rt.state === "running" ? "steer"
-                : rt.state === "idle" ? "query" : undefined}
               pendingReplyId={rt.acceptancePending}
-              onReplyAsyncQuestion={focusedEngine !== "codex"
-                || historyView.recovering || !state.wrapperOnline
-                || state.connState !== "connected"
-                || focusedSession?.tag === "archived"
-                || (rt.control ? sessionControlLocksInput(rt.control) : rt.external)
-                || rt.acceptancePending || (rt.state !== "idle" && rt.state !== "running")
-                ? undefined : (prompt) => {
-                  const current = stateRef.current;
-                  if (!focusedSid || current.focusedSid !== focusedSid
-                      || previousMachineRef.current !== machineId) return null;
-                  return replyAsyncQuestion(focusedSid, prompt, sendQuery, sendSteer);
-                }}
               onGetDiff={historyView.recovering ? undefined : getDiff}
               onOpenTurnDiff={historyView.recovering
                 ? undefined : openTurnDiff}
@@ -6551,6 +6647,12 @@ export default function App() {
                 draft={{ key: JSON.stringify([focusedComposerDraftKey, rt.pendingQuestion.ask_id]),
                   store: questionDraftsRef.current }}
                 engine={focusedEngine}
+                modelFallback={rt.pendingQuestion.model_fallback}
+                sessionLabel={focusedSession?.summary
+                  ? `${focusedSession.summary} · ${focusedNativeSessionId?.slice(0, 8) ?? ""}`
+                  : focusedNativeSessionId?.slice(0, 8)}
+                accountLabel={state.claudeProfiles.find(profile => profile.id === focusedClaudeProfileId)?.label}
+                errorRevision={`${state.connState}:${state.wrapperOnline}:${state.bannerRevision}`}
                 header={rt.pendingQuestion.header}
                 question={rt.pendingQuestion.question}
                 planDocument={rt.pendingQuestion.plan_document}
@@ -6570,6 +6672,12 @@ export default function App() {
                   if (!focusedSid || !question) return false;
                   if (!wsRef.current?.sendAnswerQuestion(
                     focusedSid, question.ask_id, answer)) return false;
+                  if (question.model_fallback) {
+                    if (answer === "编辑提问" && question.model_fallback.original_prompt != null) {
+                      setEditPrompt(question.model_fallback.original_prompt);
+                    }
+                    return true;
+                  }
                   dispatch({
                     type: "answer_question",
                     sid: focusedSid,
@@ -6580,6 +6688,27 @@ export default function App() {
               />
               </Suspense>
             )}
+
+            {focusedEngine === "codex" && focusedSid && <Suspense fallback={null}>
+              <AsyncQuestionHost key={focusedComposerDraftKey}
+                scope={focusedComposerDraftKey} store={asyncQuestions} turns={rt.turns}
+                historyTurns={historyView.turns}
+                pendingReplyId={rt.acceptancePending}
+                enabled={!archivedBrowse && !rt.loading && !historyView.recovering
+                  && !rt.pendingQuestion && !activeBtwQuestionVisible}
+                onReply={historyView.recovering || !state.wrapperOnline
+                  || state.connState !== "connected"
+                  || focusedSession?.tag === "archived"
+                  || (rt.control ? sessionControlLocksInput(rt.control) : rt.external)
+                  || rt.acceptancePending || (rt.state !== "idle" && rt.state !== "running")
+                  ? undefined : (prompt) => {
+                    const current = stateRef.current;
+                    if (!focusedSid || current.focusedSid !== focusedSid
+                        || previousMachineRef.current !== machineId) return null;
+                    return replyAsyncQuestion(focusedSid, prompt, sendQuery, sendSteer);
+                  }}
+              />
+            </Suspense>}
 
             <Composer maintenance={appUpdates.maintenance}
           dsh={rt.dsh}
@@ -6835,6 +6964,7 @@ export default function App() {
         {btwRendered && (<Suspense fallback={null}>
             <BtwPanel sid={activeBtwSid ?? undefined} rt={activeBtwSid ? state.runtimes[activeBtwSid] : undefined}
             engine={activeBtw?.engine ?? focusedEngine} opening={btwOpening}
+            questionErrorRevision={`${state.connState}:${state.wrapperOnline}:${state.bannerRevision}`}
             focusRequested={btwFocusScope === btwScope}
             onFocusConsumed={consumeBtwFocus}
             chats={(activeBtwGroup?.chats ?? []).map((chat, index) => {
@@ -6860,6 +6990,7 @@ export default function App() {
             onRequestModels={requestFocusedModels}
             draftKey={activeBtwDraftKey} draftStore={btwDraftsRef.current}
             questionDrafts={questionDraftsRef.current}
+            asyncQuestions={asyncQuestions}
             unconfirmedQueued={unconfirmedQueued}
             unconfirmedReplaceable={btwUnconfirmedReplaceable}
             queueCapacity={queueCapacity}
@@ -6911,7 +7042,7 @@ export default function App() {
               if (!activeBtwSid) return false;
               if (!wsRef.current?.sendAnswerQuestion(
                 activeBtwSid, askId, answer, answers)) return false;
-              if (answers) return true; // Batch remains visible until authoritative close.
+              if (answers || state.runtimes[activeBtwSid]?.pendingQuestion?.model_fallback) return true;
               dispatch({
                 type: "answer_question",
                 sid: activeBtwSid,

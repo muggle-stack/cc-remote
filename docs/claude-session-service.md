@@ -33,6 +33,19 @@ navigation retains client-side drafts, and only the final submission resolves
 the pending callback. The whole accepted batch is retained before its close
 event, so controller replacement cannot ask an accepted batch again.
 
+Claude model-fallback confirmation uses the native `refusal_fallback_prompt`
+dialog capability. Remote defaults an unset `switchModelsOnFlag` preference to
+asking in its native child. An explicit automatic-switch choice is merged into
+that account's user settings and applied to the live child. The pending dialog
+and its accepted answer survive controller replacement through the same private
+callback and answer ledger. The service also retains the effective model and
+its journal boundary, so older replay rows cannot overwrite a newer selection.
+
+Dialog capabilities are declared when the native worker first initializes.
+Workers created by an earlier service retain their original capabilities until
+their tasks, pending questions and background work drain and the service is
+deliberately upgraded. An ordinary Wrapper update preserves those workers.
+
 If background projection or acknowledgement fails, the controller stops advancing
 acknowledgements and accepting new prompts. Human terminal commits also wait for
 pending background delivery, so they cannot prune a failed notification. The

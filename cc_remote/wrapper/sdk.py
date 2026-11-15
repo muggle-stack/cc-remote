@@ -286,6 +286,9 @@ class SdkHandle:
         self.permission_mode = "bypassPermissions"
         self._permission_revision = 0
         self._permission_service_seq = 0
+        self._model_revision = 0
+        self._model_service_seq = 0
+        self.user_dialog_callback = None
         self.work_mode = False
         self.work_settings_path: str | None = None
         # Captured once, before the first Work turn.  The UI can subtract this
@@ -640,7 +643,13 @@ class SdkHandle:
                 },
                 isolated=self.isolate_account_env,
                 previous_owner_identity=self._service_owner_identity,
+                user_dialog_callback=self.user_dialog_callback,
             )
+        elif self.user_dialog_callback is not None:
+            from cc_remote.wrapper.claude_transport import user_dialog_transport
+
+            self.client = ClaudeSDKClient(options=opts, transport=user_dialog_transport(
+                opts, self.user_dialog_callback, isolated=self.isolate_account_env))
         elif self.isolate_account_env:
             self.client = ClaudeSDKClient(
                 options=opts,
@@ -650,6 +659,7 @@ class SdkHandle:
             self.client = ClaudeSDKClient(options=opts)
         self._conversation_rewind_capability = None
         await self.client.connect()
+        await self._configure_model_fallback_policy()
         if self.service_metadata is not None and getattr(self.client, "id", None):
             # Retain both across failed closes/connects. A worker ID alone
             # cannot distinguish a restarted service from a lost live lease.
@@ -658,6 +668,7 @@ class SdkHandle:
         self.service_recovery = getattr(self.client, "recovery", None)
         description = getattr(self.client, "description", {})
         self._permission_service_seq = description.get("permission_state_seq", 0)
+        self._model_service_seq = description.get("model_state_seq", 0)
         observed_permission = description.get("controls", {}).get("permission_mode")
         if (self._permission_service_seq and isinstance(observed_permission, str)
                 and observed_permission in CLAUDE_PERMISSION_MODES):
@@ -1294,16 +1305,56 @@ class SdkHandle:
         async with self._control_request_lock:
             assert self.client is not None
             previous_model = self.model
-            await self.client.set_model(model)
-            if previous_model != model:
+            revision = self._model_revision
+            result = await self.client.set_model(model)
+            snapshot = (result or {}).get("cc_remote_model_state")
+            if isinstance(snapshot, dict):
+                if snapshot["seq"] >= self._model_service_seq:
+                    self.model = snapshot["model"]
+                    self._model_service_seq = snapshot["seq"]
+                    self._model_revision += 1
+            elif self._model_revision == revision:
+                self.model = model
+                self._model_revision += 1
+            if previous_model != self.model:
                 # Context tokenization, capacity and category composition are
                 # model-specific. Serialize this boundary with an in-flight
                 # get_context_usage request, then discard every reading from
                 # the previous model only after Claude confirms the switch.
                 self.invalidate_context_usage_cache()
-            self.model = model
             await self._refresh_native_effort()
         log.info("model set", model=model)
+
+    async def allow_automatic_model_fallback(self) -> None:
+        """Save the explicit opt-in in this account and apply it to the live CLI."""
+        from cc_remote.wrapper.claude_settings import save_user_defaults
+
+        root = self.claude_config_dir or claude_config_dir()
+        async with self._control_request_lock:
+            await asyncio.to_thread(save_user_defaults, root, switch_models_on_flag=True)
+            await self.client._query._send_control_request({
+                "subtype": "apply_flag_settings", "settings": {"switchModelsOnFlag": True},
+            })
+
+    async def _configure_model_fallback_policy(self) -> None:
+        from cc_remote.wrapper.claude_settings import automatic_model_fallback
+        from cc_remote.wrapper.claude_transport import UserDialogCLITransport
+
+        if self.user_dialog_callback is None:
+            return
+        description = getattr(self.client, "description", {})
+        transport = getattr(self.client, "_transport", None)
+        supports_dialogs = isinstance(transport, UserDialogCLITransport) or (
+            "refusal_fallback_prompt" in description.get("supported_dialog_kinds", []))
+        if not supports_dialogs:
+            # A pre-upgrade persistent worker retains its native initialization
+            # capabilities until it drains and is deliberately replaced.
+            return
+        root = self.claude_config_dir or claude_config_dir()
+        automatic = await asyncio.to_thread(automatic_model_fallback, root)
+        await self.client._query._send_control_request({
+            "subtype": "apply_flag_settings", "settings": {"switchModelsOnFlag": automatic},
+        })
 
     async def _refresh_native_effort(self) -> None:
         """Read the CLI's applied value without changing launch preferences.
@@ -1753,7 +1804,14 @@ class SdkHandle:
             fallback = model_fallback_event(message.data)
             if (fallback is not None and fallback.input
                     and fallback.input.get("scope") == "session"):
+                seq = getattr(message, "_cc_service_seq", None)
+                if seq is not None:
+                    if seq <= self._model_service_seq:
+                        return
+                    self._model_service_seq = seq
                 self.model = fallback.input["fallback_model"]
+                self._model_revision += 1
+                message._cc_model_revision = self._model_revision
                 self.invalidate_context_usage_cache()
 
     def _start_message_pump(self) -> None:

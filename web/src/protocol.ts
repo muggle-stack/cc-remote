@@ -241,7 +241,7 @@ export interface ToolResult extends Base {
   duration_ms?: number | null;
 }
 export interface AsyncQuestionSpec { title: string; options?: string[] | null }
-export interface AssistantMsgEnd extends Base { type: "assistant_msg_end"; message_id: string; canonical_message_id?: string | null; turn_id?: string | null; background?: boolean | null; channel?: AssistantChannel; delivery?: "async" | null; questions?: AsyncQuestionSpec[] | null }
+export interface AssistantMsgEnd extends Base { type: "assistant_msg_end"; message_id: string; canonical_message_id?: string | null; turn_id?: string | null; background?: boolean | null; channel?: AssistantChannel; delivery?: "async" | null; questions?: AsyncQuestionSpec[] | null; notification_context?: TurnNotificationContext | null }
 export interface ProcessEvent extends Base {
   type: "process";
   item_id: string;
@@ -611,7 +611,8 @@ export interface EngineCapabilityItem { kind: EngineCapabilityKind; id: string; 
 export interface EngineCapabilities extends Base { dsh_commands?: DshCommandInfo[]; type: "engine_capabilities"; engine: Engine; space: Space; request_id?: string | null; cwd: string; items: EngineCapabilityItem[]; errors?: string[]; notes?: string[]; skills_only: boolean; claude_profile_id?: string | null; codex_profile_id?: string | null }
 export interface AskOption { label: string; ds?: string }
 export interface AskQuestion { plan_document?: string | null; header?: string | null; question: string; options: AskOption[]; allow_text?: boolean; secret?: boolean; multi_select?: boolean }
-export interface AskUser extends Base, AskQuestion { type: "ask_user"; notification_context?: TurnNotificationContext | null; ask_id: string; questions?: AskQuestion[] | null }
+export interface ModelFallbackPrompt { original_model: string; fallback_model: string; turn_id?: string | null; original_prompt?: string | null }
+export interface AskUser extends Base, AskQuestion { type: "ask_user"; notification_context?: TurnNotificationContext | null; ask_id: string; questions?: AskQuestion[] | null; model_fallback?: ModelFallbackPrompt | null }
 /** Authoritative Hello baseline: following AskUser frames are the complete
  * still-open set visible to this client for the same session. */
 export interface AskUserSync extends Base { type: "ask_user_sync" }
@@ -898,7 +899,7 @@ export type ServerEvent = CollaborationState | SessionArtifacts | FilesListed | 
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnUsage | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 92;
+export const PROTOCOL_VERSION = 95;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

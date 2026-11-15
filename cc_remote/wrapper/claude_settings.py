@@ -39,6 +39,7 @@ def _read(path: Path) -> tuple[bytes | None, os.stat_result | None]:
 def save_user_defaults(
     config_root: str | Path, *, model: str | None = None,
     effort: str | None = None, effort_model: str | None = None,
+    switch_models_on_flag: bool | None = None,
 ) -> None:
     """Merge only explicit selections, preserving unrelated native settings.
 
@@ -56,7 +57,9 @@ def save_user_defaults(
             raise ValueError("Claude did not report its resolved model")
         if effort_model.lower().endswith("[1m]"):
             effort_model = effort_model[:-4]
-    if model is None and effort is None:
+    if switch_models_on_flag is not None and not isinstance(switch_models_on_flag, bool):
+        raise ValueError("Invalid Claude model fallback preference")
+    if model is None and effort is None and switch_models_on_flag is None:
         return
     path = Path(config_root) / "settings.json"
     with _WRITE_LOCK:
@@ -68,6 +71,8 @@ def save_user_defaults(
                 raise ValueError("Claude user settings must be an object")
             if model is not None:
                 settings["model"] = model
+            if switch_models_on_flag is not None:
+                settings["switchModelsOnFlag"] = switch_models_on_flag
             if effort is not None:
                 table = settings.setdefault("modelSettings", {})
                 if not isinstance(table, dict):
@@ -103,3 +108,20 @@ def save_user_defaults(
 
 def save_model_default(config_root: str | Path, model: str) -> None:
     save_user_defaults(config_root, model=model)
+
+
+def automatic_model_fallback(config_root: str | Path) -> bool:
+    """Read only the native preference; an unset preference asks in Remote."""
+    # Native user settings may be a dotfile-manager symlink. Reading that
+    # preference does not require the stricter identity checks used for writes.
+    try:
+        fd = os.open(Path(config_root).expanduser() / "settings.json", os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_BYTES:
+                return False
+            raw = stream.read(_MAX_BYTES + 1)
+        settings = json.loads(raw) if raw and raw.strip() else {}
+    except (OSError, ValueError):
+        return False
+    return isinstance(settings, dict) and settings.get("switchModelsOnFlag") is True

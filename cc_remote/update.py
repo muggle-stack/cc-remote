@@ -9,7 +9,6 @@ from __future__ import annotations
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 import ast
-import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -18,20 +17,14 @@ import re
 import subprocess
 import sys
 import tarfile
-import tempfile
-import time
 from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from cc_remote.update_errors import download_reason, endpoint, network_reason, read_with_retry
+from cc_remote.update_errors import UpdateError, network_reason, read_with_retry
 from deploy.release_manifest import ReleaseManifestError, load_manifest
 from deploy.install_lock import LOCK_FD_ENV, InstallLockError, acquire_install_lock
-
-
-class UpdateError(ValueError):
-    pass
 
 
 class UpdateOutcomeUnknown(UpdateError):
@@ -195,47 +188,37 @@ def release_base(repository: str, version: str) -> str:
 
 
 def _download(url: str, destination: Path, limit: int) -> None:
-    for attempt in range(3):
-        result = subprocess.run(
-            ["curl", "--fail", "--location", "--proto", "=https,file", "--proto-redir", "=https",
-             "--tlsv1.2", "--connect-timeout", "15", "--max-time", "300", "--max-filesize", str(limit),
-             "--silent", "--show-error", "--write-out", "%{http_code}", "--output", str(destination), url],
-            check=False, capture_output=True, text=True,
-        )
-        transient = (result.returncode in {5, 6, 7, 28, 35, 52, 55, 56}
-                     or result.returncode == 22 and result.stdout.strip() in {"408", "429", "500", "502", "503", "504"})
-        if not transient or attempt == 2:
-            break
-        time.sleep(0.5 * (attempt + 1))
-    if result.returncode:
-        reason = download_reason(result.returncode, result.stdout.strip())
-        raise UpdateError(f"download failed for {destination.name} from {endpoint(url)}: {reason}; no service was changed")
-    if not destination.is_file() or destination.stat().st_size > limit:
-        raise UpdateError(f"download failed for {destination.name}: missing or oversized file; no service was changed")
+    from cc_remote.update_download import download_file
+
+    download_file(url, destination, limit)
 
 
 def download_bundle(installation: Installation, version: str, base: str, stage: Path) -> Path:
+    from cc_remote.update_download import DownloadCache
+
     manifest = installation.manifest
     name = f"cc-remote-{installation.role}-v{version}-{manifest['os']}-{manifest['arch']}.tar.gz"
     checksum = stage / "SHA256SUMS"
-    archive_path = stage / name
-    _download(f"{base}/SHA256SUMS", checksum, 1024 * 1024)
-    matches = []
-    try:
-        lines = checksum.read_text().splitlines()
-    except UnicodeError as exc:
-        raise UpdateError("release checksum file is invalid") from exc
-    for line in lines:
-        fields = line.split()
-        if len(fields) == 2 and fields[1].lstrip("*").removeprefix("./") == name:
-            matches.append(fields[0])
-    if len(matches) != 1 or not re.fullmatch(r"[0-9a-fA-F]{64}", matches[0]):
-        raise UpdateError(f"missing or ambiguous SHA256SUMS entry for {name}")
-    _download(f"{base}/{name}", archive_path, _MAX_ARCHIVE)
-    with archive_path.open("rb") as stream:
-        digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    if digest != matches[0].lower():
-        raise UpdateError("release SHA-256 verification failed; no service was changed")
+    cache = DownloadCache(installation.root)
+    digest = cache.checksum(f"{base}/{name}", name)
+    if digest is None:
+        _download(f"{base}/SHA256SUMS", checksum, 1024 * 1024)
+        matches = []
+        try:
+            lines = checksum.read_text().splitlines()
+        except UnicodeError as exc:
+            raise UpdateError("release checksum file is invalid") from exc
+        for line in lines:
+            fields = line.split()
+            if len(fields) == 2 and fields[1].lstrip("*").removeprefix("./") == name:
+                matches.append(fields[0])
+        if len(matches) != 1 or not re.fullmatch(r"[0-9a-fA-F]{64}", matches[0]):
+            raise UpdateError(f"missing or ambiguous SHA256SUMS entry for {name}")
+        digest = matches[0].lower()
+    cached = cache.fetch(f"{base}/{name}", name, digest, _MAX_ARCHIVE)
+    # Extraction is disposable. The verified archive survives an installer
+    # failure and is shared by later attempts at this exact artifact.
+    archive_path = cached
     prefix = f"cc-remote-{installation.role}-v{version}"
     try:
         with tarfile.open(archive_path, "r:gz") as archive:
@@ -255,20 +238,18 @@ def download_bundle(installation: Installation, version: str, base: str, stage: 
                     raise UpdateError("release archive contains unsafe entries")
                 names.add(path.as_posix())
             archive.extractall(stage, members=members, filter="data")
-    except (tarfile.TarError, EOFError) as exc:
-        raise UpdateError("release archive is invalid") from exc
-    bundle = stage / prefix
-    try:
+        bundle = stage / prefix
         target = load_manifest(bundle / "release-manifest.json")
-    except (ReleaseManifestError, TypeError) as exc:
-        raise UpdateError("downloaded release manifest is invalid") from exc
-    for key in ("role", "os", "arch"):
-        if target[key] != manifest[key]:
-            raise UpdateError(f"downloaded release {key} does not match the installation")
-    if target["product_version"] != version:
-        raise UpdateError("downloaded release does not match the selected version")
-    if type(target["protocol_version"]) is not int or target["protocol_version"] < 1:
-        raise UpdateError("downloaded release has an invalid protocol version")
+        for key in ("role", "os", "arch"):
+            if target[key] != manifest[key]:
+                raise UpdateError(f"downloaded release {key} does not match the installation")
+        if target["product_version"] != version:
+            raise UpdateError("downloaded release does not match the selected version")
+        if type(target["protocol_version"]) is not int or target["protocol_version"] < 1:
+            raise UpdateError("downloaded release has an invalid protocol version")
+    except (tarfile.TarError, EOFError, ReleaseManifestError, TypeError, UpdateError) as exc:
+        cache.discard(f"{base}/{name}", name, digest)
+        raise UpdateError(f"release archive is invalid: {exc}") from exc
     return bundle
 
 
@@ -346,11 +327,23 @@ def run_installer(command: list[str], lock_descriptor: int) -> int:
             print("\nWaiting for installer shutdown/rollback; do not start a second update.", file=sys.stderr)
 
 
+def _discard_cached_version(root: Path, version: str) -> None:
+    from cc_remote.update_download import DownloadCache
+
+    try:
+        DownloadCache(root).discard_version(version)
+    except (OSError, UpdateError):
+        print("WARNING: Installed release verified; cached package cleanup deferred.", file=sys.stderr)
+
+
 def update(*, role: str | None, target_version: str | None, check: bool,
            allow_protocol_change: bool = False, relay_ssh: str | None = None,
            allow_relay_update: bool = True,
            progress: Callable[[str], None] | None = None) -> int:
     report = progress or (lambda _phase: None)
+    # Product upgrades may span wire versions. Maintenance has its own stable
+    # channel and each Wrapper can catch up independently of its chat link.
+    allow_protocol_change = True
     system, machine = host_platform()
     installation = select_installation(role, system, machine)
     repository = release_repository()
@@ -408,6 +401,7 @@ def update(*, role: str | None, target_version: str | None, check: bool,
                 relay.ensure(version, installation.manifest["protocol_version"],
                              allow_protocol_change=allow_protocol_change)
             if not check and selected == current:
+                _discard_cached_version(installation.root, version)
                 retention = installation.release / "deploy/release_retention.py"
                 if retention.is_file() and (installation.root / ".release-generations.json").exists():
                     require_independent_terminal()
@@ -421,8 +415,9 @@ def update(*, role: str | None, target_version: str | None, check: bool,
             print(f"Update available: cc-remote update --role {installation.role} --version {version}")
             return 0
         require_independent_terminal()
-        with tempfile.TemporaryDirectory(prefix="cc-remote-update-") as temporary:
-            stage = Path(temporary)
+        from cc_remote.update_download import DownloadCache
+        cache = DownloadCache(installation.root)
+        with cache.staging() as stage:
             print(f"Downloading and verifying {installation.role} v{version}...", flush=True)
             report("downloading")
             bundle = download_bundle(installation, version, release_base(repository, version), stage)
@@ -434,12 +429,7 @@ def update(*, role: str | None, target_version: str | None, check: bool,
                     "follow docs/claude-session-service.md before upgrading. No service was changed"
                 )
             if target["protocol_version"] != installation.manifest["protocol_version"]:
-                if not allow_protocol_change:
-                    raise UpdateError(
-                        "wire protocol changes in this release; coordinate Relay/Web and every Wrapper, "
-                        "then repeat with --allow-protocol-change. No service was changed"
-                    )
-                print("Protocol upgrade: coordinate every machine and reload Web/PWA clients.", flush=True)
+                print("Protocol upgrade: update remaining devices through maintenance and reload Web/PWA clients.", flush=True)
             fresh = read_installation(installation.root, system, machine)
             if fresh != installation:
                 raise UpdateError("installation changed while downloading; inspect it before retrying")
@@ -463,7 +453,8 @@ def update(*, role: str | None, target_version: str | None, check: bool,
             elif installation.metadata.get("service_label"):
                 command += ["--install-root", str(installation.root),
                             "--service-label", installation.metadata["service_label"]]
-            if installation.role == "wrapper" and allow_protocol_change:
+            if (installation.role == "wrapper"
+                    and target["protocol_version"] != installation.manifest["protocol_version"]):
                 command += ["--allow-protocol-change"]
             print("Activating with the release installer; previous release retained for rollback.", flush=True)
             report("installing")
@@ -473,5 +464,6 @@ def update(*, role: str | None, target_version: str | None, check: bool,
             active = read_installation(installation.root, system, machine)
             if active.manifest != target:
                 raise UpdateError("installer returned without activating the selected release; inspect current")
+        _discard_cached_version(installation.root, version)
     print(f"Updated {installation.role} to {version}.")
     return 0

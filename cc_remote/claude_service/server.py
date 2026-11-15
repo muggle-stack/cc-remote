@@ -113,6 +113,9 @@ class Session:
         self.controls: dict = {}
         self.permission_state_seq = 0
         self.permission_revision = 0
+        self.model_state_seq = 0
+        self.model_revision = 0
+        self.supported_dialog_kinds: list[str] = []
         self.task_seeds: dict[str, dict] = {}
         self.background_turns: list[dict] = []
         self.submitted_turns: set[str] = set()
@@ -167,10 +170,10 @@ class Session:
 
         return Proxy(name)
 
-    async def start(self, options: dict, isolated: bool) -> None:
+    async def start(self, options: dict, isolated: bool, *, user_dialogs: bool = False) -> None:
         from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
-        from cc_remote.wrapper.claude_transport import account_isolated_transport
+        from cc_remote.wrapper.claude_transport import account_isolated_transport, user_dialog_transport
 
         async def permission(name, tool_input, context):
             # The SDK's signal is process-local; pending native requests remain
@@ -180,6 +183,11 @@ class Session:
                 "name": name, "input": tool_input, "context": encode_sdk(context),
             })
             return decode_sdk(answer)
+
+        async def user_dialog(request_id, payload):
+            return await self.callback("user_dialog", {
+                "request_id": request_id, "payload": payload,
+            })
 
         values = decode_sdk(options)
         servers = values.get("mcp_servers", {})
@@ -192,7 +200,10 @@ class Session:
                          "effort": opts.effort}
         factory = self.factory or ClaudeSDKClient
         kwargs = {"options": opts}
-        if isolated:
+        if user_dialogs:
+            kwargs["transport"] = user_dialog_transport(opts, user_dialog, isolated=isolated)
+            self.supported_dialog_kinds = ["refusal_fallback_prompt"]
+        elif isolated:
             kwargs["transport"] = account_isolated_transport(opts)
         self.client = factory(**kwargs)
         await self.client.connect()
@@ -233,6 +244,13 @@ class Session:
                 # stop the sole native reader at a per-turn byte cap: an offline
                 # long turn could then never deliver the Result that frees it.
                 seq = self.journal.append(value)
+                from cc_remote.wrapper.claude_model_fallback import model_fallback_event
+
+                fallback = model_fallback_event(value)
+                if fallback is not None and fallback.input["scope"] == "session":
+                    self.controls["model"] = fallback.input["fallback_model"]
+                    self.model_state_seq = seq
+                    self.model_revision += 1
                 permission = native_permission_mode(value)
                 if permission is not None:
                     self.controls["permission_mode"] = permission
@@ -287,6 +305,8 @@ class Session:
             "initializers": self.initializers, "failure": self.failure,
             "head": self.journal.seq, "controls": self.controls, "pid": os.getpid(),
             "permission_state_seq": self.permission_state_seq,
+            "model_state_seq": self.model_state_seq,
+            "supported_dialog_kinds": self.supported_dialog_kinds,
             "task_seeds": list(self.task_seeds.values()),
             "native_steering": True,
             "background_steering": True,
@@ -365,11 +385,18 @@ class Session:
             return await self.steers.interrupt(self.client)
         if method == "control":
             permission_revision = self.permission_revision
+            model_revision = self.model_revision
             result = await self.client._query._send_control_request(
                 params["request"], timeout=params.get("timeout", 60))
             request = params["request"]
             if request.get("subtype") == "set_model":
-                self.controls["model"] = request.get("model")
+                if self.model_revision == model_revision:
+                    self.controls["model"] = request.get("model")
+                    self.model_state_seq = self.journal.seq
+                    self.model_revision += 1
+                return {**(result or {}), "cc_remote_model_state": {
+                    "model": self.controls["model"], "seq": self.model_state_seq,
+                }}
             elif request.get("subtype") == "set_permission_mode":
                 # A native status received while awaiting the ACK is newer
                 # evidence than the requested value (including native fallback).
@@ -549,7 +576,8 @@ class Service:
 
         if not attached:
             try:
-                await session.start(params["options"], params.get("isolated", False))
+                await session.start(params["options"], params.get("isolated", False), user_dialogs=(
+                    "refusal_fallback_prompt" in params.get("supported_dialog_kinds", [])))
                 session.controller = owner
                 return {**session.description(), "attached": False}
             except BaseException:

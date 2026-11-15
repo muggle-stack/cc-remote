@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import plistlib
 
 import pytest
 
@@ -11,6 +12,144 @@ from deploy import cleanup, release_retention as retention
 from deploy.install_lock import acquire_install_lock
 
 SERVICE_DEPENDENCIES = retention.service_dependencies
+
+
+@pytest.fixture(params=['environment-file', 'environment', 'plist'])
+def timezone_service(tmp_path, request):
+    root = tmp_path.resolve()
+
+    def write(environment):
+        if request.param == 'plist':
+            path = root / 'timezone.plist'
+            path.write_bytes(plistlib.dumps({
+                'ProgramArguments': ['/usr/bin/true'], 'EnvironmentVariables': environment,
+            }))
+        else:
+            path = root / 'timezone.service'
+            if request.param == 'environment-file':
+                env = root / 'timezone.env'
+                env.write_text(''.join(f'{key}={json.dumps(value)}\n'
+                                       for key, value in environment.items()))
+                settings = f'EnvironmentFile={env}\n'
+            else:
+                settings = ''.join(f'Environment={json.dumps(f"{key}={value}")}\n'
+                                   for key, value in environment.items())
+            path.write_text('[Service]\nExecStart=/usr/bin/true\n' + settings)
+        return path
+
+    return write
+
+
+@pytest.mark.parametrize('timezone', [
+    'America/Los_Angeles', ':America/Los_Angeles', 'Etc/GMT+8',
+    'EST5EDT,M3.2.0/2,M11.1.0/2', '<-02>+2<-01>,M3.5.0/-1,M10.5.0/0', '', 'UTC0',
+])
+def test_timezone_configuration_allows_service_inspection(tmp_path, timezone_service, timezone):
+    unit = timezone_service({'TZ': timezone})
+    assert retention.inspect_service_files({unit}, [tmp_path.resolve() / 'unused']) == []
+
+
+@pytest.mark.parametrize('reference', ['absolute', 'colon-absolute', 'default-zone', 'custom-zone', 'posix-rules'])
+def test_timezone_files_retain_their_release(tmp_path, monkeypatch, timezone_service, reference):
+    root = tmp_path.resolve()
+    old = root / 'old release'
+    old.mkdir()
+    payload = old / 'timezone data'
+    payload.write_text('installed timezone bytes')
+    if reference == 'absolute':
+        environment = {'TZ': str(payload)}
+    elif reference == 'colon-absolute':
+        alias = root / 'timezone alias'
+        alias.symlink_to(payload)
+        environment = {'TZ': ':' + str(alias)}
+    else:
+        directory = root / 'zoneinfo'
+        name = 'posixrules' if reference == 'posix-rules' else 'America/Los_Angeles'
+        alias = directory / name
+        alias.parent.mkdir(parents=True)
+        alias.symlink_to(payload)
+        environment = {'TZ': 'EST5EDT' if reference == 'posix-rules' else name}
+        if reference == 'default-zone':
+            monkeypatch.setattr(retention, 'DEFAULT_TZDIR', directory)
+        else:
+            environment['TZDIR'] = str(directory)
+    unit = timezone_service(environment)
+    assert retention.inspect_service_files({unit}, [old]) == [str(old)]
+    reviewed = {unit: unit.read_bytes()}
+    if unit.suffix == '.service' and (root / 'timezone.env').exists():
+        env = root / 'timezone.env'
+        reviewed[env] = env.read_bytes()
+    assert retention.inspect_service_files(set(reviewed), [old], reviewed_inputs=reviewed) == [str(old)]
+
+
+def test_empty_timezone_directory_uses_system_zoneinfo(tmp_path, monkeypatch, timezone_service):
+    root = tmp_path.resolve()
+    old = root / 'old'
+    old.mkdir()
+    payload = old / 'timezone'
+    payload.write_text('installed timezone bytes')
+    directory = root / 'zoneinfo'
+    alias = directory / 'America/Los_Angeles'
+    alias.parent.mkdir(parents=True)
+    alias.symlink_to(payload)
+    monkeypatch.setattr(retention, 'DEFAULT_TZDIR', directory)
+    unit = timezone_service({'TZ': 'America/Los_Angeles', 'TZDIR': ''})
+    assert retention.inspect_service_files({unit}, [old]) == [str(old)]
+
+
+def test_timezone_inspection_keeps_unrelated_relative_paths_strict(tmp_path, timezone_service):
+    unit = timezone_service({'TZ': 'America/Los_Angeles', 'CONFIG': 'relative/path'})
+    with pytest.raises(ValueError, match='ambiguous service paths'):
+        retention.inspect_service_files({unit}, [tmp_path.resolve() / 'unused'])
+
+
+@pytest.mark.parametrize('key', list(retention.SYSTEMD_DIRECTORIES))
+@pytest.mark.parametrize('reviewed', [False, True])
+def test_systemd_directory_names_keep_their_actual_runtime(tmp_path, monkeypatch, key, reviewed):
+    root = tmp_path.resolve()
+    old = root / 'old'
+    old.mkdir()
+    directory = root / 'managed'
+    directory.mkdir()
+    (directory / 'worker').symlink_to(old)
+    monkeypatch.setitem(retention.SYSTEMD_DIRECTORIES, key, directory)
+    monkeypatch.setattr(retention, 'SYSTEMD_SYSTEM_ROOTS', (root,))
+    unit = root / 'system.service'
+    unit.write_bytes(b'[Service]\nExecStart=/usr/bin/true\n' + key + b'=worker/nested\n')
+    kwargs = {'reviewed_inputs': {unit: unit.read_bytes()}} if reviewed else {}
+    assert retention.inspect_service_files({unit}, [old], **kwargs) == [str(old)]
+
+
+@pytest.mark.parametrize('value', ['/absolute', '../escape', 'foo/../escape', '%i/path', '$ROOT/path', 'a:b'])
+def test_dynamic_systemd_directory_names_require_inspection(tmp_path, value):
+    unit = tmp_path.resolve() / 'system.service'
+    unit.write_text('[Service]\nRuntimeDirectory=' + value + '\n')
+    with pytest.raises(ValueError, match='explicit retention inventory'):
+        retention.inspect_service_files({unit}, [])
+
+
+@pytest.mark.parametrize('path', ['/run/user/1000/systemd/transient/helper.service',
+                                 '/etc/systemd/user/helper.service', '/custom/unit-path/helper.service'])
+def test_directory_directives_never_assume_a_user_managers_prefix(path):
+    with pytest.raises(ValueError, match='directory environment'):
+        retention.systemd_directory_paths(b'RuntimeDirectory', 'helper', Path(path))
+    assert retention.systemd_directory_paths(b'RuntimeDirectory', '', Path(path)) == set()
+
+
+@pytest.mark.parametrize('directory', ['relative/zoneinfo', 'zoneinfo', '${TZ_ROOT}/zoneinfo'])
+def test_unresolved_timezone_directory_defers_retirement(tmp_path, timezone_service, directory):
+    unit = timezone_service({'TZ': 'America/Los_Angeles', 'TZDIR': directory})
+    with pytest.raises(ValueError, match='explicit retention inventory'):
+        retention.inspect_service_files({unit}, [tmp_path.resolve() / 'unused'])
+
+
+@pytest.mark.parametrize('variable', ['TZ', 'TZDIR'])
+def test_inherited_timezone_requires_review(tmp_path, variable):
+    unit = tmp_path.resolve() / 'timezone.service'
+    unit.write_text(f'[Service]\nExecStart=/usr/bin/true\nPassEnvironment={variable}\n')
+    with pytest.raises(ValueError, match='inherited service timezone'):
+        retention.inspect_service_files({unit}, [])
+    assert retention.inspect_service_files({unit}, [], reviewed_inputs={unit: unit.read_bytes()}) == []
 
 
 @pytest.mark.parametrize('platform', ['linux', 'darwin'])
@@ -264,6 +403,204 @@ def prune(root):
         return retention.prune(root, fd)
     finally:
         os.close(fd)
+
+
+def test_reconnect_acceptance_retries_only_until_ready(fleet, monkeypatch):
+    root, _, activate = fleet
+    _, row = activate('first')
+    attempts = []
+
+    def acceptance(*args):
+        attempts.append(args)
+        if len(attempts) < 3:
+            raise ValueError('updated Wrapper has not reconnected')
+
+    monkeypatch.setattr(retention, 'acceptance', acceptance)
+    monkeypatch.setattr(retention.time, 'sleep', lambda seconds: None)
+    retention.wait_for_acceptance(root, row, 10)
+    assert len(attempts) == 3
+    monkeypatch.setattr(retention, 'acceptance', lambda *a: (_ for _ in ()).throw(ValueError('snapshot mismatch')))
+    with pytest.raises(ValueError, match='snapshot mismatch'):
+        retention.wait_for_acceptance(root, row, 10)
+
+
+def test_completed_first_install_staging_is_retired(fleet, monkeypatch):
+    from deploy import retention_staging as stages
+    root, _, activate = fleet
+    stage = stages.create(root)
+    (stage / 'archive.tar.gz').write_bytes(b'uploaded release')
+    unknown = stage.parent / 'historical-upload'
+    unknown.mkdir()
+    monkeypatch.setenv('CC_REMOTE_DEPLOY_STAGE', str(stage))
+    current, row = activate('first')
+    stages.finish(root, stage)
+    report = prune(root)
+    assert report['status'] == 'complete'
+    assert not stage.exists() and unknown.exists() and current.exists()
+    assert Path(row['backup']).exists() and Path(row['snapshot']).exists()
+    assert stages.records(root)['stages'] == []
+
+
+def test_deferred_staging_and_runtime_are_collected_by_maintenance(fleet, monkeypatch):
+    from deploy import retention_job, retention_staging as stages
+    root, _, activate = fleet
+    old, _ = activate('first')
+    activate('second')
+    stage = stages.create(root)
+    monkeypatch.setenv('CC_REMOTE_DEPLOY_STAGE', str(stage))
+    current, _ = activate('third')
+    stages.finish(root, stage)
+    monkeypatch.setattr(cleanup, 'process_references', lambda paths: {
+        path: ['pid 123: cwd'] if path in {stage, old} else [] for path in paths})
+    report = prune(root)
+    assert report['status'] == 'deferred' and stage.exists() and old.exists()
+    monkeypatch.setattr(cleanup, 'process_references', lambda paths: {path: [] for path in paths})
+    retention_job.run(root)
+    assert not stage.exists() and not old.exists() and current.exists()
+    assert json.loads((root / retention.STATUS).read_text())['status'] == 'complete'
+
+
+def test_unfinished_or_replaced_deployment_staging_is_retained(fleet):
+    from deploy import retention_staging as stages
+    root, _, activate = fleet
+    stage = stages.create(root)
+    activate('first')
+    prune(root)
+    assert stage.exists()
+    assert json.loads((root / retention.STATUS).read_text())['reason_code'] == 'waiting_staging'
+    stage.rename(stage.with_name('retained-copy'))
+    stage.mkdir()
+    with pytest.raises(ValueError, match='replaced'):
+        prune(root)
+
+
+@pytest.mark.parametrize('replace_on_call', [1, 2])
+def test_stage_replacement_between_registration_preview_and_apply_is_rejected(fleet, monkeypatch, replace_on_call):
+    from deploy import retention_staging as stages
+    root, _, activate = fleet
+    activate('first')
+    stage = stages.create(root)
+    monkeypatch.setenv('CC_REMOTE_DEPLOY_STAGE', str(stage))
+    activate('second')
+    stages.finish(root, stage)
+    original = cleanup.cleanup
+    calls = 0
+
+    def replace(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == replace_on_call:
+            stage.rename(stage.with_name('original-upload'))
+            stage.mkdir()
+            (stage / 'personal-file').write_text('preserve replacement data')
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cleanup, 'cleanup', replace)
+    with pytest.raises(cleanup.CleanupError, match='registered candidate was replaced'):
+        prune(root)
+    assert (stage / 'personal-file').read_text() == 'preserve replacement data'
+    assert stage.with_name('original-upload').is_dir()
+
+
+def test_completed_maintenance_does_not_repeat_acceptance(fleet, monkeypatch):
+    from deploy import retention_job
+    root, _, activate = fleet
+    activate('first')
+    prune(root)
+    monkeypatch.setattr(retention, 'prune', lambda *a, **kw: pytest.fail('already complete'))
+    retention_job.run(root)
+
+
+def test_maintenance_recovers_finish_after_committed_activation(fleet, monkeypatch):
+    from deploy import retention_job, retention_staging as stages
+    root, _, activate = fleet
+    activate('first')
+    prune(root)
+    stage = stages.create(root)
+    monkeypatch.setenv('CC_REMOTE_DEPLOY_STAGE', str(stage))
+    activate('second')
+    # Simulate a disconnected caller before the explicit finish callback.
+    retention_job.run(root)
+    assert not stage.exists() and stages.records(root)['stages'] == []
+
+
+def test_invalid_stage_does_not_create_unrecoverable_generation(fleet, monkeypatch):
+    root, _, activate = fleet
+    monkeypatch.setenv('CC_REMOTE_DEPLOY_STAGE', str(root / 'unknown'))
+    with pytest.raises(ValueError, match='stage is not available'):
+        activate('first')
+    assert retention.read_ledger(root)['generations'] == []
+
+
+def test_maintenance_does_not_overlap_installer_or_unknown_cleanup(fleet, monkeypatch):
+    from deploy import retention_job
+    root, _, activate = fleet
+    activate('first')
+    monkeypatch.setattr(retention, 'prune', lambda *a, **kw: pytest.fail('cleanup must wait'))
+    descriptor = acquire_install_lock(root)
+    try:
+        retention_job.run(root)
+    finally:
+        os.close(descriptor)
+    retention.record_retention(root, retention.read_ledger(root), status='complete')
+    cleanup.write_journal(root / cleanup.JOURNAL, {'schema': 1, 'status': 'quarantining'})
+    retention_job.run(root)
+    assert json.loads((root / retention.STATUS).read_text())['status'] == 'deferred'
+    assert json.loads((root / cleanup.JOURNAL).read_text())['status'] == 'quarantining'
+
+
+@pytest.mark.parametrize('phase,version,changes', [
+    ('succeeded', '4.0.9', True), ('installing', '4.0.9', False), ('succeeded', '4.0.8', False),
+])
+def test_maintenance_refreshes_only_current_completed_ui_receipt(fleet, phase, version, changes):
+    from deploy import retention_job
+    from cc_remote.update_jobs import UpdateJobs, JOBS, public_job
+    root, _, activate = fleet
+    current, _ = activate('first')
+    (root / JOBS).mkdir()
+    store = UpdateJobs(root)
+    with store.lock():
+        job, _ = store.create('a' * 32, version, '4.0.7')
+        store.save({**job, 'phase': phase, 'cleanup_pending': True})
+    retention_job.publish_status(root, {'current_release': str(current), 'status': 'complete'})
+    observed = public_job(store.active())
+    assert observed['cleanup_pending'] is not changes
+    assert observed['cleanup_reason'] == ('complete' if changes else None)
+
+
+@pytest.mark.parametrize('appears_during_cleanup', [False, True])
+def test_timezone_retirement_revalidates_file_aliases(fleet, tmp_path, monkeypatch, appears_during_cleanup):
+    root, _, activate = fleet
+    old, _ = activate('first')
+    activate('second')
+    activate('third')
+    units = tmp_path / 'units'
+    units.mkdir()
+    directory = tmp_path / 'zoneinfo'
+    alias = directory / 'America/Los_Angeles'
+    alias.parent.mkdir(parents=True)
+    env = tmp_path / 'timezone.env'
+    env.write_text(f'TZ=America/Los_Angeles\nTZDIR={directory}\n')
+    (units / 'timezone.service').write_text(f'[Service]\nEnvironmentFile={env}\n')
+    monkeypatch.setattr(retention, 'service_roots', lambda row: [units])
+    monkeypatch.setattr(retention, 'service_dependencies', SERVICE_DEPENDENCIES)
+    checks = 0
+
+    def acceptance(plan):
+        nonlocal checks
+        checks += 1
+        if appears_during_cleanup and checks == 2:
+            alias.symlink_to(old / 'payload')
+
+    monkeypatch.setattr(cleanup, 'run_checks', acceptance)
+    if appears_during_cleanup:
+        with pytest.raises((cleanup.CleanupError, OSError)):
+            prune(root)
+        assert checks == 2 and old.is_dir()
+        assert not list(root.rglob('.cc-remote-retired-*'))
+    else:
+        assert prune(root)['status'] == 'complete'
+        assert not old.exists()
 
 
 def test_three_upgrades_keep_current_and_complete_previous_recovery(fleet):

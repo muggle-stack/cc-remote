@@ -456,7 +456,8 @@ def group_history_events(
     return groups
 
 
-def _turn_id(group: list[dict[str, Any]]) -> str | None:
+def history_turn_id(group: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> str | None:
+    """Return the same source identity for summary and detail projections."""
     for event in group:
         if event.get("type") == "user_msg" and isinstance(event.get("msg_id"), str):
             return event["msg_id"]
@@ -583,7 +584,7 @@ def materialize_history_turns(
     """
     turns: list[dict[str, Any]] = []
     for group in group_history_events(events):
-        turn_id = _turn_id(group)
+        turn_id = history_turn_id(group)
         if turn_id is None:
             continue
         prompt = ""
@@ -2431,7 +2432,7 @@ class HistoryIndexStore:
         """Encode source-complete detail before taking the writer lock."""
         prepared: list[tuple[str, bytes]] = []
         for group in group_history_events(events):
-            turn_id = _turn_id(group)
+            turn_id = history_turn_id(group)
             if turn_id is None:
                 continue
             detail_payload = json.dumps(
@@ -2510,7 +2511,7 @@ class HistoryIndexStore:
         if (
             not isinstance(payload, list)
             or not all(isinstance(event, dict) for event in payload)
-            or _turn_id(payload) != turn_id
+            or history_turn_id(payload) != turn_id
         ):
             return None
         return tuple(payload)
@@ -2596,7 +2597,7 @@ class HistoryIndexStore:
                     )
                     continue
                 for group in group_history_events(page.events):
-                    if _turn_id(group) != turn_id:
+                    if history_turn_id(group) != turn_id:
                         continue
                     summary = next((
                         turn for turn in page.turns

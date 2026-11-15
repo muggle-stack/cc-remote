@@ -100,8 +100,8 @@ def test_real_installer_block_runs_new_bundle_preflight_before_local_stop(tmp_pa
     result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True,
                             env={key: value for key, value in os.environ.items()
                                  if key != "CC_REMOTE_RELAY_SSH"}, timeout=10)
-    assert result.returncode == (0 if outcome == "current" else 1), result.stderr
-    assert marker.exists() is (outcome == "current")
+    assert result.returncode == 0, result.stderr
+    assert marker.exists()
     assert (root / "current").resolve() == previous
 
 
@@ -163,6 +163,22 @@ def test_ui_policy_still_blocks_upstream_in_downloaded_installer(tmp_path, monke
     monkeypatch.setattr(update_relay.RelayUpdate, '_ssh', lambda *a, **k: pytest.fail('must not mutate upstream'))
     assert update_relay.installer_main([
         '--root', str(installation.root), '--bundle', str(bundle), '--user', 'service-user',
-    ]) == 1
+    ]) == 0
     assert (installation.root / 'current').resolve() == installation.release
     assert (installation.root / 'native-service-alive').read_text() == 'still running\n'
+
+
+def test_new_installer_adopts_v5326_without_the_old_updaters_protocol_opt_in(tmp_path, monkeypatch):
+    installation = _installation(tmp_path, monkeypatch)
+    old = {**installation.manifest, 'product_version': '5.3.26', 'protocol_version': 90}
+    (installation.release / 'release-manifest.json').write_text(json.dumps(old))
+    bundle = tmp_path / 'verified-new-release'
+    bundle.mkdir()
+    (bundle / 'release-manifest.json').write_text(json.dumps({**old, 'product_version': '5.3.28', 'protocol_version': 93}))
+    monkeypatch.setattr(update_relay, 'relay_release', lambda _: {'version': '5.3.26', 'protocol': 90})
+    monkeypatch.setattr(update_relay.sys.stdin, 'isatty', lambda: False)
+    monkeypatch.delenv('CC_REMOTE_RELAY_SSH', raising=False)
+    assert update_relay.installer_main([
+        '--root', str(installation.root), '--bundle', str(bundle), '--user', 'service-user',
+    ]) == 0
+    assert (installation.root / 'current').resolve() == installation.release

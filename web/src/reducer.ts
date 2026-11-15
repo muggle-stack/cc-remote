@@ -3,6 +3,7 @@ import {
   type SteerAcceptanceKind,
 } from "./pending-steers";
 import type { DshState, DshPreset, DshPermissionOption, DshCommandResult } from "./protocol";
+import type { DeviceView } from "./device-view-cache";
 import { isSyntheticReturnReceipt } from "./agent-returns";
 import { reduceWithRetainedArtifacts } from "./artifact-retention";
 // Turn/block state model for the chat UI.
@@ -18,7 +19,7 @@ import { reduceWithRetainedArtifacts } from "./artifact-retention";
 // session_focus, wrapper_reconnected, diff_report, ...) are global.
 import type { ConnState, EventOwnership } from "./ws";
 import type {
-  ServerEvent, SessionInfo, State, ContextReport, StatusReport, AskQuestion,
+  ServerEvent, SessionInfo, State, ContextReport, StatusReport, AskQuestion, ModelFallbackPrompt,
   RateLimitResetResult, ThreadGoal, ClaudePlan,
   QueryImg, QueryFile, DirEntry, AssistantChannel, ProcessStatus,
   CollaborationModeName, Notice, RateLimitUpdate,
@@ -352,7 +353,8 @@ export interface SessionRuntime {
   takeoverPending: boolean;
   takeoverMessage: string | null;
   ccSessionId?: string;
-  pendingQuestion: (AskQuestion & { ask_id: string; questions?: AskQuestion[] | null }) | null;
+  pendingQuestion: (AskQuestion & { ask_id: string; questions?: AskQuestion[] | null;
+    model_fallback?: ModelFallbackPrompt | null }) | null;
   contextReport: ContextReport | null;
   // Last usable native reading, or the latest billing reading until native
   // context has arrived. Transient refresh failures must not clear the ring.
@@ -538,6 +540,7 @@ export function createRuntime(): SessionRuntime {
 
 export type Action =
   | { type: "reset" }
+  | { type: "restore_device_view"; view: DeviceView }
   | { type: "event"; event: ServerEvent; ownership?: EventOwnership }
   | { type: "query_sent"; concurrent?: boolean; sid: string; prompt: string; msg_id: string; images?: QueryImg[]; files?: QueryFile[]; ts: number }
   | { type: "steer_sent"; concurrent?: boolean; sid: string; prompt: string; msg_id: string; images?: QueryImg[]; files?: QueryFile[]; ts: number }
@@ -2519,6 +2522,20 @@ function commandBanner(state: AppState, banner: string) {
 
 function reduceCurrent(state: AppState, action: Action): AppState {
   switch (action.type) {
+    case "restore_device_view": {
+      const view = action.view;
+      const restored = {
+        ...reduceCurrent(state, { type: "reset" }),
+        ...view.metadata,
+        sessions: view.sessions,
+        focusedSid: view.sid,
+      };
+      return reduceCurrent(restored, {
+        type: "hydrate_cache", sid: view.sid, turns: view.turns,
+        revision: view.revision, generation: view.generation,
+        historyAtStart: view.historyAtStart,
+      });
+    }
     case "reset":
       return {
         ...initialState,
@@ -4660,7 +4677,8 @@ function reduceEvent(
             .map((alias) => loadedDetail.get(alias))
             .find((candidate): candidate is Turn => !!candidate);
           if (!detail) return turn;
-          const merged = mergeAuthoritativeTurnDetail(turn, detail, built.turns);
+          const merged = mergeAuthoritativeTurnDetail(
+            turn, detail, built.turns, settledCodexHistory);
           // A completed row may be the neutral-steer segment whose text or
           // Plan spans the clarification, but only a current running History
           // (or a newer live frame which raced this page) may keep it open. An
@@ -5873,7 +5891,7 @@ function reduceEvent(
       // user's answer) can retire a restored question during normal operation.
       return patch(state, e.sid, (rt) => { rt.pendingQuestion = null; });
     case "ask_user":
-      return patch(state, e.sid, (rt) => { rt.pendingQuestion = { ask_id: e.ask_id, header: e.header, question: e.question, options: e.options, allow_text: e.allow_text, secret: e.secret, multi_select: e.multi_select, questions: e.questions, plan_document: e.plan_document }; });
+      return patch(state, e.sid, (rt) => { rt.pendingQuestion = { ask_id: e.ask_id, header: e.header, question: e.question, options: e.options, allow_text: e.allow_text, secret: e.secret, multi_select: e.multi_select, questions: e.questions, plan_document: e.plan_document, model_fallback: e.model_fallback }; });
     case "ask_user_closed":
       return patch(state, e.sid, (rt) => {
         if (rt.pendingQuestion?.ask_id === e.ask_id) {
@@ -6588,7 +6606,15 @@ function reduceEvent(
         // ids are immutable, so a completed exact block is authoritative. Never
         // use text containment here: repeated prose and bounded History prefixes
         // are both legitimate content and cannot safely prove replay identity.
-        if (!block.done) {
+        // A Codex completion snapshot can repair a message whose in-flight
+        // detail page closed its streamed prefix before the real item finished.
+        // Keep completed tasks fenced against delayed replacement snapshots.
+        const activeCodexReplacement = e.replace && boundCompletedTurns
+          && (ownership?.engine === "codex" || state.sessions.some(
+            session => session.session_id === e.sid && session.engine === "codex"))
+          && rt.state !== "idle"
+          && (!t.done || (!!rt.liveOwner && turnHasIdentityAlias(t, rt.liveOwner.turnId)));
+        if (!block.done || activeCodexReplacement) {
           block.text = e.replace ? e.text.slice(0, MAX_LIVE_TEXT_CHARS) : appendField(block.text, e.text, MAX_LIVE_TEXT_CHARS);
         }
         if (block.channel !== "final" && e.text.length > 0) {

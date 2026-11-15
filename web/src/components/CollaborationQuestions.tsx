@@ -6,7 +6,7 @@ import type {
 import type { QueryAcceptanceResult } from "../outbox";
 import { roomMemberIdentity, shortRoomSessionId } from "../collaboration";
 import { EngineIcon, Icon } from "../icons";
-import { AsyncQuestionDialog, type AsyncQuestionDraft } from "./AsyncQuestionDialog";
+import { AsyncQuestionDialog } from "./AsyncQuestionDialog";
 import { QuestionSheet, type QuestionDraft } from "./QuestionSheet";
 import "./CollaborationQuestions.css";
 
@@ -21,6 +21,11 @@ type Submission = {
   lastAttempt: number;
   receipt: Promise<QueryAcceptanceResult>;
   finish: (result: QueryAcceptanceResult) => void;
+};
+type AsyncQuestionDraft = {
+  choices: (string | null)[];
+  texts: string[];
+  scrollTop?: number;
 };
 
 export interface CollaborationQuestionCache {
@@ -53,7 +58,7 @@ function source(member: CollaborationMember): string {
 }
 
 export function CollaborationQuestions({ room, messages, deliveries, questions, pendingQuestions,
-  questionStates, ready, command, cache, listen }: {
+  questionStates, ready, command, cache, listen, onEditPrompt }: {
   room: CollaborationRoom;
   messages: CollaborationMessage[];
   deliveries: CollaborationDelivery[];
@@ -64,6 +69,7 @@ export function CollaborationQuestions({ room, messages, deliveries, questions, 
   command: Command;
   cache: CollaborationQuestionCache;
   listen: (handler: ((event: ServerEvent) => boolean) | null) => void;
+  onEditPrompt: (member: CollaborationMember, prompt: string) => void;
 }) {
   const [active, setActive] = useState<string | null>(null);
   const [opening, setOpening] = useState(0);
@@ -83,6 +89,10 @@ export function CollaborationQuestions({ room, messages, deliveries, questions, 
     if (result.accepted) {
       cache.attempts.delete(id);
       cache.asyncDrafts.delete(id);
+      cache.errors.delete(`async:${id}`);
+      setActive(current => current === `async:${id}` ? null : current);
+    } else {
+      cache.errors.set(`async:${id}`, result.error?.message || "回答未送达，请重试。");
     }
     submission.finish(result);
     redraw(value => value + 1);
@@ -221,12 +231,14 @@ export function CollaborationQuestions({ room, messages, deliveries, questions, 
     const request = command("send", { message_id: messageId, ask_id: message.id,
       targets: [message.member_id], prompt });
     if (!request) return null;
+    cache.errors.delete(asyncKey(message));
     let finish!: Submission["finish"];
     const receipt = new Promise<QueryAcceptanceResult>(resolve => { finish = resolve; });
     cache.attempts.set(message.id, messageId);
     cache.submissions.set(message.id, { roomId: room.id, memberId: message.member_id,
       messageId, prompt, lastAttempt: Date.now(), receipt, finish });
     trackRequest(cache, request, asyncKey(message), message.id);
+    closeAsync(asyncKey(message));
     return receipt;
   };
 
@@ -249,9 +261,18 @@ export function CollaborationQuestions({ room, messages, deliveries, questions, 
         allowText={item.question.allow_text} multiSelect={item.question.multi_select}
         header={item.question.header} sourceLabel={source(member)}
         submissionError={cache.errors.get(key)} planDocument={item.question.plan_document}
+        modelFallback={item.question.model_fallback}
+        sessionLabel={source(member)} accountLabel={member.spec.profile_id ?? "default"}
+        errorRevision={`${ready}:${cache.errors.get(key) ?? ""}`}
         secret={item.question.secret} questions={item.question.questions}
         onAnswers={answers => answerNative(key, { member_id: member.id, ask_id: item.question.ask_id, answers })}
-        onAnswer={answer => answerNative(key, { member_id: member.id, ask_id: item.question.ask_id, answer })} />;
+        onAnswer={answer => {
+          if (!answerNative(key, { member_id: member.id, ask_id: item.question.ask_id, answer })) return false;
+          if (answer === "编辑提问" && item.question.model_fallback?.original_prompt != null) {
+            onEditPrompt(member, item.question.model_fallback.original_prompt);
+          }
+          return true;
+        }} />;
     })}
     {asyncQuestions.map(message => {
       const member = message.member_id && members.get(message.member_id);
@@ -267,21 +288,25 @@ export function CollaborationQuestions({ room, messages, deliveries, questions, 
         <span className="collab-question-action">{submitting ? "查看回答" : "继续回答"}<Icon name="chevron-right" size={14} /></span>
       </button>;
       if (question.status === "submitting" && !cache.submissions.has(message.id)) return null;
+      const saved = cache.asyncDrafts.get(message.id);
       return <AsyncQuestionDialog key={`${key}:${opening}`} className="collab-async-question-dialog"
         engine={member.spec.engine} sourceLabel={source(member)} questionId={question.ask_id}
-        questions={question.questions.map(page => ({ title: page.question,
-          options: page.options.map(option => option.label) }))}
-        initialDraft={cache.asyncDrafts.get(message.id) ?? (question.answers ? {
-          choices: question.answers.map(() => null),
-          texts: question.answers.map(answer => Array.isArray(answer) ? answer.join("\n") : answer),
-        } : undefined)} answered={false}
-        onDraftChange={draft => { cache.asyncDrafts.set(message.id, draft); }}
-        pendingReply={cache.submissions.get(message.id)?.receipt}
+        entries={question.questions.map((page, index) => ({ key: `${key}:${index}`,
+          question: { title: page.question, options: page.options.map(option => option.label) } }))}
+        initialDrafts={question.questions.map((page, index) => ({
+          choice: saved?.choices[index] ?? (saved || question.answers ? null : page.options[0]?.label ?? null),
+          text: saved?.texts[index] ?? (Array.isArray(question.answers?.[index])
+            ? question.answers[index].join("\n") : question.answers?.[index] ?? ""),
+          scrollTop: saved?.scrollTop ?? 0,
+        }))}
+        onDraftChange={drafts => { cache.asyncDrafts.set(message.id, {
+          choices: drafts.map(draft => draft.choice), texts: drafts.map(draft => draft.text),
+          scrollTop: drafts[0]?.scrollTop ?? 0,
+        }); }}
+        pending={submitting} submissionError={cache.errors.get(key)}
         onReply={ready && (question.status !== "submitting" || cache.submissions.has(message.id))
           ? prompt => answerAsync(message, prompt) : undefined}
-        replyMode={deliveries.some(delivery => delivery.member_id === member.id
-          && ["running", "accepted", "stopping"].includes(delivery.status)) ? "steer" : "query"}
-        onClose={() => closeAsync(key)} />;
+        onLater={() => closeAsync(key)} />;
     })}
   </div>;
 }

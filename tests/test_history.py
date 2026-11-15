@@ -4338,6 +4338,91 @@ def test_turn_detail_byte_bounded_cursors_visit_adjacent_pages():
     )
 
 
+@pytest.mark.parametrize("terminal", [False, True])
+@pytest.mark.parametrize("first_kind", ["message", "tool", "process"])
+def test_assistant_only_detail_pages_keep_the_source_turn_identity(
+    first_kind, terminal,
+):
+    base = {"v": 94, "sid": "claude-session", "ts": 100.0}
+    first = {
+        "message": {
+            "type": "assistant_msg_start", "message_id": "first:thinking",
+            "channel": "thinking",
+        },
+        "tool": {
+            "type": "tool_use", "tool_use_id": "first-tool", "tool": "Read",
+            "input": {},
+        },
+        "process": {
+            "type": "process", "item_id": "first-process", "kind": "task",
+            "phase": "start", "status": "running", "title": "Inspect",
+        },
+    }[first_kind]
+    rows = [
+        {**base, **first},
+        *[
+            {**base, "ts": 101.0 + index, "type": "process",
+             "item_id": f"later-{index}", "kind": "task", "phase": "end",
+             "status": "succeeded", "title": "Done"}
+            for index in range(5)
+        ],
+    ]
+    if terminal:
+        rows.append({
+            **base, "ts": 110.0, "type": "turn_end", "turn_id": "native-turn",
+            "result": {"subtype": "success", "duration_ms": 10000,
+                       "is_error": False},
+        })
+    original = json.dumps(rows)
+    summary = materialize_history_turns(rows)[0]
+    cursor = None
+    pages = []
+    while True:
+        page, has_more, older, _, _ = mm._turn_detail_page(
+            rows, before=cursor, limit=2, max_bytes=1024,
+            bind_source_turn=True)
+        pages.append(page)
+        binding = page[0]
+        assert binding == {
+            **base, "type": "turn_binding", "msg_id": summary["id"],
+            "turn_id": summary["id"], "autonomous": True,
+        }
+        projected = materialize_history_turns(page)
+        assert len(projected) == 1
+        assert projected[0]["id"] == summary["id"]
+        assert projected[0]["done"] is terminal
+        assert projected[0]["ts"] == summary["ts"]
+        assert all(row["type"] != "user_msg" for row in page)
+        if not has_more:
+            break
+        assert older is not None and older != cursor
+        cursor = older
+    assert len(pages) == 3
+    assert not any(row == rows[0] for row in pages[0])
+    assert json.dumps(rows) == original
+    assert mm._turn_detail_page(
+        pages[0], before=None, limit=2, bind_source_turn=True)[0] == pages[0]
+
+
+def test_turn_detail_pages_preserve_existing_binding_and_user_envelopes():
+    for envelope in (
+        {"type": "turn_binding", "msg_id": "visible-turn",
+         "turn_id": "native-turn", "autonomous": True},
+        {"type": "user_msg", "msg_id": "visible-turn", "prompt": "inspect",
+         "client_msg_id": "browser-turn"},
+    ):
+        rows = [
+            envelope,
+            {"type": "process", "item_id": "old-item"},
+            {"type": "process", "item_id": "new-item"},
+        ]
+        page, *_ = mm._turn_detail_page(
+            rows, before=None, limit=1, bind_source_turn=True)
+        assert page[0] == envelope
+        assert len(page) == 2
+        assert page[-1]["item_id"] == "new-item"
+
+
 def test_turn_detail_page_keeps_a_legal_large_final_message_exact():
     final_text = "x" * (5 * 1024 * 1024)
     rows = [
@@ -4618,6 +4703,69 @@ def test_get_turn_detail_is_routed_and_revision_bound(monkeypatch, tmp_path):
         assert stale.authoritative is False and stale.events == []
 
         assert transport.sent[-2:] == [response, stale]
+
+    asyncio.run(go())
+
+
+def test_cached_claude_assistant_only_detail_keeps_identity_across_pages(tmp_path):
+    transcript = tmp_path / "claude.jsonl"
+    transcript.write_text("{}\n")
+    sid = "claude-cached-detail"
+    turn_id = "first-assistant:thinking"
+    events = (
+        {"type": "assistant_msg_start", "sid": sid, "ts": 100.0,
+         "message_id": turn_id, "channel": "thinking"},
+        {"type": "delta", "sid": sid, "ts": 101.0,
+         "message_id": turn_id, "channel": "thinking", "text": "inspect"},
+        {"type": "assistant_msg_end", "sid": sid, "ts": 102.0,
+         "message_id": turn_id, "channel": "thinking"},
+        *(
+            {"type": "process", "sid": sid, "ts": 103.0 + index,
+             "item_id": f"step-{index}", "kind": "command",
+             "phase": "end", "status": "succeeded"}
+            for index in range(5)
+        ),
+    )
+
+    async def go():
+        machine, transport = _mk_machine()
+        machine._watch_session = AsyncMock()
+        machine._claude_transcript_path_for_wire = lambda _sid: str(transcript)
+        machine._history_index = HistoryIndexStore(tmp_path / "state")
+        source = HistorySourceFingerprint.capture(transcript)
+        machine._history_index.put_turn_details(sid, "claude", source, events)
+        revision = machine._history_revision(sid)
+        cursor = None
+        responses = []
+        while True:
+            response = await machine._handle_get_turn_detail(SimpleNamespace(
+                session_id=sid, turn_id=turn_id, client_id="reader",
+                revision=revision, before=cursor, limit=2,
+            ))
+            responses.append(response)
+            assert response.authoritative is True
+            assert response.to == "reader"
+            assert response.events[0]["type"] == "turn_binding"
+            assert response.events[0]["msg_id"] == turn_id
+            assert materialize_history_turns(response.events)[0]["id"] == turn_id
+            assert all(row["type"] != "user_msg" for row in response.events)
+            if not response.has_more:
+                break
+            cursor = response.oldest_cursor
+            assert cursor and cursor.startswith("td1.")
+            # Continue reading the exact saved snapshot while the native file
+            # grows. Old derived rows must remain usable without rebuilding.
+            with transcript.open("a") as stream:
+                stream.write('{"type":"appended"}\n')
+        assert len(responses) == 3
+        assert responses[0].events[1]["item_id"] == "step-3"
+        assert transport.sent == responses
+        with sqlite3.connect(machine._history_index.path) as connection:
+            cached = connection.execute(
+                "SELECT payload_json FROM history_turn_details WHERE session_id=?",
+                (sid,),
+            ).fetchone()[0]
+        assert json.loads(cached) == list(events)
 
     asyncio.run(go())
 

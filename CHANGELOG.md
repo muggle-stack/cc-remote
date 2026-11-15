@@ -6,8 +6,89 @@
 
 - Add collaboration rooms with Claude, Codex and DSH participants, native session
   settings, public context sharing and running-turn steering.
-- Coordinate Relay, Wrapper and Web on wire protocol v92. Include the private
+- Coordinate Relay, Wrapper and Web on wire protocol v95. Include the private
   collaboration database in transactional upgrade and rollback snapshots.
+- Integrate common fixes through master v5.3.33, including deployment cleanup,
+  device restoration, model fallback confirmation, asynchronous questions and history replay.
+
+## v5.3.33
+
+Fix Claude process-detail loading and incomplete Codex replies. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Preserve the original Claude turn identity on every detail page, including compacted history without an explicit user marker.
+- Reconcile complete Codex replies with streamed text and settled history, while preserving process details and rejecting stale turn updates.
+- Preserve replacement boundaries when compacting replayed text, preventing partial and complete replies from being concatenated after reconnect.
+
+See the bilingual [release notes](docs/releases/v5.3.33.md).
+
+## v5.3.32
+
+Recover deferred deployment cleanup and improve Codex's initial session-list response. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Retry deferred cleanup through installation-scoped systemd timers and macOS LaunchAgents, with fresh dependency and service checks.
+- Track new deployment staging by activation generation and directory identity, and retire it after verified acceptance.
+- Rebuild disappearing runtime service inputs and validate installer-generated service definitions against exact templates.
+- Support administrator-authorized, bounded macOS system plist reads through `cc-remote cleanup --authorize-system-scan`.
+- Show specific cleanup reasons and refresh completed update receipts when maintenance finishes.
+- Return indexed Codex sessions before background native catalog reconciliation, preserving concurrent-read ordering and failed-profile caches.
+
+See the bilingual [release notes](docs/releases/v5.3.32.md).
+
+## v5.3.31
+
+Fix timezone environment parsing that could defer old deployment cleanup after a successful upgrade. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Accept geographic and POSIX timezone values in systemd and launchd service environments.
+- Track TZDIR, timezone files, zoneinfo aliases and posixrules as retention dependencies.
+- Recheck timezone dependencies during cleanup and restore quarantined generations when a new reference appears.
+- Require explicit inventories for unresolved timezone directories and inherited timezone settings.
+
+See the bilingual [release notes](docs/releases/v5.3.31.md).
+
+## v5.3.30
+
+Fix device selection and live reading restoration, and improve Codex question submission. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Bind chat connections to the authorized selected device, including Default while offline.
+- Restore paused live reading across Claude, Codex and DSH switches with current tools, processing status and working marks.
+- Wait for bookmarked message rows to mount and retain saved history windows when a live row is evicted.
+- Close Codex question dialogs immediately after submission while retaining delivery confirmation and failed-answer drafts.
+- Clear the selected option when the custom answer gains focus.
+
+See the bilingual [release notes](docs/releases/v5.3.30.md).
+
+## v5.3.29
+
+Unify Codex asynchronous questions and connect live question notifications. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Use the shared rounded question dialog with the Codex icon and heading across desktop and mobile.
+- Support per-question dismissal, postponement, independent drafts and navigation, with the question disclosure retained in submitted replies.
+- Include loaded history pages alongside live questions and reconcile answers received from other clients.
+- Keep page updates available after empty or externally answered drafts and restore keyboard access to unselected options.
+- Deliver live asynchronous-question notifications through Web Push and Harmony Push with device-scoped privacy and deduplication.
+
+See the bilingual [release notes](docs/releases/v5.3.29.md).
+
+## v5.3.28
+
+Improve managed upgrades and interrupted-download recovery. Wire protocol v93 and Claude Agent SDK 0.2.174.
+
+- Upgrade newer releases across chat-protocol versions through the independent maintenance channel, with durable offline device requests.
+- Resume interrupted downloads, verify complete archives and reuse bounded download caches across retries.
+- Retire abandoned extraction directories and settle downloads whose OS jobs have ended, preserving usable cached bytes for retries.
+- Preserve cancellation intent through status polling, timeouts and reconnects, with desktop and mobile waiting states.
+
+See the bilingual [release notes](docs/releases/v5.3.28.md), including the one-time transition for older updaters.
+
+## v5.3.27
+
+Improve device restoration, notification navigation and Claude model-fallback interaction. Wire protocol v93 and Claude Agent SDK 0.2.174.
+
+- Restore device-scoped session views immediately when switching devices and center generated-image loading text.
+- Revalidate notification targets after transient connection failures and deduplicate repeated notification clicks.
+- Add native Claude model-fallback confirmation with collapsible pending requests, account-scoped automatic-switch opt-in, and live model recovery.
+
+See the bilingual [release notes](docs/releases/v5.3.27.md), including the coordinated protocol and Claude session-service upgrade requirements.
 
 ## v5.3.26
 

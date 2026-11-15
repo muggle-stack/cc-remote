@@ -177,6 +177,57 @@ try {
   assert.throws(() => compiler.specifier("https://evil.example/module.js", base), /未登记/);
   const { initialState, reduce, createRuntime } = await reducerHarness.ssrLoadModule("/src/reducer.ts");
   {
+    const { DeviceViewCache } = await reducerHarness.ssrLoadModule("/src/device-view-cache.ts");
+    const cache = new DeviceViewCache();
+    const sid = "same-native-session";
+    const stateFor = (machine: string) => ({
+      ...initialState, connState: "connected", wrapperOnline: true,
+      sessions: [{ session_id: sid, engine: "codex", space: "code", summary: machine }],
+      focusedSid: sid,
+      runtimes: { [sid]: { ...createRuntime(), syncReady: true,
+        historyRevision: "revision", historyGeneration: "generation", historyHeadKnown: true,
+        pendingQuestion: { ask_id: "old-question" },
+        queue: [{ msg_id: "old-query", prompt: "private queued payload" }],
+        turns: [{ id: "turn", prompt: "Question", done: true, ts: 1,
+          blocks: [{ kind: "text", message_id: "answer", done: true, text: machine }] }],
+      } },
+    });
+    cache.remember("mac", "codex", "code", stateFor("Mac answer"));
+    cache.remember("vps", "codex", "code", stateFor("VPS answer"));
+    const view = cache.get("mac", "codex", "code");
+    assert.equal(view.turns[0].blocks[0].text, "Mac answer");
+    assert.equal(JSON.stringify(view).includes("private queued payload"), false);
+    const restored = reduce(stateFor("VPS answer"), { type: "restore_device_view", view });
+    assert.equal(restored.runtimes[sid].turns[0].blocks[0].text, "Mac answer");
+    assert.equal(restored.runtimes[sid].syncReady, false);
+    assert.equal(restored.wrapperOnline, false);
+    assert.equal(restored.runtimes[sid].pendingQuestion, null);
+    assert.deepEqual(restored.runtimes[sid].queue, []);
+    cache.acceptSessionList("mac", "codex", "code", [{
+      session_id: sid, engine: "codex", space: "code", summary: "Renamed Mac session",
+    }]);
+    assert.equal(cache.sessionLists("mac")["code:codex"][0].summary, "Renamed Mac session");
+    cache.invalidateSession("mac", sid);
+    assert.equal(cache.get("mac", "codex", "code"), undefined);
+    assert.equal(cache.get("vps", "codex", "code").turns[0].blocks[0].text, "VPS answer");
+    cache.remember("mac", "codex", "code", stateFor("Mac answer"));
+    cache.acceptSessionList("mac", "codex", "code", []);
+    assert.equal(cache.get("mac", "codex", "code"), undefined);
+    cache.remember("mac", "codex", "code", stateFor("Mac answer"));
+    cache.retainMachines(["vps"]);
+    assert.equal(cache.get("mac", "codex", "code"), undefined);
+    assert.ok(cache.get("vps", "codex", "code"));
+    cache.clear();
+    assert.equal(cache.get("vps", "codex", "code"), undefined);
+    const invalidated = stateFor("Invalidated answer");
+    invalidated.runtimes[sid].historyInvalidated = true;
+    cache.remember("mac", "codex", "code", invalidated);
+    assert.equal(cache.get("mac", "codex", "code"), undefined);
+    for (let i = 0; i < 65; i++) cache.remember(`device-${i}`, "codex", "code", stateFor(String(i)));
+    assert.equal(cache.get("device-0", "codex", "code"), undefined);
+    assert.ok(cache.get("device-64", "codex", "code"));
+  }
+  {
     const preview = { file: "/tmp/README.md", sid: "claude", requestId: "preview-1", kind: "md", loading: true };
     let state = { ...initialState, focusedSid: "claude", artifact: preview };
     state = reduce(state, { type: "restore_session_list", sessions: [] });
@@ -233,6 +284,35 @@ try {
   assert.equal(memory.read("key-4", runtime), undefined, "bottom following removes the bookmark");
   memory.clear();
   assert.equal(memory.read("key-3", runtime), undefined, "logout clears navigation memory");
+  const liveSaved = { ...saved, position: {
+    ...position, browsing: false, sizes: { [position.turnId]: 1_200 },
+  } };
+  memory.save("live-reading", liveSaved);
+  const liveRuntime = { ...runtime, turns: [{ id: position.turnId, done: false, blocks: [] }] };
+  const liveRestored = memory.read("live-reading", liveRuntime)!;
+  assert.equal(liveRestored.browse, null, "a retained live row restores its bookmark against current runtime data");
+  assert.equal(liveRestored.position.browsing, false);
+  assert.equal(liveRestored.position.scrollTop, position.scrollTop);
+  const rebound = memory.read("live-reading", { ...runtime,
+    turns: [{ id: "canonical-row", clientMsgId: position.turnId, done: false, blocks: [] }],
+  })!;
+  assert.equal(rebound.position.turnId, "canonical-row", "native identity binding keeps the live bookmark attached");
+  assert.equal(rebound.position.sizes["canonical-row"], 1_200);
+  assert.equal(rebound.position.browsing, false);
+  const evicted = memory.read("live-reading", runtime)!;
+  assert.equal(evicted.browse, projection, "a missing live row still has a bounded saved window");
+  assert.equal(evicted.position.browsing, true);
+  const ambiguous = memory.read("live-reading", { ...runtime, turns: [
+    { id: "canonical-a", clientMsgId: position.turnId, done: false, blocks: [] },
+    { id: "canonical-b", historyTurnId: position.turnId, done: false, blocks: [] },
+  ] })!;
+  assert.equal(ambiguous.browse, projection, "colliding aliases retain the original reading window");
+  memory.save("unavailable-reading", { ...liveSaved, browse: null });
+  assert.equal(memory.read("unavailable-reading", runtime), undefined,
+    "a missing bookmark without a saved window leaves the current view usable");
+  memory.save("history-reading", saved);
+  assert.equal(memory.read("history-reading", liveRuntime), saved,
+    "an explicitly browsed historical window retains its own reading lifetime");
   const beforeRestore = { ...initialState, focusedSid: "session", runtimes: { session: runtime } };
   const restoreAction = { type: "restore_history_browse", projection: { ...projection, viewId: "returned-view", windowEpoch: 1 } };
   const restored = reduce(beforeRestore, restoreAction);

@@ -159,6 +159,101 @@ test("navigation reading isolates identical session ids on different devices", a
   await expect.poll(() => navigationReadingAnchor(page)).toEqual(before);
 });
 
+for (const engine of ["claude", "codex", "dsh"] as const) {
+  test(`navigation reading keeps a live ${engine} session current across harness switches`, async ({ page }, testInfo) => {
+    test.setTimeout(60_000);
+    const shortcut = { claude: "Meta+1", codex: "Meta+2", dsh: "Meta+3" };
+    const other = engine === "claude" ? "codex" : "claude";
+    for (const gap of [1, 20, 60]) {
+      for (const backgroundOutput of [false, true]) {
+        await page.goto(`/tests/history-browser.html?reading-navigation=1&live-reading=1&engine=${engine}`);
+        const viewport = page.locator(".thread");
+        const liveTurn = page.locator(`[data-turn-id="${engine}-3"]`);
+        await expect(liveTurn.locator(".turn-working")).toBeVisible();
+        await waitForScrollIdle(page);
+        await viewport.evaluate((node, distance) => {
+          node.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -distance }));
+          node.scrollTop = node.scrollHeight - node.clientHeight - distance;
+          node.dispatchEvent(new Event("scroll"));
+        }, gap);
+        await page.waitForTimeout(350);
+        const before = await navigationReadingAnchor(page);
+        await page.keyboard.press(shortcut[other]);
+        await expect(page.getByTestId("surface")).toHaveText(`device-a:code:${other}`);
+        if (backgroundOutput) await page.getByRole("button", { name: "Background output" }).click();
+        await page.keyboard.press(shortcut[engine]);
+        await expect(page.getByTestId("surface")).toHaveText(`device-a:code:${engine}`);
+        await expect(page.getByTestId("browse-id")).toHaveText("latest");
+        await expect(liveTurn.locator(".turn-working")).toHaveCount(1);
+        await expect(liveTurn.locator(".turn-process-label")).toHaveText(/^正在处理/);
+        await expect.poll(() => navigationReadingAnchor(page)).toEqual(before);
+        if (backgroundOutput) await expect(liveTurn).toContainText("正在调用 2 个工具");
+
+        // One downward gesture must resume following, including at a clamped
+        // edge where the browser has no further physical distance to scroll.
+        if (isMobileWebKitProject(testInfo.project.name)) {
+          await dispatchTouchGesture(page, -120);
+          await viewport.evaluate(node => {
+            node.scrollTop = node.scrollHeight;
+            node.dispatchEvent(new Event("scroll"));
+          });
+        } else {
+          await viewport.hover();
+          await page.mouse.wheel(0, 1_600);
+        }
+        await expect(page.locator(".scroll-bottom-btn")).toHaveCount(0);
+        await expect(liveTurn.locator(".turn-working")).toBeVisible();
+        await expect.poll(() => viewport.evaluate(node =>
+          node.scrollHeight - node.clientHeight - node.scrollTop)).toBeLessThan(3);
+      }
+    }
+
+    // A real terminal received while away must be visible on return too.
+    await page.locator(".thread").evaluate(node => {
+      node.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -20 }));
+      node.scrollTop -= 20;
+      node.dispatchEvent(new Event("scroll"));
+    });
+    await page.waitForTimeout(350);
+    await page.keyboard.press(shortcut[other]);
+    await page.getByRole("button", { name: "Complete task" }).click();
+    await page.keyboard.press(shortcut[engine]);
+    await expect(page.getByTestId("browse-id")).toHaveText("latest");
+    await expect(page.locator(".turn-working")).toHaveCount(0);
+    await expect(page.locator(`[data-turn-id="${engine}-3"] .turn-process-label`)).toHaveText(/^已处理/);
+  });
+}
+
+test("navigation reading restores its saved window when the live bookmark was evicted", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?reading-navigation=1&rebase-reading=1");
+  const before = await navigateReadingToMiddle(page);
+  await page.keyboard.press("Meta+1");
+  await page.getByRole("button", { name: "Replace latest window" }).click();
+  await page.keyboard.press("Meta+2");
+  await expect(page.getByTestId("browse-id")).not.toHaveText("latest");
+  await expect.poll(() => navigationReadingAnchor(page)).toEqual(before);
+  await page.getByRole("button", { name: "回到最新", exact: true }).click();
+  await expect(page.getByTestId("browse-id")).toHaveText("latest");
+  await expect(page.locator('[data-turn-id="new-head-3"]')).toBeVisible();
+});
+
+test("navigation reading releases its departure bookmark after new scroll input", async ({ page }) => {
+  await page.goto("/tests/history-browser.html?reading-navigation=1&rebase-reading=1");
+  await navigateReadingToMiddle(page);
+  await page.keyboard.press("Meta+1");
+  await page.keyboard.press("Meta+2");
+  await expect(page.getByTestId("browse-id")).toHaveText("latest");
+  await page.locator(".thread").evaluate(node => {
+    node.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: 1_000 }));
+    node.scrollTop = node.scrollHeight;
+    node.dispatchEvent(new Event("scroll"));
+  });
+  await page.waitForTimeout(350);
+  await page.getByRole("button", { name: "Replace latest window" }).click();
+  await expect(page.getByTestId("browse-id")).toHaveText("latest");
+  await expect(page.locator('[data-turn-id="new-head-3"]')).toBeVisible();
+});
+
 test("turn regressions keyboard scrolling leaves the live tail and resumes at bottom", async ({ page, isMobile }) => {
   test.skip(isMobile, "Physical desktop keyboard scrolling");
   await page.goto("/tests/history-browser.html?turn-regressions=1");
@@ -633,12 +728,13 @@ async function mockRightPanelRelay(
   page: import("@playwright/test").Page,
   { visible = false, retained = true, engine = "codex", seedTurns = [], parentSid = "layout-parent",
     secondParent = false, parentState = "idle", btwReadOnly = false, imageAssets = false, imageData, externalPreview, historyReply, listReply, capabilityReply,
-    devices = [{ machine_id: "layout-machine", label: "Layout", online: true }] }: {
+    devices = [{ machine_id: "layout-machine", label: "Layout", online: true }], sessionIdForMachine }: {
     visible?: boolean;
     retained?: boolean;
     engine?: "codex" | "claude" | "dsh";
     devices?: { machine_id: string; label: string; online: boolean }[];
     parentSid?: string;
+    sessionIdForMachine?: (machineId: string) => string;
     seedTurns?: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]>;
     secondParent?: boolean;
     parentState?: "idle" | "running";
@@ -647,12 +743,13 @@ async function mockRightPanelRelay(
     imageData?: { data: string; width: number; height: number };
     externalPreview?: "allow" | "replace";
     historyReply?: (command: Record<string, unknown>, machineId: string) => PanelRelayEvent<Extract<ServerEvent, { type: "history" }>> | null;
-    listReply?: (command: Record<string, unknown>) => PanelRelayEvent | null | undefined;
+    listReply?: (command: Record<string, unknown>, machineId: string) => PanelRelayEvent | null | undefined;
     capabilityReply?: (command: Record<string, unknown>) => PanelRelayEvent | undefined;
   } = {},
 ) {
   const btwSid = "btw-layout-child";
   const commands: Record<string, unknown>[] = [];
+  const connections: string[] = [];
   const allowedReads = new Set<string>();
   let emit: (message: PanelRelayEvent) => void = () => {
     throw new Error("layout relay has not connected");
@@ -676,7 +773,9 @@ async function mockRightPanelRelay(
     devices,
   } }));
   await page.routeWebSocket(/\/ws(?:\?|$)/, (socket) => {
+    connections.push(socket.url());
     const machineId = new URL(socket.url()).searchParams.get("machine") ?? "default";
+    const machineParentSid = sessionIdForMachine?.(machineId) ?? parentSid;
     emit = (message) => socket.send(JSON.stringify({
       v: PROTOCOL_VERSION, ts: Date.now() / 1000, ...message,
     }));
@@ -701,16 +800,16 @@ async function mockRightPanelRelay(
         emit({ type: "btw_sync", generation: "layout-generation", revision: 1,
           sessions: retained ? [{ btw_sid: btwSid, parent_sid: parentSid,
             engine, created_at: 1, state: "running" }] : [] });
-        snapshot(parentSid);
+        snapshot(machineParentSid);
       } else if (command.type === "list_sessions") {
-        const response = listReply?.(command);
+        const response = listReply?.(command, machineId);
         if (response === null) return; // Allow a test to release restoration explicitly.
         if (response) { emit(response); return; }
         emit({ type: "session_list",
           engine: command.engine === "codex" ? "codex" : command.engine === "dsh" ? "dsh" : "claude",
           space: command.space === "work" ? "work" : "code",
           request_id: String(command.cmd_id),
-          sessions: command.space === "work" ? [] : [{ session_id: parentSid,
+          sessions: command.space === "work" ? [] : [{ session_id: machineParentSid,
             engine, space: "code", summary: "Layout parent",
             cwd: "/tmp/layout", state: parentState, last_modified: "100" },
           ...(secondParent ? [{ session_id: "layout-other", engine,
@@ -786,8 +885,152 @@ async function mockRightPanelRelay(
         client_id: String(command.client_id), cmd_id: String(command.cmd_id) });
     });
   });
-  return { commands, emit: (message: PanelRelayEvent) => emit(message) };
+  return { commands, connections, emit: (message: PanelRelayEvent) => emit(message) };
 }
+
+for (const width of [390, 1280]) {
+  test(`Claude assistant-only detail pages retain identity after compaction at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const sid = "layout-parent";
+    const turnId = "source-head:thinking";
+    const relay = await mockRightPanelRelay(page, {
+      engine: "claude", retained: false, parentState: "running",
+      historyReply: () => ({
+        type: "history", sid, session_id: sid,
+        revision: "layout-history", generation: "layout-generation",
+        detail: "summary", in_progress: true, newest_id: turnId,
+        events: [], has_more: false, turns: [{
+          id: turnId, prompt: "", done: false, ts: 100_000, blocks: [],
+          detailLoaded: false, processDetailState: "present", detailEventCount: 4,
+        }],
+      }),
+    });
+    await page.goto("/");
+    await expect.poll(() => relay.commands.some(command =>
+      command.type === "get_turn_detail" && command.turn_id === turnId)).toBe(true);
+    relay.emit({ type: "turn_binding", sid, seq: 1, ts: 100,
+      msg_id: turnId, turn_id: turnId, autonomous: true });
+    relay.emit({ type: "state", sid, seq: 2, state: "running" });
+    relay.emit({
+      type: "turn_detail", sid, session_id: sid, turn_id: turnId,
+      revision: "layout-history", authoritative: true,
+      has_more: false, has_newer: false, events: [
+        { v: PROTOCOL_VERSION, ts: 100, sid, type: "turn_binding",
+          msg_id: turnId, turn_id: turnId, autonomous: true },
+        { v: PROTOCOL_VERSION, ts: 102, sid, type: "assistant_msg_start",
+          message_id: "later-page:thinking", channel: "thinking" },
+        { v: PROTOCOL_VERSION, ts: 102, sid, type: "delta",
+          message_id: "later-page:thinking", channel: "thinking", text: "分页后的过程内容" },
+        { v: PROTOCOL_VERSION, ts: 103, sid, type: "assistant_msg_end",
+          message_id: "later-page:thinking", channel: "thinking" },
+      ],
+    });
+    const turn = page.locator(`.turn[data-turn-id="${turnId}"]`);
+    await expect(turn).toHaveCount(1);
+    await expect(turn).toContainText("分页后的过程内容");
+    await expect(turn.locator(".turn-process-label")).toContainText("正在处理");
+    await expect(turn.locator(".turn-working")).toBeVisible();
+    await expect(page.getByText("过程解析失败", { exact: true })).toHaveCount(0);
+    expect(relay.commands.filter(command =>
+      ["query", "steer", "interrupt"].includes(String(command.type)))).toEqual([]);
+  });
+}
+
+for (const recovery of ["completion", "history"] as const) {
+  for (const width of [390, 1280]) {
+    test(`Codex restores a partial final answer through ${recovery} at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      const sid = "layout-parent", turnId = "cut-answer-user";
+      const messageId = "cut-answer-final";
+      const prefix = "根因是 Claude 压缩后的部分过程没有";
+      const fullText = prefix + "用户消息作为锚点，分页后丢失轮次标识。";
+      const summary = {
+        id: turnId, prompt: "检查显示", done: false, blocks: [],
+        detailLoaded: false, processDetailState: "present" as const, detailEventCount: 6,
+      };
+      const relay = await mockRightPanelRelay(page, {
+        retained: false, parentState: "running", historyReply: () => ({
+          type: "history", sid, session_id: sid,
+          revision: "layout-history", generation: "layout-generation", detail: "summary",
+          in_progress: true, newest_id: turnId, events: [], has_more: false, turns: [summary],
+        }),
+      });
+      await page.goto("/");
+      await expect.poll(() => relay.commands.some(command =>
+        command.type === "get_turn_detail" && command.turn_id === turnId)).toBe(true);
+      relay.emit({ type: "turn_binding", sid, seq: 1, msg_id: turnId, turn_id: turnId });
+      relay.emit({ type: "state", sid, seq: 2, state: "running" });
+      const detail = [
+        { v: PROTOCOL_VERSION, ts: 100, sid, type: "user_msg", msg_id: turnId, prompt: summary.prompt },
+        { v: PROTOCOL_VERSION, ts: 100, sid, type: "tool_use", tool_use_id: "read-source",
+          message_id: "read-message", tool: "Read", input: {} },
+        { v: PROTOCOL_VERSION, ts: 101, sid, type: "tool_result", tool_use_id: "read-source",
+          content: "ok", is_error: false },
+        { v: PROTOCOL_VERSION, ts: 102, sid, type: "assistant_msg_start",
+          message_id: messageId, channel: "final" },
+        { v: PROTOCOL_VERSION, ts: 102, sid, type: "delta",
+          message_id: messageId, channel: "final", text: prefix },
+        { v: PROTOCOL_VERSION, ts: 103, sid,
+          type: "assistant_msg_end", message_id: messageId, channel: "final" },
+      ];
+      relay.emit({ type: "turn_detail", sid, session_id: sid, turn_id: turnId,
+        revision: "layout-history", authoritative: true,
+        has_more: false, has_newer: false, events: detail });
+      const turn = page.locator(`.turn[data-turn-id="${turnId}"]`);
+      await expect(turn).toContainText(prefix);
+      if (recovery === "completion") {
+        relay.emit({ type: "delta", sid, seq: 3, turn_id: turnId,
+          message_id: messageId, channel: "final", text: fullText, replace: true });
+        relay.emit({ type: "assistant_msg_end", sid, seq: 4, turn_id: turnId,
+          message_id: messageId, channel: "final" });
+      }
+      relay.emit({ type: "turn_end", sid, seq: 5, turn_id: turnId,
+        result: { subtype: "success", duration_ms: 4000, is_error: false } });
+      relay.emit({ type: "state", sid, seq: 6, state: "idle" });
+      if (recovery === "history") {
+        relay.emit({ type: "history", sid, session_id: sid, revision: "layout-history",
+          generation: "layout-generation", detail: "summary", live_seq: 6,
+          in_progress: false, newest_id: turnId, events: [], has_more: false,
+          turns: [{ ...summary, done: true, blocks: [{ kind: "text", message_id: messageId,
+            channel: "final", text: fullText, done: true }] }] });
+      }
+      await expect(turn.locator(".assistant-answer-segment")).toHaveText(fullText);
+      await expect(turn.locator(".turn-working")).toHaveCount(0);
+      await expect(turn.locator(".turn-process-label")).toContainText("已处理");
+      expect(relay.commands.filter(command =>
+        ["query", "steer", "interrupt"].includes(String(command.type)))).toEqual([]);
+    });
+  }
+}
+
+test("device return paints only authorized content after initial device discovery", async ({ page }) => {
+  const devices = [{ machine_id: "layout-machine", label: "Authorized device", online: true }];
+  const relay = await mockRightPanelRelay(page, {
+    retained: false, devices,
+    historyReply: command => ({ type: "history", session_id: String(command.session_id),
+      sid: String(command.session_id), revision: "authorized-history", generation: "layout-generation",
+      detail: "summary", events: [], has_more: false,
+      turns: [{ id: "authorized-turn", prompt: "Check authorized device", done: true,
+        blocks: [{ kind: "text", message_id: "authorized-answer", channel: "final",
+          text: "Answer from the authorized device", done: true }] }] }),
+  });
+  await page.addInitScript(() => localStorage.removeItem("cc_remote_machine"));
+  const pending: import("@playwright/test").Route[] = [];
+  const holdDevices = (route: import("@playwright/test").Route) => { pending.push(route); };
+  await page.route("**/api/devices", holdDevices);
+  await page.goto("/");
+  await expect.poll(() => pending.length).toBeGreaterThan(0);
+  await page.evaluate(async () => {
+    const cache = await import("/src/cache.ts");
+    await cache.loadAllReplayState("default");
+  });
+  expect(relay.connections).toHaveLength(0);
+  await page.unroute("**/api/devices", holdDevices);
+  for (const route of pending) await route.fulfill({ json: { devices } });
+  await expect(page.getByText("Answer from the authorized device", { exact: true })).toBeVisible();
+  expect(relay.connections.map(url => new URL(url).searchParams.get("machine")))
+    .toEqual(["layout-machine"]);
+});
 
 for (const engine of ["claude", "codex", "dsh"] as const) {
   test(`device switching retains isolated instant session cache for ${engine}`, async ({ page }) => {
@@ -880,6 +1123,106 @@ for (const engine of ["claude", "codex", "dsh"] as const) {
       first: "Cached answer from layout-machine", second: "Cached answer from second-machine",
       pageRetained: true, invalidatedFirst: null, secondSurvivesInvalidation: true, clearedSecond: null,
     });
+  });
+}
+
+for (const engine of ["claude", "codex", "dsh"] as const) {
+  test(`device return paints cached ${engine} before the catalog or history replies`, async ({ page }) => {
+    let holdReturningDevice = false;
+    const relay = await mockRightPanelRelay(page, {
+      engine, retained: false,
+      sessionIdForMachine: machine => `${machine}-native-session`,
+      devices: [
+        { machine_id: "layout-machine", label: "Mac", online: true },
+        { machine_id: "second-machine", label: "VPS", online: true },
+      ],
+      listReply: (_command, machine) => holdReturningDevice && machine === "layout-machine" ? null : undefined,
+      historyReply: (command, machine) => holdReturningDevice && machine === "layout-machine" ? null : {
+        type: "history", session_id: String(command.session_id), sid: String(command.session_id),
+        revision: "instant-device-history", generation: "layout-generation",
+        detail: "summary", events: [], has_more: false,
+        turns: [{ id: "native-turn", prompt: "Check device", done: true, ts: 1000,
+          blocks: [{ kind: "text", message_id: "native-answer", channel: "final",
+            text: `Remembered answer from ${machine}`, done: true }] }],
+      },
+    });
+    const selectDevice = async (label: string) => {
+      await page.getByRole("button", { name: "设备中心", exact: true }).click();
+      await page.getByRole("dialog", { name: "设备中心" }).getByRole("button", { name: new RegExp(label) }).click();
+    };
+    await page.goto("/");
+    const macAnswer = page.getByText("Remembered answer from layout-machine", { exact: true });
+    await expect(macAnswer).toBeVisible();
+    await expect.poll(() => page.evaluate(async () => {
+      const cache = await import("/src/cache.ts");
+      return (await cache.loadSession("layout-machine-native-session", "layout-machine"))?.turns.length;
+    })).toBe(1);
+    await selectDevice("VPS");
+    await expect(page.getByText("Remembered answer from second-machine", { exact: true })).toBeVisible();
+    await page.evaluate(() => {
+      document.documentElement.dataset.deviceReturnSpinner = "0";
+      document.documentElement.dataset.deviceReturnWrongMachine = "0";
+      const transaction = IDBDatabase.prototype.transaction;
+      IDBDatabase.prototype.transaction = function (storeNames, mode, options) {
+        if (this.name === "cc_remote_cache" && mode === "readonly") {
+          throw new DOMException("IndexedDB paused for the return-view regression", "InvalidStateError");
+        }
+        return transaction.call(this, storeNames, mode, options);
+      };
+      new MutationObserver(() => {
+        if (localStorage.getItem("cc_remote_machine") === "layout-machine") {
+          if (document.querySelector(".empty .spinner")) {
+            document.documentElement.dataset.deviceReturnSpinner = "1";
+          }
+          if (document.body.textContent?.includes("Remembered answer from second-machine")) {
+            document.documentElement.dataset.deviceReturnWrongMachine = "1";
+          }
+        }
+      }).observe(document.body, { childList: true, subtree: true });
+    });
+    holdReturningDevice = true;
+    const returningCommandsStart = relay.commands.length;
+    await selectDevice("Mac");
+    await expect(macAnswer).toBeVisible({ timeout: 250 });
+    await expect(page.getByText("Remembered answer from second-machine", { exact: true })).toHaveCount(0);
+    await expect(page.locator(".empty .spinner")).toHaveCount(0);
+    expect(await page.locator("html").getAttribute("data-device-return-spinner")).toBe("0");
+    expect(await page.locator("html").getAttribute("data-device-return-wrong-machine")).toBe("0");
+    expect(relay.commands.some(command => command.type === "query" || command.type === "new_session")).toBe(false);
+    await expect.poll(() => relay.commands.slice(returningCommandsStart).some(command =>
+      command.type === "list_sessions" && command.engine === engine && command.space === "code")).toBe(true);
+    const listRequest = relay.commands.slice(returningCommandsStart).findLast(command =>
+      command.type === "list_sessions" && command.engine === engine && command.space === "code")!;
+    relay.emit({ type: "session_list", engine, space: "code", request_id: String(listRequest.cmd_id),
+      sessions: [{ session_id: "layout-machine-native-session", engine, space: "code",
+        summary: "Current Mac session", cwd: "/tmp/layout", state: "idle" }] });
+    await expect.poll(() => relay.commands.slice(returningCommandsStart).some(command =>
+      command.type === "get_history" && command.session_id === "layout-machine-native-session")).toBe(true);
+    relay.emit({ type: "history", session_id: "layout-machine-native-session", sid: "layout-machine-native-session",
+      revision: "instant-device-history", generation: "layout-generation",
+      detail: "summary", events: [], has_more: false,
+      turns: [{ id: "native-turn", prompt: "Check device", done: true, ts: 1000,
+        blocks: [{ kind: "text", message_id: "native-answer", channel: "final",
+          text: "Updated Mac answer after revalidation", done: true }] }] });
+    await expect(page.getByText("Updated Mac answer after revalidation", { exact: true })).toBeVisible();
+    await expect(macAnswer).toHaveCount(0);
+    const previousLists = relay.commands.filter(command => command.type === "list_sessions").length;
+    relay.emit({ type: "session_list_invalidated", engine, space: "code" });
+    await expect.poll(() => relay.commands.filter(command => command.type === "list_sessions").length).toBeGreaterThan(previousLists);
+    const replacementList = relay.commands.findLast(command =>
+      command.type === "list_sessions" && command.engine === engine && command.space === "code")!;
+    relay.emit({ type: "session_list", engine, space: "code", request_id: String(replacementList.cmd_id),
+      sessions: [{ session_id: "replacement-native-session", engine, space: "code",
+        summary: "Replacement session", cwd: "/tmp/layout", state: "idle" }] });
+    await expect.poll(() => relay.commands.some(command =>
+      command.type === "get_history" && command.session_id === "replacement-native-session")).toBe(true);
+    relay.emit({ type: "history", session_id: "replacement-native-session", sid: "replacement-native-session",
+      revision: "replacement-history", generation: "layout-generation", detail: "summary", events: [], has_more: false,
+      turns: [{ id: "replacement-turn", prompt: "Replacement question", done: true, ts: 1000,
+        blocks: [{ kind: "text", message_id: "replacement-answer", channel: "final",
+          text: "Replacement session from the live catalog", done: true }] }] });
+    await expect(page.getByText("Replacement session from the live catalog", { exact: true })).toBeVisible();
+    await expect(page.getByText("Updated Mac answer after revalidation", { exact: true })).toHaveCount(0);
   });
 }
 
@@ -2891,12 +3234,20 @@ test("transient BTW reconnect notice does not permanently disable the composer",
   await expect(panel.locator(".btw-readonly-notice")).toHaveCount(0);
 });
 
-async function openAsyncQuestion(page: import("@playwright/test").Page, index = 0) {
-  // The scroll-to-bottom affordance can cover the middle of the last row in a
-  // narrow BTW pane. Use the card's leading icon hit area, just like a user tap.
-  await page.locator(".async-question-card").nth(index).click({ position: { x: 24, y: 24 } });
-  const dialog = page.getByRole("dialog", { name: "助手询问", exact: true });
+async function openAsyncQuestion(page: import("@playwright/test").Page, index?: number) {
+  const dialog = page.getByRole("dialog", { name: "Codex 想确认一下", exact: true });
+  const resume = page.locator(".question-resume").filter({ hasText: /等待你回答|回答提交中/ });
+  await expect.poll(async () => await dialog.isVisible() || await resume.isVisible()).toBe(true);
+  if (!await dialog.isVisible()) await resume.click();
   await expect(dialog).toBeVisible();
+  if (index !== undefined) {
+    const progress = dialog.locator(".qa-progress");
+    let current = Number((await progress.textContent())?.split("/")[0].trim() ?? "1") - 1;
+    while (current !== index) {
+      await dialog.getByRole("button", { name: current < index ? "下一题" : "上一题" }).click();
+      current += current < index ? 1 : -1;
+    }
+  }
   return dialog;
 }
 
@@ -2908,47 +3259,186 @@ const ASYNC_HISTORY_TURN = {
   id: "async-user", prompt: "继续修复", done: true, detailLoaded: true,
   forkPointId: "async-task", blocks: [{ kind: "text", message_id: "async-item",
     text: "在哪个设备发生？用的是什么手势？", channel: "final", done: true,
-    delivery: "async", questions: ASYNC_QUESTIONS }],
+    delivery: "async", questions: [ASYNC_QUESTIONS[1]] }],
 };
 
 const TEST_GENERATED_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j6RkAAAAASUVORK5CYII=";
 
-test("async question compact styling shows each question once on desktop and mobile", async ({ page }, testInfo) => {
-  const title = "这几次恢复，是你在板子失联后手动重启或断电的吗？失联前是否也有主动重启或改 IP？这能帮助区分程序触发的故障与外部操作。";
+test("async question paginated history joins the live inventory and keeps independent drafts", async ({ page }, testInfo) => {
+  const sid = "layout-parent";
+  const olderQuestion = { ...ASYNC_HISTORY_TURN, id: "older-question", ts: 1000,
+    blocks: [{ ...ASYNC_HISTORY_TURN.blocks[0], message_id: "older-question-item",
+      questions: [{ title: "历史问题需要补充什么？" }] }] };
+  const latestTurns = Array.from({ length: 4 }, (_, index) => ({
+    id: "latest-" + index, prompt: "最近的用户消息 " + index, done: true, ts: 2000 + index * 1000,
+    blocks: [{ kind: "text" as const, message_id: "latest-answer-" + index,
+      channel: "final" as const, done: true, text: "最近的消息内容。\n\n".repeat(40),
+      ...(index === 3 ? { delivery: "async" as const,
+        questions: [{ title: "当前任务需要补充什么？" }] } : {}) }],
+  }));
+  const base = { type: "history" as const, session_id: sid, sid,
+    revision: "layout-history", generation: "layout-generation", detail: "summary" as const, events: [] };
+  const relay = await mockRightPanelRelay(page, { retained: false, historyReply: command => ({
+    ...base, request_id: String(command.cmd_id),
+    ...(command.before ? { before: String(command.before), turns: [olderQuestion],
+      oldest_id: olderQuestion.id, newest_id: olderQuestion.id, has_more: false }
+      : { turns: latestTurns, oldest_id: "latest-0", newest_id: "latest-3", has_more: true }),
+  }) });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  await expect(dialog.locator("legend")).toHaveText("当前任务需要补充什么？");
+  await dialog.getByRole("textbox").fill("实时问题的草稿");
+  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  await scrollThreadToEdge(page, "start", testInfo.project.name);
+  await expect.poll(() => relay.commands.filter(command => command.type === "get_history" && command.before).length).toBe(1);
+  await expect(page.locator(".question-resume")).toContainText("2 / 2");
+  await openAsyncQuestion(page);
+  await expect(dialog.getByRole("textbox")).toHaveValue("实时问题的草稿");
+  await dialog.getByRole("button", { name: "上一题", exact: true }).click();
+  await expect(dialog.locator("legend")).toHaveText("历史问题需要补充什么？");
+  await dialog.getByRole("textbox").fill("从历史分页回答");
+  await dialog.getByRole("button", { name: "下一题", exact: true }).click();
+  await expect(dialog.getByRole("textbox")).toHaveValue("实时问题的草稿");
+  await dialog.getByRole("button", { name: "上一题", exact: true }).click();
+  await expect(dialog.getByRole("textbox")).toHaveValue("从历史分页回答");
+  await dialog.getByRole("button", { name: "提交回答", exact: true }).click();
+  await expect.poll(() => relay.commands.filter(command => command.type === "query").length).toBe(1);
+  const query = relay.commands.find(command => command.type === "query")!;
+  expect(query.sid).toBe(sid);
+  expect(query.prompt).toBe("补充回答：\n\n问题：历史问题需要补充什么？\n回答：从历史分页回答");
+  await expect(dialog).toHaveCount(0);
+  relay.emit({ type: "user_msg", sid, msg_id: String(query.msg_id), prompt: String(query.prompt) });
+  await expect(dialog).toHaveCount(0);
+  await openAsyncQuestion(page);
+  await expect(dialog.locator("legend")).toHaveText("当前任务需要补充什么？");
+  await expect(dialog.getByRole("textbox")).toHaveValue("实时问题的草稿");
+  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  await page.getByRole("button", { name: "回到最新", exact: true }).click();
+  await expect(page.locator('[data-turn-id="older-question"]')).toHaveCount(0);
+  await openAsyncQuestion(page);
+  await expect(dialog.locator("legend")).toHaveText("当前任务需要补充什么？");
+  await expect(dialog.getByRole("textbox")).toHaveValue("实时问题的草稿");
+});
+
+test("async question paginated history recognizes accepted answers from the newer runtime", async ({ page }, testInfo) => {
+  const sid = "layout-parent";
+  const olderQuestion = { ...ASYNC_HISTORY_TURN, id: "older-question",
+    blocks: [{ ...ASYNC_HISTORY_TURN.blocks[0], message_id: "older-question-item", questions: [
+      { title: "已经回答的历史问题？" }, { title: "还未回答的历史问题？" },
+    ] }] };
+  const latestTurns = Array.from({ length: 4 }, (_, index) => ({
+    id: "latest-" + index,
+    prompt: index === 3 ? "补充回答：\n\n问题：已经回答的历史问题？\n回答：已经确认"
+      : "最近的用户消息 " + index,
+    done: true, blocks: [{ kind: "text" as const, message_id: "latest-answer-" + index,
+      channel: "final" as const, done: true, text: "最近的消息内容。\n\n".repeat(40) }],
+  }));
+  const base = { type: "history" as const, session_id: sid, sid,
+    revision: "layout-history", generation: "layout-generation", detail: "summary" as const, events: [] };
+  await mockRightPanelRelay(page, { retained: false, historyReply: command => ({
+    ...base, request_id: String(command.cmd_id),
+    ...(command.before ? { before: String(command.before), turns: [olderQuestion],
+      oldest_id: olderQuestion.id, newest_id: olderQuestion.id, has_more: false }
+      : { turns: latestTurns, oldest_id: "latest-0", newest_id: "latest-3", has_more: true }),
+  }) });
+  await page.goto("/");
+  await expect(page.locator('[data-turn-id="latest-3"]')).toBeAttached();
+  await scrollThreadToEdge(page, "start", testInfo.project.name);
+  const dialog = await openAsyncQuestion(page);
+  await expect(dialog.locator("legend")).toHaveText("还未回答的历史问题？");
+  await expect(dialog.locator(".qa-progress")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "忽略当前问题", exact: true }).click();
+  await expect(page.locator(".async-question-dialog, .question-resume")).toHaveCount(0);
+});
+
+for (const collapsed of [false, true]) {
+  test(`async question external answer clears ${collapsed ? "collapsed" : "open"} drafts before web update`, async ({ page }) => {
+    const relay = await mockRightPanelRelay(page, { retained: false, seedTurns: [ASYNC_HISTORY_TURN] });
+    const next = { build_id: "f".repeat(64), version: "5.3.7", protocol: PROTOCOL_VERSION };
+    await page.route("**/cc-remote-build.json?*", route => route.fulfill({ json: next }));
+    await page.route("**/healthz?*", route => route.fulfill({ json: next }));
+    await page.goto("/");
+    const dialog = await openAsyncQuestion(page);
+    await dialog.getByRole("textbox").fill("本端尚未发送的回答");
+    if (collapsed) await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+    relay.emit({ type: "user_msg", sid: "layout-parent", msg_id: "external-answer",
+      prompt: "补充回答：\n\n问题：用的是什么手势？\n回答：另一端已确认" });
+    await expect(page.locator(".async-question-dialog, .question-resume")).toHaveCount(0);
+    await expect(page.locator(".supplemental-answer")).toContainText("另一端已确认");
+    await page.getByRole("button", { name: "状态详情：有更新", exact: true }).click();
+    await page.getByRole("button", { name: "查看更新", exact: true }).click();
+    let navigations = 0;
+    page.on("framenavigated", frame => { if (frame === page.mainFrame()) navigations++; });
+    await page.getByRole("button", { name: "刷新页面", exact: true }).click();
+    await expect.poll(() => navigations).toBe(1);
+    expect(relay.commands.filter(command => ["query", "steer", "answer_question"].includes(String(command.type)))).toHaveLength(0);
+  });
+}
+
+test("async question external answers retire matching drafts while other answers still protect web updates", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { retained: false, seedTurns: [{ ...ASYNC_HISTORY_TURN,
+    blocks: [{ ...ASYNC_HISTORY_TURN.blocks[0], questions: ASYNC_QUESTIONS }],
+  }] });
+  const next = { build_id: "f".repeat(64), version: "5.3.7", protocol: PROTOCOL_VERSION };
+  await page.route("**/cc-remote-build.json?*", route => route.fulfill({ json: next }));
+  await page.route("**/healthz?*", route => route.fulfill({ json: next }));
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  await dialog.getByRole("textbox").fill("第一题的本地草稿");
+  await dialog.getByRole("button", { name: "下一题", exact: true }).click();
+  await dialog.getByRole("textbox").fill("第二题还未提交的回答");
+  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  relay.emit({ type: "user_msg", sid: "layout-parent", msg_id: "external-answer",
+    prompt: "补充回答：\n\n问题：在哪个设备发生？\n回答：手机" });
+  await expect(page.locator(".supplemental-answer")).toContainText("手机");
+  await openAsyncQuestion(page);
+  await expect(dialog.locator("legend")).toHaveText("用的是什么手势？");
+  await expect(dialog.getByRole("textbox")).toHaveValue("第二题还未提交的回答");
+  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  const status = page.getByRole("button", { name: "状态详情：有更新", exact: true });
+  await status.click();
+  await page.getByRole("button", { name: "查看更新", exact: true }).click();
+  await page.getByRole("button", { name: "刷新页面", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "检查更新", exact: true }))
+    .toContainText("还有未发送的内容或正在导入的附件");
+  await page.getByRole("button", { name: "收起更新窗口", exact: true }).click();
+  await openAsyncQuestion(page);
+  await dialog.getByRole("textbox").fill("");
+  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  await status.click();
+  await page.getByRole("button", { name: "查看更新", exact: true }).click();
+  let navigations = 0;
+  page.on("framenavigated", frame => { if (frame === page.mainFrame()) navigations++; });
+  await page.getByRole("button", { name: "刷新页面", exact: true }).click();
+  await expect.poll(() => navigations).toBe(1);
+  expect(relay.commands.filter(command => ["query", "steer", "answer_question"].includes(String(command.type)))).toHaveLength(0);
+});
+
+test("async question compact styling matches the shared dialog on desktop and mobile", async ({ page }, testInfo) => {
+  const title = "这几次恢复，是你在板子失联后手动重启或断电的吗？失联前是否主动重启或改 IP？";
   await mockRightPanelRelay(page, { seedTurns: [{
     ...ASYNC_HISTORY_TURN, blocks: [{ ...ASYNC_HISTORY_TURN.blocks[0],
       text: title, questions: [{ title, options: null }] }],
   }] });
   await page.goto("/");
-  const entry = page.locator(".async-question-card");
-  await expect(entry).toBeVisible();
-  expect((await entry.boundingBox())!.height).toBeLessThan(110);
-  await expect(page.getByRole("dialog", { name: "助手询问" })).toHaveCount(0);
-  const card = await openAsyncQuestion(page);
-  await expect(card).toBeVisible();
-  const metrics = await card.evaluate((node) => ({
-    width: node.getBoundingClientRect().width,
-    height: node.getBoundingClientRect().height,
-    overflow: node.scrollWidth - node.clientWidth,
-    weight: Number(getComputedStyle(node.querySelector("legend")!).fontWeight),
-  }));
-  expect(metrics.width).toBeLessThanOrEqual(560);
-  expect(metrics.height).toBeLessThan(page.viewportSize()!.height);
-  expect(metrics.overflow).toBeLessThanOrEqual(1);
-  expect(metrics.weight).toBeLessThan(600);
-  expect(await card.evaluate(node => parseFloat(getComputedStyle(node).borderRadius))).toBeGreaterThanOrEqual(28);
-  await expect(card).toHaveCSS("border-top-width", "1px");
-  await card.getByLabel("你的回答", { exact: true }).fill("三指拖拽");
+  const dialog = await openAsyncQuestion(page);
+  await expect(page.locator(".async-question-card")).toHaveCount(0);
+  await expect(dialog.locator(".engine-brand-icon.codex")).toHaveCount(1);
+  await expect(dialog.getByText(title, { exact: true })).toHaveCount(1);
+  const bounds = (await dialog.boundingBox())!;
+  expect(bounds.width).toBeLessThanOrEqual(560);
+  expect(bounds.y).toBeGreaterThanOrEqual(0);
+  expect(bounds.y + bounds.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+  expect(await dialog.evaluate(node => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1);
+  await expect(dialog).toHaveCSS("border-radius", "24px");
+  await expect(dialog.getByRole("textbox")).not.toBeFocused();
+  await dialog.getByRole("textbox").fill("三指拖拽");
   await page.screenshot({ path: testInfo.outputPath("async-question-compact.png") });
   await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
   await page.screenshot({ path: testInfo.outputPath("async-question-compact-dark.png") });
-  await expect(card.getByText(title, { exact: true })).toHaveCount(1);
-  await expect(card.locator("details, .async-question-source, .async-question-original")).toHaveCount(0);
-  await expect(card).not.toContainText("原始提问");
-  await expect(card).not.toContainText("发送后将开始新一轮对话");
-  await expect(card.locator(".async-question-footer .async-question-hint")).toHaveCount(0);
-  expect(await card.getAttribute("aria-describedby")).toBeNull();
-  await expect(card.getByLabel("你的回答", { exact: true })).toHaveValue("三指拖拽");
+  await expect(dialog.locator("details, .async-question-source, .async-question-original")).toHaveCount(0);
+  await expect(dialog.locator(".async-question-hint")).toHaveCount(0);
+  await expect(dialog.getByRole("textbox")).toHaveValue("三指拖拽");
 });
 
 test("active process text shimmers and readable tool output settles without replaying animation", async ({ page }, info) => {
@@ -3662,50 +4152,38 @@ test("turn regressions daemon update keeps its cause across native history refre
   expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toHaveLength(0);
 });
 
-test("async question first layout keeps optional notes visible with vertical choices and a separate send button", async ({ page }, testInfo) => {
-  const title = "按这版目标开始可行性设计？先确认目标，再逐项验证哪些能做到。";
+test("async question first layout uses rounded cards and preserves a postponed answer", async ({ page }, testInfo) => {
+  const title = "按这版目标开始可行性设计？";
   const relay = await mockRightPanelRelay(page, { seedTurns: [{
     ...ASYNC_HISTORY_TURN, blocks: [{ ...ASYNC_HISTORY_TURN.blocks[0], text: title,
       questions: [{ title, options: ["确认，按这版做可行性设计", "需要调整，我补充说明"] }] }],
   }] });
   await page.goto("/");
-  const card = await openAsyncQuestion(page);
-  await expect(card).toBeVisible();
-  await expect(card.getByRole("textbox")).toBeVisible();
-  await expect(card.getByRole("textbox")).toHaveValue("");
-  await expect(card.getByRole("textbox")).not.toBeFocused();
-  await expect(card.locator(".async-question-notes")).toHaveCount(0);
-  const send = card.getByRole("button", { name: "发送回答", exact: true });
-  await expect(send).toBeEnabled();
-  await expect(send).toHaveCSS("border-top-left-radius", "999px");
-  await expect(card.locator(".async-question-option").first()).toHaveCSS("border-top-left-radius", "999px");
-  await expect(card.locator(".async-question-composer .async-question-send")).toHaveCount(0);
-  const options = card.locator(".async-question-option");
-  const first = await options.nth(0).boundingBox();
-  const second = await options.nth(1).boundingBox();
-  expect(second!.y).toBeGreaterThanOrEqual(first!.y + first!.height);
-  await page.screenshot({ path: testInfo.outputPath("async-question-first-layout.png") });
-  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
-  await page.screenshot({ path: testInfo.outputPath("async-question-first-layout-dark.png") });
-  expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
-  await card.getByRole("radio", { name: "需要调整，我补充说明" }).check();
-  await expect(card.getByRole("textbox")).toBeVisible();
-  // The editor is always visible. Changing a choice neither submits nor steals
-  // focus, and does not discard text that will override the selected option.
-  await expect(card.getByRole("textbox")).not.toBeFocused();
-  expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
-  await card.getByRole("textbox").fill("需要先验证续航。\n不要直接加工。");
-  await card.getByRole("radio", { name: "确认，按这版做可行性设计" }).check();
-  await expect(card.getByRole("textbox")).toBeVisible();
-  await card.getByRole("button", { name: "稍后回答", exact: true }).click();
+  const dialog = await openAsyncQuestion(page);
+  await expect(dialog.getByRole("textbox")).not.toBeFocused();
+  await expect(dialog.getByRole("radio").first()).toBeChecked();
+  await expect(dialog.locator(".async-question-option").first()).toHaveCSS("border-radius", "12px");
+  await expect(dialog.locator(".async-question-option-check")).toHaveCount(0);
+  await dialog.getByRole("radio").nth(1).check();
+  await dialog.getByRole("textbox").focus();
+  await expect(dialog.getByRole("textbox")).toHaveValue("");
+  await expect(dialog.locator(".async-question-option.selected")).toHaveCount(0);
+  await expect(dialog.getByRole("radio").nth(1)).not.toBeChecked();
+  await expect(dialog.getByRole("button", { name: "提交回答" })).toBeDisabled();
+  expect(relay.commands.filter(command => ["query", "steer"].includes(String(command.type)))).toHaveLength(0);
+  await dialog.getByRole("radio").nth(1).check();
+  await dialog.getByRole("textbox").click();
+  await expect(dialog.locator(".async-question-option.selected")).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "提交回答" })).toBeDisabled();
+  await dialog.getByRole("textbox").fill("需要先验证续航。\n不要直接加工。");
+  await dialog.getByRole("button", { name: "稍后回答" }).click();
+  await expect(page.locator(".question-resume")).toContainText("等待你回答");
   await openAsyncQuestion(page);
-  await expect(card.getByRole("radio", { name: "确认，按这版做可行性设计" })).toBeChecked();
-  await expect(card.getByRole("textbox")).toHaveValue("需要先验证续航。\n不要直接加工。");
-  await card.getByRole("button", { name: "发送回答", exact: true }).click();
+  await expect(dialog.getByRole("textbox")).toHaveValue("需要先验证续航。\n不要直接加工。");
+  await page.screenshot({ path: testInfo.outputPath("async-question-first-layout.png") });
+  await dialog.getByRole("button", { name: "提交回答" }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
-  const query = relay.commands.find(c => c.type === "query")!;
-  expect(query.prompt).toContain("回答：需要先验证续航。\n不要直接加工。");
-  expect(query.prompt).not.toContain("回答：确认");
+  expect(relay.commands.find(c => c.type === "query")?.prompt).toContain("回答：需要先验证续航。\n不要直接加工。");
 });
 
 test("async question option presses avoid native tap flashes and retain rounded keyboard focus", async ({ page, isMobile }, testInfo) => {
@@ -3721,7 +4199,7 @@ test("async question option presses avoid native tap flashes and retain rounded 
   for (const target of [option, radio]) {
     await expect(target).toHaveCSS("-webkit-tap-highlight-color", "rgba(0, 0, 0, 0)");
   }
-  await expect(option).toHaveCSS("border-top-left-radius", "999px");
+  await expect(option).toHaveCSS("border-top-left-radius", "12px");
   const box = (await radio.boundingBox())!;
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
@@ -3742,18 +4220,63 @@ test("async question option presses avoid native tap flashes and retain rounded 
   // exposes a visible focus ring following the option's rounded shape.
   // Mobile Safari need not focus a radio when tapped. Start the keyboard path
   // from a known control and tab to the selected option on both platforms.
-  await dialog.getByRole("button", { name: "关闭助手询问" }).focus();
+  await dialog.getByRole("button", { name: "忽略当前问题" }).focus();
   await page.keyboard.press("Tab");
   await expect(radio).toBeFocused();
   await expect(option).toHaveCSS("outline-style", "solid");
   await expect(option).toHaveCSS("outline-width", "2px");
-  await expect(option).toHaveCSS("border-top-left-radius", "999px");
+  await expect(option).toHaveCSS("border-top-left-radius", "12px");
   expect(relay.commands.filter(c => ["query", "steer", "answer_question", "interrupt"].includes(String(c.type))))
     .toHaveLength(0);
   // The visible textarea remains optional; an option-only answer still sends.
-  await dialog.getByRole("button", { name: "发送回答" }).click();
+  await dialog.getByRole("button", { name: "提交回答" }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
   expect(relay.commands.find(c => c.type === "query")?.prompt).toBe("补充回答：\n\n问题：在哪个设备发生？\n回答：手机");
+});
+
+test("async question keyboard reaches unselected options after editing and reopening", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { retained: false, seedTurns: [{
+    ...ASYNC_HISTORY_TURN, blocks: [{ ...ASYNC_HISTORY_TURN.blocks[0], questions: [ASYNC_QUESTIONS[0]] }],
+  }] });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  const input = dialog.getByRole("textbox");
+  const first = dialog.getByRole("radio").first();
+  const second = dialog.getByRole("radio").nth(1);
+  await input.fill("自定义回答");
+  await expect(first).not.toBeChecked();
+  await expect(second).not.toBeChecked();
+  await input.press("Shift+Tab");
+  await expect(first).toBeFocused();
+  await expect(first).not.toBeChecked();
+  await expect(input).toHaveValue("自定义回答");
+  await page.keyboard.press("ArrowDown");
+  await expect(second).toBeChecked();
+  await page.keyboard.press("Tab");
+  await expect(input).toBeFocused();
+  await expect(second).not.toBeChecked();
+  await page.keyboard.press("Shift+Tab");
+  await expect(first).toBeFocused();
+  await input.fill("清空前的回答");
+  await input.fill("");
+  await input.press("Shift+Tab");
+  await expect(first).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(input).toBeFocused();
+  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  await openAsyncQuestion(page);
+  const close = dialog.getByRole("button", { name: "忽略当前问题", exact: true });
+  await close.focus();
+  await page.keyboard.press("Tab");
+  await expect(first).toBeFocused();
+  await expect(first).not.toBeChecked();
+  await expect(second).not.toBeChecked();
+  await page.keyboard.press("Shift+Tab");
+  await expect(close).toBeFocused();
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Space");
+  await expect(first).toBeChecked();
+  expect(relay.commands.filter(command => ["query", "steer", "answer_question", "interrupt"].includes(String(command.type)))).toHaveLength(0);
 });
 
 test("generated image canonical summary survives refresh and loads original without detail", async ({ page }) => {
@@ -3908,107 +4431,129 @@ test("generated image uses full reply width and remains visible through process 
   await page.screenshot({ path: testInfo.outputPath("generated-image-wide.png") });
 });
 
-test("async question answered presentation survives refresh without rewriting or hiding the user reply", async ({ page }, testInfo) => {
-  const prompt = "补充回答：\n\n问题：在哪个设备发生？\n回答：Mac 浏览器\n\n问题：用的是什么手势？\n回答：三指拖拽\n拖到页面下方";
+test("async question answered presentation preserves the prompt disclosure through refresh", async ({ page }, testInfo) => {
+  const prompt = "补充回答：\n\n问题：用的是什么手势？\n回答：三指拖拽\n拖到页面下方";
   const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN, {
     id: "supplemental-reply", prompt, done: false, blocks: [],
   }] });
   await page.goto("/");
   for (let i = 0; i < 2; i++) {
     if (i) await page.reload();
-    const entry = page.locator(".async-question-card");
-    const card = page.getByRole("dialog", { name: "助手询问", exact: true });
-    await expect(entry).toContainText("已回答");
-    await expect(card.getByRole("textbox")).toHaveCount(0);
     const answer = page.locator(".supplemental-answer");
     await expect(answer).toContainText("三指拖拽\n拖到页面下方");
+    await expect(page.locator(".async-question-card, .question-resume, .async-question-dialog")).toHaveCount(0);
     await expect(answer.locator("details")).not.toHaveAttribute("open");
+    await answer.getByText("查看问题", { exact: true }).click();
+    await expect(answer.getByText("用的是什么手势？", { exact: true })).toBeVisible();
     await answer.locator("summary").click();
-    await expect(answer.getByText("在哪个设备发生？", { exact: true })).toBeVisible();
-    await answer.locator("summary").click();
-    if (i === 1) await page.screenshot({ path: testInfo.outputPath("async-question-answered.png") });
-    await openAsyncQuestion(page);
-    await expect(card.getByRole("textbox")).toHaveCount(2);
-    await card.getByLabel("你的回答", { exact: true }).fill("还没有发送的补充草稿");
-    await card.getByRole("button", { name: "稍后回答", exact: true }).click();
-    const reopen = entry;
-    await expect(card).toHaveCount(0);
-    await expect(card.getByRole("textbox")).toHaveCount(0);
-    await reopen.click();
-    await expect(card.getByLabel("你的回答", { exact: true })).toHaveValue("还没有发送的补充草稿");
-    await card.getByRole("button", { name: "关闭助手询问" }).click();
+    if (i) await page.screenshot({ path: testInfo.outputPath("async-question-answered.png") });
   }
   expect(relay.commands.filter(c => ["query", "steer", "interrupt", "get_turn_detail"].includes(String(c.type)))).toHaveLength(0);
 });
 
-test("async question replay after compaction keeps one answered card in its original row", async ({ page }) => {
-  const prompt = "补充回答：\n\n问题：用的是什么手势？\n回答：已经退出";
-  const turns = [ASYNC_HISTORY_TURN, {
-    id: "answered-steer", prompt, done: false, blocks: [],
+test("async question replay after compaction keeps one prompt disclosure and no duplicate pending question", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN, {
+    id: "answered-steer", prompt: "补充回答：\n\n问题：用的是什么手势？\n回答：已经退出", done: false, blocks: [],
   }, {
     ...ASYNC_HISTORY_TURN, id: "compacted-continuation", prompt: "", done: false,
     blocks: [...ASYNC_HISTORY_TURN.blocks, {
-      kind: "text", message_id: "after-compaction-answer", channel: "final",
-      text: "收到，继续执行。", done: true,
+      kind: "text", message_id: "after-compaction-answer", channel: "final", text: "收到，继续执行。", done: true,
     }],
-  }];
-  const relay = await mockRightPanelRelay(page, { seedTurns: turns });
+  }] });
   await page.goto("/");
-  for (let attempt = 0; attempt < 2; attempt++) {
-    if (attempt) await page.reload();
-    const cards = page.locator(".async-question-card");
-    await expect(cards).toHaveCount(1);
-    await expect(cards).toContainText("已回答");
-    await expect(page.locator('[data-turn-id="async-user"] .async-question-card'))
-      .toHaveCount(1);
-    await expect(page.locator('[data-turn-id="compacted-continuation"] .async-question-card'))
-      .toHaveCount(0);
+  for (let i = 0; i < 2; i++) {
+    if (i) await page.reload();
     await expect(page.locator(".supplemental-answer")).toContainText("已经退出");
     await expect(page.getByText("收到，继续执行。", { exact: true })).toBeVisible();
-    const dialog = await openAsyncQuestion(page);
-    await expect(dialog.locator(".async-question-answered")).toHaveText("已回答");
-    await dialog.getByRole("button", { name: "关闭助手询问" }).click();
+    await expect(page.locator(".async-question-card, .question-resume, .async-question-dialog")).toHaveCount(0);
   }
-  expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type))))
-    .toHaveLength(0);
+  expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toHaveLength(0);
 });
 
-test("async question unanswered draft and choices survive repeated collapse without sending", async ({ page }) => {
+test("async question unanswered drafts navigate freely and survive repeated postponement", async ({ page }, info) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [{ ...ASYNC_HISTORY_TURN,
+    blocks: [{ ...ASYNC_HISTORY_TURN.blocks[0], questions: ASYNC_QUESTIONS }],
+  }] });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  await expect(dialog.locator(".qa-progress")).toHaveText("1 / 2");
+  await dialog.getByRole("radio", { name: "手机", exact: true }).check();
+  await dialog.getByRole("button", { name: "下一题" }).click();
+  await expect(dialog.getByRole("button", { name: "提交回答" })).toBeDisabled();
+  await dialog.getByRole("button", { name: "上一题" }).click();
+  await expect(dialog.getByRole("radio", { name: "手机", exact: true })).toBeChecked();
+  await dialog.getByRole("button", { name: "下一题" }).click();
+  await dialog.getByRole("textbox").fill("选区手柄\n这是保留的草稿");
+  const navigation = (await dialog.locator(".async-question-navigation").boundingBox())!;
+  const actions = (await dialog.locator(".async-question-footer-actions").boundingBox())!;
+  if (info.project.name.includes("webkit")) expect(actions.y).toBeGreaterThanOrEqual(navigation.y + navigation.height);
+  for (let i = 0; i < 2; i++) {
+    await dialog.getByRole("button", { name: "稍后回答" }).click();
+    await expect(page.locator(".question-resume")).toContainText("2 / 2");
+    await openAsyncQuestion(page);
+    await expect(dialog.getByRole("textbox")).toHaveValue("选区手柄\n这是保留的草稿");
+  }
+  await page.screenshot({ path: info.outputPath("async-question-navigation.png") });
+  expect(relay.commands.filter(c => ["query", "steer", "answer_question", "interrupt"].includes(String(c.type)))).toHaveLength(0);
+});
+
+test("async question dismiss removes its waiting entry across refresh without answering", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
   await page.goto("/");
-  const card = await openAsyncQuestion(page);
-  await expect(card).not.toContainText("发送后将开始新一轮对话");
-  await card.getByLabel("手机", { exact: true }).check();
-  await card.getByLabel("你的回答", { exact: true }).fill("选区手柄\n这是保留的草稿");
-  for (let i = 0; i < 2; i++) {
-    await card.getByRole("button", { name: "稍后回答", exact: true }).click();
-    await expect(card.getByRole("textbox")).toHaveCount(0);
-    await expect(page.locator(".async-question-card")).toContainText("待回答");
-    await openAsyncQuestion(page);
-    await expect(card.getByLabel("手机", { exact: true })).toBeChecked();
-    await expect(card.getByLabel("你的回答", { exact: true })).toHaveValue("选区手柄\n这是保留的草稿");
-  }
-  expect(relay.commands.filter(c => ["query", "steer", "answer_question", "interrupt"].includes(String(c.type))))
-    .toHaveLength(0);
+  const dialog = await openAsyncQuestion(page);
+  await dialog.getByRole("textbox").fill("这一题不回答");
+  await dialog.getByRole("button", { name: "忽略当前问题" }).click();
+  await expect(page.locator(".async-question-dialog, .question-resume, .async-question-card")).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByText("session layout-p", { exact: true })).toBeAttached();
+  await expect.poll(() => relay.commands.filter(c => c.type === "get_history").length).toBeGreaterThanOrEqual(2);
+  await expect(page.locator(".async-question-dialog, .question-resume, .async-question-card")).toHaveCount(0);
+  expect(relay.commands.filter(c => ["query", "steer", "answer_question", "interrupt"].includes(String(c.type)))).toHaveLength(0);
 });
 
-test("async question dialog keeps independent drafts and restores keyboard focus", async ({ page }, testInfo) => {
+test("async question can answer the next page first and retire only that accepted question", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [{ ...ASYNC_HISTORY_TURN,
+    blocks: [{ ...ASYNC_HISTORY_TURN.blocks[0], questions: ASYNC_QUESTIONS }],
+  }] });
+  await page.goto("/");
+  const dialog = await openAsyncQuestion(page);
+  await dialog.getByRole("button", { name: "下一题" }).click();
+  await dialog.getByRole("textbox").fill("三指拖拽");
+  await dialog.getByRole("button", { name: "提交回答" }).click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
+  const query = relay.commands.find(c => c.type === "query")!;
+  expect(query.prompt).toBe("补充回答：\n\n问题：用的是什么手势？\n回答：三指拖拽");
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toContainText("等待你回答");
+  await openAsyncQuestion(page);
+  await expect(dialog.locator("legend")).toHaveText("在哪个设备发生？");
+  relay.emit({ type: "user_msg", sid: String(query.sid), msg_id: String(query.msg_id), prompt: String(query.prompt) });
+  await expect(dialog.locator("legend")).toHaveText("在哪个设备发生？");
+  await expect(dialog.locator(".qa-progress")).toHaveCount(0);
+  await expect(page.locator(".supplemental-answer")).toContainText("三指拖拽");
+  await expect(page.locator(".async-question-card")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "忽略当前问题" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toHaveCount(0);
+  await page.locator(".supplemental-answer summary").click();
+  await expect(page.locator(".supplemental-answer-context")).toContainText("用的是什么手势？");
+});
+
+test("async question dialog keeps independent drafts across native messages and traps keyboard focus", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { seedTurns: [{ ...ASYNC_HISTORY_TURN,
     blocks: [ASYNC_HISTORY_TURN.blocks[0], { ...ASYNC_HISTORY_TURN.blocks[0], message_id: "other-question" }],
   }] });
   await page.goto("/");
   const dialog = await openAsyncQuestion(page);
-  await dialog.getByLabel("你的回答", { exact: true }).fill("第一个问题的草稿");
+  await dialog.getByRole("textbox").fill("第一个问题的草稿");
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
-  if (testInfo.project.name === "chromium") await expect(page.locator(".async-question-card").first()).toBeFocused();
+  await expect(page.locator(".question-resume")).toBeFocused();
   await openAsyncQuestion(page, 1);
-  await expect(dialog.getByLabel("你的回答", { exact: true })).toHaveValue("");
-  await dialog.getByLabel("你的回答", { exact: true }).fill("第二个问题的草稿");
-  await dialog.getByRole("button", { name: "关闭助手询问" }).click();
-  await openAsyncQuestion(page);
-  await expect(dialog.getByLabel("你的回答", { exact: true })).toHaveValue("第一个问题的草稿");
-  // The native modal owns focus; tabbing cannot activate the main composer.
+  await expect(dialog.getByRole("textbox")).toHaveValue("");
+  await dialog.getByRole("textbox").fill("第二个问题的草稿");
+  await dialog.getByRole("button", { name: "上一题" }).click();
+  await expect(dialog.getByRole("textbox")).toHaveValue("第一个问题的草稿");
   for (let i = 0; i < 9; i++) {
     await page.keyboard.press("Tab");
     expect(await dialog.evaluate(node => node.contains(document.activeElement))).toBe(true);
@@ -4019,7 +4564,9 @@ test("async question dialog keeps independent drafts and restores keyboard focus
 });
 
 test("async question dialog fits a keyboard-sized viewport without moving into a side panel", async ({ page }, testInfo) => {
-  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
+  const relay = await mockRightPanelRelay(page, { seedTurns: [{ ...ASYNC_HISTORY_TURN, blocks: [{ ...ASYNC_HISTORY_TURN.blocks[0],
+    questions: [{ title: "请说明发生问题时的具体操作、网络和设备情况。".repeat(24), options: null }],
+  }] }] });
   await page.goto("/");
   const dialog = await openAsyncQuestion(page);
   await dialog.getByLabel("你的回答", { exact: true }).fill("保留输入中的草稿");
@@ -4039,8 +4586,8 @@ test("async question dialog fits a keyboard-sized viewport without moving into a
   expect(await dialog.evaluate(node => node.parentElement === document.body)).toBe(true);
   const box = (await dialog.boundingBox())!;
   expect(Math.abs(box.x + box.width / 2 - page.viewportSize()!.width / 2)).toBeLessThan(2);
-  await expect(dialog.getByRole("button", { name: "发送回答" })).toBeInViewport();
-  await expect(dialog.getByRole("button", { name: "关闭助手询问" })).toBeInViewport();
+  await expect(dialog.getByRole("button", { name: "提交回答" })).toBeInViewport();
+  await expect(dialog.getByRole("button", { name: "稍后回答" })).toBeInViewport();
   const body = dialog.locator(".async-question-body");
   expect(await body.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
   await expect(dialog.getByLabel("你的回答", { exact: true })).toBeInViewport({ ratio: 1 });
@@ -4064,7 +4611,7 @@ test("async question dialog omits raw source previews and preserves its draft on
   await expect(dialog.locator("details, .async-question-source, .async-question-original")).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: "在 Remote 中打开 /tmp/proposal.md" })).toHaveCount(0);
   await dialog.getByLabel("你的回答", { exact: true }).fill("保留的回答草稿");
-  await dialog.getByRole("button", { name: "关闭助手询问" }).click();
+  await dialog.getByRole("button", { name: "稍后回答" }).click();
   await expect(dialog).toHaveCount(0);
   await openAsyncQuestion(page);
   await expect(dialog.getByLabel("你的回答", { exact: true })).toHaveValue("保留的回答草稿");
@@ -4084,30 +4631,32 @@ test("async question dialog survives source row virtualization without losing it
   // the normal scroll ownership path so the old reader anchor can be released.
   await page.locator(".thread").dispatchEvent("wheel", { deltaY: -1000 });
   await pauseOutputAndScrollToHistoryStart(page);
-  await expect(page.locator(".async-question-card")).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   await expect(dialog).toBeVisible();
   await expect(dialog.getByLabel("你的回答", { exact: true })).toHaveValue("虚拟列表外也要保留");
-  await dialog.getByRole("button", { name: "发送回答" }).click();
+  await dialog.getByRole("button", { name: "提交回答" }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
   expect(relay.commands.find(c => c.type === "query")?.prompt).toContain("虚拟列表外也要保留");
   expect(relay.commands.find(c => c.type === "query")?.sid).toBe("layout-parent");
 });
 
-test("async question dialog closes on a session switch and never leaks drafts", async ({ page }) => {
+test("async question dialog switches sessions with independently retained drafts", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN], secondParent: true });
   await page.goto("/");
   const dialog = await openAsyncQuestion(page);
-  await dialog.getByLabel("你的回答", { exact: true }).fill("只属于当前会话的草稿");
-  // Drive an explicit navigation intent through the real sidebar handler.
-  // Unsolicited remote focus frames are correctly ignored by the WS client.
+  await dialog.getByRole("textbox").fill("只属于当前会话的草稿");
+  await dialog.getByRole("button", { name: "稍后回答" }).click();
   await page.getByText("Second parent", { exact: true }).evaluate(node => (node as HTMLElement).click());
   await expect(page.getByText("session layout-o", { exact: true })).toBeAttached();
-  await expect(dialog).toHaveCount(0);
   await openAsyncQuestion(page);
-  await expect(dialog.getByLabel("你的回答", { exact: true })).toHaveValue("");
+  await expect(dialog.getByRole("textbox")).toHaveValue("");
+  await dialog.getByRole("textbox").fill("第二个会话的草稿");
+  await dialog.getByRole("button", { name: "稍后回答" }).click();
+  await page.getByText("Layout parent", { exact: true }).evaluate(node => (node as HTMLElement).click());
+  await openAsyncQuestion(page);
+  await expect(dialog.getByRole("textbox")).toHaveValue("只属于当前会话的草稿");
   expect(relay.commands.filter(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toHaveLength(0);
 });
-
 test("async question dialog retains an IME draft when control becomes read-only", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
   await page.goto("/");
@@ -4125,7 +4674,7 @@ test("async question dialog retains an IME draft when control becomes read-only"
   await expect(input).toHaveValue("三指拖拽的补充");
   await expect(dialog).toContainText("当前会话暂不可写，回答草稿会保留");
   expect(await dialog.getAttribute("aria-describedby")).toBeTruthy();
-  await expect(dialog.getByRole("button", { name: "发送回答" })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "提交回答" })).toBeDisabled();
   await dialog.getByRole("button", { name: "稍后回答" }).click();
   await openAsyncQuestion(page);
   await expect(input).toHaveValue("三指拖拽的补充");
@@ -4280,6 +4829,13 @@ test(`turn regressions compaction steer clears phantom detail failure across his
   const latest = page.locator('[data-turn-id="native-latest"]');
   await expect(latest.locator(".turn-process-head")).toBeVisible();
   await latest.locator(".turn-process-head").click();
+  if (!staleProcess) {
+    await expect.poll(() => relay.commands.some(command => command.type === "get_turn_detail"
+      && command.turn_id === "native-latest")).toBe(true);
+    relay.emit({ type: "turn_detail", session_id: "layout-parent", sid: "layout-parent",
+      turn_id: "native-latest", revision: "layout-history", authoritative: false,
+      error: "详细过程未完整返回，请重试", events: [], has_more: false });
+  }
   await expect(latest.getByText(staleProcess
     ? "上下文已压缩" : "详细过程未完整返回，请重试")).toBeVisible();
   seedTurns[1] = { ...seedTurns[1], processDetailState: "none", detailReasons: [],
@@ -4361,36 +4917,29 @@ test("external preview replacement stops automatic grant retries and allows a fr
   expect(relay.commands.filter(c => c.type === "get_file_preview")).toHaveLength(4);
 });
 
-test("async question history restores a nonblocking card and replies through the scoped query outbox", async ({ page }) => {
+test("async question submits close immediately without a pending reminder", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
   await page.goto("/");
-  const entry = page.locator(".async-question-card");
-  const card = page.getByRole("dialog", { name: "助手询问", exact: true });
-  await expect(entry).toBeVisible();
-  await expect(page.getByRole("dialog", { name: "操作确认" })).toHaveCount(0);
-  // This is server-backed History, not a local pendingQuestion or replay ring.
-  await page.reload();
-  await expect(entry).toBeVisible();
   await openAsyncQuestion(page);
-  await expect(card).not.toContainText("发送后将开始新一轮对话");
-  await expect(card.getByLabel("Mac", { exact: true })).toBeChecked();
-  await expect(card.getByLabel("其他回答（填写后替代选项）")).toBeVisible();
-  await card.getByLabel("其他回答（填写后替代选项）").fill("Mac 浏览器");
-  await card.getByLabel("你的回答", { exact: true }).fill("三指拖拽");
-  await card.getByLabel("你的回答", { exact: true }).press("Shift+Enter");
-  expect(relay.commands.filter((c) => c.type === "query")).toHaveLength(0);
-  await card.getByRole("button", { name: "发送回答" }).click();
-  await expect.poll(() => relay.commands.filter((c) => c.type === "query").length).toBe(1);
-  const query = relay.commands.find((c) => c.type === "query")!;
+  await page.reload();
+  const dialog = await openAsyncQuestion(page);
+  await expect(page.getByRole("dialog", { name: "操作确认" })).toHaveCount(0);
+  await dialog.getByRole("textbox").fill("三指拖拽");
+  await dialog.getByRole("textbox").press("Shift+Enter");
+  expect(relay.commands.filter(c => c.type === "query")).toHaveLength(0);
+  await dialog.getByRole("button", { name: "提交回答" }).click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
+  const query = relay.commands.find(c => c.type === "query")!;
   expect(query.sid).toBe("layout-parent");
-  expect(query.prompt).toContain("回答：Mac 浏览器");
   expect(query.prompt).toContain("回答：三指拖拽");
-  expect(relay.commands.filter((c) => ["interrupt", "answer_question", "steer"].includes(String(c.type))))
-    .toHaveLength(0);
-  await expect(card.getByRole("button", { name: "等待确认" })).toBeDisabled();
-  await expect(entry).toContainText("待回答");
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toHaveCount(0);
+  await expect(page.getByText("回答提交中…", { exact: true })).toHaveCount(0);
   relay.emit({ type: "user_msg", sid: String(query.sid), msg_id: String(query.msg_id), prompt: String(query.prompt) });
-  await expect(card).toHaveCount(0);
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".async-question-card, .question-resume")).toHaveCount(0);
+  await expect(page.locator(".supplemental-answer")).toContainText("查看问题");
+  expect(relay.commands.filter(c => ["interrupt", "answer_question", "steer"].includes(String(c.type)))).toHaveLength(0);
 });
 
 test("async question summary keeps its ordinary answer visible after refresh without detail loading", async ({ page }) => {
@@ -4404,10 +4953,12 @@ test("async question summary keeps its ordinary answer visible after refresh wit
     }],
   }] });
   await page.goto("/");
-  await expect(page.locator(".async-question-card")).toHaveCount(1);
+  await openAsyncQuestion(page);
+  await page.getByRole("button", { name: "稍后回答", exact: true }).click();
   await expect(page.getByText(answer, { exact: true })).toBeVisible();
   await page.reload();
-  await expect(page.locator(".async-question-card")).toHaveCount(1);
+  await openAsyncQuestion(page);
+  await page.getByRole("button", { name: "稍后回答", exact: true }).click();
   await expect(page.getByText(answer, { exact: true })).toHaveCount(1);
   await expect(page.getByText(answer, { exact: true })).toBeVisible();
   expect(relay.commands.filter((c) => ["query", "steer", "get_turn_detail"].includes(String(c.type))))
@@ -4499,10 +5050,10 @@ test("async question live delivery preserves running state and uses steer instea
   relay.emit({ type: "delta", sid, message_id: "async-item", turn_id: "async-task", channel: "final", text: "在哪个设备发生？" });
   for (let i = 0; i < 2; i++) relay.emit({ type: "assistant_msg_end", sid,
     message_id: "async-item", turn_id: "async-task", channel: "final",
-    delivery: "async", questions: ASYNC_QUESTIONS });
+    delivery: "async", questions: [ASYNC_QUESTIONS[1]] });
   const card = await openAsyncQuestion(page);
   await expect(card).toHaveCount(1);
-  await expect(card).toContainText("补充会发送给当前任务，不会中断执行");
+  await expect(card.locator(".async-question-hint")).toHaveCount(0);
   await expect(card).not.toContainText("发送后将开始新一轮对话");
   await card.getByLabel("你的回答", { exact: true }).fill("三指拖拽");
   await card.getByLabel("你的回答", { exact: true }).press("Enter");
@@ -4602,13 +5153,14 @@ test("async question keyboard sends with Enter, keeps Shift+Enter newlines and d
   expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
   await input.press("Escape");
   await expect(dialog).toHaveCount(0);
-  await expect(page.locator(".async-question-card")).toContainText("待回答");
+  await expect(page.locator(".question-resume")).toBeVisible();
   await openAsyncQuestion(page);
   await expect(input).toHaveValue("第一行\n第二行");
   await input.press("Enter");
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
   const query = relay.commands.find(c => c.type === "query")!;
-  await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   relay.emit({ type: "user_msg", sid: String(query.sid), msg_id: String(query.msg_id), prompt: String(query.prompt) });
   await expect(dialog).toHaveCount(0);
   expect(query.prompt).toContain("回答：第一行\n第二行");
@@ -4657,12 +5209,12 @@ test("async question completion updates reply mode while preserving a collapsed 
   relay.emit({ type: "assistant_msg_end", sid, message_id: "async-item", turn_id: "async-task", channel: "final",
     delivery: "async", questions: [{ title: "用的是什么手势？", options: null }] });
   const card = await openAsyncQuestion(page);
-  await expect(card).toContainText("补充会发送给当前任务，不会中断执行");
+  await expect(card.locator(".async-question-hint")).toHaveCount(0);
   await card.getByLabel("你的回答", { exact: true }).fill("三指拖拽");
   await card.getByRole("button", { name: "稍后回答", exact: true }).click();
   relay.emit({ type: "turn_end", sid, turn_id: "async-task", result: { subtype: "success", is_error: false } });
   relay.emit({ type: "state", sid, state: "idle" });
-  await expect(page.locator(".async-question-card")).toBeVisible();
+  await expect(page.locator(".question-resume")).toBeVisible();
   await expect(card.getByRole("textbox")).toHaveCount(0);
   await openAsyncQuestion(page);
   await expect(card.getByLabel("你的回答", { exact: true })).toHaveValue("三指拖拽");
@@ -4670,20 +5222,15 @@ test("async question completion updates reply mode while preserving a collapsed 
   await expect(card.locator(".async-question-footer .async-question-hint")).toHaveCount(0);
   expect(await card.getAttribute("aria-describedby")).toBeNull();
   await expect(card).not.toContainText("不会中断执行");
-  await card.getByRole("button", { name: "发送回答" }).click();
+  await card.getByRole("button", { name: "提交回答" }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
   expect(relay.commands.filter(c => ["steer", "interrupt", "answer_question"].includes(String(c.type)))).toHaveLength(0);
-  await expect(card.getByRole("button", { name: "等待确认" })).toBeDisabled();
-  await card.getByRole("button", { name: "稍后回答", exact: true }).click();
-  await expect(card.getByRole("textbox")).toHaveCount(0);
-  // Submission locks input until native acceptance, not the view-only toggle.
-  await openAsyncQuestion(page);
-  await expect(card.getByRole("textbox")).toBeVisible();
-  await expect(card.getByRole("textbox")).toBeDisabled();
+  await expect(card).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   const query = relay.commands.find(c => c.type === "query")!;
   relay.emit({ type: "user_msg", sid, msg_id: String(query.msg_id), prompt: String(query.prompt) });
   await expect(card).toHaveCount(0);
-  await expect(page.locator(".async-question-card")).toContainText("已回答");
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   expect(relay.commands.filter(c => c.type === "query")).toHaveLength(1);
 });
 
@@ -4693,7 +5240,7 @@ test("async question rejected at turn completion keeps the answer and retries th
   const dialog = await openAsyncQuestion(page);
   const sid = "layout-parent";
   relay.emit({ type: "state", sid, state: "running" });
-  await expect(dialog).toContainText("补充会发送给当前任务");
+  await expect(dialog.locator(".async-question-hint")).toHaveCount(0);
   const input = dialog.getByLabel("你的回答", { exact: true });
   await input.fill("项目在这台设备的工作目录里");
   await input.press("Enter");
@@ -4702,49 +5249,56 @@ test("async question rejected at turn completion keeps the answer and retries th
   // A transport ACK and another message's rejection are not this answer's result.
   relay.emit({ type: "command_ack", client_id: String(steer.client_id), cmd_id: String(steer.cmd_id) });
   relay.emit({ type: "error", sid, msg_id: "different-answer", code: "not_steerable", message: "unrelated" });
-  await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
-  await expect(input).toHaveValue("项目在这台设备的工作目录里");
-  await expect(page.locator(".async-question-card")).toContainText("待回答");
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   relay.emit({ type: "state", sid, state: "idle" });
   relay.emit({ type: "error", sid, msg_id: String(steer.msg_id), code: "not_steerable",
     message: "Codex 任务已结束，本次引导未发送。" });
-  await expect(dialog.getByRole("status")).toHaveText("当前任务已结束，本次引导未发送。请重试以开始新一轮对话。");
+  await expect(page.locator(".header-feedback")).toContainText("操作未完成");
+  await openAsyncQuestion(page);
   await expect(input).toBeEnabled();
   await expect(input).toHaveValue("项目在这台设备的工作目录里");
-  await expect(page.locator(".async-question-card")).toContainText("待回答");
+  await expect(dialog).toBeVisible();
   await input.press("Enter");
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
   const query = relay.commands.find(c => c.type === "query")!;
   expect(query.prompt).toBe(steer.prompt);
   expect(query.msg_id).not.toBe(steer.msg_id);
   relay.emit({ type: "error", sid, msg_id: String(steer.msg_id), code: "not_steerable", message: "late old rejection" });
-  await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   relay.emit({ type: "user_msg", sid, msg_id: String(query.msg_id), prompt: String(query.prompt) });
   await expect(dialog).toHaveCount(0);
-  await expect(page.locator(".async-question-card")).toContainText("已回答");
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   expect(relay.commands.filter(c => c.type === "steer")).toHaveLength(1);
   expect(relay.commands.filter(c => c.type === "interrupt")).toHaveLength(0);
 });
 
-test("async question acceptance recovered from history closes the reopened pending editor", async ({ page }) => {
-  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN] });
+test("async question hidden submission survives session switches and accepts recovered history", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, { seedTurns: [ASYNC_HISTORY_TURN], secondParent: true });
   await page.goto("/");
   const dialog = await openAsyncQuestion(page);
   await dialog.getByLabel("你的回答", { exact: true }).fill("保留到确认收到");
-  await dialog.getByRole("button", { name: "发送回答" }).click();
+  await dialog.getByRole("button", { name: "提交回答" }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
   const query = relay.commands.find(c => c.type === "query")!;
-  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toHaveCount(0);
+  await page.getByText("Second parent", { exact: true }).evaluate(node => (node as HTMLElement).click());
+  await expect(page.getByText("session layout-o", { exact: true })).toBeAttached();
   await openAsyncQuestion(page);
-  await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
-  await expect(dialog.getByLabel("你的回答", { exact: true })).toHaveValue("保留到确认收到");
+  await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
+  await page.getByText("Layout parent", { exact: true }).evaluate(node => (node as HTMLElement).click());
+  await expect(page.getByText("session layout-p", { exact: true })).toBeAttached();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   relay.emit({ type: "history", sid: "layout-parent", session_id: "layout-parent",
     revision: "layout-history", generation: "layout-generation", detail: "summary",
     events: [], has_more: false, authoritative: true, in_progress: true,
     turns: [ASYNC_HISTORY_TURN, { id: "native-recovered-reply", clientMsgId: String(query.msg_id),
       prompt: String(query.prompt), done: false, blocks: [] }] });
   await expect(dialog).toHaveCount(0);
-  await expect(page.locator(".async-question-card")).toContainText("已回答");
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   expect(relay.commands.filter(c => c.type === "query")).toHaveLength(1);
 });
 
@@ -4753,20 +5307,23 @@ test("async question unknown steer outcome keeps the draft and prevents duplicat
   await page.goto("/");
   const dialog = await openAsyncQuestion(page);
   relay.emit({ type: "state", sid: "layout-parent", state: "running" });
-  await expect(dialog).toContainText("补充会发送给当前任务");
+  await expect(dialog.locator(".async-question-hint")).toHaveCount(0);
   await dialog.getByLabel("你的回答", { exact: true }).fill("只发一次");
-  await dialog.getByRole("button", { name: "发送回答" }).click();
+  await dialog.getByRole("button", { name: "提交回答" }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "steer").length).toBe(1);
   const steer = relay.commands.find(c => c.type === "steer")!;
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   relay.emit({ type: "error", sid: "layout-parent", msg_id: String(steer.msg_id),
     code: "steer_outcome_unknown", message: "private transport detail" });
-  await expect(dialog.getByRole("status")).toHaveText("引导已发出，尚未确认是否生效。请先查看后续结果。");
+  await expect(page.locator(".header-feedback")).toContainText("操作未完成");
+  await openAsyncQuestion(page);
   await expect(dialog.getByLabel("你的回答", { exact: true })).toHaveValue("只发一次");
-  await expect(dialog.getByRole("button", { name: "发送回答" })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "提交回答" })).toBeDisabled();
   await dialog.getByRole("form").evaluate((form: HTMLFormElement) => form.requestSubmit());
   await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
   await openAsyncQuestion(page);
-  await expect(dialog.getByRole("button", { name: "发送回答" })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "提交回答" })).toBeDisabled();
   expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(1);
 });
 
@@ -4782,7 +5339,7 @@ test("async question does not mistake a queued submission for a confirmed answer
   await input.press("Enter");
   await expect(dialog.getByRole("status")).toHaveText("当前会话暂不可写，回答已保留，请稍后重试。");
   await expect(input).toHaveValue("这条回答不能被替换或重复排队");
-  await expect(page.locator(".async-question-card")).toContainText("待回答");
+  await expect(dialog).toBeVisible();
   expect(relay.commands.filter(c => ["query", "steer"].includes(String(c.type)))).toHaveLength(0);
 });
 
@@ -4795,14 +5352,15 @@ test("async question from a hidden side chat never steals the main view", async 
   relay.emit({ type: "assistant_msg_start", sid, message_id: "async-item", channel: "final" });
   relay.emit({ type: "delta", sid, message_id: "async-item", channel: "final", text: "在哪个设备发生？" });
   relay.emit({ type: "assistant_msg_end", sid, message_id: "async-item", channel: "final",
-    delivery: "async", questions: ASYNC_QUESTIONS });
-  await expect(page.locator(".async-question-card")).toHaveCount(0);
+    delivery: "async", questions: [ASYNC_QUESTIONS[1]] });
+  await expect(page.locator(".question-resume")).toHaveCount(0);
   await expect(page.locator(".btw-panel")).toHaveCount(0);
   await page.keyboard.press("Control+Shift+k");
-  await expect(page.locator(".btw-panel .async-question-card")).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Codex 想确认一下", exact: true })).toBeVisible();
   const card = await openAsyncQuestion(page);
   await expect(card).toBeVisible();
-  await card.getByRole("button", { name: "发送回答" }).click();
+  await card.getByRole("textbox").fill("手机");
+  await card.getByRole("button", { name: "提交回答" }).click();
   await expect.poll(() => relay.commands.filter((c) => c.type === "steer").length).toBe(1);
   expect(relay.commands.find((c) => c.type === "steer")?.sid).toBe(sid);
 });
@@ -4830,23 +5388,21 @@ for (const sideChat of [false, true]) {
         relay.emit({ type: "delta", sid: "btw-layout-child", message_id,
           text: "需要补充信息", channel: "final", seq: seq++ });
         relay.emit({ type: "assistant_msg_end", sid: "btw-layout-child", message_id,
-          channel: "final", delivery: "async", questions: ASYNC_QUESTIONS, seq: seq++ });
+          channel: "final", delivery: "async", questions: [ASYNC_QUESTIONS[1]], seq: seq++ });
       }
       relay.emit({ type: "state", sid: "btw-layout-child", state: "idle", seq: seq++ });
     }
-    const entries = page.locator(".async-question-card");
-    await expect(entries).toHaveCount(2);
+    await expect(page.locator(".async-question-card")).toHaveCount(0);
     const dialog = await openAsyncQuestion(page);
+    await dialog.getByRole("textbox").fill("只发第一条回答");
     await dialog.getByRole("form").evaluate((form: HTMLFormElement) => {
       form.requestSubmit();
       form.requestSubmit();
     });
     await expect.poll(() => relay.commands.filter(c => c.type === "query").length).toBe(1);
-    await expect(dialog.getByRole("button", { name: "等待确认" })).toBeDisabled();
-    await dialog.getByRole("button", { name: "稍后回答", exact: true }).click();
     await expect(dialog).toHaveCount(0);
-    await openAsyncQuestion(page, 1);
-    await expect(dialog.getByRole("button", { name: "发送回答" })).toBeDisabled();
+    await openAsyncQuestion(page);
+    await expect(dialog.getByRole("button", { name: "提交回答" })).toBeDisabled();
     await dialog.getByRole("form").evaluate((form: HTMLFormElement) => form.requestSubmit());
     expect(relay.commands.filter(c => c.type === "query")).toHaveLength(1);
     const query = relay.commands.find((c) => c.type === "query")!;
@@ -4854,7 +5410,9 @@ for (const sideChat of [false, true]) {
     expect(query.delivery).not.toBe("replace");
     expect(relay.commands.some((c) => c.type === "interrupt")).toBe(false);
     relay.emit({ type: "user_msg", sid: String(query.sid), msg_id: String(query.msg_id), prompt: String(query.prompt) });
-    await expect(dialog.getByRole("button", { name: "发送回答" })).toBeEnabled();
+    await expect(dialog.getByRole("textbox")).toBeEnabled();
+    await dialog.getByRole("textbox").fill("第二条回答的草稿");
+    await expect(dialog.getByRole("button", { name: "提交回答" })).toBeEnabled();
     await expect(dialog).toBeVisible(); // The first question's late receipt cannot close the second.
   });
 }
@@ -10016,6 +10574,19 @@ test("Mermaid cached remount paints the final size and isolates duplicate SVG re
 
 test("generated image and Markdown image reserve known geometry throughout decoding", async ({ page }) => {
   await page.goto("/tests/history-browser.html?media-layout=1&geometry=1");
+  const placeholder = page.locator(".generated-image-frame .process-image-placeholder");
+  await expect(placeholder).toHaveText("正在加载图片…");
+  await expect(placeholder.locator("svg")).toHaveCount(0);
+  const loadingTextPosition = await placeholder.evaluate(node => {
+    const frame = node.getBoundingClientRect();
+    const text = node.querySelector("span")!.getBoundingClientRect();
+    return {
+      horizontal: Math.abs((text.left + text.right - frame.left - frame.right) / 2),
+      vertical: Math.abs((text.top + text.bottom - frame.top - frame.bottom) / 2),
+    };
+  });
+  expect(loadingTextPosition.horizontal).toBeLessThan(1);
+  expect(loadingTextPosition.vertical).toBeLessThan(1);
   const measure = () => page.evaluate(() => ({
     frames: [...document.querySelectorAll(".message-image-frame,.generated-image-frame")].map((node) => node.getBoundingClientRect().height),
     text: document.querySelector('[data-testid="below-images"]')!.getBoundingClientRect().top,
@@ -16399,3 +16970,211 @@ test(`turn regressions Claude cold history keeps response headers through expand
   expect(relay.commands.some(c => ["query", "steer", "interrupt"].includes(String(c.type)))).toBe(false);
 });
 }
+
+for (const choice of ["同意回退", "拒绝回退", "编辑提问"] as const) {
+test(`Claude model fallback ${choice} uses the native pending dialog on desktop and mobile`, async ({ page }, testInfo) => {
+  const relay = await mockRightPanelRelay(page, { engine: "claude", parentState: "running" });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(command => command.type === "switch_session")).toBe(true);
+  await expect(page.locator(".composer textarea")).toBeVisible();
+  const ask = {
+    type: "ask_user" as const, sid: "layout-parent", ask_id: "native-fallback", seq: 1,
+    question: "是否允许模型回退？", options: ["同意回退", "拒绝回退", "编辑提问", "同意回退并记住"].map(label => ({ label })),
+    model_fallback: { original_model: "claude-opus-5-6", fallback_model: "claude-opus-5-5",
+      turn_id: "original-turn", original_prompt: "分析这个仓库，并保留原模型重试" },
+  };
+  relay.emit(ask);
+  const dialog = page.getByRole("dialog", { name: "是否允许模型回退？" });
+  await expect(dialog).toBeVisible();
+  await expect(page.locator(".hstat")).toHaveText("待确认");
+  await expect(dialog.getByText("Opus 5.6", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Opus 5.5", { exact: true })).toBeVisible();
+  const automatic = dialog.getByRole("checkbox", { name: "以后自动切换" });
+  await expect(automatic).not.toBeChecked();
+  const box = (await dialog.boundingBox())!;
+  const viewport = page.viewportSize()!;
+  expect(Math.abs(box.x + box.width / 2 - viewport.width / 2)).toBeLessThan(2);
+  expect(Math.abs(box.y + box.height / 2 - viewport.height / 2)).toBeLessThan(2);
+  await page.screenshot({ path: testInfo.outputPath("model-fallback-open.png") });
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  await page.screenshot({ path: testInfo.outputPath("model-fallback-dark.png") });
+  await automatic.check();
+  await dialog.getByRole("button", { name: "收起回退确认", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  const resume = page.getByRole("button", { name: /等待确认模型切换.*处理/ });
+  await expect(resume).toBeVisible();
+  await page.setViewportSize({ width: 320, height: 740 });
+  expect((await resume.boundingBox())!.height).toBeLessThanOrEqual(48);
+  expect(await resume.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+  await page.setViewportSize(viewport);
+  expect(relay.commands.filter(command => command.type === "answer_question")).toHaveLength(0);
+  await page.screenshot({ path: testInfo.outputPath("model-fallback-collapsed.png") });
+  await resume.click();
+  await expect(automatic).toBeChecked();
+  if (choice !== "同意回退") await automatic.uncheck();
+  await dialog.getByRole("button", { name: choice, exact: true }).click();
+  await expect.poll(() => relay.commands.filter(command => command.type === "answer_question").length).toBe(1);
+  const answer = relay.commands.find(command => command.type === "answer_question")!;
+  expect(answer.sid).toBe("layout-parent");
+  expect(answer.answer).toBe(choice === "同意回退" ? "同意回退并记住" : choice);
+  await expect(dialog).toBeVisible(); // Only the native close retires the pending request.
+  relay.emit({ type: "ask_user_closed", sid: "layout-parent", seq: 2,
+    ask_id: "native-fallback", reason: "answered" });
+  await expect(dialog).toBeHidden();
+  if (choice === "编辑提问") {
+    await expect(page.locator(".composer textarea")).toHaveValue(ask.model_fallback.original_prompt);
+  }
+  if (choice === "同意回退") {
+    relay.emit({ type: "model", sid: "layout-parent", seq: 3, model: "claude-opus-5-5" });
+    relay.emit({ type: "notice", sid: "layout-parent", seq: 4, notice_id: "model-fallback:native-event",
+      severity: "warning", category: "runtime", title: "模型已回退",
+      message: "claude-opus-5-6 → claude-opus-5-5。原模型拒绝响应，已切换备用模型。",
+      detail: "切换时间 2026-11-14T01:00:00Z" });
+    await expect(page.getByTitle("选择模型", { exact: true })).toContainText("claude-opus-5-5");
+    await expect(page.locator(".header-feedback")).toHaveText("模型已回退");
+    await page.locator(".header-feedback").click();
+    const details = page.getByRole("dialog", { name: "状态详情" });
+    await expect(details).toContainText("claude-opus-5-6 → claude-opus-5-5");
+    await expect(details).toContainText("切换时间 2026-11-14T01:00:00Z");
+    await page.keyboard.press("Escape");
+  }
+  expect(relay.commands.some(command => ["query", "steer", "interrupt", "set_model"].includes(String(command.type)))).toBe(false);
+});
+}
+
+test("notification click refreshes stale device validation and keeps the current session intact", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page);
+  let unavailable = false;
+  let reads = 0;
+  await page.route("**/api/devices", async route => {
+    reads += 1;
+    if (unavailable) return route.fulfill({ status: 503, body: "unavailable" });
+    return route.fulfill({ json: { devices: [{ machine_id: "layout-machine", label: "Layout", online: true }] } });
+  });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(command => command.type === "switch_session")).toBe(true);
+  await expect(page.locator(".composer textarea")).toBeVisible();
+  await expect.poll(() => reads).toBeGreaterThan(0);
+  // The active session must finish initial device discovery before this
+  // test simulates a later failed poll and a notification retry.
+  unavailable = true;
+  await page.evaluate(() => navigator.serviceWorker.dispatchEvent(new MessageEvent("message", { data: {
+    type: "cc-remote-notification", notification_id: "unavailable-device",
+    route: { machine_id: "layout-machine", session_id: "layout-parent", engine: "codex", space: "code" },
+  } })));
+  await expect(page.locator(".header-feedback")).toHaveText("操作未完成");
+  await page.locator(".header-feedback").click();
+  await page.getByRole("button", { name: "知道了", exact: true }).click();
+  const focusBefore = relay.commands.filter(command => command.type === "switch_session").length;
+  const readsBefore = reads;
+  unavailable = false;
+  await page.evaluate(() => navigator.serviceWorker.dispatchEvent(new MessageEvent("message", { data: {
+    type: "cc-remote-notification", notification_id: "completed-turn",
+    route: { machine_id: "layout-machine", session_id: "layout-parent", engine: "codex", space: "code" },
+  } })));
+  await expect.poll(() => reads).toBeGreaterThan(readsBefore);
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem("cc_remote_notification_target"))).toBeNull();
+  expect(relay.commands.filter(command => command.type === "switch_session")).toHaveLength(focusBefore);
+  await expect(page.locator(".header-feedback").filter({ hasText: "操作未完成" })).toHaveCount(0);
+  const afterFirst = reads;
+  await page.evaluate(() => navigator.serviceWorker.dispatchEvent(new MessageEvent("message", { data: {
+    type: "cc-remote-notification", notification_id: "completed-turn",
+    route: { machine_id: "layout-machine", session_id: "layout-parent", engine: "codex", space: "code" },
+  } })));
+  await page.waitForTimeout(100);
+  expect(reads).toBe(afterFirst);
+  expect(relay.commands.some(command => ["query", "steer", "interrupt"].includes(String(command.type)))).toBe(false);
+});
+
+test("notification click retries a transient device outage and consumes the retained cold route", async ({ page }) => {
+  await mockRightPanelRelay(page);
+  let reads = 0;
+  await page.route("**/api/devices", async route => {
+    reads += 1;
+    if (reads <= 2) return route.fulfill({ status: 503, body: "unavailable" });
+    return route.fulfill({ json: { devices: [{ machine_id: "layout-machine", label: "Layout", online: true }] } });
+  });
+  await page.addInitScript(() => {
+    if (!sessionStorage.getItem("notification-fixture-captured")) {
+      sessionStorage.setItem("notification-fixture-captured", "1");
+      sessionStorage.setItem("cc_remote_notification_target", JSON.stringify({
+        machine_id: "layout-machine", session_id: "layout-parent", engine: "codex", space: "code",
+      }));
+    }
+  });
+  await page.goto("/");
+  await expect.poll(() => reads).toBeGreaterThan(2);
+  await expect(page.locator(".composer textarea")).toBeVisible();
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem("cc_remote_notification_target"))).toBeNull();
+  await expect(page.locator(".header-feedback").filter({ hasText: "操作未完成" })).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator(".composer textarea")).toBeVisible();
+  await expect(page.locator(".header-feedback").filter({ hasText: "操作未完成" })).toHaveCount(0);
+});
+
+test("notification click can retry the same notification after a failed validation", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page);
+  let unavailable = false;
+  await page.route("**/api/devices", async route => {
+    if (unavailable) return route.fulfill({ status: 503, body: "unavailable" });
+    return route.fulfill({ json: { devices: [{ machine_id: "layout-machine", label: "Layout", online: true }] } });
+  });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(command => command.type === "switch_session")).toBe(true);
+  unavailable = true;
+  const clickNotification = () => page.evaluate(() => navigator.serviceWorker.dispatchEvent(new MessageEvent("message", {
+    data: { type: "cc-remote-notification", notification_id: "retryable-turn",
+      route: { machine_id: "layout-machine", session_id: "layout-parent", engine: "codex", space: "code" } },
+  })));
+  await clickNotification();
+  await expect(page.locator(".header-feedback")).toHaveText("操作未完成");
+  await page.locator(".header-feedback").click();
+  await page.getByRole("button", { name: "知道了", exact: true }).click();
+  unavailable = false;
+  await clickNotification();
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem("cc_remote_notification_target"))).toBeNull();
+  await expect(page.locator(".header-feedback").filter({ hasText: "操作未完成" })).toHaveCount(0);
+});
+
+test("notification click resumes a cached session when returning from another device", async ({ page }) => {
+  let holdReturningDevice = false;
+  const relay = await mockRightPanelRelay(page, {
+    retained: false,
+    devices: [
+      { machine_id: "layout-machine", label: "Mac", online: true },
+      { machine_id: "second-machine", label: "VPS", online: true },
+    ],
+    sessionIdForMachine: machine => `${machine}-session`,
+    listReply: (_command, machine) => holdReturningDevice && machine === "layout-machine" ? null : undefined,
+    historyReply: (command, machine) => ({
+      type: "history", session_id: String(command.session_id), sid: String(command.session_id),
+      revision: "notification-cache", generation: "layout-generation", detail: "summary", has_more: false,
+      events: [], turns: [{ id: "remembered-turn", prompt: "Check device", done: true,
+        blocks: [{ kind: "text", message_id: "remembered-answer", channel: "final",
+          text: `Cached answer from ${machine}`, done: true }] }],
+    }),
+  });
+  await page.goto("/");
+  await expect(page.getByText("Cached answer from layout-machine", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "设备中心", exact: true }).click();
+  await page.getByRole("dialog", { name: "设备中心" }).getByRole("button", { name: /VPS/ }).click();
+  await expect(page.getByText("Cached answer from second-machine", { exact: true })).toBeVisible();
+  holdReturningDevice = true;
+  const start = relay.commands.length;
+  await page.evaluate(() => navigator.serviceWorker.dispatchEvent(new MessageEvent("message", { data: {
+    type: "cc-remote-notification", notification_id: "mac-cached-turn",
+    route: { machine_id: "layout-machine", session_id: "layout-machine-session", engine: "codex", space: "code" },
+  } })));
+  await expect(page.getByText("Cached answer from layout-machine", { exact: true })).toBeVisible();
+  await expect.poll(() => relay.commands.slice(start).some(command =>
+    command.type === "list_sessions" && command.engine === "codex" && command.space === "code")).toBe(true);
+  const request = relay.commands.slice(start).findLast(command =>
+    command.type === "list_sessions" && command.engine === "codex" && command.space === "code")!;
+  relay.emit({ type: "session_list", engine: "codex", space: "code", request_id: String(request.cmd_id),
+    sessions: [{ session_id: "layout-machine-session", engine: "codex", space: "code",
+      summary: "Restored Mac session", cwd: "/tmp/layout", state: "idle" }] });
+  await expect.poll(() => relay.commands.slice(start).filter(command => command.type === "switch_session"
+    && command.session_id === "layout-machine-session").length).toBe(1);
+  await expect.poll(() => page.evaluate(() => sessionStorage.getItem("cc_remote_notification_target"))).toBeNull();
+  expect(relay.commands.some(command => ["query", "steer", "interrupt"].includes(String(command.type)))).toBe(false);
+});

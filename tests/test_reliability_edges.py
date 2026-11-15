@@ -32,6 +32,7 @@ from cc_remote.protocol import (
     serialize,
 )
 from cc_remote.wrapper.ringbuffer import RingBuffer
+from cc_remote.wrapper.codex_sessions import catalog_index_only
 from cc_remote.wrapper.session_ctx import ActiveTurnBinding, PendingAskState
 from cc_remote.wrapper import machine as mm
 from tests.test_multisession import _mk_ctx, _mk_machine
@@ -568,7 +569,7 @@ def test_session_lists_echo_engine_and_are_unicast_to_each_requester(monkeypatch
     codex_calls = []
 
     async def list_codex_sessions(_limit):
-        codex_calls.append(_limit)
+        codex_calls.append((_limit, catalog_index_only()))
         return []
 
     monkeypatch.setattr(mm, "list_sessions", list_claude_sessions)
@@ -591,7 +592,7 @@ def test_session_lists_echo_engine_and_are_unicast_to_each_requester(monkeypatch
             ("codex", "client-codex-work"),
         ]
         assert lists[-1].space == "work"
-        assert codex_calls == [200]
+        assert codex_calls == [(200, True), (200, False)]
         # The wrapper applies the cap after filtering native metadata stubs.
         assert len(calls) == 1 and calls[0][1] is None
         assert calls[0][0] != caller_thread

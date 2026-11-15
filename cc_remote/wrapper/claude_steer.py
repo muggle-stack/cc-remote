@@ -88,6 +88,8 @@ async def apply_echo(machine, ctx, message, native_id):
     if not metadata or not native_id:
         return None
     ctx.active_msg_id = metadata["id"]
+    if hasattr(ctx.sdk, "service_turn_metadata"):
+        ctx.sdk.service_turn_metadata = metadata
     ctx.translator.rebind_turn(ctx.active_msg_id)
     await machine._remember_claude_client_message_id(
         ctx, native_id, emit_binding=False)
