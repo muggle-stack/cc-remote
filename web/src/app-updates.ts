@@ -4,7 +4,20 @@ export type UpdatePhase = "submitting" | "preparing" | "downloading" | "waiting_
 export interface UpdateJob {
   id: string; version: string; previous: string; phase: UpdatePhase; reason?: string | null;
   cleanup_pending?: boolean; cancel_requested?: boolean;
+  cleanup_reason?: string | null;
   updated_at?: number;
+}
+
+export function cleanupNotice(reason: string | null | undefined): string {
+  switch (reason) {
+    case "dependencies": return "旧版运行时仍在使用，释放引用后会自动清理。";
+    case "waiting_connection": return "正在等待设备重连，旧部署文件会自动重试清理。";
+    case "waiting_staging": return "部署暂存正在等待核对，完成验收后会自动清理。";
+    case "macos_scan_authorization": return "清理需要管理员授权扫描系统服务。请在设备上运行 cc-remote cleanup --authorize-system-scan。";
+    case "permission_required": return "清理缺少读取权限，需要管理员核对。详细原因见安装目录中的 .retention-status.json。";
+    case "review_required": return "系统服务依赖需要管理员核对。详细原因见安装目录中的 .retention-status.json。";
+    default: return "旧部署文件清理尚未完成。请检查安装目录中的 .retention-status.json，查看具体原因。";
+  }
 }
 export interface AppUpdateState {
   maintenance?: boolean;
@@ -107,6 +120,7 @@ export function parseUpdateJob(raw: unknown): UpdateJob | null {
   return { id: value.id, version: value.version, previous: value.previous, phase: value.phase as UpdatePhase,
     reason: typeof value.reason === "string" ? value.reason : null,
     cleanup_pending: value.cleanup_pending === true, cancel_requested: value.cancel_requested === true,
+    cleanup_reason: typeof value.cleanup_reason === "string" ? value.cleanup_reason : null,
     updated_at: typeof value.updated_at === "number" ? value.updated_at : undefined };
 }
 export function parseAppUpdate(raw: unknown): AppUpdateState {

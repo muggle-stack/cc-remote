@@ -1011,11 +1011,10 @@ def test_codex_sessions_toml_loader_falls_back_on_python_310(monkeypatch):
 def test_codex_session_list_cold_reads_are_singleflight(monkeypatch):
     async def run():
         machine, transport = _mk_machine()
-        calls = 0
+        calls = {True: 0, False: 0}
 
         async def fake_list(_limit):
-            nonlocal calls
-            calls += 1
+            calls[codex_sessions_module.catalog_index_only()] += 1
             await asyncio.sleep(0.01)
             return [{
                 "session_id": "catalog-session", "summary": "catalog",
@@ -1029,7 +1028,8 @@ def test_codex_session_list_cold_reads_are_singleflight(monkeypatch):
             for client in ("client-a", "client-b")
         ])
 
-        assert calls == 1
+        await machine._codex_catalog_reconcile_task
+        assert calls == {True: 1, False: 1}
         lists = [event for event in transport.sent if event.type == "session_list"]
         assert len(lists) == 2
         assert {event.to for event in lists} == {"client-a", "client-b"}

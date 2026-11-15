@@ -198,7 +198,7 @@ def public_job(value: dict | None) -> dict | None:
     # No local paths, subprocess output, commands, environment or credentials.
     return {key: value.get(key) for key in (
         "id", "version", "previous", "phase", "reason", "updated_at",
-        "created_at", "cleanup_pending", "cancel_requested",
+        "created_at", "cleanup_pending", "cleanup_reason", "cancel_requested",
     )}
 
 

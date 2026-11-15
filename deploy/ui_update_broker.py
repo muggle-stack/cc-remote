@@ -30,10 +30,7 @@ def unit_argument(value: str, *, expand_environment: bool = True) -> str:
     return '"' + (escaped.replace('$', '$$') if expand_environment else escaped) + '"'
 
 
-def install(root: Path, account) -> None:
-    from deploy.install_cli import _atomic_file
-    from deploy.linux_service import trusted
-    trusted(UNIT_DIRECTORY)
+def service_files(root: Path, account) -> dict[Path, str]:
     name = helper_path(root).name
     group = grp.getgrgid(account.pw_gid).gr_name
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", group):
@@ -70,9 +67,18 @@ PrivateTmp=yes
 UMask=0077
 RuntimeMaxSec=100
 '''
+    return {UNIT_DIRECTORY / (name + '.socket'): socket_unit,
+            UNIT_DIRECTORY / (name + '@.service'): service_unit}
+
+
+def install(root: Path, account) -> None:
+    from deploy.install_cli import _atomic_file
+    from deploy.linux_service import trusted
+    trusted(UNIT_DIRECTORY)
+    name = helper_path(root).name
+    marker = '# cc-remote restricted UI update broker\n'
     original = {}
-    paths = {UNIT_DIRECTORY / (name + '.socket'): socket_unit,
-             UNIT_DIRECTORY / (name + '@.service'): service_unit}
+    paths = service_files(root, account)
     for path in paths:
         if path.is_symlink() or path.exists() and not path.read_text().startswith(marker):
             raise ValueError("unrelated update broker unit already exists")

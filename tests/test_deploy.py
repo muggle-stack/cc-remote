@@ -617,8 +617,10 @@ def test_post_switch_activation_commits_or_restores_full_release_caddy_and_unit(
         runtime = new_release / ".venv/bin/python"
         runtime.parent.mkdir()
         runtime.write_text(
-            '#!/bin/sh\nprintf "%s\\n" "$@" > "$CLI_REGISTRATION_LOG"\n'
+            '#!/bin/sh\ncase "$1" in\n*/install_cli.py)\n'
+            'printf "%s\\n" "$@" > "$CLI_REGISTRATION_LOG"\n'
             + ("exit 0\n" if activation.endswith("success") else "exit 23\n")
+            + ';;\n*/retention_job.py) exit 0 ;;\n*) exit 99 ;;\nesac\n'
         )
         runtime.chmod(0o755)
 

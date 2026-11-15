@@ -484,12 +484,13 @@ def test_task_launcher_keeps_nonroot_identity_and_never_uses_relay(linux_launche
 
 @pytest.mark.parametrize("role", ["relay", "wrapper"])
 @pytest.mark.parametrize("option", ["--role", "--role=", "--ro", "--ro="])
-def test_launcher_selects_requested_runtime_before_loading_python(linux_launcher, role, option):
+@pytest.mark.parametrize('operation', ['update', 'cleanup'])
+def test_launcher_selects_requested_runtime_before_loading_python(linux_launcher, role, option, operation):
     command, env, releases = linux_launcher
     other = "wrapper" if role == "relay" else "relay"
     (releases[other] / "cc_remote/__main__.py").write_text("raise ImportError('broken unrelated runtime')\n")
     selection = [f"{option}{role}"] if option.endswith("=") else [option, role]
-    arguments = ["update", "--check", *selection]
+    arguments = [operation, *(['--check'] if operation == 'update' else []), *selection]
     result = subprocess.run(command + arguments, env=env, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {"role": role, "argv": arguments}

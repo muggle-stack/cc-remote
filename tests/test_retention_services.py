@@ -79,11 +79,100 @@ def test_review_is_opt_in_and_does_not_silence_default_guard(site):
     assert retention.service_dependencies(approve(), [old]) == []
 
 
-def test_reviewed_runtime_command_keeps_dependencies_and_detects_changed_input(site):
-    _, old, _, transient, _, _, approve = site
+@pytest.mark.parametrize('reviewed', [False, True])
+@pytest.mark.parametrize('missing', ['/run/user/1000', '/run/systemd/transient/finished.service'])
+def test_disappearing_runtime_inputs_trigger_complete_rediscovery(site, monkeypatch, reviewed, missing):
+    _, old, _, transient, service, context, approve = site
+    service.write_text('[Service]\nExecStart=/usr/bin/true\n')
+    context = approve() if reviewed else context
+    monkeypatch.setattr(retention.sys, 'platform', 'linux')
+    owner, name = (reviews, 'snapshot') if reviewed else (retention, 'service_files')
+    original = getattr(owner, name)
+    calls = []
+
+    def discover(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise FileNotFoundError(2, 'runtime manager exited', missing)
+        (transient / 'new.service').write_text(f'[Service]\nExecStart=/usr/bin/cat {old}/payload\n')
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, name, discover)
+    assert retention.service_dependencies(context, [old]) == [str(old)]
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize('missing,attempts', [('/run/user/1000', 3), ('/etc/systemd/system/broken.service', 1)])
+def test_persistent_or_unresolved_missing_inputs_still_defer(site, monkeypatch, missing, attempts):
+    _, old, _, _, _, context, _ = site
+    monkeypatch.setattr(retention.sys, 'platform', 'linux')
+    calls = []
+
+    def discover(*args):
+        calls.append(1)
+        raise FileNotFoundError(2, 'missing service input', missing)
+
+    monkeypatch.setattr(retention, 'service_files', discover)
+    with pytest.raises(FileNotFoundError):
+        retention.service_dependencies(context, [old])
+    assert old.is_dir() and len(calls) == attempts
+
+
+@pytest.mark.parametrize('kind', ['updater', 'retention'])
+def test_exact_installer_services_can_extend_existing_review(site, monkeypatch, kind):
+    from types import SimpleNamespace
+    from deploy import ui_update_broker, retention_job
+    root, old, units, _, _, context, approve = site
+    monkeypatch.setattr(reviews.sys, 'platform', 'linux')
+    monkeypatch.setattr(ui_update_broker, 'UNIT_DIRECTORY', units)
+    monkeypatch.setattr(retention_job, 'SYSTEM_UNITS', units)
+    monkeypatch.setattr(reviews.pwd, 'getpwnam', lambda name: SimpleNamespace(pw_gid=0))
+    (root / 'installation.json').write_text(json.dumps({'role': 'wrapper', 'user': 'operator'}))
+    approved = approve()
+    if kind == 'updater':
+        contents = {p: value.encode() for p, value in ui_update_broker.service_files(
+            root, SimpleNamespace(pw_gid=0)).items()}
+    else:
+        contents = retention_job.service_files(root, Path(context['home']), 'linux')
+    for path, raw in contents.items():
+        path.write_bytes(raw)
+        path.chmod(0o644)
+    selected = next(p for p in contents if p.suffix in {'.socket', '.timer'})
+    directory = units / ('sockets.target.wants' if kind == 'updater' else 'timers.target.wants')
+    directory.mkdir()
+    (directory / selected.name).symlink_to(selected)
+    assert retention.service_dependencies(approved, [old]) == []
+    selected.write_bytes(contents[selected] + b'\nExecStart=/unexpected/worker\n')
+    with pytest.raises(ValueError, match='configuration changed'):
+        retention.service_dependencies(approved, [old])
+
+
+def test_old_runtime_snapshot_entries_are_reinspected_without_invalidating_persistent_review(site):
+    root, old, _, transient, _, _, approve = site
+    context = approve()
+    path = root / reviews.REVIEW
+    value = json.loads(path.read_text())
+    value['snapshot']['roots'].append(str(transient))
+    value['snapshot']['files'][str(transient / 'departed.scope')] = {'kind': 'file', 'sha256': 'old'}
+    path.write_text(json.dumps(value))
+    assert retention.service_dependencies(context, [old]) == []
+    (transient / 'unreviewed.service').write_text('[Service]\nExecStart=/bin/sh -c true\n')
+    with pytest.raises(ValueError, match='indirect service'):
+        retention.service_dependencies(context, [old])
+
+
+@pytest.mark.parametrize('legacy_snapshot', [False, True])
+def test_reviewed_runtime_command_keeps_dependencies_and_detects_changed_input(site, legacy_snapshot):
+    root, old, _, transient, _, _, approve = site
     service = transient / 'legacy.service'
     service.write_text(f'[Service]\nExecStart=/bin/sh -c "cat {old}/payload"\n')
     context = approve()
+    if legacy_snapshot:
+        path = root / reviews.REVIEW
+        value = json.loads(path.read_text())
+        value['snapshot']['roots'].append(str(transient))
+        value['snapshot']['files'].update(value.pop('runtime_inputs'))
+        path.write_text(json.dumps(value))
     assert retention.service_dependencies(context, [old]) == [str(old)]
     service.write_text('[Service]\nExecStart=/bin/sh -c "$CHANGED"\n')
     with pytest.raises(ValueError, match='indirect service command'):

@@ -463,11 +463,21 @@ fi
 if [ -n "$RETENTION_GENERATION" ]; then
   if "$NEW_RELEASE_DIR/.venv/bin/python" "$NEW_RELEASE_DIR/deploy/release_retention.py" commit \
       --root "$APPDIR" --generation "$RETENTION_GENERATION"; then
+    if [ -n "${CC_REMOTE_DEPLOY_STAGE:-}" ]; then
+      "$NEW_RELEASE_DIR/.venv/bin/python" "$NEW_RELEASE_DIR/deploy/retention_staging.py" finish \
+        --root "$APPDIR" --stage "$CC_REMOTE_DEPLOY_STAGE" || \
+        echo "WARNING: Deployment staging still needs its activation outcome verified."
+    fi
     "$NEW_RELEASE_DIR/.venv/bin/python" "$NEW_RELEASE_DIR/deploy/release_retention.py" prune \
       --root "$APPDIR" || echo "WARNING: Older backups retained; inspect the retention report."
   else
     echo "WARNING: Installed, but retention acceptance is incomplete; all backups retained."
   fi
+fi
+
+if (( MANAGED_RELEASE )); then
+  "$NEW_RELEASE_DIR/.venv/bin/python" "$NEW_RELEASE_DIR/deploy/retention_job.py" install --root "$APPDIR" || \
+    echo "WARNING: Deferred cleanup scheduling needs attention; use cc-remote cleanup to retry."
 fi
 
 echo
