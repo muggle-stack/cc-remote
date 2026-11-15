@@ -888,6 +888,121 @@ async function mockRightPanelRelay(
   return { commands, connections, emit: (message: PanelRelayEvent) => emit(message) };
 }
 
+for (const width of [390, 1280]) {
+  test(`Claude assistant-only detail pages retain identity after compaction at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const sid = "layout-parent";
+    const turnId = "source-head:thinking";
+    const relay = await mockRightPanelRelay(page, {
+      engine: "claude", retained: false, parentState: "running",
+      historyReply: () => ({
+        type: "history", sid, session_id: sid,
+        revision: "layout-history", generation: "layout-generation",
+        detail: "summary", in_progress: true, newest_id: turnId,
+        events: [], has_more: false, turns: [{
+          id: turnId, prompt: "", done: false, ts: 100_000, blocks: [],
+          detailLoaded: false, processDetailState: "present", detailEventCount: 4,
+        }],
+      }),
+    });
+    await page.goto("/");
+    await expect.poll(() => relay.commands.some(command =>
+      command.type === "get_turn_detail" && command.turn_id === turnId)).toBe(true);
+    relay.emit({ type: "turn_binding", sid, seq: 1, ts: 100,
+      msg_id: turnId, turn_id: turnId, autonomous: true });
+    relay.emit({ type: "state", sid, seq: 2, state: "running" });
+    relay.emit({
+      type: "turn_detail", sid, session_id: sid, turn_id: turnId,
+      revision: "layout-history", authoritative: true,
+      has_more: false, has_newer: false, events: [
+        { v: PROTOCOL_VERSION, ts: 100, sid, type: "turn_binding",
+          msg_id: turnId, turn_id: turnId, autonomous: true },
+        { v: PROTOCOL_VERSION, ts: 102, sid, type: "assistant_msg_start",
+          message_id: "later-page:thinking", channel: "thinking" },
+        { v: PROTOCOL_VERSION, ts: 102, sid, type: "delta",
+          message_id: "later-page:thinking", channel: "thinking", text: "分页后的过程内容" },
+        { v: PROTOCOL_VERSION, ts: 103, sid, type: "assistant_msg_end",
+          message_id: "later-page:thinking", channel: "thinking" },
+      ],
+    });
+    const turn = page.locator(`.turn[data-turn-id="${turnId}"]`);
+    await expect(turn).toHaveCount(1);
+    await expect(turn).toContainText("分页后的过程内容");
+    await expect(turn.locator(".turn-process-label")).toContainText("正在处理");
+    await expect(turn.locator(".turn-working")).toBeVisible();
+    await expect(page.getByText("过程解析失败", { exact: true })).toHaveCount(0);
+    expect(relay.commands.filter(command =>
+      ["query", "steer", "interrupt"].includes(String(command.type)))).toEqual([]);
+  });
+}
+
+for (const recovery of ["completion", "history"] as const) {
+  for (const width of [390, 1280]) {
+    test(`Codex restores a partial final answer through ${recovery} at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      const sid = "layout-parent", turnId = "cut-answer-user";
+      const messageId = "cut-answer-final";
+      const prefix = "根因是 Claude 压缩后的部分过程没有";
+      const fullText = prefix + "用户消息作为锚点，分页后丢失轮次标识。";
+      const summary = {
+        id: turnId, prompt: "检查显示", done: false, blocks: [],
+        detailLoaded: false, processDetailState: "present" as const, detailEventCount: 6,
+      };
+      const relay = await mockRightPanelRelay(page, {
+        retained: false, parentState: "running", historyReply: () => ({
+          type: "history", sid, session_id: sid,
+          revision: "layout-history", generation: "layout-generation", detail: "summary",
+          in_progress: true, newest_id: turnId, events: [], has_more: false, turns: [summary],
+        }),
+      });
+      await page.goto("/");
+      await expect.poll(() => relay.commands.some(command =>
+        command.type === "get_turn_detail" && command.turn_id === turnId)).toBe(true);
+      relay.emit({ type: "turn_binding", sid, seq: 1, msg_id: turnId, turn_id: turnId });
+      relay.emit({ type: "state", sid, seq: 2, state: "running" });
+      const detail = [
+        { v: PROTOCOL_VERSION, ts: 100, sid, type: "user_msg", msg_id: turnId, prompt: summary.prompt },
+        { v: PROTOCOL_VERSION, ts: 100, sid, type: "tool_use", tool_use_id: "read-source",
+          message_id: "read-message", tool: "Read", input: {} },
+        { v: PROTOCOL_VERSION, ts: 101, sid, type: "tool_result", tool_use_id: "read-source",
+          content: "ok", is_error: false },
+        { v: PROTOCOL_VERSION, ts: 102, sid, type: "assistant_msg_start",
+          message_id: messageId, channel: "final" },
+        { v: PROTOCOL_VERSION, ts: 102, sid, type: "delta",
+          message_id: messageId, channel: "final", text: prefix },
+        { v: PROTOCOL_VERSION, ts: 103, sid,
+          type: "assistant_msg_end", message_id: messageId, channel: "final" },
+      ];
+      relay.emit({ type: "turn_detail", sid, session_id: sid, turn_id: turnId,
+        revision: "layout-history", authoritative: true,
+        has_more: false, has_newer: false, events: detail });
+      const turn = page.locator(`.turn[data-turn-id="${turnId}"]`);
+      await expect(turn).toContainText(prefix);
+      if (recovery === "completion") {
+        relay.emit({ type: "delta", sid, seq: 3, turn_id: turnId,
+          message_id: messageId, channel: "final", text: fullText, replace: true });
+        relay.emit({ type: "assistant_msg_end", sid, seq: 4, turn_id: turnId,
+          message_id: messageId, channel: "final" });
+      }
+      relay.emit({ type: "turn_end", sid, seq: 5, turn_id: turnId,
+        result: { subtype: "success", duration_ms: 4000, is_error: false } });
+      relay.emit({ type: "state", sid, seq: 6, state: "idle" });
+      if (recovery === "history") {
+        relay.emit({ type: "history", sid, session_id: sid, revision: "layout-history",
+          generation: "layout-generation", detail: "summary", live_seq: 6,
+          in_progress: false, newest_id: turnId, events: [], has_more: false,
+          turns: [{ ...summary, done: true, blocks: [{ kind: "text", message_id: messageId,
+            channel: "final", text: fullText, done: true }] }] });
+      }
+      await expect(turn.locator(".assistant-answer-segment")).toHaveText(fullText);
+      await expect(turn.locator(".turn-working")).toHaveCount(0);
+      await expect(turn.locator(".turn-process-label")).toContainText("已处理");
+      expect(relay.commands.filter(command =>
+        ["query", "steer", "interrupt"].includes(String(command.type)))).toEqual([]);
+    });
+  }
+}
+
 test("device return paints only authorized content after initial device discovery", async ({ page }) => {
   const devices = [{ machine_id: "layout-machine", label: "Authorized device", online: true }];
   const relay = await mockRightPanelRelay(page, {

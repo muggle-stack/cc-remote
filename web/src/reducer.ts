@@ -4677,7 +4677,8 @@ function reduceEvent(
             .map((alias) => loadedDetail.get(alias))
             .find((candidate): candidate is Turn => !!candidate);
           if (!detail) return turn;
-          const merged = mergeAuthoritativeTurnDetail(turn, detail, built.turns);
+          const merged = mergeAuthoritativeTurnDetail(
+            turn, detail, built.turns, settledCodexHistory);
           // A completed row may be the neutral-steer segment whose text or
           // Plan spans the clarification, but only a current running History
           // (or a newer live frame which raced this page) may keep it open. An
@@ -6603,7 +6604,15 @@ function reduceEvent(
         // ids are immutable, so a completed exact block is authoritative. Never
         // use text containment here: repeated prose and bounded History prefixes
         // are both legitimate content and cannot safely prove replay identity.
-        if (!block.done) {
+        // A Codex completion snapshot can repair a message whose in-flight
+        // detail page closed its streamed prefix before the real item finished.
+        // Keep completed tasks fenced against delayed replacement snapshots.
+        const activeCodexReplacement = e.replace && boundCompletedTurns
+          && (ownership?.engine === "codex" || state.sessions.some(
+            session => session.session_id === e.sid && session.engine === "codex"))
+          && rt.state !== "idle"
+          && (!t.done || (!!rt.liveOwner && turnHasIdentityAlias(t, rt.liveOwner.turnId)));
+        if (!block.done || activeCodexReplacement) {
           block.text = e.replace ? e.text.slice(0, MAX_LIVE_TEXT_CHARS) : appendField(block.text, e.text, MAX_LIVE_TEXT_CHARS);
         }
         if (block.channel !== "final" && e.text.length > 0) {

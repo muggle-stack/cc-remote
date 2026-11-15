@@ -16,7 +16,7 @@ import shlex
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from itertools import islice
-from typing import Callable
+from typing import Any, Callable
 
 from pydantic import ValidationError
 
@@ -2451,6 +2451,7 @@ class CodexStreamTranslator:
         self.tool_result_max = tool_result_max
         self._started: set[str] = set()
         self._text_seen: set[str] = set()
+        self._text_digests: dict[str, Any] = {}
         self._message_channels: dict[str, str] = {}
         self._async_messages: set[str] = set()
         self._tools_started: set[str] = set()
@@ -2514,6 +2515,8 @@ class CodexStreamTranslator:
             delta = p.get("delta")
             if isinstance(delta, str) and delta:
                 self._text_seen.add(iid)
+                digest = self._text_digests.setdefault(iid, hashlib.sha256())
+                digest.update(delta.encode("utf-8", "surrogatepass"))
                 self._visible_output = True
                 if channel == "final" and iid not in self._async_messages:
                     self._final_output = True
@@ -2563,10 +2566,16 @@ class CodexStreamTranslator:
                     channel = self._message_channels.get(iid, "unknown")
                 else:
                     self._message_channels[iid] = channel
-                # Some providers send only item/completed with the final text and
-                # no delta notification. Preserve that answer instead of turning
-                # it into a false empty-completed error.
-                if text and iid not in self._text_seen:
+                # Completion carries the authoritative body. A dropped live
+                # delta must not leave a partial message permanently closed.
+                # Compare bounded digests instead of retaining another full
+                # copy of every streamed answer.
+                digest = self._text_digests.get(iid)
+                text_seen = iid in self._text_seen
+                complete_digest = hashlib.sha256(
+                    text.encode("utf-8", "surrogatepass"))
+                if text and (not text_seen or digest is None
+                             or digest.digest() != complete_digest.digest()):
                     if iid not in self._started:
                         if self._open_msg is not None and self._open_msg != iid:
                             self._close_open(out)
@@ -2578,7 +2587,9 @@ class CodexStreamTranslator:
                     self._text_seen.add(iid)
                     self._visible_output = True
                     out.append(Delta(
-                        message_id=iid, text=text, channel=channel))
+                        message_id=iid, text=text, channel=channel,
+                        replace=text_seen))
+                    self._text_digests[iid] = complete_digest
                 if item.get("delivery") == "async":
                     self._async_messages.add(iid)
                     self._final_output = any(
@@ -3033,6 +3044,7 @@ class CodexStreamTranslator:
             terminal._codex_authoritative_terminal = authoritative_terminal
             out.append(terminal)
             self._clear_all_delta_budgets()
+            self._text_digests.clear()
             self._completed_plan = None
             self._turn_closed = True
 
