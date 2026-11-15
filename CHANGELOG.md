@@ -4,6 +4,16 @@
 
 ## Unreleased
 
+## v5.3.34
+
+Fix updates that remain blocked after Codex sessions become idle and allow more time for Wrapper restart recovery. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Retire pending Codex input identities when the matching record is already durable, including repeated confirmations and history backfill.
+- Reconcile previously accepted identity proofs after turn ownership is released, preserving pending records on persistence failure or identity mismatch.
+- Allow up to 120 seconds for the Wrapper control connection to recover before activation, with cancellation and timeout checks.
+
+See the bilingual [release notes](docs/releases/v5.3.34.md).
+
 ## v5.3.33
 
 Fix Claude process-detail loading and incomplete Codex replies. Wire protocol v94 and Claude Agent SDK 0.2.174.
