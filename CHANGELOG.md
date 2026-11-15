@@ -4,6 +4,19 @@
 
 ## Unreleased
 
+## v5.3.32
+
+Recover deferred deployment cleanup and improve Codex's initial session-list response. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Retry deferred cleanup through installation-scoped systemd timers and macOS LaunchAgents, with fresh dependency and service checks.
+- Track new deployment staging by activation generation and directory identity, and retire it after verified acceptance.
+- Rebuild disappearing runtime service inputs and validate installer-generated service definitions against exact templates.
+- Support administrator-authorized, bounded macOS system plist reads through `cc-remote cleanup --authorize-system-scan`.
+- Show specific cleanup reasons and refresh completed update receipts when maintenance finishes.
+- Return indexed Codex sessions before background native catalog reconciliation, preserving concurrent-read ordering and failed-profile caches.
+
+See the bilingual [release notes](docs/releases/v5.3.32.md).
+
 ## v5.3.31
 
 Fix timezone environment parsing that could defer old deployment cleanup after a successful upgrade. Wire protocol v94 and Claude Agent SDK 0.2.174.
