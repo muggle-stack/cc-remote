@@ -4,6 +4,16 @@
 
 ## Unreleased
 
+## v5.3.33
+
+Fix Claude process-detail loading and incomplete Codex replies. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Preserve the original Claude turn identity on every detail page, including compacted history without an explicit user marker.
+- Reconcile complete Codex replies with streamed text and settled history, while preserving process details and rejecting stale turn updates.
+- Preserve replacement boundaries when compacting replayed text, preventing partial and complete replies from being concatenated after reconnect.
+
+See the bilingual [release notes](docs/releases/v5.3.33.md).
+
 ## v5.3.32
 
 Recover deferred deployment cleanup and improve Codex's initial session-list response. Wire protocol v94 and Claude Agent SDK 0.2.174.
