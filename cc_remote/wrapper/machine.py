@@ -264,6 +264,7 @@ from cc_remote.wrapper.history_store import (
     MaterializedTurnDetail,
     history_image_from_events,
     history_source_extends,
+    history_turn_id,
     history_turn_snapshot_hash,
     materialize_history_turns,
     group_history_events,
@@ -832,6 +833,7 @@ def _turn_detail_page(
     before: str | None,
     limit: int,
     max_bytes: int | None = None,
+    bind_source_turn: bool = False,
 ) -> tuple[list[dict], bool, str | None, bool, str | None]:
     """Select a source-ordered, block-complete detail window."""
     grouped_rows: dict[str, list[dict]] = {}
@@ -855,6 +857,23 @@ def _turn_detail_page(
     envelope_bytes = 0
     emitted_groups: set[str] = set()
     source_rows: list[dict] = []
+    if bind_source_turn and rows and not any(
+        row.get("type") in {"user_msg", "turn_binding"} for row in rows
+    ):
+        # A compacted/automatic reply can start with an assistant or tool row.
+        # Its first item identifies the full source turn, but a later page may
+        # omit that item. Repeat the same source-derived binding on every page
+        # so isolated browser decoding never invents a different turn id.
+        turn_id = history_turn_id(rows)
+        if turn_id is not None:
+            source_rows.append({
+                **{key: rows[0][key] for key in ("v", "ts", "sid")
+                   if key in rows[0]},
+                "type": "turn_binding",
+                "msg_id": turn_id,
+                "turn_id": turn_id,
+                "autonomous": True,
+            })
     for row in rows:
         group = _turn_detail_event_group(row)
         if group is None:
@@ -17826,6 +17845,7 @@ class WrapperMachine:
             try:
                 page, has_more, oldest, has_newer, newer = _turn_detail_page(
                     snapshot_rows,
+                    bind_source_turn=True,
                     before=snapshot_cursor.before,
                     limit=getattr(cmd, "limit", 192),
                     max_bytes=min(
@@ -18117,6 +18137,7 @@ class WrapperMachine:
         try:
             page, has_more, oldest, has_newer, newer = _turn_detail_page(
                 rows,
+                bind_source_turn=True,
                 before=raw_before,
                 limit=getattr(cmd, "limit", 192),
                 max_bytes=min(
@@ -18136,6 +18157,7 @@ class WrapperMachine:
                     page, has_more, oldest, has_newer, newer = (
                         _turn_detail_page(
                             official_rows,
+                            bind_source_turn=True,
                             before=raw_before,
                             limit=getattr(cmd, "limit", 192),
                             max_bytes=min(

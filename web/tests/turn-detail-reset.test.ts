@@ -28,7 +28,7 @@ const reducerHarness = await createServer({
 });
 
 try {
-  const { initialState, reduce } =
+  const { initialState, createRuntime, reduce } =
     await reducerHarness.ssrLoadModule("/src/reducer.ts");
   const event = (body: Record<string, unknown>): ServerEvent => ({
     v: 40,
@@ -328,6 +328,158 @@ try {
   assert.equal(projectionHasTool(browseTurn, "fresh-browse-tool"), true);
   assert.equal(projectionHasTool(browseTurn, "old-browse-tool"), false,
     "the fresh browse head atomically replaces stale page segments");
+
+  for (const completed of [false, true]) {
+    const sourceId = completed ? "native-completed" : "source-head:thinking";
+    const summary: Turn = {
+      id: sourceId, prompt: "", blocks: [], done: completed,
+      ts: 100_000, detailLoaded: false, processDetailState: "present",
+      detailEventCount: 4,
+    };
+    const previous: Turn = {
+      id: "previous-user", prompt: "previous request", done: true, blocks: [],
+    };
+    let detailState = {
+      ...initialState, focusedSid: sid,
+      runtimes: { [sid]: {
+        ...createRuntime(), state: completed ? "idle" : "running",
+        historyRevision: revision, historyGeneration: "source-generation",
+        hasMore: true, oldestId: previous.id,
+        turns: [previous, summary],
+      } },
+    };
+    const page = (toolId: string): ServerEvent[] => [
+      event({ type: "turn_binding", sid, ts: 100,
+        msg_id: sourceId, turn_id: sourceId, autonomous: true }),
+      // The first assistant item belongs to another page. This page's own
+      // first item must not become the identity of the complete source turn.
+      event({ type: "assistant_msg_start", sid, ts: 102,
+        message_id: `${toolId}-message`, channel: "thinking" }),
+      event({ type: "delta", sid, ts: 102,
+        message_id: `${toolId}-message`, channel: "thinking", text: "inspect" }),
+      event({ type: "assistant_msg_end", sid, ts: 103,
+        message_id: `${toolId}-message`, channel: "thinking" }),
+      ...detailEvents(toolId).filter(e => e.type === "tool_use" || e.type === "tool_result"),
+      ...(completed ? [event({ type: "turn_end", sid, ts: 110,
+        turn_id: sourceId,
+        result: { subtype: "success", duration_ms: 10000, is_error: false } })] : []),
+    ];
+    detailState = reduce(detailState, {
+      type: "event", event: event({
+        type: "turn_detail", sid, session_id: sid, turn_id: sourceId,
+        revision, authoritative: true, events: page("latest-detail"),
+        before: null, has_more: true, oldest_cursor: "older-source-page",
+      }),
+    });
+    assert.equal(detailState.runtimes[sid].turns.length, 2);
+    let sourceTurn = detailState.runtimes[sid].turns[1] as Turn;
+    assert.equal(sourceTurn.id, sourceId);
+    assert.equal(sourceTurn.detailError, undefined);
+    assert.equal(sourceTurn.done, completed);
+    assert.equal(sourceTurn.ts, 100_000);
+    assert.equal(sourceTurn.prompt, "");
+    assert.equal(projectionHasTool(sourceTurn, "latest-detail"), true);
+    assert.equal(detailState.runtimes[sid].turns[0], previous,
+      "detail for an assistant-only turn cannot change its previous human turn");
+    detailState = reduce(detailState, {
+      type: "event", event: event({
+        type: "turn_detail", sid, session_id: sid, turn_id: sourceId,
+        revision, authoritative: true, events: page("older-detail"),
+        before: "older-source-page", has_more: false, has_newer: true,
+        newer_cursor: "latest-source-page",
+      }),
+    });
+    sourceTurn = detailState.runtimes[sid].turns[1] as Turn;
+    assert.equal(sourceTurn.detailError, undefined);
+    assert.equal(projectionHasTool(sourceTurn, "latest-detail"), true);
+    assert.equal(projectionHasTool(sourceTurn, "older-detail"), true);
+    detailState = reduce(detailState, {
+      type: "begin_history_browse", sid, scopeKey: "machine:code:claude",
+      revision, generation: "source-generation", viewId: "assistant-only-view",
+      basePageKey: "assistant-only-head",
+    });
+    assert.ok(detailState.historyBrowse);
+    const runtimeBefore = detailState.runtimes[sid];
+    detailState = reduce(detailState, {
+      type: "history_browse_detail", sid, scopeKey: detailState.historyBrowse.scopeKey,
+      revision, viewId: detailState.historyBrowse.viewId,
+      windowEpoch: detailState.historyBrowse.windowEpoch, turnId: sourceId,
+      events: page("browse-detail"), before: null, hasMore: false,
+    });
+    const browsed = detailState.historyBrowse.turns.find((t: Turn) => t.id === sourceId);
+    assert.equal(browsed?.detailError, undefined);
+    assert.equal(browsed?.done, completed);
+    assert.equal(projectionHasTool(browsed, "browse-detail"), true);
+    assert.equal(detailState.runtimes[sid], runtimeBefore);
+  }
+
+  {
+    const visibleId = "completed-after-partial-detail";
+    const nativeId = "native-completed-after-partial-detail";
+    const messageId = "same-native-answer";
+    const prefix = "根因是 Claude 压缩后的部分过程没有";
+    const fullText = prefix + "用户消息作为锚点，分页后丢失轮次标识。";
+    const summary: Turn = {
+      id: visibleId, forkPointId: nativeId, prompt: "检查显示", done: false,
+      blocks: [{ kind: "text", message_id: messageId,
+        channel: "final", text: prefix, done: false }],
+      detailLoaded: false, processDetailState: "present", detailEventCount: 4,
+    };
+    let state = {
+      ...initialState, engine: "codex", focusedSid: sid,
+      sessions: [{ session_id: sid, engine: "codex", space: "code" }],
+      runtimes: { [sid]: {
+        ...createRuntime(), state: "running", historyRevision: revision,
+        turns: [summary],
+      } },
+    };
+    state = reduce(state, { type: "event", event: event({
+      type: "turn_detail", sid, session_id: sid, turn_id: visibleId,
+      revision, authoritative: true, has_more: false, has_newer: false,
+      events: [
+        event({ type: "user_msg", sid, msg_id: visibleId, prompt: summary.prompt }),
+        event({ type: "delta", sid, message_id: messageId, channel: "final", text: prefix }),
+        event({ type: "assistant_msg_end", sid, message_id: messageId, channel: "final" }),
+      ],
+    }) });
+    const correction = event({ type: "delta", sid, turn_id: nativeId,
+      message_id: messageId, channel: "final", text: fullText, replace: true });
+    const corrected = reduce(state, { type: "event", event: correction });
+    assert.equal(corrected.runtimes[sid].turns[0].blocks
+      .find((block: Block) => block.kind === "text")?.text, fullText,
+    "a completion snapshot repairs a closed prefix while its Codex task is still active");
+    state = reduce(state, { type: "event", event: event({
+      type: "turn_end", sid, turn_id: nativeId,
+      result: { subtype: "success", duration_ms: 1000, is_error: false },
+    }) });
+    state = reduce(state, { type: "event", event: event({ type: "state", sid, state: "idle" }) });
+    state = reduce(state, { type: "event", event: event({
+      type: "history", sid, session_id: sid, revision, detail: "summary",
+      in_progress: false, newest_id: visibleId, events: [], has_more: false,
+      turns: [{ ...summary, done: true, blocks: [{ ...summary.blocks[0], text: fullText, done: true }] }],
+    }) });
+    assert.equal(state.runtimes[sid].turns.length, 1);
+    const repaired = state.runtimes[sid].turns[0];
+    assert.equal(repaired.blocks.find((block: Block) => block.kind === "text")?.text, fullText,
+      "completed canonical history repairs text cached from an in-flight detail read");
+    assert.equal(repaired.done, true);
+    const late = reduce(state, { type: "event", event: {
+      ...correction, text: "late stale replacement",
+    } });
+    assert.equal(late.runtimes[sid].turns[0].blocks
+      .find((block: Block) => block.kind === "text")?.text, fullText,
+    "a delayed snapshot cannot replace the body after the task has finished");
+    const shortened = { ...summary, done: true, detailReasons: ["answer_truncated"],
+      blocks: [{ ...summary.blocks[0], text: prefix + "…", done: true }] };
+    state = reduce(state, { type: "event", event: event({
+      type: "history", sid, session_id: sid, revision, detail: "summary",
+      in_progress: false, newest_id: visibleId, events: [], has_more: false,
+      turns: [shortened],
+    }) });
+    assert.equal(state.runtimes[sid].turns[0].blocks
+      .find((block: Block) => block.kind === "text")?.text, fullText,
+    "an explicitly shortened summary still preserves the complete loaded answer");
+  }
 } finally {
   await reducerHarness.close();
 }
