@@ -155,6 +155,9 @@ there is no fallback to a partial hard-coded directory list.
 If a login manager exits between discovery and its D-Bus query, discovery is
 restarted in full, up to three attempts. No manager is silently skipped and no
 partial inventory is reused; persistent query failure still defers cleanup.
+If a runtime/generated input disappears after discovery, its complete service
+and native-configuration observation is rebuilt up to three times. Persistent
+missing inputs and unreadable configurations still defer cleanup.
 Environment-file discovery handles spaced assignments and continued lines,
 preserves literal spaces in filenames, and retains dependencies even across
 overrides/resets. Unresolved specifiers, wildcards or ambiguous quoting/escapes
@@ -200,7 +203,16 @@ dependencies; incomplete, stale or unrecognized sets still defer cleanup.
 Failed/incomplete acceptance or insufficient process visibility retains files and
 warns without rolling back an already committed installation. A same-version
 `cc-remote update` retries deferred retention with fresh checks, without restarting
-services or sending model messages; `--check` is read-only. An interrupted installation's prepared record is recovered under the original
+services or sending model messages; `--check` is read-only.
+The installers also register an installation-scoped systemd timer on Linux or
+a user LaunchAgent on macOS. Every five minutes it retries deferred cleanup under
+the same install lock, resolves the active `current` release, and repeats live
+acceptance. An installer holding the lock defers that maintenance tick. A partial cleanup journal
+requires recovery of that original transaction. Successful cleanup updates the
+completed UI update receipt, clearing its pending notice. An older runtime still
+in use is reported as a retained dependency. Supervisor installations can use
+the same explicit `cc-remote cleanup` command with their existing job scheduler.
+An interrupted installation's prepared record is recovered under the original
 activation identity and install lock before another update can begin. The updater
 verifies the live outcome or restores the uncommitted configuration/data snapshot;
 it never reruns an unknown installation under a new identity.
@@ -223,7 +235,14 @@ files; the review stores content fingerprints, not environment-file contents.
 
 This review is bound to all persistent service definitions, aliases, load paths,
 external environment files (including optional missing files), and declared
-inputs. A change invalidates it and defers cleanup until a fresh review.
+inputs. Changed installer-generated update-broker and retention definitions can
+reuse an existing review only when their complete content, owner, mode and alias
+targets match the installer templates for this installation. Other persistent
+changes invalidate the review and defer cleanup until a fresh review.
+Literal system-manager `RuntimeDirectory`, `StateDirectory`, `CacheDirectory`,
+`LogsDirectory` and `ConfigurationDirectory` names resolve under their standard
+systemd directories, including dependency checks through existing aliases.
+Dynamic names and user-manager directory environments still require inspection.
 Environment-file discovery resolves the deterministic `%p` prefix of a literal
 non-template systemd service and `%h` in that owner's `.config/systemd/user`
 units. Other dynamic inputs still defer.
@@ -242,7 +261,8 @@ when an indirect command is covered by the review. They need no separate
 `--protect` declaration; that list covers dependencies hidden by indirection.
 
 Each retention attempt writes `.retention-status.json`, including its outcome,
-defer reason, protected dependencies, and untracked release count. Untracked
+defer reason and public reason code, protected dependencies, pending deployment
+stages, and untracked release count. Untracked
 legacy directories require a separate reviewed cleanup inventory; they are not
 silently adopted or deleted. A single inventory accepts up to 1024 candidates so
 all candidates participate in one dependency closure. Do not split a dependency
@@ -263,6 +283,20 @@ older management CLIs. v4.0.9 and earlier do not provide these features.
 Source/manual deployments continue to use reviewed cleanup inventories and their
 existing activation transactions.
 
+For new automated source uploads, create a dedicated registered workspace with
+`python deploy/retention_staging.py create --root <installation-root>`. It prints
+the new path under `<installation-root>/deployment-staging/`. A separate dedicated
+parent can be selected with `--parent <absolute-deployment-staging-directory>`.
+Copy only this deployment's source/build/archive files there and pass
+`CC_REMOTE_DEPLOY_STAGE=<printed-path>` in the role installer's environment,
+including across any `sudo` boundary. The installer binds the fresh workspace's
+inode to its activation generation. After committed acceptance, the normal
+cleanup transaction can retire it. Live cwd/open-file references defer retirement
+until the caller leaves that directory. If the final callback is lost, maintenance
+reconciles the bound committed generation after fresh acceptance. Prepared or
+unbound workspaces remain available for inspection. Existing directories are
+never adopted automatically.
+
 #### Repository cleanup command
 
 `cleanup.py` ships in both role bundles. It acquires the same `.update.lock` as
@@ -280,12 +314,17 @@ still stops cleanup. User-owned private installations inspect that user's proces
 shared/system installations must run as root to cover every service user.
 
 A macOS user installation may need administrator visibility for private system
-LaunchDaemons. An administrator can run the active release's
-`deploy/release_retention.py prune --root <installation-root>` with its Python.
-The command preserves the installation owner's metadata and inspects that
-owner's launchd domain. Native Codex configuration checks execute as the Wrapper
-user. Insufficient visibility leaves a deferred result, and the update UI shows
-that old deployment files still need cleanup.
+LaunchDaemons. Run `cc-remote cleanup --authorize-system-scan` as the installation
+owner to authorize the fixed read-only scanner through the macOS administrator
+dialog. The installer requests this authorization when needed. The root-owned
+helper and narrow sudoers rule permit bounded reads of regular, protected plist
+files directly inside `/Library/LaunchAgents` and `/Library/LaunchDaemons`.
+The helper accepts one validated plist path. It never executes release code as
+root. Later maintenance reads reuse that authorization, while the existing
+cleanup transaction runs as the desktop user. Linux system installations run
+`sudo cc-remote cleanup --role wrapper` or `--role relay` for complete process
+visibility. Native Codex configuration checks execute as the Wrapper user.
+Insufficient visibility leaves a deferred result with its specific UI notice.
 
 Create a mode-0600 JSON inventory **outside the source repository**, from the
 actual installation and its transaction records. All paths must be absolute,
@@ -321,8 +360,13 @@ Inventory schema (replace the illustrative paths):
 
 `rollback_paths` describes one complete recovery generation, including its
 configuration/state snapshots; it must contain exactly one previous release.
-Use `protected_paths` for additional service/runtime dependencies. Candidates
-must be direct children of explicitly named, dedicated `cleanup_roots`; nested
+For the very first installation, the managed staging inventory instead proves
+the absence of a prior release through the unique committed generation ledger
+and retains that activation's exact configuration/state recovery set.
+Use `protected_paths` for additional service/runtime dependencies. Registered
+staging candidates also carry optional `candidate_identities`
+device/inode pairs, binding both preview and apply to their original registration.
+Every candidate must be a direct child of an explicitly named, dedicated `cleanup_roots` entry; nested
 candidates, symlink boundaries and mounts are rejected. Transaction expectations
 accept only completed states (`committed`, `complete`, `deployed_verified`,
 `ready`), and the records must remain unchanged throughout cleanup. Unknown

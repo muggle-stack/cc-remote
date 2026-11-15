@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { AppUpdateClient, appUpdateFeedback, currentUpdateJob, newerVersion, parseAppUpdate, parseUpdateJob,
+import { AppUpdateClient, appUpdateFeedback, cleanupNotice, currentUpdateJob, newerVersion, parseAppUpdate, parseUpdateJob,
   UpdateIntentStore, updateReason, releaseHighlights, parseUpdateReceipt, preferServerUpdate } from "../src/app-updates.ts";
 
 assert(newerVersion("5.10.0", "5.9.99"));
@@ -7,6 +7,12 @@ for (const target of ["5.3.14", "5.3.13", "05.3.15", "5.3.15-beta", "$(id)"]) {
   assert.equal(newerVersion(target, "5.3.14"), false);
 }
 const job = { id: "a".repeat(32), version: "5.3.15", previous: "5.3.14", phase: "waiting", secret: "redacted" };
+assert.match(cleanupNotice("dependencies"), /仍在使用/);
+assert.match(cleanupNotice("macos_scan_authorization"), /管理员授权/);
+assert.match(cleanupNotice("permission_required"), /读取权限/);
+assert.match(cleanupNotice("waiting_connection"), /自动重试/);
+assert.match(cleanupNotice("review_required"), /依赖需要管理员核对/);
+assert.equal(parseUpdateJob({ ...job, cleanup_reason: "dependencies" })?.cleanup_reason, "dependencies");
 assert.equal(parseUpdateJob({ ...job, phase: "invalid" }), null);
 assert.equal(parseUpdateJob({ ...job, id: "../../a" }), null);
 assert(!("secret" in parseUpdateJob(job)!));

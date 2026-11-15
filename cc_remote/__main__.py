@@ -18,6 +18,10 @@ def main(argv: list[str] | None = None) -> int:
     tasks.add_argument("task_args", nargs=argparse.REMAINDER)
     messages = commands.add_parser("messages", help="local cross-session messaging MCP")
     messages.add_argument("message_args", nargs=argparse.REMAINDER)
+    cleanup = commands.add_parser('cleanup', help='retry verified obsolete deployment cleanup')
+    cleanup.add_argument('--role', choices=('relay', 'wrapper'))
+    cleanup.add_argument('--authorize-system-scan', action='store_true',
+                         help='authorize the read-only macOS system service scanner')
     ui_updates = commands.add_parser("ui-updates", help="authorize UI updates for this managed device")
     ui_updates.add_argument("action", choices=("enable", "disable"))
     ui_updates.add_argument("--role", choices=("relay", "wrapper"), default="wrapper",
@@ -36,6 +40,18 @@ def main(argv: list[str] | None = None) -> int:
         help="compatibility option; newer releases support protocol upgrades automatically",
     )
     args = parser.parse_args(argv)
+    if args.command == 'cleanup':
+        from cc_remote.update import host_platform, select_installation
+        from deploy.release_retention import main as cleanup_main
+        try:
+            current = select_installation(args.role, *host_platform())
+            command = ['prune', '--root', str(current.root)]
+            if args.authorize_system_scan:
+                command.append('--authorize-system-scan')
+            return cleanup_main(command)
+        except (OSError, ValueError) as error:
+            print(f'ERROR: {error}', file=sys.stderr)
+            return 1
     if args.command == "ui-updates":
         from cc_remote.update import host_platform, select_installation
         from deploy.ui_update_job import configure

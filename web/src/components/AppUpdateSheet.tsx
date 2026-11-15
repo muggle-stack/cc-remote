@@ -2,7 +2,7 @@ import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { Icon } from "../icons";
 import { WEB_BUILD } from "../web-build";
-import { currentUpdateJob, newerVersion, preferServerUpdate, UPDATE_LABELS, UPDATE_TERMINAL, updateReason, releaseHighlights } from "../app-updates";
+import { cleanupNotice, currentUpdateJob, newerVersion, preferServerUpdate, UPDATE_LABELS, UPDATE_TERMINAL, updateReason, releaseHighlights } from "../app-updates";
 import type { AppUpdatesController } from "../use-app-updates";
 import { CenteredSheet } from "./CenteredSheet";
 import "./AppUpdateSheet.css";
@@ -103,8 +103,8 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
       </section>}
       {reason && <p className="app-update-warning" role="status">{reason}</p>}
       {!active && data?.online === false && <p className="app-update-help">设备当前离线，确认后会保存更新请求，等待设备上线执行。</p>}
-      {succeeded && job.cleanup_pending && <p className="app-update-warning" role="status">
-        更新已安装，旧部署文件尚待清理。请检查安装目录中的 .retention-status.json，查看阻塞原因。
+      {succeeded && job.cleanup_pending && <p className={job.cleanup_reason === "dependencies" ? "app-update-help" : "app-update-warning"} role="status">
+        {cleanupNotice(job.cleanup_reason)}
       </p>}
       {!serverMode && needsRelay && !data?.allow_relay_update && serverUpdates && <button type="button"
         className="app-update-later app-update-server-link" onClick={() => setSelected("server")}>前往服务器更新</button>}

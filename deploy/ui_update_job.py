@@ -503,14 +503,17 @@ def run(root: Path, identity: str) -> None:
         if not policy["enabled"]:
             raise Cancelled("UI updates were disabled")
         install_with_download_recovery(root, state, policy, progress)
-        from deploy.release_retention import STATUS
+        from deploy.release_retention import STATUS, retention_reason
         try:
             from cc_remote.update_jobs import read_json
             retention = read_json(root / STATUS, store.owner, limit=1024 * 1024)
             deferred = retention.get("status") != "complete"
+            cleanup_reason = retention_reason(retention)
         except (OSError, ValueError):
             deferred = True
-        outcome = {"phase": "succeeded", "reason": None, "cleanup_pending": deferred}
+            cleanup_reason = 'verification_required'
+        outcome = {"phase": "succeeded", "reason": None, "cleanup_pending": deferred,
+                   'cleanup_reason': cleanup_reason}
     except Cancelled:
         try:
             prune_download_cache(root, version=state["version"])

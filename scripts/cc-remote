@@ -21,7 +21,7 @@ case "$(uname -s)" in
     selected_role=""
     role_requested=0
     role_value_next=0
-    if [ "${1:-}" = update ]; then
+    if [ "${1:-}" = update ] || [ "${1:-}" = cleanup ]; then
       for argument in "${@:2}"; do
         if [ "$role_value_next" -eq 1 ]; then
           selected_role="$argument"
