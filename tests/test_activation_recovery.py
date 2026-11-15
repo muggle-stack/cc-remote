@@ -70,6 +70,52 @@ async def test_terminal_and_ui_share_live_socket_admission(managed, monkeypatch,
             await machine._command_scheduler.close()
 
 
+@pytest.mark.parametrize("outcome", ["reconnect", "unavailable", "cancelled"])
+def test_admission_waits_for_wrapper_restart_with_bounded_cancelable_recovery(
+    managed, monkeypatch, outcome,
+):
+    root, previous, store = managed
+    record(root, previous, ui_job=IDENTITY)
+    state, _ = store.create(IDENTITY, "4.0.1", "4.0.0")
+    store.save({**state, "phase": "waiting"})
+    clock = [1000.0]
+    requests = []
+
+    def request(_path, payload, _uid):
+        requests.append((clock[0], payload))
+        if outcome == "reconnect" and clock[0] >= 1040:
+            return {"status": "ready"}
+        raise ConnectionRefusedError("Wrapper restoring sessions")
+
+    def advance(seconds):
+        clock[0] += seconds
+        if outcome == "cancelled" and clock[0] >= 1030:
+            store.save({**store.state(IDENTITY), "cancel_requested": True})
+
+    monkeypatch.setattr(installer, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], time=lambda: clock[0], sleep=advance))
+    monkeypatch.setattr(installer, "control", request)
+    descriptor = acquire_install_lock(root)
+    monkeypatch.setenv(LOCK_FD_ENV, str(descriptor))
+    try:
+        if outcome == "reconnect":
+            installer.prepare(root, IDENTITY)
+            assert activation.receipt(root)["phase"] == "quiesced"
+            assert clock[0] == 1040
+        else:
+            error = "cancelled before activation" if outcome == "cancelled" else "control connection unavailable"
+            with pytest.raises(ValueError, match=error):
+                installer.prepare(root, IDENTITY)
+            assert activation.receipt(root)["phase"] == "waiting"
+            assert clock[0] == (1030 if outcome == "cancelled" else 1120)
+        assert all(payload == {"op": "reserve_activation", "id": IDENTITY}
+                   for _, payload in requests)
+        assert (root / "current").resolve() == previous
+        assert store.active()["id"] == IDENTITY
+    finally:
+        os.close(descriptor)
+
+
 def test_surviving_installer_child_keeps_lock_after_controller_exits(managed):
     root, previous, _ = managed
     record(root, previous, phase="quiesced")
