@@ -4700,6 +4700,14 @@ class WrapperMachine:
             # app-server. Discard an alias-free materialized page and advance
             # the browser revision before it can race this identity update.
             self._bump_codex_projection_revision(session_id, aliases_only=True)
+        if native_message_id is not None:
+            # A validated no-op from put() also proves this exact identity is
+            # durable. Retire the matching pending proof in either case.
+            proof = ctx.codex_pending_steer_user_identities.get(native_message_id)
+            if (isinstance(proof, CodexSteerUserIdentityProof)
+                    and proof.native_turn_id == native_turn_id
+                    and proof.client_message_id == client_message_id):
+                ctx.codex_pending_steer_user_identities.pop(native_message_id, None)
         return inserted
 
     async def _remember_codex_initial_turn_alias(
@@ -4779,18 +4787,16 @@ class WrapperMachine:
                 continue
             if (aliases.native_messages.get(native_message_id) == client_message_id
                     and aliases.native_message_turns.get(native_message_id) == native_turn_id):
-                continue
+                if ctx is None or native_message_id not in ctx.codex_pending_steer_user_identities:
+                    continue
             if ctx is not None:
-                inserted = await self._remember_codex_client_message_id(
+                await self._remember_codex_client_message_id(
                     ctx,
                     native_turn_id,
                     client_message_id,
                     native_message_id=native_message_id,
                     source_path=source_path,
                 )
-                if inserted:
-                    ctx.codex_pending_steer_user_identities.pop(
-                        native_message_id, None)
                 continue
             store = getattr(self, "_codex_client_messages", None)
             if store is None:
@@ -4850,7 +4856,13 @@ class WrapperMachine:
                 or uncertain_match
             )
         )
-        if not (initial_query_match or steer_match):
+        # A terminal retry keeps the proof already admitted by this generation
+        # even after its original turn/steer ownership has been released.
+        retained_match = (
+            ctx.codex_pending_steer_user_identities.get(proof.native_message_id)
+            is proof
+        )
+        if not (initial_query_match or steer_match or retained_match):
             return False
         if proof.kind == "steer" and uncertain_match:
             await self._confirm_uncertain_codex_steer_identity(
@@ -4906,7 +4918,6 @@ class WrapperMachine:
             source_path=source_path,
         )
         if inserted:
-            pending_identities.pop(proof.native_message_id, None)
             sid = self._ctx_wire_sid(ctx)
             if sid:
                 self._schedule_history_refresh(

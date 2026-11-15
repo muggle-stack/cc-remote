@@ -20,6 +20,8 @@ from cc_remote import activation
 from cc_remote.update_jobs import UpdateJobs, job_id, read_json, failure_reason
 from deploy.install_lock import LOCK_FD_ENV, verify_install_lock
 
+CONTROL_RECOVERY_TIMEOUT = 120
+
 
 def _peer_identity(peer: socket.socket, uid: int):
     from cc_remote.wrapper.process_scan import process_identity, process_owner_uid
@@ -209,7 +211,10 @@ def prepare(root: Path, identity: str) -> None:
             raise ValueError("running Wrapper does not support installer admission; complete the compatibility deployment first")
         if response.get("status") != "busy":
             unavailable_since = unavailable_since or time.monotonic()
-            if time.monotonic() - unavailable_since >= 15:
+            # Restoring resident sessions can outlast a brief socket outage.
+            # Keep the same cancellable admission request until the controller
+            # returns, while still bounding a permanently unavailable service.
+            if time.monotonic() - unavailable_since >= CONTROL_RECOVERY_TIMEOUT:
                 raise ValueError("Wrapper control connection unavailable; no service was stopped")
         else:
             unavailable_since = None
