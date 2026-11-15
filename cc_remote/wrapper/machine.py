@@ -2421,11 +2421,12 @@ class WrapperMachine:
         self._codex_session_list_cache: (
             tuple[float, list[dict], tuple[tuple[str, str], ...]] | None
         ) = None
-        self._codex_session_list_refresh_task: Optional[asyncio.Task] = None
         self._codex_session_list_epoch = 0
-        self._codex_session_list_refresh_epoch = -1
-        self._codex_session_list_refresh_index_only = False
-        self._codex_session_list_read_revisions: dict[str, int] = {}
+        self._codex_session_list_reads: dict[
+            tuple[int, bool], tuple[asyncio.Task, dict[str, int], int]
+        ] = {}
+        self._codex_catalog_reconcile_task: Optional[asyncio.Task] = None
+        self._codex_catalog_reconcile_revision = 0
         self._directory_actions = DirectoryActions(self)
         self._codex_session_profile_errors: tuple[tuple[str, str], ...] = ()
         # Every subscribed handle on one shared daemon can observe the same CLI
@@ -3850,6 +3851,7 @@ class WrapperMachine:
                 error_type=type(exc).__name__,
             )
 
+    @history_timed("codex_legacy_claim")
     async def _claim_legacy_presentation_from_codex_catalog(
         self,
         raw: list[dict],
@@ -9606,13 +9608,19 @@ class WrapperMachine:
             close_history = getattr(self._codex_history, "close", None)
             if callable(close_history):
                 await close_history()
-            if self._codex_session_list_refresh_task is not None:
-                self._codex_session_list_refresh_task.cancel()
+            if self._codex_catalog_reconcile_task is not None:
+                self._codex_catalog_reconcile_task.cancel()
                 await asyncio.gather(
-                    self._codex_session_list_refresh_task,
+                    self._codex_catalog_reconcile_task,
                     return_exceptions=True,
                 )
-                self._codex_session_list_refresh_task = None
+                self._codex_catalog_reconcile_task = None
+            catalog_reads = [entry[0] for entry in self._codex_session_list_reads.values()]
+            for task in catalog_reads:
+                task.cancel()
+            if catalog_reads:
+                await asyncio.gather(*catalog_reads, return_exceptions=True)
+            self._codex_session_list_reads.clear()
             fork_tasks = [
                 *self._codex_fork_tasks.values(),
                 *self._claude_fork_tasks.values(),
@@ -13321,6 +13329,7 @@ class WrapperMachine:
             self._codex_sidebar_watches.move_to_end(sid)
         log.info("watching transcript", session_id=sid, engine=engine, size=st.st_size)
 
+    @history_timed("codex_sidebar_watches")
     async def _prime_codex_sidebar_watches(self, rows: list[dict]) -> None:
         """Watch the newest cold Codex threads for native App lifecycle.
 
@@ -28054,27 +28063,28 @@ class WrapperMachine:
                 )
 
     async def _refresh_codex_session_catalog(self) -> list[dict]:
-        """Share one cold app-server catalog read across concurrent clients."""
+        """Share reads by generation and mode without delaying indexed replies."""
         epoch = self._codex_session_list_epoch
-        task = self._codex_session_list_refresh_task
-        if (task is None or task.done()
-                or self._codex_session_list_refresh_epoch != epoch
-                or (catalog_index_only() and not self._codex_session_list_refresh_index_only)):
-            self._codex_session_list_read_revisions = (
+        indexed = catalog_index_only()
+        key = (epoch, indexed)
+        pending = self._codex_session_list_reads.get(key)
+        if pending is None:
+            read_revisions = (
                 self._session_presentation.completion_revisions("codex")
                 if self._session_presentation is not None else {})
             task = asyncio.create_task(
                 self._read_codex_profile_catalog())
-            self._codex_session_list_refresh_task = task
-            self._codex_session_list_refresh_epoch = epoch
-            self._codex_session_list_refresh_index_only = catalog_index_only()
-        read_revisions = self._codex_session_list_read_revisions
-        try:
+            pending = (task, read_revisions, self._codex_catalog_reconcile_revision)
+            self._codex_session_list_reads[key] = pending
+
+            def release_read(_task):
+                if self._codex_session_list_reads.get(key) is pending:
+                    self._codex_session_list_reads.pop(key)
+
+            task.add_done_callback(release_read)
+        task, read_revisions, reconcile_revision = pending
+        with history_stage("codex_catalog_read"):
             raw, profile_errors = await asyncio.shield(task)
-        finally:
-            if task.done() and self._codex_session_list_refresh_task is task:
-                self._codex_session_list_refresh_task = None
-                self._codex_session_list_refresh_epoch = -1
         if epoch != self._codex_session_list_epoch:
             # A create/rename/archive committed while this snapshot was being
             # built. Never let the old rows replace the optimistic temp row.
@@ -28171,12 +28181,18 @@ class WrapperMachine:
                     receipts, expected_revisions=read_revisions)
                 if epoch != self._codex_session_list_epoch:
                     return await self._refresh_codex_session_catalog()
+        if (indexed and reconcile_revision != self._codex_catalog_reconcile_revision
+                and self._codex_session_list_cache is not None):
+            return self._codex_session_list_cache[1]
+        if not indexed:
+            self._codex_catalog_reconcile_revision += 1
         self._codex_session_profile_errors = profile_errors
         self._codex_session_list_cache = (
             time.monotonic(), raw, profile_errors,
         )
         return raw
 
+    @history_timed("codex_sidebar_prune")
     async def _prune_missing_codex_sidebar_rows(
         self, raw: list[dict], previous: list[dict], *, epoch: int,
         unloaded_sids: set[str],
@@ -28249,6 +28265,7 @@ class WrapperMachine:
             log.info("removed missing Codex sidebar entries", count=len(removed))
         return [row for row in raw if row["session_id"] not in removed]
 
+    @history_timed("codex_fork_overlay")
     def _overlay_completed_codex_forks(
         self, raw: list[dict],
     ) -> list[dict]:
@@ -28689,6 +28706,7 @@ class WrapperMachine:
         )
         return rows
 
+    @history_timed("codex_profile_catalog")
     async def _read_codex_profile_catalog(
         self,
     ) -> tuple[list[dict], tuple[tuple[str, str], ...]]:
@@ -28943,60 +28961,100 @@ class WrapperMachine:
         return rows
 
     async def _list_codex_sessions(self, cmd) -> None:
-        """Paint cached rows now, then reconcile a stale catalog in background."""
+        """Reply from the native index, then reconcile older CLI rollouts."""
         if defer_session_lists():
             return None
+        profile = HistoryReadProfile()
+        token = history_profile.set(profile)
+        started = time.perf_counter()
         cached = self._codex_session_list_cache
-        cached_event = None
-        if cached is not None:
-            cached_errors = cached[2] if len(cached) > 2 else ()
-            cached_event = await self._send_codex_session_list(
-                cmd, cached[1], profile_errors=cached_errors,
-            )
-            # Code and Work are normally requested back-to-back. One second
-            # preserves that reuse while every later visit still reconciles
-            # native CLI/Desktop changes after painting the cache.
-            if time.monotonic() - cached[0] <= 1.0:
-                return cached_event
         try:
-            # The mutation has already committed to the authoritative native
-            # index. Its response must not wait for a complete JSONL repair in
-            # every account. Ordinary ListSessions still reconciles old/native
-            # CLI files, preserving discovery outside cc-remote.
-            with codex_catalog_read_mode(index_only=getattr(cmd, "type", "list_sessions") != "list_sessions"):
-                raw = await self._refresh_codex_session_catalog()
-        except Exception as e:
-            if cached_event is not None:
-                log.warning("stale Codex session catalog refresh failed",
-                            error_type=type(e).__name__)
-                cached_errors = cached[2] if cached is not None and len(cached) > 2 else ()
-                if self._codex_session_profile_errors != cached_errors:
-                    return await self._send_codex_session_list(
-                        cmd,
-                        cached[1],
-                        profile_errors=self._codex_session_profile_errors,
-                    )
-                return cached_event
-            log.exception("list_codex_sessions failed", error=str(e))
-            error = Error(
-                code=ERR_INTERNAL,
-                message="Codex 会话列表暂不可用，请稍后重试。",
-                request_id=getattr(cmd, "cmd_id", None),
-                to=getattr(cmd, "client_id", None),
-            )
-            await self.transport.send(error)
-            return error
-        cached_errors = cached[2] if cached is not None and len(cached) > 2 else ()
-        if (
-            cached is not None
-            and raw == cached[1]
-            and self._codex_session_profile_errors == cached_errors
-        ):
-            return cached_event
-        return await self._send_codex_session_list(
-            cmd, raw, profile_errors=self._codex_session_profile_errors,
-        )
+            cached_event = None
+            if cached is not None:
+                cached_errors = cached[2] if len(cached) > 2 else ()
+                cached_event = await self._send_codex_session_list(
+                    cmd, cached[1], profile_errors=cached_errors,
+                )
+                if time.monotonic() - cached[0] <= 1.0:
+                    return cached_event
+            ordinary_list = getattr(cmd, "type", "list_sessions") == "list_sessions"
+            reconciled = False
+            try:
+                with codex_catalog_read_mode(index_only=True):
+                    raw = await self._refresh_codex_session_catalog()
+                # An empty index can precede native CLI rollout discovery. Do
+                # not select a default draft until the full read confirms it.
+                if ordinary_list and not raw:
+                    with codex_catalog_read_mode(index_only=False):
+                        raw = await self._refresh_codex_session_catalog()
+                    reconciled = True
+            except Exception as exc:
+                if cached_event is not None:
+                    log.warning("stale Codex session catalog refresh failed",
+                                error_type=type(exc).__name__)
+                    cached_errors = cached[2] if len(cached) > 2 else ()
+                    if self._codex_session_profile_errors != cached_errors:
+                        return await self._send_codex_session_list(
+                            cmd, cached[1],
+                            profile_errors=self._codex_session_profile_errors,
+                        )
+                    return cached_event
+                log.exception("list_codex_sessions failed", error=str(exc))
+                error = Error(
+                    code=ERR_INTERNAL,
+                    message="Codex 会话列表暂不可用，请稍后重试。",
+                    request_id=getattr(cmd, "cmd_id", None),
+                    to=getattr(cmd, "client_id", None),
+                )
+                await self.transport.send(error)
+                return error
+            cached_errors = cached[2] if cached is not None and len(cached) > 2 else ()
+            if (cached is not None and raw == cached[1]
+                    and self._codex_session_profile_errors == cached_errors):
+                event = cached_event
+            else:
+                event = await self._send_codex_session_list(
+                    cmd, raw, profile_errors=self._codex_session_profile_errors,
+                )
+            pending = self._codex_catalog_reconcile_task
+            if (ordinary_list and not reconciled and isinstance(event, SessionList)
+                    and (pending is None or pending.done())):
+                self._codex_catalog_reconcile_task = asyncio.create_task(
+                    self._reconcile_codex_session_catalog())
+            return event
+        finally:
+            history_profile.reset(token)
+            log.info("codex session list profile",
+                     client_id=getattr(cmd, "client_id", None),
+                     space=getattr(cmd, "space", "code"),
+                     cache_hit=cached is not None,
+                     elapsed_ms=round((time.perf_counter() - started) * 1000),
+                     stages_ms={key: round(value) for key, value in profile.stages.items()},
+                     calls=profile.calls)
 
+    async def _reconcile_codex_session_catalog(self) -> None:
+        """Publish a correlated-refresh hint when native discovery changes rows."""
+        profile = HistoryReadProfile()
+        token = history_profile.set(profile)
+        started = time.perf_counter()
+        before = self._codex_session_list_cache
+        try:
+            with codex_catalog_read_mode(index_only=False):
+                await self._refresh_codex_session_catalog()
+            after = self._codex_session_list_cache
+            if after is not None and (before is None or after[1:] != before[1:]):
+                await self._invalidate_session_list("codex", "code")
+                await self._invalidate_session_list("codex", "work")
+        except Exception as exc:
+            log.warning("Codex catalog reconciliation failed", error_type=type(exc).__name__)
+        finally:
+            history_profile.reset(token)
+            log.info("codex catalog reconciliation profile",
+                     elapsed_ms=round((time.perf_counter() - started) * 1000),
+                     stages_ms={key: round(value) for key, value in profile.stages.items()},
+                     calls=profile.calls)
+
+    @history_timed("codex_list_send")
     async def _send_codex_session_list(
         self,
         cmd,
