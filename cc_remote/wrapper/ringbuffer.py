@@ -253,8 +253,12 @@ class RingBuffer:
                 continue
             key = cls._delta_replay_key(message)
             next_chars = len(message.text)
+            # A replacement starts a new text snapshot. Appends after it can
+            # share its frame, but earlier text (including another replacement)
+            # must stay outside that snapshot.
             if run and (
-                key != run_key
+                message.replace
+                or key != run_key
                 or run_chars + next_chars > _CURRENT_TURN_DELTA_CHUNK_CHARS
             ):
                 flush()
