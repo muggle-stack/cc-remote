@@ -33,6 +33,8 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
   const active = !!job && !UPDATE_TERMINAL.has(job.phase);
   const recovering = updates.maintenance && !active;
   const uncertain = active && job.phase === "unknown";
+  const waitingForRelay = active && !serverMode && job.coordinated
+    && (job.phase === "updating_relay" || (uncertain && job.server_phase === "unknown"));
   const latest = !data?.latest || newerVersion(serverUpdates?.data?.latest?.version, data.latest.version)
     ? serverUpdates?.data?.latest : data?.latest;
   const target = active ? job.version : pending?.version ?? latest?.version ?? job?.version;
@@ -47,7 +49,8 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
   const catalogUnavailable = blocked === "network" || blocked === "rate_limited" || blocked === "update_failed";
   const canInstall = (!!data?.enabled || requiresAuthorization || requiresDeviceAuthorization) && available
     && (!blocked || catalogUnavailable || requiresDeviceAuthorization) && !active && !recovering && !checking && !changing && !authorizing;
-  const canCancel = active && ["submitting", "preparing", "downloading", "waiting_network", "waiting_device", "validating", "waiting"].includes(job.phase);
+  const canCancel = waitingForRelay || (active
+    && ["submitting", "preparing", "downloading", "waiting_network", "waiting_device", "validating", "waiting"].includes(job.phase));
   const readyPage = !!webUpdate.version && !available && !active && !recovering && !pending;
   const succeeded = job?.phase === "succeeded";
   const retryPending = !!pending && pendingStatus !== "unconfirmed";
@@ -177,11 +180,12 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
       </details>
     </div>
     <footer className="app-update-footer">
-      <p>{readyPage ? "有未保存内容时会先提醒。" : active || recovering ? "收起窗口不会中断更新。"
+      <p>{waitingForRelay ? `取消会撤回 ${deviceName} 的更新，已启动的服务器更新将继续。`
+        : readyPage ? "有未保存内容时会先提醒。" : active || recovering ? "收起窗口不会中断更新。"
         : pending ? "重试会保留原请求，避免重复安装。"
         : canInstall ? data?.busy_count ? `${data.busy_count} 项操作需要先完成，其余任务可继续运行。` : "安装前会检查任务能否安全继续。" : ""}</p>
       <div className="app-update-actions">
-        {canCancel && <button type="button" className="app-update-later" disabled={changing || job.cancel_requested} onClick={() => void updates.cancel()}>取消更新</button>}
+        {canCancel && <button type="button" className="app-update-later" disabled={changing || job.cancel_requested} onClick={() => void updates.cancel()}>{waitingForRelay ? "取消设备更新" : "取消更新"}</button>}
         {uncertain && <button type="button" className="app-update-primary" disabled={changing} onClick={() => void updates.recover()}>{changing ? "核对中…" : "重新核对并恢复"}</button>}
         <button type="button" className="app-update-later" onClick={onClose}>{active || recovering ? "收起，后台继续" : available || readyPage || pending ? "稍后" : "完成"}</button>
         {readyPage ? <button type="button" className="app-update-primary" disabled={webUpdate.updating} onClick={() => void webUpdate.reload()}>{webUpdate.updating ? "检查中…" : "刷新页面"}</button>

@@ -28,6 +28,44 @@ test("unified update submits one durable server and device operation", async ({ 
   expect(commands).toHaveLength(1);
 });
 
+for (const serverPhase of ["downloading", "waiting_network", "installing", "unknown"] as const) {
+  test(`device update can be withdrawn while shared server is ${serverPhase}`, async ({ page }) => {
+    const commands: { target: string; op: string }[] = [];
+    const serverJob = { id: "b".repeat(32), version: base.latest.version,
+      previous: base.current, phase: serverPhase };
+    let job: Record<string, unknown> | null = null;
+    await page.route("**/api/server-updates", route => {
+      const body = route.request().postDataJSON();
+      if (body?.op === "cancel") commands.push({ target: "server", op: body.op });
+      return route.fulfill({ json: { ...base, busy_count: 0, job: serverJob } });
+    });
+    await page.route("**/api/updates/*", async route => {
+      const body = route.request().postDataJSON();
+      if (body?.op === "upgrade") {
+        job = { id: body.job_id, version: body.version, previous: base.current,
+          phase: serverPhase === "unknown" ? "unknown" : "updating_relay",
+          coordinated: true, server_phase: serverPhase };
+        await route.fulfill({ json: { ok: true, job } });
+      } else if (body?.op === "cancel") {
+        commands.push({ target: "device", op: body.op });
+        expect(body.job_id).toBe(job?.id);
+        job = { ...job, phase: "cancelled", cancel_requested: true };
+        await route.fulfill({ json: { ok: true, job } });
+      } else await route.fulfill({ json: { ...base, job } });
+    });
+    await page.goto(url + "?unified=1"); await open(page);
+    await page.getByRole("button", { name: "更新到 v5.3.15", exact: true }).click();
+    const withdraw = page.getByRole("button", { name: "取消设备更新", exact: true });
+    await expect(withdraw).toBeEnabled();
+    await expect(page.getByText("取消会撤回 device-a 的更新，已启动的服务器更新将继续。", { exact: true })).toBeVisible();
+    await withdraw.click();
+    await expect(withdraw).toHaveCount(0);
+    await page.reload(); await open(page);
+    await expect(withdraw).toHaveCount(0);
+    expect(commands).toEqual([{ target: "device", op: "cancel" }]);
+  });
+}
+
 test("offline device exposes a secondary server-only action", async ({ page }) => {
   const serverCommands: string[] = [];
   let job: Record<string, unknown> | null = null;
