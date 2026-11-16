@@ -745,14 +745,23 @@ def create_app(
                     return JSONResponse({"reason": "server_forbidden"}, status_code=403, headers=headers)
                 if operation == "authorize" and machine_id is None:
                     raise ValueError("device authorization requires a device")
-            result = (await server_updates.handle(command) if machine_id is None else
-                      await updates.request(machine_id, command))
+            if machine_id is None:
+                result = await server_updates.handle(command)
+            elif command["op"] == "reconcile":
+                async def authorize_server_recovery():
+                    current = await _active_claims(req, cfg, sessions)
+                    return current is not None and update_authorized(req, current)
+
+                result = await updates.request(machine_id, command, authorize_server=authorize_server_recovery)
+            else:
+                result = await updates.request(machine_id, command)
             # Browser sessions may expire/revoke while an OS launch is pending.
             if await _active_claims(req, cfg, sessions) is None:
                 return JSONResponse({"reason": "unauthorized"}, status_code=401, headers=headers)
             return JSONResponse({**result, "relay_version": __version__, "relay_protocol": PROTOCOL_VERSION}, headers=headers)
         except UpdateChannelError as exc:
-            return JSONResponse({"reason": exc.code}, status_code=503, headers=headers)
+            return JSONResponse({"reason": exc.code},
+                                status_code=403 if exc.code == "server_forbidden" else 503, headers=headers)
         except (ValueError, _BodyTooLarge, asyncio.TimeoutError):
             return JSONResponse({"reason": "invalid_request"}, status_code=400, headers=headers)
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 import json
 import time
@@ -39,7 +40,8 @@ class UpdateRelay:
         self.coordination_lock = asyncio.Lock()
         self.locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
-    async def request(self, machine: str, command: dict) -> dict:
+    async def request(self, machine: str, command: dict, *,
+                      authorize_server: Callable[[], Awaitable[bool]] | None = None) -> dict:
         if self.queue is None:
             return await self._request(machine, command)
         lock = self.locks.setdefault(machine, asyncio.Lock())
@@ -56,11 +58,12 @@ class UpdateRelay:
                             "network", "rate_limited", "update_failed"}:
                         result["reason"] = None
                     return result
-                return await self._queued_request(machine, command)
+                return await self._queued_request(machine, command, authorize_server=authorize_server)
             except UpdateError as exc:
                 return {"ok": False, "reason": failure_reason(exc)}
 
-    async def _queued_request(self, machine: str, command: dict) -> dict:
+    async def _queued_request(self, machine: str, command: dict, *,
+                              authorize_server: Callable[[], Awaitable[bool]] | None = None) -> dict:
         operation = command["op"]
         if operation in {"start", "upgrade"}:
             if machine in self.peers:
@@ -106,6 +109,8 @@ class UpdateRelay:
                             blocking_id = active["id"]
                             state = {**state, "blocking_server_job_id": blocking_id}
                             await asyncio.to_thread(self.queue.save, machine, state)
+                    if authorize_server is None or not await authorize_server():
+                        raise UpdateChannelError("server_forbidden")
                     if blocking_id is not None:
                         result = await self.server_updates.handle({"op": "reconcile", "job_id": blocking_id})
                         if result.get("ok") is not True:

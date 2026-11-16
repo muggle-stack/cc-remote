@@ -548,7 +548,8 @@ async def test_reconcile_uses_the_blocking_server_receipt_after_restart(hub, ver
 
     native.handle = recover
     restored = UpdateRelay(hub.queue.devices, native)
-    result = await restored.request('device-a', {'op': 'reconcile', 'job_id': ID})
+    result = await restored.request('device-a', {'op': 'reconcile', 'job_id': ID},
+                                    authorize_server=AsyncMock(return_value=True))
     assert result['ok'] is True
     assert reconciled == ['b' * 32]
     if version == START['version']:
@@ -573,7 +574,8 @@ async def test_blocking_server_reconcile_error_is_returned_without_starting_anot
     await hub.request('device-a', {**START, 'op': 'upgrade'})
     await hub._advance_upgrade('device-a', ID)
     native.handle = AsyncMock(return_value={'ok': False, 'reason': reason})
-    result = await hub.request('device-a', {'op': 'reconcile', 'job_id': ID})
+    result = await hub.request('device-a', {'op': 'reconcile', 'job_id': ID},
+                               authorize_server=AsyncMock(return_value=True))
     assert result['ok'] is False and result['reason'] == reason
     assert result['job']['id'] == ID and result['job']['phase'] == 'unknown'
     native.handle.assert_awaited_once_with({'op': 'reconcile', 'job_id': 'b' * 32})
@@ -590,10 +592,56 @@ async def test_blocking_server_reconcile_requires_the_exact_receipt(hub, receipt
     await hub.request('device-a', {**START, 'op': 'upgrade'})
     await hub._advance_upgrade('device-a', ID)
     native.handle = AsyncMock(return_value={'ok': True, 'job': receipt})
-    result = await hub.request('device-a', {'op': 'reconcile', 'job_id': ID})
+    result = await hub.request('device-a', {'op': 'reconcile', 'job_id': ID},
+                               authorize_server=AsyncMock(return_value=True))
     assert result['ok'] is False and result['reason'] == 'outcome_pending'
     assert result['job']['phase'] == 'unknown'
     assert not native.starts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('authorize', [None, False])
+async def test_blocking_server_recovery_denies_absent_or_revoked_authorization(hub, authorize):
+    native = ManagedServer()
+    native.job = {'id': 'b' * 32, 'version': '5.3.27', 'phase': 'unknown'}
+    hub.server_updates = native
+    hub.wake_coordinator = lambda: None
+    await hub.request('device-a', {**START, 'op': 'upgrade'})
+    await hub._advance_upgrade('device-a', ID)
+    native.handle = AsyncMock()
+    callback = None if authorize is None else AsyncMock(return_value=authorize)
+    with pytest.raises(UpdateChannelError, match='server_forbidden'):
+        await hub.request('device-a', {'op': 'reconcile', 'job_id': ID}, authorize_server=callback)
+    native.handle.assert_not_awaited()
+    assert hub.queue.job('device-a', ID)['phase'] == 'unknown'
+
+
+@pytest.mark.asyncio
+async def test_legacy_blocking_receipt_discovery_precedes_authorization_check(hub):
+    native = ManagedServer()
+    native.job = {'id': 'b' * 32, 'version': '5.3.27', 'phase': 'unknown'}
+    hub.server_updates = native
+    hub.wake_coordinator = lambda: None
+    await hub.request('device-a', {**START, 'op': 'upgrade'})
+    state = hub.queue.job('device-a', ID)
+    hub.queue.save('device-a', {**state, 'phase': 'unknown', 'server_phase': 'unknown'})
+    authorized = True
+    original_status = native.status
+
+    async def discover(**kwargs):
+        nonlocal authorized
+        authorized = False
+        return await original_status(**kwargs)
+
+    async def check_authorization():
+        return authorized
+
+    native.status = discover
+    native.handle = AsyncMock()
+    with pytest.raises(UpdateChannelError, match='server_forbidden'):
+        await hub.request('device-a', {'op': 'reconcile', 'job_id': ID},
+                          authorize_server=check_authorization)
+    native.handle.assert_not_awaited()
 
 
 @pytest.mark.asyncio

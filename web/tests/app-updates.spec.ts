@@ -156,6 +156,57 @@ test("one administrator authentication continues the pending unified update", as
   await expect.poll(() => starts).toBe(1);
 });
 
+test("server recovery requests administrator authentication and reuses the original job", async ({ page }) => {
+  let authorized = false;
+  const commands: Record<string, string>[] = [];
+  let job = { id: "a".repeat(32), version: base.latest.version, previous: base.current,
+    phase: "unknown", coordinated: true, server_phase: "unknown" };
+  await page.route("**/api/update-authorization", async route => {
+    expect(route.request().postDataJSON()).toEqual({ username: "owner", password: "test-password" });
+    authorized = true;
+    await route.fulfill({ json: { ok: true } });
+  });
+  await page.route("**/api/server-updates", route => route.fulfill(authorized
+    ? { json: { ...base, busy_count: 0 } } : { status: 403, json: { reason: "forbidden" } }));
+  await page.route("**/api/updates/*", async route => {
+    const body = route.request().postDataJSON();
+    if (["start", "upgrade", "reconcile"].includes(body?.op)) commands.push(body);
+    if (body?.op === "reconcile") {
+      expect(authorized).toBe(true);
+      job = { ...job, phase: "updating_relay", server_phase: "verifying" };
+      await route.fulfill({ json: { ok: true, job } });
+    } else await route.fulfill({ json: { ...base, job } });
+  });
+  await page.goto(url + "?unified=1"); await open(page);
+  await page.getByRole("button", { name: "重新核对并恢复", exact: true }).click();
+  await page.getByLabel("管理员账号", { exact: true }).fill("owner");
+  await page.getByLabel("管理员密码", { exact: true }).fill("test-password");
+  expect(commands).toEqual([]);
+  await page.getByRole("button", { name: "验证并继续", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "检查并更新服务器", exact: true })).toBeVisible();
+  expect(commands).toEqual([{ op: "reconcile", job_id: job.id }]);
+});
+
+test("device recovery does not require permission to update the server", async ({ page }) => {
+  const commands: Record<string, string>[] = [];
+  let job = { id: "a".repeat(32), version: base.latest.version, previous: base.current,
+    phase: "unknown", coordinated: true, server_phase: "succeeded" };
+  await page.route("**/api/server-updates", route => route.fulfill({ status: 403, json: { reason: "forbidden" } }));
+  await page.route("**/api/updates/*", async route => {
+    const body = route.request().postDataJSON();
+    if (body?.op === "reconcile") {
+      commands.push(body);
+      job = { ...job, phase: "verifying" };
+      await route.fulfill({ json: { ok: true, job } });
+    } else await route.fulfill({ json: { ...base, job } });
+  });
+  await page.goto(url + "?unified=1"); await open(page);
+  await page.getByRole("button", { name: "重新核对并恢复", exact: true }).click();
+  await expect(page.getByLabel("管理员密码", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "验证更新结果", exact: true })).toBeVisible();
+  expect(commands).toEqual([{ op: "reconcile", job_id: job.id }]);
+});
+
 test("legacy device requests native authorization once then starts its update", async ({ page }) => {
   let enabled = false, authorizations = 0, starts = 0;
   await page.route("**/api/updates/*", async route => {
