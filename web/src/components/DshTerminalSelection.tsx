@@ -36,6 +36,15 @@ export function DshTerminalSelection({ terminal, host, onClear, onCopy, onPaste 
   const rect = host.querySelector(".xterm-screen")?.getBoundingClientRect();
   if (!rect) return null;
   const parent = host.getBoundingClientRect();
+  const container = host.parentElement!;
+  const containerRect = container.getBoundingClientRect();
+  // Handle positions and pointer conversion share the host's coordinate origin.
+  const overlayStyle = {
+    left: parent.left - containerRect.left - container.clientLeft,
+    top: parent.top - containerRect.top - container.clientTop,
+    width: parent.width,
+    height: parent.height,
+  };
   const cellWidth = rect.width / terminal.cols, cellHeight = rect.height / terminal.rows;
   const position = (point: { x: number; y: number }) => ({
     left: rect.left - parent.left + point.x * cellWidth,
@@ -57,7 +66,7 @@ export function DshTerminalSelection({ terminal, host, onClear, onCopy, onPaste 
     extend(event.clientX, event.clientY);
   };
   const finish = () => { drag.current = null; setDragging(false); };
-  return <div className="dsh-terminal-selection" aria-label="终端文字选择">
+  return <div className="dsh-terminal-selection" aria-label="终端文字选择" style={overlayStyle}>
     {[{ label: "起点", pos: start, fixed: range.end }, { label: "终点", pos: end, fixed: range.start }].map(({ label, pos, fixed }) => {
       return pos.top >= 0 && pos.top <= parent.height + cellHeight && <button key={String(label)}
         className="dsh-terminal-selection-handle" aria-label={`拖动选区${label}`} style={pos}
