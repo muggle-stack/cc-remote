@@ -957,6 +957,30 @@ def test_dormant_service_and_environment_dependencies(tmp_path, monkeypatch):
         retention.service_dependencies({}, [old])
 
 
+def test_systemd_metadata_and_calendar_are_not_file_dependencies(tmp_path):
+    unit = tmp_path / 'example.timer'
+    unit.write_text('[Unit]\nDescription=Status (/dev/%I) and "/opt/runtime"\n'
+                    'Documentation=man:example(5) https://example.test/docs\n'
+                    '[Timer]\nOnCalendar=*-*-* *:00/10:00\n')
+    assert retention.inspect_service_files({unit}, []) == []
+    unit.write_text(unit.read_text() + '[Service]\nExecStart=/opt/%i/worker\n')
+    with pytest.raises(ValueError, match='nonliteral service'):
+        retention.inspect_service_files({unit}, [])
+
+
+@pytest.mark.parametrize('name', ['Description', 'Documentation', 'OnCalendar'])
+def test_metadata_named_environment_values_still_protect_dependencies(tmp_path, name):
+    old = tmp_path / 'old'
+    old.mkdir()
+    alias = tmp_path / 'alias'
+    alias.symlink_to(old, target_is_directory=True)
+    env = tmp_path / 'worker.env'
+    env.write_text(f'{name}={alias}/config\n')
+    unit = tmp_path / 'worker.service'
+    unit.write_text(f'[Unit]\nDescription=Worker\n[Service]\nEnvironmentFile={env}\n')
+    assert retention.inspect_service_files({unit}, [old]) == [str(old)]
+
+
 @pytest.mark.parametrize('kind', [
     'executable', 'relative-chain', 'directory', 'argument', 'environment',
     'environment-file', 'intermediate-owner', 'plist', 'plist-spaces', 'supervisor',
