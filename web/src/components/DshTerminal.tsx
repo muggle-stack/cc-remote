@@ -7,8 +7,10 @@ import { uuid } from "../util";
 import { Icon } from "../icons";
 import { ChoicePicker } from "./ChoicePicker";
 import { CenteredSheet } from "./CenteredSheet";
+import { DshTerminalClipboard, type TerminalClipboardTarget } from "./DshTerminalClipboard";
 import { attachTerminalTouchScroll, attachTerminalWheelScroll } from "../dsh-terminal-touch";
 import { observeTerminalPrompt } from "../dsh-terminal-prompt";
+import { attachTerminalNativeSelection } from "../dsh-terminal-selection";
 import "@xterm/xterm/css/xterm.css";
 
 export default function DshTerminal({ sid, api }: { sid: string; api: DshApiClient }) {
@@ -22,6 +24,7 @@ export default function DshTerminal({ sid, api }: { sid: string; api: DshApiClie
   const [exited, setExited] = useState(false);
   const interrupt = useRef<(() => void) | null>(null);
   const suspend = useRef<(() => void) | null>(null);
+  const clipboardTarget = useRef<TerminalClipboardTarget | null>(null);
   const host = useRef<HTMLDivElement>(null);
   const reload = useCallback(async () => {
     const result = await api.read(sid, "terminals");
@@ -69,6 +72,7 @@ export default function DshTerminal({ sid, api }: { sid: string; api: DshApiClie
       theme: { background: "#10151e", foreground: "#e5eaf3", cursor: "#88afff", selectionBackground: "#496ba86b" } });
     const fit = new FitAddon(); terminal.loadAddon(fit); terminal.open(host.current);
     const prompt = observeTerminalPrompt(terminal);
+    const detachNativeSelection = attachTerminalNativeSelection(host.current, terminal);
     const detachTouchScroll = attachTerminalTouchScroll(host.current, terminal, {
       ready: () => !gone && writable && !rendering && prompt.ready(),
       send: action => {
@@ -126,6 +130,11 @@ export default function DshTerminal({ sid, api }: { sid: string; api: DshApiClie
       }
       if (part) input({ type: "write", data: part });
     });
+    clipboardTarget.current = { terminal, paste: text => {
+      if (gone || !writable) return false;
+      terminal.paste(text); terminal.focus();
+      return true;
+    } };
     interrupt.current = () => input({ type: "write", data: "\u0003" });
     let columns = 0, rows = 0, resizeFrame = 0;
     const resize = () => {
@@ -199,8 +208,9 @@ export default function DshTerminal({ sid, api }: { sid: string; api: DshApiClie
     }).catch(fail);
     return () => {
       freeze(); unwatch(); clearInterval(heartbeat);
+      if (clipboardTarget.current?.terminal === terminal) clipboardTarget.current = null;
       if (suspend.current === freeze) { suspend.current = null; interrupt.current = null; }
-      observer.disconnect(); cancelAnimationFrame(resizeFrame); detachTouchScroll(); detachWheelScroll(); prompt.dispose(); onData.dispose(); terminal.dispose();
+      observer.disconnect(); cancelAnimationFrame(resizeFrame); detachTouchScroll(); detachWheelScroll(); detachNativeSelection(); prompt.dispose(); onData.dispose(); terminal.dispose();
       void controlInput({ action: "detach" }).catch(() => {});
     };
   }, [sid, api, target, revision, reload]);
@@ -221,6 +231,7 @@ export default function DshTerminal({ sid, api }: { sid: string; api: DshApiClie
     {target ? <div className="dsh-terminal-screen"><div className="dsh-terminal-viewport" ref={host} /></div>
       : <div className="dsh-terminal-empty"><Icon name="bash" size={32} /><p>选择终端或新建一个终端</p><small>这里的命令由你直接运行。</small></div>}
     {target && <div className="dsh-terminal-actions">
+      <DshTerminalClipboard key={`${sid}:${target}:${revision}`} targetRef={clipboardTarget} connected={connected && !busy} />
       <button aria-label="中断命令 Ctrl+C" disabled={busy || !connected} onClick={() => interrupt.current?.()}><Icon name="stop" size={15} />Ctrl+C 中断</button>
       <button disabled={busy || exited} onClick={() => setRevision(value => value + 1)}><Icon name="refresh" size={15} />重新连接</button>
       <button className="dsh-terminal-close" disabled={busy || exited} onClick={() => setStop(target)}><Icon name="trash" size={15} />关闭终端</button>
