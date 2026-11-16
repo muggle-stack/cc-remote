@@ -4,6 +4,18 @@
 
 ## Unreleased
 
+## v5.3.35
+
+Improve side-panel continuity and DSH terminal interaction, and reduce Python test overhead. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Preserve mounted side chats, file previews and videos across harness switches, including drafts, reading positions and playback progress.
+- Release panel resources on explicit close, device changes and content invalidation, with a bounded number of retained panels.
+- Pause hidden media, automatic reads and popup interaction, and route concurrent panel replies by session and request identity.
+- Preserve fine Mac trackpad scrolling in the DSH terminal and batch pending keystrokes and output to reduce interaction delays.
+- Consolidate test execution items while retaining parameter coverage, and remove unnecessary waits from simulated network retries and test-server shutdown.
+
+See the bilingual [release notes](docs/releases/v5.3.35.md).
+
 ## v5.3.34
 
 Fix updates that remain blocked after Codex sessions become idle and allow more time for Wrapper restart recovery. Wire protocol v94 and Claude Agent SDK 0.2.174.
