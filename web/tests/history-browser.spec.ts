@@ -3964,6 +3964,62 @@ test("Claude agent detail stops waiting on a lost response and retries", async (
   await expect.poll(() => relay.commands.filter((c) => c.type === "get_agent_detail").length).toBe(2);
 });
 
+test("viewed image previews remain clickable after completion and history reload", async ({ page }) => {
+  const sid = "layout-parent";
+  const turns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = [];
+  const relay = await mockRightPanelRelay(page, { imageAssets: true, seedTurns: turns });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
+  relay.emit({ type: "user_msg", sid, msg_id: "view-user", prompt: "检查图片" });
+  relay.emit({ type: "turn_binding", sid, msg_id: "view-user", turn_id: "view-native" });
+  relay.emit({ type: "state", sid, state: "running" });
+  relay.emit({ type: "process", sid, item_id: "live-view", turn_id: "view-native",
+    kind: "server_tool", phase: "end", status: "succeeded", title: "查看图片", tool: "view_image",
+    input: { file_path: "/missing/chart.png", preview_id: "live-view" } });
+  const turn = page.locator('.turn[data-turn-id="view-user"]');
+  const liveHead = turn.getByRole("button", { name: /正在处理/ }).first();
+  await expect(liveHead).toBeVisible();
+  if (await liveHead.getAttribute("aria-expanded") !== "true") await liveHead.click();
+  await turn.locator(".process-activity > summary").click();
+  await expect(turn.getByRole("button", { name: "预览查看过的图片" })).toBeEnabled();
+
+  const blocks = [0, 1].map(index => ({
+    kind: "process" as const, item_id: `exec-call.image-${index}`, processKind: "server_tool" as const,
+    phase: "end" as const, status: "succeeded" as const, done: true, title: "查看图片", tool: "view_image",
+    input: { history_image: { image_id: `img-batch-${index}`, media_type: "image/png",
+      width: 1, height: 1, byte_size: 68 } },
+  }));
+  turns.push({ id: "view-user", forkPointId: "view-native", prompt: "检查图片", done: true,
+    detailLoaded: true, processDetailState: "present", blocks });
+  relay.emit({ type: "turn_end", sid, turn_id: "view-native", result: { subtype: "success" } });
+  relay.emit({ type: "state", sid, state: "idle" });
+  relay.emit({ type: "history", sid, session_id: sid, revision: "layout-history",
+    generation: "layout-generation", detail: "summary", events: [], has_more: false, turns });
+  for (const reload of [false, true]) {
+    if (reload) await page.reload();
+    const head = turn.getByRole("button", { name: /已处理/ }).first();
+    await expect(head).toBeVisible();
+    if (await head.getAttribute("aria-expanded") !== "true") await head.click();
+    for (const selector of [".tool-group", ".process-activity"]) {
+      for (const disclosure of await turn.locator(`details${selector}`).all()) {
+        if (await disclosure.getAttribute("open") === null) {
+          await disclosure.locator(":scope > summary").click();
+        }
+      }
+    }
+    const images = turn.getByRole("button", { name: "预览查看过的图片" });
+    await expect(images).toHaveCount(2);
+    for (let index = 0; index < 2; index++) {
+      await expect(images.nth(index)).toBeEnabled();
+      await images.nth(index).click();
+      await expect(page.locator(".image-lightbox-image")).toBeVisible();
+      await page.locator(".image-lightbox-close").click();
+    }
+  }
+  expect(relay.commands.filter(c => c.type === "get_history_image")
+    .every(c => c.turn_id === "view-user")).toBe(true);
+});
+
 test("generated image live snapshot renders outside collapsed process and duplicate events stay idempotent", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { imageAssets: true });
   await page.goto("/");

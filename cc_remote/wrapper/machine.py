@@ -1169,6 +1169,13 @@ def _merge_codex_history_image_views(
     if not views:
         return merged
 
+    replaced = {item_id for view in views for item_id in view.replaces_item_ids}
+    if replaced:
+        merged = [row for row in merged if not (
+            row.get("type") == "process" and row.get("item_id") in replaced
+            and _normalized_tool_name(row.get("tool")) == "viewimage"
+        )]
+
     official_indexes: list[int] = []
     for index, row in enumerate(merged):
         if (
@@ -17546,8 +17553,15 @@ class WrapperMachine:
     ) -> list[dict]:
         """Add rollout-only image views while preserving official detail."""
         try:
-            locator = self._codex_history.rollout_fallback(
-                sid, visible_turn_id)
+            try:
+                locator = self._codex_history.rollout_fallback(sid, visible_turn_id)
+                native_turn_id, segment_index = locator.native_turn_id, locator.segment_index
+            except (AttributeError, CodexHistoryCursorError):
+                native_segment = self._codex_detail_pages.native_segment(
+                    sid, visible_turn_id, self._history_revision(sid))
+                if native_segment is None:
+                    return list(rows)
+                native_turn_id, segment_index = native_segment
             path = await asyncio.to_thread(
                 self._codex_rollout_for_wire, sid)
             if not path:
@@ -17557,8 +17571,8 @@ class WrapperMachine:
             cache_key = (
                 sid,
                 source.path,
-                locator.native_turn_id,
-                locator.segment_index,
+                native_turn_id,
+                segment_index,
             )
             cached = self._codex_history_image_views.get(cache_key)
             views: tuple[CodexHistoryImageView, ...] | None = None
@@ -17581,8 +17595,8 @@ class WrapperMachine:
                 views = await asyncio.to_thread(
                     codex_history_image_views,
                     path,
-                    locator.native_turn_id,
-                    segment_index=locator.segment_index,
+                    native_turn_id,
+                    segment_index=segment_index,
                 )
                 parsed = True
 
@@ -17616,8 +17630,8 @@ class WrapperMachine:
                     views = await asyncio.to_thread(
                         codex_history_image_views,
                         path,
-                        locator.native_turn_id,
-                        segment_index=locator.segment_index,
+                        native_turn_id,
+                        segment_index=segment_index,
                     )
                     parsed = True
             merged = _merge_codex_history_image_views(rows, views)
@@ -17672,6 +17686,8 @@ class WrapperMachine:
                             previous_item_id=view.previous_item_id,
                             next_item_id=view.next_item_id,
                             source_complete=view.source_complete,
+                            replaces_item_ids=view.replaces_item_ids,
+                            source_offset=view.source_offset,
                         )
                         for view in views
                     ),
@@ -17773,6 +17789,7 @@ class WrapperMachine:
                                       max(512 * 1024, self.cfg.ws_max_size_bytes // 2)),
                         tool_result_max=self.cfg.tool_result_max,
                         paginate=_turn_detail_page,
+                        supplement=_merge_codex_history_image_views,
                     )
                     if self._history_revision(sid) != revision:
                         raise CodexDetailCursorExpired("history revision changed")
@@ -18142,9 +18159,13 @@ class WrapperMachine:
                 rows = list(fallback_official_rows)
                 indexed_turn_id = cmd.turn_id
                 detail_snapshot = None
-        if is_codex and detail_snapshot is None:
-            rows = await self._supplement_codex_history_image_views(
-                sid, cmd.turn_id, rows)
+        if is_codex:
+            supplemented = await self._supplement_codex_history_image_views(sid, cmd.turn_id, rows)
+            if supplemented != rows:
+                # Added rows need their own stable event pagination rather than
+                # the unsupplemented SQLite snapshot's numeric coordinates.
+                detail_snapshot = None
+            rows = supplemented
         try:
             page, has_more, oldest, has_newer, newer = _turn_detail_page(
                 rows,
@@ -18554,8 +18575,8 @@ class WrapperMachine:
         engine = "codex" if is_codex else "claude"
         try:
             if is_codex:
-                official_rows = self._codex_history.summary_events(
-                    sid, cmd.turn_id)
+                summary_events = getattr(self._codex_history, "summary_events", None)
+                official_rows = summary_events(sid, cmd.turn_id) if callable(summary_events) else None
                 if official_rows is not None:
                     official_image = history_image_from_events(
                         official_rows, cmd.turn_id, cmd.image_id)
