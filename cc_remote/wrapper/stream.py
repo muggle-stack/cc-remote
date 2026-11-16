@@ -42,7 +42,7 @@ from cc_remote.protocol import (
 )
 from cc_remote.wrapper.sanitize import bounded_text, bounded_tool_input
 from cc_remote.wrapper.claude_compaction import (
-    compact_completion_events, compact_metadata, manual_compact_prompt,
+    ClaudeCompaction, compact_completion_events, compact_metadata, manual_compact_prompt,
     native_command_prompt,
 )
 from cc_remote.wrapper.claude_model_fallback import FALLBACK_TOOL, model_fallback_event
@@ -741,7 +741,7 @@ class StreamTranslator:
         # transcript UUID. Keep it separate from the browser's optimistic turn
         # id and from tool-result user envelopes.
         self._last_user_uuid: str | None = None
-        self._compaction_id: str | None = None
+        self._compaction: ClaudeCompaction | None = None
         self._usage = UsageLedger()
         self._usage_message: tuple[str, str | None] | None = None
         self._usage_rebound = False
@@ -1560,35 +1560,50 @@ class StreamTranslator:
             return []
         self.compact_boundary_id = event.item_id
         event.turn_id = self.turn_id
-        if self._compaction_id is not None:
+        compaction = getattr(msg, "_cc_compaction", self._compaction)
+        if compaction is not None:
             # Status UUIDs and persisted boundary UUIDs differ. Bind the live
-            # placeholder to its actual boundary so later history deduplicates.
-            event.input = {"compaction_started_id": self._compaction_id}
-            self._compaction_id = None
+            # placeholder even when a human echo changed its delivery route.
+            event.input = {"compaction_started_id": _wire_id(compaction.status_id, "compaction")}
+            if compaction.started:
+                event.turn_id = compaction.turn_id
+                event.background = self._background_for_turn(compaction.turn_id)
+            compaction.ended = True
+        self._compaction = None
         return [event]
 
     def _feed_compaction_status(self, msg: SystemMessage) -> list[ProcessEvent]:
         data = msg.data if isinstance(msg.data, dict) else {}
         if data.get("status") != "compacting":
-            if data.get("compact_error") and self._compaction_id is not None:
+            if data.get("compact_error"):
+                self._compaction = getattr(msg, "_cc_compaction", self._compaction)
                 return self._end_unfinished_compaction("failed")
             return []
-        if self._compaction_id is not None:
+        compaction = getattr(msg, "_cc_compaction", None)
+        if compaction is None:
+            compaction = self._compaction or ClaudeCompaction(
+                data.get("uuid") or str(uuid.uuid4()), self.turn_id)
+        if compaction.ended or compaction.started:
             return []  # Native heartbeats do not create new animations.
-        self._compaction_id = _wire_id(
-            data.get("uuid") or str(uuid.uuid4()), "compaction")
+        compaction.turn_id = self.turn_id
+        compaction.started = True
+        self._compaction = compaction
         return [ProcessEvent(
-            item_id=self._compaction_id, kind="compaction", phase="start",
-            status="running", title="压缩上下文", turn_id=self.turn_id,
+            item_id=_wire_id(compaction.status_id, "compaction"),
+            kind="compaction", phase="start", status="running", title="压缩上下文",
+            turn_id=compaction.turn_id,
         )]
 
     def _end_unfinished_compaction(self, status: str) -> list[ProcessEvent]:
-        if self._compaction_id is None:
+        compaction, self._compaction = self._compaction, None
+        if compaction is None or compaction.ended:
             return []
-        item_id, self._compaction_id = self._compaction_id, None
+        compaction.ended = True
         return [ProcessEvent(
-            item_id=item_id, kind="compaction", phase="end", status=status,
-            title="压缩上下文", turn_id=self.turn_id,
+            item_id=_wire_id(compaction.status_id, "compaction"),
+            kind="compaction", phase="end", status=status, title="压缩上下文",
+            turn_id=compaction.turn_id,
+            background=self._background_for_turn(compaction.turn_id),
         )]
 
     def _feed_hook(self, msg: HookEventMessage) -> list:
@@ -1671,6 +1686,7 @@ class StreamTranslator:
         if isinstance(msg, ResultMessage):
             # A terminal without a boundary must not leave an eternal spinner
             # or invent a successful compact (including interrupted commands).
+            self._compaction = getattr(msg, "_cc_compaction", None) or self._compaction
             events = self._end_unfinished_compaction(
                 "interrupted" if msg.is_error else "failed")
             if not self._usage_rebound and not msg.is_error:

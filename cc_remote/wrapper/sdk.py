@@ -17,6 +17,7 @@ import asyncio
 import os
 from contextlib import asynccontextmanager
 from typing import Any, Awaitable, Callable
+from uuid import uuid4
 
 from claude_agent_sdk import (
     ClaudeSDKClient, ClaudeAgentOptions, PermissionResultDeny,
@@ -57,7 +58,9 @@ from cc_remote.wrapper.claude_rewind import (
 )
 from cc_remote.wrapper.claude_runtime import inspect_claude_runtime
 from cc_remote.wrapper.claude_model_fallback import model_fallback_event
-from cc_remote.wrapper.claude_compaction import compact_context_usage, compact_metadata
+from cc_remote.wrapper.claude_compaction import (
+    ClaudeCompaction, compact_context_usage, compact_metadata,
+)
 from cc_remote.wrapper.claude_controls import (
     CLAUDE_DEFAULT_AUTO_COMPACT_MODE,
     claude_auto_compact_cli_value,
@@ -1853,6 +1856,7 @@ class SdkHandle:
         """Read the private SDK queue once for the complete client lifetime."""
         assert self._turn_messages is not None
         assert self._background_messages is not None
+        compaction: ClaudeCompaction | None = None
         try:
             query = getattr(client, "_query", None)
             if query is not None and hasattr(query, "receive_messages"):
@@ -2032,6 +2036,33 @@ class SdkHandle:
                                     else "background"
                                 )
                             )
+
+                    # Compaction can start before the human echo and finish
+                    # after it. Carry its exact identity across both queues
+                    # without changing their conversation ownership.
+                    if isinstance(message, SystemMessage) and isinstance(message.data, dict) and not (
+                        message.data.get("parent_tool_use_id")
+                        or message.data.get("parentToolUseID")
+                    ):
+                        if message.subtype == "status":
+                            if message.data.get("status") == "compacting":
+                                if compaction is None:
+                                    status_id = message.data.get("uuid")
+                                    if not isinstance(status_id, str) or not status_id:
+                                        status_id = str(uuid4())
+                                    compaction = ClaudeCompaction(status_id)
+                                message._cc_compaction = compaction
+                            elif message.data.get("compact_error"):
+                                message._cc_compaction = compaction
+                                compaction = None
+                        elif message.subtype == "compact_boundary":
+                            message._cc_compaction = compaction
+                            compaction = None
+                    elif isinstance(message, ResultMessage) and not (
+                        parse_raw and (data.get("parent_tool_use_id") or data.get("parentToolUseID"))
+                    ):
+                        message._cc_compaction = compaction
+                        compaction = None
 
                     if owner == "managed":
                         if isinstance(message, ResultMessage) and getattr(message, "_cc_background_ends", ()):

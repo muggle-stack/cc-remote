@@ -1,6 +1,7 @@
 """Normalize native Claude compact metadata from live and persisted events."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 import hashlib
 import re
@@ -8,6 +9,16 @@ import re
 from cc_remote.protocol import (
     MAX_SAFE_WIRE_INTEGER, AssistantMsgEnd, AssistantMsgStart, Delta,
 )
+
+
+@dataclass
+class ClaudeCompaction:
+    """One native compact operation, shared across presentation routes."""
+
+    status_id: str
+    turn_id: str | None = None
+    started: bool = False
+    ended: bool = False
 
 
 def manual_compact_prompt(content: object) -> str | None:

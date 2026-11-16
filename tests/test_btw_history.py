@@ -35,6 +35,44 @@ def completed(index, text=None):
     }}
 
 
+def test_compaction_replay_retains_one_completed_item_in_source_order():
+    history = BtwHistory(10000, 100)
+    history.observe(UserMsg(msg_id="human", prompt="inspect"))
+    start = ProcessEvent(item_id="compact-start", kind="compaction", phase="start",
+                         status="running", turn_id="human", title="压缩上下文")
+    history.observe(start)
+    history.observe(Delta(message_id="reply", text="continued", turn_id="human"))
+    end = start.model_copy(update={
+        "item_id": "native-boundary", "phase": "end", "status": "succeeded",
+        "input": {"compaction_started_id": "compact-start"},
+    })
+    history.observe(end)
+    history.observe(start)  # A delayed heartbeat must not revive the old item.
+    history.observe(end)
+    restored = replay(history)
+    assert [(e.type, getattr(e, "item_id", None)) for e in restored[2:-1]] == [
+        ("process", "native-boundary"), ("delta", None)]
+    assert next(e for e in restored if isinstance(e, ProcessEvent)).status == "succeeded"
+    assert history._items == 2
+    assert history._bytes == sum(RingBuffer._size(e) for e in restored[1:-1])
+
+
+def test_compaction_replay_does_not_merge_unrelated_turns():
+    history = BtwHistory(10000, 100)
+    history.observe(UserMsg(msg_id="older", prompt="previous"))
+    start = ProcessEvent(item_id="compact-start", kind="compaction", phase="start",
+                         status="running", turn_id="older", title="压缩上下文")
+    history.observe(start)
+    history.observe(UserMsg(msg_id="newer", prompt="current"))
+    history.observe(start.model_copy(update={
+        "item_id": "native-boundary", "phase": "end", "status": "succeeded",
+        "turn_id": "newer", "input": {"compaction_started_id": "compact-start"},
+    }))
+    restored = [e for e in replay(history) if isinstance(e, ProcessEvent)]
+    assert [(e.item_id, e.turn_id, e.status) for e in restored] == [
+        ("compact-start", "older", "running"), ("native-boundary", "newer", "succeeded")]
+
+
 def test_token_ring_eviction_does_not_cut_message_or_lose_user_boundary():
     history = BtwHistory(1_000_000, 100)
     ring = RingBuffer(4, 4096)
@@ -422,6 +460,83 @@ async def test_claude_btw_managed_replay_ignores_pre_echo_background_owner(previ
             assert activity.msg_id == "current-input"
             assert activity.state == "running" and not activity.continuation
             assert activity.seq is None
+
+        await native.queue.put(result())
+        await asyncio.wait_for(consumer, 3)
+        sdk.release_background_messages()
+        await until(lambda: not machine._claude_autonomous_followup_pending(ctx))
+        assert native.inputs == ["current"] and native.interrupts == 0
+    finally:
+        if consumer:
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+        await sdk._stop_message_pump()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("previous_owner", [None, "previous-input"])
+@pytest.mark.parametrize("before_echo", [False, True])
+async def test_claude_btw_compaction_spans_native_input_echo(previous_owner, before_echo):
+    from cc_remote.wrapper.sdk import SdkHandle
+    from cc_remote.wrapper.stream import StreamTranslator
+    from tests.test_claude_compaction_flow import boundary, status
+    from tests.test_claude_steering import NativeClient, assistant, result, until, user
+
+    machine, transport = _mk_machine()
+    ctx = _mk_ctx("btw-compaction")
+    ctx.btw = ctx.btw_announced = True
+    ctx.owner_client_id = "owner"
+    sdk = ctx.sdk = SdkHandle(machine.cfg)
+    sdk.client = native = NativeClient()
+    machine.sessions[ctx.key] = ctx
+    machine._configure_claude_sdk_callbacks(ctx, sdk)
+    sdk._start_message_pump()
+    consumer = None
+    try:
+        if previous_owner:
+            await machine._emit(ctx, UserMsg(msg_id=previous_owner, prompt="previous"))
+            await machine._emit(ctx, TurnEnd(turn_id=previous_owner, result=TurnResult(
+                subtype="success", duration_ms=1, is_error=False)))
+        sdk._turn_origin_id = previous_owner
+        ctx.active_msg_id = sdk.next_turn_id = "current-input"
+        ctx.translator = StreamTranslator(1024, turn_id="current-input")
+        await sdk.query("current")
+        await machine._set_state(ctx, "running")
+        await machine._emit(ctx, UserMsg(msg_id="current-input", prompt="current"))
+
+        async def consume():
+            async for message in sdk.receive_response():
+                for event in ctx.translator.feed(message):
+                    await machine._emit(ctx, event)
+
+        consumer = ctx.turn_task = asyncio.create_task(consume())
+        if not before_echo:
+            await native.queue.put(user("native-human", "current"))
+        await native.queue.put(status())
+        await until(lambda: any(isinstance(e, ProcessEvent) for e in transport.sent))
+        if before_echo:
+            await native.queue.put(user("native-human", "current"))
+        await native.queue.put(boundary())
+        await native.queue.put(assistant("continued", [{"type": "text", "text": "working"}]))
+        await until(lambda: any(e.type == "delta" for e in transport.sent))
+        processes = [e for e in transport.sent if isinstance(e, ProcessEvent)]
+        assert len(processes) == 2
+        start, end = processes
+        assert end.input == {"compaction_started_id": start.item_id}
+        assert end.turn_id == start.turn_id
+        assert end.status == "succeeded"
+        assert end.background is (True if previous_owner and before_echo else None)
+
+        for _ in range(2):
+            transport.sent.clear()
+            await machine._handle_sync_btw(SyncBtw(
+                sid=ctx.key, client_id="new-tab", owner_id="owner"))
+            restored = [e for e in transport.sent if isinstance(e, ProcessEvent)]
+            assert len(restored) == 1
+            assert restored[0].item_id == end.item_id
+            assert restored[0].status == "succeeded"
+            assert any(isinstance(e, StateEvent) and e.state == "running"
+                       and e.msg_id == "current-input" for e in transport.sent)
 
         await native.queue.put(result())
         await asyncio.wait_for(consumer, 3)
