@@ -1857,6 +1857,7 @@ class SdkHandle:
         assert self._turn_messages is not None
         assert self._background_messages is not None
         compaction: ClaudeCompaction | None = None
+        compaction_owner: str | None = None
         try:
             query = getattr(client, "_query", None)
             if query is not None and hasattr(query, "receive_messages"):
@@ -2040,6 +2041,8 @@ class SdkHandle:
                     # Compaction can start before the human echo and finish
                     # after it. Carry its exact identity across both queues
                     # without changing their conversation ownership.
+                    if compaction is not None and owner == "managed" and top_level_user:
+                        compaction_owner = "managed"
                     if isinstance(message, SystemMessage) and isinstance(message.data, dict) and not (
                         message.data.get("parent_tool_use_id")
                         or message.data.get("parentToolUseID")
@@ -2051,18 +2054,35 @@ class SdkHandle:
                                     if not isinstance(status_id, str) or not status_id:
                                         status_id = str(uuid4())
                                     compaction = ClaudeCompaction(status_id)
+                                    compaction_owner = (
+                                        "managed" if owner == "managed"
+                                        else self._steers.background_id)
                                 message._cc_compaction = compaction
                             elif message.data.get("compact_error"):
                                 message._cc_compaction = compaction
                                 compaction = None
+                                compaction_owner = None
                         elif message.subtype == "compact_boundary":
                             message._cc_compaction = compaction
                             compaction = None
-                    elif isinstance(message, ResultMessage) and not (
-                        parse_raw and (data.get("parent_tool_use_id") or data.get("parentToolUseID"))
-                    ):
-                        message._cc_compaction = compaction
-                        compaction = None
+                            compaction_owner = None
+                    elif isinstance(message, ResultMessage):
+                        # A task Result can interleave with the compacting
+                        # response. Only that response's terminal may retire
+                        # the shared operation, including after a human echo.
+                        message._cc_compaction = None
+                        child_result = parse_raw and (
+                            data.get("parent_tool_use_id") or data.get("parentToolUseID"))
+                        owns_compaction = (
+                            owner == "managed" and compaction_owner == "managed"
+                            or owner == "background" and compaction_owner != "managed" and (
+                                compaction_owner in getattr(message, "_cc_background_ends", ())
+                                if compaction_owner is not None
+                                else origin_kind in (None, "human")))
+                        if not child_result and owns_compaction:
+                            message._cc_compaction = compaction
+                            compaction = None
+                            compaction_owner = None
 
                     if owner == "managed":
                         if isinstance(message, ResultMessage) and getattr(message, "_cc_background_ends", ()):

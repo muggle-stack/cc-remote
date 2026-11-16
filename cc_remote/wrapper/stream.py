@@ -1686,7 +1686,7 @@ class StreamTranslator:
         if isinstance(msg, ResultMessage):
             # A terminal without a boundary must not leave an eternal spinner
             # or invent a successful compact (including interrupted commands).
-            self._compaction = getattr(msg, "_cc_compaction", None) or self._compaction
+            self._compaction = getattr(msg, "_cc_compaction", self._compaction)
             events = self._end_unfinished_compaction(
                 "interrupted" if msg.is_error else "failed")
             if not self._usage_rebound and not msg.is_error:

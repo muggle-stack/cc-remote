@@ -476,7 +476,8 @@ async def test_claude_btw_managed_replay_ignores_pre_echo_background_owner(previ
 @pytest.mark.asyncio
 @pytest.mark.parametrize("previous_owner", [None, "previous-input"])
 @pytest.mark.parametrize("before_echo", [False, True])
-async def test_claude_btw_compaction_spans_native_input_echo(previous_owner, before_echo):
+@pytest.mark.parametrize("unrelated_result", [False, True])
+async def test_claude_btw_compaction_spans_native_input_echo(previous_owner, before_echo, unrelated_result):
     from cc_remote.wrapper.sdk import SdkHandle
     from cc_remote.wrapper.stream import StreamTranslator
     from tests.test_claude_compaction_flow import boundary, status
@@ -516,6 +517,9 @@ async def test_claude_btw_compaction_spans_native_input_echo(previous_owner, bef
         await until(lambda: any(isinstance(e, ProcessEvent) for e in transport.sent))
         if before_echo:
             await native.queue.put(user("native-human", "current"))
+        if unrelated_result:
+            await native.queue.put({**result(), "origin": {
+                "kind": "task-notification", "taskId": "unrelated-task"}})
         await native.queue.put(boundary())
         await native.queue.put(assistant("continued", [{"type": "text", "text": "working"}]))
         await until(lambda: any(e.type == "delta" for e in transport.sent))
