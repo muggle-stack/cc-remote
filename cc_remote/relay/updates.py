@@ -94,8 +94,25 @@ class UpdateRelay:
                 return {"ok": True, "job_id": state["id"], "receipt": "found", "job": public_job(state)}
         if operation == "reconcile":
             state = await asyncio.to_thread(self.queue.job, machine, command["job_id"])
-            if state and state.get("coordinated") and state.get("server_phase") == "unknown":
-                await self.server_updates.handle({"op": "reconcile", "job_id": state["server_job_id"]})
+            if (state and state.get("coordinated") and state["phase"] not in TERMINAL
+                    and state.get("server_phase") == "unknown"):
+                async with self.coordination_lock:
+                    blocking_id = state.get("blocking_server_job_id")
+                    if blocking_id is None:
+                        # Older queue records only retain the requested version's
+                        # id. Recover the actual in-flight receipt before acting.
+                        active = (await self.server_updates.status()).get("job")
+                        if active and active["phase"] not in TERMINAL:
+                            blocking_id = active["id"]
+                            state = {**state, "blocking_server_job_id": blocking_id}
+                            await asyncio.to_thread(self.queue.save, machine, state)
+                    if blocking_id is not None:
+                        result = await self.server_updates.handle({"op": "reconcile", "job_id": blocking_id})
+                        if result.get("ok") is not True:
+                            return {"ok": False, "reason": result.get("reason") or "outcome_pending",
+                                    "job": public_job(state)}
+                        if (result.get("job") or {}).get("id") != blocking_id:
+                            return {"ok": False, "reason": "outcome_pending", "job": public_job(state)}
                 await self._advance_upgrade(machine, state["id"])
                 return {"ok": True, "job": public_job(await asyncio.to_thread(self.queue.job, machine, state["id"]))}
         if machine not in self.peers:
@@ -228,8 +245,12 @@ class UpdateRelay:
                     shared = {"server_job_id": active["id"]} if active["version"] == state["version"] else {}
                     await asyncio.to_thread(self.queue.save, machine, {**state,
                         **shared, "phase": "unknown" if active["phase"] == "unknown" else "updating_relay",
-                        "server_phase": active["phase"], "reason": active.get("reason")})
+                        "server_phase": active["phase"], "blocking_server_job_id": active["id"],
+                        "reason": active.get("reason")})
                     return
+                if state.get("blocking_server_job_id") is not None:
+                    state = {**state, "blocking_server_job_id": None}
+                    await asyncio.to_thread(self.queue.save, machine, state)
                 if version_tuple(server.get("current", "0.0.0")) < version_tuple(state["version"]):
                     if not server.get("managed", True):
                         await asyncio.to_thread(self.queue.save, machine, {**state,
@@ -258,7 +279,9 @@ class UpdateRelay:
                             "server_phase": job["phase"], "reason": job.get("reason") or "relay_unconfirmed"})
                     else:
                         await asyncio.to_thread(self.queue.save, machine, {**state,
-                            "phase": "updating_relay", "server_phase": job["phase"], "reason": job.get("reason")})
+                            "phase": "unknown" if job["phase"] == "unknown" else "updating_relay",
+                            "server_phase": job["phase"], "blocking_server_job_id": job["id"],
+                            "reason": job.get("reason")})
                     return
                 state = {**state, "server_phase": "succeeded", "phase": "waiting_device", "reason": None}
                 await asyncio.to_thread(self.queue.save, machine, state)

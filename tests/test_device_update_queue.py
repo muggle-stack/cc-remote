@@ -519,6 +519,84 @@ async def test_shared_server_failure_does_not_automatically_start_a_second_attem
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('version', ['5.3.27', START['version']])
+@pytest.mark.parametrize('legacy_record', [False, True])
+async def test_reconcile_uses_the_blocking_server_receipt_after_restart(hub, version, legacy_record):
+    native = ManagedServer()
+    native.job = {'id': 'b' * 32, 'version': version, 'phase': 'unknown', 'reason': 'job_unknown'}
+    hub.server_updates = native
+    hub.wake_coordinator = lambda: None
+    await hub.request('device-a', {**START, 'op': 'upgrade'})
+    target_id = hub.queue.job('device-a', ID)['server_job_id']
+    await hub._advance_upgrade('device-a', ID)
+    state = hub.queue.job('device-a', ID)
+    if legacy_record:
+        state.pop('blocking_server_job_id', None)
+        hub.queue.save('device-a', state)
+    else:
+        assert state['blocking_server_job_id'] == native.job['id']
+    reconciled = []
+    original = native.handle
+
+    async def recover(command):
+        if command['op'] == 'reconcile':
+            reconciled.append(command['job_id'])
+            assert command['job_id'] == 'b' * 32
+            native.job.update(phase='failed', reason='rolled_back')
+            return {'ok': True, 'job': native.job}
+        return await original(command)
+
+    native.handle = recover
+    restored = UpdateRelay(hub.queue.devices, native)
+    result = await restored.request('device-a', {'op': 'reconcile', 'job_id': ID})
+    assert result['ok'] is True
+    assert reconciled == ['b' * 32]
+    if version == START['version']:
+        assert result['job']['phase'] == 'blocked'
+        assert result['job']['reason'] == 'rolled_back'
+        assert not native.starts
+    else:
+        assert result['job']['phase'] == 'updating_relay'
+        assert native.starts == [{'op': 'start', 'job_id': target_id, 'version': START['version']}]
+        assert restored.queue.job('device-a', ID)['server_job_id'] == target_id
+        await restored._advance_upgrade('device-a', ID)
+        assert len(native.starts) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reason', ['permission_required', 'outcome_pending'])
+async def test_blocking_server_reconcile_error_is_returned_without_starting_another_job(hub, reason):
+    native = ManagedServer()
+    native.job = {'id': 'b' * 32, 'version': '5.3.27', 'phase': 'unknown', 'reason': 'job_unknown'}
+    hub.server_updates = native
+    hub.wake_coordinator = lambda: None
+    await hub.request('device-a', {**START, 'op': 'upgrade'})
+    await hub._advance_upgrade('device-a', ID)
+    native.handle = AsyncMock(return_value={'ok': False, 'reason': reason})
+    result = await hub.request('device-a', {'op': 'reconcile', 'job_id': ID})
+    assert result['ok'] is False and result['reason'] == reason
+    assert result['job']['id'] == ID and result['job']['phase'] == 'unknown'
+    native.handle.assert_awaited_once_with({'op': 'reconcile', 'job_id': 'b' * 32})
+    assert not native.starts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('receipt', [None, {'id': 'c' * 32, 'phase': 'succeeded'}])
+async def test_blocking_server_reconcile_requires_the_exact_receipt(hub, receipt):
+    native = ManagedServer()
+    native.job = {'id': 'b' * 32, 'version': '5.3.27', 'phase': 'unknown', 'reason': 'job_unknown'}
+    hub.server_updates = native
+    hub.wake_coordinator = lambda: None
+    await hub.request('device-a', {**START, 'op': 'upgrade'})
+    await hub._advance_upgrade('device-a', ID)
+    native.handle = AsyncMock(return_value={'ok': True, 'job': receipt})
+    result = await hub.request('device-a', {'op': 'reconcile', 'job_id': ID})
+    assert result['ok'] is False and result['reason'] == 'outcome_pending'
+    assert result['job']['phase'] == 'unknown'
+    assert not native.starts
+
+
+@pytest.mark.asyncio
 async def test_device_rejection_remains_visible_after_server_succeeds(hub):
     native = ManagedServer()
     native.current = START['version']
