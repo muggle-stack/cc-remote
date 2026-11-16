@@ -101,7 +101,7 @@ export function DshTerminalClipboard({ targetRef, connected }: {
     <button aria-label="复制终端文字" disabled={!targetRef.current}
       onPointerDown={() => { selection.current = targetRef.current ? terminalSelectedText(targetRef.current.terminal) : ""; }}
       onClick={() => void openCopy()}><Icon name="copy" size={15} />复制</button>
-    <button aria-label="粘贴到终端" disabled={!connected || reading} onClick={() => void paste()}>粘贴</button>
+    <button aria-label="粘贴到终端" disabled={!connected || reading} onClick={() => void paste()}><Icon name="clipboard" size={15} />粘贴</button>
     {!!visible && <CenteredSheet open label={visible.kind === "copy" ? "复制终端文字" : "粘贴到终端"}
       maxWidth={640} maxHeight={520} minimumHeight={280} className="dsh-terminal-clipboard" onClose={() => setDialog(null)}>
       <p>{visible.kind === "copy" ? "长按选择要复制的文字。" : "在下面长按粘贴，再写入终端。"}</p>
