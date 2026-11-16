@@ -11,13 +11,14 @@ export function useAppUpdates(enabled: boolean, machine: string, open: boolean, 
   const [pending, setPending] = useState<UpdateIntent | null>(null);
   const [pendingStatus, setPendingStatus] = useState<"unconfirmed" | "missing" | "unsupported">("unconfirmed");
   const openRef = useRef(open); openRef.current = open;
-  const actions = useRef({ check: async () => {}, authorize: async () => {}, start: async (_version: string, _coordinated = false) => {}, cancel: async () => {}, recover: async () => {}, observeMaintenance: () => {} });
+  const actions = useRef({ check: async (): Promise<AppUpdateState | null> => null, authorize: async () => {}, start: async (_version: string, _coordinated = false) => {}, cancel: async () => {}, recover: async () => {}, observeMaintenance: () => {} });
   useEffect(() => {
     setMaintenance(false); setData(null); setError(null); setChecking(false); setChanging(false); setPending(null);
     setPendingStatus("unconfirmed");
     if (!enabled || (scope === "device" && !machine)) return;
     let active = true, probing = false, mutation = false, lastCheck = 0, guardRevision = 0;
-    let probeChecksCatalog = false, recheck = false;
+    let recheck = false;
+    const checkWaiters: Array<(state: AppUpdateState | null) => void> = [];
     let guardObserved = false;
     let mutationRevision = 0, lookupUnsupported = false;
     let snapshot: AppUpdateState | null = null;
@@ -41,12 +42,14 @@ export function useAppUpdates(enabled: boolean, machine: string, open: boolean, 
       if (!active) return;
       if (mutation) { recheck ||= check; return; }
       if (probing) {
-        // Opening during a status poll still needs a catalog check. Coalesce
-        // concurrent opens with an already-running catalog request.
-        if (check && !probeChecksCatalog) { recheck = true; setChecking(true); }
+        // A new check must use a request started after it, including when
+        // administrator authorization changes during an in-flight read.
+        if (check) { recheck = true; setChecking(true); }
         return;
       }
-      probing = true; probeChecksCatalog = check;
+      probing = true;
+      const waiting = check ? checkWaiters.splice(0) : [];
+      let result: AppUpdateState | null = null;
       const observedRevision = guardRevision;
       const observedMutation = mutationRevision;
       if (check) setChecking(true);
@@ -89,11 +92,13 @@ export function useAppUpdates(enabled: boolean, machine: string, open: boolean, 
         }
         // A successful status poll is not an acknowledgement of a failed start.
         setError(operationError);
+        result = snapshot;
       } catch (reason) { if (observedMutation === mutationRevision) failed(reason); }
       finally {
         const checkNext = recheck; recheck = false;
-        probing = false; probeChecksCatalog = false;
+        probing = false;
         if (active && check && !checkNext) setChecking(false);
+        for (const resolve of waiting) resolve(active ? result : null);
         if (active && (checkNext || observedRevision !== guardRevision || observedMutation !== mutationRevision)) void probe(checkNext);
       }
     };
@@ -147,7 +152,10 @@ export function useAppUpdates(enabled: boolean, machine: string, open: boolean, 
       }
       finally { mutation = false; if (active) { setChanging(false); void probe(recheck); } }
     };
-    actions.current = { check: () => probe(true), authorize: async () => {
+    actions.current = { check: () => new Promise(resolve => {
+      if (!active) { resolve(null); return; }
+      checkWaiters.push(resolve); void probe(true);
+    }), authorize: async () => {
       await client.call({ op: "authorize" }); await probe();
     }, start, cancel: () => changeJob("cancel"), recover: () => changeJob("reconcile"), observeMaintenance: () => {
       if (!active) return;
@@ -164,8 +172,9 @@ export function useAppUpdates(enabled: boolean, machine: string, open: boolean, 
     window.addEventListener("focus", focus);
     return () => {
       active = false; client.close(); window.clearInterval(poll);
+      for (const resolve of checkWaiters.splice(0)) resolve(null);
       window.removeEventListener("online", focus); window.removeEventListener("focus", focus);
-      actions.current = { check: async () => {}, authorize: async () => {}, start: async () => {}, cancel: async () => {}, recover: async () => {}, observeMaintenance: () => {} };
+      actions.current = { check: async () => null, authorize: async () => {}, start: async () => {}, cancel: async () => {}, recover: async () => {}, observeMaintenance: () => {} };
     };
   }, [enabled, machine, scope]);
   const check = useCallback(() => actions.current.check(), []);

@@ -85,11 +85,13 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
       if (!mounted.current) return;
       if (!response.ok) throw new Error("管理员账号或密码不正确，请重试。");
       setAuthorization(false); setPassword("");
-      await Promise.all([updates.check(), serverUpdates?.check()]);
-      if (requiresDeviceAuthorization) await updates.authorize();
+      const [state, serverState] = await Promise.all([updates.check(), serverMode ? undefined : serverUpdates?.check()]);
+      if (!mounted.current) return;
+      if (!state || (!serverMode && serverUpdates && !serverState)) throw new Error("暂时无法确认更新能力，请重试。");
+      if (!serverMode && state.managed && (state.reason === "setup_required" || state.reason === "permission_required")) await updates.authorize();
       if (!mounted.current) return;
       if (uncertain) await updates.recover();
-      else if (target) await updates.start(target, !serverMode && coordinateUpdate);
+      else if (target) await updates.start(target, !serverMode && serverState?.managed === true);
     } catch (error) { if (mounted.current) setAuthorizationError(error instanceof Error ? error.message : "暂时无法验证，请重试。"); }
     finally { if (mounted.current) setAuthorizing(false); }
   };

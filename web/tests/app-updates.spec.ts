@@ -206,29 +206,83 @@ test("managed device can update through a source-installed relay", async ({ page
   expect(commands).toEqual(["start"]);
 });
 
-test("one administrator authentication continues the pending unified update", async ({ page }) => {
-  let authorized = false, starts = 0;
-  await page.route("**/api/update-authorization", async route => {
-    expect(route.request().postDataJSON()).toEqual({ username: "owner", password: "test-password" });
+for (const { managedServer, pendingRead } of [
+  { managedServer: true, pendingRead: false },
+  { managedServer: true, pendingRead: true },
+  { managedServer: false, pendingRead: false },
+  { managedServer: false, pendingRead: true },
+]) {
+  test(`administrator authorization refreshes ${managedServer ? "managed" : "source"} server capabilities${pendingRead ? " after an in-flight read" : ""}`, async ({ page }) => {
+    if (pendingRead) await page.clock.install();
+    let authorized = false, pauseRead = false, readStarted = false;
+    let releaseRead = () => {};
+    const readWait = new Promise<void>(resolve => { releaseRead = resolve; });
+    const commands: string[] = [];
+    await page.route("**/api/update-authorization", async route => {
+      expect(route.request().postDataJSON()).toEqual({ username: "owner", password: "test-password" });
+      authorized = true;
+      await route.fulfill({ json: { ok: true } });
+    });
+    await page.route("**/api/server-updates", async route => {
+      const accessGranted = authorized;
+      if (pauseRead && !accessGranted) {
+        pauseRead = false; readStarted = true; await readWait;
+      }
+      await route.fulfill(accessGranted
+        ? { json: managedServer ? { ...base, busy_count: 0 }
+          : { managed: false, enabled: false, reason: "unsupported", relay_version: base.relay_version } }
+        : { status: 403, json: { reason: "forbidden" } });
+    });
+    await page.route("**/api/updates/*", async route => {
+      const body = route.request().postDataJSON();
+      if (body?.op === "upgrade" || body?.op === "start") {
+        expect(authorized).toBe(true); commands.push(body.op);
+        await route.fulfill({ json: { ok: true, job: { id: body.job_id, version: body.version,
+          previous: base.current, phase: body.op === "upgrade" ? "updating_relay" : "downloading",
+          coordinated: body.op === "upgrade" } } });
+      } else await route.fulfill({ json: base });
+    });
+    await page.goto(url + "?unified=1"); await open(page);
+    await page.getByRole("button", { name: "更新到 v5.3.15", exact: true }).click();
+    await page.getByLabel("管理员账号", { exact: true }).fill("owner");
+    await page.getByLabel("管理员密码", { exact: true }).fill("test-password");
+    if (pendingRead) {
+      pauseRead = true;
+      await page.clock.fastForward(5000);
+      await expect.poll(() => readStarted).toBe(true);
+    }
+    await page.getByRole("button", { name: "验证并继续", exact: true }).click();
+    if (pendingRead) {
+      await expect.poll(() => authorized).toBe(true);
+      expect(commands).toEqual([]);
+      releaseRead();
+    }
+    await expect.poll(() => commands.length).toBe(1);
+    expect(commands).toEqual([managedServer ? "upgrade" : "start"]);
+  });
+}
+
+test("failed post-authorization capability check keeps the update unsubmitted", async ({ page }) => {
+  let authorized = false;
+  const commands: string[] = [];
+  await page.route("**/api/update-authorization", route => {
     authorized = true;
-    await route.fulfill({ json: { ok: true } });
+    return route.fulfill({ json: { ok: true } });
   });
   await page.route("**/api/server-updates", route => route.fulfill(authorized
-    ? { json: { ...base, busy_count: 0 } } : { status: 403, json: { reason: "forbidden" } }));
-  await page.route("**/api/updates/*", async route => {
+    ? { status: 503, json: { reason: "network" } } : { status: 403, json: { reason: "forbidden" } }));
+  await page.route("**/api/updates/*", route => {
     const body = route.request().postDataJSON();
-    if (body?.op === "upgrade") {
-      expect(authorized).toBe(true); starts++;
-      await route.fulfill({ json: { ok: true, job: { id: body.job_id, version: body.version,
-        previous: base.current, phase: "updating_relay", coordinated: true } } });
-    } else await route.fulfill({ json: base });
+    if (body?.op === "start" || body?.op === "upgrade") commands.push(body.op);
+    return route.fulfill({ json: base });
   });
   await page.goto(url + "?unified=1"); await open(page);
   await page.getByRole("button", { name: "更新到 v5.3.15", exact: true }).click();
   await page.getByLabel("管理员账号", { exact: true }).fill("owner");
   await page.getByLabel("管理员密码", { exact: true }).fill("test-password");
   await page.getByRole("button", { name: "验证并继续", exact: true }).click();
-  await expect.poll(() => starts).toBe(1);
+  await expect(page.getByRole("alert")).toHaveText("暂时无法确认更新能力，请重试。");
+  expect(commands).toEqual([]);
 });
 
 test("server recovery requests administrator authentication and reuses the original job", async ({ page }) => {
