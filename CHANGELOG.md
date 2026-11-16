@@ -4,6 +4,18 @@
 
 ## Unreleased
 
+## v5.3.40
+
+Improve DSH mobile terminal gestures and keyboard handling. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Scroll output directly, hold and drag for arrow keys with three repeat speeds, and double-tap for Tab.
+- Select text with a stationary long press and drag selection handles using the terminal's actual coordinates.
+- Add a horizontally scrollable shortcut row and an explicit keyboard toggle, preserving dismissal across terminal activity.
+- Retain desktop trackpad scrolling, mouse selection and full-screen terminal input.
+- Reduce keyboard-open chat composer spacing and cover selection, focus and layout regressions on desktop, WebKit and Android.
+
+See the bilingual [release notes](docs/releases/v5.3.40.md).
+
 ## v5.3.39
 
 Adapt DSH terminal controls to small phones and desktop panels. Wire protocol v94 and Claude Agent SDK 0.2.174.
