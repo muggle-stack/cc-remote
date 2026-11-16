@@ -790,10 +790,19 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
             inspect_plist(value)
             raw = json.dumps(value, default=str).encode()
         else:
+            section = b''
             for line in service_lines(raw):
+                if re.fullmatch(rb'\[[A-Za-z]+\]', line.strip()):
+                    section = line.strip()[1:-1]
+                    continue
                 key, separator, value = line.partition(b'=')
                 key = key.strip()
                 text = value.strip().decode('utf-8')
+                if ((section == b'Unit' and key in {b'Description', b'Documentation'})
+                        or (section == b'Timer' and key == b'OnCalendar')):
+                    # Human-readable metadata and calendar expressions contain
+                    # punctuation/specifiers without introducing file inputs.
+                    continue
                 if key in {b'RuntimeDirectory', b'StateDirectory', b'CacheDirectory',
                            b'LogsDirectory', b'ConfigurationDirectory'}:
                     try:
