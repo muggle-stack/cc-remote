@@ -4,6 +4,18 @@
 
 ## Unreleased
 
+## v5.3.38
+
+Fix Claude side-chat compaction status and add mobile DSH terminal controls. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Clear completed compaction indicators when Claude continues through a side-chat input or an intermediate response boundary.
+- Keep compaction state associated with its native response so concurrent background tasks retain independent status.
+- Swipe up at an idle terminal prompt to recall command history, and hold a blank area before swiping right to accept shell suggestions.
+- Support long-press text selection and add copy and paste controls, including a text sheet when browser clipboard access is unavailable.
+- Preserve terminal scrolling and selection during active commands and release gesture and clipboard state when the terminal closes or reconnects.
+
+See the bilingual [release notes](docs/releases/v5.3.38.md).
+
 ## v5.3.37
 
 Restore Linux deferred cleanup and refine systemd service dependency inspection. Wire protocol v94 and Claude Agent SDK 0.2.174.
