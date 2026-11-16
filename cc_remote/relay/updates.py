@@ -47,10 +47,10 @@ class UpdateRelay:
             try:
                 if self.server_updates is not None and command["op"] in {"status", "check"}:
                     catalog = await self.server_updates.status(check=command["op"] == "check")
-                    result = await self._queued_request(machine, {"op": "status"})
+                    result = await self._queued_request(machine, {"op": "status"} if catalog.get("latest") else command)
                     if catalog.get("latest"):
                         result["latest"] = catalog["latest"]
-                    if catalog.get("catalog_error"):
+                    if catalog.get("catalog_error") and (catalog.get("latest") or not result.get("latest")):
                         result["reason"] = result.get("reason") or catalog["catalog_error"]
                     elif catalog.get("latest") and result.get("enabled") and result.get("reason") in {
                             "network", "rate_limited", "update_failed"}:

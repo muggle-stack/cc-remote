@@ -25,6 +25,10 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
   const updates = serverMode ? serverUpdates! : deviceUpdates;
   const targetName = serverMode ? "服务器" : deviceName;
   const { data, error, checking, changing, pending, pendingStatus } = updates;
+  const deviceUnsupported = deviceUpdates.data?.managed === false
+    || deviceUpdates.data?.reason === "unsupported" || deviceUpdates.error === "unsupported";
+  const coordinateUpdate = !!serverUpdates && serverUpdates.data?.managed !== false
+    && serverUpdates.error !== "unsupported";
   const job = currentUpdateJob(data);
   const active = !!job && !UPDATE_TERMINAL.has(job.phase);
   const recovering = updates.maintenance && !active;
@@ -34,7 +38,7 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
   const target = active ? job.version : pending?.version ?? latest?.version ?? job?.version;
   const relayVersion = serverUpdates?.data?.relay_version ?? deviceUpdates.data?.relay_version;
   const available = newerVersion(target, serverMode ? data?.current ?? relayVersion : data?.current)
-    || (!serverMode && !!serverUpdates && newerVersion(target, relayVersion));
+    || (!serverMode && coordinateUpdate && newerVersion(target, relayVersion));
   const needsRelay = !serverMode && newerVersion(target, relayVersion);
   const blocked = data?.reason;
   const requiresAuthorization = serverUpdates?.error === "server_forbidden" || error === "server_forbidden";
@@ -61,12 +65,13 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
     ...(!serverMode ? [{ label: deviceName, current: deviceUpdates.data?.current, icon: "devices" as const }] : []),
     { label: "当前页面", current: WEB_BUILD.version, icon: "code" as const },
   ];
-  const includeRelay = !serverMode && (!!serverUpdates || !!data?.allow_relay_update || !!job?.coordinated);
+  const includeRelay = !serverMode && (coordinateUpdate || !!data?.allow_relay_update || !!job?.coordinated);
   const steps = serverMode ? ["服务器", "当前页面"] : includeRelay ? ["服务器", deviceName, "当前页面"] : [deviceName, "当前页面"];
   const step = includeRelay && active && (job.server_phase === "succeeded" || !needsRelay) ? 1 : 0;
   const highlights = releaseHighlights(latest?.notes ?? "");
   const serverAvailable = newerVersion(latest?.version, relayVersion);
-  const showServerAction = !serverMode && data?.online === false && serverAvailable && !active && !pending;
+  const showServerAction = !serverMode && !!serverUpdates
+    && (data?.online === false || deviceUnsupported) && serverAvailable && !active && !pending;
   const authorize = async () => {
     setAuthorizing(true); setAuthorizationError("");
     try {
@@ -77,7 +82,7 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
       setAuthorization(false); setPassword("");
       await Promise.all([updates.check(), serverUpdates?.check()]);
       if (requiresDeviceAuthorization) await updates.authorize();
-      if (mounted.current && target) await updates.start(target, !serverMode && !!serverUpdates);
+      if (mounted.current && target) await updates.start(target, !serverMode && coordinateUpdate);
     } catch (error) { if (mounted.current) setAuthorizationError(error instanceof Error ? error.message : "暂时无法验证，请重试。"); }
     finally { if (mounted.current) setAuthorizing(false); }
   };
@@ -91,7 +96,7 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
     }
     if (!mounted.current) return;
     if (pending && !retryPending) await updates.check();
-    else if (target) await updates.start(target, !serverMode && !!serverUpdates);
+    else if (target) await updates.start(target, !serverMode && coordinateUpdate);
   };
   return <CenteredSheet open label="检查更新" onClose={onClose} header={false}
     className="app-update-sheet" maxWidth={510} maxHeight={760} minimumHeight={360}>
@@ -109,7 +114,8 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
           : pending ? pendingStatus === "missing" ? `${targetName}暂未查到这次更新请求。可以重试，不会重复安装。`
             : "尚未确认上次提交的结果，将保留原请求继续核实。"
           : readyPage ? "新版页面已就绪，可刷新后继续。"
-          : available ? serverMode ? "更新服务器和网页，设备上线后可继续更新。"
+          : available ? serverMode ? deviceUnsupported ? "更新服务器和网页，当前设备请按原安装方式更新。"
+            : "更新服务器和网页，设备上线后可继续更新。"
             : includeRelay ? `先更新服务器，再更新 ${deviceName}，最后刷新页面。` : "查看本次更新内容，选择合适的时间安装。"
           : data?.current ? `${targetName} v${data.current}` : "正在读取设备与服务器版本…"}</p>
       </div>
@@ -145,7 +151,7 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
       {requiresDeviceAuthorization && <p className="app-update-help">首次更新时，设备会请求一次系统管理员认证。</p>}
       {!authorization && authorizationError && <p role="alert" className="app-update-warning">{authorizationError}</p>}
       {authorization && <form className="app-update-authorization" onSubmit={event => { event.preventDefault(); void authorize(); }}>
-        <p>验证管理员身份后即可一起更新服务器和设备。</p>
+        <p>{serverMode ? "验证管理员身份后即可更新服务器和网页。" : "验证管理员身份后即可一起更新服务器和设备。"}</p>
         <label>管理员账号<input autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} /></label>
         <label>管理员密码<input autoComplete="current-password" type="password" value={password} onChange={event => setPassword(event.target.value)} required /></label>
         {authorizationError && <p role="alert">{authorizationError}</p>}
@@ -156,7 +162,7 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
         {cleanupNotice(job.cleanup_reason)}
       </p>}
       {showServerAction && <button type="button" className="app-update-server-link" onClick={() => setSelected("server")}>
-        <span>仅更新服务器和网页<small>设备可上线后更新</small></span><Icon name="chevron-right" size={18} /></button>}
+        <span>仅更新服务器和网页<small>{deviceUnsupported ? "当前设备需按原安装方式更新" : "设备可上线后更新"}</small></span><Icon name="chevron-right" size={18} /></button>}
       {serverMode && !active && !pending && <button type="button" className="app-update-server-link" onClick={() => setSelected("device")}>
         返回 {deviceName} 更新<Icon name="chevron-right" size={18} /></button>}
       {webUpdate.message && <p className="app-update-warning" role="status">{webUpdate.message}</p>}

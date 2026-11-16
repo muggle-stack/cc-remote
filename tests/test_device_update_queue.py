@@ -365,6 +365,32 @@ class ManagedServer:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('catalog', [
+    {'managed': False, 'enabled': False, 'latest': None, 'reason': 'unsupported'},
+    {'managed': True, 'enabled': True, 'latest': None, 'catalog_error': 'network'},
+])
+async def test_device_checks_its_catalog_when_relay_has_none(hub, catalog):
+    hub.server_updates = SimpleNamespace(status=AsyncMock(return_value=catalog))
+    hub.peers['device-a'] = Peer(SimpleNamespace(), AsyncMock(return_value=True))
+    hub._request = AsyncMock(return_value={**STATUS})
+    result = await hub.request('device-a', {'op': 'check'})
+    hub._request.assert_awaited_once_with('device-a', {'op': 'check'})
+    assert result['latest'] == STATUS['latest']
+    assert result['reason'] is None
+
+
+@pytest.mark.asyncio
+async def test_shared_catalog_keeps_device_checks_local_to_relay(hub):
+    catalog = {**STATUS['latest'], 'version': '5.3.29'}
+    hub.server_updates = SimpleNamespace(status=AsyncMock(return_value={'latest': catalog}))
+    hub.peers['device-a'] = Peer(SimpleNamespace(), AsyncMock(return_value=True))
+    hub._request = AsyncMock(return_value={**STATUS, 'latest': None})
+    result = await hub.request('device-a', {'op': 'check'})
+    hub._request.assert_awaited_once_with('device-a', {'op': 'status'})
+    assert result['latest'] == catalog
+
+
+@pytest.mark.asyncio
 async def test_coordinated_update_survives_restart_then_delivers_device_once(hub):
     native = ManagedServer()
     hub.server_updates = native
