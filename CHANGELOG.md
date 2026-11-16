@@ -4,6 +4,18 @@
 
 ## Unreleased
 
+## v5.3.36
+
+Unify server and device upgrades, refine Claude model fallback dialogs and restore Codex historical image previews. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Upgrade the server and current device from one action, with durable progress and recovery across page closure, service restarts and device reconnection.
+- Preserve access to server-only updates for offline or unsupported devices and allow cancellation of a queued device update while its shared server upgrade continues.
+- Refresh installation capabilities after administrator authentication, support mixed installation methods and fall back to the release redirect when GitHub's anonymous API is rate limited.
+- Align Claude model fallback dialogs with ordinary question cards and remove duplicate fallback notices from the transcript.
+- Restore images returned by Codex batch tools in completed history, cached details and long-turn pages. Load original image bytes on demand through the existing authenticated image route.
+
+See the bilingual [release notes](docs/releases/v5.3.36.md).
+
 ## v5.3.35
 
 Improve side-panel continuity and DSH terminal interaction, and reduce Python test overhead. Wire protocol v94 and Claude Agent SDK 0.2.174.
