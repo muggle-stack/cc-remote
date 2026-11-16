@@ -4,6 +4,18 @@
 
 ## Unreleased
 
+## v5.3.39
+
+Adapt DSH terminal controls to small phones and desktop panels. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Keep copy, paste, Ctrl+C and the overflow menu on a single row with 44px-high buttons.
+- Show reconnect directly in wider panels and keep terminal termination in the overflow menu.
+- Move connection status beside the shell selector and remove the duplicate footer to give terminal output more space.
+- Preserve input focus during interruption, keep controls visible above the mobile keyboard and maintain menu focus when the panel width changes.
+- Add small-screen, panel-width and keyboard-layout coverage alongside terminal clipboard, scrolling and reconnect regressions.
+
+See the bilingual [release notes](docs/releases/v5.3.39.md).
+
 ## v5.3.38
 
 Fix Claude side-chat compaction status and add mobile DSH terminal controls. Wire protocol v94 and Claude Agent SDK 0.2.174.
