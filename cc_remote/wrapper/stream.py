@@ -42,7 +42,7 @@ from cc_remote.protocol import (
 )
 from cc_remote.wrapper.sanitize import bounded_text, bounded_tool_input
 from cc_remote.wrapper.claude_compaction import (
-    ClaudeCompaction, compact_completion_events, compact_metadata, manual_compact_prompt,
+    ClaudeCompaction, ClaudeCompactionEnd, compact_completion_events, compact_metadata, manual_compact_prompt,
     native_command_prompt,
 )
 from cc_remote.wrapper.claude_model_fallback import FALLBACK_TOOL, model_fallback_event
@@ -1657,6 +1657,10 @@ class StreamTranslator:
         )]
 
     def feed(self, msg) -> list:
+        if isinstance(msg, ClaudeCompactionEnd):
+            self._compaction = msg.compaction
+            return self._end_unfinished_compaction(
+                "interrupted" if msg.is_error else "failed")
         if isinstance(msg, StreamEvent):
             return self._feed_stream_event(msg)
         if isinstance(msg, AssistantMessage):

@@ -477,7 +477,10 @@ async def test_claude_btw_managed_replay_ignores_pre_echo_background_owner(previ
 @pytest.mark.parametrize("previous_owner", [None, "previous-input"])
 @pytest.mark.parametrize("before_echo", [False, True])
 @pytest.mark.parametrize("unrelated_result", [False, True])
-async def test_claude_btw_compaction_spans_native_input_echo(previous_owner, before_echo, unrelated_result):
+@pytest.mark.parametrize("intermediate_result", [False, True])
+async def test_claude_btw_compaction_spans_native_input_echo(
+    previous_owner, before_echo, unrelated_result, intermediate_result,
+):
     from cc_remote.wrapper.sdk import SdkHandle
     from cc_remote.wrapper.stream import StreamTranslator
     from tests.test_claude_compaction_flow import boundary, status
@@ -520,15 +523,29 @@ async def test_claude_btw_compaction_spans_native_input_echo(previous_owner, bef
         if unrelated_result:
             await native.queue.put({**result(), "origin": {
                 "kind": "task-notification", "taskId": "unrelated-task"}})
-        await native.queue.put(boundary())
+        if intermediate_result:
+            await until(lambda: sdk._managed_input_seen)
+            await sdk.steer("guide", native_id="native-guide", metadata={"id": "guide-input"})
+            await native.queue.put(result())
+            await until(lambda: any(isinstance(e, ProcessEvent) and e.phase == "end"
+                                   for e in transport.sent))
+            assert not consumer.done()
+            assert not any(isinstance(e, TurnEnd) and e.turn_id == "current-input"
+                           for e in transport.sent)
+            await native.queue.put(user("native-guide", "guide"))
+        else:
+            await native.queue.put(boundary())
         await native.queue.put(assistant("continued", [{"type": "text", "text": "working"}]))
         await until(lambda: any(e.type == "delta" for e in transport.sent))
         processes = [e for e in transport.sent if isinstance(e, ProcessEvent)]
         assert len(processes) == 2
         start, end = processes
-        assert end.input == {"compaction_started_id": start.item_id}
+        if intermediate_result:
+            assert end.item_id == start.item_id
+        else:
+            assert end.input == {"compaction_started_id": start.item_id}
         assert end.turn_id == start.turn_id
-        assert end.status == "succeeded"
+        assert end.status == ("failed" if intermediate_result else "succeeded")
         assert end.background is (True if previous_owner and before_echo else None)
 
         for _ in range(2):
@@ -538,7 +555,7 @@ async def test_claude_btw_compaction_spans_native_input_echo(previous_owner, bef
             restored = [e for e in transport.sent if isinstance(e, ProcessEvent)]
             assert len(restored) == 1
             assert restored[0].item_id == end.item_id
-            assert restored[0].status == "succeeded"
+            assert restored[0].status == end.status
             assert any(isinstance(e, StateEvent) and e.state == "running"
                        and e.msg_id == "current-input" for e in transport.sent)
 
@@ -546,7 +563,9 @@ async def test_claude_btw_compaction_spans_native_input_echo(previous_owner, bef
         await asyncio.wait_for(consumer, 3)
         sdk.release_background_messages()
         await until(lambda: not machine._claude_autonomous_followup_pending(ctx))
-        assert native.inputs == ["current"] and native.interrupts == 0
+        assert native.inputs[0] == "current"
+        assert len(native.inputs) == (2 if intermediate_result else 1)
+        assert native.interrupts == 0
     finally:
         if consumer:
             consumer.cancel()

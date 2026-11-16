@@ -21,6 +21,14 @@ class ClaudeCompaction:
     ended: bool = False
 
 
+@dataclass
+class ClaudeCompactionEnd:
+    """Project a compacting response's end while steering keeps the turn open."""
+
+    compaction: ClaudeCompaction
+    is_error: bool
+
+
 def manual_compact_prompt(content: object) -> str | None:
     """Recognize only the native /compact command, never other slash commands."""
     return native_command_prompt(content, "/compact")
