@@ -66,6 +66,8 @@ reading = { height: 510, layoutHeight: 844, offsetTop: 0, scale: 1 };
 emit("viewport-resize");
 assert.equal(attributes.get("data-short-viewport"), "ime",
   "a focused editor plus a keyboard-sized inset must hide auxiliary controls");
+assert.equal(css.get("--content-safe-bottom"), "0px",
+  "an open keyboard already covers the bottom safe area");
 
 focused = false;
 emit("viewport-resize");
@@ -77,6 +79,7 @@ reading = { height: 420, layoutHeight: 844, offsetTop: 30, scale: 1.5 };
 emit("viewport-resize");
 assert.equal(attributes.get("data-short-viewport"), "false",
   "pinch zoom must not hide the Goal monitor");
+assert.equal(css.get("--content-safe-bottom"), "env(safe-area-inset-bottom, 0px)");
 
 const goalCss = readFileSync(resolve(process.cwd(), "src/App.css"), "utf8");
 assert.match(goalCss,
@@ -87,3 +90,4 @@ stop();
 assert.equal(attributes.has("data-short-viewport"), false);
 assert.equal(frames.size, 0);
 assert.equal(delays.size, 0);
+assert.equal(css.has("--content-safe-bottom"), false);

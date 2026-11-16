@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, type RefObject } from "react";
 import type { Terminal } from "@xterm/xterm";
 import { terminalSelectedText } from "../dsh-terminal-selection";
 import { Icon } from "../icons";
@@ -8,6 +8,7 @@ export interface TerminalClipboardTarget {
   terminal: Terminal;
   paste(text: string): boolean;
 }
+export interface TerminalClipboardControls { copy(): void; paste(): void }
 
 function bufferText(terminal: Terminal): string {
   const buffer = terminal.buffer.active;
@@ -23,8 +24,9 @@ function bufferText(terminal: Terminal): string {
   return lines.join("\n");
 }
 
-export function DshTerminalClipboard({ targetRef, connected }: {
+export function DshTerminalClipboard({ targetRef, connected, controlsRef }: {
   targetRef: RefObject<TerminalClipboardTarget | null>;
+  controlsRef?: RefObject<TerminalClipboardControls | null>;
   connected: boolean;
 }) {
   const [dialog, setDialog] = useState<{ kind: "copy" | "paste"; target: TerminalClipboardTarget } | null>(null);
@@ -35,6 +37,9 @@ export function DshTerminalClipboard({ targetRef, connected }: {
   const mounted = useRef(false);
   const pending = useRef(false);
   const selection = useRef("");
+  const copyButton = useRef<HTMLButtonElement>(null);
+  const pasteButton = useRef<HTMLButtonElement>(null);
+  const touch = () => window.matchMedia("(any-pointer: coarse)").matches;
   useEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; };
@@ -97,12 +102,14 @@ export function DshTerminalClipboard({ targetRef, connected }: {
     }
   };
   const visible = dialog && dialog.target === targetRef.current ? dialog : null;
+  useImperativeHandle(controlsRef, () => ({ copy: () => { void openCopy(); }, paste: () => { void paste(); } }));
   return <>
-    <button aria-label="复制终端文字" disabled={!targetRef.current}
+    <button ref={copyButton} className="dsh-terminal-copy" aria-label="复制终端文字" disabled={!targetRef.current}
       onPointerDown={() => { selection.current = targetRef.current ? terminalSelectedText(targetRef.current.terminal) : ""; }}
       onClick={() => void openCopy()}><Icon name="copy" size={15} />复制</button>
-    <button aria-label="粘贴到终端" disabled={!connected || reading} onClick={() => void paste()}><Icon name="clipboard" size={15} />粘贴</button>
+    <button ref={pasteButton} className="dsh-terminal-paste" aria-label="粘贴到终端" disabled={!connected || reading} onClick={() => void paste()}><Icon name="clipboard" size={15} />粘贴</button>
     {!!visible && <CenteredSheet open label={visible.kind === "copy" ? "复制终端文字" : "粘贴到终端"}
+      returnFocusRef={touch() ? (visible.kind === "copy" ? copyButton : pasteButton) : undefined}
       maxWidth={640} maxHeight={520} minimumHeight={280} className="dsh-terminal-clipboard" onClose={() => setDialog(null)}>
       <p>{visible.kind === "copy" ? "长按选择要复制的文字。" : "在下面长按粘贴，再写入终端。"}</p>
       <textarea ref={field} aria-label={visible.kind === "copy" ? "终端文字" : "粘贴内容"} value={text}

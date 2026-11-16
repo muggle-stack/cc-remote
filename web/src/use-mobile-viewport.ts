@@ -37,6 +37,7 @@ export interface MobileViewportBindings {
 const APP_HEIGHT = "--app-height";
 const APP_OFFSET_TOP = "--app-offset-top";
 const KEYBOARD_INSET = "--keyboard-inset";
+const CONTENT_SAFE_BOTTOM = "--content-safe-bottom";
 const SHORT_VIEWPORT_ATTRIBUTE = "data-short-viewport";
 const SHORT_VIEWPORT_MAX_HEIGHT = 720;
 const KEYBOARD_OPEN_MIN_INSET = 80;
@@ -80,6 +81,10 @@ export function createMobileViewportSync(bindings: MobileViewportBindings): () =
     const keyboardInset = scale <= 1.01
       ? Math.max(0, layoutHeight - height - offsetTop)
       : 0;
+    // The software keyboard already covers the device's home-indicator area.
+    // Adding that safe area again leaves a blank strip above the keyboard.
+    bindings.setCssProperty(CONTENT_SAFE_BOTTOM,
+      keyboardInset >= KEYBOARD_OPEN_MIN_INSET ? "0px" : "env(safe-area-inset-bottom, 0px)");
     bindings.setCssProperty(APP_HEIGHT, px(height));
     bindings.setCssProperty(APP_OFFSET_TOP, px(scale <= 1.01 ? offsetTop : 0));
     bindings.setCssProperty(KEYBOARD_INSET, px(keyboardInset));
@@ -146,6 +151,7 @@ export function createMobileViewportSync(bindings: MobileViewportBindings): () =
     bindings.clearCssProperty(APP_HEIGHT);
     bindings.clearCssProperty(APP_OFFSET_TOP);
     bindings.clearCssProperty(KEYBOARD_INSET);
+    bindings.clearCssProperty(CONTENT_SAFE_BOTTOM);
     bindings.clearRootAttribute(SHORT_VIEWPORT_ATTRIBUTE);
   };
 }

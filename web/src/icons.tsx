@@ -67,6 +67,7 @@ const PATHS: Record<string, string> = {
   bolt: '<path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z"/>',
   queue: '<path d="M4 7h16M4 12h16M4 17h10"/>',
   term: '<path d="M5 8l4 4-4 4M12 16h7"/>',
+  keyboard: '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M5 9h1m3 0h1m3 0h1m3 0h1M5 12h1m3 0h1m3 0h1m3 0h1M7 15h10"/>',
   logout: '<path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/>',
   notify: '<path d="M18 8a6 6 0 00-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/>',
   close: '<path d="M18 6L6 18M6 6l12 12"/>',

@@ -12633,6 +12633,35 @@ test("goal editor stays inside the tablet visual viewport above the keyboard", a
   )).toBeLessThan(2);
 });
 
+test("chat composer releases bottom safe area while the mobile keyboard is open", async ({ page }, info) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/tests/history-browser.html?mobile-scroll=1&quota-composer=1");
+  const composer = page.getByTestId("quota-composer");
+  const input = composer.locator("textarea");
+  await input.fill("保留中文输入和草稿");
+  await input.focus();
+  await page.evaluate(() => {
+    Object.defineProperties(window.visualViewport!, {
+      height: { configurable: true, value: 420 },
+      offsetTop: { configurable: true, value: 0 },
+    });
+    window.visualViewport!.dispatchEvent(new Event("resize"));
+  });
+  await expect.poll(() => composer.evaluate(element => ({
+    padding: getComputedStyle(element).paddingBottom,
+    safe: document.documentElement.style.getPropertyValue("--content-safe-bottom"),
+  }))).toEqual({ padding: "4px", safe: "0px" });
+  await expect(input).toBeFocused();
+  await expect(input).toHaveValue("保留中文输入和草稿");
+  await page.screenshot({ path: info.outputPath("chat-keyboard-spacing.png") });
+  await input.evaluate(element => element.blur());
+  await page.evaluate(() => {
+    Object.defineProperty(window.visualViewport!, "height", { configurable: true, value: 844 });
+    window.visualViewport!.dispatchEvent(new Event("resize"));
+  });
+  await expect.poll(() => composer.evaluate(element => getComputedStyle(element).paddingBottom)).toBe("12px");
+});
+
 test("the compact Goal monitor yields while the mobile keyboard is open", async ({
   page,
 }) => {
