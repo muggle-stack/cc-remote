@@ -94,62 +94,19 @@ try {
   goals.reset();
   await assert.rejects(clearing, /连接已切换/);
 
-  const { observeTerminalPrompt } = await harness.ssrLoadModule("/src/dsh-terminal-prompt.ts");
-  const oscHandlers = new Map<number, (data: string) => boolean>();
-  let pasteMode: (params: number[]) => boolean = () => false;
-  let promptText = "user@host ~/repo % ";
-  const terminal = {
-    modes: { bracketedPasteMode: true },
-    parser: {
-      registerOscHandler(code: number, handler: (data: string) => boolean) {
-        oscHandlers.set(code, handler);
-        return { dispose: () => oscHandlers.delete(code) };
-      },
-      registerCsiHandler(_id: unknown, handler: (params: number[]) => boolean) {
-        pasteMode = handler;
-        return { dispose() {} };
-      },
-    },
-    buffer: { active: { baseY: 0, cursorY: 0, cursorX: 80,
-      getLine: () => ({ isWrapped: false, translateToString: () => promptText }) } },
-  };
-  const prompt = observeTerminalPrompt(terminal);
-  prompt.reset({ shell: { name: "zsh" } });
-  assert.equal(prompt.ready(), true);
-  prompt.input("echo hi");
-  assert.equal(prompt.ready(), true);
-  prompt.input("\r");
-  assert.equal(prompt.ready(), false, "Enter fences gestures before remote output arrives");
-  pasteMode([2004]);
-  assert.equal(prompt.ready(), true);
-  terminal.modes.bracketedPasteMode = false;
-  assert.equal(prompt.ready(), false, "a running command has left the native line editor");
-  terminal.modes.bracketedPasteMode = true;
-  promptText = ">>> ";
-  assert.equal(prompt.ready(), false, "a REPL prompt is not a shell input line");
-  promptText = "user@host % ";
-  prompt.reset({ shell: { name: "python" } });
-  assert.equal(prompt.ready(), false);
-  prompt.reset({ shell: { path: "/bin/bash" } });
-  promptText = "root@host:~# ";
-  assert.equal(prompt.ready(), true);
-  prompt.reset({ shell: { name: "zsh" } });
-  promptText = "  ❯ git status";
-  assert.equal(prompt.ready(), true);
-  assert.equal(oscHandlers.get(133)!("A"), false);
-  assert.equal(prompt.ready(), false);
-  oscHandlers.get(133)!("B");
-  assert.equal(prompt.ready(), true);
-  oscHandlers.get(133)!("C");
-  assert.equal(prompt.ready(), false);
-  oscHandlers.get(133)!("D;0");
-  assert.equal(prompt.ready(), false);
-  oscHandlers.get(633)!("B");
-  assert.equal(prompt.ready(), true);
-  prompt.reset({ shell: { name: "zsh" } });
-  assert.equal(prompt.ready(), true, "reattachment drops the previous prompt marker state");
-  prompt.dispose();
-  assert.equal(oscHandlers.size, 0);
+  const { terminalKey, modifyTerminalInput } = await harness.ssrLoadModule("/src/dsh-terminal-keyboard.ts");
+  const normal = { ctrl: false, alt: false, shift: false };
+  const terminal = { modes: { applicationCursorKeysMode: false } };
+  assert.equal(terminalKey(terminal, "ArrowUp"), "\x1b[A");
+  terminal.modes.applicationCursorKeysMode = true;
+  assert.equal(terminalKey(terminal, "ArrowLeft"), "\x1bOD");
+  assert.equal(terminalKey(terminal, "Shift+Tab"), "\x1b[Z");
+  assert.equal(modifyTerminalInput("c", { ...normal, ctrl: true }), "\x03");
+  assert.equal(modifyTerminalInput("[", { ...normal, ctrl: true }), "\x1b");
+  assert.equal(modifyTerminalInput("\t", { ...normal, shift: true }), "\x1b[Z");
+  assert.equal(modifyTerminalInput("b", { ...normal, alt: true }), "\x1bb");
+  assert.equal(modifyTerminalInput("\x1bOD", { ...normal, alt: true, ctrl: true }), "\x1b[1;7D");
+  assert.equal(modifyTerminalInput("中文", normal), "中文");
   console.log("DSH private reads, cancellation, transport scope, mentions and download: passed");
 } finally {
   await harness.close();
