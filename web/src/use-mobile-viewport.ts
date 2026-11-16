@@ -5,6 +5,7 @@ type ViewportListener = () => void;
 export type MobileViewportEvent =
   | "viewport-resize"
   | "viewport-scroll"
+  | "document-scroll"
   | "window-resize"
   | "orientation-change"
   | "page-show"
@@ -15,6 +16,7 @@ export interface ViewportReading {
   height: number;
   layoutHeight: number;
   offsetTop: number;
+  documentScrollTop?: number;
   scale: number;
 }
 
@@ -36,6 +38,7 @@ export interface MobileViewportBindings {
 
 const APP_HEIGHT = "--app-height";
 const APP_OFFSET_TOP = "--app-offset-top";
+const APP_DOCUMENT_TOP = "--app-document-top";
 const KEYBOARD_INSET = "--keyboard-inset";
 const CONTENT_SAFE_BOTTOM = "--content-safe-bottom";
 const SHORT_VIEWPORT_ATTRIBUTE = "data-short-viewport";
@@ -75,6 +78,10 @@ export function createMobileViewportSync(bindings: MobileViewportBindings): () =
       ? Math.max(0, reading.offsetTop)
       : 0;
     const scale = finitePositive(reading.scale, 1);
+    const scrollTop = reading.documentScrollTop ?? 0;
+    const documentScrollTop = Number.isFinite(scrollTop)
+      ? Math.max(0, scrollTop)
+      : 0;
 
     // A pinched page also has a shorter visual viewport; do not mistake that
     // user-controlled zoom for an on-screen keyboard.
@@ -87,6 +94,11 @@ export function createMobileViewportSync(bindings: MobileViewportBindings): () =
       keyboardInset >= KEYBOARD_OPEN_MIN_INSET ? "0px" : "env(safe-area-inset-bottom, 0px)");
     bindings.setCssProperty(APP_HEIGHT, px(height));
     bindings.setCssProperty(APP_OFFSET_TOP, px(scale <= 1.01 ? offsetTop : 0));
+    // The in-flow shell is positioned in document coordinates. iOS can scroll
+    // that document while revealing an editor even with overflow:hidden. Fixed
+    // overlays still use offsetTop, relative to the layout viewport instead.
+    bindings.setCssProperty(APP_DOCUMENT_TOP,
+      px(scale <= 1.01 ? offsetTop + documentScrollTop : 0));
     bindings.setCssProperty(KEYBOARD_INSET, px(keyboardInset));
     // A browser toolbar or pinch zoom can also shorten visualViewport. Only
     // expose the keyboard state when a real editor owns focus and the inset is
@@ -134,6 +146,7 @@ export function createMobileViewportSync(bindings: MobileViewportBindings): () =
   const unsubscribers = [
     bindings.listen("viewport-resize", schedule),
     bindings.listen("viewport-scroll", schedule),
+    bindings.listen("document-scroll", schedule),
     bindings.listen("window-resize", schedule),
     bindings.listen("orientation-change", settle),
     bindings.listen("page-show", settle),
@@ -150,6 +163,7 @@ export function createMobileViewportSync(bindings: MobileViewportBindings): () =
     clearSettleDelays();
     bindings.clearCssProperty(APP_HEIGHT);
     bindings.clearCssProperty(APP_OFFSET_TOP);
+    bindings.clearCssProperty(APP_DOCUMENT_TOP);
     bindings.clearCssProperty(KEYBOARD_INSET);
     bindings.clearCssProperty(CONTENT_SAFE_BOTTOM);
     bindings.clearRootAttribute(SHORT_VIEWPORT_ATTRIBUTE);
@@ -171,6 +185,7 @@ function browserBindings(): MobileViewportBindings {
         height: viewport?.height ?? layoutHeight,
         layoutHeight,
         offsetTop: viewport?.offsetTop ?? 0,
+        documentScrollTop: window.scrollY,
         scale: viewport?.scale ?? 1,
       };
     },
@@ -187,6 +202,8 @@ function browserBindings(): MobileViewportBindings {
         eventName = event === "viewport-resize" ? "resize" : "scroll";
       } else if (event === "window-resize") {
         eventName = "resize";
+      } else if (event === "document-scroll") {
+        eventName = "scroll";
       } else if (event === "orientation-change") {
         eventName = "orientationchange";
       } else if (event === "page-show") {
