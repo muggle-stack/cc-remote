@@ -18,6 +18,7 @@ export function Fixture() {
   const appearance = useTheme("codex");
   const { boldText, setBoldText } = useBoldText();
   const updates = useAppUpdates(true, machine, open);
+  const serverUpdates = useAppUpdates(location.search.includes("unified"), "", open, "server");
   const updatesRef = useRef(updates); updatesRef.current = updates;
   const transport = useRef<RelayWs | null>(null);
   const [banner, setBanner] = useState<string | undefined>();
@@ -55,7 +56,7 @@ export function Fixture() {
     </main>
     <textarea disabled={updates.maintenance} aria-label="输入消息" value={draft} onChange={event => setDraft(event.target.value)}
       style={{ margin: 24, padding: 20, borderRadius: 24 }} />
-    {open && <AppUpdateSheet updates={updates} deviceName={machine} onClose={() => setOpen(false)}
+    {open && <AppUpdateSheet updates={updates} serverUpdates={query.has("unified") ? serverUpdates : undefined} deviceName={machine} onClose={() => setOpen(false)}
       webUpdate={{ version: query.get("pageVersion"), updating: false, message: null, reload: async () => {} }} />}
   </section></div>;
 }

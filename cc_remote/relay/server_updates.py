@@ -50,11 +50,18 @@ class ServerUpdates(InstallationUpdates):
             if check:
                 async with self.check_lock:
                     if time.monotonic() - self.checked_at >= 60:
-                        self.catalog = await asyncio.to_thread(release_catalog, repository)
                         self.checked_at = time.monotonic()
+                        try:
+                            self.catalog = await asyncio.to_thread(release_catalog, repository)
+                            self.catalog_error = None
+                        except (OSError, ValueError) as exc:
+                            self.catalog_error = failure_reason(exc)
                 result["latest"] = self.catalog
+            if self.catalog_error and result["reason"] is None:
+                result["reason"] = self.catalog_error
         except (OSError, ValueError) as exc:
             result.update(enabled=False, reason=failure_reason(exc))
+        result["catalog_error"] = self.catalog_error
         return result
 
     async def start(self):

@@ -248,3 +248,34 @@ def test_server_update_rechecks_revoked_login_after_pending_operation(tmp_path):
         client.post("/api/logout", headers={"Origin": cfg.public_origin})
         finish.set()
         assert result.result(timeout=3).status_code == 401
+
+
+@pytest.fixture
+def isolated_authorization_attempts():
+    server._login_limiter.reset()
+    yield
+    server._login_limiter.reset()
+
+
+def test_update_authorization_is_scoped_to_the_current_login(tmp_path, isolated_authorization_attempts):
+    server._login_limiter.reset()
+    cfg = _cfg(tmp_path, login_users_json=json.dumps({
+        'owner': {'password': 'owner-password', 'machines': ['*']},
+        'device': {'password': 'device-password', 'machines': ['device-a']},
+    }))
+    app = server.create_app(cfg)
+    app.state.server_updates.handle = AsyncMock(return_value={'schema': 1, 'enabled': True})
+    headers = {'Origin': cfg.public_origin}
+    with TestClient(app, base_url=cfg.public_origin) as client:
+        client.post('/api/login', json={'username': 'device', 'password': 'device-password'})
+        assert client.get('/api/server-updates').status_code == 403
+        assert client.post('/api/update-authorization', headers=headers,
+                           json={'username': 'owner', 'password': 'wrong'}).status_code == 403
+        response = client.post('/api/update-authorization', headers=headers,
+                               json={'username': 'owner', 'password': 'owner-password'})
+        assert response.status_code == 200
+        assert 'HttpOnly' in response.headers['set-cookie']
+        assert client.get('/api/server-updates').status_code == 200
+        assert client.get('/api/updates/device-b').status_code == 403
+        client.post('/api/login', json={'username': 'device', 'password': 'device-password'})
+        assert client.get('/api/server-updates').status_code == 403

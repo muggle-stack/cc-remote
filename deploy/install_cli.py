@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import shlex
 import stat
+import subprocess
 import tempfile
 import sys
 
@@ -120,14 +121,32 @@ def install_cli(root: Path, destination: Path, *, role: str, user: str | None = 
     destination.parent.mkdir(parents=True, exist_ok=True)
     previous = destination.read_bytes() if destination.exists() else None
     previous_mode = stat.S_IMODE(destination.stat().st_mode) if previous is not None else 0o755
+    metadata_path = root / "installation.json"
+    previous_metadata = metadata_path.read_bytes() if metadata_path.exists() else None
     _atomic_file(destination, content, 0o755)
     try:
-        _atomic_file(root / "installation.json", (json.dumps(metadata, sort_keys=True) + "\n").encode(), 0o644)
-    except OSError:
+        _atomic_file(metadata_path, (json.dumps(metadata, sort_keys=True) + "\n").encode(), 0o644)
+        # Provision the fixed-root updater under the installer's existing OS
+        # authorization. Preserve an operator's explicit disable policy.
+        if (current / "deploy/ui_update_job.py").is_file() and not (root / "ui-update-policy.json").exists():
+            if linux_service is None or linux_service.get("manager") != "supervisor":
+                from deploy.ui_update_job import configure
+                control = None
+                if role == "wrapper":
+                    from cc_remote.activation import receipt
+                    activation = receipt(root)
+                    if activation and activation.get("release") == str(current.resolve()):
+                        control = Path(activation["control_socket"])
+                configure(root, enabled=True, control_socket=control)
+    except (OSError, ValueError, subprocess.SubprocessError):
         if previous is None:
             destination.unlink()
         else:
             _atomic_file(destination, previous, previous_mode)
+        if previous_metadata is None:
+            metadata_path.unlink(missing_ok=True)
+        elif metadata_path.read_bytes() != previous_metadata:
+            _atomic_file(metadata_path, previous_metadata, 0o644)
         raise
 
 

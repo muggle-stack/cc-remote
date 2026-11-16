@@ -50,13 +50,20 @@ class DeviceUpdateQueue:
                                      (machine,)).fetchone()
             return json.loads(row[0]) if row else None
 
+    def coordinated_pending(self) -> list[tuple[str, dict]]:
+        with self.devices._connect() as connection:
+            rows = connection.execute("SELECT machine,value FROM device_update_jobs WHERE rowid IN "
+                                      "(SELECT MAX(rowid) FROM device_update_jobs GROUP BY machine)").fetchall()
+        return [(machine, value) for machine, raw in rows
+                if (value := json.loads(raw)).get("coordinated") and value["phase"] not in TERMINAL]
+
     def save(self, machine: str, value: dict) -> None:
         job_id(value["id"])
         with self.devices._connect() as connection:
             connection.execute("UPDATE device_update_jobs SET value=? WHERE machine=? AND id=?",
-                               (json.dumps(value), machine, value["id"]))
+                               (json.dumps({**value, "updated_at": time.time()}), machine, value["id"]))
 
-    def create(self, machine: str, identity: str, version: str) -> dict:
+    def create(self, machine: str, identity: str, version: str, *, coordinated: bool = False) -> dict:
         job_id(identity)
         version_tuple(version)
         with self.devices._connect() as connection:
@@ -65,7 +72,7 @@ class DeviceUpdateQueue:
                                      (machine, identity)).fetchone()
             if row:
                 value = json.loads(row[0])
-                if value["version"] != version:
+                if value["version"] != version or bool(value.get("coordinated")) != coordinated:
                     raise UpdateError("update request identity was reused")
                 return value
             row = connection.execute("SELECT value FROM device_update_jobs WHERE machine=? ORDER BY rowid DESC LIMIT 1",
@@ -76,7 +83,7 @@ class DeviceUpdateQueue:
             known = json.loads(row[0]) if row else {}
             if known.get("managed") is not True or known.get("enabled") is not True:
                 raise UpdateError("device UI updates are disabled or have not been verified")
-            if version_tuple(version) <= version_tuple(known["current"]):
+            if not coordinated and version_tuple(version) <= version_tuple(known["current"]):
                 raise UpdateError("selected update is not newer")
             count = connection.execute("SELECT COUNT(*) FROM device_update_jobs WHERE machine=?", (machine,)).fetchone()[0]
             if count >= 1024:
@@ -84,6 +91,10 @@ class DeviceUpdateQueue:
             value = {"id": identity, "version": version, "previous": known["current"],
                      "phase": "waiting_device", "reason": None, "created_at": time.time(),
                      "updated_at": time.time(), "delivered": False}
+            if coordinated:
+                import hashlib
+                value.update(coordinated=True, phase="updating_relay", server_job_id=hashlib.sha256(
+                    f"cc-remote-update:{machine}:{identity}".encode()).hexdigest()[:32])
             connection.execute("INSERT INTO device_update_jobs(machine,id,value) VALUES (?,?,?)",
                                (machine, identity, json.dumps(value)))
             return value
@@ -95,7 +106,11 @@ class DeviceUpdateQueue:
         prior = self.job(machine, identity)
         if prior is None or prior["version"] != value.get("version"):
             return
-        observed = {**prior, **public_job(value), "delivered": True}
+        fields = public_job(value)
+        # Coordination belongs to Relay; a device receipt cannot replace it.
+        fields.pop("coordinated", None)
+        fields.pop("server_phase", None)
+        observed = {**prior, **fields, "delivered": True}
         if prior.get('cancel_requested') and value.get('phase') not in TERMINAL:
             observed['cancel_requested'] = True
         self.save(machine, observed)

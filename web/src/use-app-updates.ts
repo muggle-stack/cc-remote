@@ -11,7 +11,7 @@ export function useAppUpdates(enabled: boolean, machine: string, open: boolean, 
   const [pending, setPending] = useState<UpdateIntent | null>(null);
   const [pendingStatus, setPendingStatus] = useState<"unconfirmed" | "missing" | "unsupported">("unconfirmed");
   const openRef = useRef(open); openRef.current = open;
-  const actions = useRef({ check: async () => {}, start: async (_version: string) => {}, cancel: async () => {}, recover: async () => {}, observeMaintenance: () => {} });
+  const actions = useRef({ check: async () => {}, authorize: async () => {}, start: async (_version: string, _coordinated = false) => {}, cancel: async () => {}, recover: async () => {}, observeMaintenance: () => {} });
   useEffect(() => {
     setMaintenance(false); setData(null); setError(null); setChecking(false); setChanging(false); setPending(null);
     setPendingStatus("unconfirmed");
@@ -97,18 +97,18 @@ export function useAppUpdates(enabled: boolean, machine: string, open: boolean, 
         if (active && (checkNext || observedRevision !== guardRevision || observedMutation !== mutationRevision)) void probe(checkNext);
       }
     };
-    const start = async (version: string) => {
+    const start = async (version: string, coordinated = false) => {
       if (mutation || !active) return;
       mutation = true; mutationRevision++; operationError = null; setChanging(true); setError(null);
       // Persist BEFORE sending. An unknown acknowledgement keeps the same id
       // across page reloads; an explicit retry cannot launch a second OS job.
-      intent ??= { id: crypto.randomUUID().replaceAll("-", ""), version };
-      intent = { id: intent.id, version: intent.version };
+      intent ??= { id: crypto.randomUUID().replaceAll("-", ""), version, coordinated };
+      intent = { id: intent.id, version: intent.version, coordinated: intent.coordinated };
       ledger.save(intent); setPending(intent);
       setPendingStatus(lookupUnsupported ? "unsupported" : "unconfirmed");
       const submitted = intent;
       try {
-        const raw = await client.call({ op: "start", job_id: submitted.id, version: submitted.version });
+        const raw = await client.call({ op: submitted.coordinated ? "upgrade" : "start", job_id: submitted.id, version: submitted.version });
         if (!active) return;
         const job = parseUpdateJob(raw.job);
         if (!job || job.id !== submitted.id || job.version !== submitted.version) throw new Error("outcome_pending");
@@ -147,7 +147,9 @@ export function useAppUpdates(enabled: boolean, machine: string, open: boolean, 
       }
       finally { mutation = false; if (active) { setChanging(false); void probe(recheck); } }
     };
-    actions.current = { check: () => probe(true), start, cancel: () => changeJob("cancel"), recover: () => changeJob("reconcile"), observeMaintenance: () => {
+    actions.current = { check: () => probe(true), authorize: async () => {
+      await client.call({ op: "authorize" }); await probe();
+    }, start, cancel: () => changeJob("cancel"), recover: () => changeJob("reconcile"), observeMaintenance: () => {
       if (!active) return;
       guardRevision++; guardObserved = true; setMaintenance(true); void probe();
     } };
@@ -163,15 +165,16 @@ export function useAppUpdates(enabled: boolean, machine: string, open: boolean, 
     return () => {
       active = false; client.close(); window.clearInterval(poll);
       window.removeEventListener("online", focus); window.removeEventListener("focus", focus);
-      actions.current = { check: async () => {}, start: async () => {}, cancel: async () => {}, recover: async () => {}, observeMaintenance: () => {} };
+      actions.current = { check: async () => {}, authorize: async () => {}, start: async () => {}, cancel: async () => {}, recover: async () => {}, observeMaintenance: () => {} };
     };
   }, [enabled, machine, scope]);
   const check = useCallback(() => actions.current.check(), []);
-  const start = useCallback((version: string) => actions.current.start(version), []);
+  const start = useCallback((version: string, coordinated = false) => actions.current.start(version, coordinated), []);
   const cancel = useCallback(() => actions.current.cancel(), []);
   const recover = useCallback(() => actions.current.recover(), []);
+  const authorize = useCallback(() => actions.current.authorize(), []);
   useEffect(() => { if (open) void check(); }, [open, check, machine]);
   const observeMaintenance = useCallback(() => actions.current.observeMaintenance(), []);
-  return { data, error, checking, changing, pending, pendingStatus, maintenance, observeMaintenance, check, start, cancel, recover };
+  return { data, error, checking, changing, pending, pendingStatus, maintenance, observeMaintenance, check, start, cancel, recover, authorize };
 }
 export type AppUpdatesController = ReturnType<typeof useAppUpdates>;
