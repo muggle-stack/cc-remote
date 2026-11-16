@@ -16,7 +16,7 @@ const nativeState: Omit<DshState, "v" | "ts"> = { type: "dsh_state", sid, connec
     rounds: 3, max_rounds: 32, activation: "disarmed" },
 };
 
-async function mockDshRelay(page: Page, { running = false, commandSuccess = false, features = false, product = false, sidebarCards = false, failSettingsNamespace = "" } = {}) {
+async function mockDshRelay(page: Page, { running = false, commandSuccess = false, features = false, product = false, sidebarCards = false, failSettingsNamespace = "", terminalDetail = "/tmp" } = {}) {
   const commands: Record<string, unknown>[] = [];
   let historyTurns: Record<string, unknown>[] | undefined;
   let historyPagination: { has_more: boolean; oldest_id?: string } = { has_more: false };
@@ -212,7 +212,7 @@ async function mockDshRelay(page: Page, { running = false, commandSuccess = fals
             { id: "@deepseek-ai/dsh-session-titles", title: "Session titles", state: "disabled", controllable: true, data: { version: "0.2.2-rc.1", availability: "installation", optional: true } },
             { id: "@example/plugin", title: "Example", detail: "示例插件", state: "enabled", controllable: true, data: { version: "1.0.0", installed: true, removable: true, updatable: true } },
           ]
-          : cmd.kind === "terminals" ? terminalClosed ? [] : [{ id: "pty", title: "zsh", detail: "/tmp", state: "running", data: { cols: 80, rows: 24 } }]
+          : cmd.kind === "terminals" ? terminalClosed ? [] : [{ id: "pty", title: "zsh", detail: terminalDetail, state: "running", data: { cols: 80, rows: 24 } }]
           : cmd.kind === "terminal_output" ? (cmd.before_seq ? [] : [{ id: "1", title: "screen", data: { type: "snapshot", screen: "DSH terminal ready\r\n\x1b[36m~/workspace\x1b[0m $ pwd\r\n/home/user/workspace\r\n\x1b[36m~/workspace\x1b[0m $ ", writable: true, info: {} } }])
           : cmd.kind === "conversation" ? [{ id: "message", title: "DSH", detail: `已经检查构建 ${cmd.query ?? ""}`, state: "message" }]
           : cmd.kind === "deliverables" ? [{ id: "file", title: "report.xlsx", path: "/tmp/dsh-test/report.xlsx", detail: "交付文件" }]
@@ -1240,7 +1240,7 @@ test("DSH terminal attaches existing PTY, sends explicit input and only detaches
   await selectDshTool(page, "终端");
   await panel.getByRole("button", { name: "选择终端", exact: true }).click();
   await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
-  await expect(panel.locator(".dsh-terminal-status").getByText("已连接", { exact: true })).toBeVisible();
+  await expect(panel.locator(".dsh-terminal-connection").getByText("已连接", { exact: true })).toBeVisible();
   const input = panel.locator(".xterm-helper-textarea");
   await input.press("a");
   await expect.poll(() => relay.commands.filter(command => command.kind === "terminal").map(command => JSON.parse(String(command.value))).some(value => value.action === "input" && value.value.type === "write" && value.value.data === "a")).toBe(true);
@@ -1248,6 +1248,115 @@ test("DSH terminal attaches existing PTY, sends explicit input and only detaches
   await panel.getByRole("button", { name: "关闭会话工具" }).click();
   await expect.poll(() => relay.commands.filter(command => command.kind === "terminal").map(command => JSON.parse(String(command.value))).some(value => value.action === "detach")).toBe(true);
   expect(relay.commands.filter(command => command.kind === "terminal").map(command => JSON.parse(String(command.value))).some(value => value.action === "close" || value.action === "create")).toBe(false);
+});
+
+test("DSH terminal toolbar follows the panel width and keeps its actions on one row", async ({ page }, info) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.emulateMedia({ colorScheme: "dark" });
+  await openDsh(page, { features: true, commandSuccess: true, terminalDetail: "/Users/example/.cc-remote/collaboration/production/workspace" });
+  await openDshTools(page);
+  await selectDshTool(page, "终端");
+  const panel = page.getByLabel("DSH 会话工具", { exact: true });
+  await panel.getByRole("button", { name: "选择终端", exact: true }).click();
+  await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
+  await expect(panel.locator(".dsh-terminal-connection")).toHaveAttribute("aria-label", "已连接");
+  const more = panel.getByRole("button", { name: "终端更多操作", exact: true });
+  for (const width of [320, 360, 561, 562, 760]) {
+    await panel.evaluate((element, width) => {
+      Object.assign((element as HTMLElement).style, { width: `${width}px`, left: "20px", right: "auto" });
+    }, width);
+    const wide = width >= 562; // The panel's two border pixels are outside the query container.
+    await expect(panel.locator(".dsh-terminal-reconnect")).toBeVisible({ visible: wide });
+    await expect.poll(() => panel.locator(".dsh-terminal-actions").evaluate(element => {
+      const rect = element.getBoundingClientRect();
+      const buttons = [...element.querySelectorAll<HTMLButtonElement>("button")]
+        .filter(button => button.getClientRects().length);
+      const boxes = buttons.map(button => button.getBoundingClientRect());
+      return boxes.every(box => Math.abs(box.height - 44) < 1
+        && Math.abs(box.top - boxes[0].top) < 1 && box.left >= rect.left && box.right <= rect.right)
+        && buttons.every(button => button.scrollWidth <= button.clientWidth)
+        && element.scrollWidth <= element.clientWidth;
+    })).toBe(true);
+    expect(await panel.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await more.click();
+    const menu = panel.getByRole("menu", { name: "终端更多操作", exact: true });
+    await expect(menu.getByRole("menuitem")).toHaveCount(wide ? 1 : 2);
+    await expect(menu.getByRole("menuitem").first()).toBeFocused();
+    await page.keyboard.press("End");
+    await expect(menu.getByRole("menuitem", { name: "关闭终端", exact: true })).toBeFocused();
+    await page.keyboard.press("Home");
+    await expect(menu.getByRole("menuitem").first()).toBeFocused();
+    const menuBox = (await menu.boundingBox())!;
+    const panelBox = (await panel.boundingBox())!;
+    const moreBox = (await more.boundingBox())!;
+    expect(menuBox.x).toBeGreaterThanOrEqual(panelBox.x);
+    expect(menuBox.x + menuBox.width).toBeLessThanOrEqual(panelBox.x + panelBox.width);
+    expect(menuBox.y + menuBox.height).toBeLessThanOrEqual(moreBox.y);
+    await page.screenshot({ path: info.outputPath(`terminal-toolbar-${width}.png`) });
+    await page.keyboard.press("Escape");
+    await expect(more).toBeFocused();
+    await expect(menu).toHaveCount(0);
+  }
+  await panel.evaluate(element => { (element as HTMLElement).style.width = "360px"; });
+  await more.click();
+  await expect(panel.getByRole("menuitem", { name: "重新连接", exact: true })).toBeFocused();
+  await panel.evaluate(element => { (element as HTMLElement).style.width = "760px"; });
+  await expect(panel.getByRole("menuitem", { name: "关闭终端", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+});
+
+test("DSH terminal toolbar remains above a small-screen keyboard and recovers its height", async ({ page }, info) => {
+  await page.setViewportSize({ width: 320, height: 640 });
+  await page.emulateMedia({ colorScheme: "dark" });
+  const relay = await openDsh(page, { features: true, commandSuccess: true, terminalDetail: "/Users/example/.cc-remote/collaboration/production/workspace" });
+  await openDshTools(page);
+  await selectDshTool(page, "终端");
+  const panel = page.getByLabel("DSH 会话工具", { exact: true });
+  await panel.getByRole("button", { name: "选择终端", exact: true }).click();
+  await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
+  await expect(panel.locator(".dsh-terminal-connection")).toHaveAttribute("aria-label", "已连接");
+  const input = panel.locator(".xterm-helper-textarea");
+  await input.focus();
+  const originalHeight = (await panel.locator(".dsh-terminal-screen").boundingBox())!.height;
+  const attachments = () => relay.commands.filter(command => command.kind === "terminal")
+    .map(command => JSON.parse(String(command.value))).filter(command => command.action === "attach");
+  expect(attachments()).toHaveLength(1);
+  await page.evaluate(() => {
+    Object.defineProperties(window.visualViewport!, {
+      height: { configurable: true, value: 320 },
+      offsetTop: { configurable: true, value: 24 },
+    });
+    window.visualViewport!.dispatchEvent(new Event("resize"));
+  });
+  await expect.poll(() => panel.evaluate(element => {
+    const viewport = window.visualViewport!;
+    const screen = element.querySelector(".dsh-terminal-screen")!.getBoundingClientRect();
+    const terminal = element.querySelector(".xterm-screen")!.getBoundingClientRect();
+    const toolbar = element.querySelector(".dsh-terminal-actions")!.getBoundingClientRect();
+    return screen.height > 60 && terminal.bottom <= screen.bottom + 1
+      && toolbar.bottom <= viewport.offsetTop + viewport.height + 1;
+  })).toBe(true);
+  await expect(input).toBeFocused();
+  const interrupt = panel.getByRole("button", { name: "中断命令 Ctrl+C" });
+  await expect(interrupt).toBeInViewport();
+  await interrupt.click();
+  await expect(input).toBeFocused();
+  await page.screenshot({ path: info.outputPath("terminal-small-keyboard.png") });
+  const more = panel.getByRole("button", { name: "终端更多操作", exact: true });
+  await more.click();
+  await expect(panel.getByRole("menuitem", { name: "重新连接", exact: true })).toBeInViewport();
+  await expect(panel.getByRole("menuitem", { name: "关闭终端", exact: true })).toBeInViewport();
+  await page.keyboard.press("Escape");
+  await input.focus();
+  await page.evaluate(() => {
+    Object.defineProperties(window.visualViewport!, {
+      height: { configurable: true, value: window.innerHeight },
+      offsetTop: { configurable: true, value: 0 },
+    });
+    window.visualViewport!.dispatchEvent(new Event("resize"));
+  });
+  await expect.poll(async () => Math.abs((await panel.locator(".dsh-terminal-screen").boundingBox())!.height - originalHeight)).toBeLessThan(2);
+  expect(attachments()).toHaveLength(1);
 });
 
 test("DSH return links decorate the native autonomous round without splitting the answer", async ({ page }, info) => {
@@ -1290,7 +1399,8 @@ test("DSH terminal interrupt keeps shell and explicit close does not surface a r
   await panel.getByRole("button", { name: "中断命令 Ctrl+C" }).click();
   await expect.poll(() => relay.commands.filter(c => c.kind === "terminal").map(c => JSON.parse(String(c.value))).some(v => v.action === "input" && v.value.data === "\u0003")).toBe(true);
   expect(relay.commands.filter(c => c.kind === "terminal").map(c => JSON.parse(String(c.value))).some(v => v.action === "close")).toBe(false);
-  await panel.getByRole("button", { name: "关闭终端", exact: true }).click();
+  await panel.getByRole("button", { name: "终端更多操作", exact: true }).click();
+  await panel.getByRole("menuitem", { name: "关闭终端", exact: true }).click();
   await page.screenshot({ path: info.outputPath("dsh-terminal-close.png") });
   await page.getByRole("dialog", { name: "关闭终端？" }).getByRole("button", { name: "确认关闭", exact: true }).click();
   await expect(panel.getByText("选择终端或新建一个终端", { exact: false })).toBeVisible();
@@ -1308,7 +1418,7 @@ test("DSH terminal copies a native text selection and pastes with bracketed past
   const panel = page.getByLabel("DSH 会话工具", { exact: true });
   await panel.getByRole("button", { name: "选择终端", exact: true }).click();
   await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
-  await expect(panel.locator(".dsh-terminal-status")).toContainText("已连接");
+  await expect(panel.locator(".dsh-terminal-connection")).toContainText("已连接");
   const commands = () => relay.commands.filter(command => command.kind === "terminal").map(command => JSON.parse(String(command.value)));
   const attach = commands().find(command => command.action === "attach");
   relay.emit({ type: "dsh_read_result", sid, request_id: attach.lease, kind: "terminal_output", next_seq: 2,
@@ -1347,7 +1457,7 @@ test("DSH terminal clipboard permission fallback stays on the original attachmen
   const panel = page.getByLabel("DSH 会话工具", { exact: true });
   await panel.getByRole("button", { name: "选择终端", exact: true }).click();
   await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
-  await expect(panel.locator(".dsh-terminal-status")).toContainText("已连接");
+  await expect(panel.locator(".dsh-terminal-connection")).toContainText("已连接");
   const writes = () => relay.commands.filter(command => command.kind === "terminal")
     .map(command => JSON.parse(String(command.value))).filter(command => command.action === "input" && command.value.type === "write");
   await panel.getByRole("button", { name: "粘贴到终端" }).click();
@@ -1368,8 +1478,9 @@ test("DSH terminal clipboard permission fallback stays on the original attachmen
     } });
   });
   await panel.getByRole("button", { name: "粘贴到终端" }).click();
-  await panel.getByRole("button", { name: "重新连接", exact: true }).click();
-  await expect(panel.locator(".dsh-terminal-status")).toContainText("已连接");
+  await panel.getByRole("button", { name: "终端更多操作", exact: true }).click();
+  await panel.getByRole("menuitem", { name: "重新连接", exact: true }).click();
+  await expect(panel.locator(".dsh-terminal-connection")).toContainText("已连接");
   await page.evaluate(() => (window as unknown as { finishTerminalPaste: (value: string) => void }).finishTerminalPaste("stale input"));
   await expect(panel.getByRole("button", { name: "粘贴到终端" })).toBeEnabled();
   expect(writes().map(command => command.value.data).join("")).toBe("printf 手机");
@@ -1387,7 +1498,7 @@ test("DSH terminal Android long press uses browser text selection", async ({ pag
   const panel = page.getByLabel("DSH 会话工具", { exact: true });
   await panel.getByRole("button", { name: "选择终端", exact: true }).click();
   await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
-  await expect(panel.locator(".dsh-terminal-status")).toContainText("已连接");
+  await expect(panel.locator(".dsh-terminal-connection")).toContainText("已连接");
   const commands = () => relay.commands.filter(command => command.kind === "terminal").map(command => JSON.parse(String(command.value)));
   const attach = commands().find(command => command.action === "attach");
   relay.emit({ type: "dsh_read_result", sid, request_id: attach.lease, kind: "terminal_output", next_seq: 2,
@@ -1419,7 +1530,7 @@ test("DSH terminal long press selects text without accepting a completion", asyn
   const panel = page.getByLabel("DSH 会话工具", { exact: true });
   await panel.getByRole("button", { name: "选择终端", exact: true }).click();
   await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
-  await expect(panel.locator(".dsh-terminal-status")).toContainText("已连接");
+  await expect(panel.locator(".dsh-terminal-connection")).toContainText("已连接");
   const commands = () => relay.commands.filter(command => command.kind === "terminal").map(command => JSON.parse(String(command.value)));
   const attach = commands().find(command => command.action === "attach");
   relay.emit({ type: "dsh_read_result", sid, request_id: attach.lease, kind: "terminal_output", next_seq: 2,
@@ -1549,7 +1660,7 @@ test("DSH terminal streams and preserves the last row after centering", async ({
   const picker = page.getByRole("dialog", { name: "选择终端", exact: true });
   await expect(picker.locator("select")).toHaveCount(0);
   await picker.getByRole("button", { name: /zsh/ }).click();
-  await expect(panel.locator(".dsh-terminal-status").getByText("已连接", { exact: true })).toBeVisible();
+  await expect(panel.locator(".dsh-terminal-connection").getByText("已连接", { exact: true })).toBeVisible();
   await panel.locator(".panel-expand").click();
   await expect(panel).toHaveClass(/panel-expanded/);
   await expect.poll(async () => panel.evaluate(element => {
@@ -1571,7 +1682,7 @@ test("DSH terminal scrollback supports wheel and touch without sending shell inp
   const panel = page.getByLabel("DSH 会话工具", { exact: true });
   await panel.getByRole("button", { name: "选择终端", exact: true }).click();
   await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
-  await expect(panel.locator(".dsh-terminal-status").getByText("已连接", { exact: true })).toBeVisible();
+  await expect(panel.locator(".dsh-terminal-connection").getByText("已连接", { exact: true })).toBeVisible();
   const attach = relay.commands.filter(c => c.kind === "terminal").map(c => JSON.parse(String(c.value))).find(c => c.action === "attach");
   const output = (next_seq: number, data: string) => relay.emit({ type: "dsh_read_result", sid,
     request_id: attach.lease, kind: "terminal_output", next_seq,
@@ -1618,7 +1729,7 @@ test("DSH terminal prompt gestures recall history and accept completion once", a
   const panel = page.getByLabel("DSH 会话工具", { exact: true });
   await panel.getByRole("button", { name: "选择终端", exact: true }).click();
   await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
-  await expect(panel.locator(".dsh-terminal-status").getByText("已连接", { exact: true })).toBeVisible();
+  await expect(panel.locator(".dsh-terminal-connection").getByText("已连接", { exact: true })).toBeVisible();
   const commands = () => relay.commands.filter(command => command.kind === "terminal")
     .map(command => JSON.parse(String(command.value)));
   const attach = commands().find(command => command.action === "attach");
@@ -1714,7 +1825,8 @@ test("DSH terminal prompt gestures recall history and accept completion once", a
   expect(writes()).toHaveLength(4);
 
   // Reconnect recreates its prompt observer and callbacks once.
-  await panel.getByRole("button", { name: "重新连接", exact: true }).click();
+  await panel.getByRole("button", { name: "终端更多操作", exact: true }).click();
+  await panel.getByRole("menuitem", { name: "重新连接", exact: true }).click();
   await expect.poll(() => commands().filter(command => command.action === "attach").length).toBe(2);
   const currentAttach = commands().filter(command => command.action === "attach").at(-1);
   relay.emit({ type: "dsh_read_result", sid, request_id: currentAttach.lease,
@@ -1906,7 +2018,7 @@ test("DSH terminal renders complete output bursts and acknowledges parsed output
   const panel = page.getByLabel("DSH 会话工具", { exact: true });
   await panel.getByRole("button", { name: "选择终端", exact: true }).click();
   await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
-  await expect(panel.locator(".dsh-terminal-status").getByText("已连接", { exact: true })).toBeVisible();
+  await expect(panel.locator(".dsh-terminal-connection").getByText("已连接", { exact: true })).toBeVisible();
   const commands = () => relay.commands.filter(command => command.kind === "terminal")
     .map(command => JSON.parse(String(command.value)));
   const attach = commands().find(command => command.action === "attach");
@@ -1927,7 +2039,7 @@ test("DSH terminal preserves fine trackpad deltas and native full-screen mouse i
   const panel = page.getByLabel("DSH 会话工具", { exact: true });
   await panel.getByRole("button", { name: "选择终端", exact: true }).click();
   await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
-  await expect(panel.locator(".dsh-terminal-status").getByText("已连接", { exact: true })).toBeVisible();
+  await expect(panel.locator(".dsh-terminal-connection").getByText("已连接", { exact: true })).toBeVisible();
   const commands = () => relay.commands.filter(command => command.kind === "terminal")
     .map(command => JSON.parse(String(command.value)));
   const attach = commands().find(command => command.action === "attach");
@@ -1938,11 +2050,13 @@ test("DSH terminal preserves fine trackpad deltas and native full-screen mouse i
   const rows = panel.locator(".xterm-rows");
   await expect(rows).toContainText("history-179");
   const bottom = (await rows.textContent())!;
-  const wheel = async (selector: string, direction: number) => panel.locator(selector).evaluate((element, direction) => {
+  const wheel = async (selector: string, direction: number) => panel.locator(selector).evaluate(async (element, direction) => {
     for (let index = 0; index < 80; index++) {
       element.dispatchEvent(new WheelEvent("wheel", { deltaY: direction * 1.25, deltaX: 0.15,
         deltaMode: 0, bubbles: true, cancelable: true }));
     }
+    // xterm batches viewport synchronization and row rendering across frames.
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
   }, direction);
   await wheel(".xterm-screen", -1);
   await expect(rows).not.toHaveText(bottom);
@@ -1984,7 +2098,7 @@ test("DSH terminal batches unsent keystrokes behind delayed acknowledgements", a
   const panel = page.getByLabel("DSH 会话工具", { exact: true });
   await panel.getByRole("button", { name: "选择终端", exact: true }).click();
   await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
-  await expect(panel.locator(".dsh-terminal-status").getByText("已连接", { exact: true })).toBeVisible();
+  await expect(panel.locator(".dsh-terminal-connection").getByText("已连接", { exact: true })).toBeVisible();
   const text = "abcdefghijklmnopqrstuvwxyz0123456789";
   const started = performance.now();
   await panel.locator(".xterm-helper-textarea").pressSequentially(text);

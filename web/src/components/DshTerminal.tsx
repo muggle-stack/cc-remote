@@ -7,6 +7,7 @@ import { uuid } from "../util";
 import { Icon } from "../icons";
 import { ChoicePicker } from "./ChoicePicker";
 import { CenteredSheet } from "./CenteredSheet";
+import { PanelRowMenu } from "./PanelActions";
 import { DshTerminalClipboard, type TerminalClipboardTarget } from "./DshTerminalClipboard";
 import { attachTerminalTouchScroll, attachTerminalWheelScroll } from "../dsh-terminal-touch";
 import { observeTerminalPrompt } from "../dsh-terminal-prompt";
@@ -215,28 +216,38 @@ export default function DshTerminal({ sid, api }: { sid: string; api: DshApiClie
     };
   }, [sid, api, target, revision, reload]);
   const selected = items.find(item => item.id === target);
+  const connectionStatus = exited ? "命令行已退出" : connected ? "已连接" : "只读或未连接";
+  const reconnect = () => setRevision(value => value + 1);
   return <div className="dsh-terminal">
     <div className="dsh-terminal-toolbar">
       <ChoicePicker label="选择终端" value={target} disabled={busy || !items.length} className="dsh-terminal-picker"
         options={items.map(item => ({ value: item.id, label: item.title, icon: "bash",
           description: `${item.state === "running" ? "运行中" : "已退出"} · ${item.detail}` }))}
         onChange={value => { setStop(""); setTarget(value); }}>
-        <i data-connected={connected} /><span>{selected?.title ?? "选择终端"}</span>
+        <span className="dsh-terminal-connection" role="status" aria-label={connectionStatus} title={connectionStatus}>
+          <i data-connected={connected} aria-hidden="true" /><span className="dsh-terminal-status-text">{connectionStatus}</span>
+        </span><span>{selected?.title ?? "选择终端"}</span>
       </ChoicePicker>
       <span className="dsh-terminal-cwd" title={selected?.detail}>{selected?.detail}</span>
       <button className="iconbtn" aria-label="刷新列表" disabled={busy} onClick={() => void reload().catch(error => setError(error.message))}><Icon name="refresh" size={16} /></button>
       <button aria-label="新建终端" disabled={busy} onClick={() => void create()}><Icon name="plus" size={17} />新建</button>
     </div>
     {error && <p role="alert" className="dsh-feature-error">{error}</p>}
+    {target && !connected && !error && <p role="status" className="dsh-terminal-notice">{connectionStatus}</p>}
     {target ? <div className="dsh-terminal-screen"><div className="dsh-terminal-viewport" ref={host} /></div>
       : <div className="dsh-terminal-empty"><Icon name="bash" size={32} /><p>选择终端或新建一个终端</p><small>这里的命令由你直接运行。</small></div>}
     {target && <div className="dsh-terminal-actions">
-      <DshTerminalClipboard key={`${sid}:${target}:${revision}`} targetRef={clipboardTarget} connected={connected && !busy} />
-      <button aria-label="中断命令 Ctrl+C" disabled={busy || !connected} onClick={() => interrupt.current?.()}><Icon name="stop" size={15} />Ctrl+C 中断</button>
-      <button disabled={busy || exited} onClick={() => setRevision(value => value + 1)}><Icon name="refresh" size={15} />重新连接</button>
-      <button className="dsh-terminal-close" disabled={busy || exited} onClick={() => setStop(target)}><Icon name="trash" size={15} />关闭终端</button>
+      <div className="dsh-terminal-common-actions">
+        <DshTerminalClipboard key={`${sid}:${target}:${revision}`} targetRef={clipboardTarget} connected={connected && !busy} />
+        <button aria-label="中断命令 Ctrl+C" disabled={busy || !connected}
+          onPointerDown={event => event.preventDefault()} onClick={() => interrupt.current?.()}>Ctrl+C</button>
+      </div>
+      <button className="dsh-terminal-reconnect" disabled={busy || exited} onClick={reconnect}><Icon name="refresh" size={15} />重新连接</button>
+      <PanelRowMenu key={`${sid}:${target}:${revision}`} className="dsh-terminal-menu" label="终端更多操作" disabled={busy} items={[
+        { label: "重新连接", icon: "refresh", onClick: reconnect, disabled: exited, className: "dsh-terminal-menu-reconnect" },
+        { label: "关闭终端", icon: "trash", onClick: () => setStop(target), disabled: exited, danger: true },
+      ]} />
     </div>}
-    <div className="dsh-terminal-status"><span>{target ? exited ? "命令行已退出" : connected ? "已连接" : "只读或未连接" : ""}</span><span>收起面板保留终端</span></div>
     {!!stop && <CenteredSheet open label="关闭终端？" maxWidth={360} maxHeight={240} minimumHeight={180} className="dsh-terminal-confirm" onClose={() => { if (!busy) setStop(""); }}>
       <p>结束 {items.find(item => item.id === stop)?.title ?? "这个终端"} 及其中运行的命令。</p>
       <div><button disabled={busy} onClick={() => setStop("")}>取消</button><button className="danger" disabled={busy} onClick={() => void close()}>{busy ? "正在关闭…" : "确认关闭"}</button></div>
