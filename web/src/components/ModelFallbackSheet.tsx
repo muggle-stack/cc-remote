@@ -1,8 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ModelFallbackPrompt } from "../protocol";
-import { EngineIcon, Icon } from "../icons";
+import { EngineIcon } from "../icons";
 import type { QuestionDraft } from "./QuestionSheet";
+import { QuestionCollapseButton, QuestionResume } from "./QuestionPresentation";
 import "./ModelFallbackSheet.css";
 
 function modelLabel(model: string): string {
@@ -25,7 +26,7 @@ export function ModelFallbackSheet({ fallback, draft, sessionLabel, accountLabel
   const [automatic, setAutomatic] = useState(initial?.selected.includes("automatic") ?? false);
   const [pending, setPending] = useState(false);
   const dialogRef = useRef<HTMLDialogElement>(null);
-  const titleRef = useRef<HTMLHeadingElement>(null);
+  const titleRef = useRef<HTMLDivElement>(null);
   const resumeRef = useRef<HTMLButtonElement>(null);
   const focusResume = useRef(false);
   const save = (nextCollapsed: boolean, nextAutomatic: boolean) => {
@@ -57,22 +58,19 @@ export function ModelFallbackSheet({ fallback, draft, sessionLabel, accountLabel
     setPending(true);
   };
   const content = <dialog ref={dialogRef} className="question-dialog model-fallback-dialog"
-    aria-labelledby="model-fallback-heading" data-lock-horizontal-swipe
+    aria-labelledby="model-fallback-heading" aria-description={[accountLabel, sessionLabel].filter(Boolean).join(" · ") || undefined}
+    data-lock-horizontal-swipe
     onCancel={event => { event.preventDefault(); collapse(); }}
     onKeyDown={event => event.stopPropagation()}>
-    <div className="fallback-identity">
-      <EngineIcon engine="claude" size={34} />
-      <div className="fallback-session">
-        <strong>{accountLabel ? `Claude · ${accountLabel}` : "Claude"}</strong>
-        {sessionLabel && <span>{sessionLabel}</span>}
-      </div>
-      <button type="button" className="fallback-collapse" onClick={collapse} aria-label="收起回退确认">
-        收起 <Icon name="chev" size={16} />
-      </button>
+    <div ref={titleRef} tabIndex={-1} className="question-dialog-title">
+      <EngineIcon engine="claude" size={26} />
+      <span>Claude 想确认一下</span>
+      <QuestionCollapseButton onCollapse={collapse} />
     </div>
-    <div className="fallback-body">
-      <h2 ref={titleRef} tabIndex={-1} id="model-fallback-heading">是否允许模型回退？</h2>
-      <p>当前模型拒绝了本次请求。</p>
+    <div className="sheet-scroll fallback-body">
+      <div className="qa-header">模型回退</div>
+      <h2 id="model-fallback-heading" className="qa-question">是否切换到备用模型？</h2>
+      <p className="fallback-description">当前模型拒绝了本次请求。</p>
       <div className="fallback-models">
         <div><span>当前模型</span><strong title={fallback.original_model}>{modelLabel(fallback.original_model)}</strong></div>
         <span className="fallback-arrow" aria-hidden="true">→</span>
@@ -84,25 +82,20 @@ export function ModelFallbackSheet({ fallback, draft, sessionLabel, accountLabel
         }} />
         <span>以后自动切换</span>
       </label>
-      <div className="fallback-actions">
-        <button type="button" disabled={pending} onClick={() => answer("拒绝回退")}>拒绝回退</button>
-        <button type="button" className="fallback-edit" disabled={pending || fallback.original_prompt == null}
-          onClick={() => answer("编辑提问")}>编辑提问</button>
-        <button type="button" className="primary" disabled={pending}
-          onClick={() => answer(automatic ? "同意回退并记住" : "同意回退")}>
-          {pending ? "正在提交…" : "同意回退"}
-        </button>
-      </div>
+    </div>
+    <div className="qa-footer fallback-actions">
+      <button type="button" className="qa-previous" disabled={pending} onClick={() => answer("拒绝回退")}>拒绝回退</button>
+      <button type="button" className="qa-previous" disabled={pending || fallback.original_prompt == null}
+        onClick={() => answer("编辑提问")}>编辑提问</button>
+      <button type="button" className="qa-next" disabled={pending}
+        onClick={() => answer(automatic ? "同意回退并记住" : "同意回退")}>
+        {pending ? "正在提交…" : "同意回退"}
+      </button>
     </div>
   </dialog>;
   return <>
-    {collapsed && <button type="button" ref={resumeRef} className="question-resume fallback-resume"
-      aria-haspopup="dialog" data-lock-horizontal-swipe onClick={() => { save(false, automatic); setCollapsed(false); }}>
-      <EngineIcon engine="claude" size={23} />
-      <strong>{accountLabel ? `Claude · ${accountLabel}` : "Claude"}</strong>
-      <span className="qa-resume-label">等待确认模型切换</span>
-      <span className="qa-resume-action">处理</span>
-    </button>}
+    {collapsed && <QuestionResume engine="claude" buttonRef={resumeRef} label="等待确认模型切换"
+      onResume={() => { save(false, automatic); setCollapsed(false); }} />}
     {createPortal(content, document.body)}
   </>;
 }

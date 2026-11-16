@@ -17211,8 +17211,10 @@ test(`Claude model fallback ${choice} uses the native pending dialog on desktop 
       turn_id: "original-turn", original_prompt: "分析这个仓库，并保留原模型重试" },
   };
   relay.emit(ask);
-  const dialog = page.getByRole("dialog", { name: "是否允许模型回退？" });
+  const dialog = page.getByRole("dialog", { name: "是否切换到备用模型？" });
   await expect(dialog).toBeVisible();
+  await expect(dialog.locator(".question-dialog-title")).toHaveText("Claude 想确认一下");
+  await expect(dialog.locator(".fallback-identity, .fallback-session")).toHaveCount(0);
   await expect(page.locator(".hstat")).toHaveText("待确认");
   await expect(dialog.getByText("Opus 5.6", { exact: true })).toBeVisible();
   await expect(dialog.getByText("Opus 5.5", { exact: true })).toBeVisible();
@@ -17226,18 +17228,34 @@ test(`Claude model fallback ${choice} uses the native pending dialog on desktop 
   await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
   await page.screenshot({ path: testInfo.outputPath("model-fallback-dark.png") });
   await automatic.check();
-  await dialog.getByRole("button", { name: "收起回退确认", exact: true }).click();
+  await dialog.getByRole("button", { name: "收起问题", exact: true }).click();
   await expect(dialog).toBeHidden();
-  const resume = page.getByRole("button", { name: /等待确认模型切换.*处理/ });
+  const resume = page.getByRole("button", { name: /等待确认模型切换.*继续回答/ });
   await expect(resume).toBeVisible();
   await page.setViewportSize({ width: 320, height: 740 });
   expect((await resume.boundingBox())!.height).toBeLessThanOrEqual(48);
   expect(await resume.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
-  await page.setViewportSize(viewport);
   expect(relay.commands.filter(command => command.type === "answer_question")).toHaveLength(0);
   await page.screenshot({ path: testInfo.outputPath("model-fallback-collapsed.png") });
   await resume.click();
   await expect(automatic).toBeChecked();
+  const actionBounds = await dialog.locator(".fallback-actions button").evaluateAll(buttons => buttons.map(button => {
+    const rect = button.getBoundingClientRect();
+    return { top: rect.top, height: rect.height, fits: button.scrollWidth <= button.clientWidth };
+  }));
+  expect(actionBounds).toHaveLength(3);
+  for (const bounds of actionBounds) {
+    expect(Math.abs(bounds.top - actionBounds[0].top)).toBeLessThan(1);
+    expect(bounds.height).toBeGreaterThanOrEqual(44);
+    expect(bounds.fits).toBe(true);
+  }
+  await page.screenshot({ path: testInfo.outputPath("model-fallback-narrow.png") });
+  await page.setViewportSize({ width: 320, height: 400 });
+  await expect(dialog.locator(".fallback-actions")).toBeInViewport();
+  await expect(dialog.getByRole("button", { name: "同意回退", exact: true })).toBeInViewport();
+  expect(await dialog.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+  expect(await dialog.locator(".fallback-body").evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
+  await page.setViewportSize(viewport);
   if (choice !== "同意回退") await automatic.uncheck();
   await dialog.getByRole("button", { name: choice, exact: true }).click();
   await expect.poll(() => relay.commands.filter(command => command.type === "answer_question").length).toBe(1);
