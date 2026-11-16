@@ -2,12 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import type { DshApiClient } from "../dsh-api";
-import type { DshItem } from "../protocol";
+import type { DshItem, DshReadResult } from "../protocol";
 import { uuid } from "../util";
 import { Icon } from "../icons";
 import { ChoicePicker } from "./ChoicePicker";
 import { CenteredSheet } from "./CenteredSheet";
-import { attachTerminalTouchScroll } from "../dsh-terminal-touch";
+import { attachTerminalTouchScroll, attachTerminalWheelScroll } from "../dsh-terminal-touch";
 import "@xterm/xterm/css/xterm.css";
 
 export default function DshTerminal({ sid, api }: { sid: string; api: DshApiClient }) {
@@ -62,13 +62,15 @@ export default function DshTerminal({ sid, api }: { sid: string; api: DshApiClie
     let gone = false, writable = false, cursor = 0, pendingBytes = 0, inFlight = 0;
     const lease = uuid(), encoder = new TextEncoder();
     const queue: { value: Record<string, unknown>; bytes: number }[] = [];
-    let rendering = Promise.resolve();
+    let rendering = false;
+    const output: DshReadResult[] = [];
     const terminal = new Terminal({ cursorBlink: true, fontSize: 13, scrollback: 1000,
       theme: { background: "#10151e", foreground: "#e5eaf3", cursor: "#88afff", selectionBackground: "#496ba86b" } });
     const fit = new FitAddon(); terminal.loadAddon(fit); terminal.open(host.current);
     const detachTouchScroll = attachTerminalTouchScroll(host.current, terminal);
+    const detachWheelScroll = attachTerminalWheelScroll(host.current, terminal);
     setConnected(false); setExited(false); setError(""); setStop("");
-    const freeze = () => { gone = true; writable = false; queue.length = 0; setConnected(false); };
+    const freeze = () => { gone = true; writable = false; queue.length = 0; output.length = 0; setConnected(false); };
     suspend.current = freeze;
     const fail = (error: Error) => {
       if (gone) return;
@@ -93,6 +95,17 @@ export default function DshTerminal({ sid, api }: { sid: string; api: DshApiClie
       if (gone || !writable) return;
       const bytes = encoder.encode(JSON.stringify(value)).byteLength;
       if (pendingBytes + bytes > 65536) { fail(new Error("待发送输入过多，请重新连接")); return; }
+      const previous = queue.at(-1);
+      if (previous?.value.type === "write" && value.type === "write") {
+        const data = String(previous.value.data) + String(value.data);
+        if (encoder.encode(data).byteLength <= 2048) {
+          const mergedBytes = encoder.encode(JSON.stringify({ type: "write", data })).byteLength;
+          pendingBytes += mergedBytes - previous.bytes;
+          previous.value = { type: "write", data }; previous.bytes = mergedBytes;
+          flush();
+          return;
+        }
+      }
       pendingBytes += bytes; queue.push({ value, bytes }); flush();
     };
     const onData = terminal.onData(data => {
@@ -117,33 +130,54 @@ export default function DshTerminal({ sid, api }: { sid: string; api: DshApiClie
     const observer = new ResizeObserver(() => { cancelAnimationFrame(resizeFrame); resizeFrame = requestAnimationFrame(resize); });
     observer.observe(host.current);
     const write = (text: string) => new Promise<void>(resolve => terminal.write(text, resolve));
-    const unwatch = api.watchTerminal(sid, lease, result => {
-      rendering = rendering.then(async () => {
-        if (gone) return;
-        if (result.error) throw new Error(result.error);
-        let text = "", becameWritable = false;
-        for (const item of result.items) {
-          const frame = item.data ?? {};
-          if (frame.type === "snapshot") { terminal.reset(); text += String(frame.screen ?? ""); }
-          else if (frame.type === "output") text += String(frame.data ?? "");
-          if ("writable" in frame) {
-            becameWritable ||= !writable && frame.writable === true;
-            writable = frame.writable === true; setConnected(writable);
+    const render = async () => {
+      if (rendering || gone) return;
+      rendering = true;
+      try {
+        while (!gone && output.length) {
+          // Let xterm parse one coalesced write instead of adding a timer turn
+          // for every small frame that arrived while the last write was pending.
+          const batch = output.splice(0);
+          let text = "", becameWritable = false, nextCursor = cursor;
+          for (const result of batch) {
+            if (result.error) {
+              if (text) await write(text);
+              throw new Error(result.error);
+            }
+            for (const item of result.items) {
+              const frame = item.data ?? {};
+              if (frame.type === "snapshot") {
+                if (text) { await write(text); text = ""; }
+                if (gone) return;
+                terminal.reset(); text = String(frame.screen ?? "");
+              } else if (frame.type === "output") text += String(frame.data ?? "");
+              if ("writable" in frame) {
+                becameWritable ||= !writable && frame.writable === true;
+                writable = frame.writable === true; setConnected(writable);
+              }
+              const state = (frame.info as { state?: string } | undefined)?.state;
+              if (state === "exited" || state === "failed") {
+                writable = false; setConnected(false); setExited(true);
+                if (state === "failed") setError("终端运行失败，可刷新列表或新建终端。");
+                void reload().catch(() => {});
+              }
+            }
+            nextCursor = result.next_seq ?? nextCursor;
           }
-          const state = (frame.info as { state?: string } | undefined)?.state;
-          if (state === "exited" || state === "failed") {
-            writable = false; setConnected(false); setExited(true);
-            if (state === "failed") setError("终端运行失败，可刷新列表或新建终端。");
-            void reload().catch(() => {});
-          }
+          if (text) await write(text);
+          if (gone) return;
+          cursor = nextCursor;
+          // Acknowledge parsed output, not merely received network bytes.
+          void controlInput({ action: "ack", cursor }).catch(fail);
+          if (becameWritable) resize();
         }
-        if (text) await write(text);
-        if (gone) return;
-        cursor = result.next_seq ?? cursor;
-        // Acknowledge parsed output, not merely received network bytes.
-        void controlInput({ action: "ack", cursor }).catch(fail);
-        if (becameWritable) resize();
-      }).catch(fail);
+      } catch (error) { fail(error as Error); }
+      finally { rendering = false; }
+    };
+    const unwatch = api.watchTerminal(sid, lease, result => {
+      if (gone) return;
+      output.push(result);
+      void render();
     }, () => fail(new Error("终端连接已断开，请重新连接")));
     const heartbeat = setInterval(() => {
       if (!gone) void controlInput({ action: "ack", cursor }).catch(fail);
@@ -156,7 +190,7 @@ export default function DshTerminal({ sid, api }: { sid: string; api: DshApiClie
     return () => {
       freeze(); unwatch(); clearInterval(heartbeat);
       if (suspend.current === freeze) { suspend.current = null; interrupt.current = null; }
-      observer.disconnect(); cancelAnimationFrame(resizeFrame); detachTouchScroll(); onData.dispose(); terminal.dispose();
+      observer.disconnect(); cancelAnimationFrame(resizeFrame); detachTouchScroll(); detachWheelScroll(); onData.dispose(); terminal.dispose();
       void controlInput({ action: "detach" }).catch(() => {});
     };
   }, [sid, api, target, revision, reload]);
