@@ -8,12 +8,13 @@ from types import SimpleNamespace
 import pytest
 from claude_agent_sdk.types import ResultMessage, SystemMessage
 
-from cc_remote.protocol import GetContext, ProcessEvent
+from cc_remote.protocol import GetContext, ProcessEvent, TurnEnd
 from cc_remote.wrapper.claude_compaction import compact_metadata
 from cc_remote.wrapper.sdk import ClaudeBackgroundBoundary, SdkHandle
 from cc_remote.wrapper.stream import StreamTranslator
 from cc_remote.wrapper.work_context import recover_claude_context_usage
 from tests.test_claude_autocompact import SESSION_ID, _machine_with_sdk
+from tests.test_claude_steering import NativeClient, assistant, until, user
 
 
 def boundary():
@@ -92,6 +93,7 @@ def test_native_compact_boundary_before_user_replay_reaches_control(replay_user,
             assert background == []
             processes = [e for e in transport.sent if isinstance(e, ProcessEvent)]
             assert [e.phase for e in processes] == ["start", "end"]
+            assert all(e.turn_id is None for e in processes)
             assert ctx.claude_compaction_revision == 1
             report = await machine._handle_get_context(GetContext(sid=SESSION_ID))
             assert report.available is not False
@@ -165,6 +167,334 @@ def test_terminal_without_boundary_stops_animation_without_success(is_error):
     assert process.phase == "end"
     assert process.status == ("interrupted" if is_error else "failed")
     assert process.summary is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("end_kind", ["boundary", "error", "result"])
+@pytest.mark.parametrize("status_uuid", ["compact-start", None])
+async def test_compaction_terminal_crosses_routes_without_waiting_for_turn_end(end_kind, status_uuid):
+    handle = SdkHandle(SimpleNamespace(turn_reader_queue_cap=4))
+    handle.client = native = NativeClient()
+    background_translator = StreamTranslator(1024)
+    managed_translator = StreamTranslator(1024, turn_id="current-input")
+    events = []
+
+    async def on_background(message, _turn):
+        if not isinstance(message, ClaudeBackgroundBoundary):
+            events.extend(background_translator.feed(message))
+
+    handle.background_message_callback = on_background
+    handle._start_message_pump()
+    consumer = None
+    try:
+        handle.next_turn_id = "current-input"
+        await handle.query("current")
+
+        async def consume():
+            async for message in handle.receive_response():
+                events.extend(managed_translator.feed(message))
+
+        consumer = asyncio.create_task(consume())
+        await native.queue.put({**status(), "uuid": status_uuid})
+        await until(lambda: any(isinstance(e, ProcessEvent) for e in events))
+        await native.queue.put(user("native-user", "current"))
+        await native.queue.put({**status(), "uuid": "heartbeat"})
+        if end_kind == "boundary":
+            await native.queue.put(boundary())
+        elif end_kind == "error":
+            await native.queue.put({"type": "system", "subtype": "status",
+                                    "status": None, "compact_error": "failed"})
+        else:
+            await native.queue.put(result())
+        await until(lambda: any(isinstance(e, ProcessEvent) and e.phase == "end" for e in events))
+        processes = [e for e in events if isinstance(e, ProcessEvent)]
+        assert len(processes) == 2
+        assert processes[1].turn_id == processes[0].turn_id
+        if end_kind == "boundary":
+            assert processes[1].input == {"compaction_started_id": processes[0].item_id}
+            assert processes[1].status == "succeeded"
+        else:
+            assert processes[1].item_id == processes[0].item_id
+            assert processes[1].status == "failed"
+        if end_kind != "result":
+            assert not consumer.done(), "compaction completion must not end the answer"
+            await native.queue.put(assistant("continued", [{"type": "text", "text": "working"}]))
+            await native.queue.put(result())
+        await asyncio.wait_for(consumer, 1)
+        handle.release_background_messages()
+        await asyncio.wait_for(handle._background_callbacks_drained.wait(), 1)
+        assert len([e for e in events if isinstance(e, ProcessEvent)]) == 2
+    finally:
+        if consumer:
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+        await handle._stop_message_pump()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("before_echo", [False, True])
+@pytest.mark.parametrize("end_kind", ["boundary", "result"])
+async def test_unrelated_task_result_preserves_managed_compaction(before_echo, end_kind):
+    handle = SdkHandle(SimpleNamespace(turn_reader_queue_cap=4))
+    handle.client = native = NativeClient()
+    background_translator = StreamTranslator(1024)
+    managed_translator = StreamTranslator(1024, turn_id="current-input")
+    events = []
+    background = []
+
+    async def on_background(message, _turn):
+        background.append(message)
+        if not isinstance(message, ClaudeBackgroundBoundary):
+            events.extend(background_translator.feed(message))
+
+    handle.background_message_callback = on_background
+    handle._start_message_pump()
+    consumer = None
+    try:
+        handle.next_turn_id = "current-input"
+        await handle.query("current")
+
+        async def consume():
+            async for message in handle.receive_response():
+                events.extend(managed_translator.feed(message))
+
+        consumer = asyncio.create_task(consume())
+        if not before_echo:
+            await native.queue.put(user("native-user", "current"))
+        await native.queue.put(status())
+        await until(lambda: any(isinstance(event, ProcessEvent) for event in events))
+        if before_echo:
+            await native.queue.put(user("native-user", "current"))
+        await until(lambda: handle._managed_input_seen)
+        await native.queue.put({**result(), "origin": {
+            "kind": "task-notification", "taskId": "unrelated-task"}})
+        await until(lambda: any(isinstance(message, ResultMessage) for message in background))
+        processes = [event for event in events if isinstance(event, ProcessEvent)]
+        assert [event.phase for event in processes] == ["start"]
+        assert not consumer.done()
+
+        if end_kind == "boundary":
+            await native.queue.put(boundary())
+        await native.queue.put(result())
+        await asyncio.wait_for(consumer, 1)
+        handle.release_background_messages()
+        await asyncio.wait_for(handle._background_callbacks_drained.wait(), 1)
+        processes = [event for event in events if isinstance(event, ProcessEvent)]
+        assert [event.phase for event in processes] == ["start", "end"]
+        assert processes[1].turn_id == processes[0].turn_id
+        if end_kind == "boundary":
+            assert processes[1].status == "succeeded"
+            assert processes[1].input == {"compaction_started_id": "compact-start"}
+        else:
+            assert processes[1].status == "failed"
+            assert processes[1].item_id == "compact-start"
+    finally:
+        if consumer:
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+        await handle._stop_message_pump()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_receipt", [False, True])
+async def test_task_origin_result_can_finish_compaction_with_exact_human_receipt(with_receipt):
+    handle = SdkHandle(SimpleNamespace(turn_reader_queue_cap=4))
+    handle.client = native = NativeClient()
+    translator = StreamTranslator(1024, turn_id="current-input")
+    background = []
+
+    async def on_background(message, _turn):
+        background.append(message)
+
+    handle.background_message_callback = on_background
+    handle._start_message_pump()
+    consumer = None
+    try:
+        await handle.query("current")
+
+        async def consume():
+            return [event async for message in handle.receive_response()
+                    for event in translator.feed(message)]
+
+        consumer = asyncio.create_task(consume())
+        await native.queue.put(user("native-user", "current"))
+        await native.queue.put(status())
+        await native.queue.put({**result(), "origin": {
+            "kind": "task-notification", "taskId": "task"},
+            "user_message_uuid": "native-user" if with_receipt else "other-user"})
+        if not with_receipt:
+            await until(lambda: any(isinstance(message, ResultMessage) for message in background))
+            assert not consumer.done()
+            await native.queue.put(result())
+        events = await asyncio.wait_for(consumer, 1)
+        processes = [event for event in events if isinstance(event, ProcessEvent)]
+        assert [event.phase for event in processes] == ["start", "end"]
+        assert processes[-1].item_id == "compact-start"
+        assert processes[-1].status == "failed"
+    finally:
+        if consumer:
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+        await handle._stop_message_pump()
+
+
+@pytest.mark.asyncio
+async def test_background_compaction_waits_for_its_task_result():
+    handle = SdkHandle(SimpleNamespace(turn_reader_queue_cap=4))
+    handle.client = native = NativeClient()
+    translator = StreamTranslator(1024)
+    events = []
+    results = []
+
+    async def on_background(message, _turn):
+        if isinstance(message, ResultMessage):
+            results.append(message)
+        if not isinstance(message, ClaudeBackgroundBoundary):
+            events.extend(translator.feed(message))
+
+    handle.background_message_callback = on_background
+    handle._start_message_pump()
+    try:
+        await native.queue.put({**user("task-user", "background"), "origin": {
+            "kind": "task-notification", "taskId": "compacting-task"}})
+        await native.queue.put(status())
+        await until(lambda: any(isinstance(event, ProcessEvent) for event in events))
+        await native.queue.put({**result(), "origin": {
+            "kind": "task-notification", "taskId": "unrelated-task"}})
+        await until(lambda: len(results) == 1)
+        assert [event.phase for event in events if isinstance(event, ProcessEvent)] == ["start"]
+        await native.queue.put({**result(), "origin": {
+            "kind": "task-notification", "taskId": "compacting-task"}})
+        await until(lambda: len(results) == 2)
+        processes = [event for event in events if isinstance(event, ProcessEvent)]
+        assert [event.phase for event in processes] == ["start", "end"]
+        assert processes[-1].item_id == "compact-start"
+        assert processes[-1].status == "failed"
+    finally:
+        await handle._stop_message_pump()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("before_echo", [False, True])
+@pytest.mark.parametrize("is_error", [False, True])
+async def test_intermediate_result_settles_compaction_without_ending_steered_turn(before_echo, is_error):
+    handle = SdkHandle(SimpleNamespace(turn_reader_queue_cap=1))
+    handle.client = native = NativeClient()
+    translator = StreamTranslator(1024, turn_id="current-input")
+    background_translator = StreamTranslator(1024)
+    events = []
+    messages = []
+
+    async def on_background(message, _turn):
+        if not isinstance(message, ClaudeBackgroundBoundary):
+            events.extend(background_translator.feed(message))
+
+    handle.background_message_callback = on_background
+    handle._start_message_pump()
+    consumer = None
+    try:
+        handle.next_turn_id = "current-input"
+        await handle.query("current")
+
+        async def consume():
+            async for message in handle.receive_response():
+                messages.append(message)
+                events.extend(translator.feed(message))
+
+        consumer = asyncio.create_task(consume())
+        if not before_echo:
+            await native.queue.put(user("native-user", "current"))
+        await native.queue.put(status())
+        await until(lambda: any(isinstance(event, ProcessEvent) for event in events))
+        if before_echo:
+            await native.queue.put(user("native-user", "current"))
+        await until(lambda: handle._managed_input_seen)
+        await handle.steer("guide", native_id="native-guide", metadata={"id": "guide-input"})
+        await native.queue.put({**result(), "is_error": is_error,
+                                "__cc_service_seq": 5, "__cc_service_ts": 123.0})
+        await until(lambda: not handle._managed_input_seen and handle._turn_messages.empty())
+        processes = [event for event in events if isinstance(event, ProcessEvent)]
+        assert [event.phase for event in processes] == ["start", "end"]
+        assert processes[-1].item_id == "compact-start"
+        assert processes[-1].turn_id == processes[0].turn_id
+        assert processes[-1].status == ("interrupted" if is_error else "failed")
+        assert not any(isinstance(event, TurnEnd) for event in events)
+        assert not consumer.done()
+        settled = messages[-1]
+        assert settled._cc_service_seq == 5 and settled._cc_service_ts == 123.0
+
+        await native.queue.put(user("native-guide", "guide"))
+        await native.queue.put(assistant("continued", [{"type": "text", "text": "working"}]))
+        await native.queue.put(result())
+        await asyncio.wait_for(consumer, 1)
+        handle.release_background_messages()
+        await asyncio.wait_for(handle._background_callbacks_drained.wait(), 1)
+        assert sum(isinstance(event, ProcessEvent) for event in events) == 2
+        assert sum(isinstance(event, TurnEnd) for event in events) == 1
+        assert sum(isinstance(message, ResultMessage) for message in messages) == 1
+        assert native.consumers == 1 and native.interrupts == 0
+    finally:
+        if consumer:
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+        await handle._stop_message_pump()
+
+
+@pytest.mark.asyncio
+async def test_service_intermediate_compaction_end_does_not_commit_the_human_turn():
+    from tests.test_claude_service import environment
+
+    async with environment() as (service, attach):
+        client = await attach()
+        worker = service.sessions[client.id]
+        native = worker.client
+        handle = SdkHandle(SimpleNamespace(turn_reader_queue_cap=1))
+        handle.client = client
+        handle._start_message_pump()
+        translator = StreamTranslator(1024, turn_id="root")
+        events = []
+        messages = []
+        consumer = None
+        try:
+            handle.next_turn_id = "root"
+            await handle.query("current")
+
+            async def consume():
+                async for message in handle.receive_response():
+                    messages.append(message)
+                    events.extend(translator.feed(message))
+
+            consumer = asyncio.create_task(consume())
+            await native.queue.put(user("native-user", "current"))
+            await native.queue.put(status())
+            await until(lambda: any(isinstance(event, ProcessEvent) for event in events))
+            await handle.steer("guide", native_id="native-guide", metadata={"id": "guide-input"})
+            await native.queue.put({**result(), "origin": {
+                "kind": "task-notification", "taskId": "absorbed-task"},
+                "user_message_uuid": "native-user"})
+            await until(lambda: any(isinstance(event, ProcessEvent) and event.phase == "end"
+                                   for event in events))
+            assert not consumer.done()
+            assert not any(isinstance(event, TurnEnd) for event in events)
+            assert worker.turn["id"] == "root" and worker.terminal_seq is None
+            assert worker.ack == 0
+            assert messages[-1]._cc_service_seq > 0 and messages[-1]._cc_service_ts > 0
+
+            await native.queue.put(user("native-guide", "guide"))
+            await native.queue.put(result())
+            await asyncio.wait_for(consumer, 2)
+            assert sum(isinstance(event, ProcessEvent) for event in events) == 2
+            assert sum(isinstance(event, TurnEnd) for event in events) == 1
+            assert isinstance(messages[-1], ResultMessage)
+            await handle.ack_service_message(messages[-1], turn_id="guide-input")
+            assert worker.turn is None
+            assert len(native.prompts) == 2 and native.interrupts == 0
+        finally:
+            if consumer:
+                consumer.cancel()
+                await asyncio.gather(consumer, return_exceptions=True)
+            handle.release_background_messages()
+            await handle._stop_message_pump()
 
 
 @pytest.mark.parametrize("post", [8_000, 0, None])

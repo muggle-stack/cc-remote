@@ -1297,6 +1297,172 @@ test("DSH terminal interrupt keeps shell and explicit close does not surface a r
   await expect(panel.getByRole("alert")).toHaveCount(0);
 });
 
+test("DSH terminal copies a native text selection and pastes with bracketed paste", async ({ page }) => {
+  const relay = await openDsh(page, { features: true, commandSuccess: true });
+  await page.evaluate(() => {
+    const clipboard = { text: "", readText: async () => "echo 手机\nsecond line", writeText: async (text: string) => { clipboard.text = text; } };
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
+  });
+  await openDshTools(page);
+  await selectDshTool(page, "终端");
+  const panel = page.getByLabel("DSH 会话工具", { exact: true });
+  await panel.getByRole("button", { name: "选择终端", exact: true }).click();
+  await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
+  await expect(panel.locator(".dsh-terminal-status")).toContainText("已连接");
+  const commands = () => relay.commands.filter(command => command.kind === "terminal").map(command => JSON.parse(String(command.value)));
+  const attach = commands().find(command => command.action === "attach");
+  relay.emit({ type: "dsh_read_result", sid, request_id: attach.lease, kind: "terminal_output", next_seq: 2,
+    items: [{ id: "2", title: "output", data: { type: "output", data: "\u001b[?2004h" } }] });
+  await expect.poll(() => commands().some(command => command.action === "ack" && command.cursor === 2)).toBe(true);
+  await panel.getByRole("button", { name: "复制终端文字" }).click();
+  const copy = page.getByRole("dialog", { name: "复制终端文字", exact: true });
+  const text = copy.getByRole("textbox", { name: "终端文字" });
+  await expect(text).toHaveValue("DSH terminal ready\n~/workspace $ ");
+  await text.evaluate((element: HTMLTextAreaElement) => { element.focus(); element.setSelectionRange(0, 3); element.dispatchEvent(new Event("select", { bubbles: true })); });
+  await copy.getByRole("button", { name: "复制", exact: true }).click();
+  await expect(copy).toHaveCount(0);
+  expect(await page.evaluate(() => (navigator.clipboard as Clipboard & { text: string }).text)).toBe("DSH");
+  expect(commands().filter(command => command.action === "input" && command.value.type === "write")).toHaveLength(0);
+  await panel.getByRole("button", { name: "粘贴到终端" }).click();
+  await expect.poll(() => commands().filter(command => command.action === "input" && command.value.type === "write").map(command => command.value.data).join("")).toBe("\u001b[200~echo 手机\rsecond line\u001b[201~");
+  await panel.locator(".xterm-helper-textarea").evaluate(element => {
+    const data = new DataTransfer();
+    data.setData("text/plain", "native paste");
+    element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data }));
+  });
+  await expect.poll(() => commands().filter(command => command.action === "input" && command.value.type === "write").map(command => command.value.data).join("")).toBe("\u001b[200~echo 手机\rsecond line\u001b[201~\u001b[200~native paste\u001b[201~");
+  await expect(panel.getByRole("alert")).toHaveCount(0);
+  await page.screenshot({ path: test.info().outputPath("terminal-clipboard.png") });
+});
+
+test("DSH terminal clipboard permission fallback stays on the original attachment", async ({ page }) => {
+  const relay = await openDsh(page, { features: true, commandSuccess: true });
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+      readText: async () => { throw new DOMException("Denied", "NotAllowedError"); },
+    } });
+  });
+  await openDshTools(page);
+  await selectDshTool(page, "终端");
+  const panel = page.getByLabel("DSH 会话工具", { exact: true });
+  await panel.getByRole("button", { name: "选择终端", exact: true }).click();
+  await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
+  await expect(panel.locator(".dsh-terminal-status")).toContainText("已连接");
+  const writes = () => relay.commands.filter(command => command.kind === "terminal")
+    .map(command => JSON.parse(String(command.value))).filter(command => command.action === "input" && command.value.type === "write");
+  await panel.getByRole("button", { name: "粘贴到终端" }).click();
+  const dialog = page.getByRole("dialog", { name: "粘贴到终端", exact: true });
+  await dialog.getByRole("textbox", { name: "粘贴内容" }).fill("printf 手机");
+  await dialog.getByRole("button", { name: "写入终端", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect.poll(() => writes().map(command => command.value.data).join("")).toBe("printf 手机");
+  await expect(panel.getByRole("alert")).toHaveCount(0);
+  await panel.getByRole("button", { name: "复制终端文字" }).click();
+  const copy = page.getByRole("dialog", { name: "复制终端文字", exact: true });
+  await expect(copy.getByRole("textbox", { name: "终端文字" })).toContainText("DSH terminal ready");
+  await copy.getByRole("button", { name: "关闭复制终端文字" }).click();
+
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+      readText: () => new Promise<string>(resolve => Object.assign(window, { finishTerminalPaste: resolve })),
+    } });
+  });
+  await panel.getByRole("button", { name: "粘贴到终端" }).click();
+  await panel.getByRole("button", { name: "重新连接", exact: true }).click();
+  await expect(panel.locator(".dsh-terminal-status")).toContainText("已连接");
+  await page.evaluate(() => (window as unknown as { finishTerminalPaste: (value: string) => void }).finishTerminalPaste("stale input"));
+  await expect(panel.getByRole("button", { name: "粘贴到终端" })).toBeEnabled();
+  expect(writes().map(command => command.value.data).join("")).toBe("printf 手机");
+});
+
+test("DSH terminal Android long press uses browser text selection", async ({ page, browserName, isMobile }) => {
+  test.skip(!isMobile || browserName !== "chromium", "Chromium mobile touch input required");
+  const relay = await openDsh(page, { features: true, commandSuccess: true });
+  await page.evaluate(() => {
+    const clipboard = { text: "", writeText: async (text: string) => { clipboard.text = text; } };
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
+  });
+  await openDshTools(page);
+  await selectDshTool(page, "终端");
+  const panel = page.getByLabel("DSH 会话工具", { exact: true });
+  await panel.getByRole("button", { name: "选择终端", exact: true }).click();
+  await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
+  await expect(panel.locator(".dsh-terminal-status")).toContainText("已连接");
+  const commands = () => relay.commands.filter(command => command.kind === "terminal").map(command => JSON.parse(String(command.value)));
+  const attach = commands().find(command => command.action === "attach");
+  relay.emit({ type: "dsh_read_result", sid, request_id: attach.lease, kind: "terminal_output", next_seq: 2,
+    items: [{ id: "2", title: "screen", data: { type: "snapshot", screen: "DSH terminal ready\r\n~/repo % \u001b[?2004h",
+      writable: true, info: { shell: { name: "zsh" } } } }] });
+  await expect.poll(() => commands().some(command => command.action === "ack" && command.cursor === 2)).toBe(true);
+  const position = await panel.locator(".xterm-rows > div").first().boundingBox();
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Input.synthesizeTapGesture", { x: position!.x + 12, y: position!.y + position!.height / 2,
+    duration: 700, gestureSourceType: "touch" });
+  await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).toContain("DSH");
+  await page.screenshot({ path: test.info().outputPath("terminal-native-selection.png") });
+  await panel.getByRole("button", { name: "复制终端文字" }).tap();
+  expect(await page.evaluate(() => (navigator.clipboard as Clipboard & { text: string }).text)).toBe("DSH");
+  expect(relay.commands.filter(command => command.kind === "terminal")
+    .map(command => JSON.parse(String(command.value)))
+    .some(command => command.action === "input" && command.value.type === "write")).toBe(false);
+  await cdp.detach();
+});
+
+test("DSH terminal long press selects text without accepting a completion", async ({ page }) => {
+  const relay = await openDsh(page, { features: true, commandSuccess: true });
+  await page.evaluate(() => {
+    const clipboard = { text: "", writeText: async (text: string) => { clipboard.text = text; } };
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: clipboard });
+  });
+  await openDshTools(page);
+  await selectDshTool(page, "终端");
+  const panel = page.getByLabel("DSH 会话工具", { exact: true });
+  await panel.getByRole("button", { name: "选择终端", exact: true }).click();
+  await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
+  await expect(panel.locator(".dsh-terminal-status")).toContainText("已连接");
+  const commands = () => relay.commands.filter(command => command.kind === "terminal").map(command => JSON.parse(String(command.value)));
+  const attach = commands().find(command => command.action === "attach");
+  relay.emit({ type: "dsh_read_result", sid, request_id: attach.lease, kind: "terminal_output", next_seq: 2,
+    items: [{ id: "2", title: "screen", data: { type: "snapshot", screen: "~/repo % \u001b[?2004h",
+      writable: true, info: { shell: { name: "zsh" } } } }] });
+  await expect.poll(() => commands().some(command => command.action === "ack" && command.cursor === 2)).toBe(true);
+  const screen = panel.locator(".xterm-screen");
+  await screen.evaluate(async element => {
+    const rows = element.querySelector(".xterm-rows")!;
+    const rect = rows.firstElementChild!.getBoundingClientRect();
+    const x = rect.left + 4, y = rect.top + rect.height / 2;
+    const touch = (type: string, dx = 0) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "touches", { value: type === "touchend" ? [] : [{ identifier: 1, clientX: x + dx, clientY: y }] });
+      element.dispatchEvent(event);
+    };
+    touch("touchstart");
+    await new Promise(resolve => setTimeout(resolve, 300));
+    touch("touchmove", 80);
+    touch("touchend", 80);
+  });
+  expect(commands().filter(command => command.action === "input" && command.value.type === "write")).toHaveLength(0);
+  await expect(panel.locator(".dsh-terminal-touch-selection")).toHaveCount(1);
+  expect(await panel.locator(".xterm-rows span").first().evaluate(element => {
+    const style = getComputedStyle(element);
+    return [style.userSelect || style.getPropertyValue("-webkit-user-select"), style.pointerEvents];
+  })).toEqual(["text", "auto"]);
+  await screen.evaluate(element => {
+    const span = element.querySelector(".xterm-rows span")!;
+    const range = document.createRange();
+    range.setStart(span.firstChild!, 0); range.setEnd(span.firstChild!, 2);
+    window.getSelection()!.removeAllRanges(); window.getSelection()!.addRange(range);
+    const rect = span.getBoundingClientRect();
+    // A native context menu must not let xterm replace the selected word.
+    span.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: rect.left + 2, clientY: rect.top + 2, button: 2 }));
+  });
+  expect(await page.evaluate(() => window.getSelection()!.toString())).toBe("~/");
+  await panel.getByRole("button", { name: "复制终端文字" }).click();
+  expect(await page.evaluate(() => (navigator.clipboard as Clipboard & { text: string }).text)).toBe("~/");
+  await expect(page.getByRole("dialog", { name: "复制终端文字", exact: true })).toHaveCount(0);
+  expect(commands().filter(command => command.action === "input" && command.value.type === "write")).toHaveLength(0);
+});
+
 test("DSH bundle catalog filters locally and reads configured sources", async ({ page }, info) => {
   const relay = await openDsh(page, { features: true, commandSuccess: true });
   await page.screenshot({ path: info.outputPath("dsh-session-mode.png") });
@@ -1444,6 +1610,125 @@ test("DSH terminal scrollback supports wheel and touch without sending shell inp
   await expect(rows).toContainText("new-output-while-reading");
   expect(relay.commands.filter(c => c.kind === "terminal").map(c => JSON.parse(String(c.value)))
     .some(c => c.action === "input" && c.value.type === "write")).toBe(false);
+});
+
+test("DSH terminal prompt gestures recall history and accept completion once", async ({ page }) => {
+  const relay = await openDsh(page, { features: true, commandSuccess: true });
+  await openDshTools(page); await selectDshTool(page, "终端");
+  const panel = page.getByLabel("DSH 会话工具", { exact: true });
+  await panel.getByRole("button", { name: "选择终端", exact: true }).click();
+  await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
+  await expect(panel.locator(".dsh-terminal-status").getByText("已连接", { exact: true })).toBeVisible();
+  const commands = () => relay.commands.filter(command => command.kind === "terminal")
+    .map(command => JSON.parse(String(command.value)));
+  const attach = commands().find(command => command.action === "attach");
+  const writes = () => commands().filter(command => command.action === "input" && command.value.type === "write");
+  let sequence = 1;
+  const output = (data: string, snapshot = false) => {
+    const next = ++sequence;
+    relay.emit({ type: "dsh_read_result", sid, request_id: attach.lease,
+      kind: "terminal_output", next_seq: next, items: [{ id: String(next), title: "output",
+        data: snapshot ? { type: "snapshot", screen: data, writable: true,
+          info: { shell: { name: "zsh", path: "/bin/zsh" } } } : { type: "output", data } }] });
+    return expect.poll(() => commands().some(command => command.action === "ack" && command.cursor === next)).toBe(true);
+  };
+  const gesture = async (dx: number, dy: number, hold = 0, finish = "touchend") => {
+    await panel.locator(".xterm-screen").evaluate(async (element, { dx, dy, hold, finish }) => {
+      const rect = element.getBoundingClientRect();
+      const x = rect.left + rect.width * .4, y = rect.top + rect.height * .6;
+      const send = (type: string, scale: number) => {
+        const event = new Event(type, { bubbles: true, cancelable: true });
+        Object.defineProperty(event, "touches", { value: type === "touchend" || type === "touchcancel"
+          ? [] : [{ identifier: 42, clientX: x + dx * scale, clientY: y + dy * scale }] });
+        element.dispatchEvent(event);
+      };
+      send("touchstart", 0);
+      if (hold) await new Promise(resolve => setTimeout(resolve, hold));
+      for (let step = 1; step <= 8; step++) send("touchmove", step / 8);
+      send(finish, 1);
+    }, { dx, dy, hold, finish });
+  };
+
+  const history = Array.from({ length: 100 }, (_, index) => `output-${index}\r\n`).join("");
+  await output(`${history}~/repo % \x1b[?2004h`, true);
+  await gesture(0, -100);
+  await expect.poll(() => writes().length).toBe(1);
+  expect(writes()[0].value.data).toBe("\x1b[A");
+  await output("\r\x1b[2K~/repo % git log --oneline -5");
+  await expect(panel.locator(".xterm-rows")).toContainText("git log --oneline -5");
+
+  // Normal right-swipes remain available to the browser. A deliberate hold
+  // maps one right arrow through zsh's configured autosuggestion widget.
+  await gesture(100, 0);
+  expect(writes()).toHaveLength(1);
+  await gesture(100, 0, 300);
+  await expect.poll(() => writes().length).toBe(2);
+  expect(writes()[1].value.data).toBe("\x1b[C");
+  await gesture(100, 0, 300, "touchcancel");
+  await gesture(0, -20);
+  expect(writes()).toHaveLength(2);
+
+  // Reading output and scrolling back down in one gesture never sends a key.
+  await gesture(0, 100);
+  await expect(panel.locator(".xterm-rows")).not.toContainText("git log --oneline -5");
+  await gesture(0, -1000);
+  await expect(panel.locator(".xterm-rows")).toContainText("git log --oneline -5");
+  expect(writes()).toHaveLength(2);
+
+  await output("\x1b[?2004l\r\ncommand still running\r\n");
+  await gesture(0, -100);
+  await gesture(100, 0, 300);
+  expect(writes()).toHaveLength(2);
+  await output("\r\n~/repo % \x1b[?2004h\x1b[?1h");
+  await gesture(0, -100);
+  await expect.poll(() => writes().length).toBe(3);
+  expect(writes()[2].value.data).toBe("\x1bOA");
+
+  // A submitted command is fenced immediately, before its delayed output.
+  await panel.locator(".xterm-helper-textarea").press("Enter");
+  await expect.poll(() => writes().length).toBe(4);
+  await gesture(0, -100);
+  expect(writes()).toHaveLength(4);
+
+  // Full-screen programs and native text-selection gestures retain control.
+  await output("\x1b[?1049h\x1b[?2004h\x1b[H~/repo % full-screen");
+  await gesture(0, -100);
+  await gesture(100, 0, 300);
+  expect(writes()).toHaveLength(4);
+  await output("\x1b[?1049l\x1b[?1000h");
+  await gesture(0, -100);
+  expect(writes()).toHaveLength(4);
+  await output("\x1b[?1000l\r\n~/repo % \x1b[?2004h");
+  await panel.locator(".xterm-screen").evaluate(element => {
+    const send = (type: string, x: number) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "touches", { value: type === "touchend" ? []
+        : [{ identifier: 1, clientX: x, clientY: 150 }] });
+      element.dispatchEvent(event);
+    };
+    send("touchstart", 100);
+    element.dispatchEvent(new Event("contextmenu", { bubbles: true }));
+    send("touchmove", 220);
+    send("touchend", 220);
+  });
+  expect(writes()).toHaveLength(4);
+
+  // Reconnect recreates its prompt observer and callbacks once.
+  await panel.getByRole("button", { name: "重新连接", exact: true }).click();
+  await expect.poll(() => commands().filter(command => command.action === "attach").length).toBe(2);
+  const currentAttach = commands().filter(command => command.action === "attach").at(-1);
+  relay.emit({ type: "dsh_read_result", sid, request_id: currentAttach.lease,
+    kind: "terminal_output", next_seq: 2, items: [{ id: "2", title: "snapshot",
+      data: { type: "snapshot", screen: "~/repo % \x1b[?2004h", writable: true,
+        info: { shell: { name: "zsh" } } } }] });
+  await expect.poll(() => commands().some(command => command.action === "ack"
+    && command.lease === currentAttach.lease && command.cursor === 2)).toBe(true);
+  await gesture(100, 0, 300);
+  await expect.poll(() => writes().length).toBe(5);
+  expect(writes().at(-1).lease).toBe(currentAttach.lease);
+  expect(writes().at(-1).value.data).toBe("\x1b[C");
+  expect(writes().slice(0, 3).every(command => !/[\r\n]/u.test(command.value.data))).toBe(true);
+  await page.screenshot({ path: test.info().outputPath("terminal-gestures.png") });
 });
 
 test("DSH schedule form creates directly in the selected session", async ({ page }, info) => {
@@ -1674,6 +1959,22 @@ test("DSH terminal preserves fine trackpad deltas and native full-screen mouse i
   const screen = panel.locator(".xterm-screen");
   await screen.dispatchEvent("wheel", { deltaY: 120, deltaMode: 0, bubbles: true, cancelable: true });
   await expect.poll(() => commands().some(command => command.action === "input" && command.value.type === "write")).toBe(true);
+  const beforeTouch = commands().filter(command => command.action === "input" && command.value.type === "write").length;
+  output(5, "\x1b[?1000h\x1b[?1006h");
+  await expect.poll(() => commands().some(command => command.action === "ack" && command.cursor === 5)).toBe(true);
+  await screen.evaluate(element => {
+    const rect = element.getBoundingClientRect();
+    const touch = new Event("touchstart", { bubbles: true });
+    Object.defineProperty(touch, "touches", { value: [{ identifier: 1, clientX: rect.left + 4, clientY: rect.top + 4 }] });
+    element.dispatchEvent(touch);
+    const end = new Event("touchend", { bubbles: true });
+    Object.defineProperty(end, "touches", { value: [] });
+    element.dispatchEvent(end);
+    for (const type of ["mousedown", "mouseup"]) element.dispatchEvent(new MouseEvent(type, {
+      clientX: rect.left + 4, clientY: rect.top + 4, button: 0, bubbles: true, cancelable: true,
+    }));
+  });
+  await expect.poll(() => commands().filter(command => command.action === "input" && command.value.type === "write").length).toBeGreaterThan(beforeTouch);
 });
 
 test("DSH terminal batches unsent keystrokes behind delayed acknowledgements", async ({ page }) => {
