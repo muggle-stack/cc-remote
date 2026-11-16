@@ -4,6 +4,17 @@
 
 ## Unreleased
 
+## v5.3.37
+
+Restore Linux deferred cleanup and refine systemd service dependency inspection. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Generate a valid scalar WorkingDirectory for the retention service, including spaces and special characters.
+- Validate generated systemd units before reloading the manager and confirm that the cleanup timer is active.
+- Parse service descriptions, documentation and calendar expressions in their sections, while retaining dependency checks for environment variables with matching names.
+- Add regression coverage for runtime dependency protection and native systemd unit validation.
+
+See the bilingual [release notes](docs/releases/v5.3.37.md).
+
 ## v5.3.36
 
 Unify server and device upgrades, refine Claude model fallback dialogs and restore Codex historical image previews. Wire protocol v94 and Claude Agent SDK 0.2.174.
