@@ -4,6 +4,17 @@
 
 ## Unreleased
 
+## v5.3.41
+
+Fix DSH terminal command history navigation and iOS chat keyboard positioning. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Send one arrow key per held terminal gesture, including when the finger remains down or changes direction.
+- Remove repeat-speed feedback while preserving scrolling, selection, clipboard controls and double-tap Tab.
+- Account for iOS document panning so the chat composer remains aligned with the visible area above the keyboard.
+- Cover gesture jitter, repeated viewport offsets, Chinese input and keyboard dismissal with browser regressions.
+
+See the bilingual [release notes](docs/releases/v5.3.41.md).
+
 ## v5.3.40
 
 Improve DSH mobile terminal gestures and keyboard handling. Wire protocol v94 and Claude Agent SDK 0.2.174.
