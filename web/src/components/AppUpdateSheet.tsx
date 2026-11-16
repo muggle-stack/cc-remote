@@ -73,8 +73,10 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
   const step = includeRelay && active && (job.server_phase === "succeeded" || !needsRelay) ? 1 : 0;
   const highlights = releaseHighlights(latest?.notes ?? "");
   const serverAvailable = newerVersion(latest?.version, relayVersion);
+  const serverTransaction = !!serverUpdates?.pending
+    || !!(serverUpdates?.data?.job && !UPDATE_TERMINAL.has(serverUpdates.data.job.phase));
   const showServerAction = !serverMode && !!serverUpdates
-    && (data?.online === false || deviceUnsupported) && serverAvailable && !active && !pending;
+    && (serverTransaction || ((data?.online === false || deviceUnsupported) && serverAvailable && !active && !pending));
   const authorize = async () => {
     setAuthorizing(true); setAuthorizationError("");
     try {
@@ -167,8 +169,8 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
         {cleanupNotice(job.cleanup_reason)}
       </p>}
       {showServerAction && <button type="button" className="app-update-server-link" onClick={() => setSelected("server")}>
-        <span>仅更新服务器和网页<small>{deviceUnsupported ? "当前设备需按原安装方式更新" : "设备可上线后更新"}</small></span><Icon name="chevron-right" size={18} /></button>}
-      {serverMode && !active && !pending && <button type="button" className="app-update-server-link" onClick={() => setSelected("device")}>
+        <span>{serverTransaction ? "查看服务器更新进度" : <>仅更新服务器和网页<small>{deviceUnsupported ? "当前设备需按原安装方式更新" : "设备可上线后更新"}</small></>}</span><Icon name="chevron-right" size={18} /></button>}
+      {serverMode && <button type="button" className="app-update-server-link" onClick={() => setSelected("device")}>
         返回 {deviceName} 更新<Icon name="chevron-right" size={18} /></button>}
       {webUpdate.message && <p className="app-update-warning" role="status">{webUpdate.message}</p>}
       <details className="app-update-details">

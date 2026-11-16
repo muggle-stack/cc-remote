@@ -85,6 +85,81 @@ test("offline device exposes a secondary server-only action", async ({ page }) =
   expect(serverCommands).toEqual(["start"]);
 });
 
+for (const phase of ["downloading", "unknown"] as const) {
+  test(`server ${phase} remains accessible after the device reconnects`, async ({ page }) => {
+    let online = false;
+    let job: Record<string, string> | null = null;
+    const commands: Record<string, string>[] = [];
+    const state = () => job && phase === "unknown"
+      ? { ...base, current: base.latest.version, relay_version: base.latest.version } : base;
+    await page.route("**/api/updates/*", route => route.fulfill({ json: { ...state(), online } }));
+    await page.route("**/api/server-updates", async route => {
+      const body = route.request().postDataJSON();
+      if (["start", "cancel", "reconcile"].includes(body?.op)) {
+        commands.push(body);
+        if (body.op === "start") job = { id: body.job_id, version: body.version, previous: base.current, phase };
+        else job = { ...job!, phase: body.op === "cancel" ? "cancelled" : "verifying" };
+        await route.fulfill({ json: { ok: true, job } });
+      } else await route.fulfill({ json: { ...state(), busy_count: 0, job } });
+    });
+    await page.goto(url + "?unified=1"); await open(page);
+    await page.getByRole("button", { name: /仅更新服务器和网页/ }).click();
+    await page.getByRole("button", { name: "更新服务器至 v5.3.15", exact: true }).click();
+    await expect(page.getByRole("heading", { name: phase === "unknown" ? "更新结果待确认" : "下载更新包", exact: true })).toBeVisible();
+    online = true;
+    await page.reload(); await open(page);
+    await page.getByRole("button", { name: /查看服务器更新进度/ }).click();
+    const action = phase === "unknown" ? "reconcile" : "cancel";
+    await page.getByRole("button", { name: phase === "unknown" ? "重新核对并恢复" : "取消更新", exact: true }).click();
+    await expect.poll(() => commands.length).toBe(2);
+    expect(commands[1]).toEqual({ op: action, job_id: commands[0].job_id });
+  });
+}
+
+test("active device and server updates can both be inspected", async ({ page }) => {
+  await page.route("**/api/updates/*", route => route.fulfill({ json: { ...base, online: true,
+    job: { id: "a".repeat(32), version: base.latest.version, previous: base.current, phase: "downloading" },
+  } }));
+  await page.route("**/api/server-updates", route => route.fulfill({ json: { ...base, busy_count: 0,
+    job: { id: "b".repeat(32), version: base.latest.version, previous: base.current, phase: "unknown" },
+  } }));
+  await page.goto(url + "?unified=1"); await open(page);
+  await expect(page.getByRole("heading", { name: "下载更新包", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /查看服务器更新进度/ }).click();
+  await expect(page.getByRole("heading", { name: "更新结果待确认", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "返回 device-a 更新", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "下载更新包", exact: true })).toBeVisible();
+});
+
+test("pending server receipt remains accessible after the device reconnects", async ({ page }) => {
+  let online = false;
+  let job: Record<string, string> | null = null;
+  const starts: Record<string, string>[] = [];
+  await page.route("**/api/updates/*", route => route.fulfill({ json: { ...base, online } }));
+  await page.route("**/api/server-updates", async route => {
+    const body = route.request().postDataJSON();
+    if (body?.op === "start") {
+      starts.push(body);
+      if (starts.length === 1) { await route.abort("failed"); return; }
+      job = { id: body.job_id, version: body.version, previous: base.current, phase: "downloading" };
+      await route.fulfill({ json: { ok: true, job } });
+    } else if (body?.op === "lookup") {
+      await route.fulfill({ json: { ok: true, receipt: "missing", job_id: body.job_id, job: null } });
+    } else await route.fulfill({ json: { ...base, busy_count: 0, job } });
+  });
+  await page.goto(url + "?unified=1"); await open(page);
+  await page.getByRole("button", { name: /仅更新服务器和网页/ }).click();
+  await page.getByRole("button", { name: "更新服务器至 v5.3.15", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "更新尚未启动", exact: true })).toBeVisible();
+  online = true;
+  await page.reload(); await open(page);
+  await page.getByRole("button", { name: /查看服务器更新进度/ }).click();
+  await page.getByRole("button", { name: "重试更新", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "下载更新包", exact: true })).toBeVisible();
+  expect(starts).toHaveLength(2);
+  expect(starts[1]).toEqual(starts[0]);
+});
+
 test("online source-installed device keeps the managed server update accessible", async ({ page }) => {
   const commands: { target: string; op: string }[] = [];
   let job: Record<string, unknown> | null = null;
