@@ -8,6 +8,7 @@ import { Icon } from "../icons";
 import { ChoicePicker } from "./ChoicePicker";
 import { CenteredSheet } from "./CenteredSheet";
 import { attachTerminalTouchScroll, attachTerminalWheelScroll } from "../dsh-terminal-touch";
+import { observeTerminalPrompt } from "../dsh-terminal-prompt";
 import "@xterm/xterm/css/xterm.css";
 
 export default function DshTerminal({ sid, api }: { sid: string; api: DshApiClient }) {
@@ -67,7 +68,14 @@ export default function DshTerminal({ sid, api }: { sid: string; api: DshApiClie
     const terminal = new Terminal({ cursorBlink: true, fontSize: 13, scrollback: 1000,
       theme: { background: "#10151e", foreground: "#e5eaf3", cursor: "#88afff", selectionBackground: "#496ba86b" } });
     const fit = new FitAddon(); terminal.loadAddon(fit); terminal.open(host.current);
-    const detachTouchScroll = attachTerminalTouchScroll(host.current, terminal);
+    const prompt = observeTerminalPrompt(terminal);
+    const detachTouchScroll = attachTerminalTouchScroll(host.current, terminal, {
+      ready: () => !gone && writable && !rendering && prompt.ready(),
+      send: action => {
+        const prefix = terminal.modes.applicationCursorKeysMode ? "\u001bO" : "\u001b[";
+        terminal.input(prefix + (action === "history" ? "A" : "C"), true);
+      },
+    });
     const detachWheelScroll = attachTerminalWheelScroll(host.current, terminal);
     setConnected(false); setExited(false); setError(""); setStop("");
     const freeze = () => { gone = true; writable = false; queue.length = 0; output.length = 0; setConnected(false); };
@@ -109,6 +117,7 @@ export default function DshTerminal({ sid, api }: { sid: string; api: DshApiClie
       pendingBytes += bytes; queue.push({ value, bytes }); flush();
     };
     const onData = terminal.onData(data => {
+      prompt.input(data);
       let part = "", size = 0;
       for (const char of data) {
         const n = encoder.encode(char).length;
@@ -149,6 +158,7 @@ export default function DshTerminal({ sid, api }: { sid: string; api: DshApiClie
               if (frame.type === "snapshot") {
                 if (text) { await write(text); text = ""; }
                 if (gone) return;
+                prompt.reset(frame.info);
                 terminal.reset(); text = String(frame.screen ?? "");
               } else if (frame.type === "output") text += String(frame.data ?? "");
               if ("writable" in frame) {
@@ -190,7 +200,7 @@ export default function DshTerminal({ sid, api }: { sid: string; api: DshApiClie
     return () => {
       freeze(); unwatch(); clearInterval(heartbeat);
       if (suspend.current === freeze) { suspend.current = null; interrupt.current = null; }
-      observer.disconnect(); cancelAnimationFrame(resizeFrame); detachTouchScroll(); detachWheelScroll(); onData.dispose(); terminal.dispose();
+      observer.disconnect(); cancelAnimationFrame(resizeFrame); detachTouchScroll(); detachWheelScroll(); prompt.dispose(); onData.dispose(); terminal.dispose();
       void controlInput({ action: "detach" }).catch(() => {});
     };
   }, [sid, api, target, revision, reload]);

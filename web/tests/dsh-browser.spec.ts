@@ -1446,6 +1446,125 @@ test("DSH terminal scrollback supports wheel and touch without sending shell inp
     .some(c => c.action === "input" && c.value.type === "write")).toBe(false);
 });
 
+test("DSH terminal prompt gestures recall history and accept completion once", async ({ page }) => {
+  const relay = await openDsh(page, { features: true, commandSuccess: true });
+  await openDshTools(page); await selectDshTool(page, "终端");
+  const panel = page.getByLabel("DSH 会话工具", { exact: true });
+  await panel.getByRole("button", { name: "选择终端", exact: true }).click();
+  await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
+  await expect(panel.locator(".dsh-terminal-status").getByText("已连接", { exact: true })).toBeVisible();
+  const commands = () => relay.commands.filter(command => command.kind === "terminal")
+    .map(command => JSON.parse(String(command.value)));
+  const attach = commands().find(command => command.action === "attach");
+  const writes = () => commands().filter(command => command.action === "input" && command.value.type === "write");
+  let sequence = 1;
+  const output = (data: string, snapshot = false) => {
+    const next = ++sequence;
+    relay.emit({ type: "dsh_read_result", sid, request_id: attach.lease,
+      kind: "terminal_output", next_seq: next, items: [{ id: String(next), title: "output",
+        data: snapshot ? { type: "snapshot", screen: data, writable: true,
+          info: { shell: { name: "zsh", path: "/bin/zsh" } } } : { type: "output", data } }] });
+    return expect.poll(() => commands().some(command => command.action === "ack" && command.cursor === next)).toBe(true);
+  };
+  const gesture = async (dx: number, dy: number, hold = 0, finish = "touchend") => {
+    await panel.locator(".xterm-screen").evaluate(async (element, { dx, dy, hold, finish }) => {
+      const rect = element.getBoundingClientRect();
+      const x = rect.left + rect.width * .4, y = rect.top + rect.height * .6;
+      const send = (type: string, scale: number) => {
+        const event = new Event(type, { bubbles: true, cancelable: true });
+        Object.defineProperty(event, "touches", { value: type === "touchend" || type === "touchcancel"
+          ? [] : [{ identifier: 42, clientX: x + dx * scale, clientY: y + dy * scale }] });
+        element.dispatchEvent(event);
+      };
+      send("touchstart", 0);
+      if (hold) await new Promise(resolve => setTimeout(resolve, hold));
+      for (let step = 1; step <= 8; step++) send("touchmove", step / 8);
+      send(finish, 1);
+    }, { dx, dy, hold, finish });
+  };
+
+  const history = Array.from({ length: 100 }, (_, index) => `output-${index}\r\n`).join("");
+  await output(`${history}~/repo % \x1b[?2004h`, true);
+  await gesture(0, -100);
+  await expect.poll(() => writes().length).toBe(1);
+  expect(writes()[0].value.data).toBe("\x1b[A");
+  await output("\r\x1b[2K~/repo % git log --oneline -5");
+  await expect(panel.locator(".xterm-rows")).toContainText("git log --oneline -5");
+
+  // Normal right-swipes remain available to the browser. A deliberate hold
+  // maps one right arrow through zsh's configured autosuggestion widget.
+  await gesture(100, 0);
+  expect(writes()).toHaveLength(1);
+  await gesture(100, 0, 300);
+  await expect.poll(() => writes().length).toBe(2);
+  expect(writes()[1].value.data).toBe("\x1b[C");
+  await gesture(100, 0, 300, "touchcancel");
+  await gesture(0, -20);
+  expect(writes()).toHaveLength(2);
+
+  // Reading output and scrolling back down in one gesture never sends a key.
+  await gesture(0, 100);
+  await expect(panel.locator(".xterm-rows")).not.toContainText("git log --oneline -5");
+  await gesture(0, -1000);
+  await expect(panel.locator(".xterm-rows")).toContainText("git log --oneline -5");
+  expect(writes()).toHaveLength(2);
+
+  await output("\x1b[?2004l\r\ncommand still running\r\n");
+  await gesture(0, -100);
+  await gesture(100, 0, 300);
+  expect(writes()).toHaveLength(2);
+  await output("\r\n~/repo % \x1b[?2004h\x1b[?1h");
+  await gesture(0, -100);
+  await expect.poll(() => writes().length).toBe(3);
+  expect(writes()[2].value.data).toBe("\x1bOA");
+
+  // A submitted command is fenced immediately, before its delayed output.
+  await panel.locator(".xterm-helper-textarea").press("Enter");
+  await expect.poll(() => writes().length).toBe(4);
+  await gesture(0, -100);
+  expect(writes()).toHaveLength(4);
+
+  // Full-screen programs and native text-selection gestures retain control.
+  await output("\x1b[?1049h\x1b[?2004h\x1b[H~/repo % full-screen");
+  await gesture(0, -100);
+  await gesture(100, 0, 300);
+  expect(writes()).toHaveLength(4);
+  await output("\x1b[?1049l\x1b[?1000h");
+  await gesture(0, -100);
+  expect(writes()).toHaveLength(4);
+  await output("\x1b[?1000l\r\n~/repo % \x1b[?2004h");
+  await panel.locator(".xterm-screen").evaluate(element => {
+    const send = (type: string, x: number) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "touches", { value: type === "touchend" ? []
+        : [{ identifier: 1, clientX: x, clientY: 150 }] });
+      element.dispatchEvent(event);
+    };
+    send("touchstart", 100);
+    element.dispatchEvent(new Event("contextmenu", { bubbles: true }));
+    send("touchmove", 220);
+    send("touchend", 220);
+  });
+  expect(writes()).toHaveLength(4);
+
+  // Reconnect recreates its prompt observer and callbacks once.
+  await panel.getByRole("button", { name: "重新连接", exact: true }).click();
+  await expect.poll(() => commands().filter(command => command.action === "attach").length).toBe(2);
+  const currentAttach = commands().filter(command => command.action === "attach").at(-1);
+  relay.emit({ type: "dsh_read_result", sid, request_id: currentAttach.lease,
+    kind: "terminal_output", next_seq: 2, items: [{ id: "2", title: "snapshot",
+      data: { type: "snapshot", screen: "~/repo % \x1b[?2004h", writable: true,
+        info: { shell: { name: "zsh" } } } }] });
+  await expect.poll(() => commands().some(command => command.action === "ack"
+    && command.lease === currentAttach.lease && command.cursor === 2)).toBe(true);
+  await gesture(100, 0, 300);
+  await expect.poll(() => writes().length).toBe(5);
+  expect(writes().at(-1).lease).toBe(currentAttach.lease);
+  expect(writes().at(-1).value.data).toBe("\x1b[C");
+  expect(writes().slice(0, 3).every(command => !/[\r\n]/u.test(command.value.data))).toBe(true);
+  await page.screenshot({ path: test.info().outputPath("terminal-gestures.png") });
+});
+
 test("DSH schedule form creates directly in the selected session", async ({ page }, info) => {
   await page.emulateMedia({ colorScheme: "dark" });
   const relay = await openDsh(page, { features: true, commandSuccess: true });

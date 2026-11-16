@@ -35,33 +35,60 @@ export function attachTerminalWheelScroll(host: HTMLElement, terminal: Terminal)
   return () => host.removeEventListener("wheel", wheel, { capture: true });
 }
 
-// xterm 6's virtual viewport does not implement touch scrolling.
-// Move its buffer through the public API; a swipe must never become
-// arrow keys or other PTY input, including in full-screen terminal programs.
-export function attachTerminalTouchScroll(host: HTMLElement, terminal: Terminal): () => void {
-  let gesture: { id: number; x: number; y: number; lastY: number; remainder: number; claimed: boolean } | undefined;
+interface TerminalGestureInput {
+  ready(): boolean;
+  send(action: "history" | "complete"): void;
+}
+
+// Ordinary drags browse scrollback. At an editable prompt already at the
+// bottom, an upward swipe recalls history and hold-right accepts a suggestion.
+export function attachTerminalTouchScroll(
+  host: HTMLElement, terminal: Terminal, input?: TerminalGestureInput,
+): () => void {
+  let gesture: {
+    id: number; x: number; y: number; lastY: number; remainder: number;
+    startedAt: number; atPrompt: boolean; action?: "scroll" | "history" | "complete";
+    distance: number;
+  } | undefined;
   const clear = () => { gesture = undefined; };
+  const ready = () => terminal.buffer.active.type === "normal"
+    && terminal.buffer.active.viewportY === terminal.buffer.active.baseY
+    && terminal.modes.mouseTrackingMode === "none"
+    && !terminal.hasSelection() && input?.ready() === true;
   const start = (event: TouchEvent) => {
     clear();
     if (event.touches.length !== 1 || terminal.buffer.active.type !== "normal"
-      || !terminal.buffer.active.baseY || terminal.hasSelection()
+      || terminal.hasSelection()
       || (event.target instanceof Element && event.target.closest(".scrollbar"))) return;
     const touch = event.touches[0];
     gesture = { id: touch.identifier, x: touch.clientX, y: touch.clientY,
-      lastY: touch.clientY, remainder: 0, claimed: false };
+      lastY: touch.clientY, remainder: 0, startedAt: performance.now(),
+      atPrompt: ready(), distance: 0 };
   };
   const move = (event: TouchEvent) => {
     if (!gesture) return;
-    if (event.touches.length !== 1 || terminal.buffer.active.type !== "normal") { clear(); return; }
+    if (event.touches.length !== 1 || terminal.buffer.active.type !== "normal"
+      || terminal.hasSelection()) { clear(); return; }
     const touch = event.touches[0];
     if (touch.identifier !== gesture.id) { clear(); return; }
-    if (!gesture.claimed) {
-      const dx = Math.abs(touch.clientX - gesture.x), dy = Math.abs(touch.clientY - gesture.y);
-      if (Math.max(dx, dy) < 6) return;
-      if (dx > dy) { clear(); return; }
-      gesture.claimed = true;
+    const dx = touch.clientX - gesture.x, dy = touch.clientY - gesture.y;
+    if (!gesture.action) {
+      if (Math.max(Math.abs(dx), Math.abs(dy)) < 8) return;
+      if (gesture.atPrompt && ready() && dy < 0 && -dy > Math.abs(dx) * 1.5) {
+        gesture.action = "history";
+      } else if (gesture.atPrompt && ready() && dx > Math.abs(dy) * 1.5
+        && performance.now() - gesture.startedAt >= 250) {
+        gesture.action = "complete";
+      } else if (Math.abs(dy) > Math.abs(dx) && terminal.buffer.active.baseY) {
+        gesture.action = "scroll";
+      } else { clear(); return; }
     }
     if (event.cancelable) event.preventDefault();
+    if (gesture.action !== "scroll") {
+      gesture.distance = gesture.action === "history"
+        ? -dy - Math.abs(dx) : dx - Math.abs(dy);
+      return;
+    }
     const height = host.querySelector(".xterm-screen")?.getBoundingClientRect().height ?? 0;
     if (!height || !terminal.rows) { clear(); return; }
     gesture.remainder += (gesture.lastY - touch.clientY) / (height / terminal.rows);
@@ -69,15 +96,25 @@ export function attachTerminalTouchScroll(host: HTMLElement, terminal: Terminal)
     const lines = Math.trunc(gesture.remainder);
     if (lines) { terminal.scrollLines(lines); gesture.remainder -= lines; }
   };
+  const end = (event: TouchEvent) => {
+    const finished = gesture;
+    clear();
+    if (event.touches.length || !finished || finished.distance < 40 || !ready()
+      || finished.action !== "history" && finished.action !== "complete") return;
+    if (event.cancelable) event.preventDefault();
+    input?.send(finished.action);
+  };
   host.addEventListener("touchstart", start, { passive: true });
   host.addEventListener("touchmove", move, { passive: false });
-  host.addEventListener("touchend", clear);
+  host.addEventListener("touchend", end, { passive: false });
   host.addEventListener("touchcancel", clear);
+  host.addEventListener("contextmenu", clear);
   return () => {
     clear();
     host.removeEventListener("touchstart", start);
     host.removeEventListener("touchmove", move);
-    host.removeEventListener("touchend", clear);
+    host.removeEventListener("touchend", end);
     host.removeEventListener("touchcancel", clear);
+    host.removeEventListener("contextmenu", clear);
   };
 }
