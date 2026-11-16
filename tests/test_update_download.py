@@ -93,7 +93,9 @@ def source(tmp_path, monkeypatch):
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert, private)
     server.socket = context.wrap_socket(server.socket, server_side=True)
-    worker = Thread(target=server.serve_forever, daemon=True)
+    worker = Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True,
+    )
     worker.start()
     monkeypatch.setenv("CURL_CA_BUNDLE", str(cert))
     monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")

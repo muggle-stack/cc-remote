@@ -1,4 +1,5 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { PanelVisible } from "../right-panel-presentation";
 
 import {
   acceptAgentDetail,
@@ -28,10 +29,11 @@ export function AgentDetailController({ selection, ws, onListen, onClose,
   dshApi?: DshApiClient;
   selection: AgentDetailSelection;
   ws: RelayWs | null;
-  onListen: (listener: ((message: AgentDetail) => void) | null) => void;
+  onListen: (listener: (message: AgentDetail) => void) => () => void;
   onClose: () => void;
   onOpenFile?: (path: string, line?: number) => void;
 }) {
+  const visible = useContext(PanelVisible);
   const [panel, setPanel] = useState<AgentDetailPanelState>(() => ({
     sid: selection.sid,
     revision: selection.revision,
@@ -117,10 +119,7 @@ export function AgentDetailController({ selection, ws, onListen, onClose,
     });
   }, [clearDeadline]);
 
-  useEffect(() => {
-    onListen(receive);
-    return () => onListen(null);
-  }, [onListen, receive]);
+  useEffect(() => onListen(receive), [onListen, receive]);
   useEffect(() => {
     const current = panelRef.current;
     const id = current.stack.at(-1) ?? selection.runId;
@@ -138,12 +137,12 @@ export function AgentDetailController({ selection, ws, onListen, onClose,
   useEffect(() => {
     // Cold/native CLI agents have no resident SDK subscription. Refresh only
     // that visible active source; resident agents already push their updates.
-    if (!run || run.loading || run.error || run.viewingOlder || !run.detailRevision
+    if (!visible || !run || run.loading || run.error || run.viewingOlder || !run.detailRevision
         || run.detailRevision.startsWith("live-")
         || !["running", "pending"].includes(run.status)) return;
     const timer = setTimeout(() => request(run.runId, run.title), 3000);
     return () => clearTimeout(timer);
-  }, [request, run]);
+  }, [request, run, visible]);
   if (!run) return null;
   return <AgentDetailPanel run={run} engine={selection.engine} canGoBack={panel.stack.length > 1}
     onBack={() => setPanel((value) => ({

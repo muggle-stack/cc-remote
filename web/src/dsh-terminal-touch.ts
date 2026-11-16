@@ -1,7 +1,42 @@
 import type { Terminal } from "@xterm/xterm";
 
-// xterm 6's virtual viewport handles wheel events, but does not implement touch
-// scrolling. Move its buffer through the public API; a swipe must never become
+// Accumulate trackpad pixels before moving whole rows. xterm's viewport rounds
+// each tiny wheel event back to the same row, losing slow two-finger gestures.
+export function attachTerminalWheelScroll(host: HTMLElement, terminal: Terminal): () => void {
+  let remainder = 0;
+  const wheel = (event: WheelEvent) => {
+    const buffer = terminal.buffer.active;
+    if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.shiftKey
+      || buffer.type !== "normal" || !buffer.baseY
+      || terminal.modes.mouseTrackingMode !== "none"
+      || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) {
+      remainder = 0;
+      return;
+    }
+    const height = host.querySelector(".xterm-screen")?.getBoundingClientRect().height ?? 0;
+    if (!height || !terminal.rows) return;
+    const rowHeight = height / terminal.rows;
+    let delta = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? event.deltaY
+      : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? event.deltaY * terminal.rows
+        : event.deltaY / rowHeight;
+    delta *= terminal.options.scrollSensitivity ?? 1;
+    if (event.altKey) delta *= terminal.options.fastScrollSensitivity ?? 5;
+    if (remainder * delta < 0) remainder = 0;
+    remainder += delta;
+    const lines = Math.trunc(remainder);
+    if (lines) {
+      terminal.scrollLines(lines);
+      remainder -= lines;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  host.addEventListener("wheel", wheel, { passive: false, capture: true });
+  return () => host.removeEventListener("wheel", wheel, { capture: true });
+}
+
+// xterm 6's virtual viewport does not implement touch scrolling.
+// Move its buffer through the public API; a swipe must never become
 // arrow keys or other PTY input, including in full-screen terminal programs.
 export function attachTerminalTouchScroll(host: HTMLElement, terminal: Terminal): () => void {
   let gesture: { id: number; x: number; y: number; lastY: number; remainder: number; claimed: boolean } | undefined;

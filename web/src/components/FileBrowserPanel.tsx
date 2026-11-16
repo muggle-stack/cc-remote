@@ -1,5 +1,6 @@
 import { PanelExpandButton } from "./RightPanelPresentation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
+import { PanelVisible } from "../right-panel-presentation";
 import type { FilesListed } from "../protocol";
 import type { RelayWs } from "../ws";
 import { Icon } from "../icons";
@@ -10,9 +11,13 @@ import "./FileBrowserPanel.css";
 export function FileBrowserPanel({ sid, initialPath, ws, hidden, onListen,
   onOpenFile, onClose }: {
   sid: string; initialPath: string; ws: RelayWs | null; hidden: boolean;
-  onListen: (listener: ((message: FilesListed) => void) | null) => void;
+  onListen: (listener: (message: FilesListed) => void) => () => void;
   onOpenFile: (path: string) => void; onClose: () => void;
 }) {
+  const visible = useContext(PanelVisible);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  const deferredFile = useRef<string | null>(null);
   const [listing, setListing] = useState<FilesListed | null>(null);
   const [path, setPath] = useState(initialPath);
   const [showHidden, setShowHidden] = useState(false);
@@ -22,6 +27,12 @@ export function FileBrowserPanel({ sid, initialPath, ws, hidden, onListen,
   const timeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const openFile = useRef(onOpenFile);
   useEffect(() => { openFile.current = onOpenFile; }, [onOpenFile]);
+  useEffect(() => {
+    if (!visible || !deferredFile.current) return;
+    const path = deferredFile.current;
+    deferredFile.current = null;
+    openFile.current(path);
+  }, [visible]);
   const browse = useCallback((target: string, includeHidden: boolean,
     offset = 0, revision?: string | null) => {
     if (timeout.current) clearTimeout(timeout.current);
@@ -42,7 +53,7 @@ export function FileBrowserPanel({ sid, initialPath, ws, hidden, onListen,
     timeout.current = setTimeout(() => fail("读取目录超时，请重试"), 15000);
   }, [ws, sid]);
   useEffect(() => {
-    onListen((message) => {
+    const unsubscribe = onListen((message) => {
       if (message.sid !== sid || message.request_id !== pending.current?.id) return;
       const { append, target } = pending.current;
       pending.current = null;
@@ -53,7 +64,11 @@ export function FileBrowserPanel({ sid, initialPath, ws, hidden, onListen,
         if (!append) { setListing(null); setPath(target); }
         return;
       }
-      if (message.kind === "file") { openFile.current(message.path); return; }
+      if (message.kind === "file") {
+        if (visibleRef.current) openFile.current(message.path);
+        else deferredFile.current = message.path;
+        return;
+      }
       setPath(message.path);
       setListing((previous) => ({ ...message,
         entries: append && previous?.path === message.path
@@ -61,7 +76,7 @@ export function FileBrowserPanel({ sid, initialPath, ws, hidden, onListen,
     });
     browse(initialPath, false);
     return () => {
-      onListen(null);
+      unsubscribe();
       if (timeout.current) clearTimeout(timeout.current);
     };
   }, [sid, onListen, browse, initialPath]);

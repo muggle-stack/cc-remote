@@ -13,6 +13,7 @@ import {
   type Ref,
   type SetStateAction,
 } from "react";
+import { PanelVisible, RetainedPanelData } from "../right-panel-presentation";
 import { ChatView, type ChatViewHandle } from "./ChatView";
 import type { QueryAcceptanceResult } from "../outbox";
 import { CommandSheet } from "./CommandSheet";
@@ -142,7 +143,10 @@ interface Props {
  * fork sid supplied by App. Nothing here is allowed to follow the main
  * session's current focus.
  */
-export function BtwPanel(p: Props) {
+export function BtwPanel(props: Props) {
+  const visible = useContext(PanelVisible);
+  const live = useContext(RetainedPanelData);
+  const p = live && props.sid ? { ...props, rt: live.runtimes[props.sid] } : props;
   const [questionStore] = useState(() => p.asyncQuestions ?? new AsyncQuestionStore());
   const { expanded } = useContext(RightPanelPresentation);
   const draftKeyRef = useRef(p.draftKey);
@@ -201,7 +205,7 @@ export function BtwPanel(p: Props) {
 
   const { focusRequested, onFocusConsumed, opening, sid } = p;
   useEffect(() => {
-    if (!focusRequested) return;
+    if (!visible || !focusRequested) return;
     // The first fork (or a new sibling) may arrive after the panel is visible.
     // If the user starts doing something else in that gap, discard the intent.
     if (opening) {
@@ -225,7 +229,7 @@ export function BtwPanel(p: Props) {
       textarea.focus({ preventScroll: true });
     }
     onFocusConsumed?.();
-  }, [focusRequested, onFocusConsumed, opening, sid, inputLocked]);
+  }, [visible, focusRequested, onFocusConsumed, opening, sid, inputLocked]);
 
   const updateDraft = useCallback((
     update: (current: ComposerDraft) => ComposerDraft,
@@ -261,15 +265,15 @@ export function BtwPanel(p: Props) {
   }, [p.draftKey, p.draftStore]);
 
   useEffect(() => {
-    if (busy || inputLocked) setSheetKind(null);
-    if (inputLocked) {
+    if (busy || inputLocked || !visible) setSheetKind(null);
+    if (inputLocked || !visible) {
       setAutoCompactOpen(false);
       if (buttonSendTimerRef.current !== null) {
         window.clearTimeout(buttonSendTimerRef.current);
         buttonSendTimerRef.current = null;
       }
     }
-  }, [busy, inputLocked]);
+  }, [busy, inputLocked, visible]);
 
   useEffect(() => () => {
     if (buttonSendTimerRef.current !== null) {
@@ -355,8 +359,8 @@ export function BtwPanel(p: Props) {
     element.style.height = Math.min(element.scrollHeight, 120) + "px";
   };
   useLayoutEffect(() => {
-    if (taRef.current) grow(taRef.current);
-  }, [input, p.draftKey, lockReason, expanded]);
+    if (visible && taRef.current) grow(taRef.current);
+  }, [input, p.draftKey, lockReason, expanded, visible]);
 
   const submit = (value = taRef.current?.value ?? input, mode: SendMode = "steer") => {
     if (awaitingFirstChat || !p.sid || inputLockedRef.current) return;
@@ -577,13 +581,13 @@ export function BtwPanel(p: Props) {
                 onEdit={() => {}} onGetDiff={() => {}}
                 onOpenFile={p.onOpenFile}
                 imageAssets={p.imageAssets}
-                onLoadImage={p.onLoadImage}
+                onLoadImage={visible ? p.onLoadImage : undefined}
                 onAuthorizeImage={p.onAuthorizeImage}
                 pendingReplyId={p.rt?.acceptancePending}
                 ambiguousActiveTurnIds={activeTurnCandidates.length > 1
                   ? activeTurnCandidates : []} />}
       </div>
-      {!inputLocked && p.rt?.pendingQuestion && (
+      {visible && !inputLocked && p.rt?.pendingQuestion && (
         <QuestionSheet
           key={JSON.stringify([p.draftKey, p.rt.pendingQuestion.ask_id])}
           draft={p.questionDrafts && p.sid ? {
@@ -618,7 +622,7 @@ export function BtwPanel(p: Props) {
       {p.engine === "codex" && p.sid && <AsyncQuestionHost key={p.draftKey}
         scope={p.draftKey} store={questionStore} turns={turns}
         pendingReplyId={p.rt?.acceptancePending}
-        enabled={!p.rt?.loading && !p.rt?.pendingQuestion && !awaitingFirstChat}
+        enabled={visible && !p.rt?.loading && !p.rt?.pendingQuestion && !awaitingFirstChat}
         onReply={acceptancePending
           || (p.rt?.control ? sessionControlLocksInput(p.rt.control) : p.rt?.external)
           || (runtimeState !== "idle" && runtimeState !== "running")

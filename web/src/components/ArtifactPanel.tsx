@@ -1,6 +1,6 @@
 import { PanelFrame, PanelExpandButton } from "./RightPanelPresentation";
 import { lazy, Suspense, isValidElement, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState,
-  type ComponentPropsWithoutRef, type KeyboardEvent as ReactKeyboardEvent,
+  type ComponentProps, type ComponentPropsWithoutRef, type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import type {
@@ -35,6 +35,7 @@ import { AudioArtifactPreview } from "./AudioArtifactPreview";
 import { ZoomableImage } from "./ZoomableImage";
 import { ArtifactHeader } from "./ArtifactHeader";
 import ArtifactDownload from "./ArtifactDownload";
+import { PanelVisible, RetainedPanelData } from "../right-panel-presentation";
 import { previewImageDimension, rehypePreviewHtml } from "../markdown-preview-html";
 
 const EMPTY_GIT_DIFF_SECTIONS: GitDiffSection[] = [];
@@ -325,7 +326,16 @@ function PreviewImage({ markdownPath, src, alt, title, width, height, asset, req
   return <span className="preview-image-loading"><span className="thinking"><span/><span/><span/></span> {alt || "正在加载图片"}</span>;
 }
 
-export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
+export function ArtifactPanel(props: ComponentProps<typeof ArtifactContent>) {
+  const live = useContext(RetainedPanelData);
+  const artifact = live && props.artifact.sid
+    ? [live.artifact, ...Object.values(live.retainedArtifacts ?? {})].find(value =>
+      value != null && value.sid === props.artifact.sid && value.requestId === props.artifact.requestId)
+    : props.artifact;
+  return artifact ? <ArtifactContent {...props} artifact={artifact} /> : null;
+}
+
+function ArtifactContent({ artifact, active, hasBtw, onTab, onClose,
   onRefresh, onOpenFile, onLoadPreviewAsset, onAuthorizePreview,
   onSaveMarkdown, onDirtyChange, theme, displayName, machineId, onBack, backLabel }: {
   machineId?: string | null;
@@ -350,6 +360,7 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
   theme?: HtmlPreviewTheme;
 }) {
   const editorRef = useRef<HTMLTextAreaElement>(null);
+  const visible = useContext(PanelVisible);
   const bodyRef = useRef<HTMLDivElement>(null);
   const readingMemory = useContext(ArtifactReadingMemory);
   const artifactKey = `${artifact.sid || ""}:${artifact.file}:${artifact.requestId || ""}`;
@@ -447,26 +458,28 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
   }, [artifact.content, artifact.saveStatus, artifactKey]);
 
   useEffect(() => {
+    if (!visible) return;
     onDirtyChange?.(dirty);
     return () => onDirtyChange?.(false);
-  }, [dirty, onDirtyChange]);
+  }, [dirty, onDirtyChange, visible]);
 
   useEffect(() => {
-    if (!dirty) return;
+    if (!dirty || !visible) return;
     const warn = (event: BeforeUnloadEvent) => {
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [dirty]);
+  }, [dirty, visible]);
 
   useEffect(() => {
     if (artifact.kind !== "md" || mode !== "source" || loading) return;
+    if (!visible) { restoringSource.current = true; return; }
     if (restoringSource.current) { restoringSource.current = false; return; }
     const frame = window.requestAnimationFrame(() => editorRef.current?.focus());
     return () => window.cancelAnimationFrame(frame);
-  }, [artifact.kind, loading, mode]);
+  }, [artifact.kind, loading, mode, visible]);
 
   const canSave = artifact.kind === "md" && !loading && !artifact.error
     && artifact.writable !== false
@@ -510,7 +523,7 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
 
   const sendNextAsset = useCallback(() => {
     const current = requestedAssets.current;
-    if (current.key !== artifactKey || current.active
+    if (!visible || current.key !== artifactKey || current.active
         || !artifact.requestId || !onLoadPreviewAsset) return;
     while (current.queued.length) {
       const path = current.queued.shift()!;
@@ -520,7 +533,7 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
       }
       current.paths.delete(path);
     }
-  }, [artifact.requestId, artifactKey, onLoadPreviewAsset]);
+  }, [artifact.requestId, artifactKey, onLoadPreviewAsset, visible]);
 
   useEffect(() => {
     const current = requestedAssets.current;
@@ -630,6 +643,7 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
         reloadDisabled={loading || artifact.saving} convertedFrom={artifact.convertedFrom}
         tabs={tabs} modes={modes} actions={actions} />}
       <div ref={bodyRef} onScrollCapture={event => {
+        if (!visible) return;
         const target = event.target;
         if (!(target instanceof HTMLElement)) return;
         if (target === bodyRef.current) rememberArtifactReading(readingMemory, artifactKey,

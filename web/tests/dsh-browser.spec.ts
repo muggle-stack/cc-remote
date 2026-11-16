@@ -1613,3 +1613,86 @@ test("DSH product plugin detail market and recommendation use native controls", 
   await expect.poll(() => relay.commands.filter(c => c.kind === "manage").map(c => JSON.parse(String(c.value))).some(c => c.action === "recommendation" && c.verb === "dismiss")).toBe(true);
   expect(relay.commands.some(c => c.type === "query" || c.type === "new_session")).toBe(false);
 });
+
+test("DSH terminal renders complete output bursts and acknowledges parsed output", async ({ page }) => {
+  const relay = await openDsh(page, { features: true, commandSuccess: true });
+  await openDshTools(page);
+  await selectDshTool(page, "终端");
+  const panel = page.getByLabel("DSH 会话工具", { exact: true });
+  await panel.getByRole("button", { name: "选择终端", exact: true }).click();
+  await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
+  await expect(panel.locator(".dsh-terminal-status").getByText("已连接", { exact: true })).toBeVisible();
+  const commands = () => relay.commands.filter(command => command.kind === "terminal")
+    .map(command => JSON.parse(String(command.value)));
+  const attach = commands().find(command => command.action === "attach");
+  const start = performance.now();
+  for (let sequence = 2; sequence <= 201; sequence++) {
+    relay.emit({ type: "dsh_read_result", sid, request_id: attach.lease, kind: "terminal_output", next_seq: sequence,
+      items: [{ id: String(sequence), title: "output", data: { type: "output", data: `burst-${sequence}\r\n` } }] });
+  }
+  await expect(panel.locator(".xterm-rows")).toContainText("burst-201");
+  await expect.poll(() => commands().some(command => command.action === "ack" && command.cursor === 201)).toBe(true);
+  console.log(JSON.stringify({ terminalBurstMs: Math.round(performance.now() - start) }));
+});
+
+test("DSH terminal preserves fine trackpad deltas and native full-screen mouse input", async ({ page }) => {
+  const relay = await openDsh(page, { features: true, commandSuccess: true });
+  await openDshTools(page);
+  await selectDshTool(page, "终端");
+  const panel = page.getByLabel("DSH 会话工具", { exact: true });
+  await panel.getByRole("button", { name: "选择终端", exact: true }).click();
+  await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
+  await expect(panel.locator(".dsh-terminal-status").getByText("已连接", { exact: true })).toBeVisible();
+  const commands = () => relay.commands.filter(command => command.kind === "terminal")
+    .map(command => JSON.parse(String(command.value)));
+  const attach = commands().find(command => command.action === "attach");
+  const output = (sequence: number, data: string) => relay.emit({ type: "dsh_read_result", sid,
+    request_id: attach.lease, kind: "terminal_output", next_seq: sequence,
+    items: [{ id: String(sequence), title: "output", data: { type: "output", data } }] });
+  output(2, Array.from({ length: 180 }, (_, index) => `history-${index}\r\n`).join(""));
+  const rows = panel.locator(".xterm-rows");
+  await expect(rows).toContainText("history-179");
+  const bottom = (await rows.textContent())!;
+  const wheel = async (selector: string, direction: number) => panel.locator(selector).evaluate((element, direction) => {
+    for (let index = 0; index < 80; index++) {
+      element.dispatchEvent(new WheelEvent("wheel", { deltaY: direction * 1.25, deltaX: 0.15,
+        deltaMode: 0, bubbles: true, cancelable: true }));
+    }
+  }, direction);
+  await wheel(".xterm-screen", -1);
+  await expect(rows).not.toHaveText(bottom);
+  const scrolled = (await rows.textContent())!;
+  output(3, "more-output-while-reading\r\n");
+  await expect.poll(() => commands().some(command => command.action === "ack" && command.cursor === 3)).toBe(true);
+  await expect(rows).toHaveText(scrolled);
+  await wheel(".xterm-viewport", 1);
+  await expect(rows).toContainText("more-output-while-reading");
+  expect(commands().some(command => command.action === "input" && command.value.type === "write")).toBe(false);
+
+  output(4, "\x1b[?1049h\x1b[Hfull-screen-app");
+  await expect(rows).toContainText("full-screen-app");
+  const screen = panel.locator(".xterm-screen");
+  await screen.dispatchEvent("wheel", { deltaY: 120, deltaMode: 0, bubbles: true, cancelable: true });
+  await expect.poll(() => commands().some(command => command.action === "input" && command.value.type === "write")).toBe(true);
+});
+
+test("DSH terminal batches unsent keystrokes behind delayed acknowledgements", async ({ page }) => {
+  const relay = await openDsh(page, { features: true, commandSuccess: true });
+  await openDshTools(page);
+  await selectDshTool(page, "终端");
+  const panel = page.getByLabel("DSH 会话工具", { exact: true });
+  await panel.getByRole("button", { name: "选择终端", exact: true }).click();
+  await page.getByRole("dialog", { name: "选择终端", exact: true }).getByRole("button", { name: /zsh/ }).click();
+  await expect(panel.locator(".dsh-terminal-status").getByText("已连接", { exact: true })).toBeVisible();
+  const text = "abcdefghijklmnopqrstuvwxyz0123456789";
+  const started = performance.now();
+  await panel.locator(".xterm-helper-textarea").pressSequentially(text);
+  const writes = () => relay.commands.filter(command => command.kind === "terminal")
+    .map(command => JSON.parse(String(command.value)))
+    .filter(command => command.action === "input" && command.value.type === "write");
+  await expect.poll(() => writes().map(command => command.value.data).join("")).toBe(text);
+  console.log(JSON.stringify({ terminalInputDrainMs: Math.round(performance.now() - started),
+    inputFrames: writes().length, characters: text.length }));
+  expect(writes().length).toBeLessThan(text.length);
+  expect(writes().every(command => new TextEncoder().encode(command.value.data).byteLength <= 2048)).toBe(true);
+});

@@ -13,7 +13,8 @@ import {
   harmonyPushSnapshot, subscribeHarmonyPush, hasHarmonyPush,
   requestHarmonyPermission, confirmHarmonyPermission,
 } from "./harmony-push";
-import { RightPanelPresentation, rekeyPanelScope } from "./right-panel-presentation";
+import { RightPanelPresentation, RetainedPanelData, rekeyPanelScope } from "./right-panel-presentation";
+import { RetainedPanel } from "./components/RetainedPanel";
 import { ArtifactReadingMemory, type ArtifactReadingState } from "./artifact-reading-state";
 import type { DshCommandInfo, FilePreview, DirectoryActionScope, ServerEvent } from "./protocol";
 const DirectoryActionSheet = lazy(() => import("./components/DirectoryActionSheet"));
@@ -409,7 +410,6 @@ export default function App() {
   // File panels share one slot; centered BTW is an independent overlay above it.
   const [expandedPanelScopes, setExpandedPanelScopes] = useState<string[]>([]);
   const [centeredBtwScopes, setCenteredBtwScopes] = useState<string[]>([]);
-  const btwChatViewRef = useRef<ChatViewHandle>(null);
   // A user action owns one focus request; restored panels and streaming updates
   // must not move the caret away from whatever the user is editing.
   const [btwFocusScope, setBtwFocusScope] = useState<string | null>(null);
@@ -432,11 +432,12 @@ export default function App() {
     fileBrowser: typeof fileBrowser;
     sessionArtifacts: typeof sessionArtifacts;
   }>());
-  const artifactsListenerRef = useRef<((message: SessionArtifacts | FilePreview) => boolean) | null>(null);
-  const listenArtifacts = useCallback((listener: ((message: SessionArtifacts | FilePreview) => boolean) | null) => {
-    artifactsListenerRef.current = listener;
+  const artifactsListenerRef = useRef(new Set<(message: SessionArtifacts | FilePreview) => boolean>());
+  const listenArtifacts = useCallback((listener: (message: SessionArtifacts | FilePreview) => boolean) => {
+    artifactsListenerRef.current.add(listener);
+    return () => { artifactsListenerRef.current.delete(listener); };
   }, []);
-  const filesListenerRef = useRef<((message: FilesListed) => void) | null>(null);
+  const filesListenerRef = useRef(new Set<(message: FilesListed) => void>());
   const [directoryScope, setDirectoryScope] = useState<(DirectoryActionScope & { machineId: string }) | null>(null);
   const [deleteSession, setDeleteSession] = useState<{
     id: string; title: string; cwd: string; scope: string; engine: Engine; space: Space;
@@ -445,16 +446,18 @@ export default function App() {
   const listenDirectory = useCallback((listener: ((message: ServerEvent) => boolean) | null) => {
     directoryListenerRef.current = listener;
   }, []);
-  const listenFiles = useCallback((listener: ((message: FilesListed) => void) | null) => {
-    filesListenerRef.current = listener;
+  const listenFiles = useCallback((listener: (message: FilesListed) => void) => {
+    filesListenerRef.current.add(listener);
+    return () => { filesListenerRef.current.delete(listener); };
   }, []);
   const [viewerSelections, setViewerSelections] = useState(() => readViewerSelections(sessionStorage));
   const [viewerUrl, setViewerUrl] = useState<{ key: string; href: string; openId: string } | null>(null);
   useEffect(() => writeViewerSelections(sessionStorage, viewerSelections), [viewerSelections]);
-  const agentDetailListenerRef = useRef<((message: AgentDetail) => void) | null>(null);
+  const agentDetailListenerRef = useRef(new Set<(message: AgentDetail) => void>());
   const setAgentDetailListener = useCallback(
-    (listener: ((message: AgentDetail) => void) | null) => {
-      agentDetailListenerRef.current = listener;
+    (listener: (message: AgentDetail) => void) => {
+      agentDetailListenerRef.current.add(listener);
+      return () => { agentDetailListenerRef.current.delete(listener); };
     }, []);
   // true from the moment /btw is clicked until the fork's btw_opened arrives — so
   // the panel appears instantly (spinner) instead of waiting ~1s for the fork.
@@ -811,6 +814,9 @@ export default function App() {
     if (!artifactDirtyRef.current) return true;
     if (!window.confirm("Markdown 有未保存的修改，确定放弃吗？")) return false;
     artifactDirtyRef.current = false;
+    dispatch({ type: "clear_artifact" });
+    setFileBrowser(current => current ? { ...current, preview: false } : current);
+    setSessionArtifacts(current => current ? { ...current, selected: null } : current);
     return true;
   }, []);
   const setBtwOpeningFor = useCallback((parentSid: string, opening: boolean) => {
@@ -1113,6 +1119,7 @@ export default function App() {
       : visibleRightPanel === "files" ? fileBrowser?.id
       : visibleRightPanel === "agent" ? agentPanel?.runId : undefined) : null;
   const btwScope = panelScope("btw");
+  const btwChatViewRef = useMemo(() => ({ scope: btwScope, current: null as ChatViewHandle | null }), [btwScope]);
   // Keep each surface's presentation when navigating away; only an explicit
   // open/close changes it. Returning must not request composer autofocus.
   const setCenteredBtw = (visible: boolean) => setCenteredBtwScopes(
@@ -3932,12 +3939,13 @@ export default function App() {
                 && msg.request_id === statusRuntimeBeforeEvent.statusRequestId)
             );
           if (msg.type === "session_artifacts") {
-            artifactsListenerRef.current?.(msg);
+            for (const listener of artifactsListenerRef.current) listener(msg);
             return;
           }
-          if (msg.type === "file_preview" && artifactsListenerRef.current?.(msg)) return;
+          if (msg.type === "file_preview"
+              && [...artifactsListenerRef.current].some(listener => listener(msg))) return;
           if (msg.type === "files_listed") {
-            filesListenerRef.current?.(msg);
+            for (const listener of filesListenerRef.current) listener(msg);
             return;
           }
           if (msg.type === "file_preview" && msg.directory && !msg.error) {
@@ -3951,7 +3959,7 @@ export default function App() {
             return;
           }
           if (msg.type === "agent_detail") {
-            agentDetailListenerRef.current?.(msg);
+            for (const listener of agentDetailListenerRef.current) listener(msg);
             // Requester-scoped details never belong in the conversation
             // reducer or another browser's side panel.
             return;
@@ -4189,7 +4197,7 @@ export default function App() {
           if (!acceptsLifecycle()) return;
           turnFileRequestsRef.current.clear();
           setAgentPanel(null);
-          agentDetailListenerRef.current = null;
+          agentDetailListenerRef.current.clear();
           clearHistoryDetailRequests();
           inlineImageAssetsRef.current.clear();
           historyImageAssetsRef.current.clear();
@@ -6766,6 +6774,7 @@ export default function App() {
       </section>
       {/* Share the layout's selection: retained hidden chats reserve no space. */}
       <ArtifactReadingMemory.Provider value={artifactReadingMemory.entries}>
+      <RetainedPanelData.Provider value={state}>
       <RightPanelPresentation.Provider value={{ expanded: panelExpanded, covered: btwExpanded, layer: 0, chat: false,
         onOpenChat: toggleCenteredBtw, onExpand: togglePanelExpanded, onDock: dockPanel, onDismiss: togglePanelExpanded }}>
       {Object.keys(viewerSelections).length > 0 && <Suspense fallback={null}>
@@ -6801,6 +6810,15 @@ export default function App() {
             if (selected && confirmArtifactDiscard()) { focusListedSession(selected); setDshPanel(null); }
           }} />
       </Suspense>}
+      <RetainedPanel key={`files:${machineId}`} scope={visibleParentSid
+        ? JSON.stringify([space, engine, visibleParentSid]) : null}
+        retain={scope => {
+          const [savedSpace, savedEngine, sid] = JSON.parse(scope);
+          const saved = panelViewsBySurfaceRef.current.get(sessionScopeKey(machineId, savedEngine, savedSpace));
+          return !!state.retainedArtifacts?.[sid]
+            || fileBrowser?.sid === sid || sessionArtifacts?.parentSid === sid
+            || saved?.fileBrowser?.sid === sid || saved?.sessionArtifacts?.parentSid === sid;
+        }}>
       {(() => {
         if (visibleRightPanel === "artifacts" && sessionArtifacts) {
           const owner = sessionArtifacts;
@@ -6833,9 +6851,9 @@ export default function App() {
             dispatch({ type: "clear_artifact" });
           };
           return <Suspense fallback={<div className="artifact-panel" role="status">加载目录…</div>}>
-            <SessionFilesPanel key={fileBrowser.id} showingPreview={fileBrowser.preview}
+            <SessionFilesPanel key={fileBrowser.id} showingPreview={fileBrowser.preview && !!state.artifact}
               browser={{ sid: fileBrowser.sid, initialPath: fileBrowser.path, ws: wsRef.current,
-                hidden: fileBrowser.preview, onListen: listenFiles, onClose: closeFiles,
+                hidden: fileBrowser.preview && !!state.artifact, onListen: listenFiles, onClose: closeFiles,
                 onOpenFile: (path) => {
                   if (previewFileForSid(fileBrowser.sid, path, undefined, true))
                     setFileBrowser({ ...fileBrowser, preview: true });
@@ -6881,11 +6899,18 @@ export default function App() {
           </Suspense>;
         return null;
       })()}
+      </RetainedPanel>
       </RightPanelPresentation.Provider>
-      </ArtifactReadingMemory.Provider>
       <RightPanelPresentation.Provider value={{ expanded: btwExpanded, covered: false, layer: 1, chat: true,
         onOpenChat: toggleCenteredBtw, onExpand: showCenteredBtw, onDock: dockBtw, onDismiss: dismissCenteredBtw }}>
-        {btwRendered && (<Suspense fallback={null}>
+        <RetainedPanel key={`btw:${machineId}`} scope={visibleParentSid
+          ? JSON.stringify([space, engine, visibleParentSid]) : null}
+          retain={scope => {
+            const [savedSpace, savedEngine, sid] = JSON.parse(scope);
+            return btwPanelScopes.includes(btwPanelScopeKey(machineId, savedSpace, savedEngine, sid))
+              && !!state.btwByParentSid[sid];
+          }}>
+        {btwRendered ? (<Suspense fallback={null}>
             <BtwPanel sid={activeBtwSid ?? undefined} rt={activeBtwSid ? state.runtimes[activeBtwSid] : undefined}
             engine={activeBtw?.engine ?? focusedEngine} opening={btwOpening}
             questionErrorRevision={`${state.connState}:${state.wrapperOnline}:${state.bannerRevision}`}
@@ -6977,8 +7002,11 @@ export default function App() {
             onDismissNotice={(noticeId) => {
               if (activeBtwSid) dispatch({ type: "dismiss_notice", sid: activeBtwSid, noticeId });
             }} />
-          </Suspense>)}
+          </Suspense>) : null}
+        </RetainedPanel>
       </RightPanelPresentation.Provider>
+      </RetainedPanelData.Provider>
+      </ArtifactReadingMemory.Provider>
       {queuedQueryEditor && <Suspense fallback={null}><QueuedQueryDialog
         key={queuedQueryEditor
           ? `${queuedQueryEditor.sid}:${queuedQueryEditor.msgId}`
