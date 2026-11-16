@@ -444,9 +444,6 @@ body{
   }
 }
 .ubub-meta.ai-meta{ margin-left:0; margin-right:auto; height:22px; flex-wrap:nowrap; }
-.turn-model-notice{ display:flex; align-items:flex-start; gap:8px; margin:10px 0;
-  color:var(--dim); font-size:12px; line-height:1.6; }
-.turn-model-notice svg{ flex:none; margin-top:2px; }
 .turn-working .page-preview-links{ margin-left:12px; }
 .message-code-copy{ display:inline-flex; align-items:center; gap:5px; color:var(--faint);
   border-radius:7px; font-size:11px; line-height:1; transition:.15s; }

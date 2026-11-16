@@ -17257,7 +17257,12 @@ test(`Claude model fallback ${choice} uses the native pending dialog on desktop 
       severity: "warning", category: "runtime", title: "模型已回退",
       message: "claude-opus-5-6 → claude-opus-5-5。原模型拒绝响应，已切换备用模型。",
       detail: "切换时间 2026-11-14T01:00:00Z" });
+    relay.emit({ type: "process", sid: "layout-parent", seq: 5, item_id: "native-fallback",
+      kind: "model", phase: "snapshot", status: "succeeded", tool: "model_refusal_fallback",
+      title: "模型已回退", summary: "claude-opus-5-6 → claude-opus-5-5。原模型拒绝响应，已切换备用模型。" });
     await expect(page.getByTitle("选择模型", { exact: true })).toContainText("claude-opus-5-5");
+    await expect(page.getByRole("region", { name: "对话记录", exact: true }).getByText(/原模型拒绝响应/)).toHaveCount(0);
+    await expect(page.locator(".turn-model-notice")).toHaveCount(0);
     await expect(page.locator(".header-feedback")).toHaveText("模型已回退");
     await page.locator(".header-feedback").click();
     const details = page.getByRole("dialog", { name: "状态详情" });
@@ -17268,6 +17273,28 @@ test(`Claude model fallback ${choice} uses the native pending dialog on desktop 
   expect(relay.commands.some(command => ["query", "steer", "interrupt", "set_model"].includes(String(command.type)))).toBe(false);
 });
 }
+
+test("Claude model fallback history keeps switch metadata out of the transcript", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, {
+    engine: "claude", seedTurns: [{ id: "historical-fallback", prompt: "继续分析", done: true,
+      blocks: [
+        { kind: "process", item_id: "historical-switch", processKind: "model",
+          tool: "model_refusal_fallback", phase: "snapshot", status: "succeeded", done: true,
+          title: "模型已回退", summary: "claude-opus-5-6 → claude-opus-5-5。原模型拒绝响应，已切换备用模型。" },
+        { kind: "text", message_id: "historical-answer", channel: "final", text: "已继续完成分析。", done: true },
+      ],
+    }],
+  });
+  await page.goto("/");
+  await expect(page.getByText("已继续完成分析。", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "对话记录", exact: true }).getByText(/原模型拒绝响应/)).toHaveCount(0);
+  await expect(page.locator(".turn-model-notice, .process-timeline, .turn-process")).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByText("已继续完成分析。", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "对话记录", exact: true }).getByText(/原模型拒绝响应/)).toHaveCount(0);
+  await expect(page.locator(".turn-model-notice, .process-timeline, .turn-process")).toHaveCount(0);
+  expect(relay.commands.some(command => ["query", "steer", "interrupt", "set_model"].includes(String(command.type)))).toBe(false);
+});
 
 test("notification click refreshes stale device validation and keeps the current session intact", async ({ page }) => {
   const relay = await mockRightPanelRelay(page);

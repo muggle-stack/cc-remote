@@ -47,7 +47,6 @@ import {
   finalTextBlocks,
   generatedImageIdentity,
   generatedOutputImages,
-  modelFallbackNotices,
   hasActiveProcess,
   presentableProcessBlocks,
 } from "../process-blocks";
@@ -2993,7 +2992,6 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
             const finalBlocks = finalTextBlocks(t.blocks).filter(block =>
               block.delivery !== "async" || !block.questions?.length);
             const generatedImages = generatedOutputImages(timelineBlocks);
-            const modelNotices = modelFallbackNotices(timelineBlocks);
             const narrative = assistantContinuations(timelineBlocks, finalBlocks, engine, t.responseProcesses);
             const taskContinuation = engine === "dsh" && timelineBlocks.some(block =>
               isReturnReceipt(block) && block.kind === "process" && block.processKind === "task");
@@ -3339,10 +3337,6 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
               </div>
             )}
             {showProcessTimeline && renderProcess()}
-            {modelNotices.map((notice) => <div className="turn-model-notice" key={notice.item_id} role="note">
-              <Icon name="notify" size={15} />
-              <span>{notice.summary}</span>
-            </div>)}
             {generatedImages.length > 0 && <div className="generated-image-gallery">
               {generatedImages.map((block) => <GeneratedImagePreview key={generatedImageIdentity(block)}
                 block={block} imageAssets={imageAssets} onLoadImage={onLoadImage}
