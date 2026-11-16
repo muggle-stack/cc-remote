@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
+import { PanelVisible } from "../right-panel-presentation";
 import { createPortal } from "react-dom";
 
 import type { ComposerPaste } from "../composer-pastes";
@@ -16,6 +17,7 @@ interface Props {
 }
 
 export function PasteCards({ pastes, onChange, disabled = false }: Props) {
+  const visible = useContext(PanelVisible);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingChars, setEditingChars] = useState(0);
   const [editingLines, setEditingLines] = useState(1);
@@ -55,6 +57,7 @@ export function PasteCards({ pastes, onChange, disabled = false }: Props) {
       window.clearTimeout(lineCountTimerRef.current);
     }
   }, []);
+  useEffect(() => { if (!visible) closeEditor(); }, [visible]);
 
   if (pastes.length === 0) return null;
 
@@ -86,7 +89,7 @@ export function PasteCards({ pastes, onChange, disabled = false }: Props) {
       </article>
     ))}
 
-    {editingPaste && createPortal(
+    {visible && editingPaste && createPortal(
       <div className="paste-preview-backdrop" role="presentation"
         onMouseDown={(event) => {
           if (event.target === event.currentTarget) closeEditor();

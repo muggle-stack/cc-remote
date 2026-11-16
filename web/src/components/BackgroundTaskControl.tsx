@@ -1,8 +1,9 @@
 import {
-  useCallback, useEffect, useId, useRef, useState, useSyncExternalStore,
+  useCallback, useContext, useEffect, useId, useRef, useState, useSyncExternalStore,
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
+import { PanelVisible } from "../right-panel-presentation";
 import { useAnchoredPopoverGeometry } from "../chat-dialog-geometry";
 import type { ProcessBlock } from "../domain/conversation";
 import { Icon } from "../icons";
@@ -107,6 +108,7 @@ function TaskPopover({ anchor, id, preview, onClose, ...props }: Props & {
 }
 
 function ActiveBackgroundTasks(props: Props) {
+  const visible = useContext(PanelVisible);
   const [open, setOpen] = useState(false);
   const [preview, setPreview] = useState(false);
   const mobile = useSyncExternalStore(subscribeMobile, isMobile, () => false);
@@ -115,12 +117,13 @@ function ActiveBackgroundTasks(props: Props) {
   const needsAttention = props.processes.filter(process =>
     process.status === "failed" || process.status === "interrupted"
       || process.status === "declined").length;
-  const showPreview = preview && !open && !mobile;
+  const showPreview = visible && preview && !open && !mobile;
   const close = useCallback((restoreFocus = false) => {
     setOpen(false);
     setPreview(false);
     if (restoreFocus) anchor.current?.focus({ preventScroll: true });
   }, []);
+  useEffect(() => { if (!visible) close(); }, [visible, close]);
   const details: Props = {
     ...props,
     onOpenAgent: props.onOpenAgent ? (runId, title) => {
@@ -149,7 +152,7 @@ function ActiveBackgroundTasks(props: Props) {
     </button>
     {showPreview && <TaskPopover {...props} anchor={anchor} id={`${id}-preview`}
       preview onClose={close} />}
-    {open && (mobile
+    {visible && open && (mobile
       ? <CenteredSheet open label="后台任务" header={false}
           className="background-task-sheet" maxWidth={400} maxHeight={480}
           returnFocusRef={anchor} onClose={() => close()}>

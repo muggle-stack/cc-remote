@@ -1,4 +1,5 @@
-import { lazy, Suspense, useRef, useState, type ChangeEvent, type ReactNode } from "react";
+import { lazy, Suspense, useContext, useEffect, useRef, useState, type ChangeEvent, type ReactNode } from "react";
+import { PanelVisible } from "../right-panel-presentation";
 import { Icon } from "../icons";
 const CenteredSheet = lazy(() => import("./CenteredSheet").then(module => ({ default: module.CenteredSheet })));
 
@@ -10,7 +11,9 @@ export function AttachmentPicker({ onPick, disabled = false, className = "cmdbtn
   label?: string;
   children?: ReactNode;
 }) {
+  const visible = useContext(PanelVisible);
   const [open, setOpen] = useState(false);
+  useEffect(() => { if (!visible) setOpen(false); }, [visible]);
   const photos = useRef<HTMLInputElement>(null);
   const files = useRef<HTMLInputElement>(null);
   const camera = useRef<HTMLInputElement>(null);
@@ -33,7 +36,7 @@ export function AttachmentPicker({ onPick, disabled = false, className = "cmdbtn
     <input ref={photos} type="file" accept="image/*" multiple hidden aria-label="添加照片" onChange={imported} />
     <input ref={files} type="file" multiple hidden aria-label="添加文件" onChange={imported} />
     <input ref={camera} type="file" accept="image/*" capture="environment" hidden aria-label="拍照" onChange={imported} />
-    {open && !disabled && <Suspense fallback={null}><CenteredSheet open label={label} onClose={() => setOpen(false)} maxWidth={380}>
+    {visible && open && !disabled && <Suspense fallback={null}><CenteredSheet open label={label} onClose={() => setOpen(false)} maxWidth={380}>
       <div className="sheet-scroll attachment-choices">
         {[
           { name: "照片", description: "从相册选择图片", icon: "image", input: photos },

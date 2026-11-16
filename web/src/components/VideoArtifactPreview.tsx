@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
+import { PanelVisible } from "../right-panel-presentation";
 
 export function VideoArtifactPreview({ machineId, mediaId, title, size }: {
   machineId?: string | null;
@@ -14,6 +15,7 @@ export function VideoArtifactPreview({ machineId, mediaId, title, size }: {
 }
 
 function VideoPlayer({ src, title, size }: { src: string; title: string; size?: number }) {
+  const visible = useContext(PanelVisible);
   const ref = useRef<HTMLVideoElement>(null);
   const [error, setError] = useState<string>();
   useEffect(() => {
@@ -26,6 +28,9 @@ function VideoPlayer({ src, title, size }: { src: string; title: string; size?: 
       video.load(); // Cancel outstanding ranges, including Safari's metadata read.
     };
   }, [src]);
+  useEffect(() => {
+    if (!visible) ref.current?.pause();
+  }, [visible]);
   return <div className="artifact-video-stage">
     <video ref={ref} controls playsInline preload="metadata" aria-label={title}
       onError={() => {

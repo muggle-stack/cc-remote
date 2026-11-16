@@ -1,4 +1,9 @@
 import { createContext } from "react";
+import type { AppState } from "./reducer";
+
+export const PanelVisible = createContext(true);
+export const RetainedPanelData = createContext<Pick<AppState,
+  "runtimes" | "artifact" | "retainedArtifacts"> | null>(null);
 
 export const RightPanelPresentation = createContext({
   expanded: false,

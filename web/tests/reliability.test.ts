@@ -18520,7 +18520,7 @@ assert.match(appSource,
   /focusedSid !== sid[\s\S]{0,180}activeBtwSid !== sid/,
   "background sessions outside the focused main and visible BTW stay unable to read files");
 assert.match(btwPanelSource,
-  /<ChatView[\s\S]{0,400}imageAssets=\{p\.imageAssets\}[\s\S]{0,120}onLoadImage=\{p\.onLoadImage\}[\s\S]{0,120}onAuthorizeImage=\{p\.onAuthorizeImage\}/,
+  /<ChatView[\s\S]{0,400}imageAssets=\{p\.imageAssets\}[\s\S]{0,120}onLoadImage=\{visible \? p\.onLoadImage : undefined\}[\s\S]{0,120}onAuthorizeImage=\{p\.onAuthorizeImage\}/,
   "BTW chat rendering must receive the same bounded image authorization channel");
 assert.match(btwPanelSource, /<ChatView[\s\S]{0,100}engine=\{p\.engine\}/,
   "BTW rendering must use its real engine so Codex hook plumbing stays filtered");

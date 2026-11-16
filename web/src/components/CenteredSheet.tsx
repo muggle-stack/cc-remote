@@ -1,4 +1,5 @@
-import { useEffect, useRef, type ReactNode, type RefObject } from "react";
+import { useContext, useEffect, useRef, type ReactNode, type RefObject } from "react";
+import { PanelVisible } from "../right-panel-presentation";
 import { createPortal } from "react-dom";
 import { useChatDialogGeometry } from "../chat-dialog-geometry";
 import { Icon } from "../icons";
@@ -22,6 +23,8 @@ export function CenteredSheet({ open, label, onClose, children, className = "",
   /** Touch browsers may leave the trigger unfocused when opening a dialog. */
   returnFocusRef?: RefObject<HTMLElement | null>;
 }) {
+  const panelVisible = useContext(PanelVisible);
+  open = open && panelVisible;
   const ref = useRef<HTMLElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
