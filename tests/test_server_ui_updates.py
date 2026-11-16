@@ -248,3 +248,95 @@ def test_server_update_rechecks_revoked_login_after_pending_operation(tmp_path):
         client.post("/api/logout", headers={"Origin": cfg.public_origin})
         finish.set()
         assert result.result(timeout=3).status_code == 401
+
+
+@pytest.fixture
+def isolated_authorization_attempts():
+    server._login_limiter.reset()
+    yield
+    server._login_limiter.reset()
+
+
+def test_update_authorization_is_scoped_to_the_current_login(tmp_path, isolated_authorization_attempts):
+    server._login_limiter.reset()
+    cfg = _cfg(tmp_path, login_users_json=json.dumps({
+        'owner': {'password': 'owner-password', 'machines': ['*']},
+        'device': {'password': 'device-password', 'machines': ['device-a']},
+    }))
+    app = server.create_app(cfg)
+    app.state.server_updates.handle = AsyncMock(return_value={'schema': 1, 'enabled': True})
+    headers = {'Origin': cfg.public_origin}
+    with TestClient(app, base_url=cfg.public_origin) as client:
+        client.post('/api/login', json={'username': 'device', 'password': 'device-password'})
+        assert client.get('/api/server-updates').status_code == 403
+        assert client.post('/api/update-authorization', headers=headers,
+                           json={'username': 'owner', 'password': 'wrong'}).status_code == 403
+        response = client.post('/api/update-authorization', headers=headers,
+                               json={'username': 'owner', 'password': 'owner-password'})
+        assert response.status_code == 200
+        assert 'HttpOnly' in response.headers['set-cookie']
+        assert client.get('/api/server-updates').status_code == 200
+        assert client.get('/api/updates/device-b').status_code == 403
+        client.post('/api/login', json={'username': 'device', 'password': 'device-password'})
+        assert client.get('/api/server-updates').status_code == 403
+
+
+def test_coordinated_server_recovery_requires_admin_or_current_update_grant(tmp_path, isolated_authorization_attempts):
+    cfg = _cfg(tmp_path, login_users_json=json.dumps({
+        'owner': {'password': 'owner-password', 'machines': ['*']},
+        'device': {'password': 'device-password', 'machines': ['device-a']},
+    }))
+    app = server.create_app(cfg)
+    hub = app.state.updates
+    hub.wake_coordinator = lambda: None
+    hub.queue.remember('device-a', {'schema': 1, 'managed': True, 'enabled': True, 'current': '4.0.0'})
+    state = hub.queue.create('device-a', ID, '4.0.2', coordinated=True)
+    hub.queue.save('device-a', {**state, 'phase': 'unknown', 'server_phase': 'unknown',
+                                'blocking_server_job_id': 'b' * 32})
+    blocking = {'id': 'b' * 32, 'version': '4.0.1', 'phase': 'unknown'}
+    app.state.server_updates.status = AsyncMock(return_value={'job': blocking})
+    handle = app.state.server_updates.handle = AsyncMock(return_value={'ok': True, 'job': blocking})
+    headers = {'Origin': cfg.public_origin}
+    request = {'op': 'reconcile', 'job_id': ID}
+    with TestClient(app, base_url=cfg.public_origin) as client:
+        client.post('/api/login', json={'username': 'device', 'password': 'device-password'})
+        assert client.post('/api/server-updates', headers=headers, json=request).status_code == 403
+        denied = client.post('/api/updates/device-a', headers=headers, json=request)
+        assert denied.status_code == 403 and denied.json()['reason'] == 'server_forbidden'
+        handle.assert_not_awaited()
+        assert client.post('/api/update-authorization', headers=headers,
+                           json={'username': 'owner', 'password': 'owner-password'}).status_code == 200
+        assert client.post('/api/updates/device-a', headers=headers, json=request).status_code == 200
+        handle.assert_awaited_once_with({'op': 'reconcile', 'job_id': blocking['id']})
+        assert client.post('/api/updates/device-b', headers=headers, json=request).status_code == 403
+        client.post('/api/login', json={'username': 'device', 'password': 'device-password'})
+        assert client.post('/api/updates/device-a', headers=headers, json=request).status_code == 403
+        assert handle.await_count == 1
+        client.post('/api/login', json={'username': 'owner', 'password': 'owner-password'})
+        assert client.post('/api/updates/device-a', headers=headers, json=request).status_code == 200
+        assert handle.await_count == 2
+
+
+@pytest.mark.parametrize('coordinated', [False, True])
+def test_device_recovery_keeps_device_scope_permissions(tmp_path, isolated_authorization_attempts, coordinated):
+    from cc_remote.relay.updates import Peer
+    cfg = _cfg(tmp_path, login_users_json=json.dumps({
+        'device': {'password': 'device-password', 'machines': ['device-a']},
+    }))
+    app = server.create_app(cfg)
+    hub = app.state.updates
+    hub.wake_coordinator = lambda: None
+    hub.queue.remember('device-a', {'schema': 1, 'managed': True, 'enabled': True, 'current': '4.0.0'})
+    state = hub.queue.create('device-a', ID, '4.0.1', coordinated=coordinated)
+    state = {**state, 'phase': 'unknown', 'delivered': True, 'server_phase': 'succeeded'}
+    hub.queue.save('device-a', state)
+    hub.peers['device-a'] = Peer(SimpleNamespace())
+    hub._request = AsyncMock(return_value={'ok': True, 'job': state})
+    handle = app.state.server_updates.handle = AsyncMock()
+    with TestClient(app, base_url=cfg.public_origin) as client:
+        client.post('/api/login', json={'username': 'device', 'password': 'device-password'})
+        request = {'op': 'reconcile', 'job_id': ID}
+        result = client.post('/api/updates/device-a', headers={'Origin': cfg.public_origin}, json=request)
+        assert result.status_code == 200
+        hub._request.assert_awaited_once_with('device-a', request)
+        handle.assert_not_awaited()

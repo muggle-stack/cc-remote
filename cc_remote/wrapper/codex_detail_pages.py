@@ -7,7 +7,7 @@ pager. No source path or caller-supplied byte offset crosses the wire.
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import threading
 from typing import Callable
 from uuid import uuid4
@@ -21,6 +21,8 @@ from cc_remote.wrapper.codex_stream import (
     codex_history_boundary_user,
     codex_next_user_boundary_ts,
     codex_translate_history,
+    codex_history_image_views,
+    CodexHistoryImageView,
 )
 from cc_remote.wrapper.history_store import (
     HistorySourceFingerprint,
@@ -53,6 +55,8 @@ class _Snapshot:
     max_bytes: int
     tool_result_max: int
     segment_end_ts: float | None = None
+    segment_index: int = 0
+    image_views: tuple[CodexHistoryImageView, ...] | None = None
     # Every accepted coordinate was issued by this pager, never supplied by
     # the browser. Parent links keep reverse navigation exact across windows.
     pages: dict[_Position, _Position | None] = field(default_factory=dict)
@@ -68,10 +72,19 @@ class CodexDetailPages:
         end, before = position
         return f"{PREFIX}{key}.{end:x}.{before if before is not None else 'n'}"
 
+    def native_segment(self, sid: str, turn_id: str, revision: str) -> tuple[str, int] | None:
+        with self._lock:
+            for snapshot in reversed(self._snapshots.values()):
+                if (snapshot.sid == sid and snapshot.turn_id == turn_id
+                        and snapshot.revision == revision and snapshot.native_turn_id):
+                    return snapshot.native_turn_id, snapshot.segment_index
+        return None
+
     def read(
         self, path: str, sid: str, turn_id: str, revision: str,
         *, before: str | None, limit: int, window_bytes: int,
         max_bytes: int, tool_result_max: int, paginate: Callable[..., _Page],
+        supplement: Callable[[list[dict], tuple[CodexHistoryImageView, ...]], list[dict]] | None = None,
     ) -> _Page | None:
         """Return None for ordinary turns; reject stale private cursors."""
         with self._lock:
@@ -80,12 +93,14 @@ class CodexDetailPages:
                 window_bytes=max(1024 * 1024, window_bytes),
                 max_bytes=max_bytes, tool_result_max=tool_result_max,
                 paginate=paginate,
+                supplement=supplement,
             )
 
     def _read(
         self, path: str, sid: str, turn_id: str, revision: str,
         *, before: str | None, limit: int, window_bytes: int,
         max_bytes: int, tool_result_max: int, paginate: Callable[..., _Page],
+        supplement: Callable[[list[dict], tuple[CodexHistoryImageView, ...]], list[dict]] | None,
     ) -> _Page | None:
         if before is not None:
             if not before.startswith(PREFIX):
@@ -131,6 +146,7 @@ class CodexDetailPages:
                 sid, turn_id, revision, source, found.offset, end,
                 found.native_turn_id, user, window_bytes, limit, max_bytes,
                 tool_result_max,
+                segment_index=found.segment_index,
                 segment_end_ts=(codex_next_user_boundary_ts(
                                     path, end, found.native_turn_id, end_offset=source.size)
                                 if end < source.size else None),
@@ -176,6 +192,15 @@ class CodexDetailPages:
             row["sid"] = sid
             if row.get("type") == "user_msg":
                 row["msg_id"] = turn_id
+        if supplement is not None and snapshot.native_turn_id:
+            if snapshot.image_views is None:
+                snapshot.image_views = tuple(replace(view, data=None) for view in
+                    codex_history_image_views(path, snapshot.native_turn_id,
+                                              segment_index=snapshot.segment_index,
+                                              source_end=snapshot.end))
+            views = tuple(view for view in snapshot.image_views
+                          if view.source_offset is not None and start <= view.source_offset < end)
+            rows = supplement(rows, views)
         page, has_more, older, _has_newer, _newer = paginate(
             rows, before=group_before, limit=snapshot.limit,
             max_bytes=snapshot.max_bytes,

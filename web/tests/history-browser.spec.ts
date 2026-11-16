@@ -3964,6 +3964,62 @@ test("Claude agent detail stops waiting on a lost response and retries", async (
   await expect.poll(() => relay.commands.filter((c) => c.type === "get_agent_detail").length).toBe(2);
 });
 
+test("viewed image previews remain clickable after completion and history reload", async ({ page }) => {
+  const sid = "layout-parent";
+  const turns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = [];
+  const relay = await mockRightPanelRelay(page, { imageAssets: true, seedTurns: turns });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
+  relay.emit({ type: "user_msg", sid, msg_id: "view-user", prompt: "检查图片" });
+  relay.emit({ type: "turn_binding", sid, msg_id: "view-user", turn_id: "view-native" });
+  relay.emit({ type: "state", sid, state: "running" });
+  relay.emit({ type: "process", sid, item_id: "live-view", turn_id: "view-native",
+    kind: "server_tool", phase: "end", status: "succeeded", title: "查看图片", tool: "view_image",
+    input: { file_path: "/missing/chart.png", preview_id: "live-view" } });
+  const turn = page.locator('.turn[data-turn-id="view-user"]');
+  const liveHead = turn.getByRole("button", { name: /正在处理/ }).first();
+  await expect(liveHead).toBeVisible();
+  if (await liveHead.getAttribute("aria-expanded") !== "true") await liveHead.click();
+  await turn.locator(".process-activity > summary").click();
+  await expect(turn.getByRole("button", { name: "预览查看过的图片" })).toBeEnabled();
+
+  const blocks = [0, 1].map(index => ({
+    kind: "process" as const, item_id: `exec-call.image-${index}`, processKind: "server_tool" as const,
+    phase: "end" as const, status: "succeeded" as const, done: true, title: "查看图片", tool: "view_image",
+    input: { history_image: { image_id: `img-batch-${index}`, media_type: "image/png",
+      width: 1, height: 1, byte_size: 68 } },
+  }));
+  turns.push({ id: "view-user", forkPointId: "view-native", prompt: "检查图片", done: true,
+    detailLoaded: true, processDetailState: "present", blocks });
+  relay.emit({ type: "turn_end", sid, turn_id: "view-native", result: { subtype: "success" } });
+  relay.emit({ type: "state", sid, state: "idle" });
+  relay.emit({ type: "history", sid, session_id: sid, revision: "layout-history",
+    generation: "layout-generation", detail: "summary", events: [], has_more: false, turns });
+  for (const reload of [false, true]) {
+    if (reload) await page.reload();
+    const head = turn.getByRole("button", { name: /已处理/ }).first();
+    await expect(head).toBeVisible();
+    if (await head.getAttribute("aria-expanded") !== "true") await head.click();
+    for (const selector of [".tool-group", ".process-activity"]) {
+      for (const disclosure of await turn.locator(`details${selector}`).all()) {
+        if (await disclosure.getAttribute("open") === null) {
+          await disclosure.locator(":scope > summary").click();
+        }
+      }
+    }
+    const images = turn.getByRole("button", { name: "预览查看过的图片" });
+    await expect(images).toHaveCount(2);
+    for (let index = 0; index < 2; index++) {
+      await expect(images.nth(index)).toBeEnabled();
+      await images.nth(index).click();
+      await expect(page.locator(".image-lightbox-image")).toBeVisible();
+      await page.locator(".image-lightbox-close").click();
+    }
+  }
+  expect(relay.commands.filter(c => c.type === "get_history_image")
+    .every(c => c.turn_id === "view-user")).toBe(true);
+});
+
 test("generated image live snapshot renders outside collapsed process and duplicate events stay idempotent", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { imageAssets: true });
   await page.goto("/");
@@ -17211,8 +17267,10 @@ test(`Claude model fallback ${choice} uses the native pending dialog on desktop 
       turn_id: "original-turn", original_prompt: "分析这个仓库，并保留原模型重试" },
   };
   relay.emit(ask);
-  const dialog = page.getByRole("dialog", { name: "是否允许模型回退？" });
+  const dialog = page.getByRole("dialog", { name: "是否切换到备用模型？" });
   await expect(dialog).toBeVisible();
+  await expect(dialog.locator(".question-dialog-title")).toHaveText("Claude 想确认一下");
+  await expect(dialog.locator(".fallback-identity, .fallback-session")).toHaveCount(0);
   await expect(page.locator(".hstat")).toHaveText("待确认");
   await expect(dialog.getByText("Opus 5.6", { exact: true })).toBeVisible();
   await expect(dialog.getByText("Opus 5.5", { exact: true })).toBeVisible();
@@ -17226,18 +17284,34 @@ test(`Claude model fallback ${choice} uses the native pending dialog on desktop 
   await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
   await page.screenshot({ path: testInfo.outputPath("model-fallback-dark.png") });
   await automatic.check();
-  await dialog.getByRole("button", { name: "收起回退确认", exact: true }).click();
+  await dialog.getByRole("button", { name: "收起问题", exact: true }).click();
   await expect(dialog).toBeHidden();
-  const resume = page.getByRole("button", { name: /等待确认模型切换.*处理/ });
+  const resume = page.getByRole("button", { name: /等待确认模型切换.*继续回答/ });
   await expect(resume).toBeVisible();
   await page.setViewportSize({ width: 320, height: 740 });
   expect((await resume.boundingBox())!.height).toBeLessThanOrEqual(48);
   expect(await resume.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
-  await page.setViewportSize(viewport);
   expect(relay.commands.filter(command => command.type === "answer_question")).toHaveLength(0);
   await page.screenshot({ path: testInfo.outputPath("model-fallback-collapsed.png") });
   await resume.click();
   await expect(automatic).toBeChecked();
+  const actionBounds = await dialog.locator(".fallback-actions button").evaluateAll(buttons => buttons.map(button => {
+    const rect = button.getBoundingClientRect();
+    return { top: rect.top, height: rect.height, fits: button.scrollWidth <= button.clientWidth };
+  }));
+  expect(actionBounds).toHaveLength(3);
+  for (const bounds of actionBounds) {
+    expect(Math.abs(bounds.top - actionBounds[0].top)).toBeLessThan(1);
+    expect(bounds.height).toBeGreaterThanOrEqual(44);
+    expect(bounds.fits).toBe(true);
+  }
+  await page.screenshot({ path: testInfo.outputPath("model-fallback-narrow.png") });
+  await page.setViewportSize({ width: 320, height: 400 });
+  await expect(dialog.locator(".fallback-actions")).toBeInViewport();
+  await expect(dialog.getByRole("button", { name: "同意回退", exact: true })).toBeInViewport();
+  expect(await dialog.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+  expect(await dialog.locator(".fallback-body").evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
+  await page.setViewportSize(viewport);
   if (choice !== "同意回退") await automatic.uncheck();
   await dialog.getByRole("button", { name: choice, exact: true }).click();
   await expect.poll(() => relay.commands.filter(command => command.type === "answer_question").length).toBe(1);
@@ -17257,7 +17331,12 @@ test(`Claude model fallback ${choice} uses the native pending dialog on desktop 
       severity: "warning", category: "runtime", title: "模型已回退",
       message: "claude-opus-5-6 → claude-opus-5-5。原模型拒绝响应，已切换备用模型。",
       detail: "切换时间 2026-11-14T01:00:00Z" });
+    relay.emit({ type: "process", sid: "layout-parent", seq: 5, item_id: "native-fallback",
+      kind: "model", phase: "snapshot", status: "succeeded", tool: "model_refusal_fallback",
+      title: "模型已回退", summary: "claude-opus-5-6 → claude-opus-5-5。原模型拒绝响应，已切换备用模型。" });
     await expect(page.getByTitle("选择模型", { exact: true })).toContainText("claude-opus-5-5");
+    await expect(page.getByRole("region", { name: "对话记录", exact: true }).getByText(/原模型拒绝响应/)).toHaveCount(0);
+    await expect(page.locator(".turn-model-notice")).toHaveCount(0);
     await expect(page.locator(".header-feedback")).toHaveText("模型已回退");
     await page.locator(".header-feedback").click();
     const details = page.getByRole("dialog", { name: "状态详情" });
@@ -17268,6 +17347,28 @@ test(`Claude model fallback ${choice} uses the native pending dialog on desktop 
   expect(relay.commands.some(command => ["query", "steer", "interrupt", "set_model"].includes(String(command.type)))).toBe(false);
 });
 }
+
+test("Claude model fallback history keeps switch metadata out of the transcript", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, {
+    engine: "claude", seedTurns: [{ id: "historical-fallback", prompt: "继续分析", done: true,
+      blocks: [
+        { kind: "process", item_id: "historical-switch", processKind: "model",
+          tool: "model_refusal_fallback", phase: "snapshot", status: "succeeded", done: true,
+          title: "模型已回退", summary: "claude-opus-5-6 → claude-opus-5-5。原模型拒绝响应，已切换备用模型。" },
+        { kind: "text", message_id: "historical-answer", channel: "final", text: "已继续完成分析。", done: true },
+      ],
+    }],
+  });
+  await page.goto("/");
+  await expect(page.getByText("已继续完成分析。", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "对话记录", exact: true }).getByText(/原模型拒绝响应/)).toHaveCount(0);
+  await expect(page.locator(".turn-model-notice, .process-timeline, .turn-process")).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByText("已继续完成分析。", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "对话记录", exact: true }).getByText(/原模型拒绝响应/)).toHaveCount(0);
+  await expect(page.locator(".turn-model-notice, .process-timeline, .turn-process")).toHaveCount(0);
+  expect(relay.commands.some(command => ["query", "steer", "interrupt", "set_model"].includes(String(command.type)))).toBe(false);
+});
 
 test("notification click refreshes stale device validation and keeps the current session intact", async ({ page }) => {
   const relay = await mockRightPanelRelay(page);

@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 import time
 from urllib.parse import urlsplit, urlunsplit
@@ -218,6 +219,33 @@ class UIUpdates(InstallationUpdates):
         self.reserved = identity
         return {"status": "ready"}
 
+    async def handle(self, request: dict) -> dict:
+        if request != {"op": "authorize"}:
+            return await super().handle(request)
+        if self.root is None:
+            return {"ok": False, "reason": "unsupported"}
+        current = read_installation(self.root, *host_platform())
+        command = [str(current.release / ".venv/bin/python"), "-I", "-B",
+                   str(current.release / "deploy/ui_update_job.py"), "--root", str(self.root), "authorize"]
+        async with self.request_lock:
+            try:
+                environment = None
+                if host_platform()[0] == "linux":
+                    from deploy.linux_service import trusted
+                    for path in (self.root, current.release, Path(command[0]).resolve(), Path(command[3])):
+                        trusted(path)
+                    if os.geteuid() != 0:
+                        from cc_remote.wrapper.codex_service import user_manager_environment
+                        environment = user_manager_environment()
+                        command = ["/usr/bin/systemd-run", "--user", "--collect", "--wait", "--pipe",
+                                   "/usr/bin/pkexec", *command]
+                result = await asyncio.to_thread(subprocess.run, command,
+                    stdin=subprocess.DEVNULL, capture_output=True, timeout=90, check=False, env=environment)
+                value = json.loads(result.stdout)
+                return value if isinstance(value, dict) else {"ok": False, "reason": "permission_required"}
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                return {"ok": False, "reason": "permission_required"}
+
     async def status(self, *, check: bool = False) -> dict:
         result = {"schema": 1, "managed": False, "enabled": False, "reason": "unsupported",
                   "busy_count": self.busy_count(), "latest": self.catalog, "job": None,
@@ -248,9 +276,15 @@ class UIUpdates(InstallationUpdates):
                             repository = store.policy()["repository"]
                         except FileNotFoundError:
                             repository = release_repository()
-                        self.catalog = await asyncio.to_thread(release_catalog, repository)
                         self.checked_at = time.monotonic()
+                        try:
+                            self.catalog = await asyncio.to_thread(release_catalog, repository)
+                            self.catalog_error = None
+                        except (OSError, ValueError) as exc:
+                            self.catalog_error = failure_reason(exc)
                 result["latest"] = self.catalog
+            if self.catalog_error and result["reason"] is None:
+                result["reason"] = self.catalog_error
         except (OSError, ValueError) as exc:
             result["reason"] = failure_reason(exc)
         result["maintenance"] = self.guarded()

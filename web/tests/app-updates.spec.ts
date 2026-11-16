@@ -2,6 +2,369 @@ import { expect, test, type Page } from "@playwright/test";
 const url = "/tests/app-updates.html";
 const base = { managed: true, enabled: true, allow_relay_update: true, current: "5.3.14", relay_version: "5.3.14",
   busy_count: 2, latest: { version: "5.3.15", notes: "## 中文\n\n- 支持应用内更新。\n- 修复 Claude 历史详情。\n- 优化旧版本清理。\n\n## English\n\n- In-app updates." }, job: null };
+
+test("unified update submits one durable server and device operation", async ({ page }) => {
+  const commands: Record<string, string>[] = [];
+  let job: Record<string, unknown> | null = null;
+  await page.route("**/api/server-updates", route => route.fulfill({ json: { ...base, busy_count: 0 } }));
+  await page.route("**/api/updates/*", async route => {
+    const body = route.request().postDataJSON();
+    if (body?.op === "upgrade") {
+      commands.push(body);
+      job = { id: body.job_id, version: body.version, previous: base.current,
+        phase: "updating_relay", coordinated: true, server_phase: "downloading" };
+      await route.fulfill({ json: { ok: true, job } });
+    } else await route.fulfill({ json: { ...base, allow_relay_update: false, job } });
+  });
+  await page.goto(url + "?unified=1"); await open(page);
+  await expect(page.getByRole("group", { name: "更新目标" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "仅更新服务器和网页" })).toHaveCount(0);
+  await page.getByRole("button", { name: "更新到 v5.3.15", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "检查并更新服务器", exact: true })).toBeVisible();
+  await expect(page.locator(".app-update-steps li")).toHaveCount(3);
+  expect(commands).toHaveLength(1);
+  await page.getByRole("button", { name: "收起，后台继续", exact: true }).click();
+  await open(page);
+  expect(commands).toHaveLength(1);
+});
+
+for (const serverPhase of ["downloading", "waiting_network", "installing", "unknown"] as const) {
+  test(`device update can be withdrawn while shared server is ${serverPhase}`, async ({ page }) => {
+    const commands: { target: string; op: string }[] = [];
+    const serverJob = { id: "b".repeat(32), version: base.latest.version,
+      previous: base.current, phase: serverPhase };
+    let job: Record<string, unknown> | null = null;
+    await page.route("**/api/server-updates", route => {
+      const body = route.request().postDataJSON();
+      if (body?.op === "cancel") commands.push({ target: "server", op: body.op });
+      return route.fulfill({ json: { ...base, busy_count: 0, job: serverJob } });
+    });
+    await page.route("**/api/updates/*", async route => {
+      const body = route.request().postDataJSON();
+      if (body?.op === "upgrade") {
+        job = { id: body.job_id, version: body.version, previous: base.current,
+          phase: serverPhase === "unknown" ? "unknown" : "updating_relay",
+          coordinated: true, server_phase: serverPhase };
+        await route.fulfill({ json: { ok: true, job } });
+      } else if (body?.op === "cancel") {
+        commands.push({ target: "device", op: body.op });
+        expect(body.job_id).toBe(job?.id);
+        job = { ...job, phase: "cancelled", cancel_requested: true };
+        await route.fulfill({ json: { ok: true, job } });
+      } else await route.fulfill({ json: { ...base, job } });
+    });
+    await page.goto(url + "?unified=1"); await open(page);
+    await page.getByRole("button", { name: "更新到 v5.3.15", exact: true }).click();
+    const withdraw = page.getByRole("button", { name: "取消设备更新", exact: true });
+    await expect(withdraw).toBeEnabled();
+    await expect(page.getByText("取消会撤回 device-a 的更新，已启动的服务器更新将继续。", { exact: true })).toBeVisible();
+    await withdraw.click();
+    await expect(withdraw).toHaveCount(0);
+    await page.reload(); await open(page);
+    await expect(withdraw).toHaveCount(0);
+    expect(commands).toEqual([{ target: "device", op: "cancel" }]);
+  });
+}
+
+test("offline device exposes a secondary server-only action", async ({ page }) => {
+  const serverCommands: string[] = [];
+  let job: Record<string, unknown> | null = null;
+  await page.route("**/api/updates/*", route => route.fulfill({ json: { ...base, online: false } }));
+  await page.route("**/api/server-updates", async route => {
+    const body = route.request().postDataJSON();
+    if (body?.op === "start") {
+      serverCommands.push(body.op);
+      job = { id: body.job_id, version: body.version, previous: base.current, phase: "installing" };
+      await route.fulfill({ json: { ok: true, job } });
+    } else await route.fulfill({ json: { ...base, busy_count: 0, job } });
+  });
+  await page.goto(url + "?unified=1"); await open(page);
+  await page.getByRole("button", { name: /仅更新服务器和网页/ }).click();
+  await page.getByRole("button", { name: "更新服务器至 v5.3.15", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "正在安装 服务器 更新", exact: true })).toBeVisible();
+  expect(serverCommands).toEqual(["start"]);
+});
+
+for (const phase of ["downloading", "unknown"] as const) {
+  test(`server ${phase} remains accessible after the device reconnects`, async ({ page }) => {
+    let online = false;
+    let job: Record<string, string> | null = null;
+    const commands: Record<string, string>[] = [];
+    const state = () => job && phase === "unknown"
+      ? { ...base, current: base.latest.version, relay_version: base.latest.version } : base;
+    await page.route("**/api/updates/*", route => route.fulfill({ json: { ...state(), online } }));
+    await page.route("**/api/server-updates", async route => {
+      const body = route.request().postDataJSON();
+      if (["start", "cancel", "reconcile"].includes(body?.op)) {
+        commands.push(body);
+        if (body.op === "start") job = { id: body.job_id, version: body.version, previous: base.current, phase };
+        else job = { ...job!, phase: body.op === "cancel" ? "cancelled" : "verifying" };
+        await route.fulfill({ json: { ok: true, job } });
+      } else await route.fulfill({ json: { ...state(), busy_count: 0, job } });
+    });
+    await page.goto(url + "?unified=1"); await open(page);
+    await page.getByRole("button", { name: /仅更新服务器和网页/ }).click();
+    await page.getByRole("button", { name: "更新服务器至 v5.3.15", exact: true }).click();
+    await expect(page.getByRole("heading", { name: phase === "unknown" ? "更新结果待确认" : "下载更新包", exact: true })).toBeVisible();
+    online = true;
+    await page.reload(); await open(page);
+    await page.getByRole("button", { name: /查看服务器更新进度/ }).click();
+    const action = phase === "unknown" ? "reconcile" : "cancel";
+    await page.getByRole("button", { name: phase === "unknown" ? "重新核对并恢复" : "取消更新", exact: true }).click();
+    await expect.poll(() => commands.length).toBe(2);
+    expect(commands[1]).toEqual({ op: action, job_id: commands[0].job_id });
+  });
+}
+
+test("active device and server updates can both be inspected", async ({ page }) => {
+  await page.route("**/api/updates/*", route => route.fulfill({ json: { ...base, online: true,
+    job: { id: "a".repeat(32), version: base.latest.version, previous: base.current, phase: "downloading" },
+  } }));
+  await page.route("**/api/server-updates", route => route.fulfill({ json: { ...base, busy_count: 0,
+    job: { id: "b".repeat(32), version: base.latest.version, previous: base.current, phase: "unknown" },
+  } }));
+  await page.goto(url + "?unified=1"); await open(page);
+  await expect(page.getByRole("heading", { name: "下载更新包", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /查看服务器更新进度/ }).click();
+  await expect(page.getByRole("heading", { name: "更新结果待确认", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "返回 device-a 更新", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "下载更新包", exact: true })).toBeVisible();
+});
+
+test("pending server receipt remains accessible after the device reconnects", async ({ page }) => {
+  let online = false;
+  let job: Record<string, string> | null = null;
+  const starts: Record<string, string>[] = [];
+  await page.route("**/api/updates/*", route => route.fulfill({ json: { ...base, online } }));
+  await page.route("**/api/server-updates", async route => {
+    const body = route.request().postDataJSON();
+    if (body?.op === "start") {
+      starts.push(body);
+      if (starts.length === 1) { await route.abort("failed"); return; }
+      job = { id: body.job_id, version: body.version, previous: base.current, phase: "downloading" };
+      await route.fulfill({ json: { ok: true, job } });
+    } else if (body?.op === "lookup") {
+      await route.fulfill({ json: { ok: true, receipt: "missing", job_id: body.job_id, job: null } });
+    } else await route.fulfill({ json: { ...base, busy_count: 0, job } });
+  });
+  await page.goto(url + "?unified=1"); await open(page);
+  await page.getByRole("button", { name: /仅更新服务器和网页/ }).click();
+  await page.getByRole("button", { name: "更新服务器至 v5.3.15", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "更新尚未启动", exact: true })).toBeVisible();
+  online = true;
+  await page.reload(); await open(page);
+  await page.getByRole("button", { name: /查看服务器更新进度/ }).click();
+  await page.getByRole("button", { name: "重试更新", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "下载更新包", exact: true })).toBeVisible();
+  expect(starts).toHaveLength(2);
+  expect(starts[1]).toEqual(starts[0]);
+});
+
+test("online source-installed device keeps the managed server update accessible", async ({ page }) => {
+  const commands: { target: string; op: string }[] = [];
+  let job: Record<string, unknown> | null = null;
+  await page.route("**/api/updates/*", route => {
+    const body = route.request().postDataJSON();
+    if (body?.op === "start" || body?.op === "upgrade") commands.push({ target: "device", op: body.op });
+    return route.fulfill({ json: { ...base, online: true, managed: false, enabled: false, reason: "unsupported" } });
+  });
+  await page.route("**/api/server-updates", async route => {
+    const body = route.request().postDataJSON();
+    if (body?.op === "start") {
+      commands.push({ target: "server", op: body.op });
+      job = { id: body.job_id, version: body.version, previous: base.current, phase: "installing" };
+      await route.fulfill({ json: { ok: true, job } });
+    } else await route.fulfill({ json: { ...base, busy_count: 0, job } });
+  });
+  await page.goto(url + "?unified=1"); await open(page);
+  await expect(page.getByRole("button", { name: "更新到 v5.3.15", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: /仅更新服务器和网页/ }).click();
+  await expect(page.getByText("设备上线后可继续更新", { exact: false })).toHaveCount(0);
+  await page.getByRole("button", { name: "更新服务器至 v5.3.15", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "正在安装 服务器 更新", exact: true })).toBeVisible();
+  expect(commands).toEqual([{ target: "server", op: "start" }]);
+});
+
+test("managed device can update through a source-installed relay", async ({ page }) => {
+  const commands: string[] = [];
+  let job: Record<string, unknown> | null = null;
+  await page.route("**/api/server-updates", route => route.fulfill({ json: {
+    managed: false, enabled: false, reason: "unsupported", latest: null, relay_version: base.relay_version,
+  } }));
+  await page.route("**/api/updates/*", async route => {
+    const body = route.request().postDataJSON();
+    if (body?.op === "start" || body?.op === "upgrade") {
+      commands.push(body.op);
+      job = { id: body.job_id, version: body.version, previous: base.current, phase: "downloading" };
+      await route.fulfill({ json: { ok: true, job } });
+    } else await route.fulfill({ json: { ...base, allow_relay_update: false, job } });
+  });
+  await page.goto(url + "?unified=1"); await open(page);
+  await page.getByRole("button", { name: "更新到 v5.3.15", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "下载更新包", exact: true })).toBeVisible();
+  await expect(page.locator(".app-update-steps li")).toHaveCount(2);
+  expect(commands).toEqual(["start"]);
+});
+
+for (const { managedServer, pendingRead } of [
+  { managedServer: true, pendingRead: false },
+  { managedServer: true, pendingRead: true },
+  { managedServer: false, pendingRead: false },
+  { managedServer: false, pendingRead: true },
+]) {
+  test(`administrator authorization refreshes ${managedServer ? "managed" : "source"} server capabilities${pendingRead ? " after an in-flight read" : ""}`, async ({ page }) => {
+    if (pendingRead) await page.clock.install();
+    let authorized = false, pauseRead = false, readStarted = false;
+    let releaseRead = () => {};
+    const readWait = new Promise<void>(resolve => { releaseRead = resolve; });
+    const commands: string[] = [];
+    await page.route("**/api/update-authorization", async route => {
+      expect(route.request().postDataJSON()).toEqual({ username: "owner", password: "test-password" });
+      authorized = true;
+      await route.fulfill({ json: { ok: true } });
+    });
+    await page.route("**/api/server-updates", async route => {
+      const accessGranted = authorized;
+      if (pauseRead && !accessGranted) {
+        pauseRead = false; readStarted = true; await readWait;
+      }
+      await route.fulfill(accessGranted
+        ? { json: managedServer ? { ...base, busy_count: 0 }
+          : { managed: false, enabled: false, reason: "unsupported", relay_version: base.relay_version } }
+        : { status: 403, json: { reason: "forbidden" } });
+    });
+    await page.route("**/api/updates/*", async route => {
+      const body = route.request().postDataJSON();
+      if (body?.op === "upgrade" || body?.op === "start") {
+        expect(authorized).toBe(true); commands.push(body.op);
+        await route.fulfill({ json: { ok: true, job: { id: body.job_id, version: body.version,
+          previous: base.current, phase: body.op === "upgrade" ? "updating_relay" : "downloading",
+          coordinated: body.op === "upgrade" } } });
+      } else await route.fulfill({ json: base });
+    });
+    await page.goto(url + "?unified=1"); await open(page);
+    await page.getByRole("button", { name: "更新到 v5.3.15", exact: true }).click();
+    await page.getByLabel("管理员账号", { exact: true }).fill("owner");
+    await page.getByLabel("管理员密码", { exact: true }).fill("test-password");
+    if (pendingRead) {
+      pauseRead = true;
+      await page.clock.fastForward(5000);
+      await expect.poll(() => readStarted).toBe(true);
+    }
+    await page.getByRole("button", { name: "验证并继续", exact: true }).click();
+    if (pendingRead) {
+      await expect.poll(() => authorized).toBe(true);
+      expect(commands).toEqual([]);
+      releaseRead();
+    }
+    await expect.poll(() => commands.length).toBe(1);
+    expect(commands).toEqual([managedServer ? "upgrade" : "start"]);
+  });
+}
+
+test("failed post-authorization capability check keeps the update unsubmitted", async ({ page }) => {
+  let authorized = false;
+  const commands: string[] = [];
+  await page.route("**/api/update-authorization", route => {
+    authorized = true;
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.route("**/api/server-updates", route => route.fulfill(authorized
+    ? { status: 503, json: { reason: "network" } } : { status: 403, json: { reason: "forbidden" } }));
+  await page.route("**/api/updates/*", route => {
+    const body = route.request().postDataJSON();
+    if (body?.op === "start" || body?.op === "upgrade") commands.push(body.op);
+    return route.fulfill({ json: base });
+  });
+  await page.goto(url + "?unified=1"); await open(page);
+  await page.getByRole("button", { name: "更新到 v5.3.15", exact: true }).click();
+  await page.getByLabel("管理员账号", { exact: true }).fill("owner");
+  await page.getByLabel("管理员密码", { exact: true }).fill("test-password");
+  await page.getByRole("button", { name: "验证并继续", exact: true }).click();
+  await expect(page.getByRole("alert")).toHaveText("暂时无法确认更新能力，请重试。");
+  expect(commands).toEqual([]);
+});
+
+test("server recovery requests administrator authentication and reuses the original job", async ({ page }) => {
+  let authorized = false;
+  const commands: Record<string, string>[] = [];
+  let job = { id: "a".repeat(32), version: base.latest.version, previous: base.current,
+    phase: "unknown", coordinated: true, server_phase: "unknown" };
+  await page.route("**/api/update-authorization", async route => {
+    expect(route.request().postDataJSON()).toEqual({ username: "owner", password: "test-password" });
+    authorized = true;
+    await route.fulfill({ json: { ok: true } });
+  });
+  await page.route("**/api/server-updates", route => route.fulfill(authorized
+    ? { json: { ...base, busy_count: 0 } } : { status: 403, json: { reason: "forbidden" } }));
+  await page.route("**/api/updates/*", async route => {
+    const body = route.request().postDataJSON();
+    if (["start", "upgrade", "reconcile"].includes(body?.op)) commands.push(body);
+    if (body?.op === "reconcile") {
+      expect(authorized).toBe(true);
+      job = { ...job, phase: "updating_relay", server_phase: "verifying" };
+      await route.fulfill({ json: { ok: true, job } });
+    } else await route.fulfill({ json: { ...base, job } });
+  });
+  await page.goto(url + "?unified=1"); await open(page);
+  await page.getByRole("button", { name: "重新核对并恢复", exact: true }).click();
+  await page.getByLabel("管理员账号", { exact: true }).fill("owner");
+  await page.getByLabel("管理员密码", { exact: true }).fill("test-password");
+  expect(commands).toEqual([]);
+  await page.getByRole("button", { name: "验证并继续", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "检查并更新服务器", exact: true })).toBeVisible();
+  expect(commands).toEqual([{ op: "reconcile", job_id: job.id }]);
+});
+
+test("device recovery does not require permission to update the server", async ({ page }) => {
+  const commands: Record<string, string>[] = [];
+  let job = { id: "a".repeat(32), version: base.latest.version, previous: base.current,
+    phase: "unknown", coordinated: true, server_phase: "succeeded" };
+  await page.route("**/api/server-updates", route => route.fulfill({ status: 403, json: { reason: "forbidden" } }));
+  await page.route("**/api/updates/*", async route => {
+    const body = route.request().postDataJSON();
+    if (body?.op === "reconcile") {
+      commands.push(body);
+      job = { ...job, phase: "verifying" };
+      await route.fulfill({ json: { ok: true, job } });
+    } else await route.fulfill({ json: { ...base, job } });
+  });
+  await page.goto(url + "?unified=1"); await open(page);
+  await page.getByRole("button", { name: "重新核对并恢复", exact: true }).click();
+  await expect(page.getByLabel("管理员密码", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "验证更新结果", exact: true })).toBeVisible();
+  expect(commands).toEqual([{ op: "reconcile", job_id: job.id }]);
+});
+
+test("legacy device requests native authorization once then starts its update", async ({ page }) => {
+  let enabled = false, authorizations = 0, starts = 0;
+  await page.route("**/api/updates/*", async route => {
+    const body = route.request().postDataJSON();
+    if (body?.op === "authorize") {
+      authorizations++; enabled = true;
+      await route.fulfill({ json: { ok: true } });
+    } else if (body?.op === "start") {
+      starts++;
+      await route.fulfill({ json: { ok: true, job: { id: body.job_id, version: body.version,
+        previous: base.current, phase: "downloading" } } });
+    } else await route.fulfill({ json: { ...base, enabled, reason: enabled ? null : "setup_required" } });
+  });
+  await page.goto(url); await open(page);
+  await page.getByRole("button", { name: "更新到 v5.3.15", exact: true }).click();
+  await expect.poll(() => starts).toBe(1);
+  expect(authorizations).toBe(1);
+});
+
+test("catalog failure cannot display an old successful update as a fresh check", async ({ page }) => {
+  await page.route("**/api/updates/*", route => route.fulfill({ json: {
+    ...base, current: base.latest.version, reason: "rate_limited",
+    job: { id: 'c'.repeat(32), version: base.latest.version, previous: base.current, phase: 'succeeded' },
+  } }));
+  await page.goto(url); await open(page);
+  await expect(page.getByRole("heading", { name: "暂时无法检查更新", exact: true })).toBeVisible();
+  await expect(page.locator('.app-update-warning')).toContainText('GitHub 限流');
+  await expect(page.getByText('更新已完成', { exact: true })).toHaveCount(0);
+});
 async function open(page: Page) {
   await page.getByRole("button", { name: "更多设置", exact: true }).click();
   await page.getByRole("button", { name: /^检查更新/ }).click();
@@ -24,7 +387,7 @@ for (const phase of ["waiting_network", "waiting_device"] as const) {
       } else await route.fulfill({ json: { ...base, online: phase !== "waiting_device", maintenance: false, job } });
     });
     await page.goto(url); await open(page);
-    await page.getByRole("button", { name: "就绪后更新", exact: true }).click();
+    await page.getByRole("button", { name: "更新到 v5.3.15", exact: true }).click();
     const heading = phase === "waiting_network" ? "等待网络恢复" : "等待设备上线";
     await expect(page.getByRole("heading", { name: heading })).toBeVisible();
     await page.reload(); await open(page);
@@ -32,7 +395,7 @@ for (const phase of ["waiting_network", "waiting_device"] as const) {
     await expect(page.getByRole("textbox", { name: "输入消息" })).toBeEnabled();
     expect(starts).toHaveLength(1);
     await page.getByRole("button", { name: "取消更新", exact: true }).click();
-    await expect(page.getByRole("button", { name: "就绪后更新", exact: true })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "更新到 v5.3.15", exact: true })).toBeEnabled();
   });
 }
 
@@ -41,7 +404,7 @@ test("device upgrade is available while an older server has separate update auth
     ...base, allow_relay_update: false, relay_version: "5.3.13", online: false,
   } }));
   await page.goto(url); await open(page);
-  await expect(page.getByRole("button", { name: "就绪后更新", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "更新到 v5.3.15", exact: true })).toBeEnabled();
   await expect(page.getByText("设备当前离线，确认后会保存更新请求，等待设备上线执行。", { exact: true })).toBeVisible();
 });
 
@@ -93,7 +456,7 @@ test("application updates preserve drafts, reattach to one job and fit mobile", 
   expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
   expect(await sheet.locator(".app-update-body").evaluate(node => parseFloat(getComputedStyle(node).paddingLeft))).toBeGreaterThanOrEqual(16);
   await expect(sheet.getByRole("button", { name: "收起更新窗口" })).toBeVisible();
-  const install = sheet.getByRole("button", { name: "就绪后更新", exact: true });
+  const install = sheet.getByRole("button", { name: "更新到 v5.3.15", exact: true });
   expect(await install.evaluate(node => parseFloat(getComputedStyle(node).borderRadius))).toBeGreaterThan(20);
   await page.screenshot({ path: info.outputPath("update-sheet.png"), animations: "disabled" });
   await install.click();
@@ -104,7 +467,7 @@ test("application updates preserve drafts, reattach to one job and fit mobile", 
   await expect(sheet.getByText("等待安全更新", { exact: true }).first()).toBeVisible();
   expect(starts).toHaveLength(1);
   await sheet.getByRole("button", { name: "取消更新", exact: true }).click();
-  await expect(sheet.getByRole("button", { name: "就绪后更新", exact: true })).toBeEnabled();
+  await expect(sheet.getByRole("button", { name: "更新到 v5.3.15", exact: true })).toBeEnabled();
 });
 
 test("application update retry after lost response reuses durable identity across reload", async ({ page }) => {
@@ -123,7 +486,7 @@ test("application update retry after lost response reuses durable identity acros
     else await route.fulfill({ json: { ...base, job } });
   });
   await page.goto(url); await open(page);
-  await page.getByRole("button", { name: "就绪后更新", exact: true }).click();
+  await page.getByRole("button", { name: "更新到 v5.3.15", exact: true }).click();
   await expect(page.getByRole("heading", { name: "更新尚未启动", exact: true })).toBeVisible();
   expect(starts).toHaveLength(1);
   await page.reload(); await open(page);
@@ -147,7 +510,7 @@ test("update submission error survives successful polling and reload without aut
     } else await route.fulfill({ json: base });
   });
   await page.goto(url); await open(page);
-  await page.getByRole("button", { name: "就绪后更新", exact: true }).click();
+  await page.getByRole("button", { name: "更新到 v5.3.15", exact: true }).click();
   await expect(page.getByRole("heading", { name: "更新尚未启动" })).toBeVisible();
   await expect(page.locator(".app-update-warning")).toContainText("升级权限");
   const before = lookups;
@@ -195,7 +558,7 @@ for (const phase of ["waiting", "unknown"] as const) {
       } else await route.fulfill({ json: { ...base, job } });
     });
     await page.goto(url); await open(page);
-    await page.getByRole("button", { name: "就绪后更新", exact: true }).click();
+    await page.getByRole("button", { name: "更新到 v5.3.15", exact: true }).click();
     await expect(page.getByRole("heading", { name: phase === "waiting" ? "等待安全更新" : "更新结果待确认" })).toBeVisible();
     expect(starts).toBe(1);
     expect(await page.evaluate(() => localStorage.getItem("cc_remote_ui_update:device-a"))).toBeNull();
@@ -327,7 +690,7 @@ test("application update long notes fit a small viewport with footer visible", a
     ...base, latest: { ...base.latest, notes: "一段完整的更新记录，包含功能和修复。\n".repeat(120) },
   } }));
   await page.goto(url); await open(page);
-  const install = page.getByRole("button", { name: "就绪后更新", exact: true });
+  const install = page.getByRole("button", { name: "更新到 v5.3.15", exact: true });
   await expect(install).toBeInViewport();
   const box = await install.boundingBox();
   expect(box!.y + box!.height).toBeLessThan(568);

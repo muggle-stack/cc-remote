@@ -6,6 +6,9 @@ import json
 from pathlib import Path
 import subprocess
 import time
+import threading
+from urllib.error import HTTPError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from cc_remote.update import UpdateError, host_platform, read_installation, release_repository, version_tuple
@@ -13,10 +16,40 @@ from cc_remote.update_errors import read_with_retry
 from cc_remote.update_jobs import TERMINAL, UpdateJobs, failure_reason, helper_path, job_id, public_job
 
 
+_catalog_lock = threading.Lock()
+_catalog_cache: dict[str, tuple[float, dict]] = {}
+
+
 def release_catalog(repository: str | None = None) -> dict:
-    request = Request(f"https://api.github.com/repos/{repository or release_repository()}/releases/latest",
+    repository = repository or release_repository()
+    with _catalog_lock:
+        cached = _catalog_cache.get(repository)
+        if cached and cached[0] > time.monotonic():
+            return dict(cached[1])
+        value = _release_catalog(repository)
+        _catalog_cache[repository] = (time.monotonic() + 60, value)
+        return dict(value)
+
+
+def _release_catalog(repository: str) -> dict:
+    request = Request(f"https://api.github.com/repos/{repository}/releases/latest",
                       headers={"Accept": "application/vnd.github+json", "User-Agent": "cc-remote-updater"})
-    raw = read_with_retry(urlopen, request, timeout=15, limit=1024 * 1024)
+    try:
+        raw = read_with_retry(urlopen, request, timeout=15, limit=1024 * 1024)
+    except HTTPError as exc:
+        if exc.code != 429 and not (exc.code == 403 and (exc.headers or {}).get("X-RateLimit-Remaining") == "0"):
+            raise
+        # GitHub's stable release redirect remains available when anonymous
+        # REST discovery is rate limited. Installation still verifies SHA-256.
+        with urlopen(Request(f"https://github.com/{repository}/releases/latest", method="HEAD"), timeout=15) as response:
+            target = urlsplit(response.geturl())
+        prefix = f"/{repository}/releases/tag/v"
+        if (target.scheme != "https" or target.netloc != "github.com" or not target.path.startswith(prefix)
+                or target.query or target.fragment):
+            raise UpdateError("invalid stable release redirect") from exc
+        version = target.path[len(prefix):]
+        version_tuple(version)
+        return {"version": version, "notes": ""}
     if len(raw) > 1024 * 1024:
         raise UpdateError("oversized GitHub release response")
     value = json.loads(raw)
@@ -34,6 +67,7 @@ class InstallationUpdates:
         self.root = root or (release.parent.parent if release.parent.name == "releases"
                              and (release / "release-manifest.json").is_file() else None)
         self.catalog = None
+        self.catalog_error = None
         self.checked_at = 0.0
         self.check_lock = asyncio.Lock()
         self.request_lock = asyncio.Lock()
