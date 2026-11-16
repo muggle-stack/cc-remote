@@ -130,7 +130,7 @@ body{
 .mono{font-family:var(--mono)} .serif{font-family:var(--serif)}
 
 /* APP SHELL — single chat pane for now (sessions sidebar reserved for multi-session) */
-.shell{ position:relative; top:var(--app-offset-top,0px); display:block; height:100vh; height:var(--app-height,100dvh); overflow:hidden; }
+.shell{ position:relative; top:var(--app-document-top,var(--app-offset-top,0px)); display:block; height:100vh; height:var(--app-height,100dvh); overflow:hidden; }
 .pane{ position:relative; height:100%; display:flex; flex-direction:column; overflow:hidden; background:var(--bg); }
 
 /* ICON BUTTONS */

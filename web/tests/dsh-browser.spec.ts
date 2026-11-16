@@ -1724,7 +1724,7 @@ test("DSH terminal scrollback supports wheel and touch without sending shell inp
     .some(c => c.action === "input" && c.value.type === "write")).toBe(false);
 });
 
-test("DSH terminal long press arrows repeat, accelerate and stop on cancellation", async ({ page }) => {
+test("DSH terminal long press sends one arrow per gesture even while held", async ({ page }) => {
   const relay = await openDsh(page, { features: true, commandSuccess: true });
   await openDshTools(page); await selectDshTool(page, "终端");
   const panel = page.getByLabel("DSH 会话工具", { exact: true });
@@ -1735,18 +1735,36 @@ test("DSH terminal long press arrows repeat, accelerate and stop on cancellation
   const writes = () => commands().filter(command => command.action === "input" && command.value.type === "write").map(command => command.value.data).join("");
   await terminalGesture(page, 100, 0);
   expect(writes()).toBe("");
-  await terminalGesture(page, 0, -30, 500, 420);
-  const slow = writes();
-  const slowCount = slow.split("\x1b[A").length - 1;
-  expect(slowCount).toBeGreaterThanOrEqual(2);
-  await terminalGesture(page, 0, -120, 500, 420);
-  const fast = writes().slice(slow.length);
-  expect(fast.split("\x1b[A").length - 1).toBeGreaterThan(slowCount);
-  await terminalGesture(page, 70, 0, 500, 150, "pointercancel");
+  await panel.locator(".dsh-terminal-viewport").evaluate(async element => {
+    const rect = element.getBoundingClientRect();
+    const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
+    const send = (type: string, dx: number, dy: number) => element.dispatchEvent(new PointerEvent(type, {
+      bubbles: true, cancelable: true, pointerId: 42, pointerType: "touch", isPrimary: true,
+      clientX: x + dx, clientY: y + dy,
+    }));
+    send("pointerdown", 0, 0);
+    await new Promise(resolve => setTimeout(resolve, 500));
+    send("pointermove", 0, -30);
+    await new Promise(resolve => setTimeout(resolve, 600));
+    // Continuing farther, jittering, and reversing within this contact must
+    // never advance to another history entry or send an opposite arrow.
+    for (const [dx, dy] of [[0, -100], [2, -95], [-2, -105], [0, 50], [60, 0]]) {
+      send("pointermove", dx, dy);
+    }
+    send("pointerup", 60, 0);
+  });
+  await expect.poll(writes).toBe("\x1b[A");
+  await terminalGesture(page, 0, -30, 500, 600);
+  await expect.poll(writes).toBe("\x1b[A\x1b[A");
+  await terminalGesture(page, 0, -120, 500, 600);
+  await expect.poll(writes).toBe("\x1b[A\x1b[A\x1b[A");
+  await terminalGesture(page, 0, 120, 500, 600);
+  await expect.poll(writes).toBe("\x1b[A\x1b[A\x1b[A\x1b[B");
+  await terminalGesture(page, 70, 0, 500, 600, "pointercancel");
+  await expect.poll(writes).toBe("\x1b[A\x1b[A\x1b[A\x1b[B\x1b[C");
   const stopped = writes();
   await page.waitForTimeout(250);
   expect(writes()).toBe(stopped);
-  expect(stopped).toContain("\x1b[C");
   await expect(panel.getByLabel("方向键手势")).toHaveCount(0);
   const attach = commands().find(command => command.action === "attach");
   relay.emit({ type: "dsh_read_result", sid, request_id: attach.lease, kind: "terminal_output", next_seq: 2,

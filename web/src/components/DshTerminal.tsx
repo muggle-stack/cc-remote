@@ -293,7 +293,6 @@ export default function DshTerminal({ sid, api }: { sid: string; api: DshApiClie
       {touchFeedback && <div className="dsh-terminal-direction" role="status" aria-label="方向键手势" data-direction={touchFeedback.direction}>
         <span data-active={touchFeedback.direction === "ArrowUp"}>↑</span><span data-active={touchFeedback.direction === "ArrowLeft"}>←</span>
         <span data-active={touchFeedback.direction === "ArrowRight"}>→</span><span data-active={touchFeedback.direction === "ArrowDown"}>↓</span>
-        <small>{touchFeedback.speed ? `${touchFeedback.speed}×` : ""}</small>
       </div>}
       {visible && selectionActive && view && <DshTerminalSelection {...view}
         onCopy={() => clipboardControls.current?.copy()}

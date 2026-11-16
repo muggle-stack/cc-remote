@@ -37,7 +37,7 @@ export function attachTerminalWheelScroll(host: HTMLElement, terminal: Terminal)
 }
 
 export type TerminalDirection = "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight";
-export interface TerminalTouchFeedback { direction: TerminalDirection | null; speed: number }
+export interface TerminalTouchFeedback { direction: TerminalDirection | null }
 
 interface TerminalTouchActions {
   ready(): boolean;
@@ -61,25 +61,17 @@ export function attachTerminalTouch(
     lastY: number; remainder: number; mode: "pending" | "scroll" | "hold" | "arrows" | "dismiss" | "pinch";
   }) | undefined;
   let hold: ReturnType<typeof setTimeout> | undefined;
-  let repeat: ReturnType<typeof setTimeout> | undefined;
-  let direction: TerminalDirection | null = null;
-  let interval = 180;
   let lastTap: (Contact & { time: number }) | undefined;
   let lastTouch = -Infinity;
   let reportingMouse = false;
   let pinch: { distance: number; size: number } | undefined;
 
   const clear = () => {
-    clearTimeout(hold); clearTimeout(repeat);
-    gesture = undefined; direction = null; pinch = undefined;
+    clearTimeout(hold);
+    gesture = undefined; pinch = undefined;
     actions.feedback(null);
   };
   const cancel = () => { clear(); contacts.clear(); lastTap = undefined; };
-  const repeatKey = () => {
-    if (!direction || !actions.ready()) { clear(); return; }
-    actions.send(direction);
-    repeat = setTimeout(repeatKey, interval);
-  };
   const distance = () => {
     const [a, b] = [...contacts.values()];
     return Math.hypot(a.x - b.x, a.y - b.y);
@@ -104,7 +96,7 @@ export function attachTerminalTouch(
     hold = setTimeout(() => {
       if (gesture?.mode !== "pending") return;
       gesture.mode = "hold"; lastTap = undefined;
-      actions.feedback({ direction: null, speed: 0 });
+      actions.feedback({ direction: null });
     }, 450);
   };
   const move = (event: PointerEvent) => {
@@ -124,17 +116,18 @@ export function attachTerminalTouch(
       clearTimeout(hold); lastTap = undefined;
       gesture.mode = "scroll";
     }
-    if (gesture.mode === "hold" || gesture.mode === "arrows") {
+    if (gesture.mode === "arrows") return;
+    if (gesture.mode === "hold") {
       if (!actions.ready()) return;
       const next = displacement < 14 ? null : Math.abs(dx) > Math.abs(dy)
         ? (dx > 0 ? "ArrowRight" : "ArrowLeft") : (dy > 0 ? "ArrowDown" : "ArrowUp");
-      const speed = displacement < 48 ? 1 : displacement < 96 ? 2 : 3;
-      interval = [0, 180, 100, 50][speed];
-      if (next !== direction) {
-        clearTimeout(repeat); direction = next;
-        if (next) { gesture.mode = "arrows"; repeatKey(); }
+      if (next) {
+        // A held finger may jitter or remain down while the remote echo arrives.
+        // Send one key for this contact; the next command requires a new gesture.
+        gesture.mode = "arrows";
+        actions.send(next);
       }
-      actions.feedback({ direction: next, speed: next ? speed : 0 });
+      actions.feedback({ direction: next });
       return;
     }
     if (gesture.mode !== "scroll") return;
