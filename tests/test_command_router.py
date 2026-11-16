@@ -4,8 +4,6 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-import pytest
-
 from cc_remote.protocol import Error, Pong
 from cc_remote.wrapper.command_router import (
     COMMAND_HANDLER_NAMES,
@@ -126,37 +124,34 @@ def test_command_router_has_the_characterized_command_surface():
     assert not (set(COMMAND_HANDLER_NAMES) & set(WORK_MUTATION_COMMANDS))
 
 
-@pytest.mark.parametrize(
-    ("command_type", "handler_name"),
-    sorted(EXPECTED_COMMAND_HANDLERS.items()),
-)
-def test_command_router_resolves_direct_handlers_at_dispatch_time(
-        command_type, handler_name):
+def test_command_router_resolves_direct_handlers_at_dispatch_time(subtests):
     async def run():
-        target = _Target()
-        router = CommandRouter(target)
-        command = SimpleNamespace(type=command_type)
+        for command_type, handler_name in sorted(EXPECTED_COMMAND_HANDLERS.items()):
+            with subtests.test(command_type=command_type):
+                target = _Target()
+                router = CommandRouter(target)
+                command = SimpleNamespace(type=command_type)
 
-        result = await router.dispatch(command)
+                result = await router.dispatch(command)
 
-        assert result == f"result:{command_type}"
-        assert target.calls == [(handler_name, command_type)]
+                assert result == f"result:{command_type}"
+                assert target.calls == [(handler_name, command_type)]
 
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("command_type", sorted(EXPECTED_WORK_MUTATIONS))
-def test_command_router_groups_work_mutations_without_changing_the_command(
-        command_type):
+def test_command_router_groups_work_mutations_without_changing_the_command(subtests):
     async def run():
-        target = _Target()
-        router = CommandRouter(target)
-        command = SimpleNamespace(type=command_type)
+        for command_type in sorted(EXPECTED_WORK_MUTATIONS):
+            with subtests.test(command_type=command_type):
+                target = _Target()
+                router = CommandRouter(target)
+                command = SimpleNamespace(type=command_type)
 
-        result = await router.dispatch(command)
+                result = await router.dispatch(command)
 
-        assert result == f"result:{command_type}"
-        assert target.calls == [("_handle_work_mutation", command_type)]
+                assert result == f"result:{command_type}"
+                assert target.calls == [("_handle_work_mutation", command_type)]
 
     asyncio.run(run())
 

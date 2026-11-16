@@ -92,18 +92,19 @@ def test_every_pinned_family_has_a_projection_fixture():
     assert set(KINDS) == set(EXAMPLES)
 
 
-@pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("width", [12, 40, 100])
-def test_family_projection_is_bounded_and_responsive(kind, width):
-    source = kind + "\n" + EXAMPLES[kind]
-    text, responsive, _ = render_markdown(
-        "```mermaid\n" + source + "\n```", width
-    )
-    assert responsive
-    assert "Unsupported diagram" not in text.plain
-    assert "Source ·" not in text.plain
-    assert all(cell_len(line) <= width for line in text.plain.splitlines())
-    assert len(text) < 128 * 1024
+def test_family_projection_is_bounded_and_responsive(width, subtests):
+    for kind in KINDS:
+        with subtests.test(kind=kind):
+            source = kind + "\n" + EXAMPLES[kind]
+            text, responsive, _ = render_markdown(
+                "```mermaid\n" + source + "\n```", width
+            )
+            assert responsive
+            assert "Unsupported diagram" not in text.plain
+            assert "Source ·" not in text.plain
+            assert all(cell_len(line) <= width for line in text.plain.splitlines())
+            assert len(text) < 128 * 1024
 
 
 @pytest.mark.parametrize("width", [12, 40, 100])

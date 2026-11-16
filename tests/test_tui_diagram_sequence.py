@@ -201,10 +201,8 @@ def test_message_entities_do_not_split_into_separate_statements():
     assert "Source ·" not in text
 
 
-@pytest.mark.parametrize("width", range(8, 85))
-def test_notes_self_calls_and_nested_frames_fit_all_terminal_widths(width):
-    text = render(
-        """participant A as 中文<br/>é 👩‍💻
+def test_notes_self_calls_and_nested_frames_fit_all_terminal_widths(subtests):
+    source = """participant A as 中文<br/>é 👩‍💻
 participant B as Server
 alt first
 loop retry
@@ -217,8 +215,9 @@ Note over B,A: 两者
 end
 else second
 A->>B: remote
-end""",
-        width,
-    )
-    assert all(cell_len(line) <= width for line in text.splitlines())
-    assert "Source ·" not in text
+end"""
+    for width in range(8, 85):
+        with subtests.test(width=width):
+            text = render(source, width)
+            assert all(cell_len(line) <= width for line in text.splitlines())
+            assert "Source ·" not in text

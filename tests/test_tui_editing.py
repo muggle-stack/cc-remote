@@ -106,28 +106,31 @@ async def test_draft_visual_delete_and_open_line():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("keys", "expected"),
-    [
-        (("d", "d"), "def"),
-        (("G", "d", "d"), "abc"),
-        (("c", "c", "x", "escape"), "x\ndef"),
-        (("w", "c", "w", "x", "escape"), "abc\nx"),
-        (("A", "x", "escape"), "abcx\ndef"),
-        (("G", "I", "x", "escape"), "abc\nxdef"),
-        (("O", "x", "escape"), "x\nabc\ndef"),
-        (("l", "d", "dollar_sign"), "a\ndef"),
-    ],
-)
-async def test_draft_line_editing_boundaries(keys, expected):
+async def test_draft_line_editing_boundaries(subtests):
     app = make_app()
     async with app.run_test() as pilot:
         editor = app.query_one(Composer)
-        editor.load_text("abc\ndef")
         await pilot.press("ctrl+j")
-        await edit_keys(editor, ("g", "g", *keys))
-        assert editor.text == expected
-        assert app.focused is editor and editor.vim_mode == "NORMAL"
+        for keys, expected in [
+            (("d", "d"), "def"),
+            (("G", "d", "d"), "abc"),
+            (("c", "c", "x", "escape"), "x\ndef"),
+            (("w", "c", "w", "x", "escape"), "abc\nx"),
+            (("A", "x", "escape"), "abcx\ndef"),
+            (("G", "I", "x", "escape"), "abc\nxdef"),
+            (("O", "x", "escape"), "x\nabc\ndef"),
+            (("l", "d", "dollar_sign"), "a\ndef"),
+        ]:
+            with subtests.test(keys=keys):
+                editor.load_text("abc\ndef")
+                editor.set_mode("NORMAL")
+                editor.register = ""
+                editor.line_register = False
+                app.vim_register = ("", False)
+                app.copy_to_clipboard("")
+                await edit_keys(editor, ("g", "g", *keys))
+                assert editor.text == expected
+                assert app.focused is editor and editor.vim_mode == "NORMAL"
 
 
 @pytest.mark.asyncio
@@ -218,32 +221,35 @@ async def test_quote_then_vim_edit_then_read_keeps_reading_anchor():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("text", "cursor", "keys", "expected"),
-    [
-        ("call(old)", 6, "ci(new", "call(new)"),
-        ("one two three", 5, "daw", "one three"),
-        ("one two three", 5, "ciwNEW", "one NEW three"),
-        ('say "old"', 6, 'ci"new', 'say "new"'),
-        ("one [old] rest", 6, "da[", "one  rest"),
-        ("{outer(inner)}", 8, "cibX", "{outer(X)}"),
-        ("one two", 5, "viwd", "one "),
-        ("call()", 4, "ci(x", "call(x)"),
-        ("one <two>", 6, "da<", "one "),
-        ("one two", 0, "di(", "one two"),
-    ],
-)
-async def test_text_object_editor_commands(text, cursor, keys, expected):
+async def test_text_object_editor_commands(subtests):
     app = make_app()
     async with app.run_test() as pilot:
         editor = app.query_one(Composer)
-        editor.load_text(text)
-        editor.move_cursor((0, cursor))
         await pilot.press("ctrl+j")
-        await edit_keys(editor, map(_character_to_key, keys))
-        assert editor.text == expected
-        assert app.focused is editor
-        assert not app.client._outbox
+        for text, cursor, keys, expected in [
+            ("call(old)", 6, "ci(new", "call(new)"),
+            ("one two three", 5, "daw", "one three"),
+            ("one two three", 5, "ciwNEW", "one NEW three"),
+            ('say "old"', 6, 'ci"new', 'say "new"'),
+            ("one [old] rest", 6, "da[", "one  rest"),
+            ("{outer(inner)}", 8, "cibX", "{outer(X)}"),
+            ("one two", 5, "viwd", "one "),
+            ("call()", 4, "ci(x", "call(x)"),
+            ("one <two>", 6, "da<", "one "),
+            ("one two", 0, "di(", "one two"),
+        ]:
+            with subtests.test(text=text, cursor=cursor, keys=keys):
+                editor.load_text(text)
+                editor.set_mode("NORMAL")
+                editor.register = ""
+                editor.line_register = False
+                app.vim_register = ("", False)
+                app.copy_to_clipboard("")
+                editor.move_cursor((0, cursor))
+                await edit_keys(editor, map(_character_to_key, keys))
+                assert editor.text == expected
+                assert app.focused is editor
+                assert not app.client._outbox
 
 
 @pytest.mark.asyncio
