@@ -6983,6 +6983,9 @@ export default function App() {
             }}
             onSetAutoCompact={(selection) => activeBtwSid
               ? setBtwAutoCompact(activeBtwSid, selection) : false}
+            onContext={() => {
+              if (activeBtwSid) sendContextRequestTo(activeBtwSid, true);
+            }}
             onOpenFile={previewBtwFile} onCollapse={collapseBtw}
             imageAssets={btwInlineImageAssets}
             onLoadImage={loadBtwMessageImage}

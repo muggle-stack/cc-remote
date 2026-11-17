@@ -65,6 +65,7 @@ from cc_remote.wrapper.claude_controls import (
     CLAUDE_DEFAULT_AUTO_COMPACT_MODE,
     claude_auto_compact_cli_value,
     valid_claude_auto_compact,
+    validate_claude_auto_compact_window,
     valid_claude_model,
 )
 from cc_remote.wrapper.work_prompt import WORK_SYSTEM_PROMPT
@@ -271,6 +272,8 @@ class SdkHandle:
         self.applied_auto_compact_threshold_tokens: int | None = None
         self.effective_auto_compact_threshold_tokens: int | None = None
         self.raw_context_max_tokens: int | None = None
+        self.model_context_max_tokens: int | None = None
+        self._context_max_model: str | None = None
         # Authoritative selected Claude alias for this session.  The transcript
         # may expose a proxy's upstream model (for example glm-5.2), so recover
         # this from the SDK control plane and preserve it across reconnects.
@@ -1427,8 +1430,28 @@ class SdkHandle:
             mode, threshold_tokens)
         if checked_mode != mode or checked_threshold != threshold_tokens:
             raise ValueError("invalid Claude autocompact configuration")
+        if self._context_max_model == self.model:
+            validate_claude_auto_compact_window(mode, threshold_tokens, self.model_context_max_tokens)
         self.auto_compact_mode = checked_mode
         self.auto_compact_threshold_tokens = checked_threshold
+
+    async def get_model_context_window(self, cwd: str) -> int | None:
+        from cc_remote.wrapper.claude_models import claude_context_window
+
+        model, revision = self.model, self._context_revision
+        if not model:
+            return None
+        maximum = await claude_context_window(
+            claude_bin=self.cfg.claude_bin, model=model, cwd=cwd,
+            config_dir=self.claude_config_dir, isolate_account_env=self.isolate_account_env,
+            work_only=self.work_mode)
+        if maximum is None:
+            raise ValueError("尚未读取到模型最大窗口，请稍后重试或跟随 Claude")
+        if model != self.model or revision != self._context_revision:
+            return None
+        self.model_context_max_tokens = maximum
+        self._context_max_model = model
+        return maximum
 
     async def get_context_usage(self, *, detail: str = "summary") -> dict:
         """Return the cc session's context window usage (matches CLI /context)."""

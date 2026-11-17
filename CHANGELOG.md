@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+Align Codex and Claude context controls, confirm shared Codex settings from native runtime data, and validate Claude compaction windows against native model limits. Wire protocol v95.
+
 ## v5.3.43
 
 Use official Codex model and reasoning metadata. Wire protocol v94 and Claude Agent SDK 0.2.174.

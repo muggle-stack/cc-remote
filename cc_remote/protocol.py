@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 94
+PROTOCOL_VERSION = 95
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -2346,6 +2346,7 @@ class ContextReport(_Base):
     # for the desired/applied session control carried by AutoCompact.
     auto_compact_threshold_tokens: Optional[int] = Field(default=None, ge=0)
     raw_max_tokens: Optional[int] = Field(default=None, ge=0)
+    model_max_tokens: Optional[int] = Field(default=None, gt=0)
     categories: list[dict[str, Any]] = []
 
 

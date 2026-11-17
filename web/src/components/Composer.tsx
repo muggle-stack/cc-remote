@@ -576,7 +576,7 @@ export function Composer(p: Props) {
           }
           break;
         }
-        const parsed = parseAutoCompactArgument(args);
+        const parsed = parseAutoCompactArgument(args, p.contextReport?.model_max_tokens);
         if (!parsed.ok) {
           flash(parsed.error);
           return;
@@ -795,6 +795,7 @@ export function Composer(p: Props) {
         effectiveThresholdTokens={
           p.contextReport?.auto_compact_threshold_tokens}
         rawMaxTokens={p.contextReport?.raw_max_tokens}
+        modelMaxTokens={p.contextReport?.model_max_tokens}
         disabled={locked || !p.onSetAutoCompact}
         onChange={(selection) => {
           if (!p.onSetAutoCompact?.(selection)) {
@@ -1192,9 +1193,7 @@ export function Composer(p: Props) {
                   codex={p.engine === "codex"}
                   dsh={p.engine === "dsh"}
                   codexContext={p.engine === "codex" ? p.codexContext : null}
-                  autoCompact={p.engine === "claude" ? p.autoCompact : null}
-                  onAutoCompact={p.engine === "codex" && p.onSetCodexContext
-                    ? () => { setCtxOpen(false); setAutoCompactOpen(true); } : undefined} />
+                  autoCompact={p.engine === "claude" ? p.autoCompact : null} />
               </Suspense>
             )}
             {p.engine === "claude" && autoCompactOpen && (
@@ -1206,7 +1205,7 @@ export function Composer(p: Props) {
             {p.engine === "codex" && autoCompactOpen && (
               <div className="ctx-pop auto-compact-pop" role="dialog" aria-label="Codex 上下文上限">
                 <Suspense fallback={<p>加载设置…</p>}><CodexContextControl
-                  key={`${p.codexContext?.max_context_tokens}:${p.codexContext?.pending}`}
+                  key={p.draftKey}
                   state={p.codexContext ?? null} report={exactContextReport}
                   onChange={(value) => p.onSetCodexContext?.(value) ?? false} /></Suspense>
               </div>

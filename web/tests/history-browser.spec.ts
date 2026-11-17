@@ -2386,6 +2386,7 @@ test("session workspace Codex capacity rejects oversize and sends a session pref
     context_window_tokens: null, limit_tokens: 19000, pending: false, mutable: true, error: null });
   const setting = page.getByRole("dialog", { name: "Codex 上下文上限", exact: true });
   await expect(setting).toBeVisible();
+  await setting.getByRole("button", { name: "自定义", exact: true }).click();
   await setting.getByLabel("上下文上限（tokens）").fill("20k");
   await setting.getByRole("button", { name: "应用", exact: true }).click();
   await expect(setting.getByRole("alert")).toContainText("19,000");
@@ -2399,7 +2400,7 @@ test("session workspace Codex capacity rejects oversize and sends a session pref
     max_context_tokens: 12000, applied_max_context_tokens: null, applied_threshold_tokens: null, model_max_tokens: 20000,
     context_window_tokens: 12632, limit_tokens: 19000, pending: true, mutable: true, error: null });
   await expect(setting.getByRole("status")).toContainText("已保存上限 12,000");
-  await setting.getByRole("button", { name: "恢复 Codex 默认值" }).click();
+  await setting.getByRole("button", { name: "跟随 Codex", exact: true }).click();
   await expect.poll(() => relay.commands.filter((c) => c.type === "set_codex_context").length).toBe(2);
   expect(relay.commands.filter((c) => c.type === "set_codex_context").at(-1)?.max_context_tokens).toBeNull();
   expect(relay.commands.some((c) => c.type === "query")).toBe(false);
@@ -2425,7 +2426,7 @@ test("session workspace context ring refreshes applied capacity and distinguishe
   await ring.click();
   const popover = page.getByRole("dialog", { name: "上下文占用", exact: true });
   await expect(popover).toContainText("142,045 / 258,400 (55%)");
-  await expect(popover).toContainText("已保存上限 400,000，等待生效");
+  await expect(popover).toContainText("已保存上限 400,000，等待原生确认");
   relay.emit({ ...setting, applied_max_context_tokens: 400000, applied_threshold_tokens: 378947, pending: false });
   await expect(popover).not.toContainText("258,400");
   const request = relay.commands.filter((c) => c.type === "get_context").at(-1)!;
@@ -2437,7 +2438,7 @@ test("session workspace context ring refreshes applied capacity and distinguishe
   expect(relay.commands.some((c) => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
 });
 
-test("session workspace reconciles pending 400k with native runtime in both context surfaces", async ({ page }) => {
+test("session workspace reconciles pending 400k with native runtime in both context surfaces", async ({ page }, testInfo) => {
   const relay = await mockRightPanelRelay(page, { retained: false });
   await page.goto("/");
   await expect(page.locator(".scard.active .scard-title")).toHaveText("Layout parent");
@@ -2456,30 +2457,45 @@ test("session workspace reconciles pending 400k with native runtime in both cont
   const ring = page.getByRole("button", { name: "上下文占用", exact: true });
   await ring.click();
   const popover = page.getByRole("dialog", { name: "上下文占用", exact: true });
-  await expect(popover).toContainText("待原生运行数据确认");
+  await expect(popover).toContainText("等待原生运行数据");
   relay.emit({ ...report, source: "native_estimate" });
   await expect(popover).toContainText("371,048 / 400,000 (93%)");
   await expect(popover).toContainText("原生上限 400,000，与已保存设置一致");
   await expect(popover).not.toContainText("等待生效");
-  await popover.getByRole("button", { name: "设置上下文上限" }).click();
+  await expect(popover.getByRole("button")).toHaveCount(0);
+  await ring.click();
+  const input = page.locator("textarea").first();
+  await input.fill("/autocompact ");
+  await input.press("Enter");
   const editor = page.getByRole("dialog", { name: "Codex 上下文上限", exact: true });
   await expect(editor.getByRole("status")).toContainText("与已保存设置一致");
-  await expect(editor).toContainText("当前生效上限：400,000");
-  await expect(editor).toContainText("当前生效阈值：378,947");
+  await expect(editor).toContainText("生效上限 400K");
+  await expect(editor).toContainText("实际阈值 378,947");
+  await expect(editor.locator(".codex-context-limits")).toContainText("模型最大窗口872,000");
+  await expect(editor.locator(".codex-context-limits")).toContainText("可设置上限828,400");
   // Periodic readings must not overwrite an unsent draft or reload the thread.
+  await editor.getByRole("button", { name: "自定义", exact: true }).click();
   await editor.getByLabel("上下文上限（tokens）").fill("350k");
   relay.emit({ ...report, source: "native_estimate", total_tokens: 372000, percentage: 93 });
   await expect(editor.getByLabel("上下文上限（tokens）")).toHaveValue("350k");
   relay.emit({ ...state, max_context_tokens: 300000, context_window_tokens: 315790 });
-  await expect(editor.getByRole("status")).toContainText("已保存上限 300,000，等待生效");
-  await expect(editor.getByRole("status")).toContainText("当前生效上限：400,000");
+  await expect(editor.getByRole("status")).toContainText("已保存上限 300,000，等待原生确认");
+  await expect(editor).toContainText("生效上限 400K");
   // A real application failure must remain visible even if the latest runtime
   // happens to match a saved preference. Lack of a receipt is not that error.
   relay.emit({ ...state, error: "connection lost" });
   await expect(editor.getByRole("alert")).toContainText("connection lost");
   await expect(editor.getByRole("status")).toContainText("与已保存设置一致");
   relay.emit({ ...state, max_context_tokens: null, context_window_tokens: null });
-  await expect(editor.getByRole("status")).toContainText("默认值，待原生运行数据确认");
+  await expect(editor.getByRole("status")).toContainText("默认值，等待原生确认");
+  relay.emit({ ...state, max_context_tokens: null, context_window_tokens: null,
+    pending: false, applied_max_context_tokens: 475000, applied_threshold_tokens: 450000 });
+  relay.emit({ ...report, source: "native_estimate", max_tokens: 475000,
+    auto_compact_threshold_tokens: 450000, percentage: 78.1 });
+  await expect(editor.getByRole("status")).toHaveCount(0);
+  await expect(editor.getByRole("button", { name: "跟随 Codex", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(editor).toContainText("生效上限 475K · 实际阈值 450K");
+  await page.screenshot({ path: testInfo.outputPath("context-default-confirmed.png"), animations: "disabled" });
   expect(relay.commands.some(c => ["query", "steer", "new_session", "set_codex_context", "reconnect"].includes(String(c.type)))).toBe(false);
 });
 
@@ -2499,16 +2515,15 @@ test("session workspace distinguishes 300k capacity from native usage and compac
   };
   relay.emit(state);
   const setting = page.getByRole("dialog", { name: "Codex 上下文上限", exact: true });
-  await expect(setting).toContainText("可设置上限 828,400");
+  await expect(setting.getByRole("button", { name: "最大值", exact: true })).toHaveAttribute("title", "828,400 tokens");
   await expect(setting.getByRole("status")).toContainText("已保存上限 300,000");
-  await expect(setting.getByRole("status")).toContainText("当前生效上限：400,000");
-  await expect(setting).toContainText("进度按 Codex 原生上下文估算显示");
+  await expect(setting).toContainText("生效上限 400K");
 
   relay.emit({ ...state, applied_max_context_tokens: 300000,
     applied_threshold_tokens: 284211, pending: false });
-  await expect(setting.getByRole("status")).toContainText("设定上限：300,000");
-  await expect(setting.getByRole("status")).toContainText("当前生效上限：300,000");
-  await expect(setting.getByRole("status")).toContainText("当前生效阈值：284,211");
+  await expect(setting.getByRole("status")).toHaveCount(0);
+  await expect(setting.getByRole("button", { name: "300K", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(setting).toContainText("生效上限 300K · 实际阈值 284,211");
   await expect(setting).not.toContainText("400,000");
   expect(await setting.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("context-300k-settings.png"), animations: "disabled" });
@@ -2878,6 +2893,42 @@ for (const batch of [false, true]) {
     await expect(page.locator(".question-resume")).toHaveCount(0);
   });
 }
+
+test("session workspace Claude context window limits constrain presets and custom input", async ({ page }, testInfo) => {
+  const relay = await mockRightPanelRelay(page, { retained: false, engine: "claude" });
+  await page.goto("/");
+  await expect(page.locator(".scard.active .scard-title")).toHaveText("Layout parent");
+  relay.emit({ type: "auto_compact", sid: "layout-parent", mode: "inherit",
+    applied_mode: "inherit", pending: false, phase: "stable", mutable: true });
+  relay.emit({ type: "context_report", sid: "layout-parent", model: "claude-small",
+    total_tokens: 110000, max_tokens: 150000, raw_max_tokens: 150000,
+    model_max_tokens: 200000, auto_compact_threshold_tokens: 117000,
+    percentage: 73.3333, source: "control", categories: [] });
+  const ring = page.getByRole("button", { name: "上下文占用", exact: true });
+  await ring.click();
+  const details = page.getByRole("dialog", { name: "上下文占用", exact: true });
+  await expect(details.getByRole("button")).toHaveCount(0);
+  await ring.click();
+  const input = page.locator("textarea").first();
+  await input.fill("/autocompact ");
+  await input.press("Enter");
+  const editor = page.getByRole("dialog", { name: "自动压缩", exact: true });
+  await expect(editor).toContainText("模型最大窗口 200K");
+  await expect(editor).toContainText("实际阈值 117K · 当前窗口 150K");
+  await expect(editor.getByRole("button", { name: "200K", exact: true })).toBeEnabled();
+  await expect(editor.getByRole("button", { name: "500K", exact: true })).toBeDisabled();
+  await expect(editor.getByRole("button", { name: "1M", exact: true })).toBeDisabled();
+  await editor.getByRole("button", { name: "自定义", exact: true }).click();
+  await editor.getByLabel("自动压缩阈值（K tokens）").fill("201");
+  await expect(editor.getByRole("button", { name: "应用", exact: true })).toBeDisabled();
+  await expect(editor.getByRole("alert")).toContainText("不能超过模型最大窗口 200K");
+  await editor.getByLabel("自动压缩阈值（K tokens）").fill("200");
+  await editor.getByRole("button", { name: "应用", exact: true }).click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "set_auto_compact").length).toBe(1);
+  expect(relay.commands.find(c => c.type === "set_auto_compact")?.threshold_tokens).toBe(200000);
+  await page.screenshot({ path: testInfo.outputPath("claude-context-model-limits.png"), animations: "disabled" });
+  expect(relay.commands.some(c => c.type === "query" || c.type === "reconnect")).toBe(false);
+});
 
 test("session workspace Claude context refreshes while running and keeps its last reading silently", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, {

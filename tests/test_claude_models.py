@@ -8,6 +8,96 @@ from unittest.mock import AsyncMock
 import pytest
 
 from cc_remote.wrapper import claude_models as models
+from cc_remote.config import WrapperConfig
+from cc_remote.wrapper.sdk import SdkHandle
+
+
+@pytest.mark.asyncio
+async def test_context_ceiling_cache_uses_native_model_account_and_cli(monkeypatch, tmp_path):
+    models._context_cache.clear()
+    binary = tmp_path / "claude"
+    binary.write_text("version-one")
+    monkeypatch.setattr(models, "resolve_claude_cli", lambda _: (str(binary), "configured"))
+    calls = []
+
+    async def control(args, cwd, env, request=None):
+        calls.append((args, cwd, env, request))
+        assert args[args.index("--autocompact") + 1] == "1000000"
+        assert request == {"subtype": "get_context_usage", "detail": "summary"}
+        assert not {"--resume", "--continue"} & set(args)
+        return {"rawMaxTokens": 200_000}
+
+    monkeypatch.setattr(models, "_native_control", control)
+    options = dict(claude_bin=str(binary), model="small", cwd=str(tmp_path),
+                   config_dir=str(tmp_path / "primary"), isolate_account_env=True)
+    assert await models.claude_context_window(**options) == 200_000
+    assert await models.claude_context_window(**options) == 200_000
+    assert len(calls) == 1
+    await models.claude_context_window(**{**options, "model": "large"})
+    await models.claude_context_window(**{**options, "config_dir": str(tmp_path / "other")})
+    binary.write_text("version-two-longer")
+    await models.claude_context_window(**options)
+    assert len(calls) == 4
+
+
+@pytest.mark.asyncio
+async def test_native_context_probe_sends_only_initialize_and_local_summary(monkeypatch):
+    writes = []
+    replies = [None,
+        {"type": "control_response", "response": {"subtype": "success",
+            "request_id": "model-catalog", "response": {"models": []}}},
+        {"type": "control_response", "response": {"subtype": "success",
+            "request_id": "model-context", "response": {"rawMaxTokens": 200000}}},
+    ]
+    proc = SimpleNamespace(
+        stdin=SimpleNamespace(write=writes.append, drain=AsyncMock(), close=lambda: None),
+        stdout=SimpleNamespace(), returncode=None, terminate=lambda: None, wait=AsyncMock())
+
+    async def readline():
+        return (json.dumps(replies.pop(0)) + "\n").encode()
+
+    proc.stdout.readline = readline
+    monkeypatch.setattr(models.asyncio, "create_subprocess_exec", AsyncMock(return_value=proc))
+    result = await models._native_control(["/claude"], "/tmp", {}, {
+        "subtype": "get_context_usage", "detail": "summary"})
+    assert result["rawMaxTokens"] == 200000
+    assert [json.loads(row)["request"] for row in writes] == [
+        {"subtype": "initialize"}, {"subtype": "get_context_usage", "detail": "summary"}]
+    proc.wait.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("maximum", [None, True, 0, -1, "200000"])
+async def test_context_ceiling_rejects_invalid_native_values(monkeypatch, tmp_path, maximum):
+    models._context_cache.clear()
+    binary = tmp_path / "claude"
+    binary.write_text("native-cli")
+    monkeypatch.setattr(models, "resolve_claude_cli", lambda _: (str(binary), "configured"))
+    monkeypatch.setattr(models, "_native_control", AsyncMock(return_value={"rawMaxTokens": maximum}))
+    assert await models.claude_context_window(
+        claude_bin=str(binary), model="small", cwd=str(tmp_path)) is None
+    assert not models._context_cache
+
+
+@pytest.mark.asyncio
+async def test_handle_model_ceiling_ignores_replaced_context_and_bounds_setting(monkeypatch):
+    handle = SdkHandle(WrapperConfig())
+    handle.model = "small"
+
+    async def replaced_context(**_kwargs):
+        handle._context_revision += 1
+        return 200_000
+
+    monkeypatch.setattr(models, "claude_context_window", replaced_context)
+    assert await handle.get_model_context_window("/tmp") is None
+    assert handle.model_context_max_tokens is None
+
+    monkeypatch.setattr(models, "claude_context_window", AsyncMock(return_value=200_000))
+    assert await handle.get_model_context_window("/tmp") == 200_000
+    handle.set_auto_compact("custom", 150_000)
+    with pytest.raises(ValueError, match="200,000"):
+        handle.set_auto_compact("custom", 300_000)
+    assert handle.auto_compact_threshold_tokens == 150_000
 
 
 def test_native_catalog_keeps_new_models_and_exact_effort_capabilities():

@@ -2626,7 +2626,7 @@ class CodexHandle:
         # request applied its overrides: another client's same-thread reload can
         # emit even a complete notLoaded -> idle cycle while our RPC is pending.
         # The native resume response exposes no context configuration receipt,
-        # so shared resumes stay pending even after an apparent cold reload.
+        # so shared resumes need a later source-validated runtime sample.
         # Start and fresh private resume have no competing cache entry; fork
         # does not submit context_config and cannot confirm it either.
         if not (fork and resume_id) and self.context_settings.pending and (
@@ -2639,7 +2639,7 @@ class CodexHandle:
                 # This resume submitted the preference, including on a cold
                 # attach. Lack of a receipt must not trigger another reload at
                 # every idle/query boundary. A new explicit save can retry.
-                self.context_settings.mark_attempted()
+                self.context_settings.mark_attempted(self.model)
         if (self.context_settings.applied_model is not None
                 and self.context_settings.applied_model == self.model
                 and self.context_window is None):
@@ -5629,6 +5629,13 @@ class CodexHandle:
             if estimate is not None:
                 used, threshold = estimate.used_tokens, estimate.threshold_tokens
                 source = "native_estimate"
+                await self.context_settings.observe_native_usage(
+                    self, capacity=win, threshold=threshold,
+                    observed_at=estimate.observed_at, usage=u)
+                if (identity != (self._generation, self.thread_id, self.model, self.context_window)
+                        or self.last_token_usage is not u):
+                    return {"used_tokens": None, "context_window": self.context_window or 0,
+                            "raw": {}, "source": "recent_turn"}
         return {"used_tokens": used, "context_window": win, "raw": u,
                 "source": source, "auto_compact_threshold_tokens": threshold}
 
