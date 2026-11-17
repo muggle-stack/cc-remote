@@ -4,6 +4,16 @@
 
 ## Unreleased
 
+## v5.3.42
+
+Revert the recent iOS chat keyboard layout changes after a page-displacement regression. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Restore the v5.3.39 mobile viewport positioning and chat composer spacing.
+- Remove document-scroll compensation and cover repeated panning without accumulated offsets.
+- Preserve DSH terminal single-step history gestures, scrolling, selection, clipboard controls and keyboard toggling.
+
+See the bilingual [release notes](docs/releases/v5.3.42.md).
+
 ## v5.3.41
 
 Fix DSH terminal command history navigation and iOS chat keyboard positioning. Wire protocol v94 and Claude Agent SDK 0.2.174.
