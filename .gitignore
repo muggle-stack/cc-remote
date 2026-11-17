@@ -30,3 +30,6 @@ harmony/*.p12
 harmony/*.p7b
 harmony/*.cer
 harmony/*.csr
+
+# Generated browser-only PPTX renderer
+web/public/presentation-preview.html

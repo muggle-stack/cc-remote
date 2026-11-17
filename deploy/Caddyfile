@@ -15,9 +15,9 @@ cc-remote.example.com {
 	}
 	header @entry Cache-Control "no-store"
 	@application {
-		not path /html-preview-runner.html /html-preview-runner.js /__cc_viewer/bridge/*
+		not path /html-preview-runner.html /html-preview-runner.js /__cc_viewer/bridge/* /presentation-preview.html
 	}
-	@html_preview path /html-preview-runner.html /html-preview-runner.js
+	@html_preview path /html-preview-runner.html /html-preview-runner.js /presentation-preview.html
 	# The relay supplies the Bridge runner's HTTP sandbox + per-publication CSP.
 	# Do not overwrite it with the main app's CSP / X-Frame-Options: DENY.
 	header @application {
@@ -33,7 +33,7 @@ cc-remote.example.com {
 	header @html_preview {
 		Strict-Transport-Security "max-age=31536000"
 		Cache-Control "no-store"
-		Content-Security-Policy "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'"
+		Content-Security-Policy "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data: blob:; media-src data: blob:; connect-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "SAMEORIGIN"
 		Referrer-Policy "no-referrer"

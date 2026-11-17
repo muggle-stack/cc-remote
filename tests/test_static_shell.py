@@ -29,6 +29,7 @@ def _app(root, state):
     ("/cc-remote-build.json", "cc-remote-build.json"),
     ("/cc-remote-viewer-runner.js", "cc-remote-viewer-runner.js"),
     ("/cc-remote-viewer-zoom.js", "cc-remote-viewer-zoom.js"),
+    ("/presentation-preview.html", "presentation-preview.html"),
 ])
 def test_same_size_and_mtime_update_invalidates_shell(tmp_path, url, filename):
     root = tmp_path / "web"

@@ -7,7 +7,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build && npm run build:viewer-runner && node scripts/check-bundle-budget.mjs",
+    "build:presentation": "vite build --config vite.presentation-preview.config.ts",
+    "predev": "npm run build:presentation",
+    "build": "npm run build:presentation && tsc -b && vite build && npm run build:viewer-runner && node scripts/check-bundle-budget.mjs",
     "build:viewer-runner": "vite build --config vite.viewer-runner.config.ts && vite build --config vite.viewer-runner.config.ts --mode zoom",
     "build:theme-preview": "vite build --config vite.theme-preview.config.ts",
     "lint": "oxlint",
@@ -24,6 +26,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@aiden0z/pptx-renderer": "1.4.0",
     "@tanstack/react-virtual": "3.14.8",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/xterm": "6.0.0",

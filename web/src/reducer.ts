@@ -176,14 +176,14 @@ export interface PreviewAuthorizationState {
   operation: PreviewAuthorizationOperation;
   path: string;
   resolvedPath: string;
-  format: "markdown" | "text" | "html" | "image" | "pdf" | "audio" | "video" | "spreadsheet";
+  format: "markdown" | "text" | "html" | "image" | "pdf" | "audio" | "video" | "spreadsheet" | "presentation";
   previewId?: string;
   status: "required" | "submitting" | "granted";
 }
 
 export interface Artifact {
   file: string;
-  kind: "diff" | "md" | "file" | "gitdiff" | "html" | "image" | "pdf" | "audio" | "video" | "spreadsheet";
+  kind: "diff" | "md" | "file" | "gitdiff" | "html" | "image" | "pdf" | "audio" | "video" | "spreadsheet" | "presentation";
   sid?: string | null;
   requestId?: string;
   diff?: DiffLine[];
@@ -5364,7 +5364,7 @@ function reduceEvent(
         kind: "gitdiff", sections: parseGitDiff(e.diff),
       } };
     case "file_preview":
-      if (!state.artifact || !["md", "file", "html", "image", "pdf", "audio", "video", "spreadsheet"].includes(state.artifact.kind)
+      if (!state.artifact || !["md", "file", "html", "image", "pdf", "audio", "video", "spreadsheet", "presentation"].includes(state.artifact.kind)
           || state.artifact.requestId !== e.request_id
           || state.artifact.sid !== (e.sid ?? state.focusedSid)) return state;
       return { ...state, artifact: {

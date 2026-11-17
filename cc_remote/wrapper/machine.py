@@ -2041,7 +2041,7 @@ class WrapperMachine:
     HTML_PREVIEW_SUFFIXES = frozenset({".htm", ".html"})
     OFFICE_PREVIEW_SUFFIXES = frozenset({
         ".doc", ".docx", ".odt", ".rtf", ".xls", ".xlsx", ".ods",
-        ".ppt", ".pptx", ".odp",
+        ".ppt", ".odp",
     })
     OFFICE_PREVIEW_INPUT_MAX_BYTES = 32 * 1024 * 1024
     OFFICE_PREVIEW_TIMEOUT_SECONDS = 45
@@ -27248,13 +27248,26 @@ class WrapperMachine:
             dict[str, PreviewCapability]
         ] = None,
     ) -> dict[str, object]:
-        """Read or render one artifact entirely on the wrapper host.
+        """Read or convert one artifact for the browser's embedded preview.
 
         The returned dictionary is short-lived and immediately serialized into
         a requester-routed WebSocket response. No artifact or converted preview
         is persisted by the relay/VPS.
         """
         suffix = os.path.splitext(path)[1].lower()
+        if suffix == ".pptx":
+            from cc_remote.wrapper.presentation_preview import validate_presentation_preview
+
+            relative, data, file_stat, _ = cls._read_session_file(
+                cwd, path, allowed_suffixes=frozenset({".pptx"}),
+                max_bytes=ARTIFACT_PREVIEW_MAX_BYTES, allow_truncate=False,
+                allowed_external_paths=allowed_external_paths)
+            validate_presentation_preview(data)
+            return {
+                "path": relative, "format": "presentation", "data": data,
+                "media_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "size": file_stat.st_size, "mtime_ns": file_stat.st_mtime_ns,
+            }
         if suffix == ".xlsx":
             from cc_remote.wrapper.spreadsheet_preview import spreadsheet_preview
 
@@ -27742,6 +27755,8 @@ class WrapperMachine:
             return "html"
         if suffix == ".xlsx":
             return "spreadsheet"
+        if suffix == ".pptx":
+            return "presentation"
         if suffix in cls.OFFICE_PREVIEW_SUFFIXES or suffix == ".pdf":
             return "pdf"
         if suffix in cls.PREVIEW_ASSET_MEDIA_TYPES:

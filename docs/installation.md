@@ -445,7 +445,9 @@ sudo apt-get update
 sudo apt-get install -y libreoffice bubblewrap
 ```
 
-这用于 DOCX/PPTX 等需要转换的格式；**XLSX 预览不需要这两个包**，macOS 也可用。
+这用于 DOCX、旧版 PPT 等需要转换的格式。PPTX 在浏览器内渲染，支持翻页、缩略图、
+缩放与原文件下载，手机端采用连续纵向阅读；XLSX 使用内置单元格预览。这两种格式均可用于 macOS 和 Linux，
+预览引擎随 Web 一起发布。PPTX 文件上限为 8 MiB，解压后上限为 64 MiB。
 Relay 不需要安装转换器。
 
 #### 用设备中心配对 Mac / Linux（推荐）

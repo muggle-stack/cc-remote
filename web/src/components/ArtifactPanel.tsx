@@ -81,6 +81,7 @@ function MarkdownPreviewCode({
 }
 
 const SpreadsheetPreview = lazy(() => import("./SpreadsheetPreview"));
+const PresentationPreview = lazy(() => import("./PresentationPreview"));
 
 function HtmlArtifactPreview({ content, theme }: {
   content: string;
@@ -590,9 +591,9 @@ function ArtifactContent({ artifact, active, hasBtw, onTab, onClose,
   ]);
 
   const title = displayName || artifact.file.split("/").pop()
-    || (["md", "file", "html", "image", "pdf", "audio", "video", "spreadsheet"].includes(artifact.kind) ? "文件预览" : "改动");
+    || (["md", "file", "html", "image", "pdf", "audio", "video", "spreadsheet", "presentation"].includes(artifact.kind) ? "文件预览" : "改动");
   const mermaidFile = artifact.kind === "file" && /\.(?:mmd|mermaid)$/i.test(artifact.file);
-  const renderedArtifact = ["image", "pdf", "audio", "video"].includes(artifact.kind)
+  const renderedArtifact = ["image", "pdf", "audio", "video", "presentation"].includes(artifact.kind)
     || (artifact.kind === "html" && mode === "preview");
   const tabs = hasBtw ? <PanelTabs active={active}
     artifactKind={artifact.kind} hasArtifact hasBtw={hasBtw} onTab={switchPanelTab} /> : null;
@@ -620,7 +621,7 @@ function ArtifactContent({ artifact, active, hasBtw, onTab, onClose,
     </button>}
     {artifact.kind === "md" && artifact.saveStatus === "saved" && !dirty
       && <span className="markdown-save-state ok">已保存</span>}
-    {["md", "file", "html", "image", "pdf"].includes(artifact.kind)
+    {["md", "file", "html", "image", "pdf", "presentation"].includes(artifact.kind)
       && <ArtifactDownload id={artifactKey} file={displayName || artifact.file} data={artifact.data}
         content={artifact.content} converted={artifact.convertedFrom}
         unavailable={loading ? "正在读取文件…" : artifact.authorization ? "授权后可下载"
@@ -659,7 +660,7 @@ function ArtifactContent({ artifact, active, hasBtw, onTab, onClose,
             authorization={artifact.authorization}
             onDecision={onAuthorizePreview} />
         ) : loading ? (
-          <div className="diff-empty"><span className="thinking"><span/><span/><span/></span> {["md", "file", "html", "image", "pdf", "audio", "video", "spreadsheet"].includes(artifact.kind) ? "正在读取文件…" : "正在读取 diff…"}</div>
+          <div className="diff-empty"><span className="thinking"><span/><span/><span/></span> {["md", "file", "html", "image", "pdf", "audio", "video", "spreadsheet", "presentation"].includes(artifact.kind) ? "正在读取文件…" : "正在读取 diff…"}</div>
         ) : artifact.error ? (
           <div className="preview-error"><Icon name="read" size={18} />{artifact.error}</div>
         ) : artifact.kind === "gitdiff" ? (
@@ -712,6 +713,10 @@ function ArtifactContent({ artifact, active, hasBtw, onTab, onClose,
             : <HtmlArtifactPreview content={artifact.content || ""} theme={theme} />
         ) : artifact.kind === "spreadsheet" ? (
           <Suspense fallback={<div className="diff-empty">读取表格…</div>}><SpreadsheetPreview key={artifactKey} content={artifact.content || ""} data={artifact.data} title={title} /></Suspense>
+        ) : artifact.kind === "presentation" ? (
+          <Suspense fallback={<div className="diff-empty">正在准备幻灯片预览…</div>}>
+            <PresentationPreview key={artifactKey} data={artifact.data} title={title} />
+          </Suspense>
         ) : artifact.kind === "image" ? (
           <ImageArtifactPreview data={artifact.data} mediaType={artifact.mediaType}
             title={title} />
