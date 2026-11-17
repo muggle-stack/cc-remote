@@ -2120,8 +2120,9 @@ class Models(_Base):
     seq'd/buffered). Each entry: {id, display_name, description, efforts,
     default_effort, is_default}. `efforts` is authoritative: turn/start does NOT
     validate the level (it accepts `bogus-zzz`), so offering one the model lacks
-    only fails later inside the model API. Empty list = we couldn't read it; the
-    client falls back to its static table rather than rendering nothing.
+    only fails later inside the model API. `effort_descriptions` preserves the
+    native per-level descriptions. An unavailable Codex catalog retains the
+    client's last native catalog or shows a retry action before first discovery.
 
     `default_model`/`default_effort` are what a NEW no-override session starts on.
     They are NOT the focused session's controls (those are per-session events)."""

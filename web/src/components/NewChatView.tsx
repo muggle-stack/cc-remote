@@ -138,7 +138,7 @@ const defaultExecutionControls = (
 });
 
 function NewChatSelectorSheet({
-  open, kind, options, current, onClose, onPick,
+  open, kind, options, current, onClose, onPick, catalogUnavailable, onRequestModels,
 }: {
   open: boolean;
   kind: "models" | "efforts";
@@ -146,11 +146,20 @@ function NewChatSelectorSheet({
   current: string | null;
   onClose: () => void;
   onPick: (value: string | null) => void;
+  catalogUnavailable?: boolean;
+  onRequestModels?: () => void;
 }) {
   const title = kind === "models" ? "选择模型" : "选择思考强度";
   return (
     <CenteredSheet open={open} label={title} onClose={onClose}>
         <div className="sheet-scroll">
+          {kind === "models" && catalogUnavailable && <>
+            <div className="cmd-empty" role="status">暂未读取到模型列表，可使用本机默认配置。</div>
+            {onRequestModels && <button type="button" className="cmd" onClick={onRequestModels}>
+              <span className="cmd-ic"><Icon name="refresh" size={17} /></span>
+              <span className="cmd-tx"><span className="cmd-nm">重新读取模型列表</span></span>
+            </button>}
+          </>}
           {options.map((option) => (
             <button key={option.id ?? "__local_default__"}
               className={"cmd" + (option.id === current ? " sel" : "")}
@@ -920,6 +929,8 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
         open={sheetKind !== null}
         kind={sheetKind ?? "models"}
         options={sheetKind === "efforts" ? effortOptions : modelOptions}
+        catalogUnavailable={engine === "codex" && modelList.length === 0}
+        onRequestModels={onRequestModels}
         current={sheetKind === "efforts" ? effort : model}
         onClose={() => setSheetKind(null)}
         onPick={(value) => {

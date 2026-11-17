@@ -4894,22 +4894,13 @@ class CodexHandle:
         )
         return effective
 
-    async def set_effort(self, effort: str) -> bool:
-        if not isinstance(effort, str) or not effort:
+    async def set_effort(self, effort: Optional[str]) -> bool:
+        if effort is not None and (not isinstance(effort, str) or not effort):
             raise ValueError("Codex effort must be non-empty")
         authoritative = await self._update_thread_settings(
             effort=effort, wait_for_notification=True)
         if not authoritative:
-            self.effort = effort
-            self.applied_effort = effort
-            self.display_effort = effort
-            self.display_effort_model = self.model
-            self.display_effort_cwd = (
-                os.path.realpath(self._cwd)
-                if isinstance(self._cwd, str) and self._cwd else None
-            )
-            self.display_effort_generation = self._generation
-            self._display_effort_retry_at = None
+            self._apply_thread_settings({"effort": effort})
         log.info("codex thread effort set", requested=effort,
                  applied=self.effort)
         return authoritative

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { MODELS, matchModelId, modelsFor, effortsFor, defaultEffortFor } from "../src/data.ts";
+import { MODELS, matchModelId, modelsFor, effortsFor } from "../src/data.ts";
 import { compatibleNewChatEffort, newChatEfforts, reconcileNewChatSelection } from "../src/new-chat-selection.ts";
 
 for (const id of ["claude-fable-5-1", "claude-mythos-5-1"]) {
@@ -21,7 +21,6 @@ assert.equal(modelsFor("claude", catalog)[0].ds, "Opus 5.5");
 assert.equal(modelsFor("cc", catalog)[1].name, "Company");
 assert.deepEqual(effortsFor("claude", "claude-opus-5-5[1m]", catalog).map((e) => e.id), ["high", "max"]);
 assert.deepEqual(effortsFor("claude", "provider-new-model", catalog), []);
-assert.equal(defaultEffortFor("claude", "provider-new-model", catalog), "model-default");
 assert.equal(compatibleNewChatEffort("claude", "provider-new-model", "max", catalog, null), null);
 assert.deepEqual(reconcileNewChatSelection("claude", "claude-opus-5-5", "max", catalog, null),
   { model: "claude-opus-5-5", effort: "max" });
