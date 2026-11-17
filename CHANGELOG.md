@@ -4,7 +4,16 @@
 
 ## Unreleased
 
-Align Codex and Claude context controls, confirm shared Codex settings from native runtime data, and validate Claude compaction windows against native model limits. Wire protocol v95.
+## v5.3.44
+
+Align Codex and Claude context controls and confirm native context settings. Wire protocol v95 and Claude Agent SDK 0.2.174.
+
+- Confirm shared Codex context preferences from fresh native runtime records, including restoring defaults.
+- Show read-only usage details from the context ring and open settings with bare `/autocompact`.
+- Display Claude model window limits separately from the configured window and effective compaction threshold.
+- Reject oversized Claude settings in the UI and before saving, launching or applying them.
+
+See the bilingual [release notes](docs/releases/v5.3.44.md).
 
 ## v5.3.43
 
