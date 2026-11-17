@@ -596,7 +596,7 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
 Publish Relay/Web and Wrapper artifacts from the same tagged commit. The strict
 chat gate requires matching protocol versions. The maintenance channel remains
 available while devices catch up to the server. `setup-vps.sh` verifies that its
-Web build matches the Relay. Protocol v95 uses this same flow. Activate Relay/Web
+Web build matches the Relay. Protocol v96 uses this same flow. Activate Relay/Web
 together, upgrade each Wrapper through maintenance, then reload Web/PWA clients.
 
 The wrapper installer treats local Work data and versioned private control state

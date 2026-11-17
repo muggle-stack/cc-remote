@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+- Add embedded PPTX preview with navigation, thumbnails, zoom and bounded cleanup. Wire protocol v96.
+
 ## v5.3.44
 
 Align Codex and Claude context controls and confirm native context settings. Wire protocol v95 and Claude Agent SDK 0.2.174.

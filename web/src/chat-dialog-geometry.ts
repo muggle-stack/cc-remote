@@ -34,6 +34,7 @@ interface AnchoredPopoverGeometryOptions {
   gutter?: number;
   minimumHeight?: number;
   align?: "center" | "start";
+  viewport?: boolean;
 }
 
 interface Bounds {
@@ -270,6 +271,7 @@ export function useAnchoredPopoverGeometry({
   gutter = 16,
   minimumHeight = 64,
   align = "center",
+  viewport = false,
 }: AnchoredPopoverGeometryOptions): AnchoredPopoverGeometry | null {
   const [geometry, setGeometry] = useState<AnchoredPopoverGeometry | null>(null);
 
@@ -299,8 +301,8 @@ export function useAnchoredPopoverGeometry({
       }
 
       const visual = visualBounds();
-      const chat = (threadShell && elementBounds(threadShell))
-        ?? fallbackChatBounds(scope);
+      const chat = viewport ? null : ((threadShell && elementBounds(threadShell))
+        ?? fallbackChatBounds(scope));
       const bounds = chat ? intersection(visual, chat) ?? visual : visual;
       const rawWidth = Math.max(1, bounds.right - bounds.left);
       const horizontalGutter = Math.min(gutter, Math.max(0, (rawWidth - 1) / 2));
@@ -368,7 +370,7 @@ export function useAnchoredPopoverGeometry({
       document.removeEventListener("scroll", schedule, true);
       resizeObserver?.disconnect();
     };
-  }, [align, anchorRef, gap, gutter, maxHeight, maxWidth, minimumHeight, open]);
+  }, [align, anchorRef, gap, gutter, maxHeight, maxWidth, minimumHeight, open, viewport]);
 
   return open ? geometry : null;
 }
