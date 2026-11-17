@@ -4,6 +4,17 @@
 
 ## Unreleased
 
+## v5.3.43
+
+Use official Codex model and reasoning metadata. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Display native model names, descriptions, ordering and reasoning capabilities.
+- Remove static Codex model lists and local effort rankings, and follow native defaults for stale choices.
+- Let Codex side chats inherit official fork settings.
+- Preserve account-scoped catalogs through failed reads, provide retry controls and clear removed defaults after successful refreshes.
+
+See the bilingual [release notes](docs/releases/v5.3.43.md).
+
 ## v5.3.42
 
 Revert the recent iOS chat keyboard layout changes after a page-displacement regression. Wire protocol v94 and Claude Agent SDK 0.2.174.
