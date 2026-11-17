@@ -14,6 +14,7 @@ interface Props {
   state?: AutoCompact | null;
   effectiveThresholdTokens?: number | null;
   rawMaxTokens?: number | null;
+  modelMaxTokens?: number | null;
   newSession?: boolean;
   disabled?: boolean;
   onChange: (selection: AutoCompactSelection) => void;
@@ -30,6 +31,7 @@ export function AutoCompactControl({
   state,
   effectiveThresholdTokens,
   rawMaxTokens,
+  modelMaxTokens,
   newSession = false,
   disabled = false,
   onChange,
@@ -63,7 +65,7 @@ export function AutoCompactControl({
       state.applied_mode, state.applied_threshold_tokens)
     : null;
   const customTokens = Number(customThousands) * 1_000;
-  const customValid = validAutoCompactThreshold(customTokens);
+  const customValid = validAutoCompactThreshold(customTokens, modelMaxTokens);
   const phaseLabel = state?.phase === "compacting" ? "正在压缩"
     : state?.phase === "reconnecting" ? "正在重连"
       : state?.phase === "blocked" ? "需要处理"
@@ -105,7 +107,7 @@ export function AutoCompactControl({
             className={!customOpen && normalized.mode === "custom"
               && normalized.thresholdTokens === thresholdTokens
               ? "selected" : ""}
-            disabled={locked}
+            disabled={locked || (modelMaxTokens != null && thresholdTokens > modelMaxTokens)}
             onClick={() => choose({ mode: "custom", thresholdTokens })}>
             {formatAutoCompactTokens(thresholdTokens)}
           </button>
@@ -120,7 +122,8 @@ export function AutoCompactControl({
       {customOpen && (
         <div className="auto-compact-custom">
           <label>
-            <input type="number" min="100" max="1000" step="10"
+            <input type="number" aria-label="自动压缩阈值（K tokens）"
+              min="100" max={(modelMaxTokens ?? 1_000_000) / 1_000} step="1"
               value={customThousands}
               disabled={locked}
               onChange={(event) => setCustomThousands(event.target.value)} />
@@ -133,6 +136,8 @@ export function AutoCompactControl({
         </div>
       )}
       <div className="auto-compact-meta">
+        <span>模型最大窗口 {modelMaxTokens != null
+          ? formatAutoCompactTokens(modelMaxTokens) : newSession ? "首次连接后读取" : "读取中"}</span>
         {state?.pending && applied && state.phase === "waiting_terminal" && (
           <span>当前为 {autoCompactSelectionLabel(applied)}；回合结束后安全切换。</span>
         )}
@@ -149,8 +154,11 @@ export function AutoCompactControl({
         {effectiveThresholdTokens != null && effectiveThresholdTokens > 0 && (
           <span>实际阈值 {formatAutoCompactTokens(effectiveThresholdTokens)}
             {rawMaxTokens != null && rawMaxTokens > 0
-              ? ` · 原始窗口 ${formatAutoCompactTokens(rawMaxTokens)}` : ""}
+              ? ` · 当前窗口 ${formatAutoCompactTokens(rawMaxTokens)}` : ""}
           </span>
+        )}
+        {customOpen && modelMaxTokens != null && customTokens > modelMaxTokens && (
+          <span className="error" role="alert">不能超过模型最大窗口 {formatAutoCompactTokens(modelMaxTokens)}</span>
         )}
         {newSession && (
           <span>随新会话首次启动生效，不会额外重连。</span>

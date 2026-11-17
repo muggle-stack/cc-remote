@@ -771,6 +771,7 @@ export interface ContextReport extends Base {
   is_auto_compact_enabled?: boolean | null;
   auto_compact_threshold_tokens?: number | null;
   raw_max_tokens?: number | null;
+  model_max_tokens?: number | null;
   categories: ContextCategory[];
 }
 
@@ -812,7 +813,7 @@ export type ServerEvent = SessionArtifacts | FilesListed | CodexContext
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnUsage | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 94;
+export const PROTOCOL_VERSION = 95;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

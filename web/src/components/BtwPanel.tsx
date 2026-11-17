@@ -124,6 +124,7 @@ interface Props {
   onSetEffort: (effort: string) => void;
   onSetServiceTier: (tier: string) => boolean;
   onSetAutoCompact: (selection: AutoCompactSelection) => boolean;
+  onContext?: () => void;
   onOpenFile?: (path: string, line?: number) => void;
   imageAssets?: Record<string, InlineImageAsset>;
   onLoadImage?: (path: string, previewId?: string) => boolean;
@@ -393,12 +394,13 @@ export function BtwPanel(props: Props) {
         return;
       }
       if (!command.args) {
+        p.onContext?.();
         setAutoCompactOpen(true);
         setInput("");
         resetTaHeight();
         return;
       }
-      const parsed = parseAutoCompactArgument(command.args);
+      const parsed = parseAutoCompactArgument(command.args, p.rt?.contextReport?.model_max_tokens);
       if (!parsed.ok) {
         flash(parsed.error);
         return;
@@ -784,6 +786,9 @@ export function BtwPanel(props: Props) {
               mode: p.rt?.autoCompact?.mode ?? "inherit",
               thresholdTokens: p.rt?.autoCompact?.threshold_tokens ?? null,
             }} state={p.rt?.autoCompact}
+              modelMaxTokens={p.rt?.contextReport?.model_max_tokens}
+              rawMaxTokens={p.rt?.contextReport?.raw_max_tokens}
+              effectiveThresholdTokens={p.rt?.contextReport?.auto_compact_threshold_tokens}
               disabled={inputLocked || !p.sid}
               onChange={(selection) => {
                 if (inputLockedRef.current) return;

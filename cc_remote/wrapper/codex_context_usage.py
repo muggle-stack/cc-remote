@@ -7,7 +7,7 @@ matches the newest rollout usage sample, native turn and effective window.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import json
 import os
@@ -33,6 +33,7 @@ _USAGE_KEYS = (
 class CodexContextEstimate:
     used_tokens: int
     threshold_tokens: int | None
+    observed_at: float | None = field(default=None, compare=False)
 
 
 def _number(value: str | None) -> int | None:
@@ -161,6 +162,6 @@ def read_codex_context_estimate(
         threshold = _optional_number(fields.get("auto_compact_scope_limit"))
         if threshold is not None and threshold > window:
             return None
-        return CodexContextEstimate(used, threshold)
+        return CodexContextEstimate(used, threshold, observed_at)
     except (OSError, sqlite3.Error, TypeError, ValueError, OverflowError):
         return None

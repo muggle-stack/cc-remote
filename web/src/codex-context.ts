@@ -3,9 +3,7 @@ import type { CodexContext, ContextReport } from "./protocol";
 const positiveTokens = (value: number | null | undefined): number | null =>
   value != null && Number.isSafeInteger(value) && value > 0 ? value : null;
 
-/** Present observed runtime separately from the native configuration receipt.
- * Matching a usage sample must never clear pending or trigger another reload.
- */
+/** Backend confirmation includes the sample's timestamp and native threshold. */
 export function codexContextPresentation(
   state: CodexContext | null | undefined,
   report: ContextReport | null | undefined,
@@ -25,8 +23,18 @@ export function codexContextPresentation(
   const saved = state?.max_context_tokens?.toLocaleString() ?? "默认值";
   const status = !state?.pending ? null : matchesSaved
     ? `原生上限 ${capacity!.toLocaleString()}，与已保存设置一致`
-    : `已保存上限 ${saved}，${native && state.max_context_tokens != null ? "等待生效" : "待原生运行数据确认"}`;
+    : `已保存上限 ${saved}，${native ? "等待原生确认" : "等待原生运行数据"}`;
   return { capacity, threshold, matchesSaved, status };
+}
+
+export function codexContextPresets(limit: number | null | undefined): number[] {
+  return [200_000, 300_000, 400_000].filter(value => limit != null && value < limit);
+}
+
+export function formatContextTokens(value: number): string {
+  if (value >= 1_000_000 && value % 1_000_000 === 0) return `${value / 1_000_000}M`;
+  if (value >= 1_000 && value % 1_000 === 0) return `${value / 1_000}K`;
+  return value.toLocaleString();
 }
 
 export function parseContextCapacity(value: string): number | null | undefined {

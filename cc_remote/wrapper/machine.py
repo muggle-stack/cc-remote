@@ -184,6 +184,7 @@ from cc_remote.wrapper.claude_controls import (
     claude_auto_compact_cli_value,
     valid_claude_alias,
     valid_claude_auto_compact,
+    validate_claude_auto_compact_window,
     valid_claude_model,
     valid_claude_permission,
 )
@@ -7633,6 +7634,17 @@ class WrapperMachine:
         # enforce its own threshold when the next normal turn starts.
         return total is not None and target is not None and total >= target
 
+    @staticmethod
+    async def _claude_context_ceiling(ctx: SessionContext) -> int | None:
+        reader = getattr(ctx.sdk, "get_model_context_window", None)
+        if callable(reader):
+            try:
+                return await reader(ctx.cwd)
+            except Exception:
+                return None
+        maximum = getattr(ctx.sdk, "model_context_max_tokens", None)
+        return maximum if type(maximum) is int and maximum > 0 else None
+
     async def _compact_managed_claude_context(
         self,
         ctx: SessionContext,
@@ -7748,6 +7760,21 @@ class WrapperMachine:
             return await self._publish_claude_auto_compact(ctx, force=True)
         if ctx.auto_compact_phase == "blocked":
             return await self._publish_claude_auto_compact(ctx, force=True)
+
+        maximum = await self._claude_context_ceiling(ctx) if current.mode == "custom" else None
+        if (current.mode == "custom" and maximum is None
+                and isinstance(ctx.sdk, SdkHandle)):
+            ctx.auto_compact_phase = "blocked"
+            ctx.auto_compact_error = "尚未读取到模型最大窗口，请稍后重试或跟随 Claude"
+            event, _ = await self._publish_claude_auto_compact(ctx, force=True)
+            return event, False
+        try:
+            validate_claude_auto_compact_window(current.mode, current.threshold_tokens, maximum)
+        except ValueError as exc:
+            ctx.auto_compact_phase = "blocked"
+            ctx.auto_compact_error = str(exc)
+            event, _ = await self._publish_claude_auto_compact(ctx, force=True)
+            return event, False
 
         sdk = ctx.sdk
         old_applied = (current.applied_mode, current.applied_threshold_tokens)
@@ -21005,7 +21032,8 @@ class WrapperMachine:
                 await self._emit(ctx, error)
                 return error
             previous = (settings.max_tokens, settings.threshold, settings.window,
-                        settings.pending, settings.apply_attempted, settings.error)
+                        settings.pending, settings.apply_attempted, settings.error,
+                        settings.attempted_at, settings.attempted_model)
             try:
                 await settings.select(ctx.sdk, cmd.max_context_tokens)
                 if self._codex_controls is None:
@@ -21014,7 +21042,8 @@ class WrapperMachine:
                     self._ctx_wire_sid(ctx), settings.max_tokens, settings.window)
             except Exception as exc:
                 (settings.max_tokens, settings.threshold, settings.window,
-                 settings.pending, settings.apply_attempted, settings.error) = previous
+                 settings.pending, settings.apply_attempted, settings.error,
+                 settings.attempted_at, settings.attempted_model) = previous
                 settings.error = str(exc)[:1024]
                 return await self._publish_codex_context(ctx)
             if ctx.state == "idle":
@@ -21070,14 +21099,24 @@ class WrapperMachine:
                 await self._emit(ctx, error)
                 return event, error
 
-            setter = getattr(ctx.sdk, "set_auto_compact", None)
-            if callable(setter):
-                setter(cmd.mode, cmd.threshold_tokens)
-            else:
-                # Compatibility for narrow test/embedded adapters. Protocol
-                # validation has already bounded both values.
-                ctx.sdk.auto_compact_mode = cmd.mode
-                ctx.sdk.auto_compact_threshold_tokens = cmd.threshold_tokens
+            maximum = await self._claude_context_ceiling(ctx) if cmd.mode == "custom" else None
+            try:
+                if (cmd.mode == "custom" and maximum is None
+                        and isinstance(ctx.sdk, SdkHandle)):
+                    raise ValueError("尚未读取到模型最大窗口，请稍后重试或跟随 Claude")
+                validate_claude_auto_compact_window(cmd.mode, cmd.threshold_tokens, maximum)
+                setter = getattr(ctx.sdk, "set_auto_compact", None)
+                if callable(setter):
+                    setter(cmd.mode, cmd.threshold_tokens)
+                else:
+                    ctx.sdk.auto_compact_mode = cmd.mode
+                    ctx.sdk.auto_compact_threshold_tokens = cmd.threshold_tokens
+            except ValueError as exc:
+                error = Error(code=ERR_BAD_PROMPT, message=str(exc),
+                              request_id=getattr(cmd, "cmd_id", None),
+                              to=getattr(cmd, "client_id", None))
+                await self._emit(ctx, error)
+                return error
             ctx.auto_compact_error = None
             ctx.auto_compact_phase = "waiting_terminal"
             ctx.auto_compact_compaction_done = False
@@ -22398,8 +22437,6 @@ class WrapperMachine:
         prefer_cached_claude: bool = False,
         claude_summary: dict | None = None,
     ):
-        if ctx.engine == "codex":
-            await self._publish_codex_context(ctx)
         try:
             context_source: Literal[
                 "control", "cached_control", "recent_turn"
@@ -22604,6 +22641,10 @@ class WrapperMachine:
                         return event
             else:
                 usage = await ctx.sdk.get_context_usage()
+            if ctx.engine == "claude":
+                model_max = await self._claude_context_ceiling(ctx)
+                if model_max is not None:
+                    usage = {**usage, "modelMaxTokens": model_max}
             if ctx.engine == "claude" and context_source == "control":
                 await self._reconcile_claude_context_fallback(ctx, usage)
             work_fields: dict[str, int | float] = {}
@@ -22630,6 +22671,8 @@ class WrapperMachine:
                         "session_percentage": session_percentage,
                     }
             if ctx.engine == "codex":
+                # A fresh native sample may have confirmed a shared resume.
+                await self._publish_codex_context(ctx)
                 raw_used = usage.get("used_tokens")
                 raw_win = usage.get("context_window")
                 available = (
@@ -22681,6 +22724,7 @@ class WrapperMachine:
                 is_auto_compact_enabled=usage.get("isAutoCompactEnabled"),
                 auto_compact_threshold_tokens=auto_threshold,
                 raw_max_tokens=physical_max,
+                model_max_tokens=usage.get("modelMaxTokens"),
                 categories=usage.get("categories", []) or [],
                 **work_fields,
             )
@@ -38254,6 +38298,21 @@ class WrapperMachine:
                     saved_claude_controls.applied_auto_compact_mode,
                     saved_claude_controls.applied_auto_compact_threshold_tokens,
                 )
+            if explicit_claude_auto_compact and launch_auto_compact[0] == "custom":
+                from cc_remote.wrapper.claude_models import claude_context_window
+
+                maximum = await claude_context_window(
+                    claude_bin=self.cfg.claude_bin, model=model or "default", cwd=target_cwd,
+                    config_dir=self._claude_config_root(claude_profile),
+                    isolate_account_env=self._claude_profiles_explicit,
+                    work_only=space == "work")
+                try:
+                    if maximum is None:
+                        raise ValueError("尚未读取到模型最大窗口，请稍后重试或跟随 Claude")
+                    validate_claude_auto_compact_window(*launch_auto_compact, maximum)
+                except ValueError as exc:
+                    await reject(ERR_BAD_PROMPT, str(exc), route="sid", sid=wire_resume_id)
+                    return None
             set_auto_compact = getattr(sdk, "set_auto_compact", None)
             if callable(set_auto_compact):
                 set_auto_compact(*launch_auto_compact)

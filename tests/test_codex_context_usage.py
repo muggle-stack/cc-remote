@@ -56,6 +56,7 @@ def read(source, **overrides):
 def test_screenshot_82_percent_uses_native_95_percent_estimate(source):
     estimate = read(source)
     assert estimate == native.CodexContextEstimate(284793, 284211)
+    assert estimate.observed_at == SECONDS + 0.052
     assert round(estimate.used_tokens / 300000 * 100) == 95
     assert estimate.used_tokens >= estimate.threshold_tokens
 

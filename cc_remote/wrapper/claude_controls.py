@@ -275,6 +275,14 @@ def claude_auto_compact_cli_value(
     return str(checked_threshold)
 
 
+def validate_claude_auto_compact_window(
+    mode: str, threshold_tokens: int | None, maximum: int | None,
+) -> None:
+    if (mode == "custom" and threshold_tokens is not None
+            and type(maximum) is int and maximum > 0 and threshold_tokens > maximum):
+        raise ValueError(f"自动压缩阈值不能超过当前模型的最大窗口 {maximum:,} tokens")
+
+
 def claude_auto_compact_from_cli(value: object) -> tuple[str, int | None]:
     """Parse only canonical broker launch values, never user settings text."""
     if value is None:
