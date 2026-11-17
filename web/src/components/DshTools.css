@@ -112,7 +112,7 @@
   .dsh-terminal .dsh-terminal-menu .panel-row-menu-items > .dsh-terminal-menu-reconnect { display:none; }
 }
 @media (any-pointer:coarse) {
-  .dsh-terminal-actions { gap:4px; padding:6px 8px max(6px,var(--content-safe-bottom,env(safe-area-inset-bottom))); }
+  .dsh-terminal-actions { gap:4px; padding:6px 8px max(6px,env(safe-area-inset-bottom)); }
   .dsh-terminal-common-actions { display:flex; flex:0 0 auto; gap:2px; order:2; }
   .dsh-terminal .dsh-terminal-common-actions .dsh-terminal-copy,.dsh-terminal .dsh-terminal-common-actions .dsh-terminal-paste { display:none; }
   .dsh-terminal .dsh-terminal-common-actions button { font-size:12px; padding-inline:6px; }
