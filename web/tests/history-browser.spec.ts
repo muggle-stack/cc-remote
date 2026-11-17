@@ -12633,9 +12633,10 @@ test("goal editor stays inside the tablet visual viewport above the keyboard", a
   )).toBeLessThan(2);
 });
 
-test("chat composer follows the keyboard through iOS document panning", async ({ page }, info) => {
+test("chat keyboard opening keeps the shell offset independent of document scroll", async ({ page }, info) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/tests/history-browser.html?mobile-scroll=1&quota-composer=1");
+  const shell = page.locator(".shell");
   const composer = page.getByTestId("quota-composer");
   const input = composer.locator("textarea");
   await input.fill("保留中文输入和草稿");
@@ -12643,41 +12644,31 @@ test("chat composer follows the keyboard through iOS document panning", async ({
   await page.evaluate(() => {
     Object.defineProperties(window.visualViewport!, {
       height: { configurable: true, value: 420 },
-      offsetTop: { configurable: true, value: 0 },
+      offsetTop: { configurable: true, value: 24 },
     });
     window.visualViewport!.dispatchEvent(new Event("resize"));
   });
-  await expect.poll(() => composer.evaluate(element => ({
-    padding: getComputedStyle(element).paddingBottom,
-    safe: document.documentElement.style.getPropertyValue("--content-safe-bottom"),
-  }))).toEqual({ padding: "4px", safe: "0px" });
-  await expect(input).toBeFocused();
-  await expect(input).toHaveValue("保留中文输入和草稿");
-  const bottomGap = () => composer.evaluate(element => {
-    const viewport = window.visualViewport!;
-    return viewport.offsetTop + viewport.height - element.getBoundingClientRect().bottom;
-  });
-  await expect.poll(bottomGap).toBeCloseTo(0, 1);
+  await expect.poll(() => shell.evaluate(element => ({
+    top: getComputedStyle(element).top,
+    height: element.getBoundingClientRect().height,
+  }))).toEqual({ top: "24px", height: 420 });
+  const padding = await composer.evaluate(element => getComputedStyle(element).paddingBottom);
 
-  // iOS can pan the layout document as well as the visual viewport to reveal
-  // a focused editor. Its extra document scroll must not lift the composer.
+  // Safari may pan its document repeatedly while keeping the editor visible.
+  // Feeding that pan back into shell.top moves the whole page again, so the
+  // shell must continue to use the visual viewport offset on every event.
   await page.addStyleTag({ content: "html { overflow:auto!important; } body { min-height:1800px!important; }" });
-  await page.evaluate(() => {
-    Object.defineProperty(window.visualViewport!, "offsetTop", { configurable: true, value: 24 });
-    window.scrollTo(0, 60);
-    window.visualViewport!.dispatchEvent(new Event("scroll"));
-  });
-  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(60);
-  await expect.poll(bottomGap).toBeCloseTo(0, 1);
+  for (const scrollTop of [60, 120, 240, 360]) {
+    await page.evaluate(top => {
+      window.scrollTo(0, top);
+      window.visualViewport!.dispatchEvent(new Event("scroll"));
+    }, scrollTop);
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(scrollTop);
+    await expect.poll(() => shell.evaluate(element => getComputedStyle(element).top)).toBe("24px");
+  }
   await expect(input).toBeFocused();
   await expect(input).toHaveValue("保留中文输入和草稿");
 
-  // A later document-only pan must be followed even when visualViewport's
-  // dimensions and own offset stay unchanged.
-  await page.evaluate(() => { window.scrollTo(0, 90); });
-  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(90);
-  await expect.poll(bottomGap).toBeCloseTo(0, 1);
-  await page.screenshot({ path: info.outputPath("chat-keyboard-spacing.png") });
   await input.evaluate(element => element.blur());
   await page.evaluate(() => {
     Object.defineProperties(window.visualViewport!, {
@@ -12686,9 +12677,14 @@ test("chat composer follows the keyboard through iOS document panning", async ({
     });
     window.visualViewport!.dispatchEvent(new Event("resize"));
   });
-  await expect.poll(() => composer.evaluate(element => getComputedStyle(element).paddingBottom)).toBe("12px");
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
-  await expect.poll(bottomGap).toBeCloseTo(0, 1);
+  await expect.poll(() => shell.evaluate(element => ({
+    top: element.getBoundingClientRect().top,
+    height: element.getBoundingClientRect().height,
+  }))).toEqual({ top: 0, height: 844 });
+  expect(await composer.evaluate(element => getComputedStyle(element).paddingBottom)).toBe(padding);
+  await expect(input).toHaveValue("保留中文输入和草稿");
+  await page.screenshot({ path: info.outputPath("chat-keyboard-restored.png") });
 });
 
 test("the compact Goal monitor yields while the mobile keyboard is open", async ({

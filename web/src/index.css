@@ -130,7 +130,7 @@ body{
 .mono{font-family:var(--mono)} .serif{font-family:var(--serif)}
 
 /* APP SHELL — single chat pane for now (sessions sidebar reserved for multi-session) */
-.shell{ position:relative; top:var(--app-document-top,var(--app-offset-top,0px)); display:block; height:100vh; height:var(--app-height,100dvh); overflow:hidden; }
+.shell{ position:relative; top:var(--app-offset-top,0px); display:block; height:100vh; height:var(--app-height,100dvh); overflow:hidden; }
 .pane{ position:relative; height:100%; display:flex; flex-direction:column; overflow:hidden; background:var(--bg); }
 
 /* ICON BUTTONS */
@@ -1126,7 +1126,7 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .empty .loading-tx{ color:var(--faint); font-size:13px; }
 
 /* COMPOSER */
-.composer{ flex:none; padding:8px 12px calc(12px + var(--content-safe-bottom,env(safe-area-inset-bottom)));
+.composer{ flex:none; padding:8px 12px calc(12px + env(safe-area-inset-bottom));
   background:var(--bg); }
 .composer-in{ max-width:760px; margin:0 auto; position:relative; }
 .paste-card{ position:relative; display:flex; width:min(100%,300px); min-width:0; align-items:center;
@@ -1171,7 +1171,7 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
   .paste-preview-backdrop{ align-items:flex-end; padding:10px; }
   .paste-preview{ width:100%; height:min(76vh,620px); border-radius:16px; }
 }
-.work-composer{ padding:10px 12px calc(12px + var(--content-safe-bottom,env(safe-area-inset-bottom))); background:var(--raised); border-top:0; }
+.work-composer{ padding:10px 12px calc(12px + env(safe-area-inset-bottom)); background:var(--raised); border-top:0; }
 .work-composer-in{ max-width:820px; }
 .work-compose-card{ padding:12px 14px 10px; border:1px solid var(--border-strong); border-radius:18px;
   background:var(--surface); box-shadow:var(--shadow-sm); }
@@ -1694,8 +1694,6 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .hint-mode.plan{ color:var(--accent-ink); }
 .hint-mode.danger{ color:var(--danger); }
 .hint-kbds{ white-space:nowrap; flex:1; text-align:center; overflow:hidden; text-overflow:ellipsis; }
-[data-short-viewport="ime"] .composer { padding-bottom:4px; }
-[data-short-viewport="ime"] .composer .hint { padding-top:3px; }
 /* Narrow screens: hide desktop shortcuts and distribute every live control
    across the remaining row width. Desktop keeps the original split layout. */
 @media (max-width:640px){
