@@ -4,7 +4,15 @@
 
 ## Unreleased
 
-- Add embedded PPTX preview with navigation, thumbnails, zoom and bounded cleanup. Wire protocol v96.
+## v5.3.45
+
+Add browser-rendered PPTX previews with mobile continuous reading. Wire protocol v96 and Claude Agent SDK 0.2.174.
+
+- Browse slides with navigation, thumbnails, zoom and original-file downloads.
+- Use rounded cards and controls with an anchored zoom menu on mobile and desktop.
+- Render in an isolated browser frame, validate package limits and release resources when closing previews.
+
+See the bilingual [release notes](docs/releases/v5.3.45.md).
 
 ## v5.3.44
 
