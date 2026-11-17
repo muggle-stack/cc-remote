@@ -116,7 +116,7 @@ interface Props {
   takeoverMessage?: string | null;
   engine?: "claude" | "codex" | "dsh";
   archived?: boolean;
-  catalog?: Catalog;   // engine-reported models/efforts; falls back to data.ts
+  catalog?: Catalog;   // engine-reported models and reasoning capabilities
   onRequestModels?: () => void;
   editPrompt: string | null;
   onEditConsumed: () => void;
@@ -1221,6 +1221,7 @@ export function Composer(p: Props) {
         kind={sheetKind ?? "models"}
         engine={p.engine}
         catalog={p.catalog}
+        onRequestModels={p.onRequestModels}
         dsh={p.dsh}
         onClose={() => setSheetKind(null)}
         currentModel={p.model}

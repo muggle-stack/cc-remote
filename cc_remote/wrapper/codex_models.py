@@ -1,19 +1,8 @@
-"""The codex app-server IS the model catalog — ask it, never hardcode it.
+"""Discover models and reasoning capabilities through Codex's app-server.
 
-`model/list` reports, per model, `supportedReasoningEfforts` and
-`defaultReasoningEffort`. That is the ONLY source of truth: `turn/start` does not
-validate `effort` at the RPC layer (measured — it happily accepts `bogus-zzz` and
-starts the turn), so an unsupported level only blows up later, inside the model
-API, as a failed turn.
-
-We learned this the hard way by hardcoding the GPT-5.6 effort table and getting it
-wrong twice: `minimal` doesn't exist on any model, and `gpt-5.6-luna` tops out at
-`max`, not `ultra`. The catalog also moves under us — 0.143.0 knew nothing of the
-5.6 family, 0.144.1 dropped `gpt-5.3-codex`.
-
-Presentation (Chinese blurbs, icons) stays in the web's data.ts, keyed by id; we
-ship `display_name`/`description` from the server as the fallback for models the
-web has never heard of. So a new codex model shows up in the UI on its own.
+`model/list` supplies model identifiers, descriptions, supported reasoning
+efforts and their defaults. Preserve these native values for validation and
+presentation, with account-scoped caching when discovery is unavailable.
 """
 from __future__ import annotations
 
@@ -95,17 +84,10 @@ def resolve_service_tier(
 _profile_cache: dict[str, tuple[list[dict], float]] = {}
 _inflight: dict[str, asyncio.Task[list[dict]]] = {}
 
-# Cost/latency order, low -> high. Used only to clamp an unsupported request DOWN
-# to something the model accepts; unknown levels sort last so they never win.
-EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
 # Wire/display sentinel used only when app-server explicitly selected the
 # model's default but model/list is temporarily unavailable. It is never sent
 # back to turn/start as a reasoning effort.
 MODEL_DEFAULT_EFFORT = "model-default"
-
-
-def _rank(effort: str) -> int:
-    return EFFORT_ORDER.index(effort) if effort in EFFORT_ORDER else len(EFFORT_ORDER)
 
 
 def _profile_cache_key(codex_home: str | None) -> str:
@@ -199,14 +181,18 @@ def _normalize(raw: list[dict]) -> list[dict]:
         if not mid:
             continue
         mid = str(mid)[:256]
-        efforts = [str(e.get("reasoningEffort"))[:64]
-                   for e in (m.get("supportedReasoningEfforts") or [])
-                   if isinstance(e, dict) and e.get("reasoningEffort")][:_MAX_EFFORTS]
+        supported = [e for e in (m.get("supportedReasoningEfforts") or [])
+                     if isinstance(e, dict) and e.get("reasoningEffort")][:_MAX_EFFORTS]
+        efforts = [str(e["reasoningEffort"])[:64] for e in supported]
         out.append({
             "id": mid,
             "display_name": str(m.get("displayName") or mid)[:_MAX_CATALOG_TEXT],
             "description": str(m.get("description") or "")[:_MAX_CATALOG_TEXT],
             "efforts": efforts,
+            "effort_descriptions": {
+                effort: str(entry.get("description") or "")[:_MAX_CATALOG_TEXT]
+                for effort, entry in zip(efforts, supported)
+            },
             "default_effort": (
                 str(m.get("defaultReasoningEffort"))[:64]
                 if m.get("defaultReasoningEffort") else None),
@@ -293,21 +279,24 @@ async def clamp_effort(
     *,
     codex_home: str | None = None,
 ) -> Optional[str]:
-    """Coerce `effort` to something `model` actually supports.
+    """Keep supported choices, using the native default for a stale override.
 
-    Clamps DOWN — the highest supported level at or below the request — so we never
-    silently spend more than the user asked for. If the request is below everything
-    the model offers, take its lowest. An unknown model (custom provider, or a
-    catalog we couldn't read) passes through untouched: codex forwards it verbatim.
+    Unknown models or unavailable catalogs retain explicit choices for native
+    validation. If a known model has no advertised default, clear the unsupported
+    override so app-server can select its default without a local guess.
     """
-    if not effort:
+    if not effort or not model:
         return effort
-    supported = await efforts_for(model, codex_home=codex_home)
-    if not supported or effort in supported:
+    entry = next((m for m in await codex_catalog(codex_home=codex_home)
+                  if m["id"] == model), None)
+    if entry is None:
         return effort
-    want = _rank(effort)
-    below = [e for e in supported if _rank(e) <= want]
-    picked = max(below, key=_rank) if below else min(supported, key=_rank)
-    log.warning("codex effort not supported by model -> clamped",
+    supported = entry["efforts"]
+    if effort in supported:
+        return effort
+    picked = entry.get("default_effort")
+    if not picked or picked not in supported:
+        picked = None
+    log.warning("codex unsupported effort replaced with native default",
                 model=model, requested=effort, applied=picked, supported=supported)
     return picked

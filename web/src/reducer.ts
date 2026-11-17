@@ -5295,9 +5295,9 @@ function reduceEvent(
       let catalogDefault = state.catalogDefault;
       let catalogDefaultEffort = state.catalogDefaultEffort;
       let catalogDefaultCwd = state.catalogDefaultCwd;
-      if (e.cwd || e.engine === "dsh") {
-        // Cwd-aware Claude and all DSH responses replace defaults even when
-        // absent: do not reuse a prior directory's or removed provider's values.
+      if (e.cwd || e.engine === "dsh" || (e.engine === "codex" && e.models.length > 0)) {
+        // Successful native Codex reads, cwd-aware Claude and DSH responses
+        // replace defaults even when absent. Never reuse a removed default.
         catalogDefault = { ...catalogDefault };
         catalogDefaultEffort = { ...catalogDefaultEffort };
         if (e.default_model) {

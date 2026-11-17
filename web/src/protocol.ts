@@ -567,13 +567,14 @@ export interface ArtifactInvalidated extends Base { type: "artifact_invalidated"
 // The engine's own model catalog. codex's app-server reports, per model, exactly
 // which reasoning levels it accepts — and `turn/start` does NOT validate the level
 // (it accepts `bogus-zzz`), so one we invent client-side only fails later inside the
-// model API. The server is authoritative; data.ts's table is a fallback.
+// model API. Codex choices and descriptions come from this native catalog.
 export interface GetModels extends Base { type: "get_models"; engine?: string | null; client_id?: string | null; cwd?: string | null; claude_profile_id?: string | null; codex_profile_id?: string | null }
 export interface CatalogModel {
   id: string;
   display_name: string;
   description: string;
   efforts: string[];
+  effort_descriptions?: Record<string, string>;
   default_effort?: string | null;
   is_default?: boolean;
   service_tiers?: ModelServiceTier[] | null;

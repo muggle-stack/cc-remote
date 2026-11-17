@@ -14858,7 +14858,7 @@ test("new-chat controls pass native prompts and preserve command arguments", asy
 });
 
 test("new-chat controls keep attachments through local commands and IME confirmation", async ({ page }) => {
-  await page.goto("/tests/history-browser.html?newchat-controls=1");
+  await page.goto("/tests/history-browser.html?newchat-controls=1&newchat-commands=1");
   const input = page.locator(".newchat-input");
   await page.getByLabel("添加文件", { exact: true }).setInputFiles({
     name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("inspect these notes"),
@@ -14927,6 +14927,88 @@ test("new-chat controls omit Code-directory skills in a new Work session", async
   await expect(requests).toHaveText("1");
 });
 
+for (const width of [390, 1280]) {
+  test(`new-chat controls use the native Codex model list across all pickers at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const relay = await mockRightPanelRelay(page, { retained: false, visible: false });
+    await page.goto("/");
+    const activeModel = page.locator('.composer button[title="选择模型"]');
+    await expect(activeModel).toBeVisible();
+    await expect.poll(() => relay.commands.some(command => command.type === "get_models")).toBe(true);
+    relay.emit({ type: "model", sid: "layout-parent", seq: 1, model: "custom-current-model" });
+    await expect(activeModel).toHaveText("custom-current-model");
+    await activeModel.click();
+    const picker = page.getByRole("dialog", { name: "选择模型", exact: true });
+    await expect(picker).toContainText("暂未读取到模型列表");
+    await expect(picker).not.toContainText("GPT-5.6");
+    let requests = relay.commands.filter(command => command.type === "get_models").length;
+    await picker.getByRole("button", { name: "重新读取模型列表" }).click();
+    await expect.poll(() => relay.commands.filter(command => command.type === "get_models").length).toBeGreaterThan(requests);
+    const nativeModels = [
+      { id: "gpt-future", display_name: "Native future", description: "Newest server description",
+        efforts: ["adaptive", "low"], default_effort: "adaptive",
+        effort_descriptions: { adaptive: "Native adaptive reasoning", low: "Native future low" } },
+      { id: "gpt-5.6-sol", display_name: "Native Sol", description: "Updated server description",
+        efforts: ["low"], default_effort: "low",
+        effort_descriptions: { low: "Native Sol low reasoning" } },
+    ];
+    relay.emit({ type: "models", engine: "codex", models: nativeModels });
+    await expect(picker.locator(".cmd-nm")).toHaveText(["Native future", "Native Sol"]);
+    await expect(picker.locator(".cmd-ds")).toHaveText(["Newest server description", "Updated server description"]);
+    relay.emit({ type: "models", engine: "codex", models: [] });
+    await expect(picker.locator(".cmd-nm")).toHaveText(["Native future", "Native Sol"]);
+    await picker.getByRole("button", { name: "Native Sol Updated server description" }).click();
+    await expect.poll(() => relay.commands.filter(command => command.type === "set_model").at(-1)?.model).toBe("gpt-5.6-sol");
+    relay.emit({ type: "model", sid: "layout-parent", seq: 2, model: "gpt-5.6-sol" });
+    await expect(activeModel).toHaveText("Native Sol");
+    await page.locator('.composer button[title="思考强度"]').click();
+    const effortPicker = page.getByRole("dialog", { name: "选择思考强度", exact: true });
+    await expect(effortPicker.locator(".cmd-nm")).toHaveText(["low"]);
+    await expect(effortPicker.locator(".cmd-ds")).toHaveText(["Native Sol low reasoning"]);
+    await effortPicker.getByRole("button", { name: "low Native Sol low reasoning" }).click();
+    await expect.poll(() => relay.commands.filter(command => command.type === "set_effort").at(-1)?.effort).toBe("low");
+    relay.emit({ type: "effort", sid: "layout-parent", seq: 3, effort: "low" });
+
+    const showSidebar = page.getByLabel("显示会话侧栏", { exact: true });
+    if (await showSidebar.isVisible()) await showSidebar.click();
+    await page.getByRole("button", { name: "新会话", exact: true }).click();
+    await page.getByTitle("选择模型", { exact: true }).click();
+    await expect(picker.locator(".cmd-nm")).toHaveText(["本机默认", "Native future", "Native Sol"]);
+    await picker.getByRole("button", { name: "Native future Newest server description" }).click();
+    await page.getByTitle("选择思考强度", { exact: true }).click();
+    await expect(effortPicker.locator(".cmd-nm")).toHaveText(["默认", "adaptive", "low"]);
+    await expect(effortPicker.locator(".cmd-ds").nth(1)).toHaveText("Native adaptive reasoning");
+    await effortPicker.getByRole("button", { name: "adaptive Native adaptive reasoning" }).click();
+    await page.locator(".newchat-input").fill("hello");
+    await page.getByRole("button", { name: "开始", exact: true }).click();
+    await expect.poll(() => relay.commands.filter(command => command.type === "new_session").at(-1)?.model).toBe("gpt-future");
+    await expect.poll(() => relay.commands.filter(command => command.type === "new_session").at(-1)?.effort).toBe("adaptive");
+  });
+
+  test(`new-chat controls retry an unavailable native Codex catalog at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const relay = await mockRightPanelRelay(page, { retained: false, visible: false });
+    await page.goto("/");
+    await expect.poll(() => relay.commands.some(command => command.type === "get_models")).toBe(true);
+    const showSidebar = page.getByLabel("显示会话侧栏", { exact: true });
+    if (await showSidebar.isVisible()) await showSidebar.click();
+    await page.getByRole("button", { name: "新会话", exact: true }).click();
+    await page.getByTitle("选择模型", { exact: true }).click();
+    const picker = page.getByRole("dialog", { name: "选择模型", exact: true });
+    await expect(picker).toContainText("暂未读取到模型列表，可使用本机默认配置");
+    await expect(picker).not.toContainText("GPT-");
+    const requests = relay.commands.filter(command => command.type === "get_models").length;
+    await picker.getByRole("button", { name: "重新读取模型列表" }).click();
+    await expect.poll(() => relay.commands.filter(command => command.type === "get_models").length).toBeGreaterThan(requests);
+    relay.emit({ type: "models", engine: "codex", models: [{
+      id: "native-model", display_name: "Recovered model", description: "From app-server", efforts: [],
+    }] });
+    await expect(picker.locator(".cmd-nm")).toHaveText(["本机默认", "Recovered model"]);
+    await expect(picker).not.toContainText("暂未读取到模型列表");
+    await expect(picker.getByRole("button", { name: "重新读取模型列表" })).toHaveCount(0);
+  });
+}
+
 for (const engine of ["claude", "codex"] as const) {
   test(`new-chat controls preserve raw ${engine} model IDs through catalog refresh and creation`, async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
@@ -14982,7 +15064,7 @@ for (const engine of ["claude", "codex"] as const) {
     relay.emit({ type: "models", engine, cwd: request.cwd as string | undefined,
       models: [{ id: model, display_name: "Discovered model", description: "", efforts: ["low", "high"] }] });
     await expect(efforts.locator(".sheet-scroll .cmd-nm")).toHaveText(["默认", "low", "high"]);
-    await efforts.getByRole("button", { name: /^high / }).click();
+    await efforts.getByRole("button", { name: /^high(?: |$)/ }).click();
     await expect(efforts).not.toBeVisible();
     await expect(effortButton).toHaveText("high");
     // A catalog refresh must not silently clear a supported explicit choice.

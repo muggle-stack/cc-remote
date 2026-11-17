@@ -454,7 +454,7 @@ CODEX_COLLABORATION_MODES = frozenset({"default", "plan"})
 CODEX_FAST_SERVICE_TIERS = frozenset({"fast", "priority"})
 CODEX_EFFORT_RESOLVE_TIMEOUT_SECONDS = 1.0
 CODEX_EFFORT_RESOLVE_RETRY_SECONDS = 30.0
-BTW_DEFAULT_EFFORT = "xhigh"
+CLAUDE_BTW_DEFAULT_EFFORT = "xhigh"
 CODEX_DAEMON_RECOVERY_TIMEOUT_SECONDS = 45.0
 CODEX_TURN_START_RECONCILE_INTERVAL_SECONDS = 0.25
 CODEX_TURN_START_RECONCILE_DEADLINE_SECONDS = 120.0
@@ -20715,8 +20715,8 @@ class WrapperMachine:
         """Resolve app-server's nullable thread effort into a stable readout.
 
         ``reasoningEffort: null`` means "no thread override", not "the control
-        is still loading". Prefer a wrapper-owned explicit choice (notably BTW's
-        default), then app-server's effective configured fallback. If no
+        is still loading". Prefer a user-supplied explicit choice, then
+        app-server's effective configured fallback. If no
         configured level exists, publish a truthful model-default sentinel while
         leaving ``sdk.effort`` unset so turn/start keeps following app-server.
         """
@@ -20830,6 +20830,9 @@ class WrapperMachine:
             # model-default until the next scoped probe resolves it.
             return _session_effort(ctx) or MODEL_DEFAULT_EFFORT
 
+        if explicit and resolved is None:
+            sdk.effort = None
+            sdk.applied_effort = None
         if isinstance(resolved, str) and resolved.strip():
             resolved = resolved.strip()
             # A concrete configured default is presentation state, not a thread
@@ -20865,7 +20868,7 @@ class WrapperMachine:
         return MODEL_DEFAULT_EFFORT
 
     async def _apply_codex_effort(self, ctx, effort: Optional[str]) -> Optional[str]:
-        """Clamp `effort` to what ctx's codex model supports and apply it to the live
+        """Resolve `effort` against the native catalog and apply it to the live
         handle. Returns the APPLIED level (may differ from the request); the caller
         announces it. Doesn't touch ctx.announced_effort.
 
@@ -20881,8 +20884,6 @@ class WrapperMachine:
             effort,
             **({} if home is None else {"codex_home": home}),
         )
-        if not applied:
-            return applied
         # Persist through app-server's official thread setting. turn/start repeats
         # it defensively, but a restart/eviction no longer loses the selection.
         authoritative_update = await ctx.sdk.set_effort(applied)
@@ -20910,7 +20911,7 @@ class WrapperMachine:
         if control_error is not None:
             return control_error
         if ctx.engine == "codex":
-            applied = await self._apply_codex_effort(ctx, cmd.effort) or cmd.effort
+            applied = await self._apply_codex_effort(ctx, cmd.effort) or MODEL_DEFAULT_EFFORT
             ctx.announced_effort = applied
             event = Effort(effort=applied)
             await self._emit(ctx, event)
@@ -38429,9 +38430,8 @@ class WrapperMachine:
                     codex_resume_model_reconcile = model
             if model:
                 sdk.model = model
-                # A stale client can ask for a level this model doesn't have (it used
-                # to offer `minimal`, and `ultra` on luna). codex takes any string here
-                # and only fails inside the model API, so clamp against the real catalog.
+                # Validate stale client choices against native capabilities,
+                # using the model's advertised default when unsupported.
                 effort = await clamp_effort(
                     model,
                     effort,
@@ -38439,7 +38439,7 @@ class WrapperMachine:
                         "codex_home": self._codex_home(codex_profile),
                     }),
                 )
-        if effort or engine == "claude":
+        if effort or engine == "claude" or explicit_codex_effort:
             # Both new and resumed Claude sessions inherit native defaults
             # unless this command supplied an explicit effort override.
             sdk.effort = effort
@@ -39144,11 +39144,10 @@ class WrapperMachine:
                 sdk.auto_compact_threshold_tokens = auto_threshold
                 sdk.applied_auto_compact_mode = auto_mode
                 sdk.applied_auto_compact_threshold_tokens = auto_threshold
-        # Side chats are independent working conversations, not disposable
-        # low-effort probes. Start them at the product default while preserving
-        # the existing per-session effort control. Claude applies this at
-        # connect; Codex clamps it against the forked model before its first turn.
-        sdk.effort = BTW_DEFAULT_EFFORT
+        # Codex inherits the official fork's settings. Claude applies its
+        # existing side-chat default at connect.
+        if engine != "codex":
+            sdk.effort = CLAUDE_BTW_DEFAULT_EFFORT
         ctx = SessionContext(
             session_id=None, sdk=sdk,
             buffer=RingBuffer(self.cfg.ring_max_events, self.cfg.ring_max_bytes),
@@ -39242,8 +39241,7 @@ class WrapperMachine:
                                 space=catalog_space,
                                 error_type=type(exc).__name__,
                             )
-                await self._resolve_codex_session_effort(
-                    ctx, preferred=BTW_DEFAULT_EFFORT)
+                await self._resolve_codex_session_effort(ctx)
             await self._stamp_codex_daemon_epoch(ctx)
         except asyncio.CancelledError:
             disconnected = False

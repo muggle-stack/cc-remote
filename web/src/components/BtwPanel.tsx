@@ -759,6 +759,7 @@ export function BtwPanel(props: Props) {
         kind={sheetKind ?? "models"}
         engine={p.engine}
         catalog={p.catalog}
+        onRequestModels={p.onRequestModels}
         currentModel={p.rt?.model}
         currentEffort={p.rt?.effort}
         onClose={() => setSheetKind(null)}
