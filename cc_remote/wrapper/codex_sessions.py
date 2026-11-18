@@ -333,6 +333,21 @@ def codex_session_cwd(
     return meta.get("cwd") if meta else None
 
 
+def codex_session_provider(
+    session_id: str, *, codex_home: str | os.PathLike[str] | None = None,
+) -> Optional[str]:
+    """Read the provider bound to this exact native session, including old rollouts."""
+    path = _rollout_path(session_id, codex_home=codex_home)
+    meta = _read_meta(path) if path else None
+    if not meta or meta.get("id") != session_id:
+        return None
+    provider = meta.get("model_provider") or "openai"
+    if (not isinstance(provider, str) or not provider.strip() or len(provider) > 256
+            or any(ord(char) < 32 for char in provider)):
+        return None
+    return provider.strip()
+
+
 def codex_rollout_path(
     session_id: str,
     *,

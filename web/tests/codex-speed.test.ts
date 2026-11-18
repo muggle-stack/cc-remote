@@ -134,6 +134,33 @@ try {
   assert.deepEqual(modelsFor("codex", {
     codex: emptyAccount.catalog[modelCatalogScopeKey("codex", "new-account")] ?? [],
   }), [], "an uninitialized account never borrows another account's model list");
+  let sessionState = profileState;
+  for (const [sid, effort] of [["thread-b", "adaptive"], ["thread-a", "high"]]) {
+    sessionState = reduce(sessionState, { type: "event", event: {
+      type: "models", v: PROTOCOL_VERSION, ts: 1, engine: "codex", sid,
+      codex_profile_id: "primary", default_model: "shared", default_effort: effort,
+      models: [{ id: "shared", efforts: [effort], service_tiers: effort === "high"
+        ? [{ id: "priority" }] : [] }],
+    } });
+  }
+  const sessionCatalog = (sid: string) => ({
+    codex: sessionState.catalog[modelCatalogScopeKey("codex", "primary", null, sid)] ?? [],
+  });
+  assert.deepEqual(effortsFor("codex", "shared", sessionCatalog("thread-a")).map(x => x.id), ["high"]);
+  assert.deepEqual(effortsFor("codex", "shared", sessionCatalog("thread-b")).map(x => x.id), ["adaptive"]);
+  assert.equal(speedsFor("shared", sessionCatalog("thread-b")).options.length, 1);
+  assert.equal(speedsFor("shared", sessionCatalog("thread-a")).options.length, 2);
+  assert.deepEqual(sessionState.catalogDefault, profileState.catalogDefault,
+    "out-of-order thread provider catalogs never overwrite new-session model defaults");
+  assert.deepEqual(sessionState.catalogDefaultEffort, profileState.catalogDefaultEffort);
+  assert.deepEqual(sessionCatalog("unread-thread"), { codex: [] },
+    "a thread waiting for provider discovery cannot borrow the account's current provider");
+  const failedSession = reduce(sessionState, { type: "event", event: {
+    type: "models", v: PROTOCOL_VERSION, ts: 1, engine: "codex", sid: "thread-a",
+    codex_profile_id: "primary", models: [], error: "provider unavailable",
+  } });
+  assert.deepEqual(failedSession.catalog, sessionState.catalog,
+    "a failed thread catalog read retains only its previous provider capabilities");
   let state = { ...initialState, focusedSid: "a",
     runtimes: { a: createRuntime(), b: createRuntime() } };
   for (const tier of ["ultrafast", "default", "ultrafast"]) {

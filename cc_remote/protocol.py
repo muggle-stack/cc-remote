@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 96
+PROTOCOL_VERSION = 97
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -1915,7 +1915,9 @@ class DirList(_Base):
 class GetModels(_Command):
     """client -> wrapper: what models does this engine actually offer?
 
-    Codex answers with app-server's model/list. Claude reads the native picker
+    Codex answers with app-server's model/list. A sid selects that thread's
+    provider; no sid selects the account's current default provider.
+    Claude reads the native picker
     from a prompt-free initialization and resolves no-override settings for cwd.
     """
     type: Literal["get_models"] = "get_models"
@@ -2124,8 +2126,10 @@ class Models(_Base):
     native per-level descriptions. An unavailable Codex catalog retains the
     client's last native catalog or shows a retry action before first discovery.
 
-    `default_model`/`default_effort` are what a NEW no-override session starts on.
-    They are NOT the focused session's controls (those are per-session events)."""
+    For Codex, sid echoes a thread-scoped provider catalog and its catalog
+    defaults. Without sid, `default_model`/`default_effort` describe a NEW
+    no-override session. Neither replaces the focused thread's controls.
+    """
     type: Literal["models"] = "models"
     dsh_permissions: list[DshPermissionOption] = Field(default_factory=list, max_length=256)
     dsh_presets: list[DshPreset] = Field(default_factory=list, max_length=256)

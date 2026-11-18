@@ -155,6 +155,7 @@ _WORK_DISABLED_FEATURES = (
     "hooks",
     "memories",
     "multi_agent",
+    "multi_agent_v2",
     "personality",
     "plugin_sharing",
     "plugins",
@@ -1495,6 +1496,7 @@ def _work_thread_config(
 
     return {
         "features": {name: False for name in _WORK_DISABLED_FEATURES},
+        "agents": {"enabled": False},
         # Work artifacts may legitimately be called AGENTS.md.  They are data,
         # not a route for re-introducing Code/project instructions.
         "project_doc_max_bytes": 0,
@@ -1531,6 +1533,7 @@ class CodexHandle:
         )
         self.proc: Optional[asyncio.subprocess.Process] = None
         self.thread_id: Optional[str] = None
+        self.model_provider: Optional[str] = None
         # Separate native fork lifetime from this disposable transport. A proxy
         # reconnect can preserve an ephemeral thread; replacing its server cannot.
         self._ephemeral_thread_id: Optional[str] = None
@@ -2531,6 +2534,8 @@ class CodexHandle:
                     authoritative = dict(res)
                     authoritative.pop("reasoningEffort", None)
                 self._apply_thread_settings(authoritative)
+                if http_only_resume:
+                    self.model_provider = "openai"
                 if resume_id and not fork and preserve_controls:
                     # Some generations echo config-derived defaults even when
                     # resume overrides were accepted. Keep the next turn pinned
@@ -4705,6 +4710,13 @@ class CodexHandle:
         current UI receives their lossless-compatible ``on-request`` projection.
         """
         self._thread_settings_revision += 1
+        thread = settings.get("thread")
+        provider = settings.get("modelProvider")
+        if not provider and isinstance(thread, dict):
+            provider = thread.get("modelProvider")
+        if (isinstance(provider, str) and provider.strip() and len(provider) <= 256
+                and not any(ord(char) < 32 for char in provider)):
+            self.model_provider = provider.strip()
         cwd = settings.get("cwd")
         if (isinstance(cwd, str) and os.path.isabs(cwd)
                 and 0 < len(cwd) <= 4096):
@@ -4846,7 +4858,8 @@ class CodexHandle:
         async with self._thread_settings_lock:
             settings: dict[str, Any] = {"model": model}
             if normalize_service_tier(self.service_tier) != "default":
-                catalog = await codex_catalog(codex_home=self.codex_home)
+                catalog = await codex_catalog(
+                    codex_home=self.codex_home, model_provider=self.model_provider)
                 try:
                     tier = resolve_service_tier(model, self.service_tier, catalog)
                 except ValueError:
@@ -4907,10 +4920,11 @@ class CodexHandle:
 
     async def set_service_tier(self, tier: Optional[str]) -> None:
         async with self._thread_settings_lock:
-            scope = (self.model, self.thread_id, self._generation)
-            catalog = (await codex_catalog(codex_home=self.codex_home)
+            scope = (self.model, self.model_provider, self.thread_id, self._generation)
+            catalog = (await codex_catalog(
+                codex_home=self.codex_home, model_provider=self.model_provider)
                        if normalize_service_tier(tier) != "default" else [])
-            if scope != (self.model, self.thread_id, self._generation):
+            if scope != (self.model, self.model_provider, self.thread_id, self._generation):
                 raise ValueError("模型或会话已变化，请重新选择速度。")
             normalized = resolve_service_tier(self.model, tier, catalog)
             authoritative = await self._update_thread_settings_serialized(

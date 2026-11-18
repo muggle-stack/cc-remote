@@ -138,7 +138,8 @@ class SettingsForm(Overlay):
         return values
 
     def catalog(self, kind):
-        key = (kind, *self.client.capability_key(self.args(kind)))
+        args = {**self.args(kind), "sid": None if self.new else self.sid}
+        key = (kind, *self.client.capability_key(args, session=kind == "models"))
         return self.client.settings_catalogs.get(key, {})
 
     def compose(self):
@@ -179,7 +180,7 @@ class SettingsForm(Overlay):
 
     async def fetch(self):
         await self.client._send(
-            p.GetModels(sid=self.sid, **self.args("models"))
+            p.GetModels(sid=None if self.new else self.sid, **self.args("models"))
         )
         if self.engine == "codex" and self.space == "code":
             await self.client._send(
