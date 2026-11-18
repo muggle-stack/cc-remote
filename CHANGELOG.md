@@ -4,6 +4,16 @@
 
 ## Unreleased
 
+## v5.3.48
+
+Restores the in-app upgrade path for older Wrappers using Claude Agent SDK 0.2.174. This compatibility release uses SDK 0.2.174 and wire protocol v97.
+
+- Devices using the 0.2.174 SDK can install this release and adopt the new migration flow.
+- When a later update changes the SDK, the installer waits for active work, switches the managed Claude service with the Wrapper, and rolls back both on failure. Idle resident sessions can pass upgrade admission.
+- Regression coverage checks idle Claude, Codex and DSH sessions, Claude migration and release package contents.
+
+See the bilingual [release notes](docs/releases/v5.3.48.md).
+
 ## v5.3.47
 
 Inspect workspace files in the background and improve account display and Claude plan approval. Wire protocol v97 and Claude Agent SDK 0.2.184.
