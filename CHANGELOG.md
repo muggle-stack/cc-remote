@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+## v5.3.49
+
+The Claude quota panel shows the current account's saved subscription plan while active quota queries are off. Wire protocol v97.
+
+See the bilingual [release notes](docs/releases/v5.3.49.md).
+
 ## v5.3.48
 
 Restores the in-app upgrade path for older Wrappers using Claude Agent SDK 0.2.174. This compatibility release uses SDK 0.2.174 and wire protocol v97.
