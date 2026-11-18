@@ -63,7 +63,7 @@ from contextlib import AsyncExitStack, contextmanager
 from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from uuid import uuid4
-from typing import BinaryIO, Literal, Optional
+from typing import Literal, Optional
 
 from cc_remote.wrapper import codex_readiness
 from cc_remote.wrapper.artifact_service import ArtifactService
@@ -439,10 +439,16 @@ from cc_remote.wrapper.process_scan import (
 from cc_remote.wrapper.command_router import CommandRouter, UNHANDLED_COMMAND
 from cc_remote.wrapper.command_scheduler import CommandScheduler
 from cc_remote.wrapper.preview_capabilities import (
-    PREVIEW_PATH_MAX_BYTES,
     PreviewCapability,
     PreviewCapabilityError,
     PreviewCapabilityStore,
+)
+from cc_remote.wrapper.session_files import (
+    PreviewAuthorizationNeeded as _PreviewAuthorizationNeeded,
+    PreviewCapabilityChanged as _PreviewCapabilityChanged,
+    open_session_file,
+    path_is_below,
+    read_session_file,
 )
 from cc_remote.wrapper.transport import WrapperTransport
 
@@ -1562,19 +1568,6 @@ class _FileRevisionConflict(RuntimeError):
         self.size = size
         self.mtime_ns = mtime_ns
         self.revision = revision
-
-
-class _PreviewAuthorizationNeeded(ValueError):
-    """An otherwise valid preview points outside cwd without a capability."""
-
-    def __init__(self, path: str, resolved_path: str):
-        super().__init__("外部文件需要确认后才能预览")
-        self.path = path
-        self.resolved_path = resolved_path
-
-
-class _PreviewCapabilityChanged(_PreviewAuthorizationNeeded):
-    """The exact file identity previously authorized no longer matches."""
 
 
 @dataclass(frozen=True)
@@ -10198,12 +10191,7 @@ class WrapperMachine:
 
     # ---- emit (per-ctx seq + buffer + best-effort send), serialized per ctx ----
 
-    @staticmethod
-    def _path_is_below(root: str, candidate: str) -> bool:
-        try:
-            return os.path.commonpath((root, candidate)) == root
-        except ValueError:
-            return False
+    _path_is_below = staticmethod(path_is_below)
 
     def _normalize_preview_write_event(self, msg) -> tuple[str, ...]:
         """Decorate one write ToolUse without granting filesystem access.
@@ -22897,7 +22885,9 @@ class WrapperMachine:
             if failure == "usage helper unavailable":
                 query_state = "unconfigured"
                 failure = None
-        windows = await self._claude_rate_limit_snapshot(ctx)
+        windows = await self._claude_rate_limit_snapshot(
+            ctx, include_plan=query_state == "enabled" and failure is None,
+        )
         report = StatusReport(
             thread={"thread_id": ctx.session_id or ctx.key,
                     "session_id": ctx.session_id,
@@ -22905,6 +22895,7 @@ class WrapperMachine:
             runtime={}, context={},
             rate_limits=[{
                 "limit_id": update.limit_id, "limit_name": update.name,
+                "plan_type": update.plan_type,
                 "rate_limit_reached_type": update.reached_type,
                 "primary": update.primary, "secondary": update.secondary,
                 "monthly": update.monthly,
@@ -23098,7 +23089,7 @@ class WrapperMachine:
         await self._emit(ctx, event)
 
     async def _claude_rate_limit_snapshot(
-        self, ctx: SessionContext,
+        self, ctx: SessionContext, *, include_plan: bool = False,
     ) -> tuple[RateLimitUpdate, ...]:
         store = self._claude_rate_limit_stores.get(
             self._claude_profile_for_ctx(ctx).id)
@@ -23106,7 +23097,9 @@ class WrapperMachine:
             return ()
         async with self._claude_rate_limit_lock:
             try:
-                return await asyncio.to_thread(store.snapshot)
+                return await asyncio.to_thread(
+                    store.snapshot, include_plan=include_plan,
+                )
             except ClaudeRateLimitStoreError:
                 log.warning("Claude rate-limit snapshot unavailable")
                 return ()
@@ -27040,7 +27033,9 @@ class WrapperMachine:
             if selected is None:
                 await self._record_claude_plan_permission(ctx, tool_input, permission_context, denied=True)
                 return PermissionResultDeny(message="用户要求继续修改计划。")
-            return PermissionResultAllow(updated_permissions=[PermissionUpdate(type="setMode", mode=selected)])
+            return PermissionResultAllow(updated_permissions=[PermissionUpdate(
+                type="setMode", mode=selected, destination="session",
+            )])
         if tool_name == "AskUserQuestion":
             return await self._on_claude_ask_user_question(ctx, tool_input)
 
@@ -27147,129 +27142,8 @@ class WrapperMachine:
             log.info("ask_user answered", ask_id=cmd.ask_id)
             return None
 
-    @staticmethod
-    def _open_session_file(
-        cwd: str,
-        path: str,
-        *,
-        allowed_suffixes: Optional[frozenset[str]],
-        max_bytes: int,
-        allow_truncate: bool,
-        allowed_external_paths: Optional[
-            dict[str, PreviewCapability]
-        ] = None,
-    ) -> tuple[str, BinaryIO, os.stat_result]:
-        """Open a bounded regular file below cwd without following an escape.
-
-        ``realpath`` contains relative or tool-reported absolute paths inside
-        the session root while rejecting symlinks that escape it. ``O_NONBLOCK``
-        prevents a malicious FIFO from hanging the wrapper before ``fstat`` can
-        reject the special file.
-        """
-        if path.startswith("~"):
-            raise ValueError("预览路径必须位于当前工作目录")
-        try:
-            path_bytes = len(path.encode("utf-8", "surrogatepass"))
-        except UnicodeEncodeError as exc:
-            raise ValueError("预览路径无效") from exc
-        if (
-            not path
-            or "\x00" in path
-            or path_bytes > PREVIEW_PATH_MAX_BYTES
-        ):
-            raise ValueError("预览路径过长")
-
-        root = os.path.realpath(cwd)
-        candidate = os.path.realpath(
-            path if os.path.isabs(path) else os.path.join(root, path))
-        if (
-            len(candidate.encode("utf-8", "surrogatepass"))
-            > PREVIEW_PATH_MAX_BYTES
-        ):
-            raise ValueError("预览路径过长")
-        inside_root = WrapperMachine._path_is_below(root, candidate)
-
-        suffix = os.path.splitext(candidate)[1].lower()
-        if allowed_suffixes is not None and suffix not in allowed_suffixes:
-            raise ValueError("不支持预览该文件类型")
-        capability = (
-            (allowed_external_paths or {}).get(candidate)
-            if not inside_root else None
-        )
-        if not inside_root and capability is None:
-            raise _PreviewAuthorizationNeeded(path, candidate)
-
-        access_root = root if inside_root else os.path.dirname(candidate)
-        relative = (os.path.relpath(candidate, root)
-                    if inside_root else os.path.basename(candidate))
-        display_path = relative.replace(os.sep, "/") if inside_root else candidate
-        if relative in ("", "."):
-            raise ValueError("预览目标必须是普通文件")
-        parts = relative.split(os.sep)
-        file_flags = os.O_RDONLY
-        file_flags |= getattr(os, "O_CLOEXEC", 0)
-        file_flags |= getattr(os, "O_NONBLOCK", 0)
-        file_flags |= getattr(os, "O_NOFOLLOW", 0)
-        dir_flags = os.O_RDONLY
-        dir_flags |= getattr(os, "O_CLOEXEC", 0)
-        dir_flags |= getattr(os, "O_DIRECTORY", 0)
-        dir_flags |= getattr(os, "O_NOFOLLOW", 0)
-        dir_fd: Optional[int] = None
-        try:
-            # Walk from an already-open cwd and refuse symlinks at every hop.
-            # This closes the realpath/open race where a parent directory could
-            # otherwise be replaced by an escaping symlink between both calls.
-            dir_fd = os.open(access_root, dir_flags)
-            for part in parts[:-1]:
-                next_fd = os.open(part, dir_flags, dir_fd=dir_fd)
-                os.close(dir_fd)
-                dir_fd = next_fd
-            fd = os.open(parts[-1], file_flags, dir_fd=dir_fd)
-        except FileNotFoundError as exc:
-            raise ValueError("文件不存在") from exc
-        except PermissionError as exc:
-            raise ValueError("没有权限读取该文件") from exc
-        except OSError as exc:
-            raise ValueError("无法打开该文件") from exc
-        finally:
-            if dir_fd is not None:
-                os.close(dir_fd)
-
-        try:
-            file_stat = os.fstat(fd)
-            if not stat.S_ISREG(file_stat.st_mode):
-                raise ValueError("预览目标必须是普通文件")
-            if (
-                not inside_root
-                and capability is not None
-                and not capability.matches(file_stat)
-            ):
-                raise _PreviewCapabilityChanged(path, candidate)
-            if not allow_truncate and file_stat.st_size > max_bytes:
-                raise ValueError(
-                    f"预览文件超过 {max_bytes // (1024 * 1024)} MiB 限制")
-            return display_path, os.fdopen(fd, "rb"), file_stat
-        except BaseException:
-            os.close(fd)
-            raise
-
-    @staticmethod
-    def _read_session_file(
-        cwd: str, path: str, *, allowed_suffixes: Optional[frozenset[str]],
-        max_bytes: int, allow_truncate: bool,
-        allowed_external_paths: Optional[dict[str, PreviewCapability]] = None,
-    ) -> tuple[str, bytes, os.stat_result, bool]:
-        display_path, handle, file_stat = WrapperMachine._open_session_file(
-            cwd, path, allowed_suffixes=allowed_suffixes, max_bytes=max_bytes,
-            allow_truncate=allow_truncate, allowed_external_paths=allowed_external_paths)
-        with handle:
-            data = handle.read(max_bytes + 1)
-
-        truncated = len(data) > max_bytes or file_stat.st_size > max_bytes
-        if truncated and not allow_truncate:
-            raise ValueError(
-                f"预览文件超过 {max_bytes // (1024 * 1024)} MiB 限制")
-        return display_path, data[:max_bytes], file_stat, truncated
+    _open_session_file = staticmethod(open_session_file)
+    _read_session_file = staticmethod(read_session_file)
 
     @classmethod
     def _read_text_preview(

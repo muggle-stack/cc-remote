@@ -151,7 +151,7 @@ async def test_claude_profiles_use_the_daily_cli_account_metadata(
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(other))
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "ambient-other-account")
-    monkeypatch.setenv("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1")
+    monkeypatch.delenv("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", raising=False)
     parent = dict(os.environ)
     profile = native if selected == "native" else other
     handle = SdkHandle(
@@ -237,7 +237,7 @@ async def test_account_isolated_transport_scrubs_only_its_child_environment(
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "ambient-aws")
     monkeypatch.setenv("WRAPPER_TOKEN", "control-secret")
     monkeypatch.setenv("CLAUDECODE", "nested")
-    monkeypatch.setenv("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1")
+    monkeypatch.delenv("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", raising=False)
     parent = dict(os.environ)
     captured: dict[str, object] = {}
 

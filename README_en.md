@@ -265,12 +265,20 @@ development/builds use **Python 3.13 and Node 24**, matching CI and [`.nvmrc`](.
 Prepare at least one working engine:
 
 - **Claude:** daily Claude Code `>= 2.1.263`, normally at `~/.local/bin/claude`.
-  Wrapper launches that CLI; the Python Agent SDK is pinned to `0.2.174`.
+  Wrapper launches that CLI; the Python Agent SDK is pinned to `0.2.184`.
 - **Codex:** an authenticated official CLI. Shared control requires both
   `codex app-server daemon --help` and `codex app-server proxy --help`.
 
 - **DSH (optional):** Node 24 and `@deepseek-ai/dsh@0.2.2-rc.1`. Follow [DSH integration](docs/dsh-integration.md)
   to start the local API, load the metadata plugin and pair. Wrapper installation does not install or upgrade DSH automatically.
+
+Codex and Claude Code sessions can call `inspect_file` to inspect files inside their workspace in the background.
+
+- **Images** include PNG, JPEG, WebP, GIF, AVIF, HEIC/HEIF, TIFF, BMP, and SVG. Use `frame` for animated and multi-frame images.
+- **Documents and pages** include PPTX, PDF, DOCX, static HTML, Markdown, and Mermaid. Use `page` to select a slide, document page, or viewport. HTML and Markdown can load relative resources inside the workspace. Static HTML inspection disables page scripts. DOCX uses browser layout and pagination.
+- **Tables** include XLSX and UTF-8 CSV/TSV. Use `sheet` for an XLSX worksheet and `range` for an area such as `B2:H15`. The tool shows the selected grid by default. Set `view: "data"` for saved cell values and formula text.
+
+Raster decoding and table data reads run locally. Screenshot rendering uses sandboxed headless Chrome or Chromium on the Wrapper device, including Playwright Chromium installed for the Wrapper user.
 
 ### 1. Install dependencies and build
 

@@ -392,6 +392,8 @@ def _tool_meta(name: str, tool_input: dict[str, Any], *, server_tool: bool = Fal
         parts = raw_name.split("__", 2)
         server = _short_text(parts[1], 1000) if len(parts) > 1 else None
         display = parts[2] if len(parts) > 2 else raw_name
+        if server == "cc_remote_artifact_preview" and display == "inspect_file":
+            return "file", "查看文件", server
         return "mcp", _short_text(tool_input.get("description")) or display, server
     if server_tool:
         category = "web_search" if lower in {"web_search", "web_fetch"} else "server_tool"

@@ -36,6 +36,8 @@ from mcp.server import Server
 
 from cc_remote.config import WrapperConfig
 from cc_remote.claude_paths import claude_config_dir
+from cc_remote.wrapper.artifact_inspection import SERVER_NAME as ARTIFACT_PREVIEW_SERVER
+from cc_remote.wrapper.artifact_inspection import make_artifact_server
 from cc_remote.wrapper.claude_settings import save_user_defaults
 from cc_remote.claude_permissions import CLAUDE_PERMISSION_MODES, native_permission_mode
 from cc_remote.claude_steering import (
@@ -423,8 +425,16 @@ class SdkHandle:
         auto_compact_override: tuple[str, int | None] | None = None,
         effort_override: object = _CURRENT_LAUNCH_VALUE,
     ) -> ClaudeAgentOptions:
+        mcp_servers = {}
         if not self.work_mode:
             model_override = normalize_claude_model_selection(model_override)
+            for name, instance in (
+                ("cc-remote-ask", self.ask_server),
+                ("cc_remote_messages", self.message_server),
+                (ARTIFACT_PREVIEW_SERVER, make_artifact_server(cwd) if cwd else None),
+            ):
+                if instance is not None:
+                    mcp_servers[name] = {"type": "sdk", "name": name, "instance": instance}
         code_prompt_append = (
             "You have two MCP tools on the cc-remote-ask server:\n"
             "- `ask_user(question, options)`: ask the user a clarifying question with "
@@ -580,13 +590,7 @@ class SdkHandle:
             # Work asks ordinary clarifying questions in chat; it does not need
             # Code's ask/set-mode MCP schemas. Strict mode also prevents MCP
             # configured outside this explicit SDK invocation from leaking in.
-            mcp_servers=(
-                {} if self.work_mode else
-                {**({"cc-remote-ask": {"type": "sdk", "name": "cc-remote-ask", "instance": self.ask_server}}
-                    if self.ask_server is not None else {}),
-                 **({"cc_remote_messages": {"type": "sdk", "name": "cc_remote_messages", "instance": self.message_server}}
-                    if self.message_server is not None else {})}
-            ),
+            mcp_servers=mcp_servers,
             strict_mcp_config=self.work_mode,
             # Empty custom agents plus safe mode keeps installed/global agent
             # definitions out; the explicit tool allowlist also omits Agent.

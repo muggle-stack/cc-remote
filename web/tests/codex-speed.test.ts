@@ -83,10 +83,13 @@ try {
   assert.doesNotMatch(emptyMarkup, /GPT-|gpt-/);
   const nativeMarkup = renderToStaticMarkup(createElement(CommandSheet, {
     open: true, kind: "models", engine: "codex", onClose: () => undefined,
-    catalog: nativeCatalog,
+    catalog: nativeCatalog, currentModel: "gpt-5.6-terra",
   }));
   assert.match(nativeMarkup, /Native Terra/);
   assert.match(nativeMarkup, /Updated native Terra description/);
+  assert.doesNotMatch(nativeMarkup, /class="cmd-ic"/);
+  assert.match(nativeMarkup, /aria-pressed="true"/);
+  assert.match(nativeMarkup, /class="cmd-check"/);
   assert.doesNotMatch(nativeMarkup, /均衡|日常编码|GPT-5\.6 Terra/,
     "known ids use the same native display metadata as newly discovered models");
   const effortMarkup = renderToStaticMarkup(createElement(CommandSheet, {

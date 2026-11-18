@@ -211,9 +211,10 @@ export function CommandSheet({
               <button
                 key={m.id}
                 className={"cmd" + (m.id === currentModel ? " sel" : "")}
+                aria-pressed={m.id === currentModel}
                 onClick={() => onPickModel?.(m.id)}
               >
-                <span className="cmd-ic"><Icon name={m.ic} size={17} /></span>
+                {engine === "dsh" && <span className="cmd-ic"><Icon name={m.ic} size={17} /></span>}
                 <span className="cmd-tx">
                   <span className="cmd-nm">{m.name}</span>
                   <span className="cmd-ds">{m.ds}</span>

@@ -211,12 +211,20 @@ Wrapper 主动出站连接 Relay，设备不需要开放公网入站端口。Rel
 至少准备一个可用引擎：
 
 - **Claude**：日常 Claude Code `>= 2.1.263`，默认路径 `~/.local/bin/claude`。
-  Wrapper 使用该 CLI；Python Agent SDK 固定为 `0.2.174`。
+  Wrapper 使用该 CLI；Python Agent SDK 固定为 `0.2.184`。
 - **Codex**：已登录的官方 CLI。共享控制需要同时支持
   `codex app-server daemon --help` 和 `codex app-server proxy --help`。
 
 - **DSH（可选）**：Node 24 与 `@deepseek-ai/dsh@0.2.2-rc.1`。先按 [DSH 接入说明](docs/dsh-integration.md)
   启动本地 API、加载元数据插件并完成配对；普通 Wrapper 安装不会自动安装或升级 DSH。
+
+Codex 和 Claude 的 Code 会话可以用 `inspect_file` 在后台查看当前工作目录中的文件。
+
+- **图片**：PNG、JPEG、WebP、GIF、AVIF、HEIC/HEIF、TIFF、BMP、SVG。动图或多帧图片可以用 `frame` 选择帧。
+- **文档和网页**：PPTX、PDF、DOCX、静态 HTML、Markdown 和 Mermaid。用 `page` 选择幻灯片、文档页或网页视口。HTML 和 Markdown 可以加载工作目录内的相对资源，HTML 预览禁用页面脚本。DOCX 的分页和版式以浏览器渲染为准。
+- **表格**：XLSX、UTF-8 CSV、TSV。用 `sheet` 选择 XLSX 工作表，用 `range` 选择区域，例如 `B2:H15`。默认返回选区截图，`view: "data"` 返回保存的单元格值和公式文本。
+
+图片解码和表格数据读取在本机完成。截图渲染使用 Wrapper 机器上的沙箱无头 Chrome 或 Chromium，也支持为 Wrapper 用户安装的 Playwright Chromium。
 
 ### 1. 安装依赖并构建
 

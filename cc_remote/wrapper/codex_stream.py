@@ -3803,6 +3803,8 @@ def _tool_presentation(item: dict) -> tuple[str, str, str | None, str | None]:
     if item_type == "mcpToolCall":
         server = str(item.get("server") or "MCP")[:1024]
         tool = str(item.get("tool") or "mcp")[:1024]
+        if _is_artifact_inspection(server, tool):
+            return tool, "file", "查看文件", server
         return tool, "mcp", f"{server} · {tool}"[:1024], server
     if item_type == "dynamicToolCall":
         tool = str(item.get("tool") or "dynamicTool")[:1024]
@@ -4009,6 +4011,23 @@ def _reasoning_summary(item: dict) -> str:
     return text
 
 
+def _is_artifact_inspection(server: object, tool: object) -> bool:
+    return server == "cc_remote_artifact_preview" and tool == "inspect_file"
+
+
+def _artifact_inspection_text(result: dict) -> str:
+    # The model receives the actual image. Browser history only needs the
+    # result caption so binary content never enters the chat replay ring.
+    content = result.get("content")
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        item["text"] for item in content[:64]
+        if isinstance(item, dict) and item.get("type") in {"text", "input_text"}
+        and isinstance(item.get("text"), str)
+    )
+
+
 def _mcp_result_content(item: dict):
     error = item.get("error") if isinstance(item.get("error"), dict) else None
     if error is not None:
@@ -4016,6 +4035,8 @@ def _mcp_result_content(item: dict):
     result = item.get("result")
     if not isinstance(result, dict):
         return result or ""
+    if _is_artifact_inspection(item.get("server"), item.get("tool")):
+        return _artifact_inspection_text(result)
     # `_meta` is server-private and can contain connector/session data. Never put
     # it in a replayable client ring.
     return _redact_credentials({
@@ -5039,7 +5060,15 @@ def codex_translate_history(
                                 if has_image
                                 else "图片读取未返回可预览内容"
                             )
-                        if category in {"mcp", "server_tool"}:
+                        if _is_artifact_inspection(tool_meta[3], tool_meta[0]):
+                            if isinstance(raw_output, list):
+                                raw_output = _artifact_inspection_text({"content": raw_output})
+                            else:
+                                detail, structured_error = _history_structured_tool_output(raw_output)
+                                raw_output = (
+                                    _artifact_inspection_text(detail) if isinstance(detail, dict) else detail
+                                )
+                        elif category in {"mcp", "server_tool"}:
                             raw_output, structured_error = (
                                 _history_structured_tool_output(raw_output))
                         output, was_truncated = bounded_text(
@@ -5131,10 +5160,13 @@ def codex_translate_history(
                             else {"arguments": arguments}),
                         64 * 1024,
                     )
+                    artifact_inspection = _is_artifact_inspection(server, tool)
+                    title = "查看文件" if artifact_inspection else f"{server} · {tool}"[:1024]
                     upsert_tool_use(
-                        tool_id, tool, "mcp", f"{server} · {tool}"[:1024],
+                        tool_id, tool, "file" if artifact_inspection else "mcp", title,
                         server, tool_input, line_no, raw_ts)
-                    content, is_error = _legacy_mcp_result(p.get("result"))
+                    content, is_error = _legacy_mcp_result(
+                        p.get("result"), artifact_inspection=artifact_inspection)
                     output, truncated = bounded_text(content, tool_result_max)
                     upsert_tool_result(ToolResult(
                         tool_use_id=tool_id,
@@ -5558,6 +5590,8 @@ def _hist_tool_presentation(
         parts = raw_name.split("__", 2)
         server = parts[1] if len(parts) > 1 and parts[1] else "MCP"
         mcp_tool = parts[2] if len(parts) > 2 and parts[2] else raw_name
+        if _is_artifact_inspection(server, mcp_tool):
+            return mcp_tool, "file", "查看文件", server
         return mcp_tool[:1024], "mcp", f"{server} · {mcp_tool}"[:1024], server[:1024]
     return tool[:1024], "tool", raw_name[:1024], None
 
@@ -5680,7 +5714,7 @@ def _legacy_duration_ms(duration) -> int | None:
     return milliseconds if milliseconds >= 0 else None
 
 
-def _legacy_mcp_result(result) -> tuple[object, bool]:
+def _legacy_mcp_result(result, *, artifact_inspection: bool = False) -> tuple[object, bool]:
     """Decode persisted Rust ``Result`` while excluding server-private metadata."""
     if not isinstance(result, dict):
         return "MCP 工具调用已完成", False
@@ -5691,6 +5725,8 @@ def _legacy_mcp_result(result) -> tuple[object, bool]:
     value = result.get("Ok")
     if not isinstance(value, dict):
         return "MCP 工具调用已完成", False
+    if artifact_inspection:
+        return _artifact_inspection_text(value), bool(value.get("isError"))
     safe = _redact_credentials({
         key: value.get(key) for key in ("content", "structuredContent")
         if value.get(key) is not None

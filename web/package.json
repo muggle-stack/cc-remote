@@ -9,7 +9,8 @@
     "dev": "vite",
     "build:presentation": "vite build --config vite.presentation-preview.config.ts",
     "predev": "npm run build:presentation",
-    "build": "npm run build:presentation && tsc -b && vite build && npm run build:viewer-runner && node scripts/check-bundle-budget.mjs",
+    "build": "npm run build:presentation && tsc -b && vite build && npm run build:viewer-runner && npm run build:artifact-inspection && node scripts/check-bundle-budget.mjs",
+    "build:artifact-inspection": "vite build --config vite.artifact-inspection.config.ts",
     "build:viewer-runner": "vite build --config vite.viewer-runner.config.ts && vite build --config vite.viewer-runner.config.ts --mode zoom",
     "build:theme-preview": "vite build --config vite.theme-preview.config.ts",
     "lint": "oxlint",
@@ -55,6 +56,7 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
+    "docx-preview": "0.4.1",
     "oxlint": "^1.71.0",
     "typescript": "~6.0.2",
     "vite": "^8.1.1"
