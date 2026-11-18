@@ -4,6 +4,16 @@
 
 ## Unreleased
 
+## v5.3.47
+
+Inspect workspace files in the background and improve account display and Claude plan approval. Wire protocol v97 and Claude Agent SDK 0.2.184.
+
+- Add background document and image inspection for Claude Code and Codex, with range previews and cell data for spreadsheets.
+- Show verified Claude plans and Fable usage. Fix Codex subscription labels and explain known status diagnostics.
+- Apply the selected Claude plan permission mode to the current session and simplify both model pickers.
+
+See the bilingual [release notes](docs/releases/v5.3.47.md).
+
 ## v5.3.46
 
 Keep Codex model controls with each thread's provider and disable both subagent generations in Work. Wire protocol v97 and Claude Agent SDK 0.2.174.
