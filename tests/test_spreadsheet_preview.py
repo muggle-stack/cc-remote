@@ -4,6 +4,8 @@ from zipfile import ZipFile, ZIP_DEFLATED
 
 import pytest
 
+from cc_remote.wrapper.artifact_inspection import inspect_artifact
+from cc_remote.wrapper.artifact_tables import inspect_table
 from cc_remote.wrapper.spreadsheet_preview import spreadsheet_preview
 from cc_remote.wrapper.machine import WrapperMachine
 
@@ -57,3 +59,35 @@ def test_not_a_workbook_and_external_file_boundary(tmp_path):
     outside.write_bytes(workbook())
     with pytest.raises(ValueError):
         WrapperMachine._read_file_preview(str(root), str(outside))
+
+
+@pytest.mark.asyncio
+async def test_background_table_can_read_late_rows_and_keep_exact_formula_cache(tmp_path):
+    source = tmp_path / "report.xlsx"
+    source.write_bytes(workbook(sheet="""<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <dimension ref="AB900:AC900"/><sheetData><row r="900">
+        <c r="AB900"><f>SUM(C900:AA900)</f><v>0.123456789012345</v></c>
+        <c r="AC900"><f>SUM(C901:AA901)</f></c>
+        </row></sheetData></worksheet>"""))
+    result = await inspect_artifact(
+        str(tmp_path), source.name, sheet="路线图", cell_range="$AB$900:AC900", view="data",
+    )
+    assert len(result) == 1
+    assert json.loads(result[0].text) == {
+        "sheet": "路线图", "sheets": ["路线图", "进展"], "range": "AB900:AC900",
+        "cells": {
+            "AB900": {"value": "0.123456789012345", "formula": "SUM(C900:AA900)"},
+            "AC900": {"value": "", "formula": "SUM(C901:AA901)"},
+        },
+    }
+    with pytest.raises(ValueError, match="进展"):
+        await inspect_artifact(str(tmp_path), source.name, sheet="missing", view="data")
+    with pytest.raises(ValueError, match="32 rows"):
+        await inspect_artifact(str(tmp_path), source.name, cell_range="A1:D100", view="data")
+
+
+def test_visual_table_displays_literal_markup_as_text():
+    table = inspect_table(workbook(), ".xlsx", "路线图", "A1:C1", visual=True)
+    markup = table.as_html().decode()
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in markup
+    assert "<script>" not in markup

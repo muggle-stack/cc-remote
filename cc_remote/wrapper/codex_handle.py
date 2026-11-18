@@ -29,12 +29,21 @@ import os
 from pathlib import Path
 import re
 import signal
+import sqlite3
 import sys
 import time
 from collections import OrderedDict, deque
 from typing import Any, Awaitable, Callable, Optional
 
 from cc_remote import __version__
+from cc_remote.wrapper.artifact_inspection import SERVER_NAME as ARTIFACT_PREVIEW_SERVER
+from cc_remote.wrapper.artifact_inspection import (
+    CodexArtifactScope,
+    bind_codex_scope,
+    codex_mcp_config,
+    discard_pending_codex_scope,
+    prepare_codex_scope,
+)
 from cc_remote.wrapper.rollout_io import rollout_open, rollout_size
 from cc_remote.log import logger
 from cc_remote.wrapper.token_usage import CodexUsageTracker
@@ -1360,6 +1369,7 @@ def _openai_http_resume_thread_config() -> dict[str, Any]:
 
 def _code_thread_config(
     *, http_only_resume: bool, web_search: Optional[str],
+    artifact_scope: CodexArtifactScope | None = None,
 ) -> Optional[dict[str, Any]]:
     """Compose independent Code-time overrides without losing either one."""
     config: dict[str, Any] = {}
@@ -1367,6 +1377,8 @@ def _code_thread_config(
         config.update(_openai_http_resume_thread_config())
     if web_search:
         config["web_search"] = web_search
+    if artifact_scope is not None:
+        config["mcp_servers"] = {ARTIFACT_PREVIEW_SERVER: codex_mcp_config(artifact_scope)}
     return config or None
 
 
@@ -1533,6 +1545,7 @@ class CodexHandle:
         )
         self.proc: Optional[asyncio.subprocess.Process] = None
         self.thread_id: Optional[str] = None
+        self._artifact_scope: CodexArtifactScope | None = None
         self.model_provider: Optional[str] = None
         # Separate native fork lifetime from this disposable transport. A proxy
         # reconnect can preserve an ephemeral thread; replacing its server cannot.
@@ -2339,11 +2352,22 @@ class CodexHandle:
         if not connected:  # pragma: no cover - the attempt list is never empty
             raise RuntimeError("unable to start Codex app-server transport")
         bound_thread_id: Optional[str] = None
+        artifact_scope = None
+        self._artifact_scope = None
         context_config = await self.context_settings.validated_config(self) if not self.work_mode else {}
         try:
             if control_only:
                 log.info("codex control connection established", cwd=self._cwd)
                 return
+            state_dir = getattr(self.cfg, "state_dir", None)
+            if not self.work_mode and state_dir is not None:
+                account = os.path.realpath(child_env.get("CODEX_HOME") or Path.home() / ".codex")
+                try:
+                    artifact_scope = await asyncio.to_thread(
+                        prepare_codex_scope, Path(state_dir), account, None if fork else resume_id,
+                    )
+                except (OSError, ValueError, sqlite3.Error) as exc:
+                    log.warning("Codex artifact inspection unavailable", error_type=type(exc).__name__)
             if self.work_mode:
                 # Inspect the effective native runtime rather than guessing at
                 # user-configured skill and MCP names.  Failure is fatal: silently
@@ -2382,6 +2406,7 @@ class CodexHandle:
                     web_search=(
                         None if self.work_mode else self.web_search_override
                     ),
+                    artifact_scope=artifact_scope,
                 )
                 if code_config is not None:
                     fork_params["config"] = code_config
@@ -2453,6 +2478,7 @@ class CodexHandle:
                     code_config = _code_thread_config(
                         http_only_resume=http_only_resume,
                         web_search=self.web_search_override,
+                        artifact_scope=artifact_scope,
                     )
                     if code_config is not None:
                         resume_params["config"] = code_config
@@ -2505,10 +2531,13 @@ class CodexHandle:
                     params["model"] = self.model
                 if self.permission_profile:
                     params["permissions"] = self.permission_profile
-                if not self.work_mode and self.web_search_override:
-                    params["config"] = {
-                        "web_search": self.web_search_override,
-                    }
+                if not self.work_mode:
+                    code_config = _code_thread_config(
+                        http_only_resume=False, web_search=self.web_search_override,
+                        artifact_scope=artifact_scope,
+                    )
+                    if code_config is not None:
+                        params["config"] = code_config
                 if context_config:
                     params.setdefault("config", {}).update(context_config)
                 if self.work_mode:
@@ -2574,7 +2603,21 @@ class CodexHandle:
                     raise _CodexDaemonGenerationChanged(
                         "Codex app-server changed while binding its thread"
                     )
+            if artifact_scope is not None:
+                self._artifact_scope = artifact_scope
+                try:
+                    await asyncio.to_thread(
+                        bind_codex_scope, artifact_scope, self.thread_id, self._cwd,
+                    )
+                except (OSError, ValueError, sqlite3.Error) as exc:
+                    log.warning("Codex artifact workspace unavailable", error_type=type(exc).__name__)
         except BaseException as exc:
+            if artifact_scope is not None:
+                try:
+                    await asyncio.to_thread(discard_pending_codex_scope, artifact_scope)
+                except (OSError, sqlite3.Error) as cleanup_error:
+                    log.warning("Codex artifact scope cleanup failed",
+                                error_type=type(cleanup_error).__name__)
             # initialize is not the complete connection boundary: resume/start
             # and sticky settings still target the same daemon child. If that
             # child is replaced after initialize, rebind the already-known
@@ -4899,6 +4942,8 @@ class CodexHandle:
             raise RuntimeError(
                 "Codex app-server did not confirm the requested cwd"
             )
+        if self._artifact_scope is not None and self.thread_id is not None:
+            await asyncio.to_thread(bind_codex_scope, self._artifact_scope, self.thread_id, effective)
         log.info(
             "codex thread cwd set",
             requested=target,

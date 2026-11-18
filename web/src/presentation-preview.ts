@@ -22,6 +22,7 @@ export function installPresentationPreview(
         || !(event.data.bytes instanceof ArrayBuffer)) return;
     cleanup();
     const port = event.ports[0];
+    const inspectPage = Number.isInteger(event.data.inspectPage) ? Number(event.data.inspectPage) : null;
     const container = document.getElementById("slide")!;
     const rail = document.getElementById("pages")!;
     if (typeof event.data.accent === "string") {
@@ -36,6 +37,9 @@ export function installPresentationPreview(
     const abort = new AbortController();
     const thumbnails = new Map<Element, SlideHandle>();
     const send = () => { if (alive) port.postMessage(state); };
+    const finishInspection = () => {
+      if (alive) port.postMessage({ ...state, type: "inspection" });
+    };
     const fitTableInsets = (element: HTMLElement) => {
       // Some generators emit inch-sized margins. Use the OOXML default
       // horizontal inset only when the margins consume the entire cell.
@@ -154,6 +158,15 @@ export function installPresentationPreview(
       if (!alive) return;
       state.pageCount = viewer!.slideCount;
       if (!state.pageCount) throw new Error("Empty presentation");
+      if (inspectPage !== null) {
+        if (inspectPage < 1 || inspectPage > state.pageCount) {
+          state.error = `This presentation has ${state.pageCount} slides. Select a valid page.`;
+        } else if (inspectPage !== 1) {
+          await updatePage(inspectPage - 1);
+        }
+        finishInspection();
+        return;
+      }
       observer = new IntersectionObserver(entries => {
         if (!alive) return;
         for (const entry of entries) {
@@ -194,7 +207,8 @@ export function installPresentationPreview(
       viewer?.destroy();
       state.error = "PPTX 无法解析，文件可能已损坏或超出预览上限";
       state.busy = false;
-      send();
+      if (inspectPage !== null) finishInspection();
+      else send();
     }
   });
 }

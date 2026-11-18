@@ -65,6 +65,7 @@ _WRAPPER_DEPLOY = (
     "linux_service.py",
     "wrapper_exec.py",
     "wrapper_main.py",
+    "artifact_inspect_main.py",
     "adopt_wrapper.py",
     "atomic_symlink.py",
     "check_codex_readiness.py",
@@ -94,13 +95,14 @@ _WRAPPER_SCRIPTS = (
 )
 
 
-def _copy_tree(source: Path, destination: Path) -> None:
+def _copy_tree(source: Path, destination: Path, *, exclude_root: str | None = None) -> None:
     if not source.is_dir():
         raise BuildError(f"required directory is missing: {source}")
     for path in sorted(source.rglob("*")):
         relative = path.relative_to(source)
         if (
-            "__pycache__" in relative.parts
+            relative.parts[0] == exclude_root
+            or "__pycache__" in relative.parts
             or path.name.endswith((".pyc", ".pyo"))
             or path.name == ".DS_Store"
         ):
@@ -242,18 +244,15 @@ def build_bundle(
         protocol_version = backend_protocol(protocol_path)
     except ProtocolBundleError as exc:
         raise BuildError(str(exc)) from exc
+    web_dist = root / "web" / "dist"
+    try:
+        validate_protocol_bundle(protocol_path, web_dist / "cc-remote-build.json", init_path)
+    except ProtocolBundleError as exc:
+        raise BuildError(str(exc)) from exc
     if role == "relay":
-        try:
-            validate_protocol_bundle(
-                protocol_path,
-                root / "web" / "dist" / "cc-remote-build.json",
-                init_path,
-            )
-        except ProtocolBundleError as exc:
-            raise BuildError(str(exc)) from exc
-        if not (root / "web" / "dist" / "index.html").is_file():
+        if not (web_dist / "index.html").is_file():
             raise BuildError("web/dist is missing; build the web client first")
-        if not (root / "web" / "dist" / "cc-remote-viewer-runner.js").is_file():
+        if not (web_dist / "cc-remote-viewer-runner.js").is_file():
             raise BuildError("Viewer runner is missing; run the complete web build first")
 
     prefix = f"cc-remote-{role}-v{product_version}"
@@ -282,8 +281,22 @@ def build_bundle(
                 (staging / "deploy" / filename).chmod(0o755)
         if role == "wrapper":
             _copy_tree(root / "integrations" / "dsh", staging / "integrations" / "dsh")
+            _copy_file(
+                web_dist / "presentation-preview.html",
+                staging / "share" / "cc-remote" / "presentation-preview.html",
+            )
+            _copy_file(
+                web_dist / "licenses" / "pptx-renderer.txt",
+                staging / "licenses" / "pptx-renderer.txt",
+            )
+            if not (web_dist / "artifact-inspection" / "artifact-document-preview.html").is_file():
+                raise BuildError("Document inspection renderer is missing; run the complete web build first")
+            _copy_tree(
+                web_dist / "artifact-inspection",
+                staging / "share" / "cc-remote" / "artifact-inspection",
+            )
         if role == "relay":
-            _copy_tree(root / "web" / "dist", staging / "web" / "dist")
+            _copy_tree(web_dist, staging / "web" / "dist", exclude_root="artifact-inspection")
         else:
             for filename in _WRAPPER_SCRIPTS:
                 target = staging / "scripts" / filename
