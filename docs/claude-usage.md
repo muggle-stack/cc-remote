@@ -4,6 +4,10 @@ The quota meter reads the Wrapper's account cache on session focus/reconnect,
 when opened or refreshed, and once per minute while the Claude page is visible.
 Native `RateLimitEvent` updates remain enabled. Active helper queries are **off
 by default**, even if a helper is already configured or the cache is empty.
+The subscription badge can use Claude Code's saved account display name for the
+selected profile while active queries are disabled. Only the display name is
+sent to the browser. It reflects the last account information saved by Claude
+Code, and a display name from a successful helper read takes precedence.
 For an opted-in account, these same reads also refresh through its helper, with
 a 15-second minimum interval, including failures, across sessions and clients.
 Neither path sends a prompt, resumes an engine, modifies history, interrupts

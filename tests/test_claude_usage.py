@@ -40,6 +40,15 @@ def enable_queries(machine):
     return machine._claude_profiles.default
 
 
+@pytest.fixture(autouse=True)
+def isolate_native_account(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    return home
+
+
 def test_usage_percentages_and_null_windows_are_not_sdk_fractions(tmp_path):
     store = ClaudeRateLimitStore(tmp_path)
     store.observe(_event("seven_day_sonnet", .8).rate_limit_info)
@@ -149,11 +158,15 @@ async def test_helper_bounds_output_time_and_private_errors(monkeypatch, tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_busy_session_read_and_parallel_sessions_share_one_get(monkeypatch, tmp_path):
+async def test_busy_session_read_and_parallel_sessions_share_one_get(
+    monkeypatch, tmp_path, isolate_native_account,
+):
     machine, transport = _mk_machine()
     reader = machine._claude_usage_reader = ClaudeUsageReader(tmp_path)
     profile = enable_queries(machine)
     configure(reader, profile, [sys.executable])
+    (isolate_native_account / ".claude.json").write_text(
+        '{"oauthAccount":{"planDisplayName":"Max"}}')
     one, two = _mk_ctx("one", "one"), _mk_ctx("two", "two")
     one.state = "running"
     one.active_msg_id = "active-user"
@@ -186,13 +199,17 @@ async def test_busy_session_read_and_parallel_sessions_share_one_get(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_failed_or_unconfigured_read_retains_native_cache(monkeypatch, tmp_path):
+async def test_failed_or_unconfigured_read_retains_native_cache(
+    monkeypatch, tmp_path, isolate_native_account,
+):
     machine, _ = _mk_machine()
     reader = machine._claude_usage_reader = ClaudeUsageReader(tmp_path)
     profile = machine._claude_profiles.default
     ctx = _mk_ctx("session", "session")
     machine.sessions = {ctx.key: ctx}
     await machine._observe_claude_rate_limit_message(ctx, _event("five_hour", .42))
+    (isolate_native_account / ".claude.json").write_text(
+        '{"oauthAccount":{"planDisplayName":"Ultra"}}')
     request = GetStatus(sid=ctx.key, cmd_id="read", client_id="browser")
     report = await machine._handle_get_status(request)
     assert report.quota_query_state == "disabled"
@@ -210,11 +227,14 @@ async def test_failed_or_unconfigured_read_retains_native_cache(monkeypatch, tmp
     report = await machine._handle_get_status(request)
     assert report.component_errors == ["rate_limits: usage response invalid"]
     assert report.rate_limits[0].primary.used_percent == 42
+    assert report.rate_limits[0].plan_type == "Ultra"
     assert "private" not in report.model_dump_json()
 
 
 @pytest.mark.asyncio
-async def test_disabled_queries_never_inspect_or_run_existing_helper(monkeypatch, tmp_path):
+async def test_disabled_queries_read_native_plan_without_helper(
+    monkeypatch, tmp_path, isolate_native_account,
+):
     machine, _ = _mk_machine()
     reader = machine._claude_usage_reader = ClaudeUsageReader(tmp_path)
     profile = machine._claude_profiles.default
@@ -231,9 +251,60 @@ async def test_disabled_queries_never_inspect_or_run_existing_helper(monkeypatch
         assert report.quota_query_state == "disabled"
         assert report.rate_limits == [] and not report.component_errors
         assert await reader.refresh(profile, forbidden) == "usage query disabled"
+
+    account_path = isolate_native_account / ".claude.json"
+    account_path.write_text(json.dumps({"oauthAccount": {
+        "planDisplayName": "Ultra", "subscriptionType": "pro",
+        "accountUuid": "private-account-id",
+    }}))
+    report = await machine._handle_get_status(GetStatus(sid=ctx.key))
+    row, = report.rate_limits
+    assert report.quota_query_state == "disabled" and not report.component_errors
+    assert row.limit_id == "claude" and row.plan_type == "Ultra"
+    assert row.primary is None and row.secondary is None
+    assert "private-account-id" not in report.model_dump_json()
+
     await machine._observe_claude_rate_limit_message(ctx, _event("five_hour", .42))
     report = await machine._handle_get_status(GetStatus(sid=ctx.key))
     assert report.rate_limits[0].primary.used_percent == 42
+    assert report.rate_limits[0].plan_type == "Ultra"
+
+    account_path.write_text('{"oauthAccount":{"subscriptionType":"pro"}}')
+    report = await machine._handle_get_status(GetStatus(sid=ctx.key))
+    assert report.rate_limits[0].primary.used_percent == 42
+    assert report.rate_limits[0].plan_type is None
+    account_path.write_text('{"oauthAccount":')
+    report = await machine._handle_get_status(GetStatus(sid=ctx.key))
+    assert report.rate_limits[0].primary.used_percent == 42
+    assert report.rate_limits[0].plan_type is None
+
+
+@pytest.mark.asyncio
+async def test_passive_plan_respects_explicit_claude_account_root(
+    monkeypatch, tmp_path, isolate_native_account,
+):
+    home = isolate_native_account
+    native_root = home / ".claude"
+    other_root = tmp_path / "other-account"
+    for root, plan in ((home, "Ultra"), (native_root, "Pro"), (other_root, "Max")):
+        root.mkdir(exist_ok=True)
+        (root / ".claude.json").write_text(json.dumps({"oauthAccount": {
+            "planDisplayName": plan,
+        }}))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(other_root))
+    monkeypatch.setenv("CC_REMOTE_CLAUDE_PROFILES_JSON", json.dumps({
+        "native": {"label": "Native", "config_dir": str(native_root), "default": True},
+        "other": {"label": "Other", "config_dir": str(other_root)},
+    }))
+    machine, _ = _mk_machine()
+    for profile_id, expected in (("native", "Ultra"), ("other", "Max")):
+        sid = profile_id + "-session"
+        ctx = _mk_ctx(sid, sid)
+        ctx.claude_profile_id = profile_id
+        ctx.sdk = None
+        machine.sessions[ctx.key] = ctx
+        report = await machine._handle_get_status(GetStatus(sid=ctx.key))
+        assert [row.plan_type for row in report.rate_limits] == [expected]
 
 
 @pytest.mark.parametrize("windows", [

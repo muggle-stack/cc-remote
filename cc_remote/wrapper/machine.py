@@ -207,6 +207,7 @@ from cc_remote.wrapper.claude_runtime import UnsupportedClaudeCliVersion
 from cc_remote.wrapper.claude_rate_limits import (
     ClaudeRateLimitStore,
     ClaudeRateLimitStoreError,
+    read_cached_claude_plan,
 )
 from cc_remote.wrapper.claude_usage import ClaudeUsageError, ClaudeUsageReader
 from cc_remote.wrapper.codex_controls import (
@@ -22885,8 +22886,13 @@ class WrapperMachine:
             if failure == "usage helper unavailable":
                 query_state = "unconfigured"
                 failure = None
+        native_plan = await asyncio.to_thread(
+            read_cached_claude_plan, self._claude_config_root(profile),
+            isolate_account_env=self._claude_profiles_explicit,
+        )
         windows = await self._claude_rate_limit_snapshot(
             ctx, include_plan=query_state == "enabled" and failure is None,
+            native_plan=native_plan,
         )
         report = StatusReport(
             thread={"thread_id": ctx.session_id or ctx.key,
@@ -23090,19 +23096,22 @@ class WrapperMachine:
 
     async def _claude_rate_limit_snapshot(
         self, ctx: SessionContext, *, include_plan: bool = False,
+        native_plan: str | None = None,
     ) -> tuple[RateLimitUpdate, ...]:
         store = self._claude_rate_limit_stores.get(
             self._claude_profile_for_ctx(ctx).id)
-        if store is None:
+        if store is not None:
+            async with self._claude_rate_limit_lock:
+                try:
+                    return await asyncio.to_thread(
+                        store.snapshot, include_plan=include_plan,
+                        native_plan=native_plan,
+                    )
+                except ClaudeRateLimitStoreError:
+                    log.warning("Claude rate-limit snapshot unavailable")
+        if native_plan is None:
             return ()
-        async with self._claude_rate_limit_lock:
-            try:
-                return await asyncio.to_thread(
-                    store.snapshot, include_plan=include_plan,
-                )
-            except ClaudeRateLimitStoreError:
-                log.warning("Claude rate-limit snapshot unavailable")
-                return ()
+        return (RateLimitUpdate(limit_id="claude", name="Claude", plan_type=native_plan),)
 
     async def _seed_claude_rate_limits(
         self, ctx: SessionContext,
