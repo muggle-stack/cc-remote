@@ -10,6 +10,7 @@ import {
 import { accountStatsNote } from "../status-capabilities";
 import { statusNotices } from "../notice-presentation";
 import {
+  codexAccountPlan,
   quotaTone,
   quotaWindowLabel,
   remainingPercent,
@@ -194,7 +195,7 @@ export function StatusSheet({ open, report, notices = [], error, onClose,
           <h3>账户</h3>
           <div className="status-grid">
             <Row label="认证方式">{report.account.auth_type}</Row>
-            <Row label="订阅计划">{show(report.account.plan_type)}</Row>
+            <Row label="订阅计划">{show(error ? null : codexAccountPlan(report))}</Row>
             <Row label="需要 OpenAI 登录">{yesNo(report.account.requires_openai_auth)}</Row>
           </div>
           {statsNote && report.rate_limits.length === 0 && !usage &&

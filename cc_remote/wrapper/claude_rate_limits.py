@@ -34,6 +34,13 @@ _RATE_LIMITS: dict[str, tuple[str, str, str, int | None]] = {
     "seven_day_sonnet": (
         "claude-seven-day-sonnet", "Sonnet", "primary", 10_080,
     ),
+    "seven_day_fable": (
+        "claude-seven-day-fable", "Fable", "primary", 10_080,
+    ),
+}
+_PLAN_NAMES = {
+    name.casefold(): name
+    for name in ("Free", "Pro", "Max", "Ultra", "Team", "Enterprise")
 }
 
 
@@ -96,6 +103,7 @@ class ClaudeRateLimitStore:
     def __init__(self, state_dir: str | os.PathLike[str]):
         self.path = Path(state_dir) / "claude-rate-limits.json"
         self._limits = self._load()
+        self._plan_type: str | None = None
         self.revisions: dict[str, int] = {}
 
     def _load(self) -> dict[str, dict[str, Any]]:
@@ -203,11 +211,16 @@ class ClaudeRateLimitStore:
                 "Claude rate-limit cache could not be persisted") from exc
 
     @staticmethod
-    def _updates(limits: dict[str, dict[str, Any]]) -> tuple[RateLimitUpdate, ...]:
+    def _updates(limits: dict[str, dict[str, Any]], *,
+                 plan_type: str | None = None) -> tuple[RateLimitUpdate, ...]:
         grouped: dict[str, dict[str, Any]] = {}
         for rate_type in _RATE_LIMITS:
             entry = limits.get(rate_type)
             if entry is None:
+                continue
+            if rate_type == "seven_day_fable" and (
+                entry.get("used_percent") is None or entry.get("resets_at") is None
+            ):
                 continue
             limit_id, name, slot, duration = _RATE_LIMITS[rate_type]
             update = grouped.setdefault(limit_id, {
@@ -222,6 +235,10 @@ class ClaudeRateLimitStore:
             # must not clear the rejection reported in this same observation.
             if entry.get("status") == "rejected" and not update["reached_type"]:
                 update["reached_type"] = rate_type
+        if plan_type:
+            grouped.setdefault("claude", {
+                "limit_id": "claude", "name": "Claude",
+            })["plan_type"] = plan_type
         return tuple(RateLimitUpdate(**update) for update in grouped.values())
 
     def observe(self, info: Any, *, now: int | None = None) -> tuple[RateLimitUpdate, ...]:
@@ -283,6 +300,22 @@ class ClaudeRateLimitStore:
         Validate everything before changing or persisting any cache entry.
         """
         observed_at = int(time.time()) if now is None else int(now)
+        display_name = payload.get("plan_display_name")
+        plan_type = (_PLAN_NAMES.get(display_name.strip().casefold())
+                     if isinstance(display_name, str) else None)
+        scoped_limits = payload.get("limits")
+        if "seven_day_fable" not in payload and isinstance(scoped_limits, list):
+            for limit in scoped_limits:
+                if not isinstance(limit, dict) or limit.get("kind") != "weekly_scoped":
+                    continue
+                scope = limit.get("scope")
+                model = scope.get("model") if isinstance(scope, dict) else None
+                if isinstance(model, dict) and model.get("display_name") == "Fable":
+                    payload = {**payload, "seven_day_fable": {
+                        "utilization": limit.get("percent"),
+                        "resets_at": limit.get("resets_at"),
+                    }}
+                    break
         parsed: dict[str, dict | None] = {}
         for name in _RATE_LIMITS:
             if name not in payload:
@@ -294,10 +327,13 @@ class ClaudeRateLimitStore:
             if not isinstance(window, dict):
                 raise ValueError("invalid usage window")
             used = window.get("utilization")
+            raw_reset = window.get("resets_at")
+            if name == "seven_day_fable" and (used is None or raw_reset is None):
+                parsed[name] = None
+                continue
             if (isinstance(used, bool) or not isinstance(used, (int, float))
                     or not math.isfinite(used) or not 0 <= used <= 100):
                 raise ValueError("invalid usage percentage")
-            raw_reset = window.get("resets_at")
             reset = None
             if raw_reset is not None:
                 if not isinstance(raw_reset, str) or len(raw_reset) > 64:
@@ -317,7 +353,7 @@ class ClaudeRateLimitStore:
                 "status": "rejected" if used >= 100 else "allowed",
                 "observed_at": observed_at,
             }
-        if not parsed:
+        if not parsed and plan_type is None:
             raise ValueError("usage windows missing")
         for name, entry in parsed.items():
             if self.revisions.get(name, 0) != revisions.get(name, 0):
@@ -326,9 +362,12 @@ class ClaudeRateLimitStore:
                 self._limits.pop(name, None)
             else:
                 self._limits[name] = entry
-        self._persist()
+        if parsed:
+            self._persist()
+        self._plan_type = plan_type
 
-    def snapshot(self, *, now: int | None = None) -> tuple[RateLimitUpdate, ...]:
+    def snapshot(self, *, now: int | None = None,
+                 include_plan: bool = False) -> tuple[RateLimitUpdate, ...]:
         observed_at = int(time.time()) if now is None else int(now)
         expired = [
             rate_type
@@ -353,4 +392,6 @@ class ClaudeRateLimitStore:
             for rate_type in expired:
                 self._limits.pop(rate_type, None)
             self._persist()
-        return self._updates(self._limits)
+        return self._updates(
+            self._limits, plan_type=self._plan_type if include_plan else None,
+        )

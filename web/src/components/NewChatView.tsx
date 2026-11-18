@@ -138,12 +138,13 @@ const defaultExecutionControls = (
 });
 
 function NewChatSelectorSheet({
-  open, kind, options, current, onClose, onPick, catalogUnavailable, onRequestModels,
+  open, kind, options, current, showIcons, onClose, onPick, catalogUnavailable, onRequestModels,
 }: {
   open: boolean;
   kind: "models" | "efforts";
   options: SelectorOption[];
   current: string | null;
+  showIcons: boolean;
   onClose: () => void;
   onPick: (value: string | null) => void;
   catalogUnavailable?: boolean;
@@ -163,8 +164,9 @@ function NewChatSelectorSheet({
           {options.map((option) => (
             <button key={option.id ?? "__local_default__"}
               className={"cmd" + (option.id === current ? " sel" : "")}
+              aria-pressed={option.id === current}
               onClick={() => onPick(option.id)}>
-              <span className="cmd-ic"><Icon name={option.icon} size={17} /></span>
+              {showIcons && <span className="cmd-ic"><Icon name={option.icon} size={17} /></span>}
               <span className="cmd-tx">
                 <span className="cmd-nm">{option.name}</span>
                 <span className="cmd-ds">{option.description}</span>
@@ -928,6 +930,7 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
       <NewChatSelectorSheet
         open={sheetKind !== null}
         kind={sheetKind ?? "models"}
+        showIcons={sheetKind === "efforts" || engine === "dsh"}
         options={sheetKind === "efforts" ? effortOptions : modelOptions}
         catalogUnavailable={engine === "codex" && modelList.length === 0}
         onRequestModels={onRequestModels}

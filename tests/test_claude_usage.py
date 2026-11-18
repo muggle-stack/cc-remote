@@ -53,6 +53,36 @@ def test_usage_percentages_and_null_windows_are_not_sdk_fractions(tmp_path):
     assert restored.primary == row.primary and restored.secondary == row.secondary
 
 
+def test_account_plan_and_fable_use_reported_values_only(tmp_path):
+    store = ClaudeRateLimitStore(tmp_path)
+    now = int(time.time())
+    reset = datetime.fromtimestamp(now + 86400, timezone.utc).isoformat()
+    payload = {
+        "plan_display_name": "Ultra",
+        "subscriptionType": "pro",
+        "limits": [{
+            "kind": "weekly_scoped",
+            "scope": {"model": {"display_name": "Fable"}},
+            "percent": 0,
+            "resets_at": reset,
+        }],
+    }
+    store.observe_usage(payload, {}, now=now)
+    fable, plan = store.snapshot(now=now, include_plan=True)
+    assert fable.limit_id == "claude-seven-day-fable"
+    assert fable.primary.used_percent == 0
+    assert fable.primary.resets_at == now + 86400
+    assert plan.limit_id == "claude" and plan.plan_type == "Ultra"
+    assert "Ultra" not in store.path.read_text()
+    assert [row.plan_type for row in ClaudeRateLimitStore(tmp_path).snapshot(
+        now=now, include_plan=True)] == [None]
+    store.observe_usage({
+        "subscriptionType": "pro",
+        "seven_day_fable": {"utilization": 50, "resets_at": None},
+    }, {}, now=now)
+    assert store.snapshot(now=now, include_plan=True) == ()
+
+
 @pytest.mark.parametrize("invalid", [True, "5", -1, 101, float("nan"), None])
 def test_invalid_usage_is_atomic(tmp_path, invalid):
     store = ClaudeRateLimitStore(tmp_path)
@@ -136,7 +166,7 @@ async def test_busy_session_read_and_parallel_sessions_share_one_get(monkeypatch
         calls.append(profile.id)
         await asyncio.sleep(.01)
         await machine._observe_claude_rate_limit_message(one, _event("five_hour", .65))
-        return usage(1)
+        return {**usage(1), "plan_display_name": "Ultra"}
     monkeypatch.setattr(reader, "_read", read)
     reports = await asyncio.gather(*(machine._handle_get_status(GetStatus(
         sid=sid, cmd_id="request-" + sid, client_id="browser-" + sid))
@@ -147,6 +177,7 @@ async def test_busy_session_read_and_parallel_sessions_share_one_get(monkeypatch
         assert not report.component_errors
         assert report.rate_limits[0].primary.used_percent == 65
         assert report.rate_limits[0].secondary.used_percent == 0
+        assert report.rate_limits[0].plan_type == "Ultra"
         assert report.to == "browser-" + sid
         assert report.request_id == "request-" + sid
     assert one.state == "running" and one.active_msg_id == "active-user"

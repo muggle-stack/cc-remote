@@ -15003,10 +15003,11 @@ for (const width of [390, 1280]) {
         efforts: ["low"], default_effort: "low",
         effort_descriptions: { low: "Native Sol low reasoning" } },
     ];
-    relay.emit({ type: "models", engine: "codex", models: nativeModels });
+    relay.emit({ type: "models", engine: "codex", sid: "layout-parent", models: nativeModels });
     await expect(picker.locator(".cmd-nm")).toHaveText(["Native future", "Native Sol"]);
     await expect(picker.locator(".cmd-ds")).toHaveText(["Newest server description", "Updated server description"]);
-    relay.emit({ type: "models", engine: "codex", models: [] });
+    await expect(picker.locator(".cmd-ic")).toHaveCount(0);
+    relay.emit({ type: "models", engine: "codex", sid: "layout-parent", models: [] });
     await expect(picker.locator(".cmd-nm")).toHaveText(["Native future", "Native Sol"]);
     await picker.getByRole("button", { name: "Native Sol Updated server description" }).click();
     await expect.poll(() => relay.commands.filter(command => command.type === "set_model").at(-1)?.model).toBe("gpt-5.6-sol");
@@ -15024,7 +15025,9 @@ for (const width of [390, 1280]) {
     if (await showSidebar.isVisible()) await showSidebar.click();
     await page.getByRole("button", { name: "新会话", exact: true }).click();
     await page.getByTitle("选择模型", { exact: true }).click();
+    relay.emit({ type: "models", engine: "codex", models: nativeModels });
     await expect(picker.locator(".cmd-nm")).toHaveText(["本机默认", "Native future", "Native Sol"]);
+    await expect(picker.locator(".cmd-ic")).toHaveCount(0);
     await picker.getByRole("button", { name: "Native future Newest server description" }).click();
     await page.getByTitle("选择思考强度", { exact: true }).click();
     await expect(effortPicker.locator(".cmd-nm")).toHaveText(["默认", "adaptive", "low"]);

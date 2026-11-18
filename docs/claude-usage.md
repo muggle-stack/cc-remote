@@ -63,11 +63,13 @@ and stdout to 64 KiB. Stderr and raw errors are never shown or logged.
 
 ```json
 {
+  "plan_display_name": "Ultra",
   "five_hour": {"utilization": 37, "resets_at": "2026-10-01T12:00:00Z"},
   "seven_day": {"utilization": 12.5, "resets_at": "2026-10-05T12:00:00Z"},
   "monthly": {"utilization": 16, "resets_at": "2026-11-01T00:00:00Z"},
   "seven_day_opus": null,
-  "seven_day_sonnet": null
+  "seven_day_sonnet": null,
+  "seven_day_fable": {"utilization": 20, "resets_at": "2026-10-05T12:00:00Z"}
 }
 ```
 
@@ -77,6 +79,13 @@ null means unknown. A null window clears its cached value. Unknown fields,
 account details and paid-credit balances are discarded. Newer native events
 win over older in-flight HTTP results. Invalid results do not replace valid
 observations. Cached windows expire individually at their reset time.
+
+The optional `plan_display_name` comes from the provider's current account
+response for this same login. The Wrapper accepts known display names and
+keeps them in memory for successful helper reads. A helper that only returns
+usage can omit this field. Fable appears with a reported percentage and reset
+time, either as `seven_day_fable` or in the provider's `limits` array as a
+`weekly_scoped` entry with `scope.model.display_name` set to `Fable`.
 
 `monthly` is optional and uses the same percentage/reset fields. It represents
 the provider's actual subscription cycle, never a guessed 30-day duration. A

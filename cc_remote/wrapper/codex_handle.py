@@ -7742,7 +7742,9 @@ def _safe_notice_thread_id(value: Any) -> Optional[str]:
     return None
 
 
-def _stable_notice_id(method: str, payload: dict[str, Any]) -> str:
+def _stable_notice_id(
+    method: str, payload: dict[str, Any], *, recognized: bool = False,
+) -> str:
     # Routing metadata may be unknown during initialize and appear on the same
     # warning later. Keep identity tied to user-visible content so that timing
     # difference cannot create a duplicate bar after thread/start.
@@ -7755,7 +7757,31 @@ def _stable_notice_id(method: str, payload: dict[str, Any]) -> str:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    return f"codex-notice-{hashlib.sha256(canonical).hexdigest()[:24]}"
+    prefix = "codex-notice-diagnostic-" if recognized else "codex-notice-"
+    return f"{prefix}{hashlib.sha256(canonical).hexdigest()[:24]}"
+
+
+def _recognized_notice(method: str, message: str) -> tuple[str, str] | None:
+    """Map known native diagnostics to fixed public copy, never native text."""
+    if method == "warning" and re.match(
+        r"^This session was recorded with model `[^`\r\n]+`"
+        r" but is resuming with `[^`\r\n]+`\.",
+        message,
+    ):
+        return "恢复会话时更换了模型", "当前模型与此前记录的模型不同，可在模型选择器中确认。"
+    if method == "configWarning":
+        keys, separator, _hint = message.partition(
+            ". If you want these settings to apply,",
+        )
+        if (separator
+                and keys.startswith("Ignored unsupported project-local config keys in ")
+                and "notify" in keys.rsplit(": ", 1)[-1].split(", ")):
+            return "项目通知配置被忽略", "notify 需要配置在当前账号的用户级 config.toml。"
+        if (message.startswith("Codex is ignoring ")
+                and any(line.strip().endswith(": `mcp_servers.codex.type` is ignored.")
+                        for line in message.splitlines()[1:])):
+            return "MCP 配置项未识别", "Codex 忽略了 mcp_servers.codex.type，请核对当前版本的 MCP 配置。"
+    return None
 
 
 def _notice_from_notification(
@@ -7820,6 +7846,10 @@ def _notice_from_notification(
 
     if message is None:
         return None
+    recognized = _recognized_notice(str(method), message)
+    if recognized is not None:
+        title, message = recognized
+        detail = None
     public = {
         "severity": severity,
         "category": category,
@@ -7829,7 +7859,7 @@ def _notice_from_notification(
         "thread_id": thread_id,
     }
     return Notice(
-        notice_id=_stable_notice_id(str(method), public),
+        notice_id=_stable_notice_id(str(method), public, recognized=recognized is not None),
         **public,
     )
 

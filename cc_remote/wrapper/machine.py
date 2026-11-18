@@ -22885,7 +22885,9 @@ class WrapperMachine:
             if failure == "usage helper unavailable":
                 query_state = "unconfigured"
                 failure = None
-        windows = await self._claude_rate_limit_snapshot(ctx)
+        windows = await self._claude_rate_limit_snapshot(
+            ctx, include_plan=query_state == "enabled" and failure is None,
+        )
         report = StatusReport(
             thread={"thread_id": ctx.session_id or ctx.key,
                     "session_id": ctx.session_id,
@@ -22893,6 +22895,7 @@ class WrapperMachine:
             runtime={}, context={},
             rate_limits=[{
                 "limit_id": update.limit_id, "limit_name": update.name,
+                "plan_type": update.plan_type,
                 "rate_limit_reached_type": update.reached_type,
                 "primary": update.primary, "secondary": update.secondary,
                 "monthly": update.monthly,
@@ -23086,7 +23089,7 @@ class WrapperMachine:
         await self._emit(ctx, event)
 
     async def _claude_rate_limit_snapshot(
-        self, ctx: SessionContext,
+        self, ctx: SessionContext, *, include_plan: bool = False,
     ) -> tuple[RateLimitUpdate, ...]:
         store = self._claude_rate_limit_stores.get(
             self._claude_profile_for_ctx(ctx).id)
@@ -23094,7 +23097,9 @@ class WrapperMachine:
             return ()
         async with self._claude_rate_limit_lock:
             try:
-                return await asyncio.to_thread(store.snapshot)
+                return await asyncio.to_thread(
+                    store.snapshot, include_plan=include_plan,
+                )
             except ClaudeRateLimitStoreError:
                 log.warning("Claude rate-limit snapshot unavailable")
                 return ()

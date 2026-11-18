@@ -41,6 +41,21 @@ export function accountQuotaWindows(
   return quotaWindowsForLimits(report?.rate_limits ?? [], "codex");
 }
 
+export function codexAccountPlan(
+  report?: StatusReport | null,
+  limits: readonly StatusRateLimit[] = report?.rate_limits ?? [],
+): string | null {
+  const accountLimit = limits.find((limit) => limit.limit_id === "codex")
+    ?? quotaWindowsForLimits(limits, "codex").limit;
+  // The login record can retain an older entitlement after an account change.
+  const quotaReadFailed = report?.component_errors.some(
+    (error) => error.startsWith("rate_limits:"),
+  );
+  const plan = accountLimit?.plan_type
+    ?? (quotaReadFailed ? null : report?.account?.plan_type);
+  return plan ? plan[0].toUpperCase() + plan.slice(1) : null;
+}
+
 export function quotaWindowsForLimits(
   limits: readonly StatusRateLimit[],
   accountLimitId: "codex" | "claude" | "dsh",

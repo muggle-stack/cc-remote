@@ -96,6 +96,9 @@ export function conversationNotices(notices: Notice[]): Notice[] {
 export function statusNotices(notices: Notice[]): Notice[] {
   return notices.filter((notice) => isOfficialNotice(notice)
     && notice.category !== "rate_limit").map((notice) => {
+    if (notice.notice_id.startsWith("codex-notice-diagnostic-")) {
+      return { ...notice, detail: null };
+    }
     const copy = {
       runtime: ["运行状态", "Codex 报告了一项运行状态；如操作受影响，请在本机 Codex 中检查。"],
       guardian: ["安全守护", "Codex 的安全守护需要关注，请在本机 Codex 中检查。"],
