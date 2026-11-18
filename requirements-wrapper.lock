@@ -230,13 +230,13 @@ cffi==2.1.0 ; platform_python_implementation != 'PyPy' \
     # via
     #   -c requirements.lock
     #   cryptography
-claude-agent-sdk==0.2.184 \
-    --hash=sha256:40509cadce72d62ded6c3ed831bbcffbff1a7fed8a19cfe1670b3a55418ed089 \
-    --hash=sha256:74ad73f21284c0b084e55cbacd2bc71550961ba8fe4fdc3bdcb80aa1422906bb \
-    --hash=sha256:7da47448c5d635ebf773cfe4424cdea76cc3a4893069a976fc2fa60ff9e50f39 \
-    --hash=sha256:bed60d0fd661c1e55cd053ab2e3207e4c2b5fe85730ba8b7fc3ca8599a2b12d6 \
-    --hash=sha256:f76d069f835f1b101e4134f7a5e3c23a081e7e626fc072187ea1ec03dfb673a3 \
-    --hash=sha256:fdf8e7be4b65f30263724bd516b1147c609127ea3fec96b510c275d111a1686e
+claude-agent-sdk==0.2.174 \
+    --hash=sha256:0d46be4e858418227d1d455c7787335f4bed073899f48b657c01cc210683803f \
+    --hash=sha256:2380f28ad19c9f95d2de01d75ad4eeffa1ec2008cb4e35e5bc569de6279d85f9 \
+    --hash=sha256:368699227f4ccb6fff541f4add983854fdd6e95fed5e509264cb079316ae234b \
+    --hash=sha256:728592effdfe63e96fbad7ba3b2ddf642e3aad344e73692b429898fbfcb33f12 \
+    --hash=sha256:7729458ca2e0031e6d67452dd8fdda4ff07b4fcf40c4bfed867c78ae963bdbdd \
+    --hash=sha256:8be611533b7be210791a39716479d7d692e5e3afe8798529b5262db00f470165
     # via
     #   -c requirements.lock
     #   -r requirements-wrapper.txt

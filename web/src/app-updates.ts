@@ -45,7 +45,7 @@ const REASONS: Record<string, string> = {
   control_unavailable: "设备的更新配置与本地控制连接不一致，需要检查安装配置。",
   permission_required: "设备尚未获得所需的升级权限，请先由管理员完成配置。",
   protocol_change: "当前更新器需要先完成一次升级。新版本支持通过独立维护通道跨协议更新。",
-  service_migration: "这个版本涉及 Claude 服务迁移，需要完成现有任务后统一升级。",
+  service_migration: "这台设备的 Claude 服务需要通过兼容版本或管理员维护完成迁移。",
   relay_permission: "服务器也需要升级，但尚未为当前设备授权服务器升级。",
   device_unavailable: "设备未连接更新服务，或尚未安装支持应用内更新的版本。",
   outcome_pending: "尚未收到完整结果，请继续检查原更新任务。不要重复创建更新。",

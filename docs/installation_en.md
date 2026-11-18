@@ -187,9 +187,13 @@ and locked dependencies are used; users do not run CI, pytest or Node builds.
 Update the Electron application separately.
 An activated Wrapper upgrade prints the Codex connection result described above;
 `--check` does not configure or run local acceptance checks.
-The independent Claude service is never restarted. Finish in-process Claude,
-BTW and queued work before updating. SDK/service-protocol changes stop the command
-and require the [Claude service migration procedure](claude-session-service.md).
+Ordinary updates keep the independent Claude service running. Updates wait for
+in-process Claude, BTW and queued work. A managed Claude service SDK change
+waits for its own work to drain, then switches the service and Wrapper together
+and verifies their handshake. Idle sessions resume from their existing IDs.
+Older updaters first need a release with the same SDK and migration support.
+For local wire changes and custom service launchers, see the
+[Claude service migration procedure](claude-session-service.md).
 
 Starting with v4.0.10, installers record the previous code, service configuration and
 private-state snapshot before switching. After acceptance, retain the active

@@ -84,6 +84,7 @@ _WRAPPER_DEPLOY = (
     "install_cli.py",
     "install_lock.py",
     "install_claude_service.py",
+    "claude_service_upgrade.py",
     "prepare_wrapper_stage.py",
     "python-version.txt",
     "release_manifest.py",

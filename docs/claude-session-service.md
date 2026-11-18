@@ -259,10 +259,18 @@ are preserved.
 
 The SDK service stays on its original immutable source and venv while its
 sessions are alive. Keep that release; `service.json` records the source and
-process identity. If an upgrade changes the pinned SDK or local service
-protocol, stage it first and wait for native turns, pending callbacks and
-autonomous work to finish before replacing the service itself. Do not bypass a
-version mismatch or restart a busy service to satisfy an acceptance check.
+process identity. A migration-capable updater handles an SDK change with the
+same local wire version for the service installed by `install_claude_service.py`.
+The installer waits for native turns, callbacks, queued input, background work
+and outstanding journal acknowledgments. Idle workers can remain resident
+until the switch. It verifies the new service's SDK and source before committing
+the Wrapper and restores the old pair if activation fails. Idle sessions are
+resumed using their native IDs and transcripts.
+
+An older updater needs an intermediate release with its current SDK pin
+before it can run this migration. Keep that release available until devices
+have adopted it. Local protocol changes, custom launchers or two registered
+service sockets require a separately coordinated service migration.
 
 An OS reboot, explicit interrupt, service crash or explicit service stop is
 outside the Wrapper-only deployment guarantee. The journal is disk-backed;

@@ -99,7 +99,7 @@ class LocalControl:
                     "process": asdict(identity) if identity else None}
         if (isinstance(request, dict) and set(request) == {"op", "id"}
                 and request["op"] == "reserve_activation"):
-            return self.machine._ui_updates.reserve_activation(request["id"])
+            return await self.machine._ui_updates.reserve_activation(request["id"])
         if (isinstance(request, dict) and set(request) == {"op", "id"}
                 and request["op"] == "reserve_ui_update"):
             return self.machine._ui_updates.reserve(request["id"])

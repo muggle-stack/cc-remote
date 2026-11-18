@@ -47,6 +47,10 @@ def managed(tmp_path, monkeypatch):
     release.mkdir(parents=True)
     (root / "current").symlink_to(release)
     (release / "release-manifest.json").write_text(json.dumps(_manifest(version="4.0.0")))
+    (release / "requirements-wrapper.lock").write_text("claude-agent-sdk==0.2.174\n")
+    service = release / "cc_remote/claude_service"
+    service.mkdir(parents=True)
+    (service / "wire.py").write_text("VERSION = 1\n")
     user = pwd.getpwuid(os.geteuid())
     (root / "installation.json").write_text(json.dumps({"schema": 1, "role": "wrapper", "user": user.pw_name}))
     monkeypatch.setattr(launcher, "host_platform", lambda: ("darwin", "arm64"))
