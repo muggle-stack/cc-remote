@@ -24,16 +24,26 @@ LABEL = "com.muggle.cc-remote.claude-service"
 UNIT = "cc-remote-claude-service.service"
 
 
-def commands(source: Path, state_dir: Path) -> list[str]:
-    executable = Path(sys.executable)
+def commands(state_dir: Path, *, interpreter: Path | None = None) -> list[str]:
+    executable = interpreter or Path(sys.executable)
     python = executable.parent.resolve() / executable.name
     return [str(python), "-m", "cc_remote.claude_service", "--state-dir", str(state_dir)]
 
 
-def unit_text(source: Path, state_dir: Path) -> str:
+def launch_agent(source: Path, state_dir: Path, *, interpreter: Path | None = None) -> dict:
+    return {
+        "Label": LABEL, "ProgramArguments": commands(state_dir, interpreter=interpreter),
+        "WorkingDirectory": str(source), "RunAtLoad": True,
+        "KeepAlive": {"SuccessfulExit": False}, "Umask": 0o077,
+        "StandardOutPath": str(state_dir / "stdout.log"),
+        "StandardErrorPath": str(state_dir / "stderr.log"),
+    }
+
+
+def unit_text(source: Path, state_dir: Path, *, interpreter: Path | None = None) -> str:
     def quote(value):
         return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$") + '"'
-    argv = " ".join(quote(value) for value in commands(source, state_dir))
+    argv = " ".join(quote(value) for value in commands(state_dir, interpreter=interpreter))
     # Unlike ExecStart's argument list, WorkingDirectory is one unquoted path.
     working_directory = str(source).replace("\\", "\\\\").replace("%", "%%").replace("\n", "\\n").replace("\r", "\\r")
     return f"""[Unit]
@@ -78,13 +88,7 @@ def install(source: Path, state_dir: Path) -> None:
         if destination.exists():
             raise RuntimeError("existing Claude service is not ready; inspect it before retrying")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "Label": LABEL, "ProgramArguments": commands(source, state_dir),
-            "WorkingDirectory": str(source), "RunAtLoad": True,
-            "KeepAlive": {"SuccessfulExit": False}, "Umask": 0o077,
-            "StandardOutPath": str(state_dir / "stdout.log"),
-            "StandardErrorPath": str(state_dir / "stderr.log"),
-        }
+        payload = launch_agent(source, state_dir)
         destination.write_bytes(plistlib.dumps(payload))
         destination.chmod(0o600)
         subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(destination)], check=True)

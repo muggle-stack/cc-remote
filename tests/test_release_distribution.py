@@ -192,6 +192,7 @@ def test_release_bundles_are_deterministic_and_role_scoped(
         assert f"{prefix}/deploy/install-wrapper.sh" in members
         assert f"{prefix}/deploy/install_lock.py" in members
         assert f"{prefix}/deploy/install_claude_service.py" in members
+        assert f"{prefix}/deploy/claude_service_upgrade.py" in members
         assert f"{prefix}/deploy/check_codex_readiness.py" in members
         assert f"{prefix}/deploy/check_codex_lifetime.py" in members
         assert f"{prefix}/deploy/adopt_wrapper.py" in members

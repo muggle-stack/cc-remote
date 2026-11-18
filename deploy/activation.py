@@ -159,6 +159,14 @@ def begin(args) -> str:
         from deploy.work_registry_snapshot import resolve_wrapper_state_dir
         state = resolve_wrapper_state_dir(args.home, env_file=args.env_file, plist=args.plist)
         value.update(control_socket=str(state / "control/control.sock"), uid=pwd.getpwnam(args.user).pw_uid)
+        if value["previous"]:
+            from cc_remote.update import _claude_contract
+            old_sdk, old_wire = _claude_contract(Path(value["previous"]))
+            new_sdk, new_wire = _claude_contract(target)
+            if old_wire != new_wire:
+                raise ValueError("Claude SDK/service compatibility requires a service protocol migration")
+            if old_sdk != new_sdk:
+                value["claude_upgrade"] = True
     else:
         from urllib.parse import urlsplit
         parsed = urlsplit(args.origin)
@@ -188,8 +196,20 @@ def prepare(root: Path, identity: str) -> None:
         except (OSError, ValueError):
             response = {"status": "unavailable"}
         if response.get("status") == "ready":
-            change(root, identity, phase="quiesced")
+            fields = {}
+            if value.get("claude_upgrade"):
+                if "claude_service" not in response:
+                    raise ValueError("Claude SDK/service compatibility requires a migration-capable Wrapper")
+                old = response["claude_service"]
+                if old is not None:
+                    claude_service_call(value, "plan", old)
+                    from deploy.release_retention import retain_claude_rollback
+                    retain_claude_rollback(root, value["generation"], Path(old["source"]))
+                fields["claude_service"] = old
+            change(root, identity, phase="quiesced", **fields)
             return
+        if value.get("claude_upgrade") and response.get("status") in {"rejected", "service_migration"}:
+            raise ValueError("Claude SDK/service compatibility requires an idle, managed service and a migration-capable Wrapper")
         if response.get("status") == "rejected" and not legacy:
             # One-time migration for the previous opt-in updater. Reuse its
             # actual busy-work admission, never bypass it or enable a policy.
@@ -220,6 +240,47 @@ def prepare(root: Path, identity: str) -> None:
             unavailable_since = None
         time.sleep(1)
     raise ValueError("affected operations did not finish; no service was stopped")
+
+
+def claude_service_call(value: dict, action: str, old: dict) -> None:
+    import pwd
+    from cc_remote.update import _claude_contract
+
+    previous, release = Path(value["previous"]), Path(value["release"])
+    account = pwd.getpwuid(value["uid"])
+    old_sdk, old_wire = _claude_contract(previous)
+    sdk, wire = _claude_contract(release)
+    if (old_wire != wire or not isinstance(old, dict) or old.get("sdk") != old_sdk
+            or not isinstance(old.get("pid"), int) or old["pid"] <= 0
+            or not all(isinstance(old.get(key), str) and Path(old[key]).is_absolute()
+                       for key in ("source", "socket"))):
+        raise ValueError("Claude SDK/service compatibility could not be verified")
+    credentials = {}
+    if account.pw_uid != os.geteuid():
+        credentials = {"user": account.pw_uid, "group": account.pw_gid, "extra_groups": []}
+    result = subprocess.run(
+        [str(release / ".venv/bin/python"), "-I", "-B", str(release / "deploy/claude_service_upgrade.py"), action],
+        input=json.dumps({"previous": old, "release": str(release), "sdk": sdk}),
+        capture_output=True, text=True, cwd=release, timeout=100,
+        env={"HOME": account.pw_dir, "PATH": os.defpath},
+        pass_fds=(int(os.environ[LOCK_FD_ENV]),), **credentials,
+    )
+    if result.returncode:
+        raise ValueError("Claude SDK/service compatibility migration failed: " + result.stderr.strip()[:200])
+
+
+def update_claude_service(root: Path, identity: str, action: str) -> None:
+    value = activation.receipt(root, identity)
+    if not value.get("claude_upgrade"):
+        return
+    if action == "switch" and (value["phase"] != "stopped" or "claude_service" not in value):
+        raise ValueError("Claude SDK/service compatibility migration was not admitted")
+    old = value.get("claude_service")
+    if old is None or action != "switch" and not value.get("claude_upgrade_started"):
+        return
+    if action == "switch":
+        change(root, identity, claude_upgrade_started=True)
+    claude_service_call(value, action, old)
 
 
 def finish(root: Path, identity: str, outcome: str) -> None:
@@ -293,6 +354,7 @@ def recover(root: Path, identity: str) -> str:
     _, row = release_retention.generation(root, value["generation"])
     if row["phase"] == "committed" or value["phase"] == "succeeded":
         if current == value["release"] and health(value, current):
+            update_claude_service(root, identity, "verify")
             if row["phase"] == "prepared":
                 release_retention.commit(root, row["id"], snapshot=value.get("snapshot"))
             finish(root, identity, "succeeded")
@@ -342,6 +404,7 @@ def recover(root: Path, identity: str) -> str:
         staged.unlink()
     staged.symlink_to(value["previous"])
     os.replace(staged, root / "current")
+    update_claude_service(root, identity, "restore")
     change(root, identity, phase="restored")
     if sys.platform != "darwin" and not row.get("linux_service"):
         subprocess.run(["systemctl", "daemon-reload"], check=True, timeout=30, pass_fds=(int(os.environ[LOCK_FD_ENV]),))
@@ -360,7 +423,9 @@ def recover(root: Path, identity: str) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("action", choices=("begin", "prepare", "phase", "finish", "recover"))
+    parser.add_argument("action", choices=(
+        "begin", "prepare", "phase", "finish", "recover", "claude-switch", "claude-restore", "claude-verify",
+    ))
     parser.add_argument("--id")
     parser.add_argument("--value")
     parser.add_argument("--snapshot")
@@ -385,6 +450,8 @@ def main() -> None:
             prepare(args.root, job_id(args.id))
         elif args.action == "recover":
             print(recover(args.root, job_id(args.id)))
+        elif args.action.startswith("claude-"):
+            update_claude_service(args.root, job_id(args.id), args.action.removeprefix("claude-"))
         elif args.action == "finish":
             if args.value not in activation.TERMINAL_PHASES | {"recovery_required"}:
                 raise ValueError("invalid activation outcome")

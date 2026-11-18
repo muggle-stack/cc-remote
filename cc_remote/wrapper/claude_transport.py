@@ -137,8 +137,12 @@ class AccountIsolatedSubprocessCLITransport(
 
         self._reject_windows_batch_cli(self._cli_path)
 
-        # Wrapper preflight checks the daily executable. The SDK checks its
-        # announced version when the init message arrives.
+        # Older SDKs check the executable before launch. Newer SDKs check
+        # its announced version on the init message instead.
+        check_version = getattr(self, "_check_claude_version", None)
+        if check_version is not None and not _sdk_cli.os.environ.get("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK"):
+            await check_version()
+
         cmd = self._build_command()
         try:
             # Keep the SDK's precedence while starting from an account-clean

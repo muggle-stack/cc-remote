@@ -45,7 +45,7 @@ Before changing a live service:
 
 For Claude, follow [session-service installation and acceptance](../docs/claude-session-service.md)
 before planning a non-interrupting Wrapper upgrade. Keep an existing SDK service
-outside the Wrapper activation transaction. First migration, remaining
+outside ordinary Wrapper activation transactions. First migration, remaining
 in-process turns (including private `/btw` forks), and deferred queries must
 drain first; daemon readiness alone does not prove an old child was adopted.
 If the local service protocol or pinned SDK changes, stage first and defer the
@@ -430,8 +430,9 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
   and validates one stable role bundle, then calls its existing role installer.
   `--check` performs no activation; `--version` selects an exact published version.
   Both roles on one host require `--role`. Protocol changes are accepted for newer
-  releases. `--allow-protocol-change` remains a compatibility option. SDK/service-contract changes
-  defer to the Claude service migration procedure. The installer inherits the
+  releases. `--allow-protocol-change` remains a compatibility option. Managed
+  Claude SDK migrations use the same activation lock and rollback receipt.
+  Local wire changes follow the Claude service migration procedure. The installer inherits the
   update lock so a disconnected caller cannot accidentally start a second update.
   The command must run outside the managed Wrapper/Relay process tree. Device
   updates inspect the paired Relay. An already-current Relay is skipped. A
@@ -455,8 +456,9 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
   older caller; an interactive terminal can request it when missing. First
   pairing is separate from this existing-installation upgrade path.
   Explicit Mac registration can bind an existing immutable root and LaunchAgent;
-  future installs preserve that layout and service identity. The command does not
-  restart the independent Claude service, automatically adopt source/Docker
+  future installs preserve that layout and service identity. The command keeps
+  the independent Claude service running during ordinary updates. It does not
+  automatically adopt source/Docker
   layouts, or automate downgrade rollback. Recorded managed generations use the
   retention procedure above.
   Direct role installers use the same per-installation `.update.lock` before

@@ -308,6 +308,7 @@ class Session:
             "model_state_seq": self.model_state_seq,
             "supported_dialog_kinds": self.supported_dialog_kinds,
             "task_seeds": list(self.task_seeds.values()),
+            "callbacks_pending": any(not future.done() for _, future in self.callbacks.values()),
             "native_steering": True,
             "background_steering": True,
             "background_activity_steering": True,
