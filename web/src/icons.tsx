@@ -61,6 +61,8 @@ const PATHS: Record<string, string> = {
   bold: '<path d="M6 12h8a4 4 0 0 1 0 8H6V4h7a4 4 0 0 1 0 8"/>',
   dots: '<circle cx="12" cy="5" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="12" cy="19" r="1.4"/>',
   send: '<path d="M12 19V6M6 12l6-6 6 6"/>',
+  waveform: '<path d="M3 11v2m4-5v8m5-12v16m5-12v8m4-5v2"/>',
+  volume: '<path d="M3 9v6h4l5 4V5L7 9H3Zm13 0a4.2 4.2 0 0 1 0 6m2.5-8.5a7.8 7.8 0 0 1 0 11"/>',
   stop: '<rect x="6" y="6" width="12" height="12" rx="2.5"/>',
   pause: '<path d="M8 5v14M16 5v14"/>',
   'arrow-right': '<path d="M5 12h14m-5-5 5 5-5 5"/>',

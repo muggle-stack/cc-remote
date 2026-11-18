@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { NewChatView } from "../../src/components/NewChatView";
 import { Composer } from "../../src/components/Composer";
@@ -14,6 +14,8 @@ const engine = params.get("engine") as "claude" | "codex" | "dsh" || "claude";
 const side = params.has("side");
 const work = params.has("work");
 const fresh = params.has("new");
+const voice = params.has("voice");
+const ChatView = lazy(() => import("../../src/components/ChatView").then(({ ChatView }) => ({ default: ChatView })));
 const profiles = [
   { id: "cc_remote_work", allowed: true },
   { id: ":read-only", allowed: true },
@@ -23,7 +25,7 @@ const profiles = [
 const sid = "queue-fixture";
 export function Fixture() {
   const [visible, setVisible] = useState(true);
-  const [state, setState] = useState<State>("running");
+  const [state, setState] = useState<State>(voice ? "idle" : "running");
   const [perm, setPerm] = useState(engine === "codex" ? "never" : work ? "acceptEdits" : "bypassPermissions");
   const [profile, setProfile] = useState<string | null>(work ? "cc_remote_work" : null);
   const [search, setSearch] = useState<"cached" | "live">("cached");
@@ -62,8 +64,15 @@ export function Fixture() {
   return <>
     <button data-testid="state" onClick={() => setState(state === "running" ? "idle" : "running")}>Toggle state</button>
     <output data-testid="events">{JSON.stringify(events)}</output>
+    {params.has("reply") && <div style={{ height: 300, display: "flex" }}>
+      <Suspense fallback={null}><ChatView sid={sid} voiceSpeech turns={[{
+        id: "voice-reply", prompt: "说一句话", done: true, doneTs: Date.now(),
+        blocks: [{ kind: "text", message_id: "answer", text: "你好，测试朗读。", done: true }],
+      }]} /></Suspense>
+    </div>}
     {fresh && <button data-testid="auth-remount" onClick={() => setVisible(value => !value)}>Toggle login</button>}
     {fresh ? visible && <NewChatView engine={engine} space={work ? "work" : "code"}
+      voiceEnabled={voice}
       draftKey={sid} draftStore={drafts}
       cwd="/tmp" controlScopeKey={`${engine}:${work}:new`} onPickCwd={() => {}}
       onGetPermissionProfiles={() => record("catalog")} permissionProfiles={profiles}
@@ -75,7 +84,7 @@ export function Fixture() {
       onSelect={() => {}} onCloseChat={() => {}}
       onSend={prompt => record("send", prompt)} onSteer={prompt => record("steer", prompt)}
       onAnswerQuestion={() => {}} onCollapse={() => {}} onDismissNotice={() => {}} />
-      : <Composer {...common} state={state} connState="connected" wrapperOnline
+      : <Composer {...common} voiceEnabled={voice} state={state} connState="connected" wrapperOnline
         queue={queue} pendingSend={null} failedDeferred={[]}
         surface={work ? "work" : undefined}
         model="opus" effort="high" perm={perm}

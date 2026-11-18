@@ -1,6 +1,92 @@
 import { expect, test } from "@playwright/test";
 
 const url = "/tests/composer-queue.html";
+
+for (const fresh of [false, true]) {
+  test(`voice hold updates ${fresh ? "new" : "existing"} chat draft before release`, async ({ page }) => {
+    let chunks = 0;
+    await page.routeWebSocket("**/v1/realtime?intent=transcription", (ws) => {
+      ws.onMessage((data) => {
+        const event = JSON.parse(String(data));
+        if (event.type === "session.update") ws.send(JSON.stringify({ type: "session.updated" }));
+        if (event.type === "input_audio_buffer.append" && ++chunks === 1) {
+          const audio = Buffer.from(event.audio, "base64");
+          expect(audio.byteLength).toBe(4800);
+          expect(audio.some(sample => sample !== 0)).toBe(true);
+          ws.send(JSON.stringify({
+            type: "conversation.item.input_audio_transcription.delta", transcript: "实时中间结果",
+          }));
+        }
+        if (event.type === "input_audio_buffer.commit") ws.send(JSON.stringify({
+          type: "conversation.item.input_audio_transcription.completed", transcript: "最终转写草稿",
+        }));
+      });
+    });
+    await page.goto(`${url}?voice=1${fresh ? "&new=1" : ""}`);
+    await page.evaluate(() => {
+      const stats: { opened: number; track?: MediaStreamTrack } = { opened: 0 };
+      Object.assign(window, { voiceTest: stats });
+      let syntheticMic: MediaStream | null = null;
+      document.addEventListener("click", () => {
+        const context = new AudioContext();
+        const microphone = context.createMediaStreamDestination();
+        const tone = context.createOscillator();
+        tone.connect(microphone);
+        tone.start();
+        void context.resume();
+        syntheticMic = microphone.stream;
+      }, { once: true });
+      Object.defineProperty(Object.getPrototypeOf(navigator.mediaDevices), "getUserMedia", { value: async () => {
+        stats.opened++;
+        if (!syntheticMic) throw new Error("missing synthetic microphone");
+        stats.track = syntheticMic.getAudioTracks()[0];
+        return syntheticMic;
+      } });
+    });
+    const mic = page.getByRole("button", { name: "按住说话" });
+    const input = page.locator("textarea");
+    const stats = () => page.evaluate(() => {
+      const stats = (window as Window & { voiceTest: { opened: number; track?: MediaStreamTrack } }).voiceTest;
+      return { opened: stats.opened, stopped: Number(stats.track?.readyState === "ended") };
+    });
+    await mic.click();
+    expect(await stats()).toEqual({ opened: 0, stopped: 0 });
+    const box = (await mic.boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await expect.poll(async () => (await stats()).opened).toBe(1);
+    await expect(input).toHaveValue("实时中间结果");
+    await expect(mic).toHaveClass(/voice-input-held/);
+    await expect(page.getByTestId("events")).toHaveText("[]");
+    await page.mouse.up();
+    await expect(input).toHaveValue("最终转写草稿");
+    await expect(mic).toHaveCount(0);
+    await expect(page.getByRole("button", { name: fresh ? "开始" : "发送", exact: true })).toBeEnabled();
+    await expect(page.getByTestId("events")).toHaveText("[]");
+    expect(await stats()).toEqual({ opened: 1, stopped: 1 });
+  });
+}
+
+test("voice narration only requests the selected completed reply", async ({ page }) => {
+  const requests: string[] = [];
+  await page.route("**/v1/audio/speech", async (route) => {
+    requests.push(route.request().postDataJSON().input);
+    await route.fulfill({ status: 200, contentType: "audio/pcm", body: Buffer.alloc(24000) });
+  });
+  await page.goto(`${url}?reply=1`);
+  const read = page.getByRole("button", { name: "朗读回复" });
+  await expect(read).toBeVisible();
+  expect(requests).toEqual([]);
+  await read.click();
+  const stop = page.getByRole("button", { name: "停止朗读" });
+  await expect(stop).toBeVisible();
+  await expect.poll(() => requests).toEqual(["你好，测试朗读。"]);
+  await stop.click();
+  await expect(read).toBeVisible();
+  await read.click();
+  await expect.poll(() => requests.length).toBe(2);
+  await expect(read).toBeVisible();
+});
 test("new-chat controls retain private draft and attachments across login remount", async ({ page }) => {
   await page.goto(`${url}?engine=claude&new=1&attachment=1`);
   const input = page.locator("textarea");
