@@ -363,6 +363,7 @@ from cc_remote.wrapper.codex_sessions import (
     CODEX_EXACT_CATALOG_MAX_IDS,
     list_codex_sessions, codex_exact_catalog_rows, codex_session_cwd,
     codex_rollout_path, codex_model, codex_effort, codex_session_settings,
+    codex_session_provider,
     codex_session_presence, codex_session_confirmed_missing,
     codex_missing_sidebar_sessions,
     codex_current_provider,
@@ -3353,6 +3354,37 @@ class WrapperMachine:
             return None
         return str(profile.home)
 
+    async def _known_codex_session_model_provider(
+        self, profile: CodexProfile, native_sid: str,
+        ctx: Optional[SessionContext] = None,
+    ) -> Optional[str]:
+        provider = getattr(ctx.sdk, "model_provider", None) if ctx is not None else None
+        if not provider:
+            provider = await asyncio.to_thread(
+                codex_session_provider, native_sid, codex_home=self._codex_home(profile))
+        if (not isinstance(provider, str) or not provider.strip()
+                or len(provider) > 256 or any(ord(char) < 32 for char in provider)):
+            return None
+        return "openai" if provider == "cc_remote_openai_http" else provider.strip()
+
+    async def _codex_session_model_provider(
+        self, profile: CodexProfile, native_sid: str,
+        ctx: Optional[SessionContext] = None,
+    ) -> str:
+        provider = await self._known_codex_session_model_provider(profile, native_sid, ctx)
+        if provider:
+            return provider
+        result = await self._codex_rpc_for_profile(
+            profile, "thread/read", {"threadId": native_sid, "includeTurns": False})
+        thread = result.get("thread") if isinstance(result, dict) else None
+        if not isinstance(thread, dict) or thread.get("id") != native_sid:
+            raise RuntimeError("Codex 未返回目标会话的模型提供方")
+        provider = thread.get("modelProvider")
+        if (not isinstance(provider, str) or not provider.strip()
+                or len(provider) > 256 or any(ord(char) < 32 for char in provider)):
+            raise RuntimeError("Codex 会话的模型提供方无法确认")
+        return "openai" if provider == "cc_remote_openai_http" else provider.strip()
+
     async def _resolve_codex_profile_model(
         self,
         profile: CodexProfile,
@@ -3360,8 +3392,9 @@ class WrapperMachine:
         *,
         explicit: bool = False,
         catalog: Optional[list[dict]] = None,
+        model_provider: Optional[str] = None,
     ) -> tuple[Optional[str], bool]:
-        """Resolve a model inside exactly one Codex account namespace.
+        """Resolve a model inside one Codex account/provider namespace.
 
         A non-empty catalog proves availability. Explicit unavailable choices
         fail closed; implicit/retired values follow that account's advertised
@@ -3371,11 +3404,10 @@ class WrapperMachine:
         """
         if catalog is None:
             home = self._codex_home(profile)
-            catalog = (
-                await codex_catalog()
-                if home is None
-                else await codex_catalog(codex_home=home)
-            )
+            kwargs = {} if home is None else {"codex_home": home}
+            if model_provider is not None:
+                kwargs["model_provider"] = model_provider
+            catalog = await codex_catalog(**kwargs)
         catalog_ids = {
             item["id"] for item in catalog
             if isinstance(item.get("id"), str) and item["id"]
@@ -3386,7 +3418,7 @@ class WrapperMachine:
             raise _UnsupportedCodexModel(candidate)
         if candidate and catalog_ids:
             home = self._codex_home(profile)
-            provider = await asyncio.to_thread(
+            provider = model_provider or await asyncio.to_thread(
                 codex_current_provider,
                 **({} if home is None else {"codex_home": home}),
             )
@@ -20082,7 +20114,7 @@ class WrapperMachine:
         return normalize_claude_model_selection(model), None
 
     async def _handle_get_models(self, cmd) -> None:
-        """Answer with the engine's catalog and effective new-session defaults.
+        """Answer with the requested account/thread provider's model catalog.
 
         Codex uses model/list; Claude exposes its picker in the initialization
         response. Neither discovery starts a model turn or resumes a session.
@@ -20091,6 +20123,8 @@ class WrapperMachine:
         claude_profile = None
         codex_profile = None
         codex_home = None
+        model_provider = None
+        models_sid = getattr(cmd, "sid", None) if engine == "codex" else None
         if engine in {"cc", "claude"}:
             try:
                 claude_profile = self._claude_profile(
@@ -20106,8 +20140,13 @@ class WrapperMachine:
                 return error
         if engine == "codex":
             try:
-                codex_profile = self._codex_profile(
-                    getattr(cmd, "codex_profile_id", None))
+                requested_profile = getattr(cmd, "codex_profile_id", None)
+                if models_sid:
+                    codex_profile, native_sid = self._codex_target(models_sid)
+                    if requested_profile is not None and requested_profile != codex_profile.id:
+                        raise ValueError("Codex session/profile mismatch")
+                else:
+                    codex_profile = self._codex_profile(requested_profile)
             except ValueError:
                 error = Error(
                     code=ERR_AUTH,
@@ -20118,19 +20157,35 @@ class WrapperMachine:
                 await self.transport.send(error)
                 return error
             codex_home = self._codex_home(codex_profile)
+            if models_sid:
+                try:
+                    model_provider = await self._codex_session_model_provider(
+                        codex_profile, native_sid, self.sessions.get(models_sid))
+                except Exception:
+                    msg = Models(
+                        engine=engine, sid=models_sid, models=[],
+                        codex_profile_id=codex_profile.id,
+                        error="模型提供方读取失败，请重试。",
+                        to=getattr(cmd, "client_id", None),
+                    )
+                    await self.transport.send(msg)
+                    return msg
         # Page reloads, reconnects and opening the picker are explicit reads.
         # They must bypass the internal effort cache so newly available models
-        # appear immediately. The catalog coalesces concurrent reads per home.
-        models = (
-            await codex_catalog(force=True)
-            if engine == "codex" and codex_home is None
-            else await codex_catalog(force=True, codex_home=codex_home)
-            if engine == "codex" else []
-        )
+        # appear immediately. Reads coalesce within the same home/provider.
+        catalog_kwargs = {} if codex_home is None else {"codex_home": codex_home}
+        if model_provider is not None:
+            catalog_kwargs["model_provider"] = model_provider
+        models = await codex_catalog(force=True, **catalog_kwargs) if engine == "codex" else []
         default_model = None
         default_effort = None
         defaults_cwd = None
-        if engine == "codex":
+        if engine == "codex" and models_sid:
+            default_model = _codex_catalog_default_model(models)
+            selected = next((item for item in models if item.get("id") == default_model), None)
+            if selected:
+                default_effort = selected.get("default_effort")
+        elif engine == "codex":
             # Report the same profile-scoped defaults _spawn will apply. A stale
             # configured model follows this account's catalog default; an empty
             # catalog preserves config because availability is then unknown.
@@ -20194,7 +20249,7 @@ class WrapperMachine:
             # No cwd is Work's catalog-only request. Its native policy owns the
             # default; do not read Code settings or overwrite Code's cwd cache.
         msg = Models(
-            engine=engine, models=models, default_model=default_model,
+            engine=engine, sid=models_sid, models=models, default_model=default_model,
             default_effort=default_effort, cwd=defaults_cwd,
             claude_profile_id=(
                 claude_profile.id if claude_profile else None),
@@ -20788,6 +20843,9 @@ class WrapperMachine:
         profile = self._codex_profile_for_ctx(ctx)
         home = self._codex_home(profile)
         kwargs = {} if home is None else {"codex_home": home}
+        provider = getattr(sdk, "model_provider", None)
+        if provider is not None:
+            kwargs["model_provider"] = provider
         resolved: Optional[str] = None
         if explicit:
             try:
@@ -20906,10 +20964,14 @@ class WrapperMachine:
         config.toml either."""
         profile = self._codex_profile_for_ctx(ctx)
         home = self._codex_home(profile)
+        kwargs = {} if home is None else {"codex_home": home}
+        provider = getattr(ctx.sdk, "model_provider", None)
+        if provider is not None:
+            kwargs["model_provider"] = provider
         applied = await clamp_effort(
             getattr(ctx.sdk, "model", None),
             effort,
-            **({} if home is None else {"codex_home": home}),
+            **kwargs,
         )
         # Persist through app-server's official thread setting. turn/start repeats
         # it defensively, but a restart/eviction no longer loses the selection.
@@ -35506,8 +35568,10 @@ class WrapperMachine:
         model = (
             _session_model(ctx) if ctx is not None else None
         ) or settings.get("model")
-        model, _ = await self._resolve_codex_profile_model(
-            codex_profile, model)
+        provider = await self._known_codex_session_model_provider(codex_profile, native_sid, ctx)
+        if provider is not None:
+            model, _ = await self._resolve_codex_profile_model(
+                codex_profile, model, model_provider=provider)
         approval: Optional[str] = None
         granular_approval = bool(settings.get("approval_policy_granular"))
         if ctx is not None:
@@ -36443,8 +36507,10 @@ class WrapperMachine:
         }
         parent_model = (entry.get("controls") or {}).get("model")
         if isinstance(parent_model, str) and parent_model:
-            parent_model, _ = await self._resolve_codex_profile_model(
-                codex_profile, parent_model)
+            provider = await self._known_codex_session_model_provider(codex_profile, _native_sid, ctx)
+            if provider is not None:
+                parent_model, _ = await self._resolve_codex_profile_model(
+                    codex_profile, parent_model, model_provider=provider)
             if parent_model:
                 params["model"] = parent_model
         parent_approval = (entry.get("controls") or {}).get(
@@ -37085,8 +37151,10 @@ class WrapperMachine:
             params["lastTurnId"] = cmd.last_turn_id
         parent_model = controls.get("model")
         if parent_model:
-            parent_model, _ = await self._resolve_codex_profile_model(
-                codex_profile, parent_model)
+            provider = await self._known_codex_session_model_provider(codex_profile, _native_sid, ctx)
+            if provider is not None:
+                parent_model, _ = await self._resolve_codex_profile_model(
+                    codex_profile, parent_model, model_provider=provider)
             if parent_model:
                 params["model"] = parent_model
         parent_approval = controls.get("approval_policy")
@@ -38234,7 +38302,11 @@ class WrapperMachine:
             auto_compact_threshold_tokens = None
 
         codex_resume_model_reconcile: Optional[str] = None
+        codex_provider: Optional[str] = None
         if engine == "codex":
+            if resume_id:
+                codex_provider = await self._known_codex_session_model_provider(
+                    codex_profile, resume_id)
             if not resume_id:
                 configured_model = await asyncio.to_thread(
                     codex_model,
@@ -38366,6 +38438,8 @@ class WrapperMachine:
         # sees the first turn as already-applied (cc's connect re-syncs it anyway;
         # this is what keeps codex from a spurious first-turn reconnect).
         if engine == "codex":
+            if codex_provider is not None:
+                sdk.model_provider = codex_provider
             preserve_codex_controls = space == "work"
             preserve_codex_permission_profile = space == "work"
             if collaboration_mode in CODEX_COLLABORATION_MODES:
@@ -38382,13 +38456,25 @@ class WrapperMachine:
                 sdk.web_search = web_search
             if service_tier is not None:
                 try:
+                    if (resume_id and codex_provider is None
+                            and normalize_service_tier(service_tier) != "default"):
+                        codex_provider = await self._codex_session_model_provider(
+                            codex_profile, resume_id)
+                        sdk.model_provider = codex_provider
+                    speed_kwargs = {"codex_home": self._codex_home(codex_profile)}
+                    if codex_provider is not None:
+                        speed_kwargs["model_provider"] = codex_provider
                     speed_catalog = (
-                        await codex_catalog(codex_home=self._codex_home(codex_profile))
+                        await codex_catalog(**speed_kwargs)
                         if normalize_service_tier(service_tier) != "default" else [])
                     sdk.service_tier = resolve_service_tier(
                         model or sdk.model, service_tier, speed_catalog)
                 except ValueError as exc:
                     await reject(ERR_BAD_PROMPT, str(exc),
+                                 route="sid", sid=wire_resume_id)
+                    return None
+                except RuntimeError:
+                    await reject(ERR_BAD_PROMPT, "模型提供方读取失败，请重试。",
                                  route="sid", sid=wire_resume_id)
                     return None
             # Seed from the session's own bounded rollout tail, never config.toml.
@@ -38484,13 +38570,14 @@ class WrapperMachine:
                 if mode in CODEX_COLLABORATION_MODES:
                     sdk.collaboration_mode = mode
                 try:
-                    resolved_model, _ = (
-                        await self._resolve_codex_profile_model(
+                    resolved_model = model
+                    if codex_provider is not None:
+                        resolved_model, _ = await self._resolve_codex_profile_model(
                             codex_profile,
                             model,
                             explicit=explicit_codex_model,
+                            model_provider=codex_provider,
                         )
-                    )
                 except _UnsupportedCodexModel:
                     await reject(
                         ERR_BAD_PROMPT,
@@ -38506,13 +38593,13 @@ class WrapperMachine:
                 sdk.model = model
                 # Validate stale client choices against native capabilities,
                 # using the model's advertised default when unsupported.
-                effort = await clamp_effort(
-                    model,
-                    effort,
-                    **({} if self._codex_home(codex_profile) is None else {
+                if not resume_id or codex_provider is not None:
+                    effort_kwargs = {} if self._codex_home(codex_profile) is None else {
                         "codex_home": self._codex_home(codex_profile),
-                    }),
-                )
+                    }
+                    if codex_provider is not None:
+                        effort_kwargs["model_provider"] = codex_provider
+                    effort = await clamp_effort(model, effort, **effort_kwargs)
         if effort or engine == "claude" or explicit_codex_effort:
             # Both new and resumed Claude sessions inherit native defaults
             # unless this command supplied an explicit effort override.
@@ -38626,18 +38713,25 @@ class WrapperMachine:
                 await ctx.sdk.connect(
                     **codex_connect_options,
                 )
-                if resume_id and not explicit_codex_model:
+                if resume_id:
                     # A missing/stale rollout tail cannot retire a live choice.
                     # Validate the authoritative resume model before deciding
                     # whether this account's advertised default must replace it.
-                    native_model = getattr(ctx.sdk, "model", None)
-                    resolved_model, model_replaced = (
-                        await self._resolve_codex_profile_model(
-                            codex_profile, native_model,
+                    native_model = (codex_resume_model_reconcile if explicit_codex_model
+                                    else getattr(ctx.sdk, "model", None))
+                    model_kwargs = {"explicit": explicit_codex_model}
+                    provider = getattr(ctx.sdk, "model_provider", None) or codex_provider
+                    # An old server may omit provider metadata. Never validate
+                    # its thread against the currently configured provider.
+                    if provider is not None:
+                        resolved_model, model_replaced = (
+                            await self._resolve_codex_profile_model(
+                                codex_profile, native_model,
+                                model_provider=provider, **model_kwargs,
+                            )
                         )
-                    )
-                    if native_model and model_replaced:
-                        codex_resume_model_reconcile = resolved_model
+                        if native_model and (model_replaced or explicit_codex_model):
+                            codex_resume_model_reconcile = resolved_model
                 if (
                     resume_id
                     and codex_resume_model_reconcile
@@ -38727,6 +38821,17 @@ class WrapperMachine:
                 "请确认该账号已登录后重试。",
                 route="sid",
                 sid=wire_resume_id,
+            )
+            return None
+        except _UnsupportedCodexModel:
+            try:
+                await ctx.sdk.disconnect()
+            except Exception:
+                log.warning("rejected Codex model spawn cleanup failed")
+            await reject(
+                ERR_BAD_PROMPT,
+                "所选模型不适用于当前 Codex 账号，请重新选择。",
+                route="sid", sid=wire_resume_id,
             )
             return None
         except Exception as e:

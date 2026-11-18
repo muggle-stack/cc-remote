@@ -368,8 +368,9 @@ function catalogForEngineProfile(
   engine: Engine,
   profileId?: string | null,
   cwd?: string | null,
+  sessionId?: string | null,
 ): Catalog {
-  const scoped = catalog[modelCatalogScopeKey(engine, profileId, cwd)];
+  const scoped = catalog[modelCatalogScopeKey(engine, profileId, cwd, sessionId)];
   return {
     ...catalog,
     [engine]: scoped ?? [],
@@ -1318,7 +1319,8 @@ export default function App() {
       : rt.ccSessionId);
   const focusedCatalog = catalogForEngineProfile(
     state.catalog, focusedEngine, focusedAccountProfileId,
-    space === "code" ? focusedSession?.cwd || currentCwd : undefined);
+    space === "code" ? focusedSession?.cwd || currentCwd : undefined,
+    focusedEngine === "codex" ? focusedSid : undefined);
   const completedGoalRetired = completedGoalHasNewerUserTurn(
     rt.goal, rt.turns,
   ) || completedGoalHasNewerUserTurn(rt.goal, historyView.turns);
@@ -1358,7 +1360,8 @@ export default function App() {
   const capabilityCwd = focusedSession?.cwd || currentCwd;
   const requestFocusedModels = () => wsRef.current?.sendGetModels(
     focusedEngine, focusedEngine === "claude" && space === "code" ? capabilityCwd : undefined,
-    focusedCodexProfileId, focusedClaudeProfileId);
+    focusedCodexProfileId, focusedClaudeProfileId,
+    focusedEngine === "codex" ? focusedSid : undefined);
   const focusedComposerDraftKey = composerDraftKey(
     machineId, space, focusedEngine, focusedSid ?? "",
   );
@@ -2172,9 +2175,11 @@ export default function App() {
       focusedEngine,
       focusedEngine === "claude" && space === "code" ? capabilityCwd : undefined,
       focusedCodexProfileId,
-      focusedClaudeProfileId);
+      focusedClaudeProfileId,
+      focusedEngine === "codex" ? focusedSid : undefined);
   }, [
     capabilityCwd,
+    focusedSid,
     focusedAccountProfileId,
     focusedClaudeProfileId,
     focusedCodexProfileId,

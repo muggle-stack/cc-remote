@@ -128,15 +128,17 @@ const MAX_LIVE_SPILL_ARCHIVE_CHARS = 16 * 1024 * 1024;
 // noisy app-server to grow every resident session indefinitely.
 export const MAX_SESSION_NOTICES = 8;
 
-/** Account-sensitive model/default cache key. */
+/** Separate thread-provider catalogs from account defaults. */
 export function modelCatalogScopeKey(
   engine: string,
   profileId?: string | null,
   cwd?: string | null,
+  sessionId?: string | null,
 ): string {
   const account = (engine === "codex" || engine === "claude") && profileId
     ? `${engine}\u0000${profileId}`
     : engine;
+  if (engine === "codex" && sessionId) return `${account}\u0000session:${sessionId}`;
   return engine === "claude" && cwd ? `${account}\u0000${cwd}` : account;
 }
 
@@ -5282,11 +5284,14 @@ function reduceEvent(
           : e.engine === "claude"
             ? (e.claude_profile_id ?? state.defaultClaudeProfileId)
             : null,
+        null,
+        e.engine === "codex" ? e.sid : null,
       );
       const catalogKey = e.engine === "claude" && e.cwd ? `${cacheKey}\u0000${e.cwd}` : cacheKey;
       const catalog = e.models.length || e.engine === "dsh"
         ? { ...state.catalog, [catalogKey]: e.models }
         : state.catalog;
+      if (e.engine === "codex" && e.sid) return { ...state, catalog };
       if (e.cwd && e.cwd !== state.newChat?.cwd) {
         // Cwd-aware reads run concurrently. Never let a late response for a
         // directory the user has left replace the still-current result.

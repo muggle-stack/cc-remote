@@ -4,6 +4,9 @@
 
 ## Unreleased
 
+- Disable both native Codex subagent generations in Work mode.
+- Scope Codex model catalogs and model, reasoning and speed validation to each thread's provider. Wire protocol v97.
+
 ## v5.3.45
 
 Add browser-rendered PPTX previews with mobile continuous reading. Wire protocol v96 and Claude Agent SDK 0.2.174.

@@ -976,6 +976,9 @@ def test_codex_work_thread_config_disables_context_without_model_or_auth_overrid
     assert config["features"] == {
         name: False for name in codex_handle_module._WORK_DISABLED_FEATURES
     }
+    assert config["features"]["multi_agent"] is False
+    assert config["features"]["multi_agent_v2"] is False
+    assert config["agents"] == {"enabled": False}
     assert config["skills"]["config"] == [
         {"path": "/home/test/.codex/skills/private/SKILL.md", "enabled": False},
         {"path": "/system/skills/official/SKILL.md", "enabled": False},
@@ -3424,14 +3427,20 @@ def test_machine_forced_model_effort_publish_falls_back_after_probe_churn():
         ("current-model", "selected-model", None, "selected-model", []),
         (None, "retired-model", None, "current-model", ["current-model"]),
         (None, "selected-model", "current-model", "current-model", ["current-model"]),
+        (None, "selected-model", "unavailable", None, []),
     ],
 )
+@pytest.mark.parametrize("known_provider", [True, False])
 def test_codex_resume_preserves_native_model_and_restores_nullable_effort(
         monkeypatch, tmp_path, rollout_model, native_model, explicit_model,
-        expected_model, expected_updates):
+        expected_model, expected_updates, known_provider):
+    handles = []
+
     class FakeCodexHandle:
         def __init__(self, _cfg, cwd=None, daemon_mode=None,
                      daemon_manager=None):
+            handles.append(self)
+            self.connect_calls = []
             self.cwd = cwd
             self._cwd = cwd
             self._generation = 1
@@ -3470,12 +3479,14 @@ def test_codex_resume_preserves_native_model_and_restores_nullable_effort(
             self.approval_policy = value
 
         async def connect(self, **kwargs):
+            self.connect_calls.append(kwargs)
             self.thread_id = kwargs["resume_id"]
             self.preconnect_effort = self.effort
             self.preconnect_model = self.model
             # The native selection can be newer than a stale or unreadable
             # rollout tail; availability must be decided after this receipt.
             self.model = native_model
+            self.model_provider = "openai"
             # Some app-server versions omit the effective override on resume.
             self.effort = None
             self.applied_effort = None
@@ -3500,6 +3511,10 @@ def test_codex_resume_preserves_native_model_and_restores_nullable_effort(
         machine.cfg.cc_cwd = str(tmp_path)
         monkeypatch.setattr(machine_module, "CodexHandle", FakeCodexHandle)
         monkeypatch.setattr(
+            machine_module, "codex_session_provider",
+            lambda *_args, **_kwargs: "openai" if known_provider else None,
+        )
+        monkeypatch.setattr(
             machine_module,
             "codex_session_cwd",
             lambda _thread_id: str(tmp_path),
@@ -3513,7 +3528,8 @@ def test_codex_resume_preserves_native_model_and_restores_nullable_effort(
             },
         )
 
-        async def catalog(*, codex_home=None):
+        async def catalog(*, codex_home=None, model_provider=None):
+            assert model_provider == "openai"
             return [{
                 "id": "current-model",
                 "efforts": ["high"],
@@ -3543,10 +3559,18 @@ def test_codex_resume_preserves_native_model_and_restores_nullable_effort(
             engine="codex",
             space="code",
             model=explicit_model,
+            bootstrap=expected_model is None,
         )
 
+        if expected_model is None:
+            assert ctx is None
+            assert _transport.sent[-1].code == machine_module.ERR_BAD_PROMPT
+            assert len(handles[0].connect_calls) == (0 if known_provider else 1)
+            return
         assert ctx is not None
-        assert ctx.sdk.preconnect_model == "current-model"
+        assert ctx.sdk.preconnect_model == (
+            "current-model" if known_provider else explicit_model or rollout_model or "gpt-test"
+        )
         assert ctx.sdk.set_model_calls == expected_updates
         assert ctx.sdk.model == expected_model
         assert ctx.sdk.preconnect_effort == "high"

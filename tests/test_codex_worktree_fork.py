@@ -27,7 +27,7 @@ from tests.test_multisession import _mk_ctx, _mk_machine
 @pytest.fixture(autouse=True)
 def _profile_model_catalog(monkeypatch):
     """Keep fork tests independent of the developer machine's live catalog."""
-    async def catalog(*, codex_home=None):
+    async def catalog(*, codex_home=None, model_provider=None):
         return [
             {
                 "id": "gpt-test",
@@ -44,6 +44,7 @@ def _profile_model_catalog(monkeypatch):
         ]
 
     monkeypatch.setattr(machine_module, "codex_catalog", catalog)
+    monkeypatch.setattr(machine_module, "codex_session_provider", lambda *_args, **_kwargs: "openai")
     monkeypatch.setattr(
         machine_module, "codex_current_provider", lambda **_kwargs: "")
     async def active_session(*_args, **_kwargs):
@@ -600,7 +601,8 @@ def test_codex_same_cwd_fork_inherits_model_and_permissions_once(monkeypatch):
     asyncio.run(run())
 
 
-def test_codex_fork_replaces_a_retired_parent_model(monkeypatch):
+@pytest.mark.parametrize("provider", ["openai", "custom", None])
+def test_codex_fork_resolves_parent_model_only_in_its_native_provider(monkeypatch, provider):
     async def run():
         machine, _ = _mk_machine()
         parent = _ctx()
@@ -608,7 +610,8 @@ def test_codex_fork_replaces_a_retired_parent_model(monkeypatch):
         machine.sessions = {"parent": parent}
         calls = []
 
-        async def catalog(*, codex_home=None):
+        async def catalog(*, codex_home=None, model_provider=None):
+            assert model_provider == provider
             return [{
                 "id": "current-default",
                 "efforts": ["low"],
@@ -625,6 +628,8 @@ def test_codex_fork_replaces_a_retired_parent_model(monkeypatch):
         monkeypatch.setattr(machine, "_is_codex_session", is_codex)
         monkeypatch.setattr(machine, "_list_codex_sessions", list_sessions)
         monkeypatch.setattr(machine_module, "codex_catalog", catalog)
+        monkeypatch.setattr(
+            machine_module, "codex_session_provider", lambda *_args, **_kwargs: provider)
         monkeypatch.setattr(machine_module, "codex_rpc", rpc)
         monkeypatch.setattr(
             machine_module, "find_rollout_fork", lambda *_args: None)
@@ -633,9 +638,10 @@ def test_codex_fork_replaces_a_retired_parent_model(monkeypatch):
             _command(last_turn_id="turn-2"))
 
         assert result.session_id == "forked-thread"
-        assert calls[0][1]["model"] == "current-default"
+        expected = "current-default" if provider == "openai" else "retired-model"
+        assert calls[0][1]["model"] == expected
         assert machine._codex_forks.entries[
-            "request-1"]["controls"]["model"] == "current-default"
+            "request-1"]["controls"]["model"] == expected
 
     asyncio.run(run())
 

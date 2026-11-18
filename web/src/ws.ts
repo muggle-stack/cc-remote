@@ -1192,6 +1192,7 @@ export class RelayWs {
     cwd?: string | null,
     codexProfileId?: string | null,
     claudeProfileId?: string | null,
+    sessionId?: string | null,
   ): void {
     const frame: Record<string, unknown> = {
       v: PROTOCOL_VERSION, type: "get_models", engine,
@@ -1201,6 +1202,7 @@ export class RelayWs {
     if (engine === "codex" && codexProfileId) {
       frame.codex_profile_id = codexProfileId;
     }
+    if (engine === "codex" && sessionId) frame.sid = sessionId;
     if (engine === "claude" && claudeProfileId) {
       frame.claude_profile_id = claudeProfileId;
     }
