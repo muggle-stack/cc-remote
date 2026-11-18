@@ -1,5 +1,5 @@
 -r requirements-common.txt
-claude-agent-sdk==0.2.174
+claude-agent-sdk==0.2.184
 Pillow==12.3.0
 pillow-heif==1.8.1
 playwright==1.62.0

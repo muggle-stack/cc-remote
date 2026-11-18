@@ -17,7 +17,7 @@ FALLBACK_DIALOG_KIND = "refusal_fallback_prompt"
 
 
 class UserDialogCLITransport(_sdk_cli.SubprocessCLITransport):
-    """Bridge the native dialog control channel missing from pinned SDK 0.2.174.
+    """Bridge the native dialog control channel.
 
     Dialogs use the existing stdout reader and serialized stdin writer. Their
     waiters must run separately so a pending human choice never blocks native
@@ -118,7 +118,7 @@ class AccountIsolatedSubprocessCLITransport(
 ):
     """Spawn one Claude child without inherited account selectors.
 
-    Agent SDK 0.2.174 treats ``ClaudeAgentOptions.env`` as an overlay on the
+    Agent SDK treats ``ClaudeAgentOptions.env`` as an overlay on the
     Wrapper process environment. Empty strings are not equivalent to unsetting
     modern Claude authentication selectors, while mutating ``os.environ`` would
     race unrelated Codex and tool spawns. This pinned adapter mirrors the SDK's
@@ -137,9 +137,8 @@ class AccountIsolatedSubprocessCLITransport(
 
         self._reject_windows_batch_cli(self._cli_path)
 
-        if not _sdk_cli.os.environ.get("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK"):
-            await self._check_claude_version()
-
+        # Wrapper preflight checks the daily executable. The SDK checks its
+        # announced version when the init message arrives.
         cmd = self._build_command()
         try:
             # Keep the SDK's precedence while starting from an account-clean

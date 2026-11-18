@@ -27033,7 +27033,9 @@ class WrapperMachine:
             if selected is None:
                 await self._record_claude_plan_permission(ctx, tool_input, permission_context, denied=True)
                 return PermissionResultDeny(message="用户要求继续修改计划。")
-            return PermissionResultAllow(updated_permissions=[PermissionUpdate(type="setMode", mode=selected)])
+            return PermissionResultAllow(updated_permissions=[PermissionUpdate(
+                type="setMode", mode=selected, destination="session",
+            )])
         if tool_name == "AskUserQuestion":
             return await self._on_claude_ask_user_question(ctx, tool_input)
 
