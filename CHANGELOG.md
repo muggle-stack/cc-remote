@@ -4,8 +4,15 @@
 
 ## Unreleased
 
+## v5.3.46
+
+Keep Codex model controls with each thread's provider and disable both subagent generations in Work. Wire protocol v97 and Claude Agent SDK 0.2.174.
+
 - Disable both native Codex subagent generations in Work mode.
-- Scope Codex model catalogs and model, reasoning and speed validation to each thread's provider. Wire protocol v97.
+- Scope model catalogs, reasoning levels and speed validation to the original provider when restoring or forking a thread.
+- Keep Web and TUI catalog responses separate by account and session, including failed refreshes.
+
+See the bilingual [release notes](docs/releases/v5.3.46.md).
 
 ## v5.3.45
 
