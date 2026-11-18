@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import stat
 import time
 from datetime import datetime
 from pathlib import Path
@@ -20,10 +21,12 @@ from typing import Any
 from uuid import uuid4
 
 from cc_remote.protocol import RateLimitUpdate, StatusRateLimitWindow
+from cc_remote.wrapper.child_env import claude_profile_child_env
 
 
 _VERSION = 1
 _MAX_FILE_BYTES = 32 * 1024
+_MAX_NATIVE_ACCOUNT_FILE_BYTES = 4 * 1024 * 1024
 _RATE_LIMITS: dict[str, tuple[str, str, str, int | None]] = {
     "five_hour": ("claude", "Claude", "primary", 300),
     "seven_day": ("claude", "Claude", "secondary", 10_080),
@@ -46,6 +49,43 @@ _PLAN_NAMES = {
 
 class ClaudeRateLimitStoreError(RuntimeError):
     pass
+
+
+def _plan_name(value: object) -> str | None:
+    if isinstance(value, str):
+        return _PLAN_NAMES.get(value.strip().casefold())
+    return None
+
+
+def read_cached_claude_plan(
+    config_dir: str | None, *, isolate_account_env: bool,
+) -> str | None:
+    """Read only the selected native account's cached display name."""
+    try:
+        overlay = claude_profile_child_env(
+            config_dir, isolate_account_env=isolate_account_env)
+        selected_root = overlay.get("CLAUDE_CONFIG_DIR")
+        if not isolate_account_env and selected_root is None:
+            selected_root = os.environ.get("CLAUDE_CONFIG_DIR")
+        root = Path(selected_root or Path.home())
+        if not root.is_absolute():
+            return None
+        # Only a regular file in this account's layout is useful. In
+        # particular, don't follow a metadata symlink to another profile.
+        fd = os.open(root / ".claude.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_NATIVE_ACCOUNT_FILE_BYTES:
+                return None
+            raw = stream.read(_MAX_NATIVE_ACCOUNT_FILE_BYTES + 1)
+        if len(raw) > _MAX_NATIVE_ACCOUNT_FILE_BYTES:
+            return None
+        payload = json.loads(raw)
+    except (OSError, ValueError, RuntimeError):
+        return None
+    account = payload.get("oauthAccount") if isinstance(payload, dict) else None
+    # subscriptionType is a coarse billing category and can say "pro" for Ultra.
+    return _plan_name(account.get("planDisplayName")) if isinstance(account, dict) else None
 
 
 def _used_percent(value: Any) -> int | None:
@@ -300,9 +340,7 @@ class ClaudeRateLimitStore:
         Validate everything before changing or persisting any cache entry.
         """
         observed_at = int(time.time()) if now is None else int(now)
-        display_name = payload.get("plan_display_name")
-        plan_type = (_PLAN_NAMES.get(display_name.strip().casefold())
-                     if isinstance(display_name, str) else None)
+        plan_type = _plan_name(payload.get("plan_display_name"))
         scoped_limits = payload.get("limits")
         if "seven_day_fable" not in payload and isinstance(scoped_limits, list):
             for limit in scoped_limits:
@@ -367,7 +405,8 @@ class ClaudeRateLimitStore:
         self._plan_type = plan_type
 
     def snapshot(self, *, now: int | None = None,
-                 include_plan: bool = False) -> tuple[RateLimitUpdate, ...]:
+                 include_plan: bool = False,
+                 native_plan: str | None = None) -> tuple[RateLimitUpdate, ...]:
         observed_at = int(time.time()) if now is None else int(now)
         expired = [
             rate_type
@@ -392,6 +431,5 @@ class ClaudeRateLimitStore:
             for rate_type in expired:
                 self._limits.pop(rate_type, None)
             self._persist()
-        return self._updates(
-            self._limits, plan_type=self._plan_type if include_plan else None,
-        )
+        helper_plan = self._plan_type if include_plan else None
+        return self._updates(self._limits, plan_type=helper_plan or native_plan)
