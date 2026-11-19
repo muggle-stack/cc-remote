@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+## v5.3.51
+
+Desktop dictation starts and stops with clicks. Touch clients show recording status with haptics on supported Android browsers and HarmonyOS. The HarmonyOS app adds microphone permission for the configured chat. Wire protocol v97.
+
+See the bilingual [release notes](docs/releases/v5.3.51.md).
+
 ## v5.3.50
 
 Add opt-in live dictation and streamed reply narration to Web/PWA. Relay configuration keeps voice controls hidden until a Doubao Voice project key is set. Wire protocol v97.
