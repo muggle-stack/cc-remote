@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+## v5.3.52
+
+Disable deletion while a session is active and show why a fork or an unavailable Codex daemon blocks deletion. Preserve drafts when deletion fails. The sidebar refreshes automatically after archive, restore, or permanent deletion in Codex App. Wire protocol v97.
+
+See the bilingual [release notes](docs/releases/v5.3.52.md).
+
 ## v5.3.51
 
 Desktop dictation starts and stops with clicks. Touch clients show recording status with haptics on supported Android browsers and HarmonyOS. The HarmonyOS app adds microphone permission for the configured chat. Wire protocol v97.
