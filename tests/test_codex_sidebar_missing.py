@@ -187,6 +187,38 @@ async def test_external_catalog_change_invalidates_sidebar(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_external_catalog_poll_reads_all_observed_ids(tmp_path, monkeypatch):
+    machine, transport = _machine(tmp_path)
+    home = tmp_path / "primary"
+    ids = [f"thread-{index}" for index in range(codex_sessions.CODEX_EXACT_CATALOG_MAX_IDS + 1)]
+    _catalog(home, [(sid, None) for sid in ids])
+
+    # Each catalog fits the sidebar, but browsing successive catalogs retains
+    # more IDs for this account than a single exact state query can accept.
+    rows = [_row("primary", sid) for sid in ids]
+    page_size = machine.CODEX_SESSION_LIST_MAX_ROWS
+    monkeypatch.setattr(machine, "_read_codex_profile_catalog", AsyncMock(
+        side_effect=[(rows[:page_size], ()), (rows[page_size:], ())],
+    ))
+    await machine._refresh_codex_session_catalog()
+    await machine._refresh_codex_session_catalog()
+
+    with sqlite3.connect(home / "state_5.sqlite") as db:
+        db.execute("UPDATE threads SET archived = 1 WHERE id = ?", (ids[0],))
+        db.execute("DELETE FROM threads WHERE id = ?", (ids[-1],))
+
+    await machine._poll_codex_sidebar_archive_states()
+    assert machine._codex_sidebar_archive_states[("primary", ids[0])] is True
+    assert machine._codex_sidebar_archive_states[("primary", ids[-1])] is None
+    assert [(event.type, event.space) for event in transport.sent] == [
+        ("session_list_invalidated", "code"),
+        ("session_list_invalidated", "work"),
+    ]
+    await machine._poll_codex_sidebar_archive_states()
+    assert len(transport.sent) == 2
+
+
+@pytest.mark.asyncio
 async def test_legacy_unpin_during_catalog_outage_keeps_cache_but_clears_pin(tmp_path, monkeypatch):
     machine, transport = _machine(tmp_path)
     _catalog(tmp_path / "primary", [("thread", str(tmp_path / "primary" / "sessions" / "gone.jsonl"))])

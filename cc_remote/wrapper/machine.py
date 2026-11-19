@@ -28139,21 +28139,26 @@ class WrapperMachine:
             expected = by_profile.get(profile.id)
             if not expected:
                 continue
-            current = await asyncio.to_thread(
-                codex_thread_archive_states,
-                expected,
-                codex_home=self._codex_home(profile),
-            )
-            if current is None:
-                continue
-            for native_sid, archived in expected.items():
-                key = (profile.id, native_sid)
-                if key not in observed or observed[key] != archived:
+            native_sids = list(expected)
+            home = self._codex_home(profile)
+            batch_size = CODEX_EXACT_CATALOG_MAX_IDS
+            # One account can retain IDs from multiple sidebar snapshots.
+            for start in range(0, len(native_sids), batch_size):
+                batch = native_sids[start:start + batch_size]
+                current = await asyncio.to_thread(
+                    codex_thread_archive_states, batch, codex_home=home,
+                )
+                if current is None:
                     continue
-                actual = current.get(native_sid)
-                if actual != archived:
-                    observed[key] = actual
-                    changed = True
+                for native_sid in batch:
+                    archived = expected[native_sid]
+                    key = (profile.id, native_sid)
+                    if key not in observed or observed[key] != archived:
+                        continue
+                    actual = current.get(native_sid)
+                    if actual != archived:
+                        observed[key] = actual
+                        changed = True
         if changed:
             # Absence from the index is a read hint. Normal catalog refresh
             # still verifies the rollout and protects live/pending threads.
