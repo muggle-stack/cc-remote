@@ -1648,11 +1648,11 @@ export class RelayWs {
   }
 
   sendDeleteSession(sessionId: string, engine: "claude" | "codex" | "dsh",
-                    space: Space = "code"): boolean {
+                    space: Space = "code"): string | null {
     return this.sendListRefreshingCommand({
       v: PROTOCOL_VERSION, type: "delete_session", session_id: sessionId,
       engine, space, ts: nowTs(),
-    }, engine, space) !== null;
+    }, engine, space);
   }
 
   sendPrepareDirectoryAction(scope: import("./protocol").DirectoryActionScope): string | null {

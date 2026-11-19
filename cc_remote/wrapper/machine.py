@@ -2443,6 +2443,9 @@ class WrapperMachine:
         self._codex_session_list_cache: (
             tuple[float, list[dict], tuple[tuple[str, str], ...]] | None
         ) = None
+        self._codex_sidebar_archive_states: OrderedDict[
+            tuple[str, str], bool | None
+        ] = OrderedDict()
         self._codex_session_list_epoch = 0
         self._codex_session_list_reads: dict[
             tuple[int, bool], tuple[asyncio.Task, dict[str, int], int]
@@ -14868,6 +14871,7 @@ class WrapperMachine:
                             and ctx.session_id not in self._watch):
                         await self._watch_session(ctx.session_id)
                 await self._poll_watches_once()
+                await self._poll_codex_sidebar_archive_states()
                 await self._refresh_timed_tasks()
                 await self._refresh_codex_background_processes()
             except asyncio.CancelledError:
@@ -28115,11 +28119,47 @@ class WrapperMachine:
                 await self._invalidate_session_list("codex", "code")
             except Exception as exc:
                 log.warning(
-                    "Codex CLI thread catalog hint could not be published",
+                    "Codex catalog hint could not be published",
                     profile_id=profile_id,
                     thread_id=native_thread_id,
                     error_type=type(exc).__name__,
                 )
+
+    async def _poll_codex_sidebar_archive_states(self) -> None:
+        """Notice App archive/delete operations even without a shared proxy."""
+        observed = self._codex_sidebar_archive_states
+        if not observed:
+            return
+        by_profile: dict[str, dict[str, bool | None]] = {}
+        for (profile_id, native_sid), archived in observed.items():
+            by_profile.setdefault(profile_id, {})[native_sid] = archived
+
+        changed = False
+        for profile in self._codex_profiles:
+            expected = by_profile.get(profile.id)
+            if not expected:
+                continue
+            current = await asyncio.to_thread(
+                codex_thread_archive_states,
+                expected,
+                codex_home=self._codex_home(profile),
+            )
+            if current is None:
+                continue
+            for native_sid, archived in expected.items():
+                key = (profile.id, native_sid)
+                if key not in observed or observed[key] != archived:
+                    continue
+                actual = current.get(native_sid)
+                if actual != archived:
+                    observed[key] = actual
+                    changed = True
+        if changed:
+            # Absence from the index is a read hint. Normal catalog refresh
+            # still verifies the rollout and protects live/pending threads.
+            self._invalidate_codex_session_catalog()
+            await self._invalidate_session_list("codex", "code")
+            await self._invalidate_session_list("codex", "work")
 
     async def _refresh_codex_session_catalog(self) -> list[dict]:
         """Share reads by generation and mode without delaying indexed replies."""
@@ -28249,6 +28289,19 @@ class WrapperMachine:
         self._codex_session_list_cache = (
             time.monotonic(), raw, profile_errors,
         )
+        # Preserve the last observed native state across catalog reads from
+        # other clients so they cannot mask an App change before this poll.
+        observed = self._codex_sidebar_archive_states
+        for row in raw:
+            profile_id = row.get("codex_profile_id")
+            native_sid = row.get("native_session_id")
+            if (isinstance(profile_id, str) and profile_id not in failed_profile_ids
+                    and isinstance(native_sid, str)):
+                key = (profile_id, native_sid)
+                observed.setdefault(key, row.get("tag") == "archived")
+                observed.move_to_end(key)
+        while len(observed) > 2 * self.CODEX_SESSION_LIST_MAX_ROWS:
+            observed.popitem(last=False)
         return raw
 
     @history_timed("codex_sidebar_prune")
@@ -33324,14 +33377,9 @@ class WrapperMachine:
         is_codex = await self._is_codex_session(sid)
         engine = "codex" if is_codex else "claude"
         if engine != requested_engine:
-            error = Error(
-                code=ERR_AUTH,
-                message="会话不属于请求的引擎",
-                sid=sid,
-                to=getattr(cmd, "client_id", None),
+            return await self._send_code_delete_error(
+                cmd, sid, ERR_AUTH, "会话不属于请求的引擎",
             )
-            await self.transport.send(error)
-            return error
         try:
             native_sid, work_profile_id = self._work_session_identity(engine, sid)
         except ValueError:
@@ -33350,14 +33398,9 @@ class WrapperMachine:
                 work_profile_id if engine == "codex" else None),
         )
         if work_record is not None:
-            error = Error(
-                code=ERR_AUTH,
-                message="Work 会话必须从 Work 空间删除",
-                sid=sid,
-                to=getattr(cmd, "client_id", None),
+            return await self._send_code_delete_error(
+                cmd, sid, ERR_AUTH, "Work 会话必须从 Work 空间删除",
             )
-            await self.transport.send(error)
-            return error
         claude_profile: ClaudeProfile | None = None
         if engine == "claude":
             try:
@@ -33500,14 +33543,9 @@ class WrapperMachine:
                 and self._claude_transcript_path(
                     claude_profile, native_sid) is None
             ):
-                error = Error(
-                    code=ERR_NOT_RUNNING,
-                    message="Claude 会话不存在",
-                    sid=sid,
-                    to=getattr(cmd, "client_id", None),
+                return await self._send_code_delete_error(
+                    cmd, sid, ERR_NOT_RUNNING, "Claude 会话不存在",
                 )
-                await self.transport.send(error)
-                return error
         fork_journal = (
             self._codex_forks if engine == "codex" else self._claude_forks)
         fork_delete_state = None
@@ -33524,15 +33562,10 @@ class WrapperMachine:
                 engine=engine,
                 session_id=sid,
             )
-            error = Error(
-                code=ERR_INTERNAL,
-                message="无法安全记录派生会话删除状态，未执行删除",
-                sid=sid,
-                to=getattr(cmd, "client_id", None),
-            )
             await cleanup_transient_codex_ctx()
-            await self.transport.send(error)
-            return error
+            return await self._send_code_delete_error(
+                cmd, sid, ERR_INTERNAL, "无法安全记录派生会话删除状态，未执行删除",
+            )
 
         async def abort_fork_delete() -> None:
             if fork_delete_state != "delete_pending":

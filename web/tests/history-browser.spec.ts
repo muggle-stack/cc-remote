@@ -1375,6 +1375,97 @@ for (const [engine, space] of [["claude", "code"], ["codex", "code"], ["claude",
   });
 }
 
+test("Codex session deletion disables running sessions and preserves drafts when rejected", async ({ page, isMobile }) => {
+  const parentSid = "delete-parent";
+  const sessions = [
+    { session_id: parentSid, engine: "codex" as const, state: "idle" as const,
+      summary: "父会话", cwd: "/tmp/delete-test" },
+    { session_id: "delete-running", engine: "codex" as const, state: "running" as const,
+      summary: "运行中的会话", cwd: "/tmp/delete-test" },
+  ];
+  const relay = await mockRightPanelRelay(page, {
+    parentSid,
+    retained: false,
+    listReply: command => command.engine === "codex" && command.space !== "work"
+      ? { type: "session_list", engine: "codex", space: "code",
+        request_id: String(command.cmd_id), sessions }
+      : undefined,
+  });
+  const showSidebar = async () => {
+    if (await page.locator(".shell.sidebar-open").count() === 0) {
+      await page.getByLabel("显示会话侧栏", { exact: true }).click();
+    }
+  };
+  const card = (title: string) => page.locator(".scard").filter({ hasText: title });
+  const deleteButton = page.locator(".card-menu").getByRole("button", { name: "删除会话", exact: true });
+  const composer = page.locator(".composer textarea");
+  const openMenu = async (title: string) => {
+    if (isMobile) {
+      const touch = (type: "touchstart" | "touchend") => card(title).evaluate((target, eventType) => {
+        const { x, y, width, height } = target.getBoundingClientRect();
+        const point = { identifier: 1, target, clientX: x + width / 2, clientY: y + height / 2 };
+        const event = new Event(eventType, { bubbles: true, cancelable: true });
+        Object.defineProperties(event, {
+          touches: { value: eventType === "touchstart" ? [point] : [] },
+          changedTouches: { value: [point] },
+        });
+        target.dispatchEvent(event);
+      }, type);
+      await touch("touchstart");
+      await expect(deleteButton).toBeVisible();
+      await touch("touchend");
+      return;
+    }
+    const more = card(title).getByRole("button", { name: "更多操作" });
+    await more.focus();
+    await more.click();
+  };
+  await page.goto("/");
+  await showSidebar();
+  await openMenu("运行中的会话");
+  await expect(deleteButton).toBeDisabled();
+  expect(relay.commands.some(command => command.type === "delete_session")).toBe(false);
+  await page.keyboard.press("Escape");
+
+  await card("父会话").getByText("父会话", { exact: true }).click();
+  await composer.fill("保留未发送的草稿");
+  await showSidebar();
+  const requests = () => relay.commands.filter(command => command.type === "delete_session");
+  const submit = async () => {
+    const count = requests().length;
+    await openMenu("父会话");
+    await deleteButton.click();
+    const confirm = page.getByRole("dialog", { name: "删除这条会话？" })
+      .getByRole("button", { name: "删除会话", exact: true });
+    if (count === 0) {
+      relay.emit({ type: "state", sid: parentSid, seq: 1, state: "running" });
+      await expect(confirm).toBeDisabled();
+      relay.emit({ type: "state", sid: parentSid, seq: 2, state: "idle" });
+      await expect(confirm).toBeEnabled();
+    }
+    await confirm.click();
+    await expect.poll(() => requests().length).toBe(count + 1);
+    return String(requests().at(-1)?.cmd_id);
+  };
+  for (const [code, message, label] of [
+    ["busy", "该会话仍有派生会话；请先从最深层派生会话开始删除，再删除父会话", "先删子会话"],
+    ["not_running", "Codex 删除通道连接失败，请稍后重试", "服务未连接"],
+  ]) {
+    const request_id = await submit();
+    relay.emit({ type: "error", sid: parentSid, request_id, code, message });
+    const status = page.locator(".header-feedback-text");
+    await expect(status).toHaveText(label);
+    expect(await status.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+    await expect(composer).toHaveValue("保留未发送的草稿");
+    await expect(card("父会话")).toHaveCount(1);
+  }
+  const request_id = await submit();
+  relay.emit({ type: "session_list", engine: "codex", space: "code", request_id,
+    sessions: sessions.filter(session => session.session_id !== parentSid) });
+  await expect(card("父会话")).toHaveCount(0);
+  await expect(composer).toHaveValue("");
+});
+
 for (const engine of ["claude", "codex"] as const) {
   test(`side chat scope shows ${engine} background tasks independently of the parent and siblings`, async ({ page, isMobile }, testInfo) => {
     await page.setViewportSize(isMobile ? { width: 390, height: 844 } : { width: 1568, height: 900 });

@@ -132,6 +132,7 @@ import { MAX_RUNTIME_SESSIONS } from "./runtime-bounds";
 import {
   FORK_FOCUS_REFRESH_MS,
   forkFocusLeaseSession,
+  isSessionDeleteBlockedByState,
   isTerminalSessionMigrationError,
   isTerminalWorktreeForkError,
   matchesSessionForkRequest,
@@ -457,6 +458,7 @@ export default function App() {
   const [deleteSession, setDeleteSession] = useState<{
     id: string; title: string; cwd: string; scope: string; engine: Engine; space: Space;
   } | null>(null);
+  const pendingSessionDeletes = useRef(new Map<string, { sid: string; scope: string }>());
   const directoryListenerRef = useRef<((message: ServerEvent) => boolean) | null>(null);
   const listenDirectory = useCallback((listener: ((message: ServerEvent) => boolean) | null) => {
     directoryListenerRef.current = listener;
@@ -993,6 +995,7 @@ export default function App() {
     localStorage.setItem(MACHINE_KEY, machineId);
     pendingCreateRef.current = null;
     createRequestsRef.current.clear();
+    pendingSessionDeletes.current.clear();
     pendingSessionMigrationRef.current = null;
     clearForkFocusLease(false);
     setMigrateSession(null);
@@ -3583,6 +3586,10 @@ export default function App() {
             setMigrateSession(null);
           }
           if (msg.type === "error"
+              && msg.request_id && msg.code !== "wrapper_offline") {
+            pendingSessionDeletes.current.delete(msg.request_id);
+          }
+          if (msg.type === "error"
               && isTerminalSessionMigrationError(msg.code)
               && matchesSessionMigrationRequest(
                 pendingSessionMigrationRef.current,
@@ -3794,6 +3801,22 @@ export default function App() {
               stateRef.current.defaultCodexProfileId,
               msg,
             );
+            // The correlated refresh follows the native delete result. Sending
+            // the command alone is not enough to discard a draft.
+            const deletion = msg.request_id
+              ? pendingSessionDeletes.current.get(msg.request_id) : undefined;
+            if (msg.request_id && deletion && deletion.scope === ownership?.scopeKey
+                && !normalized.sessions.some(session => session.session_id === deletion.sid)) {
+              pendingSessionDeletes.current.delete(msg.request_id);
+              composerDraftsRef.current.delete(composerDraftKey(
+                machineId, listedSpace, msg.engine, deletion.sid,
+              ));
+              invalidateHistoryPageScopes(deletion.sid);
+              if (forkFocusLeaseRef.current?.childSessionId === deletion.sid) {
+                clearForkFocusLease(false);
+              }
+              if (stateRef.current.focusedSid === deletion.sid) clearHistoryDetailRequests();
+            }
             const lease = forkFocusLeaseSession(
               forkFocusLeaseRef.current,
               normalized.sessions,
@@ -4144,6 +4167,7 @@ export default function App() {
           clearLegacyAuthMarkers(localStorage);
           pendingCreateRef.current = null;
           createRequestsRef.current.clear();
+          pendingSessionDeletes.current.clear();
           pendingBtwByParentRef.current.clear();
           pendingSessionForkRef.current = null;
           pendingWorktreeForkRef.current = null;
@@ -6018,6 +6042,7 @@ export default function App() {
       wsRef.current?.stop();
       pendingCreateRef.current = null;
       createRequestsRef.current.clear();
+      pendingSessionDeletes.current.clear();
       pendingBtwByParentRef.current.clear();
       pendingSessionForkRef.current = null;
       pendingWorktreeForkRef.current = null;
@@ -6135,6 +6160,14 @@ export default function App() {
     ? activeTurnCandidates[0] : null;
   const ambiguousActiveTurnIds = activeTurnCandidates.length > 1
     ? activeTurnCandidates : [];
+  const liveSessionStates = Object.fromEntries(state.sessions.map((session) => {
+    const runtime = state.runtimes[session.session_id];
+    return [session.session_id, mergeSessionActivityState(
+      session.state,
+      runtime?.state,
+      runtime?.mirroredRunning,
+    ) ?? "idle"];
+  }));
 
   return (
     <ViewerPagesProvider scope={visibleParentSid && authed
@@ -6154,14 +6187,7 @@ export default function App() {
         defaultCodexProfileId={state.defaultCodexProfileId}
         onSpaceChange={switchSpace}
         sessions={state.sessions}
-        liveStates={Object.fromEntries(state.sessions.map((session) => {
-          const runtime = state.runtimes[session.session_id];
-          return [session.session_id, mergeSessionActivityState(
-            session.state,
-            runtime?.state,
-            runtime?.mirroredRunning,
-          ) ?? "idle"];
-        }))}
+        liveStates={liveSessionStates}
         completionBadges={completionBadges}
         activeSessionId={focusedSid}
         machineId={machineId}
@@ -6214,23 +6240,18 @@ export default function App() {
       /></Suspense>}</SidebarState>
       {deleteSession?.scope === activeScopeKey && <Suspense fallback={null}>
         <SessionDeleteSheet key={deleteSession.id} title={deleteSession.title} cwd={deleteSession.cwd}
+        disabledReason={appUpdates.maintenance ? "设备正在更新"
+          : isSessionDeleteBlockedByState(liveSessionStates[deleteSession.id]) ? "会话空闲后可删除" : undefined}
           work={deleteSession.space === "work"} onClose={() => setDeleteSession(null)} onConfirm={() => {
           const { id, engine: targetEngine, space: targetSpace } = deleteSession;
-          if (!wsRef.current?.sendDeleteSession(id, targetEngine, targetSpace)) return false;
-          setDeleteSession(null);
-          if (forkFocusLeaseRef.current?.childSessionId === id) {
-            clearForkFocusLease(false);
-          }
-          composerDraftsRef.current.delete(composerDraftKey(
-            machineId, targetSpace, targetEngine, id,
-          ));
-          invalidateHistoryPageScopes(id);
-          if (focusedSid === id) clearHistoryDetailRequests();
-          if (focusedSid === id) dispatch({
-            type: "enter_new_chat", cwd: "~", cwdSource: "default",
-            claudeProfileId: newChatClaudeProfileId,
-            codexProfileId: newChatCodexProfileId,
+          const requestId = wsRef.current?.sendDeleteSession(id, targetEngine, targetSpace);
+          if (!requestId) return false;
+          const pending = pendingSessionDeletes.current;
+          pending.set(requestId, {
+            sid: id, scope: sessionScopeKey(machineId, targetEngine, targetSpace),
           });
+          if (pending.size > 64) pending.delete(pending.keys().next().value!);
+          setDeleteSession(null);
           return true;
         }} />
       </Suspense>}
