@@ -17,8 +17,11 @@ from tests.test_codex_profiles import _context, _machine
 def _catalog(home: Path, rows=()):
     home.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(home / "state_5.sqlite") as db:
-        db.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT)")
-        db.executemany("INSERT INTO threads VALUES (?, ?)", rows)
+        db.execute(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT,"
+            " archived INTEGER NOT NULL DEFAULT 0)"
+        )
+        db.executemany("INSERT INTO threads (id, rollout_path) VALUES (?, ?)", rows)
 
 
 def _row(profile, sid, status="notLoaded"):
@@ -88,7 +91,10 @@ def test_catalog_materializing_during_scan_preserves_session(tmp_path, monkeypat
 
     def materialize(*args, **kwargs):
         with sqlite3.connect(home / "state_5.sqlite") as db:
-            db.execute("INSERT OR IGNORE INTO threads VALUES (?, ?)", ("new", None))
+            db.execute(
+                "INSERT OR IGNORE INTO threads (id, rollout_path) VALUES (?, ?)",
+                ("new", None),
+            )
         yield from walk(*args, **kwargs)
 
     monkeypatch.setattr(codex_sessions.os, "walk", materialize)
@@ -126,6 +132,90 @@ async def test_refresh_removes_deleted_rows_cache_and_pins_per_account(tmp_path,
     assert machine._session_pins.ids("codex") == {"stack@same-id"}
     assert not [e for e in transport.sent if e.type == "error"]
     assert live.exists()  # Removing a project directory never removes its history.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("before", "after"), [(False, True), (True, False), (False, None)])
+async def test_external_catalog_change_invalidates_sidebar(tmp_path, monkeypatch, before, after):
+    machine, transport = _machine(tmp_path)
+    primary = tmp_path / "primary"
+    stack = tmp_path / "stack"
+    for home in (primary, stack):
+        root = home / ("archived_sessions" if before and home == primary else "sessions")
+        root.mkdir(parents=True)
+        rollout = root / "rollout-shared-id.jsonl"
+        rollout.write_text("{}\n")
+        _catalog(home, [("shared-id", str(rollout))])
+
+    primary_db = primary / "state_5.sqlite"
+    with sqlite3.connect(primary_db) as db:
+        db.execute("UPDATE threads SET archived = ?", (before,))
+
+    async def native_list(_limit, *, codex_home=None):
+        states = codex_sessions.codex_thread_archive_states(
+            ["shared-id"], codex_home=codex_home)
+        return [
+            {"session_id": sid, "status": "notLoaded", "cwd": "/project",
+             "tag": "archived" if archived else None}
+            for sid, archived in (states or {}).items()
+        ]
+
+    monkeypatch.setattr(machine_module, "list_codex_sessions", native_list)
+    assert len(await machine._refresh_codex_session_catalog()) == 2
+    await machine._poll_codex_sidebar_archive_states()
+    assert not transport.sent
+
+    with sqlite3.connect(primary_db) as db:
+        if after is None:
+            db.execute("DELETE FROM threads")
+        else:
+            db.execute("UPDATE threads SET archived = ?", (after,))
+    # Another client's refresh may replace the cache before the watcher runs.
+    rows = await machine._refresh_codex_session_catalog()
+    assert [row["tag"] for row in rows if row["codex_profile_id"] == "primary"] == (
+        [] if after is None else ["archived" if after else None]
+    )
+    await machine._poll_codex_sidebar_archive_states()
+    assert [(event.type, event.engine, event.space) for event in transport.sent] == [
+        ("session_list_invalidated", "codex", "code"),
+        ("session_list_invalidated", "codex", "work"),
+    ]
+    assert machine._codex_session_list_cache is None
+    assert machine._codex_sidebar_archive_states[("stack", "shared-id")] is False
+    await machine._poll_codex_sidebar_archive_states()
+    assert len(transport.sent) == 2
+
+
+@pytest.mark.asyncio
+async def test_external_catalog_poll_reads_all_observed_ids(tmp_path, monkeypatch):
+    machine, transport = _machine(tmp_path)
+    home = tmp_path / "primary"
+    ids = [f"thread-{index}" for index in range(codex_sessions.CODEX_EXACT_CATALOG_MAX_IDS + 1)]
+    _catalog(home, [(sid, None) for sid in ids])
+
+    # Each catalog fits the sidebar, but browsing successive catalogs retains
+    # more IDs for this account than a single exact state query can accept.
+    rows = [_row("primary", sid) for sid in ids]
+    page_size = machine.CODEX_SESSION_LIST_MAX_ROWS
+    monkeypatch.setattr(machine, "_read_codex_profile_catalog", AsyncMock(
+        side_effect=[(rows[:page_size], ()), (rows[page_size:], ())],
+    ))
+    await machine._refresh_codex_session_catalog()
+    await machine._refresh_codex_session_catalog()
+
+    with sqlite3.connect(home / "state_5.sqlite") as db:
+        db.execute("UPDATE threads SET archived = 1 WHERE id = ?", (ids[0],))
+        db.execute("DELETE FROM threads WHERE id = ?", (ids[-1],))
+
+    await machine._poll_codex_sidebar_archive_states()
+    assert machine._codex_sidebar_archive_states[("primary", ids[0])] is True
+    assert machine._codex_sidebar_archive_states[("primary", ids[-1])] is None
+    assert [(event.type, event.space) for event in transport.sent] == [
+        ("session_list_invalidated", "code"),
+        ("session_list_invalidated", "work"),
+    ]
+    await machine._poll_codex_sidebar_archive_states()
+    assert len(transport.sent) == 2
 
 
 @pytest.mark.asyncio

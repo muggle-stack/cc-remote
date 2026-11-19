@@ -14,6 +14,7 @@ import {
 import {
   canDeleteSidebarSession,
   isSessionArchiveBlockedByState,
+  isSessionDeleteBlockedByState,
   isSessionMigrationBlockedByState,
   isWorktreeForkBlockedByState,
   sessionMenuCapabilities,
@@ -352,6 +353,7 @@ export function SessionsSidebar({ maintenance = false, open, engine, space, sess
     const migrationBlocked = isSessionMigrationBlockedByState(st);
     const archiveBlocked = maintenance || (!isArchived && (engine === "codex" || engine === "dsh")
       && isSessionArchiveBlockedByState(st));
+    const deleteBlocked = maintenance || isSessionDeleteBlockedByState(st);
     const profilePresentation = profilePresentationFor(s);
     const title = s.summary || (s.first_prompt || "").slice(0, 40) || s.session_id.slice(0, 8);
     return (
@@ -440,7 +442,8 @@ export function SessionsSidebar({ maintenance = false, open, engine, space, sess
             ))}
             {capabilities.delete
                 && canDeleteSidebarSession(engine, space, isArchived) && (
-              <button disabled={maintenance} className="danger" onClick={() => doDelete(s)}>
+              <button disabled={deleteBlocked} className="danger" onClick={() => doDelete(s)}
+                title={maintenance ? "设备正在更新" : deleteBlocked ? "会话空闲后可删除" : undefined}>
                 <Icon name="trash" size={15} />{space === "work" ? "删除工作" : "删除会话"}
               </button>
             )}

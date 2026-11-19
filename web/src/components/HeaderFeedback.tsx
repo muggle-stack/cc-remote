@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import "./HeaderFeedback.css";
 import type { Notice } from "../protocol";
+import { commandProblemLabel } from "../problem-presentation";
 import {
   advanceConnectionFeedback, connectionFeedbackItem, headerBannerKind,
   headerNoticeItem, HEADER_SUCCESS_TTL_MS,
@@ -92,7 +93,8 @@ export function HeaderFeedback({
     const id = JSON.stringify([deviceScope, "banner", bannerRevision]);
     if (commandItem?.id !== id) {
       commandItem = {
-        id, deviceScope, sessionScope, label: "操作未完成", tone: "warning", message: banner, banner, bannerRevision,
+        id, deviceScope, sessionScope, label: commandProblemLabel(banner),
+        tone: "warning", message: banner, banner, bannerRevision,
       };
       // Connection frames overwrite the legacy banner string. Keep the latest
       // command outcome available until acknowledged, independently of transport.

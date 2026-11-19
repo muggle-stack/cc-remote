@@ -3229,6 +3229,28 @@ def test_foreign_cli_thread_started_is_only_a_catalog_hint():
     asyncio.run(run())
 
 
+def test_app_lifecycle_notifications_are_only_catalog_hints():
+    async def run():
+        hints = []
+        handle = CodexHandle(_Cfg())
+        handle.metadata_changed_callback = hints.append
+        handle._using_daemon_proxy = True
+        handle.thread_id = "current"
+        for method in ("thread/archived", "thread/unarchived", "thread/deleted"):
+            await handle._dispatch({
+                "method": method, "params": {"threadId": "another-thread"},
+            })
+        handle._control_only_connection = True
+        await handle._dispatch({
+            "method": "thread/deleted", "params": {"threadId": "unrelated"},
+        })
+        assert hints == ["another-thread"] * 3
+        assert handle.thread_id == "current"
+        assert handle.turn_id is None
+
+    asyncio.run(run())
+
+
 def test_machine_deduplicates_cli_thread_catalog_hints_across_handles():
     async def run():
         machine, transport = _mk_machine()

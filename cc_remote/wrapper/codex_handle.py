@@ -7163,7 +7163,10 @@ class CodexHandle:
             # notifications used by this connection. In particular, never let
             # shared-daemon sibling lifecycle bind or mutate this handle.
             return
-        if method in {"thread/readState/changed", "thread/section/changed"}:
+        if method in {
+            "thread/readState/changed", "thread/section/changed",
+            "thread/archived", "thread/unarchived", "thread/deleted",
+        }:
             target = _notification_thread_id(m)
             callback = self.metadata_changed_callback
             if (self._using_daemon_proxy and isinstance(target, str)

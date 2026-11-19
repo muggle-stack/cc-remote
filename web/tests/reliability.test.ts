@@ -1248,7 +1248,7 @@ assert.match(historyAppSource,
   /const effectiveState = mergeSessionActivityState\([\s\S]*focusedSessionState/,
   "catalog or mirrored native work must paint a running header without granting a local Stop action");
 assert.match(historyAppSource,
-  /liveStates=\{Object\.fromEntries\(state\.sessions\.map[\s\S]*mergeSessionActivityState/,
+  /const liveSessionStates = Object\.fromEntries\(state\.sessions\.map[\s\S]*mergeSessionActivityState[\s\S]*liveStates=\{liveSessionStates\}/,
   "catalog or mirrored native work must paint a running session badge in the sidebar");
 const rewindChatViewSource = readFileSync(resolve(
   process.cwd(), "src/components/ChatView.tsx"), "utf8");
