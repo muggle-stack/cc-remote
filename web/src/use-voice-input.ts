@@ -17,6 +17,8 @@ const UPDATE_SESSION = JSON.stringify({
 });
 
 type Stage = "idle" | "starting" | "recording" | "finishing";
+export type VoiceInputGesture = "hold" | "toggle";
+
 type Recording = {
   scope: string;
   context: AudioContext;
@@ -93,12 +95,11 @@ export function useVoiceInput(
     if (error) onError(error);
   };
 
-  const start = () => {
+  const start = (gesture: VoiceInputGesture) => {
     if (!enabled || recordingRef.current) return;
     let context: AudioContext;
     try {
-      // Use the press gesture to unlock Web Audio, then request the mic only
-      // after the hold threshold.
+      // Use the user gesture to unlock Web Audio before requesting the mic.
       context = new AudioContext();
       void context.resume().catch(() => {});
     } catch (error) {
@@ -200,7 +201,8 @@ export function useVoiceInput(
         finish(recording, recording.transcript, candidateError(error));
       }
     };
-    recording.timer = window.setTimeout(() => void connect(), HOLD_MS);
+    if (gesture === "hold") recording.timer = window.setTimeout(() => void connect(), HOLD_MS);
+    else void connect();
   };
 
   const release = () => {

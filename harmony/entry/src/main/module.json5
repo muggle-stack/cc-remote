@@ -23,6 +23,13 @@
           "uris": [{ "scheme": "cc-remote-app", "host": "notification" }] }
       ]
     }],
-    "requestPermissions": [{ "name": "ohos.permission.INTERNET" }]
+    "requestPermissions": [
+      { "name": "ohos.permission.INTERNET" },
+      {
+        "name": "ohos.permission.MICROPHONE",
+        "reason": "$string:microphone_reason",
+        "usedScene": { "abilities": ["EntryAbility"], "when": "inuse" }
+      }
+    ]
   }
 }

@@ -744,7 +744,8 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
   const sendButton = canTalk || voiceActive ? (
     <VoiceInputButton recording={voice.stage === "starting" || voice.stage === "recording"}
       finishing={voice.stage === "finishing"}
-      start={() => { setVoiceError(null); voice.start(); }} release={voice.release} cancel={voice.cancel} />
+      start={(gesture) => { setVoiceError(null); voice.start(gesture); }}
+      release={voice.release} cancel={voice.cancel} />
   ) : (
     <button className="newchat-send" aria-label="开始" title="开始新对话"
       onPointerDown={() => {

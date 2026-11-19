@@ -33,6 +33,12 @@ export function sameOrigin(server: string, value: string): boolean {
   return server !== '' && server === httpsOrigin(value);
 }
 
+export function microphoneRequest(server: string, current: string, origin: string,
+  resources: string[]): boolean {
+  return sameOrigin(server, current) && sameOrigin(server, origin)
+    && resources.length === 1 && resources[0] === 'TYPE_AUDIO_CAPTURE';
+}
+
 export function settingsRequest(value: string, server: string, current: string,
   mainFrame: boolean, gesture: boolean): boolean {
   return value === SETTINGS_URL && mainFrame && gesture && sameOrigin(server, current);

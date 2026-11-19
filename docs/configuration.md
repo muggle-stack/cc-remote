@@ -142,7 +142,7 @@ hook 和 Wrapper 应使用相同的 `CC_REMOTE_STATE_DIR`；日志默认为
 | `WRAPPER_TOKEN` | 占位值 | 单机器/兼容模式下的 wrapper Bearer token；未设置 `WRAPPER_TOKENS_JSON` 时必须配置。 |
 | `WRAPPER_TOKENS_JSON` | 空 | 可选机器绑定 token：`{"laptop":"…","server":"…"}`；设置后替代 relay 的通配 `WRAPPER_TOKEN`。 |
 | `WEB_STATIC_DIR` | 空 | 指向 `web/dist` 则同源托管网页；留空则只做 API/WS。 |
-| `DOUBAO_VOICE_API_KEY` | 空 | 可选。填写同时开通豆包流式语音识别 2.0（小时版）和语音合成 2.0 的项目 Key，启用长按转写和回复朗读。 |
+| `DOUBAO_VOICE_API_KEY` | 空 | 可选。填写同时开通豆包流式语音识别 2.0（小时版）和语音合成 2.0 的项目 Key，启用实时转写和回复朗读。 |
 | `CLIENT_QUEUE_CAP` / `CLIENT_QUEUE_BYTES` | `4096` / `16777216` | 单客户端待发帧数/字节硬上限；超限断开慢客户端，不静默丢帧。 |
 | `MAX_CLIENTS` / `CLIENT_HELLO_TIMEOUT` | `8` / `10` | 已接受客户端总数和首个 Hello 帧等待秒数的硬上限。 |
 | `WS_MAX_SIZE_BYTES` | `16777216` | relay 与 wrapper 接受的单个 WebSocket 帧上限。 |
@@ -183,7 +183,7 @@ hook 和 Wrapper 应使用相同的 `CC_REMOTE_STATE_DIR`；日志默认为
 
 ### 语音输入与朗读
 
-配置中继的 `DOUBAO_VOICE_API_KEY` 后，支持录音的 Web/PWA 客户端可以在空草稿长按说话。转写实时显示在输入框，松手后的定稿可继续编辑。回复旁的喇叭按需发起流式朗读，音频只在播放时缓冲。
+配置中继的 `DOUBAO_VOICE_API_KEY` 后，支持录音的客户端会在空草稿显示语音按钮。电脑上点击开始转写，再点一次结束。手机上长按开始，松手结束。转写实时显示在输入框，结束后的草稿可继续编辑。回复旁的喇叭按需发起流式朗读，音频只在播放时缓冲。
 
 录音需要 HTTPS（本机 loopback 也可）和用户授予麦克风权限。配置语音后，中继仅在主应用入口允许同源页面请求麦克风。使用自定义反代时，请保留主应用的 `Permissions-Policy` 响应头。
 

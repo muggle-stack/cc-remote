@@ -3,7 +3,8 @@ import { expect, test } from "@playwright/test";
 const url = "/tests/composer-queue.html";
 
 for (const fresh of [false, true]) {
-  test(`voice hold updates ${fresh ? "new" : "existing"} chat draft before release`, async ({ page }) => {
+  test(`voice streams to the ${fresh ? "new" : "existing"} chat draft before the desktop click or mobile release`, async ({ page }, testInfo) => {
+    const mobile = testInfo.project.use.hasTouch === true;
     let chunks = 0;
     await page.routeWebSocket("**/v1/realtime?intent=transcription", (ws) => {
       ws.onMessage((data) => {
@@ -35,7 +36,7 @@ for (const fresh of [false, true]) {
         tone.start();
         void context.resume();
         syntheticMic = microphone.stream;
-      }, { once: true });
+      }, { once: true, capture: true });
       Object.defineProperty(Object.getPrototypeOf(navigator.mediaDevices), "getUserMedia", { value: async () => {
         stats.opened++;
         if (!syntheticMic) throw new Error("missing synthetic microphone");
@@ -43,22 +44,33 @@ for (const fresh of [false, true]) {
         return syntheticMic;
       } });
     });
-    const mic = page.getByRole("button", { name: "按住说话" });
+    const mic = page.locator(".voice-input");
     const input = page.locator("textarea");
     const stats = () => page.evaluate(() => {
       const stats = (window as Window & { voiceTest: { opened: number; track?: MediaStreamTrack } }).voiceTest;
       return { opened: stats.opened, stopped: Number(stats.track?.readyState === "ended") };
     });
-    await mic.click();
-    expect(await stats()).toEqual({ opened: 0, stopped: 0 });
-    const box = (await mic.boundingBox())!;
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-    await page.mouse.down();
+    if (mobile) {
+      await expect(mic).toHaveAccessibleName("按住说话");
+      await mic.click();
+      expect(await stats()).toEqual({ opened: 0, stopped: 0 });
+      const box = (await mic.boundingBox())!;
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.mouse.down();
+    } else {
+      await expect(mic).toHaveAccessibleName("开始语音转写");
+      await mic.click();
+    }
     await expect.poll(async () => (await stats()).opened).toBe(1);
     await expect(input).toHaveValue("实时中间结果");
     await expect(mic).toHaveClass(/voice-input-held/);
     await expect(page.getByTestId("events")).toHaveText("[]");
-    await page.mouse.up();
+    if (mobile) {
+      await page.mouse.up();
+    } else {
+      await expect(mic).toHaveAccessibleName("停止语音转写");
+      await mic.click();
+    }
     await expect(input).toHaveValue("最终转写草稿");
     await expect(mic).toHaveCount(0);
     await expect(page.getByRole("button", { name: fresh ? "开始" : "发送", exact: true })).toBeEnabled();
@@ -66,6 +78,43 @@ for (const fresh of [false, true]) {
     expect(await stats()).toEqual({ opened: 1, stopped: 1 });
   });
 }
+
+test("voice desktop stop cancels a pending microphone request", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.use.hasTouch === true, "Desktop click behavior");
+  let connections = 0;
+  await page.routeWebSocket("**/v1/realtime?intent=transcription", () => { connections++; });
+  await page.goto(`${url}?voice=1`);
+  await page.evaluate(() => {
+    const pending = { grant: () => {}, track: null as MediaStreamTrack | null };
+    Object.assign(window, { pendingVoiceTest: pending });
+    Object.defineProperty(Object.getPrototypeOf(navigator.mediaDevices), "getUserMedia", {
+      value: () => new Promise<MediaStream>((resolve) => {
+        const context = new AudioContext();
+        const stream = context.createMediaStreamDestination().stream;
+        pending.track = stream.getAudioTracks()[0];
+        pending.grant = () => {
+          resolve(stream);
+          void context.close();
+        };
+      }),
+    });
+  });
+  const mic = page.locator(".voice-input");
+  await mic.press("Enter");
+  await expect(mic).toHaveAccessibleName("停止语音转写");
+  await mic.press("Enter");
+  await expect(mic).toHaveAccessibleName("开始语音转写");
+  const state = await page.evaluate(async () => {
+    const pending = (window as Window & {
+      pendingVoiceTest: { grant: () => void; track: MediaStreamTrack };
+    }).pendingVoiceTest;
+    pending.grant();
+    await Promise.resolve();
+    return pending.track.readyState;
+  });
+  expect(state).toBe("ended");
+  expect(connections).toBe(0);
+});
 
 test("voice narration only requests the selected completed reply", async ({ page }) => {
   const requests: string[] = [];
