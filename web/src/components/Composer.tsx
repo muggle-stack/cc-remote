@@ -62,6 +62,8 @@ import {
 import { PendingImageAttachments } from "./PendingImageAttachments";
 import { QueuedQueryChip } from "./QueuedQueryChip";
 import { UsageMeter } from "./UsageMeter";
+import { VoiceInputButton } from "./VoiceInputButton";
+import { useVoiceInput, voiceInputAvailable } from "../use-voice-input";
 const SpeedPicker = lazy(() => import("./SpeedPicker").then(m => ({ default: m.SpeedPicker })));
 import { PasteCards } from "./PasteCards";
 import { uuid } from "../util";
@@ -78,6 +80,7 @@ const DshCommandFeedback = lazy(() => import("./DshCommandFeedback"));
 
 interface Props {
   maintenance?: boolean;
+  voiceEnabled?: boolean;
   dsh?: DshState;
   dshSid?: string;
   readDsh?: DshRead;
@@ -355,15 +358,20 @@ export function Composer(p: Props) {
     textarea.style.height = "auto";
     textarea.style.height = Math.min(textarea.scrollHeight, 132) + "px";
   }, [nativeTextareaSizing]);
-  useLayoutEffect(() => {
-    growTa();
-  }, [growTa, input, p.draftKey]);
   const focusTa = () => setTimeout(() => taRef.current?.focus(), 0);
   const flash = (msg: string, duration = 2200) => {
     setNotice(msg);
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
     noticeTimer.current = window.setTimeout(() => setNotice(null), duration);
   };
+  const canTalk = p.voiceEnabled === true && !busy && !locked && !importing
+    && !hasText && !hasAttachments && voiceInputAvailable();
+  const voice = useVoiceInput(canTalk, p.draftKey, setInput, flash);
+  const voiceActive = voice.stage !== "idle";
+  const displayedInput = voiceActive ? voice.transcript : input;
+  useLayoutEffect(() => {
+    growTa();
+  }, [growTa, displayedInput, p.draftKey]);
 
   const onInput = (v: string) => setInput(v);
 
@@ -831,7 +839,7 @@ export function Composer(p: Props) {
       data-chat-composer
       ref={taRef}
       rows={1}
-      value={input}
+      value={displayedInput}
       placeholder={importing ? "正在安全导入附件…"
         : p.maintenance ? "设备正在更新，草稿已保留…"
         : offline ? "机器离线 — 等待重连…"
@@ -841,6 +849,7 @@ export function Composer(p: Props) {
             ? "补充当前任务…"
             : placeholder))}
       disabled={locked}
+      readOnly={voiceActive}
       onChange={(e) => { onInput(e.target.value); setReferenceCaret(e.target.selectionStart); }}
       onSelect={(e) => setReferenceCaret(e.currentTarget.selectionStart)}
       aria-controls={refs.open ? "dsh-reference-list" : undefined}
@@ -850,8 +859,13 @@ export function Composer(p: Props) {
         imeSubmitRef.current.endComposition();
         onInput(e.currentTarget.value);
       }}
-      onPaste={onPaste}
+      onPaste={(event) => { if (voiceActive) event.preventDefault(); else onPaste(event); }}
       onKeyDown={(e) => {
+        if (voiceActive) {
+          if (e.key === "Escape") voice.cancel();
+          if (e.key === "Enter" || e.key === "Escape") e.preventDefault();
+          return;
+        }
         if (imeSubmitRef.current.isComposingInput(e.nativeEvent)) return;
         const plainTab = e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey;
         if (refs.open) {
@@ -903,7 +917,11 @@ export function Composer(p: Props) {
     />
   );
 
-  const sendControl = (
+  const sendControl = canTalk || voiceActive ? (
+    <VoiceInputButton recording={voice.stage === "starting" || voice.stage === "recording"}
+      finishing={voice.stage === "finishing"}
+      start={voice.start} release={voice.release} cancel={voice.cancel} />
+  ) : (
     <button className={sendClass}
       onPointerDown={() => {
         if (imeSubmitRef.current.shouldCommitBeforeButtonSubmit()) taRef.current?.blur();

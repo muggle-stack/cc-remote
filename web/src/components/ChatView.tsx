@@ -35,6 +35,7 @@ import { assistantContinuations, ContinuationRenderKeys, continuationTerminalOwn
 import { isReturnReceipt, returnRunId, returnedAgents } from "../agent-returns";
 import { TimedMessageTag } from "./TimedMessageTag";
 import { Icon, ClaudeMark, EngineWorking, EngineDone } from "../icons";
+import { useVoicePlayback } from "../use-voice-playback";
 import { PanelVisible } from "../right-panel-presentation";
 import { WorkingWord } from "./WorkingWord";
 import { canForkTurn } from "../session-worktree";
@@ -349,7 +350,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   activeTurnId = null,
   ambiguousActiveTurnIds = [],
   initialReadingState, onReadingStateSave,
-  surface = "code" }: {
+  surface = "code", voiceSpeech }: {
   ref?: Ref<ChatViewHandle>;
   sessionLink?: SessionMessageNavigation["sessionLink"];
   onOpenSession?: (nativeId: string) => void;
@@ -357,6 +358,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   onDshPlugin?: (name: string) => void;
   sid: string | null;
   turns: Turn[];
+  voiceSpeech?: boolean;
   initialReadingState?: ChatReadingState;
   onReadingStateSave?: (position: ChatReadingState | null) => void;
   surface?: Space;
@@ -421,6 +423,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   ambiguousActiveTurnIds?: readonly string[];
 }) {
   const visible = useContext(PanelVisible);
+  const voicePlayback = useVoicePlayback(voiceSpeech === true && visible && typeof AudioContext !== "undefined");
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
   const recommendations = useDshRecommendations(engine === "dsh" ? dshApi : undefined, sid, incomingTurns);
@@ -3381,6 +3384,17 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
                       <Icon name="branch" size={13} />
                     </button>
                   )}
+                  {voiceSpeech && t.done && finalBlocks.length > 0 && typeof AudioContext !== "undefined" && (
+                    <button type="button"
+                      className={"ubub-act" + (voicePlayback.playing === t.id ? " voice-playing" : "")}
+                      aria-label={voicePlayback.playing === t.id ? "停止朗读" : "朗读回复"}
+                      title={voicePlayback.playing === t.id ? "停止朗读" : "朗读回复"}
+                      aria-pressed={voicePlayback.playing === t.id}
+                      onClick={() => voicePlayback.toggle(t.id, aiText(t))}>
+                      <Icon name={voicePlayback.playing === t.id ? "stop" : "volume"} size={13} />
+                    </button>
+                  )}
+                  {voicePlayback.failed === t.id && <span className="voice-playback-error" role="status">朗读暂不可用</span>}
                   <Suspense fallback={null}><PagePreviewLinks turn={t} sid={sid} /></Suspense>
                 </div>}
                 {showCompletionFooter && !terminalProblem && ti === turns.length - 1

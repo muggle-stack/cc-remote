@@ -388,6 +388,20 @@ export default function App() {
   const [space, setSpace] = useState<Space>(initialSpacesRef.current[initialEngineRef.current]);
   const spacesByEngineRef = useRef<Record<Engine, Space>>(initialSpacesRef.current);
   const [authed, setAuthed] = useState(false);
+  const [voiceConfig, setVoiceConfig] = useState<{ transcription: boolean; speech: boolean } | null>(null);
+  useEffect(() => {
+    setVoiceConfig(null);
+    if (!authed) return;
+    const controller = new AbortController();
+    void fetch("/api/voice-config", { cache: "no-store", signal: controller.signal })
+      .then((response) => response.ok ? response.json() : null)
+      .then((config) => {
+        if (!controller.signal.aborted && config) {
+          setVoiceConfig({ transcription: config.transcription === true, speech: config.speech === true });
+        }
+      }).catch(() => {});
+    return () => controller.abort();
+  }, [authed]);
   const changingNotificationModeRef = useRef(false);
   const [notificationBindingRevision, recheckNotificationBinding] = useReducer((value: number) => value + 1, 0);
   const [harmonyPush, setHarmonyPush] = useState(harmonyPushSnapshot);
@@ -6346,6 +6360,7 @@ export default function App() {
           </div>
         ) : state.newChat ? (
           <Suspense fallback={null}><NewChatView cwd={state.newChat.cwd}
+            voiceEnabled={voiceConfig?.transcription && state.wrapperOnline && !appUpdates.maintenance}
             draftKey={composerDraftKey(machineId, space, engine, "new")}
             draftStore={composerDraftsRef.current}
             editPrompt={editPrompt} onEditConsumed={() => setEditPrompt(null)}
@@ -6425,6 +6440,7 @@ export default function App() {
             <Suspense fallback={<div className="thread" />}><ChatView key={`${activeScopeKey}\u0000${focusedSid ?? ""}`}
               {...chatReadingMemory}
               sid={focusedSid} turns={historyView.turns}
+              voiceSpeech={voiceConfig?.speech}
               dshApi={focusedEngine === "dsh" ? dshApi : undefined}
               onDshPlugin={focusedEngine === "dsh" && focusedSid ? name => setDshPanel({ sid: focusedSid, scope: activeScopeKey, selection: { kind: "bundles", query: name } }) : undefined}
               sessionLink={(nativeId) => {
@@ -6647,7 +6663,7 @@ export default function App() {
               />
             </Suspense>}
 
-            <Composer maintenance={appUpdates.maintenance}
+            <Composer maintenance={appUpdates.maintenance} voiceEnabled={voiceConfig?.transcription}
           dsh={rt.dsh}
           dshSid={focusedSid ?? undefined}
           readDsh={dshApi.read}

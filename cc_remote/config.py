@@ -239,6 +239,9 @@ class RelayConfig:
     # traffic travel in cleartext) for being reachable over a bare public IP
     # without a TLS terminator in front.
     allow_insecure_http: bool = field(default_factory=lambda: _bool("ALLOW_INSECURE_HTTP"))
+    doubao_voice_api_key: str = field(
+        default_factory=lambda: _env("DOUBAO_VOICE_API_KEY", "").strip(), repr=False,
+    )
     # Optional Web Push. Configure all three VAPID values to deliver completion
     # notices even when no browser WebSocket is connected.
     push_vapid_public_key: str = field(

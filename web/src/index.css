@@ -1675,6 +1675,13 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .sendbtn:disabled{ background:var(--border-strong); color:var(--faint); cursor:default; }
 .sendbtn svg{ width:19px; height:19px; }
 .sendbtn.interrupt{ background:var(--danger); color:var(--on-danger,#fff); }
+.sendbtn.voice-input{ background:var(--accent-weak); color:var(--accent-ink); touch-action:none;
+  user-select:none; -webkit-touch-callout:none; }
+.sendbtn.voice-input-held{ transform:scale(1.2); background:var(--accent); color:var(--on-accent,#fff); }
+.sendbtn.voice-input[aria-busy="true"]{ opacity:.65; }
+.ubub-act.voice-playing{ color:var(--accent-ink); background:var(--accent-weak); }
+.voice-playback-error{ color:var(--danger); }
+@media (prefers-reduced-motion: reduce){ .sendbtn.voice-input{ transition:none; } }
 .hint{ display:flex; align-items:center; gap:12px; font-size:11px; color:var(--faint); padding:7px 2px 1px; }
 .hint-right{ position:relative; display:flex; align-items:center; gap:14px; margin-left:auto; flex:none; }
 .hint-control-scope{ color:var(--faint); font-size:10px; font-weight:var(--font-weight-600); white-space:nowrap; }

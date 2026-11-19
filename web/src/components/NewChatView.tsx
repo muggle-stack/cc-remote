@@ -28,6 +28,8 @@ import { CommandSheet } from "./CommandSheet";
 import { CenteredSheet } from "./CenteredSheet";
 import { ChoicePicker } from "./ChoicePicker";
 import { AttachmentPicker } from "./AttachmentPicker";
+import { VoiceInputButton } from "./VoiceInputButton";
+import { useVoiceInput, voiceInputAvailable } from "../use-voice-input";
 import { permissionProfileLabel } from "../data";
 import { codexProfilePresentation } from "../codex-profile-presentation";
 import {
@@ -54,6 +56,7 @@ export { compatibleNewChatEffort, newChatCatalogRequest, resolveNewChatLocalDefa
   reconcileNewChatSelection, newChatEfforts } from "../new-chat-selection";
 
 interface Props {
+  voiceEnabled?: boolean;
   draftKey?: string;
   draftStore?: ComposerDraftStore;
   editPrompt?: string | null;
@@ -207,7 +210,7 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
   onPickCodexProfile, skills, skillsOnline = true, skillsError = false, onRequestSkills,
   permissionProfiles, onGetPermissionProfiles, onOpenExtensions,
   dshCommands, dshPresets = [], dshPermissions = [], dshPreset, dshError, onPickDshPreset,
-  onSend, draftKey, draftStore }: Props) {
+  onSend, draftKey, draftStore, voiceEnabled }: Props) {
   const localDrafts = useRef(new ComposerDraftStore());
   const drafts = draftStore ?? localDrafts.current;
   const key = draftKey ?? "new";
@@ -327,6 +330,12 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
   }, []);
 
   const hasAttachments = images.length > 0 || files.length > 0;
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const canTalk = voiceEnabled === true && !creating && !importing
+    && !text.trim() && !hasAttachments && !pastes.length && voiceInputAvailable();
+  const voice = useVoiceInput(canTalk, `${key}\u0000${cwd}`, setText, setVoiceError);
+  const voiceActive = voice.stage !== "idle";
+  useEffect(() => { setVoiceError(null); }, [key, cwd]);
   // Effects run after paint. Derive the fail-closed defaults synchronously too,
   // so a send in the first frame after a device/surface switch cannot reuse
   // another authorization scope's choices.
@@ -678,18 +687,25 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
       placeholder={space === "work" ? "描述要完成的工作，或上传文档、表格、演示…"
         : engine === "codex" ? "输入 / 命令，$ Skill" : "输入 / 命令"}
       aria-label="新会话消息" ref={taRef}
-      value={text} onChange={(e) => {
+      value={voiceActive ? voice.transcript : text} onChange={(e) => {
         setText(e.target.value);
         setAutoCompactNotice(null);
-      }} onPaste={onPaste}
+        setVoiceError(null);
+      }} onPaste={(event) => { if (voiceActive) event.preventDefault(); else onPaste(event); }}
       autoFocus={autoFocus} rows={space === "work" ? 3 : 1}
       disabled={creating || importing}
+      readOnly={voiceActive}
       onCompositionStart={() => imeSubmitRef.current.startComposition()}
       onCompositionEnd={(e) => {
         imeSubmitRef.current.endComposition();
         setText(e.currentTarget.value);
       }}
       onKeyDown={(e) => {
+        if (voiceActive) {
+          if (e.key === "Escape") voice.cancel();
+          if (e.key === "Enter" || e.key === "Escape") e.preventDefault();
+          return;
+        }
         if (e.key === "Tab" && e.shiftKey) {
           e.preventDefault();
           if (engine === "codex") {
@@ -725,7 +741,11 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
       label={space === "work" ? "添加资料" : "添加附件"}
       disabled={creating || importing} />
   );
-  const sendButton = (
+  const sendButton = canTalk || voiceActive ? (
+    <VoiceInputButton recording={voice.stage === "starting" || voice.stage === "recording"}
+      finishing={voice.stage === "finishing"}
+      start={() => { setVoiceError(null); voice.start(); }} release={voice.release} cancel={voice.cancel} />
+  ) : (
     <button className="newchat-send" aria-label="开始" title="开始新对话"
       onPointerDown={() => {
         if (imeSubmitRef.current.shouldCommitBeforeButtonSubmit()) taRef.current?.blur();
@@ -914,13 +934,13 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
                 })} />
             )}
           </div>
-          {(space === "work" || createError || importing || creating || autoCompactNotice) && (
+          {(space === "work" || createError || importing || creating || autoCompactNotice || voiceError) && (
             <div className="newchat-foot-right">
             <span className="newchat-hint" role="status">{createError
               ? `创建失败：${createError}`
               : importing ? "正在导入附件…"
                 : creating ? "正在创建会话…"
-                  : autoCompactNotice ?? "Enter 发送"}</span>
+                  : voiceError ?? autoCompactNotice ?? "Enter 发送"}</span>
             {space === "work" && sendButton}
           </div>
           )}

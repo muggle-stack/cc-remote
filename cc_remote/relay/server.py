@@ -41,6 +41,8 @@ from cc_remote.relay.auth import (
 from cc_remote.relay.devices import DeviceStore
 from cc_remote.relay.updates import UpdateRelay, UpdateChannelError
 from cc_remote.relay.server_updates import ServerUpdates
+from cc_remote.relay.voice import DoubaoVoice
+from cc_remote.relay.voice_routes import voice_router
 from cc_remote.relay.harmony_push import (
     HarmonyPushDispatcher, HarmonyPushStore, HarmonySubscription, HuaweiPushSender,
     TOKEN_RE as HARMONY_TOKEN_RE,
@@ -594,6 +596,14 @@ def create_app(
     link_preview_limiter = LoginRateLimiter(max_per_ip=120)
     devices = device_store or DeviceStore(cfg.device_db_path)
 
+    async def authorize_voice(req: Request | WebSocket) -> bool:
+        return (_request_origin_allowed(req, cfg, allow_missing=(
+            isinstance(req, Request) and req.method == "GET"
+        )) and await _active_claims(req, cfg, sessions) is not None)
+
+    voice = DoubaoVoice(cfg.doubao_voice_api_key) if cfg.doubao_voice_api_key else None
+    app.include_router(voice_router(voice, authorize_voice, _read_json_limited, cfg.max_clients))
+
     async def push_session_active(subscription: PushSubscription | HarmonySubscription) -> bool:
         claims = await sessions.claims_for_session(subscription.session_jti, subscription.expires_at)
         return claims is not None and await _claims_allow_machine(claims, subscription.machine_id, devices)
@@ -832,6 +842,9 @@ def create_app(
             return response
         response = await call_next(req)
         path = req.url.path
+        if path in {"/", "/index.html"} and response.status_code in {200, 304}:
+            microphone = "(self)" if voice is not None else "()"
+            response.headers["Permissions-Policy"] = f"camera=(), microphone={microphone}, geolocation=()"
         if path in {"/", "/index.html", "/sw.js", "/cc-remote-build.json", "/cc-remote-viewer-runner.js", "/cc-remote-viewer-zoom.js"}:
             response.headers["Cache-Control"] = "no-cache, must-revalidate"
         elif (
