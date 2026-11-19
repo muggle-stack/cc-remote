@@ -2,6 +2,7 @@ import {
   lazy,
   Suspense,
   useCallback,
+  useContext,
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
@@ -17,6 +18,10 @@ import {
 import {
   defaultRangeExtractor,
   elementScroll,
+  measureElement,
+  observeElementOffset,
+  observeElementRect,
+  type VirtualizerOptions,
   useVirtualizer,
 } from "@tanstack/react-virtual";
 import type {
@@ -30,6 +35,8 @@ import { assistantContinuations, ContinuationRenderKeys, continuationTerminalOwn
 import { isReturnReceipt, returnRunId, returnedAgents } from "../agent-returns";
 import { TimedMessageTag } from "./TimedMessageTag";
 import { Icon, ClaudeMark, EngineWorking, EngineDone } from "../icons";
+import { useVoicePlayback } from "../use-voice-playback";
+import { PanelVisible } from "../right-panel-presentation";
 import { WorkingWord } from "./WorkingWord";
 import { canForkTurn } from "../session-worktree";
 import { sidebarDragIntent } from "../responsive-layout";
@@ -41,7 +48,6 @@ import {
   finalTextBlocks,
   generatedImageIdentity,
   generatedOutputImages,
-  modelFallbackNotices,
   hasActiveProcess,
   presentableProcessBlocks,
 } from "../process-blocks";
@@ -344,7 +350,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   activeTurnId = null,
   ambiguousActiveTurnIds = [],
   initialReadingState, onReadingStateSave,
-  surface = "code" }: {
+  surface = "code", voiceSpeech }: {
   ref?: Ref<ChatViewHandle>;
   sessionLink?: SessionMessageNavigation["sessionLink"];
   onOpenSession?: (nativeId: string) => void;
@@ -352,6 +358,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   onDshPlugin?: (name: string) => void;
   sid: string | null;
   turns: Turn[];
+  voiceSpeech?: boolean;
   initialReadingState?: ChatReadingState;
   onReadingStateSave?: (position: ChatReadingState | null) => void;
   surface?: Space;
@@ -416,6 +423,10 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
    * Empty for idle/browse/missing-owner states, which must stay fail-closed. */
   ambiguousActiveTurnIds?: readonly string[];
 }) {
+  const visible = useContext(PanelVisible);
+  const voicePlayback = useVoicePlayback(voiceSpeech === true && visible && typeof AudioContext !== "undefined");
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
   const recommendations = useDshRecommendations(engine === "dsh" ? dshApi : undefined, sid, incomingTurns);
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentSizerRef = useRef<HTMLDivElement>(null);
@@ -771,7 +782,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
       && activeHistoryAnchor?.direction === "newer"
     ? "end" : "start";
   const canFollowLiveTail = useCallback(() =>
-    activeScrollScopeRef.current === scrollScope
+    visibleRef.current && activeScrollScopeRef.current === scrollScope
       && renderedScrollScopeRef.current === scrollScope
       && !browseMode
       && !!controllerRef.current?.isFollowing()
@@ -785,6 +796,20 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   const virtualizer = useVirtualizer({
     count: turns.length,
     getScrollElement: () => scrollRef.current,
+    // Hidden retained panels report zero-sized DOM. Keep the last viewport and
+    // row measurements until the same nodes are visible again.
+    observeElementRect: useCallback<VirtualizerOptions<HTMLDivElement, Element>["observeElementRect"]>((instance, callback) => observeElementRect(instance,
+      rect => { if (visibleRef.current && rect.height > 0) callback(rect); }), []),
+    observeElementOffset: useCallback<VirtualizerOptions<HTMLDivElement, Element>["observeElementOffset"]>((instance, callback) => observeElementOffset(instance,
+      (offset, scrolling) => { if (visibleRef.current) callback(offset, scrolling); }), []),
+    measureElement: useCallback<NonNullable<VirtualizerOptions<HTMLDivElement, Element>["measureElement"]>>((element, entry, instance) => {
+      if (!visibleRef.current || !element.getClientRects().length) {
+        const index = instance.indexFromElement(element);
+        return instance.itemSizeCache.get(instance.options.getItemKey(index))
+          ?? instance.options.estimateSize(index);
+      }
+      return measureElement(element, entry, instance);
+    }, []),
     estimateSize: index => initialReadingState?.sizes[turns[index]?.id]
       ?? HISTORY_VIRTUAL_ESTIMATE_PX,
     initialOffset: initialReadingState?.scrollTop ?? 0,
@@ -796,6 +821,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
     anchorTo: virtualAnchorTo,
     followOnAppend: virtualScrollPolicy.followOnAppend,
     scrollToFn: (offset, options, instance) => {
+      if (!visibleRef.current) return;
       // scrollToEnd keeps reconciling its target as streamed rows or the IME
       // resize. Changing followOnAppend does not cancel that pending operation.
       // Check ownership at the actual DOM write, including delayed corrections;
@@ -857,6 +883,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   }, []);
 
   const restoreRetainedMeasurementBoundary = useCallback((): boolean => {
+    if (!visibleRef.current) return false;
     const boundary = retainedMeasurementBoundaryRef.current;
     const el = scrollRef.current;
     const controller = controllerRef.current;
@@ -909,6 +936,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   }, [measureTurnOffset]);
 
   const rememberReadingPosition = () => {
+    if (!visibleRef.current) return;
     const el = scrollRef.current;
     if (!el || controllerRef.current?.isFollowing()
         || historyAnchorRef.current.current() || detailAnchorRef.current
@@ -921,6 +949,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
 
   const saveReadingStateRef = useRef<() => void>(() => {});
   saveReadingStateRef.current = () => {
+    if (!visibleRef.current) return;
     const el = scrollRef.current;
     if (!el || pendingReadingRestoreRef.current) return;
     const bookmark = controllerRef.current?.isFollowing() ? null : captureReadingBookmark(el);
@@ -1026,11 +1055,12 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   const observeScrollLayout = useCallback(() => {
     const el = scrollRef.current;
     const controller = controllerRef.current;
-    if (el && controller) syncScrollState(controller.observeLayout(readScrollMetrics(el)));
+    if (visibleRef.current && el && el.clientHeight > 0 && controller)
+      syncScrollState(controller.observeLayout(readScrollMetrics(el)));
   }, [syncScrollState]);
 
   const applyScrollCommand = useCallback((command: ScrollCommand | null) => {
-    if (!command) return;
+    if (!visibleRef.current || !command) return;
     const el = scrollRef.current;
     const controller = controllerRef.current;
     if (!el || !controller) return;
@@ -1063,6 +1093,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
     let previousHeight = el.clientHeight;
     const observer = new ResizeObserver(() => {
       const nextHeight = el.clientHeight;
+      if (!visibleRef.current || nextHeight === 0) return;
       if (Math.abs(nextHeight - previousHeight) < 0.5) return;
       previousHeight = nextHeight;
       // Composer actions and the mobile keyboard resize the thread from
@@ -1079,6 +1110,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
     const content = contentSizerRef.current;
     if (!content || typeof ResizeObserver === "undefined") return;
     const followMeasuredTail = () => {
+      if (!visibleRef.current) return;
       // TanStack updates the in-flow leading spacer from ResizeObserver
       // measurements. Correct the retained reading row in this same
       // pre-paint notification so the spacer update never becomes a visible
@@ -1088,6 +1120,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
       observeScrollLayout();
     };
     const observer = new ResizeObserver((entries) => {
+      if (!visibleRef.current) return;
       for (const entry of entries) {
         const node = entry.target as HTMLElement;
         if (node !== content && node.isConnected) virtualizer.resizeItem(
@@ -1333,6 +1366,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   ]);
 
   useEffect(() => {
+    if (!visible) return;
     const handlePointerEnd = (event: globalThis.PointerEvent) => {
       if (scrollbarDragIntentRef.current?.pointerId === event.pointerId) {
         scrollbarDragIntentRef.current = null;
@@ -1373,7 +1407,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
     };
   }, [
     clearTextSelection, observeNativeTextSelection,
-    releaseTextSelectionInteraction,
+    releaseTextSelectionInteraction, visible,
   ]);
 
   const completeHistoryLoadGates = useCallback(() => {
@@ -1411,6 +1445,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   // Cached-newer paging may append at the tail and evict rows at the head, so
   // it deliberately uses the same keyed measurement transaction as prepend.
   const doLoadPage = (direction: HistoryPageDirection): boolean => {
+    if (!visibleRef.current) return false;
     if (historyAnchorRef.current.current() || historyRequestRef.current) {
       return false;
     }
@@ -1570,6 +1605,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   ]);
 
   useLayoutEffect(() => {
+    if (!visible) return;
     const pending = deferredOlderIntentRef.current;
     const currentAuthority = incomingHistoryPresentation.authorityScope;
     if (pending && (pending.authorityScope !== currentAuthority
@@ -1611,7 +1647,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
     incomingHistoryPresentation.authorityScope,
     incomingHistoryPresentation.cursor,
     olderHistoryAvailability, resolvedHistoryViewId,
-    stageDeferredOlderIntent,
+    stageDeferredOlderIntent, visible,
   ]);
 
   // Scroll/touch events can repeat many times while a finger or wheel remains
@@ -1788,7 +1824,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   useLayoutEffect(() => {
     const el = scrollRef.current;
     const controller = controllerRef.current;
-    if (!el || !controller) return;
+    if (!visible || !el || !controller) return;
 
     // Initial mount, session switches, and authoritative revision replacements
     // are anchored synchronously before paint. Commit the scope only once the
@@ -1863,13 +1899,13 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
     clearHistoryRequestTimeout, clearTextSelection,
     completeHistoryPageActivity, historyRevision,
     resolvedHistoryViewId,
-    scrollScope, sid, syncScrollState, turns,
+    scrollScope, sid, syncScrollState, turns, visible,
   ]);
 
   useLayoutEffect(() => {
     const saved = pendingReadingRestoreRef.current;
     const el = scrollRef.current;
-    if (!saved || !el) return;
+    if (!visible || !saved || !el) return;
     if (!initialReadingState) {
       pendingReadingRestoreRef.current = undefined;
       return;
@@ -1921,9 +1957,15 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
     cancelHistoryAnchor, clearHistoryRequestTimeout, disposeTextSelection,
   ]);
 
+  useEffect(() => { if (!visible) setZoom(null); }, [visible]);
   useEffect(() => setZoom(null), [sid]);
 
   const settleUserScrollIntent = () => {
+    if (!visibleRef.current) {
+      userScrollIntentRef.current = false;
+      userScrollDirectionRef.current = null;
+      return;
+    }
     if (touchYRef.current !== null || wheelGestureActiveRef.current
         || scrollbarDragIntentRef.current?.scope === scrollScope) {
       if (userScrollIntentTimerRef.current !== null) {
@@ -2100,6 +2142,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   };
 
   const onScroll = () => {
+    if (!visibleRef.current) return;
     const el = scrollRef.current;
     const controller = controllerRef.current;
     if (!el || !controller) return;
@@ -2247,6 +2290,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
 
   useEffect(() => {
     const intentScope = manualLatestIntentRef.current;
+    if (!visible) return;
     if (!browseMode || intentScope !== scrollScope) {
       manualLatestIntentRef.current = null;
       return;
@@ -2262,7 +2306,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
     leaveHistoryBrowse();
   }, [
     activeHistoryGeneration, browseMode, hasNewer, historyWindowEpoch,
-    leaveHistoryBrowse, scrollScope, turns,
+    leaveHistoryBrowse, scrollScope, turns, visible,
   ]);
 
   const onWheel = (event: WheelEvent<HTMLDivElement>) => {
@@ -2952,7 +2996,6 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
             const finalBlocks = finalTextBlocks(t.blocks).filter(block =>
               block.delivery !== "async" || !block.questions?.length);
             const generatedImages = generatedOutputImages(timelineBlocks);
-            const modelNotices = modelFallbackNotices(timelineBlocks);
             const narrative = assistantContinuations(timelineBlocks, finalBlocks, engine, t.responseProcesses);
             const taskContinuation = engine === "dsh" && timelineBlocks.some(block =>
               isReturnReceipt(block) && block.kind === "process" && block.processKind === "task");
@@ -3298,10 +3341,6 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
               </div>
             )}
             {showProcessTimeline && renderProcess()}
-            {modelNotices.map((notice) => <div className="turn-model-notice" key={notice.item_id} role="note">
-              <Icon name="notify" size={15} />
-              <span>{notice.summary}</span>
-            </div>)}
             {generatedImages.length > 0 && <div className="generated-image-gallery">
               {generatedImages.map((block) => <GeneratedImagePreview key={generatedImageIdentity(block)}
                 block={block} imageAssets={imageAssets} onLoadImage={onLoadImage}
@@ -3346,6 +3385,17 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
                       <Icon name="branch" size={13} />
                     </button>
                   )}
+                  {voiceSpeech && t.done && finalBlocks.length > 0 && typeof AudioContext !== "undefined" && (
+                    <button type="button"
+                      className={"ubub-act" + (voicePlayback.playing === t.id ? " voice-playing" : "")}
+                      aria-label={voicePlayback.playing === t.id ? "停止朗读" : "朗读回复"}
+                      title={voicePlayback.playing === t.id ? "停止朗读" : "朗读回复"}
+                      aria-pressed={voicePlayback.playing === t.id}
+                      onClick={() => voicePlayback.toggle(t.id, aiText(t))}>
+                      <Icon name={voicePlayback.playing === t.id ? "stop" : "volume"} size={13} />
+                    </button>
+                  )}
+                  {voicePlayback.failed === t.id && <span className="voice-playback-error" role="status">朗读暂不可用</span>}
                   <Suspense fallback={null}><PagePreviewLinks turn={t} sid={sid} /></Suspense>
                 </div>}
                 {showCompletionFooter && !terminalProblem && ti === turns.length - 1
@@ -3409,7 +3459,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
           </div>
         )}
       </div>
-      {zoom && <ChatImageLightbox key={sid ?? ""} selection={zoom}
+      {visible && zoom && <ChatImageLightbox key={sid ?? ""} selection={zoom}
         imageAssets={imageAssets} historyImageAssets={historyImageAssets}
         onLoadImage={onLoadImage} onLoadHistoryImage={onLoadHistoryImage}
         onAuthorizeImage={onAuthorizeImage}

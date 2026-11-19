@@ -15,6 +15,10 @@ The conversation UI stays web-based; it is not a rewrite of the UI in ArkUI.
   new windows. The chat remains mounted and retains its draft when returning.
   Same-origin new windows retain **返回聊天** and the app's login cookies.
 - System file selection through ArkWeb's default file-upload handling.
+- With Relay transcription enabled, hold the microphone button in an empty
+  composer to dictate. On first use, allow the HarmonyOS microphone prompt and
+  hold again if the prompt ended the gesture. The configured HTTPS chat can
+  request microphone access while it is in use.
 - Downloads from the configured server, including generated images/files using
   `blob:` URLs and authenticated HTTP media. ArkWeb keeps its existing login
   context; after download, the system **Save to Files** picker selects a destination.
@@ -24,7 +28,7 @@ The conversation UI stays web-based; it is not a rewrite of the UI in ArkUI.
   Android-specific blur override is installed.
 - App background/foreground never reloads chat or submits a model message.
 
-Camera/microphone capture, a persistent download manager, non-HTTPS external
+Camera capture, a persistent download manager, non-HTTPS external
 app links and browser-control MCP are outside this preview. Native completion
 notifications have a separate optional Push Kit integration described below. Persistent
 login remains subject to the Relay cookie's normal expiry. No cookie, model

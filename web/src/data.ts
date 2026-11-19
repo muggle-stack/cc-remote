@@ -101,8 +101,7 @@ export const MODELS: Model[] = [
 // the chip shows is exactly what you can grep for in the config. No translated labels.
 export interface Effort { id: string; name: string; ds: string; ic: string }
 
-// Blurb + icon per level, low -> high. Order here IS the cost/latency order, and is
-// what we rank by — never trust arrival order from the server.
+// Legacy presentation for Claude/DSH. Codex uses native descriptions and order.
 const EFFORT_META: Record<string, { ds: string; ic: string }> = {
   minimal: { ds: "几乎不推理 · 最快最省", ic: "gauge1" },
   low: { ds: "更快 · 轻推理", ic: "gauge1" },
@@ -112,29 +111,11 @@ const EFFORT_META: Record<string, { ds: string; ic: string }> = {
   max: { ds: "最深推理 · 最难的问题", ic: "gauge5" },
   ultra: { ds: "极限推理 · 最慢最贵", ic: "crown" },
 };
-export const EFFORT_ORDER = Object.keys(EFFORT_META);
-const rank = (id: string) => { const i = EFFORT_ORDER.indexOf(id); return i < 0 ? EFFORT_ORDER.length : i; };
 const effort = (id: string): Effort => ({ id, name: id, ds: EFFORT_META[id]?.ds ?? "", ic: EFFORT_META[id]?.ic ?? "gauge3" });
 const efforts = (...ids: string[]): Effort[] => ids.map(effort);
 
 export const EFFORTS: Effort[] = efforts("low", "medium", "high", "xhigh", "max");        // cc
 
-// ---- Codex: the app-server IS the catalog ----
-// Everything below is only a FALLBACK for the first paint (and if `model/list`
-// fails). The live catalog arrives as a `models` frame and wins — see catalogFor().
-// Hardcoding this table is what produced two shipped bugs: `minimal` exists on no
-// model at all, and gpt-5.6-luna tops out at `max`, not `ultra`. `turn/start` accepts
-// ANY effort string (measured: `bogus-zzz` starts a turn), so a level we invent here
-// doesn't fail loudly — it fails deep inside the model API. Never guess these.
-export const CODEX_EFFORTS: Effort[] = efforts("low", "medium", "high", "xhigh");         // gpt-5.5 and older
-export const CODEX_EFFORTS_56: Effort[] = efforts("low", "medium", "high", "xhigh", "max", "ultra");
-export const CODEX_MODELS: Model[] = [
-  { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", ds: "旗舰 · 最强 agentic 编码", ic: "crown", efforts: CODEX_EFFORTS_56 },
-  { id: "gpt-5.6-terra", name: "GPT-5.6 Terra", ds: "均衡 · 日常编码", ic: "balance", efforts: CODEX_EFFORTS_56 },
-  { id: "gpt-5.6-luna", name: "GPT-5.6 Luna", ds: "轻量 · 更快", ic: "bolt", efforts: efforts("low", "medium", "high", "xhigh", "max") },
-  { id: "gpt-5.5", name: "GPT-5.5", ds: "上一代 · 旧会话兼容", ic: "cpu" },
-  { id: "gpt-5.4", name: "GPT-5.4", ds: "更早 · 旧会话兼容", ic: "cpu" },
-];
 export const CODEX_PERMS: Perm[] = [
   { id: "never", name: "Never", short: "Never", ds: "不询问 · 需要审批时拒绝", ic: "shield" },
   { id: "on-request", name: "On Request", short: "On Request", ds: "需要时才询问", ic: "shield" },
@@ -222,35 +203,22 @@ export const permissionProfileLabel = (
 /** Live catalogs by engine, as reported by the wrapper (`models` frame). */
 export type Catalog = Record<string, CatalogModel[]>;
 
-// Pretty Chinese name/blurb/icon per known id. A model we've never heard of still
-// renders — it just borrows the server's own English display_name/description, so a
-// newly-shipped codex model appears in the UI without a redeploy.
-const CODEX_LOOKS: Record<string, { name: string; ds: string; ic: string }> = {
-  "gpt-5.6-sol": { name: "GPT-5.6 Sol", ds: "旗舰 · 最强 agentic 编码", ic: "crown" },
-  "gpt-5.6-terra": { name: "GPT-5.6 Terra", ds: "均衡 · 日常编码", ic: "balance" },
-  "gpt-5.6-luna": { name: "GPT-5.6 Luna", ds: "轻量 · 更快", ic: "bolt" },
-};
-
-const fromCatalog = (entries: CatalogModel[], engine: string): Model[] =>
-  entries.map((e) => {
-    const look = engine === "codex" ? CODEX_LOOKS[e.id] : undefined;
-    return {
-      id: e.id,
-      name: look?.name ?? e.display_name ?? e.id,
-      ds: look?.ds ?? e.description ?? "",
-      ic: look?.ic ?? "cpu",
-      // The app-server's empty list is authoritative: this model accepts no
-      // reasoning override. Preserve [] instead of falling back to a generic
-      // Codex list which can fail only after turn/start reaches the model API.
-      efforts: e.efforts.map(effort),
-    };
-  });
+const fromCatalog = (entries: CatalogModel[], engine?: string): Model[] =>
+  entries.map((e) => ({
+    id: e.id,
+    name: e.display_name || e.id,
+    ds: e.description ?? "",
+    ic: "cpu",
+    // Empty native capabilities stay empty, including before discovery.
+    efforts: e.efforts.map((id) => engine === "codex"
+      ? { id, name: id, ds: e.effort_descriptions?.[id] ?? "", ic: "gauge3" }
+      : effort(id)),
+  }));
 
 export const modelsFor = (engine?: string, catalog?: Catalog): Model[] => {
-  if (engine === "dsh") return fromCatalog(catalog?.dsh ?? [], "dsh");
-  const key = engine === "codex" ? "codex" : "claude";
-  const live = catalog?.[key];
-  return live?.length ? fromCatalog(live, key) : key === "codex" ? CODEX_MODELS : MODELS;
+  if (engine === "codex" || engine === "dsh") return fromCatalog(catalog?.[engine] ?? [], engine);
+  const live = catalog?.claude;
+  return live?.length ? fromCatalog(live) : MODELS;
 };
 
 /** Model a NEW chat starts on: the engine's configured default (codex config.toml's
@@ -267,13 +235,13 @@ export const defaultModelFor = (engine?: string, catalog?: Catalog,
     ? want : (list[0]?.id ?? "");
 };
 
-/** Effort levels the SELECTED model actually accepts. Unknown/unset model falls back
- *  to the engine's baseline list. */
+/** Effort levels the selected model accepts. Codex and DSH require native
+ *  capabilities before offering overrides. */
 export const effortsFor = (engine?: string, model?: string | null, catalog?: Catalog): Effort[] => {
   const m = model ? modelsFor(engine, catalog).find((x) => x.id === model
     || (engine !== "codex" && x.id.replace(/\[1m\]$/i, "") === model.replace(/\[1m\]$/i, ""))) : undefined;
   if (m?.efforts) return m.efforts;
-  return engine === "dsh" ? [] : engine === "codex" ? CODEX_EFFORTS : EFFORTS;
+  return engine === "dsh" || engine === "codex" ? [] : EFFORTS;
 };
 
 /** A null app-server thread effort is a real model-default state, not loading.
@@ -294,15 +262,6 @@ export function effortIsSelectable(
   return !!normalized && normalized !== "model-default";
 }
 
-/** Default effort = the HIGHEST level the selected model supports (product decision:
- *  always think as hard as the model allows — we deliberately ignore the server's
- *  own `default_effort`, which is `low` for sol). Also what we clamp to when the user
- *  switches to a model that lacks the current level (sol `ultra` -> luna `max`). */
-export const defaultEffortFor = (engine?: string, model?: string | null, catalog?: Catalog): string => {
-  if (engine === "dsh") return catalog?.dsh?.find(item => item.id === model)?.default_effort ?? "";
-  const list = effortsFor(engine, model, catalog);
-  return list.length ? list.reduce((a, b) => (rank(b.id) > rank(a.id) ? b : a)).id : "model-default";
-};
 export const permsFor = (engine?: string): Perm[] => (engine === "dsh" ? [] : engine === "codex" ? CODEX_PERMS : PERMS);
 
 /** Localized display only; selections retain the exact native permission ID. */

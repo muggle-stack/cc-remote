@@ -1,6 +1,7 @@
 import ReactMarkdown from "react-markdown";
 import {
   useCallback,
+  useContext,
   useEffect,
   useId,
   useRef,
@@ -9,6 +10,7 @@ import {
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
+import { PanelVisible } from "../right-panel-presentation";
 import { useAnchoredPopoverGeometry } from "../chat-dialog-geometry";
 import type { ProcessBlock } from "../domain/conversation";
 import { Icon } from "../icons";
@@ -82,6 +84,8 @@ export function PlanProgressFloatingCard({ anchorRef, block, open,
   compact?: boolean;
 }) {
   const cardRef = useRef<HTMLElement>(null);
+  const visible = useContext(PanelVisible);
+  open = open && visible;
   const position = useAnchoredPopoverGeometry({
     open,
     anchorRef,
@@ -131,6 +135,7 @@ export function PlanProgressPopover({ block, openOverride, onOpenChange,
   detailLoading?: boolean;
   onNeedDetail?: () => void;
 }) {
+  const visible = useContext(PanelVisible);
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
   const open = openOverride ?? uncontrolledOpen;
   const rootRef = useRef<HTMLDivElement>(null);
@@ -142,6 +147,7 @@ export function PlanProgressPopover({ block, openOverride, onOpenChange,
     setUncontrolledOpen(next);
     onOpenChange?.(next);
   }, [onOpenChange]);
+  useEffect(() => { if (!visible) setOpen(false); }, [visible, setOpen]);
 
   return <div ref={rootRef} className="plan-progress-control">
     <button type="button"

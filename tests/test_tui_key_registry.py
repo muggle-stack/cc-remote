@@ -87,20 +87,24 @@ def test_example_covers_every_registered_action_with_current_defaults():
     assert KeyConfig(data).yank_highlight_ms == KeyConfig().yank_highlight_ms
 
 
-@pytest.mark.parametrize("row", KeyConfig().index(), ids=lambda row: row["id"])
-def test_every_function_shortcut_can_be_remapped_disabled_and_indexed(row):
-    layer, name = row["id"].split(".")
-    remapped = KeyConfig({layer: {name: ["f20"]}})
-    match = next(r for r in remapped.index() if r["id"] == row["id"])
-    assert match["keys"] == ["f20"] and match["enabled"]
-    assert row["id"] in {r["id"] for r in remapped.lookup("f20", layer=layer)}
-    for old in row["keys"]:
-        assert row["id"] not in {
-            r["id"] for r in remapped.lookup(old, layer=layer)
-        }
-    disabled = KeyConfig({layer: {name: []}})
-    match = next(r for r in disabled.index() if r["id"] == row["id"])
-    assert match["keys"] == [] and not match["enabled"]
+@pytest.mark.parametrize("layer", sorted({row["layer"] for row in KeyConfig().index()}))
+def test_every_function_shortcut_can_be_remapped_disabled_and_indexed(layer, subtests):
+    for row in KeyConfig().index():
+        if row["layer"] != layer:
+            continue
+        with subtests.test(shortcut=row["id"]):
+            _, name = row["id"].split(".")
+            remapped = KeyConfig({layer: {name: ["f20"]}})
+            match = next(r for r in remapped.index() if r["id"] == row["id"])
+            assert match["keys"] == ["f20"] and match["enabled"]
+            assert row["id"] in {r["id"] for r in remapped.lookup("f20", layer=layer)}
+            for old in row["keys"]:
+                assert row["id"] not in {
+                    r["id"] for r in remapped.lookup(old, layer=layer)
+                }
+            disabled = KeyConfig({layer: {name: []}})
+            match = next(r for r in disabled.index() if r["id"] == row["id"])
+            assert match["keys"] == [] and not match["enabled"]
 
 
 @pytest.mark.asyncio

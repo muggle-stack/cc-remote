@@ -67,7 +67,7 @@ def _installation(tmp_path, monkeypatch, *, role="wrapper", system="darwin", roo
     return updater.read_installation(root, system, "arm64")
 
 
-def _bundle(tmp_path, installation, *, changes=None, unsafe=None, fail=False):
+def _bundle(tmp_path, installation, *, changes=None, unsafe=None, fail=False, can_migrate_claude=False):
     mirror = tmp_path / "mirror"
     mirror.mkdir(exist_ok=True)
     target = {**installation.manifest, "product_version": "4.0.1", "git_sha": "b" * 40, **(changes or {})}
@@ -96,6 +96,8 @@ link.replace(root / 'current')
         "cc_remote/claude_service/wire.py": b"VERSION = 1\n",
         f"deploy/install-{installation.role}.sh": installer.encode(),
     }
+    if can_migrate_claude:
+        files["deploy/claude_service_upgrade.py"] = b"# fixture for a migration-capable bundle"
     with tarfile.open(mirror / filename, "w:gz") as archive:
         for name, data in files.items():
             info = tarfile.TarInfo(f"{prefix}/{name}")
@@ -314,13 +316,14 @@ def test_newer_release_upgrades_protocol_without_an_extra_flag(tmp_path, monkeyp
     assert len(json.loads(marker.read_text())) == 1
 
 
-def test_sdk_change_does_not_restart_an_independent_service(tmp_path, monkeypatch):
+@pytest.mark.parametrize("can_migrate", [False, True])
+def test_sdk_change_reaches_only_a_migration_capable_installer(tmp_path, monkeypatch, can_migrate):
     installation = _installation(tmp_path, monkeypatch)
     (installation.release / "requirements-wrapper.lock").write_text("claude-agent-sdk==0.2.150\n")
-    mirror, marker, _ = _bundle(tmp_path, installation)
+    mirror, marker, _ = _bundle(tmp_path, installation, can_migrate_claude=can_migrate)
     monkeypatch.setenv("CC_REMOTE_RELEASE_BASE_URL", mirror.as_uri())
-    assert main(["update", "--version", "4.0.1", "--allow-protocol-change"]) == 1
-    assert not marker.exists()
+    assert main(["update", "--version", "4.0.1", "--allow-protocol-change"]) == (0 if can_migrate else 1)
+    assert marker.exists() == can_migrate
 
 
 def test_installer_failure_is_not_retried_or_reported_as_success(tmp_path, monkeypatch):
@@ -617,6 +620,50 @@ def test_failed_registration_restores_the_previous_command(tmp_path, monkeypatch
     with pytest.raises(OSError, match="disk failure"):
         install_cli(installation.root, destination, role="wrapper", user="service-user")
     assert destination.read_bytes() == previous
+
+
+@pytest.mark.parametrize('role', ['wrapper', 'relay'])
+def test_registration_provisions_updates_without_a_separate_enable_step(tmp_path, monkeypatch, role):
+    from deploy import ui_update_job
+    from deploy import linux_service
+    installation = _installation(tmp_path, monkeypatch, role=role,
+                                 system='darwin' if role == 'wrapper' else 'linux')
+    source = installation.release / 'bin/cc-remote'
+    source.parent.mkdir()
+    source.write_bytes((ROOT / 'scripts/cc-remote').read_bytes())
+    (installation.release / 'deploy').mkdir()
+    (installation.release / 'deploy/ui_update_job.py').touch()
+    configured = []
+    monkeypatch.setattr(linux_service, 'trusted', lambda *_: None)
+    monkeypatch.setattr(ui_update_job, 'configure', lambda root, **kwargs: configured.append((root, kwargs)))
+    destination = tmp_path / 'bin/cc-remote'
+    options = {'user': 'service-user'} if role == 'wrapper' else {'domain': 'remote.example.test'}
+    install_cli(installation.root, destination, role=role, **options)
+    assert configured == [(installation.root, {'enabled': True, 'control_socket': None})]
+    (installation.root / 'ui-update-policy.json').write_text('{"enabled": false}')
+    if role == 'wrapper':
+        monkeypatch.setattr(cli_installer.sys, 'platform', 'darwin')
+    install_cli(installation.root, destination, role=role, **options)
+    assert len(configured) == 1
+
+
+def test_update_provision_failure_restores_previous_registration(tmp_path, monkeypatch):
+    from deploy import ui_update_job
+    installation = _installation(tmp_path, monkeypatch)
+    source = installation.release / 'bin/cc-remote'
+    source.parent.mkdir()
+    source.write_bytes((ROOT / 'scripts/cc-remote').read_bytes())
+    destination = tmp_path / 'bin/cc-remote'
+    install_cli(installation.root, destination, role='wrapper', user='service-user')
+    original = destination.read_bytes()
+    metadata = (installation.root / 'installation.json').read_bytes()
+    (installation.release / 'deploy').mkdir()
+    (installation.release / 'deploy/ui_update_job.py').touch()
+    monkeypatch.setattr(ui_update_job, 'configure', lambda *_args, **_kw: (_ for _ in ()).throw(ValueError('setup failed')))
+    with pytest.raises(ValueError, match='setup failed'):
+        install_cli(installation.root, destination, role='wrapper', user='service-user', service_label='test.wrapper')
+    assert destination.read_bytes() == original
+    assert (installation.root / 'installation.json').read_bytes() == metadata
 
 
 def test_explicit_macos_registration_binds_existing_root_and_launch_agent(tmp_path, monkeypatch):

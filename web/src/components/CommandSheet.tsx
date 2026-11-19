@@ -13,7 +13,8 @@ interface Props {
   open: boolean;
   kind: "commands" | "models" | "efforts" | "perms";
   engine?: "claude" | "codex" | "dsh";
-  catalog?: Catalog;   // engine-reported models/efforts; falls back to data.ts
+  catalog?: Catalog;
+  onRequestModels?: () => void;
   // command mode: the token typed after "/" in the composer (prefix filter).
   // There is NO input box in this sheet anymore — the composer textarea is the
   // single input, and this palette is a live suggestion overlay driven by it.
@@ -35,7 +36,7 @@ interface Props {
 }
 
 export function CommandSheet({
-  open, kind, engine, catalog, dsh, dshPermissions, filter = "", onClose, onPickCommand,
+  open, kind, engine, catalog, onRequestModels, dsh, dshPermissions, filter = "", onClose, onPickCommand,
   currentModel, onPickModel, currentEffort, onPickEffort, currentPerm,
   onPickPerm, onUseDefaultPerm, currentPermissionProfile, permissionProfiles,
   onPickPermissionProfile, currentWebSearch, onPickWebSearch,
@@ -172,7 +173,14 @@ export function CommandSheet({
               )}
             </>
           ) : isEffortMode ? (
-            EFFORTS.map((ef) => (
+            EFFORTS.length === 0 ? <>
+              <div className="cmd-empty" role="status">{MODELS.some(model => model.id === currentModel)
+                ? "当前模型未提供可选思考强度。" : "暂未读取到当前模型的思考强度。"}</div>
+              {onRequestModels && <button type="button" className="cmd" onClick={onRequestModels}>
+                <span className="cmd-ic"><Icon name="refresh" size={17} /></span>
+                <span className="cmd-tx"><span className="cmd-nm">重新读取模型列表</span></span>
+              </button>}
+            </> : EFFORTS.map((ef) => (
               <button
                 key={ef.id}
                 className={"cmd" + (
@@ -190,14 +198,23 @@ export function CommandSheet({
                   : <span className="cmd-kbd" />}
               </button>
             ))
+          ) : MODELS.length === 0 ? (
+            <>
+              <div className="cmd-empty" role="status">暂未读取到模型列表。</div>
+              {onRequestModels && <button type="button" className="cmd" onClick={onRequestModels}>
+                <span className="cmd-ic"><Icon name="refresh" size={17} /></span>
+                <span className="cmd-tx"><span className="cmd-nm">重新读取模型列表</span></span>
+              </button>}
+            </>
           ) : (
             MODELS.map((m) => (
               <button
                 key={m.id}
                 className={"cmd" + (m.id === currentModel ? " sel" : "")}
+                aria-pressed={m.id === currentModel}
                 onClick={() => onPickModel?.(m.id)}
               >
-                <span className="cmd-ic"><Icon name={m.ic} size={17} /></span>
+                {engine === "dsh" && <span className="cmd-ic"><Icon name={m.ic} size={17} /></span>}
                 <span className="cmd-tx">
                   <span className="cmd-nm">{m.name}</span>
                   <span className="cmd-ds">{m.ds}</span>

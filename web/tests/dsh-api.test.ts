@@ -93,6 +93,20 @@ try {
   const clearing = goals.clear("codex-a");
   goals.reset();
   await assert.rejects(clearing, /连接已切换/);
+
+  const { terminalKey, modifyTerminalInput } = await harness.ssrLoadModule("/src/dsh-terminal-keyboard.ts");
+  const normal = { ctrl: false, alt: false, shift: false };
+  const terminal = { modes: { applicationCursorKeysMode: false } };
+  assert.equal(terminalKey(terminal, "ArrowUp"), "\x1b[A");
+  terminal.modes.applicationCursorKeysMode = true;
+  assert.equal(terminalKey(terminal, "ArrowLeft"), "\x1bOD");
+  assert.equal(terminalKey(terminal, "Shift+Tab"), "\x1b[Z");
+  assert.equal(modifyTerminalInput("c", { ...normal, ctrl: true }), "\x03");
+  assert.equal(modifyTerminalInput("[", { ...normal, ctrl: true }), "\x1b");
+  assert.equal(modifyTerminalInput("\t", { ...normal, shift: true }), "\x1b[Z");
+  assert.equal(modifyTerminalInput("b", { ...normal, alt: true }), "\x1bb");
+  assert.equal(modifyTerminalInput("\x1bOD", { ...normal, alt: true, ctrl: true }), "\x1b[1;7D");
+  assert.equal(modifyTerminalInput("中文", normal), "中文");
   console.log("DSH private reads, cancellation, transport scope, mentions and download: passed");
 } finally {
   await harness.close();

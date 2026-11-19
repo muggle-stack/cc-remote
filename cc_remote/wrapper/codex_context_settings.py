@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import time
 
 
 # Codex 0.154.0 ModelInfo::auto_compact_token_limit caps the trigger at
@@ -79,6 +80,8 @@ class NativeContextSettings:
         self.applied_model: str | None = None
         self.pending = False
         self.apply_attempted = False
+        self.attempted_at: float | None = None
+        self.attempted_model: str | None = None
         self.error: str | None = None
         self.lock = asyncio.Lock()
 
@@ -87,11 +90,66 @@ class NativeContextSettings:
         # Pending describes confirmation, not permission to detach again.
         return self.pending and not self.apply_attempted
 
-    def mark_attempted(self) -> None:
+    def mark_attempted(self, model: str | None = None) -> None:
         """Consume the automatic attempt without claiming native acceptance."""
         self.apply_attempted = True
+        self.attempted_at = time.time()
+        self.attempted_model = model
         if self.pending:
             self.error = UNCONFIRMED_CONTEXT_MESSAGE
+
+    async def observe_native_usage(self, handle, *, capacity: int,
+                                   threshold: int | None, observed_at: float | None,
+                                   usage: dict) -> bool:
+        """Confirm effective values from a fresh, source-validated native sample.
+
+        A shared resume has no config receipt. Its later runtime can still prove
+        the requested capacity and trigger are active, regardless of which
+        subscriber caused the reload. Pre-resume replay cannot establish this.
+        """
+        if (not self.pending or not self.apply_attempted
+                or self.error != UNCONFIRMED_CONTEXT_MESSAGE
+                or self.attempted_at is None or observed_at is None
+                or observed_at <= self.attempted_at
+                or not self.attempted_model or self.attempted_model != handle.model):
+            return False
+        selection = (self.max_tokens, self.window, self.threshold, self.attempted_at)
+        identity = (handle.thread_id, handle.model, handle._generation, handle.cwd)
+        bounds = await asyncio.to_thread(model_context_bounds, handle.model, handle.codex_home)
+        if bounds is None:
+            return False
+        window, expected_threshold = self.window, self.threshold
+        if self.max_tokens is None:
+            try:
+                result = await handle._request("config/read", {
+                    "cwd": handle.cwd, "includeLayers": False,
+                })
+                config = result["config"]
+                configured_window = config.get("model_context_window")
+                window = (configured_window if type(configured_window) is int
+                          and configured_window > 0 else bounds.default_window)
+                window = min(window, bounds.max_window)
+                configured_threshold = config.get("model_auto_compact_token_limit")
+                expected_threshold = window * _NATIVE_COMPACT_PERCENT // 100
+                if type(configured_threshold) is int and configured_threshold > 0:
+                    expected_threshold = min(expected_threshold, configured_threshold)
+                if config.get("model_auto_compact_token_limit_scope") not in {None, "total"}:
+                    return False
+            except Exception:
+                return False
+        if (window is None or capacity != bounds.effective_window(window)
+                or threshold != expected_threshold
+                or identity != (handle.thread_id, handle.model, handle._generation, handle.cwd)
+                or handle.last_token_usage is not usage or handle.context_window != capacity
+                or selection != (self.max_tokens, self.window, self.threshold, self.attempted_at)
+                or not self.pending or self.error != UNCONFIRMED_CONTEXT_MESSAGE):
+            return False
+        self.applied_window = self.window
+        self.applied_effective_window = capacity
+        self.applied_threshold = threshold
+        self.applied_model = handle.model
+        self.pending, self.error = False, None
+        return True
 
     async def confirm_applied(self, handle) -> None:
         """Keep capacity from the accepted configuration separate from old usage.
@@ -135,6 +193,8 @@ class NativeContextSettings:
         self.threshold = None
         self.pending = selected or max_tokens is not None
         self.apply_attempted = False
+        self.attempted_at = None
+        self.attempted_model = None
 
     def config(self) -> dict:
         if self.max_tokens is None or self.threshold is None or self.window is None:
@@ -163,6 +223,8 @@ class NativeContextSettings:
             self.window, self.threshold = window, threshold
             self.pending = True
             self.apply_attempted = False
+            self.attempted_at = None
+            self.attempted_model = None
         return self.config()
 
     async def select(self, handle, max_tokens: int | None) -> None:
@@ -175,15 +237,16 @@ class NativeContextSettings:
         self.threshold = bounds.compact_limit(window) if window is not None else None
         self.pending = True
         self.apply_attempted = False
+        self.attempted_at = None
+        self.attempted_model = None
         self.error = None
 
     async def apply(self, handle) -> bool:
         """Resubscribe with config and let native guards reload an idle thread.
 
-        A subscribed thread silently ignores resume config (verified on 0.153.4).
+        A subscribed thread silently ignores resume config (verified on 0.167.0).
         Shared resume has no request-bound context configuration receipt, so
-        even an apparent reload must leave the change pending. Only a connect
-        path that can prove it accepted these settings may clear pending.
+        an apparent reload stays pending until the runtime values confirm it.
         Each selection gets one automatic attempt; an unconfirmable or failed
         attempt must not repeatedly detach at idle/query boundaries.
         """
@@ -210,7 +273,7 @@ class NativeContextSettings:
                 return False
             # Once detachment starts, even a lost response is an uncertain
             # result. Keep pending, but require an explicit save to retry.
-            self.mark_attempted()
+            self.mark_attempted(handle.model)
             try:
                 await handle._request("thread/unsubscribe", {"threadId": sid})
             except Exception:

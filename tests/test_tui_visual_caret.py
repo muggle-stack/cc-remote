@@ -1,6 +1,8 @@
 """Visual's painted caret must be inside the exact inclusive yank range."""
 
 import pytest
+from textual import events
+from textual.keys import key_to_character
 
 from tests.test_tui_vim_shared import make_app, open_surface
 
@@ -21,34 +23,35 @@ def painted_cursor(widget):
 @pytest.mark.parametrize(
     "surface", ["chat", "draft", "report", "form", "search"]
 )
-@pytest.mark.parametrize(
-    "text,start,moves,caret,copied",
-    [
-        ("abcd", (0, 0), (), "a", "a"),
-        ("abcd", (0, 0), ("l",), "b", "ab"),
-        ("abc", (0, 0), ("l", "l"), "c", "abc"),
-        ("abcd", (0, 2), ("h", "h"), "a", "abc"),
-        ("中文字符", (0, 0), ("l", "l"), "字", "中文字"),
-        ("abc\ndef", (0, 0), ("j", "l"), "e", "abc\nde"),
-    ],
-)
-async def test_visible_character_is_also_copied(
-    surface, text, start, moves, caret, copied
-):
+async def test_visible_character_is_also_copied(surface, subtests):
     app = make_app()
     async with app.run_test(size=(80, 30)) as pilot:
         widget = await open_surface(app, surface)
-        widget.load_text(text)
-        widget.set_mode("NORMAL")
-        widget.move_cursor(start)
-        await pilot.press("v", *moves)
         await pilot.pause()
-        assert painted_cursor(widget) == caret
-        assert widget._cursor_offset == (
-            widget.wrapped_document.location_to_offset(widget.visual_cursor)
-        )
-        await pilot.press("y")
-        assert app.clipboard == copied
+        for text, start, moves, caret, copied in [
+            ("abcd", (0, 0), (), "a", "a"),
+            ("abcd", (0, 0), ("l",), "b", "ab"),
+            ("abc", (0, 0), ("l", "l"), "c", "abc"),
+            ("abcd", (0, 2), ("h", "h"), "a", "abc"),
+            ("中文字符", (0, 0), ("l", "l"), "字", "中文字"),
+            ("abc\ndef", (0, 0), ("j", "l"), "e", "abc\nde"),
+        ]:
+            with subtests.test(text=text, start=start, moves=moves):
+                widget.load_text(text)
+                widget.set_mode("NORMAL")
+                widget.move_cursor(start)
+                app.copy_to_clipboard("")
+                # Keep real widget dispatch and painting for every boundary.
+                # App-level routing on all surfaces is covered in vim_shared.
+                for key in ("v", *moves):
+                    await widget._on_key(events.Key(key, key_to_character(key)))
+                await pilot.pause()
+                assert painted_cursor(widget) == caret
+                assert widget._cursor_offset == (
+                    widget.wrapped_document.location_to_offset(widget.visual_cursor)
+                )
+                await widget._on_key(events.Key("y", "y"))
+                assert app.clipboard == copied
 
 
 @pytest.mark.asyncio

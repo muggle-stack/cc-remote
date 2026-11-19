@@ -374,7 +374,7 @@ def test_raster_detection_preserves_external_authorization(tmp_path):
 
 
 def test_office_preview_converts_inside_ephemeral_sandbox(tmp_path, monkeypatch):
-    source = tmp_path / "deck.pptx"
+    source = tmp_path / "deck.docx"
     source.write_bytes(b"office-source")
     machine, _ = _mk_machine()
 
@@ -400,10 +400,10 @@ def test_office_preview_converts_inside_ephemeral_sandbox(tmp_path, monkeypatch)
     monkeypatch.setattr(
         type(machine), "_run_office_conversion", classmethod(fake_convert))
 
-    preview = machine._read_file_preview(str(tmp_path), "deck.pptx")
+    preview = machine._read_file_preview(str(tmp_path), "deck.docx")
 
     assert preview["format"] == "pdf"
-    assert preview["converted_from"] == "pptx"
+    assert preview["converted_from"] == "docx"
     assert preview["data"] == b"%PDF-1.7\nconverted"
     assert preview["size"] == len(b"office-source")
     assert list(tmp_path.iterdir()) == [source]

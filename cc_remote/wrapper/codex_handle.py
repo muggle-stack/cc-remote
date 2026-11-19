@@ -29,12 +29,21 @@ import os
 from pathlib import Path
 import re
 import signal
+import sqlite3
 import sys
 import time
 from collections import OrderedDict, deque
 from typing import Any, Awaitable, Callable, Optional
 
 from cc_remote import __version__
+from cc_remote.wrapper.artifact_inspection import SERVER_NAME as ARTIFACT_PREVIEW_SERVER
+from cc_remote.wrapper.artifact_inspection import (
+    CodexArtifactScope,
+    bind_codex_scope,
+    codex_mcp_config,
+    discard_pending_codex_scope,
+    prepare_codex_scope,
+)
 from cc_remote.wrapper.rollout_io import rollout_open, rollout_size
 from cc_remote.log import logger
 from cc_remote.wrapper.token_usage import CodexUsageTracker
@@ -155,6 +164,7 @@ _WORK_DISABLED_FEATURES = (
     "hooks",
     "memories",
     "multi_agent",
+    "multi_agent_v2",
     "personality",
     "plugin_sharing",
     "plugins",
@@ -1359,6 +1369,7 @@ def _openai_http_resume_thread_config() -> dict[str, Any]:
 
 def _code_thread_config(
     *, http_only_resume: bool, web_search: Optional[str],
+    artifact_scope: CodexArtifactScope | None = None,
 ) -> Optional[dict[str, Any]]:
     """Compose independent Code-time overrides without losing either one."""
     config: dict[str, Any] = {}
@@ -1366,6 +1377,8 @@ def _code_thread_config(
         config.update(_openai_http_resume_thread_config())
     if web_search:
         config["web_search"] = web_search
+    if artifact_scope is not None:
+        config["mcp_servers"] = {ARTIFACT_PREVIEW_SERVER: codex_mcp_config(artifact_scope)}
     return config or None
 
 
@@ -1495,6 +1508,7 @@ def _work_thread_config(
 
     return {
         "features": {name: False for name in _WORK_DISABLED_FEATURES},
+        "agents": {"enabled": False},
         # Work artifacts may legitimately be called AGENTS.md.  They are data,
         # not a route for re-introducing Code/project instructions.
         "project_doc_max_bytes": 0,
@@ -1531,6 +1545,8 @@ class CodexHandle:
         )
         self.proc: Optional[asyncio.subprocess.Process] = None
         self.thread_id: Optional[str] = None
+        self._artifact_scope: CodexArtifactScope | None = None
+        self.model_provider: Optional[str] = None
         # Separate native fork lifetime from this disposable transport. A proxy
         # reconnect can preserve an ephemeral thread; replacing its server cannot.
         self._ephemeral_thread_id: Optional[str] = None
@@ -2336,11 +2352,22 @@ class CodexHandle:
         if not connected:  # pragma: no cover - the attempt list is never empty
             raise RuntimeError("unable to start Codex app-server transport")
         bound_thread_id: Optional[str] = None
+        artifact_scope = None
+        self._artifact_scope = None
         context_config = await self.context_settings.validated_config(self) if not self.work_mode else {}
         try:
             if control_only:
                 log.info("codex control connection established", cwd=self._cwd)
                 return
+            state_dir = getattr(self.cfg, "state_dir", None)
+            if not self.work_mode and state_dir is not None:
+                account = os.path.realpath(child_env.get("CODEX_HOME") or Path.home() / ".codex")
+                try:
+                    artifact_scope = await asyncio.to_thread(
+                        prepare_codex_scope, Path(state_dir), account, None if fork else resume_id,
+                    )
+                except (OSError, ValueError, sqlite3.Error) as exc:
+                    log.warning("Codex artifact inspection unavailable", error_type=type(exc).__name__)
             if self.work_mode:
                 # Inspect the effective native runtime rather than guessing at
                 # user-configured skill and MCP names.  Failure is fatal: silently
@@ -2379,6 +2406,7 @@ class CodexHandle:
                     web_search=(
                         None if self.work_mode else self.web_search_override
                     ),
+                    artifact_scope=artifact_scope,
                 )
                 if code_config is not None:
                     fork_params["config"] = code_config
@@ -2450,6 +2478,7 @@ class CodexHandle:
                     code_config = _code_thread_config(
                         http_only_resume=http_only_resume,
                         web_search=self.web_search_override,
+                        artifact_scope=artifact_scope,
                     )
                     if code_config is not None:
                         resume_params["config"] = code_config
@@ -2502,10 +2531,13 @@ class CodexHandle:
                     params["model"] = self.model
                 if self.permission_profile:
                     params["permissions"] = self.permission_profile
-                if not self.work_mode and self.web_search_override:
-                    params["config"] = {
-                        "web_search": self.web_search_override,
-                    }
+                if not self.work_mode:
+                    code_config = _code_thread_config(
+                        http_only_resume=False, web_search=self.web_search_override,
+                        artifact_scope=artifact_scope,
+                    )
+                    if code_config is not None:
+                        params["config"] = code_config
                 if context_config:
                     params.setdefault("config", {}).update(context_config)
                 if self.work_mode:
@@ -2531,6 +2563,8 @@ class CodexHandle:
                     authoritative = dict(res)
                     authoritative.pop("reasoningEffort", None)
                 self._apply_thread_settings(authoritative)
+                if http_only_resume:
+                    self.model_provider = "openai"
                 if resume_id and not fork and preserve_controls:
                     # Some generations echo config-derived defaults even when
                     # resume overrides were accepted. Keep the next turn pinned
@@ -2569,7 +2603,21 @@ class CodexHandle:
                     raise _CodexDaemonGenerationChanged(
                         "Codex app-server changed while binding its thread"
                     )
+            if artifact_scope is not None:
+                self._artifact_scope = artifact_scope
+                try:
+                    await asyncio.to_thread(
+                        bind_codex_scope, artifact_scope, self.thread_id, self._cwd,
+                    )
+                except (OSError, ValueError, sqlite3.Error) as exc:
+                    log.warning("Codex artifact workspace unavailable", error_type=type(exc).__name__)
         except BaseException as exc:
+            if artifact_scope is not None:
+                try:
+                    await asyncio.to_thread(discard_pending_codex_scope, artifact_scope)
+                except (OSError, sqlite3.Error) as cleanup_error:
+                    log.warning("Codex artifact scope cleanup failed",
+                                error_type=type(cleanup_error).__name__)
             # initialize is not the complete connection boundary: resume/start
             # and sticky settings still target the same daemon child. If that
             # child is replaced after initialize, rebind the already-known
@@ -2626,7 +2674,7 @@ class CodexHandle:
         # request applied its overrides: another client's same-thread reload can
         # emit even a complete notLoaded -> idle cycle while our RPC is pending.
         # The native resume response exposes no context configuration receipt,
-        # so shared resumes stay pending even after an apparent cold reload.
+        # so shared resumes need a later source-validated runtime sample.
         # Start and fresh private resume have no competing cache entry; fork
         # does not submit context_config and cannot confirm it either.
         if not (fork and resume_id) and self.context_settings.pending and (
@@ -2639,7 +2687,7 @@ class CodexHandle:
                 # This resume submitted the preference, including on a cold
                 # attach. Lack of a receipt must not trigger another reload at
                 # every idle/query boundary. A new explicit save can retry.
-                self.context_settings.mark_attempted()
+                self.context_settings.mark_attempted(self.model)
         if (self.context_settings.applied_model is not None
                 and self.context_settings.applied_model == self.model
                 and self.context_window is None):
@@ -4705,6 +4753,13 @@ class CodexHandle:
         current UI receives their lossless-compatible ``on-request`` projection.
         """
         self._thread_settings_revision += 1
+        thread = settings.get("thread")
+        provider = settings.get("modelProvider")
+        if not provider and isinstance(thread, dict):
+            provider = thread.get("modelProvider")
+        if (isinstance(provider, str) and provider.strip() and len(provider) <= 256
+                and not any(ord(char) < 32 for char in provider)):
+            self.model_provider = provider.strip()
         cwd = settings.get("cwd")
         if (isinstance(cwd, str) and os.path.isabs(cwd)
                 and 0 < len(cwd) <= 4096):
@@ -4846,7 +4901,8 @@ class CodexHandle:
         async with self._thread_settings_lock:
             settings: dict[str, Any] = {"model": model}
             if normalize_service_tier(self.service_tier) != "default":
-                catalog = await codex_catalog(codex_home=self.codex_home)
+                catalog = await codex_catalog(
+                    codex_home=self.codex_home, model_provider=self.model_provider)
                 try:
                     tier = resolve_service_tier(model, self.service_tier, catalog)
                 except ValueError:
@@ -4886,6 +4942,8 @@ class CodexHandle:
             raise RuntimeError(
                 "Codex app-server did not confirm the requested cwd"
             )
+        if self._artifact_scope is not None and self.thread_id is not None:
+            await asyncio.to_thread(bind_codex_scope, self._artifact_scope, self.thread_id, effective)
         log.info(
             "codex thread cwd set",
             requested=target,
@@ -4894,32 +4952,24 @@ class CodexHandle:
         )
         return effective
 
-    async def set_effort(self, effort: str) -> bool:
-        if not isinstance(effort, str) or not effort:
+    async def set_effort(self, effort: Optional[str]) -> bool:
+        if effort is not None and (not isinstance(effort, str) or not effort):
             raise ValueError("Codex effort must be non-empty")
         authoritative = await self._update_thread_settings(
             effort=effort, wait_for_notification=True)
         if not authoritative:
-            self.effort = effort
-            self.applied_effort = effort
-            self.display_effort = effort
-            self.display_effort_model = self.model
-            self.display_effort_cwd = (
-                os.path.realpath(self._cwd)
-                if isinstance(self._cwd, str) and self._cwd else None
-            )
-            self.display_effort_generation = self._generation
-            self._display_effort_retry_at = None
+            self._apply_thread_settings({"effort": effort})
         log.info("codex thread effort set", requested=effort,
                  applied=self.effort)
         return authoritative
 
     async def set_service_tier(self, tier: Optional[str]) -> None:
         async with self._thread_settings_lock:
-            scope = (self.model, self.thread_id, self._generation)
-            catalog = (await codex_catalog(codex_home=self.codex_home)
+            scope = (self.model, self.model_provider, self.thread_id, self._generation)
+            catalog = (await codex_catalog(
+                codex_home=self.codex_home, model_provider=self.model_provider)
                        if normalize_service_tier(tier) != "default" else [])
-            if scope != (self.model, self.thread_id, self._generation):
+            if scope != (self.model, self.model_provider, self.thread_id, self._generation):
                 raise ValueError("模型或会话已变化，请重新选择速度。")
             normalized = resolve_service_tier(self.model, tier, catalog)
             authoritative = await self._update_thread_settings_serialized(
@@ -5638,6 +5688,13 @@ class CodexHandle:
             if estimate is not None:
                 used, threshold = estimate.used_tokens, estimate.threshold_tokens
                 source = "native_estimate"
+                await self.context_settings.observe_native_usage(
+                    self, capacity=win, threshold=threshold,
+                    observed_at=estimate.observed_at, usage=u)
+                if (identity != (self._generation, self.thread_id, self.model, self.context_window)
+                        or self.last_token_usage is not u):
+                    return {"used_tokens": None, "context_window": self.context_window or 0,
+                            "raw": {}, "source": "recent_turn"}
         return {"used_tokens": used, "context_window": win, "raw": u,
                 "source": source, "auto_compact_threshold_tokens": threshold}
 
@@ -7106,7 +7163,10 @@ class CodexHandle:
             # notifications used by this connection. In particular, never let
             # shared-daemon sibling lifecycle bind or mutate this handle.
             return
-        if method in {"thread/readState/changed", "thread/section/changed"}:
+        if method in {
+            "thread/readState/changed", "thread/section/changed",
+            "thread/archived", "thread/unarchived", "thread/deleted",
+        }:
             target = _notification_thread_id(m)
             callback = self.metadata_changed_callback
             if (self._using_daemon_proxy and isinstance(target, str)
@@ -7685,7 +7745,9 @@ def _safe_notice_thread_id(value: Any) -> Optional[str]:
     return None
 
 
-def _stable_notice_id(method: str, payload: dict[str, Any]) -> str:
+def _stable_notice_id(
+    method: str, payload: dict[str, Any], *, recognized: bool = False,
+) -> str:
     # Routing metadata may be unknown during initialize and appear on the same
     # warning later. Keep identity tied to user-visible content so that timing
     # difference cannot create a duplicate bar after thread/start.
@@ -7698,7 +7760,31 @@ def _stable_notice_id(method: str, payload: dict[str, Any]) -> str:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    return f"codex-notice-{hashlib.sha256(canonical).hexdigest()[:24]}"
+    prefix = "codex-notice-diagnostic-" if recognized else "codex-notice-"
+    return f"{prefix}{hashlib.sha256(canonical).hexdigest()[:24]}"
+
+
+def _recognized_notice(method: str, message: str) -> tuple[str, str] | None:
+    """Map known native diagnostics to fixed public copy, never native text."""
+    if method == "warning" and re.match(
+        r"^This session was recorded with model `[^`\r\n]+`"
+        r" but is resuming with `[^`\r\n]+`\.",
+        message,
+    ):
+        return "恢复会话时更换了模型", "当前模型与此前记录的模型不同，可在模型选择器中确认。"
+    if method == "configWarning":
+        keys, separator, _hint = message.partition(
+            ". If you want these settings to apply,",
+        )
+        if (separator
+                and keys.startswith("Ignored unsupported project-local config keys in ")
+                and "notify" in keys.rsplit(": ", 1)[-1].split(", ")):
+            return "项目通知配置被忽略", "notify 需要配置在当前账号的用户级 config.toml。"
+        if (message.startswith("Codex is ignoring ")
+                and any(line.strip().endswith(": `mcp_servers.codex.type` is ignored.")
+                        for line in message.splitlines()[1:])):
+            return "MCP 配置项未识别", "Codex 忽略了 mcp_servers.codex.type，请核对当前版本的 MCP 配置。"
+    return None
 
 
 def _notice_from_notification(
@@ -7763,6 +7849,10 @@ def _notice_from_notification(
 
     if message is None:
         return None
+    recognized = _recognized_notice(str(method), message)
+    if recognized is not None:
+        title, message = recognized
+        detail = None
     public = {
         "severity": severity,
         "category": category,
@@ -7772,7 +7862,7 @@ def _notice_from_notification(
         "thread_id": thread_id,
     }
     return Notice(
-        notice_id=_stable_notice_id(str(method), public),
+        notice_id=_stable_notice_id(str(method), public, recognized=recognized is not None),
         **public,
     )
 

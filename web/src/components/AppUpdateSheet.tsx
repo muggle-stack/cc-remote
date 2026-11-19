@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { Icon } from "../icons";
 import { WEB_BUILD } from "../web-build";
@@ -13,43 +13,100 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
   webUpdate: { version: string | null; updating: boolean; message: string | null; reload: () => Promise<void> };
 }) {
   const [selected, setSelected] = useState<"device" | "server" | null>(null);
+  const [authorization, setAuthorization] = useState(false);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [authorizing, setAuthorizing] = useState(false);
+  const [authorizationError, setAuthorizationError] = useState("");
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const serverMode = !!serverUpdates && (selected === "server" || (selected === null
     && preferServerUpdate(deviceUpdates.data, serverUpdates.data, !!deviceUpdates.pending, !!serverUpdates.pending)));
   const updates = serverMode ? serverUpdates! : deviceUpdates;
   const targetName = serverMode ? "服务器" : deviceName;
   const { data, error, checking, changing, pending, pendingStatus } = updates;
+  const deviceUnsupported = deviceUpdates.data?.managed === false
+    || deviceUpdates.data?.reason === "unsupported" || deviceUpdates.error === "unsupported";
+  const coordinateUpdate = !!serverUpdates && serverUpdates.data?.managed !== false
+    && serverUpdates.error !== "unsupported";
   const job = currentUpdateJob(data);
   const active = !!job && !UPDATE_TERMINAL.has(job.phase);
   const recovering = updates.maintenance && !active;
   const uncertain = active && job.phase === "unknown";
-  const available = newerVersion(data?.latest?.version, data?.current);
-  const target = active ? job.version : pending?.version ?? data?.latest?.version ?? job?.version;
+  const waitingForRelay = active && !serverMode && job.coordinated
+    && (job.phase === "updating_relay" || (uncertain && job.server_phase === "unknown"));
+  const latest = !data?.latest || newerVersion(serverUpdates?.data?.latest?.version, data.latest.version)
+    ? serverUpdates?.data?.latest : data?.latest;
+  const target = active ? job.version : pending?.version ?? latest?.version ?? job?.version;
   const relayVersion = serverUpdates?.data?.relay_version ?? deviceUpdates.data?.relay_version;
+  const available = newerVersion(target, serverMode ? data?.current ?? relayVersion : data?.current)
+    || (!serverMode && coordinateUpdate && newerVersion(target, relayVersion));
   const needsRelay = !serverMode && newerVersion(target, relayVersion);
   const blocked = data?.reason;
-  const canInstall = !!data?.enabled && available && !blocked && !active && !recovering && !checking && !changing;
-  const canCancel = active && ["submitting", "preparing", "downloading", "waiting_network", "waiting_device", "validating", "waiting"].includes(job.phase);
-  const readyPage = !!webUpdate.version && !active && !recovering && !pending;
+  const requiresAuthorization = serverUpdates?.error === "server_forbidden" || error === "server_forbidden";
+  const requiresDeviceAuthorization = !serverMode && data?.managed === true
+    && (blocked === "setup_required" || blocked === "permission_required");
+  const catalogUnavailable = blocked === "network" || blocked === "rate_limited" || blocked === "update_failed";
+  const canInstall = (!!data?.enabled || requiresAuthorization || requiresDeviceAuthorization) && available
+    && (!blocked || catalogUnavailable || requiresDeviceAuthorization) && !active && !recovering && !checking && !changing && !authorizing;
+  const canCancel = waitingForRelay || (active
+    && ["submitting", "preparing", "downloading", "waiting_network", "waiting_device", "validating", "waiting"].includes(job.phase));
+  const readyPage = !!webUpdate.version && !available && !active && !recovering && !pending;
   const succeeded = job?.phase === "succeeded";
   const retryPending = !!pending && pendingStatus !== "unconfirmed";
   const reason = updateReason(pending && pendingStatus === "missing" && error === "outcome_pending" ? null
     : error || (active ? job.reason : blocked || job?.reason));
   const title = recovering ? "正在确认更新进度" : active ? job.phase === "installing" ? `正在安装 ${targetName} 更新` : UPDATE_LABELS[job.phase]
     : pending ? pendingStatus === "missing" ? "更新尚未启动" : "更新请求待确认" : readyPage ? "刷新页面即可使用新版"
-    : available ? `cc-remote v${target}` : succeeded ? "更新已完成"
+    : available ? `cc-remote v${target}` : catalogUnavailable ? "暂时无法检查更新" : succeeded ? "更新已完成"
     : checking ? "正在检查更新" : data?.latest && data.current ? "已是最新版本" : "检查应用更新";
   const eyebrow = recovering ? "正在更新" : active ? uncertain ? "需要确认" : "正在更新" : pending ? checking ? "正在核实" : retryPending ? "可以重试" : "需要确认"
     : readyPage && succeeded ? `${targetName}更新完成` : readyPage ? "新版页面已就绪"
-    : available ? "发现新版本" : succeeded ? "更新完成" : "版本状态";
+    : available ? "发现新版本" : catalogUnavailable ? "检查未完成" : succeeded ? "更新完成" : "版本状态";
   const rows = [
-    ...(!serverMode ? [{ label: deviceName, current: deviceUpdates.data?.current, icon: "devices" as const }] : []),
     { label: "服务器", current: relayVersion, icon: "globe" as const },
+    ...(!serverMode ? [{ label: deviceName, current: deviceUpdates.data?.current, icon: "devices" as const }] : []),
     { label: "当前页面", current: WEB_BUILD.version, icon: "code" as const },
   ];
-  const includeRelay = !serverMode && !!data?.allow_relay_update;
+  const includeRelay = !serverMode && (coordinateUpdate || !!data?.allow_relay_update || !!job?.coordinated);
   const steps = serverMode ? ["服务器", "当前页面"] : includeRelay ? ["服务器", deviceName, "当前页面"] : [deviceName, "当前页面"];
-  const step = includeRelay && active && ["installing", "verifying"].includes(job.phase) ? 1 : 0;
-  const highlights = releaseHighlights(data?.latest?.notes ?? "");
+  const step = includeRelay && active && (job.server_phase === "succeeded" || !needsRelay) ? 1 : 0;
+  const highlights = releaseHighlights(latest?.notes ?? "");
+  const serverAvailable = newerVersion(latest?.version, relayVersion);
+  const serverTransaction = !!serverUpdates?.pending
+    || !!(serverUpdates?.data?.job && !UPDATE_TERMINAL.has(serverUpdates.data.job.phase));
+  const showServerAction = !serverMode && !!serverUpdates
+    && (serverTransaction || ((data?.online === false || deviceUnsupported) && serverAvailable && !active && !pending));
+  const authorize = async () => {
+    setAuthorizing(true); setAuthorizationError("");
+    try {
+      const response = await fetch("/api/update-authorization", { method: "POST", credentials: "same-origin",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password }) });
+      if (!mounted.current) return;
+      if (!response.ok) throw new Error("管理员账号或密码不正确，请重试。");
+      setAuthorization(false); setPassword("");
+      const [state, serverState] = await Promise.all([updates.check(), serverMode ? undefined : serverUpdates?.check()]);
+      if (!mounted.current) return;
+      if (!state || (!serverMode && serverUpdates && !serverState)) throw new Error("暂时无法确认更新能力，请重试。");
+      if (!serverMode && state.managed && (state.reason === "setup_required" || state.reason === "permission_required")) await updates.authorize();
+      if (!mounted.current) return;
+      if (uncertain) await updates.recover();
+      else if (target) await updates.start(target, !serverMode && serverState?.managed === true);
+    } catch (error) { if (mounted.current) setAuthorizationError(error instanceof Error ? error.message : "暂时无法验证，请重试。"); }
+    finally { if (mounted.current) setAuthorizing(false); }
+  };
+  const install = async () => {
+    if (requiresAuthorization) { setAuthorization(true); return; }
+    if (requiresDeviceAuthorization) {
+      setAuthorizing(true); setAuthorizationError("");
+      try { await updates.authorize(); }
+      catch { if (mounted.current) setAuthorizationError("请在设备上完成系统管理员认证后重试。"); return; }
+      finally { if (mounted.current) setAuthorizing(false); }
+    }
+    if (!mounted.current) return;
+    if (pending && !retryPending) await updates.check();
+    else if (target) await updates.start(target, !serverMode && coordinateUpdate);
+  };
   return <CenteredSheet open label="检查更新" onClose={onClose} header={false}
     className="app-update-sheet" maxWidth={510} maxHeight={760} minimumHeight={360}>
     <header className="app-update-heading">
@@ -58,10 +115,6 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
         <Icon name="chevrons-right" size={20} /></button>
     </header>
     <div className="sheet-scroll app-update-body">
-      {serverUpdates && <div className="app-update-targets" role="group" aria-label="更新目标">
-        <button type="button" aria-pressed={!serverMode} onClick={() => setSelected("device")}>{deviceName}</button>
-        <button type="button" aria-pressed={serverMode} onClick={() => setSelected("server")}>服务器</button>
-      </div>}
       <div className="app-update-summary" role="status" aria-live="polite">
         <span className={`app-update-eyebrow${succeeded && !active && !available ? " success" : ""}`}>
           {succeeded && !active && !available && <Icon name="check" size={16} />}{eyebrow}</span>
@@ -70,19 +123,21 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
           : pending ? pendingStatus === "missing" ? `${targetName}暂未查到这次更新请求。可以重试，不会重复安装。`
             : "尚未确认上次提交的结果，将保留原请求继续核实。"
           : readyPage ? "新版页面已就绪，可刷新后继续。"
-          : available ? serverMode ? "更新服务器和网页，设备上的版本可随后单独更新。" : "查看本次更新内容，选择合适的时间安装。"
+          : available ? serverMode ? deviceUnsupported ? "更新服务器和网页，当前设备请按原安装方式更新。"
+            : "更新服务器和网页，设备上线后可继续更新。"
+            : includeRelay ? `先更新服务器，再更新 ${deviceName}，最后刷新页面。` : "查看本次更新内容，选择合适的时间安装。"
           : data?.current ? `${targetName} v${data.current}` : "正在读取设备与服务器版本…"}</p>
       </div>
       {active ? <section className="app-update-progress" aria-label="更新进度">
         {!uncertain && !["waiting", "waiting_network", "waiting_device"].includes(job.phase) && <div className="app-update-progress-track" aria-hidden="true"><i /></div>}
         <ol className="app-update-steps">
           {steps.map((label, index) => {
-            const done = !uncertain && (includeRelay && index === 0 ? !needsRelay : index < step);
+            const done = !uncertain && (includeRelay && index === 0
+              ? job.coordinated ? job.server_phase === "succeeded" : !needsRelay : index < step);
             const current = !uncertain && index === step && !done;
             return <li key={index} className={done ? "done" : current ? "current" : ""}>
               <span className="app-update-step-icon">{done && <Icon name="check" size={14} />}</span>
               <span>{label}</span><small>{index === steps.length - 1 ? "待更新后检查" : done ? "已就绪" : uncertain ? "待确认"
-                : includeRelay && index === 0 && index < step ? "待单独更新"
                 : current ? serverMode || !includeRelay || index === 1 ? job.phase === "verifying" ? "验证中" : job.phase === "installing" ? "安装中" : "准备中" : job.phase === "updating_relay" ? "更新中" : "准备中" : "等待中"}</small>
             </li>;
           })}
@@ -101,35 +156,49 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
       {available && !active && !recovering && !pending && highlights.length > 0 && <section className="app-update-highlights">
         <h4>更新亮点</h4><ul>{highlights.map((line, index) => <li key={index}>{line}</li>)}</ul>
       </section>}
-      {reason && <p className="app-update-warning" role="status">{reason}</p>}
+      {reason && !requiresAuthorization && !requiresDeviceAuthorization && <p className="app-update-warning" role="status">{reason}</p>}
+      {requiresDeviceAuthorization && <p className="app-update-help">首次更新时，设备会请求一次系统管理员认证。</p>}
+      {!authorization && authorizationError && <p role="alert" className="app-update-warning">{authorizationError}</p>}
+      {authorization && <form className="app-update-authorization" onSubmit={event => { event.preventDefault(); void authorize(); }}>
+        <p>{serverMode ? "验证管理员身份后即可更新服务器和网页。" : "验证管理员身份后即可一起更新服务器和设备。"}</p>
+        <label>管理员账号<input autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} /></label>
+        <label>管理员密码<input autoComplete="current-password" type="password" value={password} onChange={event => setPassword(event.target.value)} required /></label>
+        {authorizationError && <p role="alert">{authorizationError}</p>}
+        <button type="submit" disabled={authorizing}>{authorizing ? "验证中…" : "验证并继续"}</button>
+      </form>}
       {!active && data?.online === false && <p className="app-update-help">设备当前离线，确认后会保存更新请求，等待设备上线执行。</p>}
       {succeeded && job.cleanup_pending && <p className={job.cleanup_reason === "dependencies" ? "app-update-help" : "app-update-warning"} role="status">
         {cleanupNotice(job.cleanup_reason)}
       </p>}
-      {!serverMode && needsRelay && !data?.allow_relay_update && serverUpdates && <button type="button"
-        className="app-update-later app-update-server-link" onClick={() => setSelected("server")}>前往服务器更新</button>}
+      {showServerAction && <button type="button" className="app-update-server-link" onClick={() => setSelected("server")}>
+        <span>{serverTransaction ? "查看服务器更新进度" : <>仅更新服务器和网页<small>{deviceUnsupported ? "当前设备需按原安装方式更新" : "设备可上线后更新"}</small></>}</span><Icon name="chevron-right" size={18} /></button>}
+      {serverMode && <button type="button" className="app-update-server-link" onClick={() => setSelected("device")}>
+        返回 {deviceName} 更新<Icon name="chevron-right" size={18} /></button>}
       {webUpdate.message && <p className="app-update-warning" role="status">{webUpdate.message}</p>}
       <details className="app-update-details">
         <summary>{active || recovering || pending ? "更新详情" : available ? "查看完整更新说明" : "版本与更新记录"}<Icon name="chevron-right" size={18} /></summary>
         {active && <div className="app-update-record"><p>目标版本 v{job.version}</p><p>当前阶段：{serverMode && job.phase === "installing" ? "安装服务器更新" : UPDATE_LABELS[job.phase]}</p></div>}
         {pending && !active && <p>重试沿用原更新请求；查询进度不会自动启动安装。</p>}
-        {data?.latest?.notes && <div className="app-update-notes"><ReactMarkdown skipHtml
+        {latest?.notes && <div className="app-update-notes"><ReactMarkdown skipHtml
           allowedElements={["p", "h1", "h2", "h3", "h4", "ul", "ol", "li", "strong", "em", "code", "pre", "a", "blockquote", "hr", "br"]}
           components={{ a: ({ children, href }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a> }}
-        >{data.latest.notes}</ReactMarkdown></div>}
+        >{latest.notes}</ReactMarkdown></div>}
       </details>
     </div>
     <footer className="app-update-footer">
-      <p>{readyPage ? "有未保存内容时会先提醒。" : active || recovering ? "收起窗口不会中断更新。"
+      <p>{waitingForRelay ? `取消会撤回 ${deviceName} 的更新，已启动的服务器更新将继续。`
+        : readyPage ? "有未保存内容时会先提醒。" : active || recovering ? "收起窗口不会中断更新。"
         : pending ? "重试会保留原请求，避免重复安装。"
         : canInstall ? data?.busy_count ? `${data.busy_count} 项操作需要先完成，其余任务可继续运行。` : "安装前会检查任务能否安全继续。" : ""}</p>
       <div className="app-update-actions">
-        {canCancel && <button type="button" className="app-update-later" disabled={changing || job.cancel_requested} onClick={() => void updates.cancel()}>取消更新</button>}
-        {uncertain && <button type="button" className="app-update-primary" disabled={changing} onClick={() => void updates.recover()}>{changing ? "核对中…" : "重新核对并恢复"}</button>}
+        {canCancel && <button type="button" className="app-update-later" disabled={changing || job.cancel_requested} onClick={() => void updates.cancel()}>{waitingForRelay ? "取消设备更新" : "取消更新"}</button>}
+        {uncertain && <button type="button" className="app-update-primary" disabled={changing || authorizing}
+          onClick={() => requiresAuthorization && (serverMode || waitingForRelay)
+            ? setAuthorization(true) : void updates.recover()}>{changing ? "核对中…" : "重新核对并恢复"}</button>}
         <button type="button" className="app-update-later" onClick={onClose}>{active || recovering ? "收起，后台继续" : available || readyPage || pending ? "稍后" : "完成"}</button>
         {readyPage ? <button type="button" className="app-update-primary" disabled={webUpdate.updating} onClick={() => void webUpdate.reload()}>{webUpdate.updating ? "检查中…" : "刷新页面"}</button>
           : !active && !recovering && (available || pending) && <button type="button" className="app-update-primary" disabled={pending ? changing || checking : !canInstall}
-            onClick={() => pending && !retryPending ? void updates.check() : target && void updates.start(target)}>{changing ? "提交中…" : pending ? checking ? "核实中…" : retryPending ? "重试更新" : "重新确认" : data?.busy_count && canInstall ? "就绪后更新" : serverMode ? `更新服务器至 v${target}` : `更新到 v${target}`}</button>}
+            onClick={() => void install()}>{authorizing ? "等待设备认证…" : changing ? "提交中…" : pending ? checking ? "核实中…" : retryPending ? "重试更新" : "重新确认" : serverMode ? `更新服务器至 v${target}` : `更新到 v${target}`}</button>}
       </div>
     </footer>
   </CenteredSheet>;

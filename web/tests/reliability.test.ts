@@ -1248,7 +1248,7 @@ assert.match(historyAppSource,
   /const effectiveState = mergeSessionActivityState\([\s\S]*focusedSessionState/,
   "catalog or mirrored native work must paint a running header without granting a local Stop action");
 assert.match(historyAppSource,
-  /liveStates=\{Object\.fromEntries\(state\.sessions\.map[\s\S]*mergeSessionActivityState/,
+  /const liveSessionStates = Object\.fromEntries\(state\.sessions\.map[\s\S]*mergeSessionActivityState[\s\S]*liveStates=\{liveSessionStates\}/,
   "catalog or mirrored native work must paint a running session badge in the sidebar");
 const rewindChatViewSource = readFileSync(resolve(
   process.cwd(), "src/components/ChatView.tsx"), "utf8");
@@ -11135,7 +11135,7 @@ try {
     onCollapse: () => {},
     onDismissNotice: () => {},
   }));
-  assert.match(btwPanelMarkup, /GPT-5\.6 Terra/);
+  assert.match(btwPanelMarkup, /gpt-5\.6-terra/);
   assert.match(btwPanelMarkup, />high</);
   assert.match(btwPanelMarkup, /queued follow-up/);
   assert.match(btwPanelMarkup, /replacement follow-up/);
@@ -17257,6 +17257,10 @@ try {
   const picked: string[] = [];
   const tree = CommandSheet({
     open: true, kind: "models", engine: "codex", onClose: () => {},
+    catalog: { codex: [
+      { id: "gpt-5.6-terra", display_name: "Native Terra", description: "", efforts: [] },
+      { id: "gpt-5.6-luna", display_name: "Native Luna", description: "", efforts: [] },
+    ] },
     onPickModel: (model: string) => { picked.push(model); },
   });
   const clickModelButtons = (node: unknown): void => {
@@ -18212,7 +18216,10 @@ assert.equal(btwEffortFrame.type, "set_effort");
 assert.equal(btwEffortFrame.sid, "btw-pinned");
 assert.equal(btwEffortFrame.effort, "high");
 
-const codexModels = modelsFor("codex");
+const codexModels = modelsFor("codex", { codex: [
+  { id: "gpt-5.6-terra", display_name: "Native Terra", description: "", efforts: [] },
+  { id: "gpt-5.6-luna", display_name: "Native Luna", description: "", efforts: [] },
+] });
 assert.equal(MODELS[0].id, "opus[1m]",
   "offline suggestions keep the native family alias, not a pinned version");
 assert.equal(MODELS[0].name, "Opus");
@@ -18520,7 +18527,7 @@ assert.match(appSource,
   /focusedSid !== sid[\s\S]{0,180}activeBtwSid !== sid/,
   "background sessions outside the focused main and visible BTW stay unable to read files");
 assert.match(btwPanelSource,
-  /<ChatView[\s\S]{0,400}imageAssets=\{p\.imageAssets\}[\s\S]{0,120}onLoadImage=\{p\.onLoadImage\}[\s\S]{0,120}onAuthorizeImage=\{p\.onAuthorizeImage\}/,
+  /<ChatView[\s\S]{0,400}imageAssets=\{p\.imageAssets\}[\s\S]{0,120}onLoadImage=\{visible \? p\.onLoadImage : undefined\}[\s\S]{0,120}onAuthorizeImage=\{p\.onAuthorizeImage\}/,
   "BTW chat rendering must receive the same bounded image authorization channel");
 assert.match(btwPanelSource, /<ChatView[\s\S]{0,100}engine=\{p\.engine\}/,
   "BTW rendering must use its real engine so Codex hook plumbing stays filtered");

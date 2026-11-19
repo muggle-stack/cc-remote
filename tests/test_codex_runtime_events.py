@@ -159,6 +159,46 @@ def test_notice_methods_copy_only_bounded_public_fields():
     asyncio.run(run())
 
 
+@pytest.mark.asyncio
+async def test_recognized_stack_diagnostics_are_distinct_and_deduplicated():
+    delivered = []
+
+    async def capture(event):
+        delivered.append(event)
+
+    handle = CodexHandle(_Cfg(), runtime_event_callback=capture)
+    await handle.activate_runtime_events()
+    for path in ("/private/config.toml", "/private/other/config.toml"):
+        await handle._dispatch({
+            "method": "configWarning",
+            "params": {"summary": (
+                f"Ignored unsupported project-local config keys in {path}: notify. "
+                "If you want these settings to apply, manually set them in your user-level config.toml."
+            ), "path": path},
+        })
+    await handle._dispatch({
+        "method": "configWarning",
+        "params": {"summary": (
+            "Codex is ignoring 1 unrecognized configuration setting. "
+            "Check for typos or deprecated settings.\n"
+            "  project (/private/config.toml): `mcp_servers.codex.type` is ignored."
+        )},
+    })
+    await handle._dispatch({
+        "method": "warning",
+        "params": {"message": (
+            "This session was recorded with model `private-model` but is resuming "
+            "with `gpt-6-luna`. Consider switching back to `private-model`."
+        )},
+    })
+    assert [event.title for event in delivered] == [
+        "项目通知配置被忽略", "MCP 配置项未识别", "恢复会话时更换了模型",
+    ]
+    for event in delivered:
+        assert event.notice_id.startswith("codex-notice-diagnostic-")
+        assert "private" not in serialize(event)
+
+
 def test_rate_update_drops_account_secrets_and_emits_one_reached_notice():
     async def run():
         delivered = []

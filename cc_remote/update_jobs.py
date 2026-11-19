@@ -199,12 +199,16 @@ def public_job(value: dict | None) -> dict | None:
     return {key: value.get(key) for key in (
         "id", "version", "previous", "phase", "reason", "updated_at",
         "created_at", "cleanup_pending", "cleanup_reason", "cancel_requested",
+        "coordinated", "server_phase",
     )}
 
 
 def failure_reason(exc: BaseException) -> str:
     import ssl
-    from urllib.error import URLError
+    from urllib.error import HTTPError, URLError
+    if isinstance(exc, HTTPError) and (exc.code == 429 or (
+            exc.code == 403 and (exc.headers or {}).get("X-RateLimit-Remaining") == "0")):
+        return "rate_limited"
     if isinstance(exc, URLError) and isinstance(exc.reason, BaseException):
         return failure_reason(exc.reason)
     if isinstance(exc, ssl.SSLCertVerificationError):

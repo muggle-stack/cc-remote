@@ -17,6 +17,7 @@ import asyncio
 import os
 from contextlib import asynccontextmanager
 from typing import Any, Awaitable, Callable
+from uuid import uuid4
 
 from claude_agent_sdk import (
     ClaudeSDKClient, ClaudeAgentOptions, PermissionResultDeny,
@@ -35,6 +36,8 @@ from mcp.server import Server
 
 from cc_remote.config import WrapperConfig
 from cc_remote.claude_paths import claude_config_dir
+from cc_remote.wrapper.artifact_inspection import SERVER_NAME as ARTIFACT_PREVIEW_SERVER
+from cc_remote.wrapper.artifact_inspection import make_artifact_server
 from cc_remote.wrapper.claude_settings import save_user_defaults
 from cc_remote.claude_permissions import CLAUDE_PERMISSION_MODES, native_permission_mode
 from cc_remote.claude_steering import (
@@ -57,11 +60,14 @@ from cc_remote.wrapper.claude_rewind import (
 )
 from cc_remote.wrapper.claude_runtime import inspect_claude_runtime
 from cc_remote.wrapper.claude_model_fallback import model_fallback_event
-from cc_remote.wrapper.claude_compaction import compact_context_usage, compact_metadata
+from cc_remote.wrapper.claude_compaction import (
+    ClaudeCompaction, ClaudeCompactionEnd, compact_context_usage, compact_metadata,
+)
 from cc_remote.wrapper.claude_controls import (
     CLAUDE_DEFAULT_AUTO_COMPACT_MODE,
     claude_auto_compact_cli_value,
     valid_claude_auto_compact,
+    validate_claude_auto_compact_window,
     valid_claude_model,
 )
 from cc_remote.wrapper.work_prompt import WORK_SYSTEM_PROMPT
@@ -268,6 +274,8 @@ class SdkHandle:
         self.applied_auto_compact_threshold_tokens: int | None = None
         self.effective_auto_compact_threshold_tokens: int | None = None
         self.raw_context_max_tokens: int | None = None
+        self.model_context_max_tokens: int | None = None
+        self._context_max_model: str | None = None
         # Authoritative selected Claude alias for this session.  The transcript
         # may expose a proxy's upstream model (for example glm-5.2), so recover
         # this from the SDK control plane and preserve it across reconnects.
@@ -417,8 +425,16 @@ class SdkHandle:
         auto_compact_override: tuple[str, int | None] | None = None,
         effort_override: object = _CURRENT_LAUNCH_VALUE,
     ) -> ClaudeAgentOptions:
+        mcp_servers = {}
         if not self.work_mode:
             model_override = normalize_claude_model_selection(model_override)
+            for name, instance in (
+                ("cc-remote-ask", self.ask_server),
+                ("cc_remote_messages", self.message_server),
+                (ARTIFACT_PREVIEW_SERVER, make_artifact_server(cwd) if cwd else None),
+            ):
+                if instance is not None:
+                    mcp_servers[name] = {"type": "sdk", "name": name, "instance": instance}
         code_prompt_append = (
             "You have two MCP tools on the cc-remote-ask server:\n"
             "- `ask_user(question, options)`: ask the user a clarifying question with "
@@ -574,13 +590,7 @@ class SdkHandle:
             # Work asks ordinary clarifying questions in chat; it does not need
             # Code's ask/set-mode MCP schemas. Strict mode also prevents MCP
             # configured outside this explicit SDK invocation from leaking in.
-            mcp_servers=(
-                {} if self.work_mode else
-                {**({"cc-remote-ask": {"type": "sdk", "name": "cc-remote-ask", "instance": self.ask_server}}
-                    if self.ask_server is not None else {}),
-                 **({"cc_remote_messages": {"type": "sdk", "name": "cc_remote_messages", "instance": self.message_server}}
-                    if self.message_server is not None else {})}
-            ),
+            mcp_servers=mcp_servers,
             strict_mcp_config=self.work_mode,
             # Empty custom agents plus safe mode keeps installed/global agent
             # definitions out; the explicit tool allowlist also omits Agent.
@@ -1424,8 +1434,28 @@ class SdkHandle:
             mode, threshold_tokens)
         if checked_mode != mode or checked_threshold != threshold_tokens:
             raise ValueError("invalid Claude autocompact configuration")
+        if self._context_max_model == self.model:
+            validate_claude_auto_compact_window(mode, threshold_tokens, self.model_context_max_tokens)
         self.auto_compact_mode = checked_mode
         self.auto_compact_threshold_tokens = checked_threshold
+
+    async def get_model_context_window(self, cwd: str) -> int | None:
+        from cc_remote.wrapper.claude_models import claude_context_window
+
+        model, revision = self.model, self._context_revision
+        if not model:
+            return None
+        maximum = await claude_context_window(
+            claude_bin=self.cfg.claude_bin, model=model, cwd=cwd,
+            config_dir=self.claude_config_dir, isolate_account_env=self.isolate_account_env,
+            work_only=self.work_mode)
+        if maximum is None:
+            raise ValueError("尚未读取到模型最大窗口，请稍后重试或跟随 Claude")
+        if model != self.model or revision != self._context_revision:
+            return None
+        self.model_context_max_tokens = maximum
+        self._context_max_model = model
+        return maximum
 
     async def get_context_usage(self, *, detail: str = "summary") -> dict:
         """Return the cc session's context window usage (matches CLI /context)."""
@@ -1853,6 +1883,8 @@ class SdkHandle:
         """Read the private SDK queue once for the complete client lifetime."""
         assert self._turn_messages is not None
         assert self._background_messages is not None
+        compaction: ClaudeCompaction | None = None
+        compaction_owner: str | None = None
         try:
             query = getattr(client, "_query", None)
             if query is not None and hasattr(query, "receive_messages"):
@@ -2033,6 +2065,52 @@ class SdkHandle:
                                 )
                             )
 
+                    # Compaction can start before the human echo and finish
+                    # after it. Carry its exact identity across both queues
+                    # without changing their conversation ownership.
+                    if compaction is not None and owner == "managed" and top_level_user:
+                        compaction_owner = "managed"
+                    if isinstance(message, SystemMessage) and isinstance(message.data, dict) and not (
+                        message.data.get("parent_tool_use_id")
+                        or message.data.get("parentToolUseID")
+                    ):
+                        if message.subtype == "status":
+                            if message.data.get("status") == "compacting":
+                                if compaction is None:
+                                    status_id = message.data.get("uuid")
+                                    if not isinstance(status_id, str) or not status_id:
+                                        status_id = str(uuid4())
+                                    compaction = ClaudeCompaction(status_id)
+                                    compaction_owner = (
+                                        "managed" if owner == "managed"
+                                        else self._steers.background_id)
+                                message._cc_compaction = compaction
+                            elif message.data.get("compact_error"):
+                                message._cc_compaction = compaction
+                                compaction = None
+                                compaction_owner = None
+                        elif message.subtype == "compact_boundary":
+                            message._cc_compaction = compaction
+                            compaction = None
+                            compaction_owner = None
+                    elif isinstance(message, ResultMessage):
+                        # A task Result can interleave with the compacting
+                        # response. Only that response's terminal may retire
+                        # the shared operation, including after a human echo.
+                        message._cc_compaction = None
+                        child_result = parse_raw and (
+                            data.get("parent_tool_use_id") or data.get("parentToolUseID"))
+                        owns_compaction = (
+                            owner == "managed" and compaction_owner == "managed"
+                            or owner == "background" and compaction_owner != "managed" and (
+                                compaction_owner in getattr(message, "_cc_background_ends", ())
+                                if compaction_owner is not None
+                                else origin_kind in (None, "human")))
+                        if not child_result and owns_compaction:
+                            message._cc_compaction = compaction
+                            compaction = None
+                            compaction_owner = None
+
                     if owner == "managed":
                         if isinstance(message, ResultMessage) and getattr(message, "_cc_background_ends", ()):
                             # The human Result may also settle task inputs that
@@ -2047,6 +2125,16 @@ class SdkHandle:
                                 release, self._turn_origin_id)
                         if isinstance(message, ResultMessage) and (
                                 intermediate or self._steers.pending):
+                            if message._cc_compaction is not None:
+                                # This response ended, but its accepted steer
+                                # still owns a later response. Project only the
+                                # compact end through the same ordered reader.
+                                compact_end = ClaudeCompactionEnd(
+                                    message._cc_compaction, message.is_error)
+                                for field in ("_cc_service_seq", "_cc_service_ts"):
+                                    if hasattr(message, field):
+                                        setattr(compact_end, field, getattr(message, field))
+                                await self._turn_messages.put(compact_end)
                             # The original response ended just before an accepted
                             # input was consumed. Keep the same sole consumer,
                             # but another task replay is not absorbed by that

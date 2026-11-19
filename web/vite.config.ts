@@ -76,6 +76,19 @@ export default defineConfig({
   server: {
     proxy: {
       "/api": { target: "http://127.0.0.1:8765" },
+      "/v1": {
+        target: "http://127.0.0.1:8765",
+        ws: true,
+        rewriteWsOrigin: true,
+        configure(proxy) {
+          proxy.on("proxyReq", (request, incoming) => {
+            if (incoming.headers.origin === `http://${incoming.headers.host}`) {
+              request.setHeader("Host", "127.0.0.1:8765");
+              request.setHeader("Origin", "http://127.0.0.1:8765");
+            }
+          });
+        },
+      },
       "/ws": {
         target: "ws://127.0.0.1:8765",
         ws: true,

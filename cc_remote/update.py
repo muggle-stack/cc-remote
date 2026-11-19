@@ -423,11 +423,15 @@ def update(*, role: str | None, target_version: str | None, check: bool,
             bundle = download_bundle(installation, version, release_base(repository, version), stage)
             report("validating")
             target = load_manifest(bundle / "release-manifest.json")
-            if installation.role == "wrapper" and _claude_contract(installation.release) != _claude_contract(bundle):
-                raise UpdateError(
-                    "Claude SDK/service compatibility changes in this release; drain native work and "
-                    "follow docs/claude-session-service.md before upgrading. No service was changed"
-                )
+            if installation.role == "wrapper":
+                current_sdk, current_wire = _claude_contract(installation.release)
+                target_sdk, target_wire = _claude_contract(bundle)
+                if (current_wire != target_wire or current_sdk != target_sdk
+                        and not (bundle / "deploy/claude_service_upgrade.py").is_file()):
+                    raise UpdateError(
+                        "Claude SDK/service compatibility changes in this release; use a "
+                        "migration-capable release. No service was changed"
+                    )
             if target["protocol_version"] != installation.manifest["protocol_version"]:
                 print("Protocol upgrade: update remaining devices through maintenance and reload Web/PWA clients.", flush=True)
             fresh = read_installation(installation.root, system, machine)

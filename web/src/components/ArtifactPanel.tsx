@@ -1,6 +1,6 @@
 import { PanelFrame, PanelExpandButton } from "./RightPanelPresentation";
 import { lazy, Suspense, isValidElement, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState,
-  type ComponentPropsWithoutRef, type KeyboardEvent as ReactKeyboardEvent,
+  type ComponentProps, type ComponentPropsWithoutRef, type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import type {
@@ -35,6 +35,7 @@ import { AudioArtifactPreview } from "./AudioArtifactPreview";
 import { ZoomableImage } from "./ZoomableImage";
 import { ArtifactHeader } from "./ArtifactHeader";
 import ArtifactDownload from "./ArtifactDownload";
+import { PanelVisible, RetainedPanelData } from "../right-panel-presentation";
 import { previewImageDimension, rehypePreviewHtml } from "../markdown-preview-html";
 
 const EMPTY_GIT_DIFF_SECTIONS: GitDiffSection[] = [];
@@ -80,6 +81,7 @@ function MarkdownPreviewCode({
 }
 
 const SpreadsheetPreview = lazy(() => import("./SpreadsheetPreview"));
+const PresentationPreview = lazy(() => import("./PresentationPreview"));
 
 function HtmlArtifactPreview({ content, theme }: {
   content: string;
@@ -325,7 +327,16 @@ function PreviewImage({ markdownPath, src, alt, title, width, height, asset, req
   return <span className="preview-image-loading"><span className="thinking"><span/><span/><span/></span> {alt || "正在加载图片"}</span>;
 }
 
-export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
+export function ArtifactPanel(props: ComponentProps<typeof ArtifactContent>) {
+  const live = useContext(RetainedPanelData);
+  const artifact = live && props.artifact.sid
+    ? [live.artifact, ...Object.values(live.retainedArtifacts ?? {})].find(value =>
+      value != null && value.sid === props.artifact.sid && value.requestId === props.artifact.requestId)
+    : props.artifact;
+  return artifact ? <ArtifactContent {...props} artifact={artifact} /> : null;
+}
+
+function ArtifactContent({ artifact, active, hasBtw, onTab, onClose,
   onRefresh, onOpenFile, onLoadPreviewAsset, onAuthorizePreview,
   onSaveMarkdown, onDirtyChange, theme, displayName, machineId, onBack, backLabel }: {
   machineId?: string | null;
@@ -350,6 +361,7 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
   theme?: HtmlPreviewTheme;
 }) {
   const editorRef = useRef<HTMLTextAreaElement>(null);
+  const visible = useContext(PanelVisible);
   const bodyRef = useRef<HTMLDivElement>(null);
   const readingMemory = useContext(ArtifactReadingMemory);
   const artifactKey = `${artifact.sid || ""}:${artifact.file}:${artifact.requestId || ""}`;
@@ -447,26 +459,28 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
   }, [artifact.content, artifact.saveStatus, artifactKey]);
 
   useEffect(() => {
+    if (!visible) return;
     onDirtyChange?.(dirty);
     return () => onDirtyChange?.(false);
-  }, [dirty, onDirtyChange]);
+  }, [dirty, onDirtyChange, visible]);
 
   useEffect(() => {
-    if (!dirty) return;
+    if (!dirty || !visible) return;
     const warn = (event: BeforeUnloadEvent) => {
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [dirty]);
+  }, [dirty, visible]);
 
   useEffect(() => {
     if (artifact.kind !== "md" || mode !== "source" || loading) return;
+    if (!visible) { restoringSource.current = true; return; }
     if (restoringSource.current) { restoringSource.current = false; return; }
     const frame = window.requestAnimationFrame(() => editorRef.current?.focus());
     return () => window.cancelAnimationFrame(frame);
-  }, [artifact.kind, loading, mode]);
+  }, [artifact.kind, loading, mode, visible]);
 
   const canSave = artifact.kind === "md" && !loading && !artifact.error
     && artifact.writable !== false
@@ -510,7 +524,7 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
 
   const sendNextAsset = useCallback(() => {
     const current = requestedAssets.current;
-    if (current.key !== artifactKey || current.active
+    if (!visible || current.key !== artifactKey || current.active
         || !artifact.requestId || !onLoadPreviewAsset) return;
     while (current.queued.length) {
       const path = current.queued.shift()!;
@@ -520,7 +534,7 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
       }
       current.paths.delete(path);
     }
-  }, [artifact.requestId, artifactKey, onLoadPreviewAsset]);
+  }, [artifact.requestId, artifactKey, onLoadPreviewAsset, visible]);
 
   useEffect(() => {
     const current = requestedAssets.current;
@@ -577,9 +591,9 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
   ]);
 
   const title = displayName || artifact.file.split("/").pop()
-    || (["md", "file", "html", "image", "pdf", "audio", "video", "spreadsheet"].includes(artifact.kind) ? "文件预览" : "改动");
+    || (["md", "file", "html", "image", "pdf", "audio", "video", "spreadsheet", "presentation"].includes(artifact.kind) ? "文件预览" : "改动");
   const mermaidFile = artifact.kind === "file" && /\.(?:mmd|mermaid)$/i.test(artifact.file);
-  const renderedArtifact = ["image", "pdf", "audio", "video"].includes(artifact.kind)
+  const renderedArtifact = ["image", "pdf", "audio", "video", "presentation"].includes(artifact.kind)
     || (artifact.kind === "html" && mode === "preview");
   const tabs = hasBtw ? <PanelTabs active={active}
     artifactKind={artifact.kind} hasArtifact hasBtw={hasBtw} onTab={switchPanelTab} /> : null;
@@ -607,7 +621,7 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
     </button>}
     {artifact.kind === "md" && artifact.saveStatus === "saved" && !dirty
       && <span className="markdown-save-state ok">已保存</span>}
-    {["md", "file", "html", "image", "pdf"].includes(artifact.kind)
+    {["md", "file", "html", "image", "pdf", "presentation"].includes(artifact.kind)
       && <ArtifactDownload id={artifactKey} file={displayName || artifact.file} data={artifact.data}
         content={artifact.content} converted={artifact.convertedFrom}
         unavailable={loading ? "正在读取文件…" : artifact.authorization ? "授权后可下载"
@@ -630,6 +644,7 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
         reloadDisabled={loading || artifact.saving} convertedFrom={artifact.convertedFrom}
         tabs={tabs} modes={modes} actions={actions} />}
       <div ref={bodyRef} onScrollCapture={event => {
+        if (!visible) return;
         const target = event.target;
         if (!(target instanceof HTMLElement)) return;
         if (target === bodyRef.current) rememberArtifactReading(readingMemory, artifactKey,
@@ -645,7 +660,7 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
             authorization={artifact.authorization}
             onDecision={onAuthorizePreview} />
         ) : loading ? (
-          <div className="diff-empty"><span className="thinking"><span/><span/><span/></span> {["md", "file", "html", "image", "pdf", "audio", "video", "spreadsheet"].includes(artifact.kind) ? "正在读取文件…" : "正在读取 diff…"}</div>
+          <div className="diff-empty"><span className="thinking"><span/><span/><span/></span> {["md", "file", "html", "image", "pdf", "audio", "video", "spreadsheet", "presentation"].includes(artifact.kind) ? "正在读取文件…" : "正在读取 diff…"}</div>
         ) : artifact.error ? (
           <div className="preview-error"><Icon name="read" size={18} />{artifact.error}</div>
         ) : artifact.kind === "gitdiff" ? (
@@ -698,6 +713,10 @@ export function ArtifactPanel({ artifact, active, hasBtw, onTab, onClose,
             : <HtmlArtifactPreview content={artifact.content || ""} theme={theme} />
         ) : artifact.kind === "spreadsheet" ? (
           <Suspense fallback={<div className="diff-empty">读取表格…</div>}><SpreadsheetPreview key={artifactKey} content={artifact.content || ""} data={artifact.data} title={title} /></Suspense>
+        ) : artifact.kind === "presentation" ? (
+          <Suspense fallback={<div className="diff-empty">正在准备幻灯片预览…</div>}>
+            <PresentationPreview key={artifactKey} data={artifact.data} title={title} />
+          </Suspense>
         ) : artifact.kind === "image" ? (
           <ImageArtifactPreview data={artifact.data} mediaType={artifact.mediaType}
             title={title} />

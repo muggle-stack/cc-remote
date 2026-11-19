@@ -105,18 +105,11 @@ jobs:
         env:
           EXPECTED_UNAME: ${{ matrix.expected_uname }}
         run: test "$(uname -m)" = "$EXPECTED_UNAME"
-      - name: Build Relay web client
-        if: matrix.role == 'relay'
-        uses: actions/setup-node@v6
+      - name: Download Web assets built and tested by CI
+        uses: actions/download-artifact@v4
         with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - name: Materialize Relay web client
-        if: matrix.role == 'relay'
-        run: |
-          npm --prefix web ci
-          npm --prefix web run build
+          name: ci-web-dist
+          path: web/dist
       - name: Build deterministic role bundle
         env:
           RELEASE_ROLE: ${{ matrix.role }}

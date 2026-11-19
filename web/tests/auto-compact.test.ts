@@ -12,7 +12,7 @@ import {
 } from "../src/auto-compact.ts";
 import { clientSlashesFor } from "../src/data.ts";
 import { PROTOCOL_VERSION, type ServerEvent, type CodexContext, type ContextReport } from "../src/protocol.ts";
-import { codexContextPresentation } from "../src/codex-context.ts";
+import { codexContextPresentation, codexContextPresets, formatContextTokens } from "../src/codex-context.ts";
 import { RelayWs } from "../src/ws.ts";
 import { historyContainsTurn, mergeInitialHistory } from "../src/history-merge.ts";
 import type { Turn } from "../src/domain/conversation.ts";
@@ -34,17 +34,17 @@ function checkCodexRuntimePresentation() {
   const lower = codexContextPresentation({ ...setting, max_context_tokens: 300000 }, native);
   assert.equal(lower.capacity, 400000);
   assert.equal(lower.matchesSaved, false);
-  assert.equal(lower.status, "已保存上限 300,000，等待生效");
+  assert.equal(lower.status, "已保存上限 300,000，等待原生确认");
   for (const invalid of [null, { ...native, source: "recent_turn" as const },
     { ...native, available: false }, { ...native, model: "other-model" },
     { ...native, sid: "primary@one" }, { ...native, max_tokens: 0 }]) {
     const presentation = codexContextPresentation(setting, invalid);
     assert.equal(presentation.capacity, null);
     assert.equal(presentation.matchesSaved, false);
-    assert.equal(presentation.status, "已保存上限 400,000，待原生运行数据确认");
+    assert.equal(presentation.status, "已保存上限 400,000，等待原生运行数据");
   }
   assert.equal(codexContextPresentation({ ...setting, max_context_tokens: null }, native).status,
-    "已保存上限 默认值，待原生运行数据确认", "a matching number cannot prove default inheritance");
+    "已保存上限 默认值，等待原生确认", "a matching number cannot prove default inheritance");
   assert.equal(codexContextPresentation({ ...setting, pending: false }, native).status, null);
   const older = { ...setting, applied_max_context_tokens: 300000, applied_threshold_tokens: 284211 };
   assert.equal(codexContextPresentation(older, { ...native, auto_compact_threshold_tokens: null }).threshold, null,
@@ -52,6 +52,13 @@ function checkCodexRuntimePresentation() {
   assert.equal(codexContextPresentation(older, null).capacity, 300000);
 }
 checkCodexRuntimePresentation();
+assert.deepEqual(codexContextPresets(null), []);
+assert.deepEqual(codexContextPresets(19000), []);
+assert.deepEqual(codexContextPresets(300000), [200000]);
+assert.deepEqual(codexContextPresets(828400), [200000, 300000, 400000]);
+assert.equal(formatContextTokens(400000), "400K");
+assert.equal(formatContextTokens(1000000), "1M");
+assert.equal(formatContextTokens(828400), "828,400");
 
 // Claude writes the native /compact user UUID after the boundary, while the
 // live command can finish without echoing that UUID. Both projections still
@@ -117,6 +124,10 @@ assert.equal(parseAutoCompactArgument("99999").ok, false);
 assert.equal(parseAutoCompactArgument("100.0005k").ok, false);
 assert.equal(validAutoCompactThreshold(100_000), true);
 assert.equal(validAutoCompactThreshold(1_000_001), false);
+assert.equal(validAutoCompactThreshold(200_000, 200_000), true);
+assert.equal(validAutoCompactThreshold(500_000, 200_000), false);
+assert.equal(parseAutoCompactArgument("500k", 200_000).ok, false);
+assert.equal(parseAutoCompactArgument("200k", 200_000).ok, true);
 assert.deepEqual(normalizeAutoCompactSelection("custom", null), {
   mode: "inherit", thresholdTokens: null,
 });
@@ -188,7 +199,7 @@ for (const [source, argument, condition] of [
   assert.match(source,
     new RegExp(`if \\(!${argument.replace(".", "\\.")}\\) \\{[\\s\\S]{0,160}setAutoCompactOpen\\(true\\)`),
     "a bare autocompact command must open its hidden editor");
-  assert.ok(source.includes(`parseAutoCompactArgument(${argument})`),
+  assert.ok(source.includes(`parseAutoCompactArgument(${argument}`),
     "a parameterized autocompact command must apply directly");
 }
 
@@ -299,6 +310,51 @@ const reducerHarness = await createServer({
   server: { middlewareMode: true, watch: null },
 });
 try {
+  const { default: CodexContextControl } = await reducerHarness.ssrLoadModule(
+    "/src/components/CodexContextControl.tsx");
+  const defaultContext: CodexContext = {
+    v: PROTOCOL_VERSION, ts: 2, type: "codex_context", sid: "context-ui", model: "fixture",
+    max_context_tokens: null, applied_max_context_tokens: 475000,
+    applied_threshold_tokens: 450000, model_max_tokens: 872000, limit_tokens: 828400,
+    context_window_tokens: null, pending: false, mutable: true, error: null,
+  };
+  const controls = renderToStaticMarkup(createElement(CodexContextControl, {
+    state: defaultContext, onChange: () => true,
+  }));
+  assert.match(controls, /auto-compact-options/);
+  assert.match(controls, /跟随 Codex/);
+  assert.match(controls, /生效上限 475K/);
+  assert.match(controls, /实际阈值 450K/);
+  assert.match(controls, /模型最大窗口/);
+  assert.match(controls, /828,400/);
+  assert.doesNotMatch(controls, /<form|等待会话|等待原生/);
+  assert.match(controls, /aria-pressed="true"/);
+  const unknownModel = renderToStaticMarkup(createElement(CodexContextControl, {
+    state: { ...defaultContext, limit_tokens: null }, onChange: () => true,
+  }));
+  assert.doesNotMatch(unknownModel, />200K<|>300K<|>400K</);
+  const { default: ContextPopover } = await reducerHarness.ssrLoadModule(
+    "/src/components/ContextPopover.tsx");
+  const contextDetails = renderToStaticMarkup(createElement(ContextPopover, {
+    codex: true, codexContext: defaultContext,
+    report: { v: PROTOCOL_VERSION, ts: 2, type: "context_report", sid: defaultContext.sid,
+      model: defaultContext.model, source: "native_estimate", total_tokens: 171528,
+      max_tokens: 475000, percentage: 36.11, categories: [], auto_compact_threshold_tokens: 450000 },
+  }));
+  assert.match(contextDetails, /303,472/);
+  assert.match(contextDetails, /25,000/);
+  assert.doesNotMatch(contextDetails, /<button|设置上下文/);
+  const { default: AutoCompactControl } = await reducerHarness.ssrLoadModule(
+    "/src/components/AutoCompactControl.tsx");
+  const claudeControls = renderToStaticMarkup(createElement(AutoCompactControl, {
+    value: { mode: "inherit", thresholdTokens: null }, modelMaxTokens: 200000,
+    effectiveThresholdTokens: 167000, rawMaxTokens: 200000, onChange: () => {},
+  }));
+  assert.match(claudeControls, /模型最大窗口 200K/);
+  assert.match(claudeControls, /实际阈值 167K/);
+  assert.match(claudeControls, /disabled="">500K/);
+  assert.match(claudeControls, /disabled="">1M/);
+  assert.doesNotMatch(claudeControls, /disabled="">200K/);
   const { createRuntime, initialState, reduce } =
     await reducerHarness.ssrLoadModule("/src/reducer.ts");
   const event = (body: Record<string, unknown>): ServerEvent => ({

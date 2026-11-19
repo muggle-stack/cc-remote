@@ -1,3 +1,6 @@
 {
-  "string": [{ "name": "app_description", "value": "随时连接你的 Claude 与 Codex 会话" }]
+  "string": [
+    { "name": "app_description", "value": "随时连接你的 Claude 与 Codex 会话" },
+    { "name": "microphone_reason", "value": "将你长按录制的语音实时转写为输入框草稿。" }
+  ]
 }

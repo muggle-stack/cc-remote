@@ -97,6 +97,29 @@ class Connection:
             await asyncio.gather(self.task, return_exceptions=True)
 
 
+async def upgrade_inventory(socket_path: str) -> tuple[dict, list]:
+    """Inspect workers without taking a controller lease or sending a turn."""
+    connection = Connection(socket_path)
+    try:
+        async with asyncio.timeout(3):
+            await connection.connect()
+            hello = await connection.call("hello")
+            workers = await connection.call("list")
+            return hello, workers
+    finally:
+        await connection.disconnect()
+
+
+def worker_busy_for_upgrade(worker: dict) -> bool:
+    return (
+        worker["turn"] is not None
+        or worker["head"] != worker["after"]
+        or bool(worker.get("pending_steers"))
+        or bool(worker.get("callbacks_pending"))
+        or any(seed["data"].get("subtype") == "task_started" for seed in worker["task_seeds"])
+    )
+
+
 def options_payload(options) -> dict:
     # Callables and live MCP objects stay in their owning processes. Provider
     # environment goes over the same-user socket only, never to disk/relay/log.

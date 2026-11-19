@@ -45,7 +45,7 @@ Before changing a live service:
 
 For Claude, follow [session-service installation and acceptance](../docs/claude-session-service.md)
 before planning a non-interrupting Wrapper upgrade. Keep an existing SDK service
-outside the Wrapper activation transaction. First migration, remaining
+outside ordinary Wrapper activation transactions. First migration, remaining
 in-process turns (including private `/btw` forks), and deferred queries must
 drain first; daemon readiness alone does not prove an old child was adopted.
 If the local service protocol or pinned SDK changes, stage first and defer the
@@ -430,8 +430,9 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
   and validates one stable role bundle, then calls its existing role installer.
   `--check` performs no activation; `--version` selects an exact published version.
   Both roles on one host require `--role`. Protocol changes are accepted for newer
-  releases. `--allow-protocol-change` remains a compatibility option. SDK/service-contract changes
-  defer to the Claude service migration procedure. The installer inherits the
+  releases. `--allow-protocol-change` remains a compatibility option. Managed
+  Claude SDK migrations use the same activation lock and rollback receipt.
+  Local wire changes follow the Claude service migration procedure. The installer inherits the
   update lock so a disconnected caller cannot accidentally start a second update.
   The command must run outside the managed Wrapper/Relay process tree. Device
   updates inspect the paired Relay. An already-current Relay is skipped. A
@@ -455,17 +456,18 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
   older caller; an interactive terminal can request it when missing. First
   pairing is separate from this existing-installation upgrade path.
   Explicit Mac registration can bind an existing immutable root and LaunchAgent;
-  future installs preserve that layout and service identity. The command does not
-  restart the independent Claude service, automatically adopt source/Docker
+  future installs preserve that layout and service identity. The command keeps
+  the independent Claude service running during ordinary updates. It does not
+  automatically adopt source/Docker
   layouts, or automate downgrade rollback. Recorded managed generations use the
   retention procedure above.
   Direct role installers use the same per-installation `.update.lock` before
   reading rollback state or changing services. They validate the inherited file
   descriptor from a managed update; an environment marker cannot bypass the lock.
-- `ui_update_job.py` — opt-in application updates through an independent schema-1
-  maintenance channel. `cc-remote ui-updates enable` configures one fixed Wrapper
-  root; `--allow-relay-update` separately permits its existing administrator SSH
-  route. Linux creates a root-owned, argument-restricted sudo helper and requires
+- `ui_update_job.py` — application updates through an independent schema-1
+  maintenance channel. Managed installation registers one fixed Wrapper root
+  automatically; `--allow-relay-update` retains the terminal updater's existing
+  administrator SSH route. Linux creates a root-owned, argument-restricted sudo helper and requires
   systemd; macOS uses the original user's launchd domain. Browser requests cannot
   choose commands, paths, package URLs, environment or protocol overrides.
   Intent is fsynced before OS submission; retries observe the same receipt.
@@ -474,9 +476,10 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
   All normal updater locks, contract checks, installers and retention still apply.
   An unknown launch or activation remains unresolved until the original transaction
   is inspected; never erase receipts to resubmit. See [setup, scope and recovery](../docs/in-app-updates.md).
-  `sudo cc-remote ui-updates enable --role relay` independently authorizes the
-  managed server's socket broker. Only full-scope browser logins can use this
-  server-wide endpoint; device ownership never grants server maintenance rights.
+  Managed Relay installation also registers its socket broker. Full-scope
+  browser logins can coordinate server and device updates; restricted logins
+  can authenticate an administrator once for a session-bound update grant.
+  That grant does not expand access to other devices.
   Its root-owned receipts and OS worker survive Relay restarts and device changes.
   The Relay remains unprivileged; no SSH route on a selected Wrapper is required.
 - `linux_service.py` / `wrapper_exec.py` — Linux Supervisor adapter for the same
@@ -595,7 +598,7 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
 Publish Relay/Web and Wrapper artifacts from the same tagged commit. The strict
 chat gate requires matching protocol versions. The maintenance channel remains
 available while devices catch up to the server. `setup-vps.sh` verifies that its
-Web build matches the Relay. Protocol v95 uses this same flow. Activate Relay/Web
+Web build matches the Relay. Protocol v98 uses this same flow. Activate Relay/Web
 together, upgrade each Wrapper through maintenance, then reload Web/PWA clients.
 
 The wrapper installer treats local Work data and versioned private control state

@@ -46,7 +46,9 @@ export function PdfArtifactPreview({ data, title }: {
   useEffect(() => {
     const stage = stageRef.current;
     if (!stage) return;
-    const updateWidth = () => setStageWidth(Math.max(0, stage.clientWidth - 24));
+    const updateWidth = () => {
+      if (stage.clientWidth > 24) setStageWidth(stage.clientWidth - 24);
+    };
     updateWidth();
     const observer = new ResizeObserver(updateWidth);
     observer.observe(stage);

@@ -482,6 +482,10 @@ cleanup() {
     elif [ "$device_changed" -eq 1 ]; then
       echo "New device credential retained for a retry: $device_file" >&2
     fi
+    if [ "$rollback_ready" -eq 1 ] && [ -n "${activation_id:-}" ]; then
+      "$target/.venv/bin/python" "$target/deploy/activation.py" --root "$appdir" \
+        claude-restore --id "$activation_id" || rollback_ready=0
+    fi
     if [ "$rollback_ready" -eq 1 ] && { [ "$service_stopped" -eq 1 ] || \
        [ "$switched" -eq 1 ] || [ "$service_changed" -eq 1 ]; }; then
       if ! restart_after_rollback; then
@@ -764,6 +768,7 @@ elif [ "$service_was_running" -eq 1 ]; then
   stop_wrapper_service || die "existing wrapper could not be stopped safely"
 fi
 "$target/.venv/bin/python" "$target/deploy/activation.py" --root "$appdir" phase --id "$activation_id" --value stopped
+"$target/.venv/bin/python" "$target/deploy/activation.py" --root "$appdir" claude-switch --id "$activation_id"
 rollback_snapshot="$(
   mktemp -d "$rollback_root/activation-$release_name.XXXXXX"
 )"
@@ -944,6 +949,7 @@ if [ "$migration_ready" -ne 1 ]; then
     --snapshot "$rollback_snapshot" || true
   die "Claude/Codex Work profile migrations did not become ready"
 fi
+"$target/.venv/bin/python" "$target/deploy/activation.py" --root "$appdir" claude-verify --id "$activation_id"
 
 # The real Wrapper prepares and probes each account as the service user. Read
 # its fresh result here; never run a user's Codex binary as the Linux installer.

@@ -44,7 +44,7 @@ interface Props {
 export function QuestionSheet(props: Props) {
   if (props.modelFallback) return <ModelFallbackSheet fallback={props.modelFallback}
     draft={props.draft} sessionLabel={props.sessionLabel} accountLabel={props.accountLabel}
-    errorRevision={props.errorRevision} onAnswer={props.onAnswer} />;
+    sourceLabel={props.sourceLabel} errorRevision={props.errorRevision} onAnswer={props.onAnswer} />;
   return props.questions?.length ? <QuestionBatchSheet key={JSON.stringify(props.questions)}
     engine={props.engine} questions={props.questions} draft={props.draft} sourceLabel={props.sourceLabel}
     submissionError={props.submissionError}

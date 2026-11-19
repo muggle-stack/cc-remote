@@ -22,7 +22,7 @@ from deploy import release_retention, ui_update_job
 from deploy.install_lock import acquire_install_lock, LOCK_FD_ENV
 from deploy.work_registry_snapshot import create_snapshot
 from tests.test_multisession import _mk_machine
-from tests.test_ui_updates import managed as managed
+from tests.test_ui_updates import installer_lock as installer_lock, managed as managed
 from tests.test_update import _manifest
 
 IDENTITY = "c" * 32
@@ -32,6 +32,10 @@ def record(root, previous, **fields):
     target = root / "releases/new"
     target.mkdir(exist_ok=True)
     (target / "release-manifest.json").write_text(json.dumps(_manifest(version="4.0.1")))
+    (target / "requirements-wrapper.lock").write_text("claude-agent-sdk==0.2.174\n")
+    service = target / "cc_remote/claude_service"
+    service.mkdir(parents=True, exist_ok=True)
+    (service / "wire.py").write_text("VERSION = 1\n")
     value = {"schema": 1, "id": IDENTITY, "root": str(root), "phase": "waiting",
              "previous": str(previous), "release": str(target), "uid": os.getuid(),
              "control_socket": "/tmp/unused-activation.sock", "generation": None,
@@ -42,9 +46,15 @@ def record(root, previous, **fields):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("origin", ["terminal", "ui"])
-async def test_terminal_and_ui_share_live_socket_admission(managed, monkeypatch, origin):
+@pytest.mark.parametrize("engine", ["claude", "codex", "dsh"])
+async def test_terminal_and_ui_admit_idle_resident_sessions(managed, monkeypatch, origin, engine):
+    from tests.test_multisession import _mk_ctx
+
     root, previous, store = managed
     machine, _ = _mk_machine()
+    ctx = _mk_ctx("idle", "idle")
+    ctx.engine = engine
+    machine.sessions[ctx.key] = ctx
     updates = machine._ui_updates = UIUpdates(machine, root)
     with tempfile.TemporaryDirectory(prefix="ccr-admission-", dir="/tmp") as short:
         local = LocalControl(SimpleNamespace(cfg=SimpleNamespace(state_dir=Path(short)), _ui_updates=updates))
@@ -68,6 +78,120 @@ async def test_terminal_and_ui_share_live_socket_admission(managed, monkeypatch,
             os.close(fd)
             await local.close()
             await machine._command_scheduler.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pending", ["turn", "callback", "queue", "unacknowledged", "background"])
+async def test_claude_sdk_upgrade_waits_for_work_then_admits_resident_workers(
+    managed, monkeypatch, installer_lock, pending,
+):
+    from cc_remote.claude_service import client
+    from tests.test_multisession import _mk_ctx
+
+    root, previous, _ = managed
+    record(root, previous, claude_upgrade=True)
+    machine, _ = _mk_machine()
+    updates = UIUpdates(machine, root)
+    ctx = _mk_ctx("resident", "resident")
+    machine.sessions[ctx.key] = ctx
+    machine.cfg.claude_service_socket = "/tmp/claude-fixture/service.sock"
+    hello = {"pid": 25, "source": str(previous), "sdk_version": "0.2.174"}
+    idle = {"id": "worker", "turn": None, "head": 10, "after": 10, "task_seeds": [],
+            "callbacks_pending": False}
+    work = {**idle}
+    if pending == "turn":
+        work["turn"] = {"id": "playing"}
+    if pending == "callback":
+        work["callbacks_pending"] = True
+    if pending == "queue":
+        ctx.queued_queries.append(object())
+    if pending == "unacknowledged":
+        work["head"] = 11
+    if pending == "background":
+        work["task_seeds"] = [{"data": {"subtype": "task_started"}}]
+
+    async def inventory(path):
+        assert path == machine.cfg.claude_service_socket
+        return hello, [work]
+
+    monkeypatch.setattr(client, "upgrade_inventory", inventory)
+    try:
+        assert await updates.reserve_activation(IDENTITY) == {"status": "busy"}
+        assert not updates.guarded()
+        ctx.queued_queries.clear()
+        work = idle
+        response = await updates.reserve_activation(IDENTITY)
+        assert response == {"status": "ready", "claude_service": {
+            "socket": machine.cfg.claude_service_socket, "source": str(previous), "sdk": "0.2.174", "pid": 25,
+        }}
+        assert updates.guarded()
+        assert machine.sessions[ctx.key] is ctx
+    finally:
+        await machine._command_scheduler.close()
+
+
+def test_sdk_switch_persists_intent_before_changing_owner(managed, monkeypatch):
+    root, previous, _ = managed
+    old = {"source": str(previous)}
+    value = record(root, previous, phase="stopped", claude_upgrade=True, claude_service=old)
+    calls = []
+
+    def service_call(_value, action, service):
+        assert activation.receipt(root)["claude_upgrade_started"]
+        assert service == old
+        calls.append(action)
+
+    monkeypatch.setattr(installer, "claude_service_call", service_call)
+    installer.update_claude_service(root, value["id"], "switch")
+    installer.update_claude_service(root, value["id"], "verify")
+    installer.update_claude_service(root, value["id"], "restore")
+    assert calls == ["switch", "verify", "restore"]
+
+
+@pytest.mark.parametrize("outcome", ["reconnect", "unavailable", "cancelled"])
+def test_admission_waits_for_wrapper_restart_with_bounded_cancelable_recovery(
+    managed, monkeypatch, outcome,
+):
+    root, previous, store = managed
+    record(root, previous, ui_job=IDENTITY)
+    state, _ = store.create(IDENTITY, "4.0.1", "4.0.0")
+    store.save({**state, "phase": "waiting"})
+    clock = [1000.0]
+    requests = []
+
+    def request(_path, payload, _uid):
+        requests.append((clock[0], payload))
+        if outcome == "reconnect" and clock[0] >= 1040:
+            return {"status": "ready"}
+        raise ConnectionRefusedError("Wrapper restoring sessions")
+
+    def advance(seconds):
+        clock[0] += seconds
+        if outcome == "cancelled" and clock[0] >= 1030:
+            store.save({**store.state(IDENTITY), "cancel_requested": True})
+
+    monkeypatch.setattr(installer, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], time=lambda: clock[0], sleep=advance))
+    monkeypatch.setattr(installer, "control", request)
+    descriptor = acquire_install_lock(root)
+    monkeypatch.setenv(LOCK_FD_ENV, str(descriptor))
+    try:
+        if outcome == "reconnect":
+            installer.prepare(root, IDENTITY)
+            assert activation.receipt(root)["phase"] == "quiesced"
+            assert clock[0] == 1040
+        else:
+            error = "cancelled before activation" if outcome == "cancelled" else "control connection unavailable"
+            with pytest.raises(ValueError, match=error):
+                installer.prepare(root, IDENTITY)
+            assert activation.receipt(root)["phase"] == "waiting"
+            assert clock[0] == (1030 if outcome == "cancelled" else 1120)
+        assert all(payload == {"op": "reserve_activation", "id": IDENTITY}
+                   for _, payload in requests)
+        assert (root / "current").resolve() == previous
+        assert store.active()["id"] == IDENTITY
+    finally:
+        os.close(descriptor)
 
 
 def test_surviving_installer_child_keeps_lock_after_controller_exits(managed):
@@ -291,7 +415,9 @@ def test_interrupted_switch_restores_actual_database_and_configuration(managed, 
     config.write_text("new service configuration\n")
     (root / "current").unlink()
     (root / "current").symlink_to(target)
-    activation.save(root, {**value, "generation": identity, "snapshot": str(snapshot)})
+    activation.save(root, {**value, "generation": identity, "snapshot": str(snapshot),
+                           "claude_upgrade": True, "claude_upgrade_started": True,
+                           "claude_service": {"source": str(previous)}})
     if failure == "corrupt-snapshot":
         (snapshot / "claude.sqlite3").write_bytes(b"damaged")
     calls = []
@@ -300,6 +426,8 @@ def test_interrupted_switch_restores_actual_database_and_configuration(managed, 
         if failure == "stop":
             raise ValueError("cannot confirm stop")
     monkeypatch.setattr(installer, "service", service)
+    monkeypatch.setattr(installer, "claude_service_call", lambda value, action, old: calls.append(
+        f"claude-{action}"))
     monkeypatch.setattr(installer.sys, "platform", platform)
     def system_command(argv, **kwargs):
         assert argv == ["systemctl", "daemon-reload"]
@@ -319,7 +447,7 @@ def test_interrupted_switch_restores_actual_database_and_configuration(managed, 
             assert calls == ["stop"]
         else:
             assert installer.recover(root, IDENTITY) == "failed"
-            assert calls == ["stop", *(["daemon-reload"] if platform == "linux" else []), "start"]
+            assert calls == ["stop", "claude-restore", *(["daemon-reload"] if platform == "linux" else []), "start"]
             assert (root / "current").resolve() == previous
             assert config.read_text() == "old service configuration\n"
             assert activation.receipt(root)["phase"] == "rolled_back"

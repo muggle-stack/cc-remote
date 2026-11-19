@@ -6,10 +6,197 @@
 
 - Add collaboration rooms with Claude, Codex and DSH participants, native session
   settings, public context sharing and running-turn steering.
-- Coordinate Relay, Wrapper and Web on wire protocol v95. Include the private
+- Coordinate Relay, Wrapper and Web on wire protocol v98. Include the private
   collaboration database in transactional upgrade and rollback snapshots.
-- Integrate common fixes through master v5.3.33, including deployment cleanup,
-  device restoration, model fallback confirmation, asynchronous questions and history replay.
+- Sync common fixes and features through master v5.3.52.
+
+## v5.3.52
+
+Disable deletion while a session is active and show why a fork or an unavailable Codex daemon blocks deletion. Preserve drafts when deletion fails. The sidebar refreshes automatically after archive, restore, or permanent deletion in Codex App. Wire protocol v97.
+
+See the bilingual [release notes](docs/releases/v5.3.52.md).
+
+## v5.3.51
+
+Desktop dictation starts and stops with clicks. Touch clients show recording status with haptics on supported Android browsers and HarmonyOS. The HarmonyOS app adds microphone permission for the configured chat. Wire protocol v97.
+
+See the bilingual [release notes](docs/releases/v5.3.51.md).
+
+## v5.3.50
+
+Add opt-in live dictation and streamed reply narration to Web/PWA. Relay configuration keeps voice controls hidden until a Doubao Voice project key is set. Wire protocol v97.
+
+See the bilingual [release notes](docs/releases/v5.3.50.md).
+
+## v5.3.49
+
+The Claude quota panel shows the current account's saved subscription plan while active quota queries are off. Wire protocol v97.
+
+See the bilingual [release notes](docs/releases/v5.3.49.md).
+
+## v5.3.48
+
+Restores the in-app upgrade path for older Wrappers using Claude Agent SDK 0.2.174. This compatibility release uses SDK 0.2.174 and wire protocol v97.
+
+- Devices using the 0.2.174 SDK can install this release and adopt the new migration flow.
+- When a later update changes the SDK, the installer waits for active work, switches the managed Claude service with the Wrapper, and rolls back both on failure. Idle resident sessions can pass upgrade admission.
+- Regression coverage checks idle Claude, Codex and DSH sessions, Claude migration and release package contents.
+
+See the bilingual [release notes](docs/releases/v5.3.48.md).
+
+## v5.3.47
+
+Inspect workspace files in the background and improve account display and Claude plan approval. Wire protocol v97 and Claude Agent SDK 0.2.184.
+
+- Add background document and image inspection for Claude Code and Codex, with range previews and cell data for spreadsheets.
+- Show verified Claude plans and Fable usage. Fix Codex subscription labels and explain known status diagnostics.
+- Apply the selected Claude plan permission mode to the current session and simplify both model pickers.
+
+See the bilingual [release notes](docs/releases/v5.3.47.md).
+
+## v5.3.46
+
+Keep Codex model controls with each thread's provider and disable both subagent generations in Work. Wire protocol v97 and Claude Agent SDK 0.2.174.
+
+- Disable both native Codex subagent generations in Work mode.
+- Scope model catalogs, reasoning levels and speed validation to the original provider when restoring or forking a thread.
+- Keep Web and TUI catalog responses separate by account and session, including failed refreshes.
+
+See the bilingual [release notes](docs/releases/v5.3.46.md).
+
+## v5.3.45
+
+Add browser-rendered PPTX previews with mobile continuous reading. Wire protocol v96 and Claude Agent SDK 0.2.174.
+
+- Browse slides with navigation, thumbnails, zoom and original-file downloads.
+- Use rounded cards and controls with an anchored zoom menu on mobile and desktop.
+- Render in an isolated browser frame, validate package limits and release resources when closing previews.
+
+See the bilingual [release notes](docs/releases/v5.3.45.md).
+
+## v5.3.44
+
+Align Codex and Claude context controls and confirm native context settings. Wire protocol v95 and Claude Agent SDK 0.2.174.
+
+- Confirm shared Codex context preferences from fresh native runtime records, including restoring defaults.
+- Show read-only usage details from the context ring and open settings with bare `/autocompact`.
+- Display Claude model window limits separately from the configured window and effective compaction threshold.
+- Reject oversized Claude settings in the UI and before saving, launching or applying them.
+
+See the bilingual [release notes](docs/releases/v5.3.44.md).
+
+## v5.3.43
+
+Use official Codex model and reasoning metadata. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Display native model names, descriptions, ordering and reasoning capabilities.
+- Remove static Codex model lists and local effort rankings, and follow native defaults for stale choices.
+- Let Codex side chats inherit official fork settings.
+- Preserve account-scoped catalogs through failed reads, provide retry controls and clear removed defaults after successful refreshes.
+
+See the bilingual [release notes](docs/releases/v5.3.43.md).
+
+## v5.3.42
+
+Revert the recent iOS chat keyboard layout changes after a page-displacement regression. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Restore the v5.3.39 mobile viewport positioning and chat composer spacing.
+- Remove document-scroll compensation and cover repeated panning without accumulated offsets.
+- Preserve DSH terminal single-step history gestures, scrolling, selection, clipboard controls and keyboard toggling.
+
+See the bilingual [release notes](docs/releases/v5.3.42.md).
+
+## v5.3.41
+
+Fix DSH terminal command history navigation and iOS chat keyboard positioning. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Send one arrow key per held terminal gesture, including when the finger remains down or changes direction.
+- Remove repeat-speed feedback while preserving scrolling, selection, clipboard controls and double-tap Tab.
+- Account for iOS document panning so the chat composer remains aligned with the visible area above the keyboard.
+- Cover gesture jitter, repeated viewport offsets, Chinese input and keyboard dismissal with browser regressions.
+
+See the bilingual [release notes](docs/releases/v5.3.41.md).
+
+## v5.3.40
+
+Improve DSH mobile terminal gestures and keyboard handling. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Scroll output directly, hold and drag for arrow keys with three repeat speeds, and double-tap for Tab.
+- Select text with a stationary long press and drag selection handles using the terminal's actual coordinates.
+- Add a horizontally scrollable shortcut row and an explicit keyboard toggle, preserving dismissal across terminal activity.
+- Retain desktop trackpad scrolling, mouse selection and full-screen terminal input.
+- Reduce keyboard-open chat composer spacing and cover selection, focus and layout regressions on desktop, WebKit and Android.
+
+See the bilingual [release notes](docs/releases/v5.3.40.md).
+
+## v5.3.39
+
+Adapt DSH terminal controls to small phones and desktop panels. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Keep copy, paste, Ctrl+C and the overflow menu on a single row with 44px-high buttons.
+- Show reconnect directly in wider panels and keep terminal termination in the overflow menu.
+- Move connection status beside the shell selector and remove the duplicate footer to give terminal output more space.
+- Preserve input focus during interruption, keep controls visible above the mobile keyboard and maintain menu focus when the panel width changes.
+- Add small-screen, panel-width and keyboard-layout coverage alongside terminal clipboard, scrolling and reconnect regressions.
+
+See the bilingual [release notes](docs/releases/v5.3.39.md).
+
+## v5.3.38
+
+Fix Claude side-chat compaction status and add mobile DSH terminal controls. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Clear completed compaction indicators when Claude continues through a side-chat input or an intermediate response boundary.
+- Keep compaction state associated with its native response so concurrent background tasks retain independent status.
+- Swipe up at an idle terminal prompt to recall command history, and hold a blank area before swiping right to accept shell suggestions.
+- Support long-press text selection and add copy and paste controls, including a text sheet when browser clipboard access is unavailable.
+- Preserve terminal scrolling and selection during active commands and release gesture and clipboard state when the terminal closes or reconnects.
+
+See the bilingual [release notes](docs/releases/v5.3.38.md).
+
+## v5.3.37
+
+Restore Linux deferred cleanup and refine systemd service dependency inspection. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Generate a valid scalar WorkingDirectory for the retention service, including spaces and special characters.
+- Validate generated systemd units before reloading the manager and confirm that the cleanup timer is active.
+- Parse service descriptions, documentation and calendar expressions in their sections, while retaining dependency checks for environment variables with matching names.
+- Add regression coverage for runtime dependency protection and native systemd unit validation.
+
+See the bilingual [release notes](docs/releases/v5.3.37.md).
+
+## v5.3.36
+
+Unify server and device upgrades, refine Claude model fallback dialogs and restore Codex historical image previews. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Upgrade the server and current device from one action, with durable progress and recovery across page closure, service restarts and device reconnection.
+- Preserve access to server-only updates for offline or unsupported devices and allow cancellation of a queued device update while its shared server upgrade continues.
+- Refresh installation capabilities after administrator authentication, support mixed installation methods and fall back to the release redirect when GitHub's anonymous API is rate limited.
+- Align Claude model fallback dialogs with ordinary question cards and remove duplicate fallback notices from the transcript.
+- Restore images returned by Codex batch tools in completed history, cached details and long-turn pages. Load original image bytes on demand through the existing authenticated image route.
+
+See the bilingual [release notes](docs/releases/v5.3.36.md).
+
+## v5.3.35
+
+Improve side-panel continuity and DSH terminal interaction, and reduce Python test overhead. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Preserve mounted side chats, file previews and videos across harness switches, including drafts, reading positions and playback progress.
+- Release panel resources on explicit close, device changes and content invalidation, with a bounded number of retained panels.
+- Pause hidden media, automatic reads and popup interaction, and route concurrent panel replies by session and request identity.
+- Preserve fine Mac trackpad scrolling in the DSH terminal and batch pending keystrokes and output to reduce interaction delays.
+- Consolidate test execution items while retaining parameter coverage, and remove unnecessary waits from simulated network retries and test-server shutdown.
+
+See the bilingual [release notes](docs/releases/v5.3.35.md).
+
+## v5.3.34
+
+Fix updates that remain blocked after Codex sessions become idle and allow more time for Wrapper restart recovery. Wire protocol v94 and Claude Agent SDK 0.2.174.
+
+- Retire pending Codex input identities when the matching record is already durable, including repeated confirmations and history backfill.
+- Reconcile previously accepted identity proofs after turn ownership is released, preserving pending records on persistence failure or identity mismatch.
+- Allow up to 120 seconds for the Wrapper control connection to recover before activation, with cancellation and timeout checks.
+
+See the bilingual [release notes](docs/releases/v5.3.34.md).
 
 ## v5.3.33
 

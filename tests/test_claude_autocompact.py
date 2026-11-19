@@ -203,10 +203,45 @@ def test_idle_autocompact_change_reconnects_and_persists_exact_session():
     asyncio.run(run())
 
 
+def test_autocompact_rejects_above_native_model_ceiling_before_saving():
+    async def run():
+        sdk = _AutoCompactSdk()
+        sdk.model_context_max_tokens = 200_000
+        machine, _transport, ctx = _machine_with_sdk(sdk)
+        error = await machine._handle_set_auto_compact(SetAutoCompact(
+            sid=SESSION_ID, mode="custom", threshold_tokens=500_000))
+        assert isinstance(error, Error)
+        assert "200,000" in error.message
+        assert sdk.auto_compact_mode == "inherit"
+        assert sdk.reconnects == []
+        assert machine._claude_controls.get(SESSION_ID).auto_compact_mode == "inherit"
+        # A previous smaller configured window is not the native model ceiling.
+        sdk.raw_context_max_tokens = 100_000
+        ctx.state = "running"
+        accepted = await machine._handle_set_auto_compact(SetAutoCompact(
+            sid=SESSION_ID, mode="custom", threshold_tokens=200_000))
+        assert accepted.pending and accepted.threshold_tokens == 200_000
+    asyncio.run(run())
+
+
+def test_pending_autocompact_revalidates_ceiling_before_reconnect():
+    async def run():
+        sdk = _AutoCompactSdk()
+        sdk.set_auto_compact("custom", 500_000)
+        sdk.model_context_max_tokens = 200_000
+        machine, _transport, ctx = _machine_with_sdk(sdk)
+        event, applied = await machine._apply_pending_claude_auto_compact(ctx, reason="test")
+        assert not applied and event.phase == "blocked"
+        assert "200,000" in event.error
+        assert sdk.reconnects == []
+    asyncio.run(run())
+
+
 def test_applied_autocompact_publishes_new_generation_cached_context():
     class ContextSdk(_AutoCompactSdk):
         control_plane_failed = False
         context_probe_suppressed = False
+        model_context_max_tokens = 1_000_000
 
         def __init__(self):
             super().__init__()
@@ -260,6 +295,7 @@ def test_applied_autocompact_publishes_new_generation_cached_context():
         assert report.max_tokens == 400_000
         assert report.auto_compact_threshold_tokens == 400_000
         assert report.raw_max_tokens == 1_000_000
+        assert report.model_max_tokens == 1_000_000
         assert sdk.context_calls == 0
 
     asyncio.run(run())

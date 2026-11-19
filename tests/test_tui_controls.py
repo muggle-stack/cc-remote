@@ -49,7 +49,9 @@ def catalogs(form):
             ]
         },
     }.items():
-        key = (kind, *form.client.capability_key(form.args(kind)))
+        key = (kind, *form.client.capability_key(
+            {**form.args(kind), "sid": None if form.new else form.sid},
+            session=kind == "models"))
         form.client.settings_catalogs[key] = data
 
 
@@ -299,6 +301,24 @@ async def test_catalog_responses_bound_to_requested_directory_and_profile():
     form.values["cwd"] = "/new"
     form.profiles["codex_profile_id"] = "account"
     assert not form.catalog("permission_profiles")
+
+
+@pytest.mark.asyncio
+async def test_model_responses_keep_session_provider_and_new_session_scopes_separate():
+    _, client = setup()
+    for sid in ("one", "two", None):
+        await client._send(p.GetModels(engine="codex", sid=sid, codex_profile_id="account"))
+    requests = list(client.catalog_reads.values())
+    for sid, effort in (("two", "adaptive"), ("one", "high"), (None, "low")):
+        client._on_event({
+            "type": "models", "engine": "codex", "sid": sid,
+            "codex_profile_id": "account",
+            "models": [{"id": "shared", "efforts": [effort]}],
+        })
+        assert len(client.catalog_reads) == (2 if sid == "two" else 1 if sid == "one" else 0)
+    for request, effort in zip(requests, ("high", "adaptive", "low")):
+        key = ("models", *client.capability_key(request, session=True))
+        assert client.settings_catalogs[key]["models"][0]["efforts"] == [effort]
 
 
 @pytest.mark.asyncio

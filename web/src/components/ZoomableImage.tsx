@@ -1,4 +1,5 @@
-import { useLayoutEffect, useRef, type ImgHTMLAttributes } from "react";
+import { useContext, useLayoutEffect, useRef, type ImgHTMLAttributes } from "react";
+import { PanelVisible } from "../right-panel-presentation";
 import {
   constrainImageTransform, panImageTransform, pinchImageTransform, zoomImageTransform,
   IMAGE_WHEEL_ZOOM_RATE, MAX_IMAGE_SCALE,
@@ -12,6 +13,9 @@ export function ZoomableImage({ src, alt, onLoad, onError }: Pick<
   ImgHTMLAttributes<HTMLImageElement>, "src" | "alt" | "onLoad" | "onError"
 >) {
   const stageRef = useRef<HTMLDivElement>(null);
+  const visible = useContext(PanelVisible);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
   const imageRef = useRef<HTMLImageElement>(null);
 
   useLayoutEffect(() => {
@@ -125,6 +129,7 @@ export function ZoomableImage({ src, alt, onLoad, onError }: Pick<
       nativeGesture = null;
     };
     const fit = () => {
+      if (!visibleRef.current || stage.clientWidth === 0 || stage.clientHeight === 0) return;
       if (!image.complete || !image.naturalWidth || !image.naturalHeight) return;
       const { image: imageSize, viewport, widthScale, maxScale } = sizes();
       if (!imageSize.width || !imageSize.height || !viewport.width || !viewport.height) return;

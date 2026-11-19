@@ -4,7 +4,7 @@
 
 Self-hosted · Multiple sessions and devices · Live tool activity · Code / Work / Collaboration · Web / PWA / TUI
 
-**Product version: v5.3.33** · Wire protocol v95
+**Product version: v5.3.52** · Wire protocol v98
 
 [中文](README.md) · [Collaboration rooms](#collaboration) · [Release install (recommended)](#install-and-upgrade) · [Engine comparison](#engines-and-features) · [Try from source](#quick-start) ·
 [Interface tour](#interface-tour) · [Terminal workspace](#terminal-workspace) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)
@@ -148,7 +148,7 @@ After a member is bound, continue adjusting its model, permissions and other
 runtime settings in the native session.
 
 To try this branch, select `feat/multi-agent-collaboration` during the
-[source installation steps](#quick-start). This source uses **wire protocol v95**.
+[source installation steps](#quick-start). This source uses **wire protocol v98**.
 Relay, Web and every connected Wrapper must use the same source snapshot.
 For an existing installation, follow the repository deployment procedure to
 upgrade the tiers together and preserve private state in deployment snapshots.
@@ -362,6 +362,14 @@ Prepare at least one working engine:
 - **DSH (optional):** Node 24 and `@deepseek-ai/dsh@0.2.2-rc.1`. Follow [DSH integration](docs/dsh-integration.md)
   to start the local API, load the metadata plugin and pair. Wrapper installation does not install or upgrade DSH automatically.
 
+Codex and Claude Code sessions can call `inspect_file` to inspect files inside their workspace in the background.
+
+- **Images** include PNG, JPEG, WebP, GIF, AVIF, HEIC/HEIF, TIFF, BMP, and SVG. Use `frame` for animated and multi-frame images.
+- **Documents and pages** include PPTX, PDF, DOCX, static HTML, Markdown, and Mermaid. Use `page` to select a slide, document page, or viewport. HTML and Markdown can load relative resources inside the workspace. Static HTML inspection disables page scripts. DOCX uses browser layout and pagination.
+- **Tables** include XLSX and UTF-8 CSV/TSV. Use `sheet` for an XLSX worksheet and `range` for an area such as `B2:H15`. The tool shows the selected grid by default. Set `view: "data"` for saved cell values and formula text.
+
+Raster decoding and table data reads run locally. Screenshot rendering uses sandboxed headless Chrome or Chromium on the Wrapper device, including Playwright Chromium installed for the Wrapper user.
+
 ### 1. Install dependencies and build
 
 ```bash
@@ -486,7 +494,7 @@ procedures, independent of core deployment success.
 ### Web, PWA and Desktop
 
 Web/PWA are the released graphical clients, sharing one UI across all three engines.
-The existing macOS Desktop is an experimental Electron shell; v5.3.33 does not ship a new
+The existing macOS Desktop is an experimental Electron shell; v5.3.52 does not ship a new
 Desktop installer. The compatibility repair loads the configured Relay's pages instead of
 outdated bundled assets, retaining sign-in and native integrations. `cc-remote update` updates
 Relay, Web and Wrapper, not the Electron application. See [Desktop compatibility](docs/desktop.md).

@@ -131,6 +131,30 @@ class BtwHistory:
                 # A later suffix of an evicted item is not a whole message.
                 # Only an exact completed snapshot may restore it below.
                 return
+            if (isinstance(event, ProcessEvent) and event.kind == "compaction"
+                    and event.phase == "end" and event.input):
+                start_id = event.input.get("compaction_started_id")
+                start_key = "process:" + start_id if isinstance(start_id, str) else None
+                start_owner = self._owners.get(start_key)
+                start_turn = self.turns.get(start_owner)
+                start_group = start_turn.items.get(start_key) if start_turn else None
+                start = start_group.events.get("process") if start_group else None
+                if (isinstance(start, ProcessEvent) and start.kind == "compaction"
+                        and start.turn_id == event.turn_id and start_key != key
+                        and self._owners.get(key) in {None, start_owner}):
+                    # Store the canonical boundary once, at the original start's
+                    # position. A later reconnect must not replay its old spinner.
+                    if key not in self._owners:
+                        start_turn.items = OrderedDict(
+                            (key if item == start_key else item, group)
+                            for item, group in start_turn.items.items())
+                        self._owners[key] = start_owner
+                    else:
+                        self._bytes -= start_group.size
+                        self._items -= 1
+                        del start_turn.items[start_key]
+                    del self._owners[start_key]
+                    self._omitted[start_key] = None
             owner = self._owners.get(key) if key else None
             parent = getattr(event, "parent_id", None)
             if owner is None and parent:
@@ -190,8 +214,8 @@ class BtwHistory:
                 self._items -= 1
                 self._owners.pop(key, None)
                 self._omitted[key] = None
-            while len(self._omitted) > 10000:
-                self._omitted.popitem(last=False)
+        while len(self._omitted) > 10000:
+            self._omitted.popitem(last=False)
 
     def repair(self, native_turn_id: str, snapshots: list[tuple[str | None, list]],
                *, item_order: list[str] | None = None) -> None:

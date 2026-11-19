@@ -1,4 +1,6 @@
 -r requirements-common.txt
 claude-agent-sdk==0.2.174
 Pillow==12.3.0
+pillow-heif==1.8.1
+playwright==1.62.0
 backports.zstd==1.8.0 ; python_version < "3.14"

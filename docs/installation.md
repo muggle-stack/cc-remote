@@ -29,11 +29,11 @@ Web，Wrapper 包只含本机控制端；两者都自带 `uv`，安装时创建�
 ### 1）下载并校验引导脚本
 
 在 GitHub Release 页面确认版本与 release attestation，再在待安装机器下载同一版本的
-`install.sh` 和 `SHA256SUMS`。下例使用 `5.3.33`；请先确认对应版本已发布，或替换为已选定的已发布 tag
+`install.sh` 和 `SHA256SUMS`。下例使用 `5.3.52`；请先确认对应版本已发布，或替换为已选定的已发布 tag
 （变量中不带开头的 `v`）。该路径不会自动安装尚未发布的开发分支：
 
 ```bash
-export CC_REMOTE_VERSION=5.3.33
+export CC_REMOTE_VERSION=5.3.52
 release_base="https://github.com/muggle-stack/cc-remote/releases/download/v${CC_REMOTE_VERSION}"
 curl -fLO "$release_base/install.sh"
 curl -fLO "$release_base/SHA256SUMS"
@@ -154,11 +154,13 @@ DNS、TLS、连接超时、SSH 认证和 sudo 权限等原因。按提示检查�
 
 命令校验 SHA-256、安装包路径、平台和版本，随后复用原安装器的不可变切换、状态快照
 与失败回滚；保留账号、配对和外部配置，不会重新配对。同版本不重启服务，重复更新会被
-锁住，激活失败不会自动重试。独立 Claude 服务不在更新范围内。更新使用预构建 Web 与
+锁住，激活失败不会自动重试。日常升级保留独立 Claude 服务。更新使用预构建 Web 与
 锁定依赖，不在用户机器上执行 CI、pytest 或 Node 构建；Electron 本体另行更新。
 真正升级 Wrapper 后会显示上述 Codex 连接检查结果；`--check` 不触发配置或本地验收。
-升级前先等待进程内 Claude、BTW 和排队消息处理结束；SDK 或独立服务协议变化时，
-命令会停止并要求按 [Claude 服务指南](claude-session-service.md) 完成迁移。
+升级前先等待进程内 Claude、BTW 和排队消息处理结束。受管理的独立 Claude 服务更换 SDK 时，
+更新器等实际工作收尾后配套切换两个服务，并验证握手。空闲驻留会话可按原 ID 恢复。
+旧更新器需要先安装同 SDK 的兼容版，独立服务本地协议变化或自定义服务按
+[Claude 服务指南](claude-session-service.md) 处理。
 
 v4.0.10 起，安装器会在切换前记录旧版代码、服务配置和私有状态快照；新版本通过验收后，
 保留当前版本及上一版完整回滚资料，通过 `deploy/cleanup.py` 清理有记录的更早版本。
@@ -445,7 +447,9 @@ sudo apt-get update
 sudo apt-get install -y libreoffice bubblewrap
 ```
 
-这用于 DOCX/PPTX 等需要转换的格式；**XLSX 预览不需要这两个包**，macOS 也可用。
+这用于 DOCX、旧版 PPT 等需要转换的格式。PPTX 在浏览器内渲染，支持翻页、缩略图、
+缩放与原文件下载，手机端采用连续纵向阅读；XLSX 使用内置单元格预览。这两种格式均可用于 macOS 和 Linux，
+预览引擎随 Web 一起发布。PPTX 文件上限为 8 MiB，解压后上限为 64 MiB。
 Relay 不需要安装转换器。
 
 #### 用设备中心配对 Mac / Linux（推荐）

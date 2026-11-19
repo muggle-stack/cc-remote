@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_claude_sdk_policy_is_exact():
     assert claude_runtime.validate_sdk_version("0.2.174") == "0.2.174"
-    for unsupported in ("0.2.157", "0.2.173", "0.2.175"):
+    for unsupported in ("0.2.173", "0.2.175", "0.2.184"):
         with pytest.raises(RuntimeError, match="not the verified 0.2.174"):
             claude_runtime.validate_sdk_version(unsupported)
 

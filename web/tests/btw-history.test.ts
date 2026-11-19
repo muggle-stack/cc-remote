@@ -255,6 +255,55 @@ try {
   dshEvent({ type: "replay_end", to_seq: 6, truncated: false });
   assert.equal(state.runtimes[dshSid].historyInvalidated, true);
   assert.equal(state.runtimes[dshSid].loading, true);
+
+  // A pre-echo compact keeps its original owner when the human response
+  // starts. Its boundary replaces the exact placeholder before turn_end.
+  const compactSid = "btw-compact";
+  const compactEvent = (body: Record<string, unknown>) => {
+    state = reduce(state, { type: "event", event: {
+      v: 94, ts: 1, sid: compactSid, ...body,
+    } as ServerEvent });
+  };
+  compactEvent({ type: "btw_opened", request_id: "compact-open", parent_sid: "main",
+    btw_sid: compactSid, engine: "claude", created_at: 3, revision: 4 });
+  compactEvent({ type: "user_msg", msg_id: "compact-human", prompt: "inspect" });
+  compactEvent({ type: "state", state: "running", msg_id: "compact-human" });
+  const compactStart = { type: "process", kind: "compaction", item_id: "compact-start",
+    phase: "start", status: "running", title: "压缩上下文", background: true };
+  compactEvent(compactStart);
+  const { ProcessActivity } = await harness.ssrLoadModule("/src/components/ProcessTimeline.tsx");
+  const compactBlocks = () => state.runtimes[compactSid].turns.flatMap(turn => turn.blocks)
+    .filter(block => block.kind === "process");
+  assert.match(renderToStaticMarkup(createElement(ProcessActivity, {
+    block: compactBlocks()[0],
+  })), /process-compaction-running/);
+  const compactEnd = { ...compactStart, item_id: "compact-boundary", phase: "end",
+    status: "succeeded", background: false,
+    input: { compaction_started_id: "compact-start" } };
+  compactEvent(compactEnd);
+  compactEvent({ type: "delta", message_id: "continued", turn_id: "compact-human",
+    channel: "commentary", text: "Continuing after compaction" });
+  assert.equal(compactBlocks().length, 1);
+  assert.equal(compactBlocks()[0].done, true);
+  assert.doesNotMatch(renderToStaticMarkup(createElement(ProcessActivity, {
+    block: compactBlocks()[0],
+  })), /process-compaction-running/);
+  assert.equal(state.runtimes[compactSid].state, "running");
+
+  for (let i = 0; i < 2; i++) {
+    compactEvent({ type: "replay_start", generation: "compact-g", from_seq: 0,
+      to_seq: 10, truncated: false, rebuild: true });
+    compactEvent({ type: "user_msg", msg_id: "compact-human", prompt: "inspect" });
+    compactEvent(compactEnd);
+    compactEvent({ type: "delta", message_id: "continued", turn_id: "compact-human",
+      channel: "commentary", text: "Continuing after compaction" });
+    compactEvent({ type: "state", state: "running", msg_id: "compact-human" });
+    compactEvent({ type: "replay_end", to_seq: 10, truncated: false });
+    assert.equal(compactBlocks().length, 1);
+    assert.equal(compactBlocks()[0].done, true);
+    assert.equal(state.runtimes[compactSid].state, "running");
+    assert.equal(state.runtimes[compactSid].liveOwner?.turnId, "compact-human");
+  }
 } finally {
   await harness.close();
 }

@@ -171,6 +171,7 @@ def test_release_bundles_are_deterministic_and_role_scoped(
     if role == "relay":
         assert f"{prefix}/web/dist/index.html" in members
         assert f"{prefix}/web/dist/cc-remote-viewer-runner.js" in members
+        assert not any("/artifact-inspection/" in member for member in members)
         assert f"{prefix}/requirements-relay.lock" in members
         assert f"{prefix}/deploy/install-relay.sh" in members
         assert f"{prefix}/deploy/install_lock.py" in members
@@ -180,10 +181,18 @@ def test_release_bundles_are_deterministic_and_role_scoped(
         assert f"{prefix}/requirements-wrapper.lock" not in members
     else:
         assert not any("/web/" in name for name in members)
+        assert f"{prefix}/share/cc-remote/presentation-preview.html" in members
+        assert f"{prefix}/licenses/pptx-renderer.txt" in members
+        renderer = f"{prefix}/share/cc-remote/artifact-inspection"
+        assert f"{renderer}/artifact-document-preview.html" in members
+        assert f"{renderer}/licenses/docx-preview.txt" in members
+        assert any(member.startswith(f"{renderer}/assets/pdf.worker") for member in members)
+        assert f"{prefix}/deploy/artifact_inspect_main.py" in members
         assert f"{prefix}/requirements-wrapper.lock" in members
         assert f"{prefix}/deploy/install-wrapper.sh" in members
         assert f"{prefix}/deploy/install_lock.py" in members
         assert f"{prefix}/deploy/install_claude_service.py" in members
+        assert f"{prefix}/deploy/claude_service_upgrade.py" in members
         assert f"{prefix}/deploy/check_codex_readiness.py" in members
         assert f"{prefix}/deploy/check_codex_lifetime.py" in members
         assert f"{prefix}/deploy/adopt_wrapper.py" in members
@@ -462,7 +471,8 @@ def test_role_locks_and_release_workflow_are_versioned_inputs():
     )
     assert "tags:" in workflow
     assert "v*.*.*" in workflow
-    assert "npm --prefix web run build" in workflow
+    assert "name: ci-web-dist" in workflow
+    assert "npm --prefix web run build" in source_workflow
     assert "uses: ./.github/workflows/ci.yml" in workflow
     assert "pytest" in source_workflow
     assert "actions/attest" in workflow

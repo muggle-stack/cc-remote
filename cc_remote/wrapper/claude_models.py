@@ -16,6 +16,7 @@ import tempfile
 import time
 
 from cc_remote.log import logger
+from cc_remote.protocol import MAX_AUTO_COMPACT_TOKENS, MAX_SAFE_WIRE_INTEGER
 from cc_remote.wrapper.child_env import claude_profile_process_env
 from cc_remote.wrapper.claude_controls import valid_claude_model
 from cc_remote.wrapper.claude_runtime import resolve_claude_cli
@@ -27,6 +28,8 @@ _TIMEOUT = 20.0
 _MAX_SCOPES = 64
 _cache: OrderedDict[tuple, tuple[float, list[dict]]] = OrderedDict()
 _lock = asyncio.Lock()
+_context_cache: OrderedDict[tuple, tuple[float, int]] = OrderedDict()
+_context_lock = asyncio.Lock()
 
 
 def _normalize(raw: object) -> list[dict]:
@@ -95,6 +98,12 @@ async def _read_catalog(
 
 
 async def _initialize_catalog(args: list[str], cwd: str, env: dict[str, str]) -> list[dict]:
+    result = await _native_control(args, cwd, env)
+    return _normalize(result.get("models"))
+
+
+async def _native_control(args: list[str], cwd: str, env: dict[str, str],
+                          request: dict | None = None) -> dict:
     proc = await asyncio.create_subprocess_exec(
         *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL, cwd=cwd, env=env,
@@ -119,7 +128,28 @@ async def _initialize_catalog(args: list[str], cwd: str, env: dict[str, str]) ->
                 if response.get("subtype") != "success":
                     raise RuntimeError("Claude initialization rejected")
                 result = response.get("response")
-                return _normalize(result.get("models") if isinstance(result, dict) else None)
+                if request is not None:
+                    proc.stdin.write((json.dumps({
+                        "type": "control_request", "request_id": "model-context",
+                        "request": request,
+                    }) + "\n").encode())
+                    await proc.stdin.drain()
+                    break
+                return result if isinstance(result, dict) else {}
+            if request is not None:
+                while line := await proc.stdout.readline():
+                    message = json.loads(line)
+                    if not isinstance(message, dict):
+                        continue
+                    response = message.get("response")
+                    if (message.get("type") != "control_response"
+                            or not isinstance(response, dict)
+                            or response.get("request_id") != "model-context"):
+                        continue
+                    if response.get("subtype") != "success":
+                        raise RuntimeError("Claude context inspection rejected")
+                    result = response.get("response")
+                    return result if isinstance(result, dict) else {}
             raise RuntimeError("Claude closed before model discovery")
     finally:
         proc.stdin.close()
@@ -136,6 +166,65 @@ async def _initialize_catalog(args: list[str], cwd: str, env: dict[str, str]) ->
             except ProcessLookupError:
                 pass
             await proc.wait()
+
+
+async def claude_context_window(*, claude_bin: str, model: str, cwd: str,
+                                config_dir: str | None = None,
+                                isolate_account_env: bool = False,
+                                work_only: bool = False) -> int | None:
+    """Ask the native CLI for this model's largest configurable window.
+
+    Live rawMaxTokens includes --autocompact, so a reduced live window cannot
+    reveal its ceiling. An empty, non-persisted child requests the largest
+    supported CLI window; Claude clamps it to the model/provider's own limit.
+    Only initialize and a local summary are sent. No model turn is created.
+    """
+    if valid_claude_model(model) is None:
+        return None
+    async with _context_lock:
+        try:
+            binary, _ = resolve_claude_cli(
+                claude_bin or str(Path.home() / ".local/bin/claude"))
+            binary = os.path.realpath(binary)
+            stat = os.stat(binary)
+            target = os.path.realpath(cwd)
+            key = (binary, stat.st_mtime_ns, stat.st_size, target, model,
+                   os.path.realpath(config_dir) if config_dir else None,
+                   isolate_account_env, work_only)
+            cached_at, cached = _context_cache.get(key, (0.0, None))
+            if cached is not None and time.monotonic() - cached_at < _TTL:
+                _context_cache.move_to_end(key)
+                return cached
+            env = claude_profile_process_env(config_dir, isolate_account_env=isolate_account_env)
+            env.pop("CLAUDECODE", None)
+            args = [binary, "--print", "--input-format", "stream-json",
+                    "--output-format", "stream-json", "--verbose",
+                    "--no-session-persistence", "--safe-mode", "--strict-mcp-config",
+                    "--tools", "", "--model", model,
+                    "--autocompact", str(MAX_AUTO_COMPACT_TOKENS)]
+            with ExitStack() as scope:
+                if work_only:
+                    settings = scope.enter_context(tempfile.NamedTemporaryFile(
+                        mode="w+", prefix="cc-remote-context-", suffix=".json"))
+                    json.dump(_claude_runtime_settings(config_dir), settings)
+                    settings.flush()
+                    args.extend(["--setting-sources", "", "--settings", settings.name])
+                elif isolate_account_env:
+                    args.extend(["--setting-sources", "user"])
+                result = await _native_control(args, target, env, {
+                    "subtype": "get_context_usage", "detail": "summary",
+                })
+            maximum = result.get("rawMaxTokens")
+            if type(maximum) is not int or not 0 < maximum <= MAX_SAFE_WIRE_INTEGER:
+                return None
+        except Exception as exc:
+            log.warning("Claude context ceiling unavailable", reason=type(exc).__name__)
+            return None
+        _context_cache[key] = (time.monotonic(), maximum)
+        _context_cache.move_to_end(key)
+        while len(_context_cache) > _MAX_SCOPES:
+            _context_cache.popitem(last=False)
+        return maximum
 
 
 async def claude_model_catalog(

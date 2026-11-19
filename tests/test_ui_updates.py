@@ -47,6 +47,10 @@ def managed(tmp_path, monkeypatch):
     release.mkdir(parents=True)
     (root / "current").symlink_to(release)
     (release / "release-manifest.json").write_text(json.dumps(_manifest(version="4.0.0")))
+    (release / "requirements-wrapper.lock").write_text("claude-agent-sdk==0.2.174\n")
+    service = release / "cc_remote/claude_service"
+    service.mkdir(parents=True)
+    (service / "wire.py").write_text("VERSION = 1\n")
     user = pwd.getpwuid(os.geteuid())
     (root / "installation.json").write_text(json.dumps({"schema": 1, "role": "wrapper", "user": user.pw_name}))
     monkeypatch.setattr(launcher, "host_platform", lambda: ("darwin", "arm64"))
@@ -703,6 +707,60 @@ async def test_catalog_network_error_does_not_release_maintenance(managed, monke
         store.save({**store.active(), 'phase': 'succeeded'})
     assert (await updates.status())['maintenance'] is False
     await machine._command_scheduler.close()
+
+
+@pytest.mark.asyncio
+async def test_catalog_failure_survives_status_poll_until_successful_recheck(managed, monkeypatch):
+    root, _, store = managed
+    machine, _ = _mk_machine()
+    machine._local_control = SimpleNamespace(socket=Path(store.policy()['control_socket']), server=object())
+    updates = UIUpdates(machine, root)
+    updates.catalog = {'version': '4.0.0', 'notes': ''}
+    monkeypatch.setattr(device_updates, 'release_catalog', lambda *_: (_ for _ in ()).throw(ConnectionError()))
+    first = await updates.status(check=True)
+    assert first['reason'] == 'network'
+    assert (await updates.status())['reason'] == 'network'
+    updates.checked_at = 0
+    monkeypatch.setattr(device_updates, 'release_catalog', lambda *_: {'version': '4.0.1', 'notes': ''})
+    assert (await updates.status(check=True))['reason'] is None
+    assert (await updates.status())['latest']['version'] == '4.0.1'
+    await machine._command_scheduler.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_device_authorization_uses_only_fixed_installation_command(managed, monkeypatch):
+    root, release, _ = managed
+    updates = UIUpdates(SimpleNamespace(), root)
+    calls = []
+    monkeypatch.setattr(device_updates.subprocess, 'run', lambda argv, **kwargs:
+                        calls.append((argv, kwargs)) or SimpleNamespace(stdout=b'{"ok":true}', returncode=0))
+    assert await updates.handle({'op': 'authorize'}) == {'ok': True}
+    assert calls[0][0] == [str(release / '.venv/bin/python'), '-I', '-B',
+                            str(release / 'deploy/ui_update_job.py'), '--root', str(root), 'authorize']
+    assert calls[0][1]['stdin'] == subprocess.DEVNULL
+    assert await updates.handle({'op': 'authorize', 'command': 'anything'}) == {'ok': False, 'reason': 'invalid_request'}
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_linux_authorization_uses_verified_user_manager(managed, monkeypatch):
+    from cc_remote.wrapper import codex_service
+    from deploy import linux_service
+    root, release, _ = managed
+    current = SimpleNamespace(release=release)
+    monkeypatch.setattr(device_updates, 'host_platform', lambda: ('linux', 'x86_64'))
+    monkeypatch.setattr(device_updates, 'read_installation', lambda *_: current)
+    monkeypatch.setattr(linux_service, 'trusted', lambda *_: None)
+    monkeypatch.setattr(os, 'geteuid', lambda: 1000)
+    environment = {'PATH': os.defpath, 'XDG_RUNTIME_DIR': '/run/user/1000',
+                   'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/run/user/1000/bus'}
+    monkeypatch.setattr(codex_service, 'user_manager_environment', lambda: environment)
+    calls = []
+    monkeypatch.setattr(device_updates.subprocess, 'run', lambda argv, **kwargs:
+                        calls.append((argv, kwargs)) or SimpleNamespace(stdout=b'{"ok":true}', returncode=0))
+    assert await UIUpdates(SimpleNamespace(), root).handle({'op': 'authorize'}) == {'ok': True}
+    assert calls[0][0][:6] == ['/usr/bin/systemd-run', '--user', '--collect', '--wait', '--pipe', '/usr/bin/pkexec']
+    assert calls[0][1]['env'] == environment
 
 
 @pytest.mark.asyncio

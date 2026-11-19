@@ -14,6 +14,7 @@ from starlette.types import Scope
 
 _SHELL_FILES = frozenset({
     ".", "index.html", "sw.js", "cc-remote-build.json", "cc-remote-viewer-runner.js", "cc-remote-viewer-zoom.js",
+    "presentation-preview.html",
 })
 
 

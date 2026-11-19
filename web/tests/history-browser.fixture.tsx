@@ -20,6 +20,7 @@ import { ReadingNavigationFixture } from "./fixtures/reading-navigation";
 import { QuotaLayoutFixture } from "./fixtures/quota-layout";
 import { RewindFixture } from "./fixtures/rewind";
 import { CompletionReadingFixture } from "./fixtures/completion-reading";
+import { PresentationPreviewFixture } from "./fixtures/presentation-preview";
 
 import "../src/index.css";
 import "../src/App.css";
@@ -3284,6 +3285,8 @@ createRoot(document.getElementById("root")!).render(
     ? <ArtifactPreviewFixture kind="html" />
     : rootParams.has("artifact-pdf")
     ? <ArtifactPreviewFixture kind="pdf" />
+    : rootParams.has("artifact-presentation")
+    ? <PresentationPreviewFixture />
     : rootParams.has("artifact-gif")
     ? <ArtifactPreviewFixture kind="gif" />
     : rootParams.has("artifact-invalid-gif")

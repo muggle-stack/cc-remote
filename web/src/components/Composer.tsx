@@ -62,6 +62,8 @@ import {
 import { PendingImageAttachments } from "./PendingImageAttachments";
 import { QueuedQueryChip } from "./QueuedQueryChip";
 import { UsageMeter } from "./UsageMeter";
+import { VoiceInputButton, VoiceInputStatus } from "./VoiceInputButton";
+import { useVoiceInput, voiceInputAvailable } from "../use-voice-input";
 const SpeedPicker = lazy(() => import("./SpeedPicker").then(m => ({ default: m.SpeedPicker })));
 import { PasteCards } from "./PasteCards";
 import { uuid } from "../util";
@@ -78,6 +80,7 @@ const DshCommandFeedback = lazy(() => import("./DshCommandFeedback"));
 
 interface Props {
   maintenance?: boolean;
+  voiceEnabled?: boolean;
   dsh?: DshState;
   dshSid?: string;
   readDsh?: DshRead;
@@ -116,7 +119,7 @@ interface Props {
   takeoverMessage?: string | null;
   engine?: "claude" | "codex" | "dsh";
   archived?: boolean;
-  catalog?: Catalog;   // engine-reported models/efforts; falls back to data.ts
+  catalog?: Catalog;   // engine-reported models and reasoning capabilities
   onRequestModels?: () => void;
   editPrompt: string | null;
   onEditConsumed: () => void;
@@ -355,15 +358,20 @@ export function Composer(p: Props) {
     textarea.style.height = "auto";
     textarea.style.height = Math.min(textarea.scrollHeight, 132) + "px";
   }, [nativeTextareaSizing]);
-  useLayoutEffect(() => {
-    growTa();
-  }, [growTa, input, p.draftKey]);
   const focusTa = () => setTimeout(() => taRef.current?.focus(), 0);
   const flash = (msg: string, duration = 2200) => {
     setNotice(msg);
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
     noticeTimer.current = window.setTimeout(() => setNotice(null), duration);
   };
+  const canTalk = p.voiceEnabled === true && !busy && !locked && !importing
+    && !hasText && !hasAttachments && voiceInputAvailable();
+  const voice = useVoiceInput(canTalk, p.draftKey, setInput, flash);
+  const voiceActive = voice.stage !== "idle";
+  const displayedInput = voiceActive ? voice.transcript : input;
+  useLayoutEffect(() => {
+    growTa();
+  }, [growTa, displayedInput, p.draftKey]);
 
   const onInput = (v: string) => setInput(v);
 
@@ -576,7 +584,7 @@ export function Composer(p: Props) {
           }
           break;
         }
-        const parsed = parseAutoCompactArgument(args);
+        const parsed = parseAutoCompactArgument(args, p.contextReport?.model_max_tokens);
         if (!parsed.ok) {
           flash(parsed.error);
           return;
@@ -795,6 +803,7 @@ export function Composer(p: Props) {
         effectiveThresholdTokens={
           p.contextReport?.auto_compact_threshold_tokens}
         rawMaxTokens={p.contextReport?.raw_max_tokens}
+        modelMaxTokens={p.contextReport?.model_max_tokens}
         disabled={locked || !p.onSetAutoCompact}
         onChange={(selection) => {
           if (!p.onSetAutoCompact?.(selection)) {
@@ -830,7 +839,7 @@ export function Composer(p: Props) {
       data-chat-composer
       ref={taRef}
       rows={1}
-      value={input}
+      value={displayedInput}
       placeholder={importing ? "正在安全导入附件…"
         : p.maintenance ? "设备正在更新，草稿已保留…"
         : offline ? "机器离线 — 等待重连…"
@@ -840,6 +849,7 @@ export function Composer(p: Props) {
             ? "补充当前任务…"
             : placeholder))}
       disabled={locked}
+      readOnly={voiceActive}
       onChange={(e) => { onInput(e.target.value); setReferenceCaret(e.target.selectionStart); }}
       onSelect={(e) => setReferenceCaret(e.currentTarget.selectionStart)}
       aria-controls={refs.open ? "dsh-reference-list" : undefined}
@@ -849,8 +859,13 @@ export function Composer(p: Props) {
         imeSubmitRef.current.endComposition();
         onInput(e.currentTarget.value);
       }}
-      onPaste={onPaste}
+      onPaste={(event) => { if (voiceActive) event.preventDefault(); else onPaste(event); }}
       onKeyDown={(e) => {
+        if (voiceActive) {
+          if (e.key === "Escape") voice.cancel();
+          if (e.key === "Enter" || e.key === "Escape") e.preventDefault();
+          return;
+        }
         if (imeSubmitRef.current.isComposingInput(e.nativeEvent)) return;
         const plainTab = e.key === "Tab" && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey;
         if (refs.open) {
@@ -902,7 +917,10 @@ export function Composer(p: Props) {
     />
   );
 
-  const sendControl = (
+  const sendControl = canTalk || voiceActive ? (
+    <VoiceInputButton stage={voice.stage}
+      start={voice.start} release={voice.release} cancel={voice.cancel} />
+  ) : (
     <button className={sendClass}
       onPointerDown={() => {
         if (imeSubmitRef.current.shouldCommitBeforeButtonSubmit()) taRef.current?.blur();
@@ -948,7 +966,8 @@ export function Composer(p: Props) {
             )}
           </div>
         )}
-        {notice && <div className="composer-notice">{notice}</div>}
+        {voiceActive ? <VoiceInputStatus stage={voice.stage} />
+          : notice && <div className="composer-notice">{notice}</div>}
         {p.engine === "dsh" && <Suspense fallback={null}><DshCommandFeedback
           scope={p.draftKey} state={p.dsh} result={dshResult} /></Suspense>}
         {(p.queue.length > 0 || p.pendingSend || p.failedDeferred.length > 0) && (
@@ -1192,9 +1211,7 @@ export function Composer(p: Props) {
                   codex={p.engine === "codex"}
                   dsh={p.engine === "dsh"}
                   codexContext={p.engine === "codex" ? p.codexContext : null}
-                  autoCompact={p.engine === "claude" ? p.autoCompact : null}
-                  onAutoCompact={p.engine === "codex" && p.onSetCodexContext
-                    ? () => { setCtxOpen(false); setAutoCompactOpen(true); } : undefined} />
+                  autoCompact={p.engine === "claude" ? p.autoCompact : null} />
               </Suspense>
             )}
             {p.engine === "claude" && autoCompactOpen && (
@@ -1206,7 +1223,7 @@ export function Composer(p: Props) {
             {p.engine === "codex" && autoCompactOpen && (
               <div className="ctx-pop auto-compact-pop" role="dialog" aria-label="Codex 上下文上限">
                 <Suspense fallback={<p>加载设置…</p>}><CodexContextControl
-                  key={`${p.codexContext?.max_context_tokens}:${p.codexContext?.pending}`}
+                  key={p.draftKey}
                   state={p.codexContext ?? null} report={exactContextReport}
                   onChange={(value) => p.onSetCodexContext?.(value) ?? false} /></Suspense>
               </div>
@@ -1221,6 +1238,7 @@ export function Composer(p: Props) {
         kind={sheetKind ?? "models"}
         engine={p.engine}
         catalog={p.catalog}
+        onRequestModels={p.onRequestModels}
         dsh={p.dsh}
         onClose={() => setSheetKind(null)}
         currentModel={p.model}

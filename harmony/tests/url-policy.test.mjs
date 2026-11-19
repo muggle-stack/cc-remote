@@ -32,6 +32,21 @@ test('exact origin matching cannot be widened by redirects, credentials or hostn
   }
 });
 
+test('microphone access requires the configured HTTPS origin and an audio-only request', () => {
+  const audio = 'TYPE_AUDIO_CAPTURE';
+  const video = 'TYPE_VIDEO_CAPTURE';
+  assert.equal(policy.microphoneRequest(server, server + '/chat', server, [audio]), true);
+  for (const origin of ['https://evil.example', 'http://remote.example', server + ':8443',
+    server + '.evil', 'https://user@remote.example', 'null']) {
+    assert.equal(policy.microphoneRequest(server, server, origin, [audio]), false, origin);
+  }
+  assert.equal(policy.microphoneRequest(server, 'https://evil.example', server, [audio]), false);
+  assert.equal(policy.microphoneRequest('', server, server, [audio]), false);
+  for (const resources of [[], [video], [audio, video]]) {
+    assert.equal(policy.microphoneRequest(server, server, server, resources), false);
+  }
+});
+
 test('same-origin navigation stays mounted and external clicks go to the system browser', () => {
   assert.equal(policy.navigationAction(server + '/login', server, server, true, true, false), 'allow');
   assert.equal(policy.navigationAction('https://docs.example/a', server, server, true, true, true), 'external');

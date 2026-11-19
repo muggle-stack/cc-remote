@@ -114,6 +114,17 @@ def configure(root: Path, *, enabled: bool, allow_relay: bool = False,
     return {"enabled": True, "allow_relay_update": allow_relay}
 
 
+def authorize(root: Path) -> dict:
+    """Use the device's native administrator prompt for a legacy installation."""
+    value = read_installation(root, *host_platform())
+    if value.role != "wrapper":
+        raise UpdateError("device authorization requires a Wrapper installation")
+    from cc_remote.activation import receipt
+    activation = receipt(root)
+    control = activation.get("control_socket") if activation else None
+    return configure(root, enabled=True, control_socket=Path(control) if control else None)
+
+
 def launch(root: Path, identity: str, version: str) -> dict:
     value, account = installation(root)
     store = UpdateJobs(root)
@@ -575,6 +586,7 @@ def main() -> int:
     start = sub.add_parser("start")
     start.add_argument("id")
     start.add_argument("version")
+    sub.add_parser("authorize")
     for action in ("run", "cancel", "reconcile", "observe", "prune_cache"):
         sub.add_parser(action).add_argument("id")
     recovery = sub.add_parser("recover")
@@ -582,6 +594,9 @@ def main() -> int:
     recovery.add_argument("generation", type=int)
     args = parser.parse_args()
     try:
+        if args.action == "authorize":
+            print(json.dumps({"ok": True, **authorize(args.root)}))
+            return 0
         if args.action == "run":
             run(args.root, args.id)
             return 0

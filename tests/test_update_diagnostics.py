@@ -8,8 +8,17 @@ from urllib.error import HTTPError, URLError
 
 import pytest
 
-from cc_remote import update, update_relay
+from cc_remote import update, update_download, update_errors, update_relay
 from tests.test_update import _installation
+
+
+@pytest.fixture
+def retry_delays(monkeypatch):
+    delays = []
+    # Network failures are simulated here, so record backoff without waiting.
+    monkeypatch.setattr(update_errors, "time", SimpleNamespace(sleep=delays.append))
+    monkeypatch.setattr(update_download, "time", SimpleNamespace(sleep=delays.append))
+    return delays
 
 
 @pytest.mark.parametrize("error,expected", [
@@ -24,7 +33,7 @@ from tests.test_update import _installation
     (HTTPError("https://secret/", 302, "secret Location", {}, None), "unexpected redirect"),
 ])
 @pytest.mark.parametrize("path,stage", [("healthz", "Relay health check"), ("cc-remote-build.json", "Relay Web version check")])
-def test_relay_network_failure_names_the_stage_and_cause_without_leaking_secrets(monkeypatch, error, expected, path, stage):
+def test_relay_network_failure_names_the_stage_and_cause_without_leaking_secrets(monkeypatch, error, expected, path, stage, retry_delays):
     def fail(*args, **kwargs):
         raise error
     monkeypatch.setattr(update_relay, "build_opener", lambda *args: SimpleNamespace(open=fail))
@@ -34,6 +43,11 @@ def test_relay_network_failure_names_the_stage_and_cause_without_leaking_secrets
     assert stage in message and expected in message and "relay.example.test" in message
     assert "check" in message and "no local service was changed" in message
     assert "secret" not in message
+    transient = expected in {
+        "TLS handshake", "timed out", "connection refused",
+        "connection was interrupted/reset", "HTTP 502",
+    }
+    assert retry_delays == ([0.5, 1.0] if transient else [])
 
 
 def test_bad_server_response_is_not_misreported_as_a_network_problem(monkeypatch):
@@ -46,7 +60,7 @@ def test_bad_server_response_is_not_misreported_as_a_network_problem(monkeypatch
                                          (22, "HTTP 403"), (23, "disk space"), (28, "timed out"),
                                          (35, "TLS handshake"), (60, "TLS certificate verification"),
                                          (56, "receiving"), (63, "permitted size")])
-def test_download_failure_preserves_curl_reason_but_not_signed_redirects(tmp_path, monkeypatch, code, expected, capsys):
+def test_download_failure_preserves_curl_reason_but_not_signed_redirects(tmp_path, monkeypatch, code, expected, capsys, retry_delays):
     def run(command, **kwargs):
         assert kwargs["capture_output"] is True
         assert "--write-out" in command
@@ -59,6 +73,7 @@ def test_download_failure_preserves_curl_reason_but_not_signed_redirects(tmp_pat
     assert "no service was changed" in message
     assert "secret" not in message and "private.example" not in message
     assert not capsys.readouterr().err
+    assert retry_delays == ([0.5, 1.0] if code in {5, 6, 7, 28, 35, 56} else [])
 
 
 @pytest.mark.parametrize("code,stderr,expected", [

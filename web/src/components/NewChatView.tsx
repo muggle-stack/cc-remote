@@ -28,6 +28,8 @@ import { CommandSheet } from "./CommandSheet";
 import { CenteredSheet } from "./CenteredSheet";
 import { ChoicePicker } from "./ChoicePicker";
 import { AttachmentPicker } from "./AttachmentPicker";
+import { VoiceInputButton, VoiceInputStatus } from "./VoiceInputButton";
+import { useVoiceInput, voiceInputAvailable } from "../use-voice-input";
 import { permissionProfileLabel } from "../data";
 import { codexProfilePresentation } from "../codex-profile-presentation";
 import {
@@ -54,6 +56,7 @@ export { compatibleNewChatEffort, newChatCatalogRequest, resolveNewChatLocalDefa
   reconcileNewChatSelection, newChatEfforts } from "../new-chat-selection";
 
 interface Props {
+  voiceEnabled?: boolean;
   draftKey?: string;
   draftStore?: ComposerDraftStore;
   editPrompt?: string | null;
@@ -138,24 +141,35 @@ const defaultExecutionControls = (
 });
 
 function NewChatSelectorSheet({
-  open, kind, options, current, onClose, onPick,
+  open, kind, options, current, showIcons, onClose, onPick, catalogUnavailable, onRequestModels,
 }: {
   open: boolean;
   kind: "models" | "efforts";
   options: SelectorOption[];
   current: string | null;
+  showIcons: boolean;
   onClose: () => void;
   onPick: (value: string | null) => void;
+  catalogUnavailable?: boolean;
+  onRequestModels?: () => void;
 }) {
   const title = kind === "models" ? "选择模型" : "选择思考强度";
   return (
     <CenteredSheet open={open} label={title} onClose={onClose}>
         <div className="sheet-scroll">
+          {kind === "models" && catalogUnavailable && <>
+            <div className="cmd-empty" role="status">暂未读取到模型列表，可使用本机默认配置。</div>
+            {onRequestModels && <button type="button" className="cmd" onClick={onRequestModels}>
+              <span className="cmd-ic"><Icon name="refresh" size={17} /></span>
+              <span className="cmd-tx"><span className="cmd-nm">重新读取模型列表</span></span>
+            </button>}
+          </>}
           {options.map((option) => (
             <button key={option.id ?? "__local_default__"}
               className={"cmd" + (option.id === current ? " sel" : "")}
+              aria-pressed={option.id === current}
               onClick={() => onPick(option.id)}>
-              <span className="cmd-ic"><Icon name={option.icon} size={17} /></span>
+              {showIcons && <span className="cmd-ic"><Icon name={option.icon} size={17} /></span>}
               <span className="cmd-tx">
                 <span className="cmd-nm">{option.name}</span>
                 <span className="cmd-ds">{option.description}</span>
@@ -196,7 +210,7 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
   onPickCodexProfile, skills, skillsOnline = true, skillsError = false, onRequestSkills,
   permissionProfiles, onGetPermissionProfiles, onOpenExtensions,
   dshCommands, dshPresets = [], dshPermissions = [], dshPreset, dshError, onPickDshPreset,
-  onSend, draftKey, draftStore }: Props) {
+  onSend, draftKey, draftStore, voiceEnabled }: Props) {
   const localDrafts = useRef(new ComposerDraftStore());
   const drafts = draftStore ?? localDrafts.current;
   const key = draftKey ?? "new";
@@ -316,6 +330,12 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
   }, []);
 
   const hasAttachments = images.length > 0 || files.length > 0;
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const canTalk = voiceEnabled === true && !creating && !importing
+    && !text.trim() && !hasAttachments && !pastes.length && voiceInputAvailable();
+  const voice = useVoiceInput(canTalk, `${key}\u0000${cwd}`, setText, setVoiceError);
+  const voiceActive = voice.stage !== "idle";
+  useEffect(() => { setVoiceError(null); }, [key, cwd]);
   // Effects run after paint. Derive the fail-closed defaults synchronously too,
   // so a send in the first frame after a device/surface switch cannot reuse
   // another authorization scope's choices.
@@ -667,18 +687,25 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
       placeholder={space === "work" ? "描述要完成的工作，或上传文档、表格、演示…"
         : engine === "codex" ? "输入 / 命令，$ Skill" : "输入 / 命令"}
       aria-label="新会话消息" ref={taRef}
-      value={text} onChange={(e) => {
+      value={voiceActive ? voice.transcript : text} onChange={(e) => {
         setText(e.target.value);
         setAutoCompactNotice(null);
-      }} onPaste={onPaste}
+        setVoiceError(null);
+      }} onPaste={(event) => { if (voiceActive) event.preventDefault(); else onPaste(event); }}
       autoFocus={autoFocus} rows={space === "work" ? 3 : 1}
       disabled={creating || importing}
+      readOnly={voiceActive}
       onCompositionStart={() => imeSubmitRef.current.startComposition()}
       onCompositionEnd={(e) => {
         imeSubmitRef.current.endComposition();
         setText(e.currentTarget.value);
       }}
       onKeyDown={(e) => {
+        if (voiceActive) {
+          if (e.key === "Escape") voice.cancel();
+          if (e.key === "Enter" || e.key === "Escape") e.preventDefault();
+          return;
+        }
         if (e.key === "Tab" && e.shiftKey) {
           e.preventDefault();
           if (engine === "codex") {
@@ -714,7 +741,11 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
       label={space === "work" ? "添加资料" : "添加附件"}
       disabled={creating || importing} />
   );
-  const sendButton = (
+  const sendButton = canTalk || voiceActive ? (
+    <VoiceInputButton stage={voice.stage}
+      start={(gesture) => { setVoiceError(null); voice.start(gesture); }}
+      release={voice.release} cancel={voice.cancel} />
+  ) : (
     <button className="newchat-send" aria-label="开始" title="开始新对话"
       onPointerDown={() => {
         if (imeSubmitRef.current.shouldCommitBeforeButtonSubmit()) taRef.current?.blur();
@@ -824,6 +855,7 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
         )}
 
         <div className="newchat-editor">
+          <VoiceInputStatus stage={voice.stage} />
           {suggestionOpen && !creating && !importing && (
             <div className="cmd-pop" role="listbox" aria-label={skillOpen ? "Skills" : "命令"} data-lock-horizontal-swipe>
               {commandMatches.map(command => (
@@ -903,13 +935,13 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
                 })} />
             )}
           </div>
-          {(space === "work" || createError || importing || creating || autoCompactNotice) && (
+          {(space === "work" || createError || importing || creating || autoCompactNotice || voiceError) && (
             <div className="newchat-foot-right">
             <span className="newchat-hint" role="status">{createError
               ? `创建失败：${createError}`
               : importing ? "正在导入附件…"
                 : creating ? "正在创建会话…"
-                  : autoCompactNotice ?? "Enter 发送"}</span>
+                  : voiceError ?? autoCompactNotice ?? "Enter 发送"}</span>
             {space === "work" && sendButton}
           </div>
           )}
@@ -919,7 +951,10 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
       <NewChatSelectorSheet
         open={sheetKind !== null}
         kind={sheetKind ?? "models"}
+        showIcons={sheetKind === "efforts" || engine === "dsh"}
         options={sheetKind === "efforts" ? effortOptions : modelOptions}
+        catalogUnavailable={engine === "codex" && modelList.length === 0}
+        onRequestModels={onRequestModels}
         current={sheetKind === "efforts" ? effort : model}
         onClose={() => setSheetKind(null)}
         onPick={(value) => {

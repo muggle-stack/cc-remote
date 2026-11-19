@@ -81,9 +81,10 @@ try {
       }],
     }],
   }));
-  assert.match(fallbackNoticeMarkup, /claude-original.*claude-fallback/);
+  assert.doesNotMatch(fallbackNoticeMarkup, /claude-original|claude-fallback|turn-model-notice/,
+    "model fallback metadata must not repeat the header feedback in the transcript");
   assert.doesNotMatch(fallbackNoticeMarkup, /查看本轮详情|查看更多内容|class="process-timeline/,
-    "a model switch stays visible without creating an empty processed disclosure");
+    "hidden model metadata must not create an empty processed disclosure");
 
   const legacyTurn = { id: "legacy", prompt: "edit", done: true, blocks: [{
     kind: "tool", tool: "fileChange", tool_use_id: "edit", message_id: "m", done: true,

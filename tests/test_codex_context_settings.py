@@ -259,6 +259,111 @@ async def test_other_client_keeps_setting_pending_and_our_subscription_restored(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("capacity,configured,observed,threshold", [
+    (12000, None, 12000, 11368),
+    (None, None, 9500, 9000),
+    (None, 15000, 14250, 13500),
+])
+async def test_fresh_native_runtime_confirms_shared_context_setting(
+    catalog, capacity, configured, observed, threshold,
+):
+    settings, handle = NativeContextSettings(), handle_for(catalog)
+    handle.cwd, handle._generation = str(catalog), 3
+    handle.last_token_usage, handle.context_window = {}, observed
+    await settings.select(handle, capacity)
+    settings.mark_attempted(handle.model)
+    handle._request.return_value = {"config": {"model_context_window": configured}}
+    assert await settings.observe_native_usage(
+        handle, capacity=observed, threshold=threshold,
+        observed_at=settings.attempted_at + 1, usage=handle.last_token_usage)
+    assert not settings.pending and settings.error is None
+    assert settings.applied_effective_window == observed
+    assert settings.applied_threshold == threshold
+    assert settings.applied_window == settings.window
+    handle.force_reconnect.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", [
+    "before_attempt", "old_sample", "wrong_window", "wrong_threshold", "unknown_time",
+    "other_model", "real_failure", "changed_selection", "changed_generation", "changed_sample",
+    "missing_config", "different_scope", "changed_cwd",
+])
+async def test_context_confirmation_rejects_stale_ambiguous_or_changed_runtime(catalog, reason):
+    settings, handle = NativeContextSettings(), handle_for(catalog)
+    handle.cwd, handle._generation = str(catalog), 3
+    handle.last_token_usage, handle.context_window = {}, 9500
+    await settings.select(handle, None)
+    settings.mark_attempted(handle.model)
+    stamp = settings.attempted_at + 1
+    observed, threshold = 9500, 9000
+
+    async def read_config(*_args):
+        if reason == "changed_selection":
+            await settings.select(handle, 12000)
+        if reason == "changed_generation":
+            handle._generation += 1
+        if reason == "changed_sample":
+            handle.last_token_usage = {}
+        if reason == "changed_cwd":
+            handle.cwd = "/different-project"
+        if reason == "missing_config":
+            raise TimeoutError("unavailable")
+        return {"config": {"model_context_window": None,
+                           "model_auto_compact_token_limit_scope": "body_after_prefix" if reason == "different_scope" else None}}
+
+    handle._request.side_effect = read_config
+    if reason == "before_attempt":
+        settings.apply_attempted = False
+    elif reason == "old_sample":
+        stamp = settings.attempted_at - 1
+    elif reason == "wrong_window":
+        observed = 19000
+    elif reason == "wrong_threshold":
+        threshold = 8999
+    elif reason == "unknown_time":
+        stamp = None
+    elif reason == "other_model":
+        handle.model = "other"
+    elif reason == "real_failure":
+        settings.error = "connection lost"
+    assert not await settings.observe_native_usage(
+        handle, capacity=observed, threshold=threshold, observed_at=stamp,
+        usage=handle.last_token_usage)
+    assert settings.pending and settings.applied_effective_window is None
+    handle.force_reconnect.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_context_read_publishes_confirmed_default_in_same_response(catalog, monkeypatch):
+    from cc_remote.wrapper import codex_handle as module
+    from cc_remote.wrapper.codex_context_usage import CodexContextEstimate
+    from cc_remote.wrapper.machine import WrapperMachine
+    from tests.test_codex_controls import _Cfg
+
+    handle = module.CodexHandle(_Cfg(), codex_home=str(catalog))
+    handle.model, handle.thread_id, handle._cwd = "fixture", "one", str(catalog)
+    handle.last_token_usage = {"last": {"totalTokens": 5000}, "modelContextWindow": 9500}
+    handle.context_window = 9500
+    await handle.context_settings.select(handle, None)
+    handle.context_settings.mark_attempted(handle.model)
+    stamp = handle.context_settings.attempted_at + 1
+    handle._request = AsyncMock(return_value={"config": {"model_context_window": None}})
+    monkeypatch.setattr(module, "read_codex_context_estimate", lambda *_a, **_k:
+                        CodexContextEstimate(5010, 9000, stamp))
+    machine = SimpleNamespace(_emit=AsyncMock())
+    machine._publish_codex_context = lambda ctx: WrapperMachine._publish_codex_context(machine, ctx)
+    ctx = SimpleNamespace(sdk=handle, engine="codex", space="code", btw=False, work_id=None)
+    event = await WrapperMachine._handle_get_context_locked(machine, ctx, None)
+    assert event.source == "native_estimate"
+    assert event.max_tokens == 9500 and event.auto_compact_threshold_tokens == 9000
+    settings_event = machine._emit.call_args_list[0].args[1]
+    assert not settings_event.pending and settings_event.applied_max_context_tokens == 9500
+    assert settings_event.applied_threshold_tokens == 9000
+    assert settings_event.max_context_tokens is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("capacity", [12000, None], ids=["set-limit", "reset-limit"])
 @pytest.mark.parametrize("reconnect_fails", [False, True])
 async def test_unconfirmed_context_is_not_reloaded_at_each_turn_boundary(

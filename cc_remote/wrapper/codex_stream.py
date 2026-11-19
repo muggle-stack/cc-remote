@@ -271,6 +271,8 @@ class CodexHistoryImageView:
     height: int | None = None
     data: bytes | None = None
     source_complete: bool = False
+    replaces_item_ids: tuple[str, ...] = ()
+    source_offset: int | None = None
 
 
 @dataclass(frozen=True)
@@ -3801,6 +3803,8 @@ def _tool_presentation(item: dict) -> tuple[str, str, str | None, str | None]:
     if item_type == "mcpToolCall":
         server = str(item.get("server") or "MCP")[:1024]
         tool = str(item.get("tool") or "mcp")[:1024]
+        if _is_artifact_inspection(server, tool):
+            return tool, "file", "查看文件", server
         return tool, "mcp", f"{server} · {tool}"[:1024], server
     if item_type == "dynamicToolCall":
         tool = str(item.get("tool") or "dynamicTool")[:1024]
@@ -4007,6 +4011,23 @@ def _reasoning_summary(item: dict) -> str:
     return text
 
 
+def _is_artifact_inspection(server: object, tool: object) -> bool:
+    return server == "cc_remote_artifact_preview" and tool == "inspect_file"
+
+
+def _artifact_inspection_text(result: dict) -> str:
+    # The model receives the actual image. Browser history only needs the
+    # result caption so binary content never enters the chat replay ring.
+    content = result.get("content")
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        item["text"] for item in content[:64]
+        if isinstance(item, dict) and item.get("type") in {"text", "input_text"}
+        and isinstance(item.get("text"), str)
+    )
+
+
 def _mcp_result_content(item: dict):
     error = item.get("error") if isinstance(item.get("error"), dict) else None
     if error is not None:
@@ -4014,6 +4035,8 @@ def _mcp_result_content(item: dict):
     result = item.get("result")
     if not isinstance(result, dict):
         return result or ""
+    if _is_artifact_inspection(item.get("server"), item.get("tool")):
+        return _artifact_inspection_text(result)
     # `_meta` is server-private and can contain connector/session data. Never put
     # it in a replayable client ring.
     return _redact_credentials({
@@ -5037,7 +5060,15 @@ def codex_translate_history(
                                 if has_image
                                 else "图片读取未返回可预览内容"
                             )
-                        if category in {"mcp", "server_tool"}:
+                        if _is_artifact_inspection(tool_meta[3], tool_meta[0]):
+                            if isinstance(raw_output, list):
+                                raw_output = _artifact_inspection_text({"content": raw_output})
+                            else:
+                                detail, structured_error = _history_structured_tool_output(raw_output)
+                                raw_output = (
+                                    _artifact_inspection_text(detail) if isinstance(detail, dict) else detail
+                                )
+                        elif category in {"mcp", "server_tool"}:
                             raw_output, structured_error = (
                                 _history_structured_tool_output(raw_output))
                         output, was_truncated = bounded_text(
@@ -5129,10 +5160,13 @@ def codex_translate_history(
                             else {"arguments": arguments}),
                         64 * 1024,
                     )
+                    artifact_inspection = _is_artifact_inspection(server, tool)
+                    title = "查看文件" if artifact_inspection else f"{server} · {tool}"[:1024]
                     upsert_tool_use(
-                        tool_id, tool, "mcp", f"{server} · {tool}"[:1024],
+                        tool_id, tool, "file" if artifact_inspection else "mcp", title,
                         server, tool_input, line_no, raw_ts)
-                    content, is_error = _legacy_mcp_result(p.get("result"))
+                    content, is_error = _legacy_mcp_result(
+                        p.get("result"), artifact_inspection=artifact_inspection)
                     output, truncated = bounded_text(content, tool_result_max)
                     upsert_tool_result(ToolResult(
                         tool_use_id=tool_id,
@@ -5556,6 +5590,8 @@ def _hist_tool_presentation(
         parts = raw_name.split("__", 2)
         server = parts[1] if len(parts) > 1 and parts[1] else "MCP"
         mcp_tool = parts[2] if len(parts) > 2 and parts[2] else raw_name
+        if _is_artifact_inspection(server, mcp_tool):
+            return mcp_tool, "file", "查看文件", server
         return mcp_tool[:1024], "mcp", f"{server} · {mcp_tool}"[:1024], server[:1024]
     return tool[:1024], "tool", raw_name[:1024], None
 
@@ -5678,7 +5714,7 @@ def _legacy_duration_ms(duration) -> int | None:
     return milliseconds if milliseconds >= 0 else None
 
 
-def _legacy_mcp_result(result) -> tuple[object, bool]:
+def _legacy_mcp_result(result, *, artifact_inspection: bool = False) -> tuple[object, bool]:
     """Decode persisted Rust ``Result`` while excluding server-private metadata."""
     if not isinstance(result, dict):
         return "MCP 工具调用已完成", False
@@ -5689,6 +5725,8 @@ def _legacy_mcp_result(result) -> tuple[object, bool]:
     value = result.get("Ok")
     if not isinstance(value, dict):
         return "MCP 工具调用已完成", False
+    if artifact_inspection:
+        return _artifact_inspection_text(value), bool(value.get("isError"))
     safe = _redact_credentials({
         key: value.get(key) for key in ("content", "structuredContent")
         if value.get(key) is not None
@@ -5962,6 +6000,7 @@ def codex_history_image_views(
     native_turn_id: str,
     *,
     segment_index: int = 0,
+    source_end: int | None = None,
 ) -> tuple[CodexHistoryImageView, ...]:
     """Recover image reads/generation from one exact native rollout segment.
 
@@ -5982,6 +6021,8 @@ def codex_history_image_views(
     if window is None:
         return ()
     start_offset, end_offset = window
+    if source_end is not None:
+        end_offset = min(end_offset, source_end)
 
     calls: list[dict[str, object]] = []
     by_call_id: dict[str, dict[str, object]] = {}
@@ -5991,13 +6032,16 @@ def codex_history_image_views(
     last_anchor_id: str | None = None
     awaiting_next_anchor: list[dict[str, object]] = []
     source_complete = False
+    open_calls: set[str] = set()
+    track_exec_calls = True
+    exec_batch: dict | None = None
     try:
         source = rollout_open(path, "rb")
     except OSError:
         return ()
     with source:
         source.seek(start_offset)
-        for _offset, line in _bounded_jsonl_records(
+        for source_offset, line in _bounded_jsonl_records(
             source, end_offset=end_offset,
         ):
             try:
@@ -6009,6 +6053,9 @@ def codex_history_image_views(
                 continue
             row_type = row.get("type")
             payload_type = payload.get("type")
+            metadata = payload.get("internal_chat_message_metadata_passthrough")
+            metadata_turn = metadata.get("turn_id") if isinstance(metadata, dict) else None
+            exact_turn = metadata_turn in (None, native_turn_id)
 
             if row_type == "event_msg" and payload_type == "task_started":
                 turn_id = payload.get("turn_id")
@@ -6037,9 +6084,93 @@ def codex_history_image_views(
                         awaiting_next_anchor.clear()
                     last_anchor_id = None
                     current_segment += 1
+                    exec_batch = None
                 else:
                     saw_visible_user = True
                 continue
+
+            if row_type == "response_item" and payload_type in {
+                "function_call", "custom_tool_call",
+            }:
+                raw_call_id = payload.get("call_id")
+                # Nested ImageView records have no parent id. Associate their
+                # output only while a single, exact native call is outstanding.
+                exec_batch = None
+                if (track_exec_calls and isinstance(raw_call_id, str)
+                        and _SAFE_WIRE_ID.fullmatch(raw_call_id)):
+                    open_calls.add(raw_call_id)
+                    if (exact_turn and current_segment == segment_index
+                            and payload.get("name") == "exec"
+                            and len(open_calls) == 1):
+                        exec_batch = {"call_id": raw_call_id, "items": []}
+                if len(open_calls) > _MAX_HISTORY_IMAGE_VIEWS_PER_SEGMENT:
+                    # Never infer a parent after losing track of active calls.
+                    exec_batch = None
+                    open_calls.clear()
+                    track_exec_calls = False
+
+            if row_type == "event_msg" and payload_type == "item_completed":
+                item = payload.get("item")
+                if (exec_batch is not None and isinstance(item, dict)
+                        and item.get("type") == "ImageView"
+                        and payload.get("turn_id") == native_turn_id
+                        and current_segment == segment_index):
+                    item_id = item.get("id")
+                    items = exec_batch["items"]
+                    if (isinstance(item_id, str) and _SAFE_WIRE_ID.fullmatch(item_id)
+                            and all(entry["item_id"] != item_id for entry in items)):
+                        if len(items) >= _MAX_HISTORY_IMAGE_VIEWS_PER_SEGMENT:
+                            exec_batch = None
+                        else:
+                            items.append({"item_id": item_id, "timestamp": row.get("timestamp"),
+                                          "previous_item_id": last_anchor_id})
+
+            if row_type == "response_item" and payload_type in {
+                "function_call_output", "custom_tool_call_output",
+            }:
+                raw_call_id = payload.get("call_id")
+                if isinstance(raw_call_id, str):
+                    open_calls.discard(raw_call_id)
+                if exec_batch is not None and raw_call_id == exec_batch["call_id"]:
+                    output = payload.get("output")
+                    items = exec_batch["items"]
+                    outputs = [part for part in output
+                               if isinstance(part, dict) and part.get("type") == "input_image"
+                               ] if isinstance(output, list) else []
+                    if (exact_turn and items and len(outputs) == len(items)
+                            and len(calls) + len(items) <= _MAX_HISTORY_IMAGE_VIEWS_PER_SEGMENT):
+                        images = []
+                        remaining = _MAX_HISTORY_IMAGE_BYTES_PER_SEGMENT - image_bytes
+                        for part in outputs:
+                            image = _history_image_payload(part.get("image_url"))
+                            if image is None or len(image[3]) > remaining:
+                                break
+                            images.append(image)
+                            remaining -= len(image[3])
+                        if len(images) == len(items):
+                            # Output order can differ from parallel ImageView
+                            # completion order. These are the call's returned
+                            # images, not claims about any one current file path.
+                            for index, image in enumerate(images):
+                                image_id = _live_id(f"{raw_call_id}.image-{index}",
+                                                    "history-image-output")
+                                if image_id in by_call_id:
+                                    continue
+                                record = {
+                                    "call_id": image_id, "item_id": image_id, "path": "",
+                                    "source_offset": source_offset,
+                                    "timestamp": items[0]["timestamp"],
+                                    "output_seen": True, "image": image,
+                                    "previous_item_id": items[0]["previous_item_id"],
+                                    "next_item_id": None,
+                                    "replaces_item_ids": tuple(entry["item_id"] for entry in items)
+                                    if index == 0 else (),
+                                }
+                                calls.append(record)
+                                by_call_id[image_id] = record
+                                awaiting_next_anchor.append(record)
+                                image_bytes += len(image[3])
+                    exec_batch = None
 
             generated_item = (_rollout_generated_image_item(payload)
                               if row_type == "event_msg" else None)
@@ -6066,6 +6197,7 @@ def codex_history_image_views(
                 image_path, _ = bounded_text(generated_item.get("savedPath"), 16 * 1024)
                 record = {
                     "call_id": raw_call_id, "item_id": raw_call_id,
+                    "source_offset": source_offset,
                     "path": image_path, "timestamp": row.get("timestamp"),
                     "output_seen": True, "image": image, "generated": True,
                     "previous_item_id": last_anchor_id, "next_item_id": None,
@@ -6113,6 +6245,7 @@ def codex_history_image_views(
                 image_path, _ = bounded_text(raw_path, 16 * 1024)
                 record: dict[str, object] = {
                     "call_id": call_id,
+                    "source_offset": source_offset,
                     "item_id": _live_id(
                         payload.get("id") or call_id,
                         "history-image-view",
@@ -6245,5 +6378,7 @@ def codex_history_image_views(
             height=height,
             data=data,
             source_complete=source_complete,
+            replaces_item_ids=tuple(record.get("replaces_item_ids", ())),
+            source_offset=record.get("source_offset"),
         ))
     return tuple(views)

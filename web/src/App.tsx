@@ -13,7 +13,8 @@ import {
   harmonyPushSnapshot, subscribeHarmonyPush, hasHarmonyPush,
   requestHarmonyPermission, confirmHarmonyPermission,
 } from "./harmony-push";
-import { RightPanelPresentation, rekeyPanelScope } from "./right-panel-presentation";
+import { RightPanelPresentation, RetainedPanelData, rekeyPanelScope } from "./right-panel-presentation";
+import { RetainedPanel } from "./components/RetainedPanel";
 import { ArtifactReadingMemory, type ArtifactReadingState } from "./artifact-reading-state";
 import type { DshCommandInfo, FilePreview, DirectoryActionScope, ServerEvent, CollaborationMember } from "./protocol";
 const DirectoryActionSheet = lazy(() => import("./components/DirectoryActionSheet"));
@@ -133,6 +134,7 @@ import { MAX_RUNTIME_SESSIONS } from "./runtime-bounds";
 import {
   FORK_FOCUS_REFRESH_MS,
   forkFocusLeaseSession,
+  isSessionDeleteBlockedByState,
   isTerminalSessionMigrationError,
   isTerminalWorktreeForkError,
   matchesSessionForkRequest,
@@ -369,8 +371,9 @@ function catalogForEngineProfile(
   engine: Engine,
   profileId?: string | null,
   cwd?: string | null,
+  sessionId?: string | null,
 ): Catalog {
-  const scoped = catalog[modelCatalogScopeKey(engine, profileId, cwd)];
+  const scoped = catalog[modelCatalogScopeKey(engine, profileId, cwd, sessionId)];
   return {
     ...catalog,
     [engine]: scoped ?? [],
@@ -398,6 +401,20 @@ export default function App() {
   useEffect(() => {
     if (!authed) collaborationCachesRef.current.clear();
   }, [authed]);
+  const [voiceConfig, setVoiceConfig] = useState<{ transcription: boolean; speech: boolean } | null>(null);
+  useEffect(() => {
+    setVoiceConfig(null);
+    if (!authed) return;
+    const controller = new AbortController();
+    void fetch("/api/voice-config", { cache: "no-store", signal: controller.signal })
+      .then((response) => response.ok ? response.json() : null)
+      .then((config) => {
+        if (!controller.signal.aborted && config) {
+          setVoiceConfig({ transcription: config.transcription === true, speech: config.speech === true });
+        }
+      }).catch(() => {});
+    return () => controller.abort();
+  }, [authed]);
   const changingNotificationModeRef = useRef(false);
   const [notificationBindingRevision, recheckNotificationBinding] = useReducer((value: number) => value + 1, 0);
   const [harmonyPush, setHarmonyPush] = useState(harmonyPushSnapshot);
@@ -421,7 +438,6 @@ export default function App() {
   // File panels share one slot; centered BTW is an independent overlay above it.
   const [expandedPanelScopes, setExpandedPanelScopes] = useState<string[]>([]);
   const [centeredBtwScopes, setCenteredBtwScopes] = useState<string[]>([]);
-  const btwChatViewRef = useRef<ChatViewHandle>(null);
   // A user action owns one focus request; restored panels and streaming updates
   // must not move the caret away from whatever the user is editing.
   const [btwFocusScope, setBtwFocusScope] = useState<string | null>(null);
@@ -444,29 +460,33 @@ export default function App() {
     fileBrowser: typeof fileBrowser;
     sessionArtifacts: typeof sessionArtifacts;
   }>());
-  const artifactsListenerRef = useRef<((message: SessionArtifacts | FilePreview) => boolean) | null>(null);
-  const listenArtifacts = useCallback((listener: ((message: SessionArtifacts | FilePreview) => boolean) | null) => {
-    artifactsListenerRef.current = listener;
+  const artifactsListenerRef = useRef(new Set<(message: SessionArtifacts | FilePreview) => boolean>());
+  const listenArtifacts = useCallback((listener: (message: SessionArtifacts | FilePreview) => boolean) => {
+    artifactsListenerRef.current.add(listener);
+    return () => { artifactsListenerRef.current.delete(listener); };
   }, []);
-  const filesListenerRef = useRef<((message: FilesListed) => void) | null>(null);
+  const filesListenerRef = useRef(new Set<(message: FilesListed) => void>());
   const [directoryScope, setDirectoryScope] = useState<(DirectoryActionScope & { machineId: string }) | null>(null);
   const [deleteSession, setDeleteSession] = useState<{
     id: string; title: string; cwd: string; scope: string; engine: Engine; space: Space;
   } | null>(null);
+  const pendingSessionDeletes = useRef(new Map<string, { sid: string; scope: string }>());
   const directoryListenerRef = useRef<((message: ServerEvent) => boolean) | null>(null);
   const listenDirectory = useCallback((listener: ((message: ServerEvent) => boolean) | null) => {
     directoryListenerRef.current = listener;
   }, []);
-  const listenFiles = useCallback((listener: ((message: FilesListed) => void) | null) => {
-    filesListenerRef.current = listener;
+  const listenFiles = useCallback((listener: (message: FilesListed) => void) => {
+    filesListenerRef.current.add(listener);
+    return () => { filesListenerRef.current.delete(listener); };
   }, []);
   const [viewerSelections, setViewerSelections] = useState(() => readViewerSelections(sessionStorage));
   const [viewerUrl, setViewerUrl] = useState<{ key: string; href: string; openId: string } | null>(null);
   useEffect(() => writeViewerSelections(sessionStorage, viewerSelections), [viewerSelections]);
-  const agentDetailListenerRef = useRef<((message: AgentDetail) => void) | null>(null);
+  const agentDetailListenerRef = useRef(new Set<(message: AgentDetail) => void>());
   const setAgentDetailListener = useCallback(
-    (listener: ((message: AgentDetail) => void) | null) => {
-      agentDetailListenerRef.current = listener;
+    (listener: (message: AgentDetail) => void) => {
+      agentDetailListenerRef.current.add(listener);
+      return () => { agentDetailListenerRef.current.delete(listener); };
     }, []);
   // true from the moment /btw is clicked until the fork's btw_opened arrives — so
   // the panel appears instantly (spinner) instead of waiting ~1s for the fork.
@@ -823,6 +843,9 @@ export default function App() {
     if (!artifactDirtyRef.current) return true;
     if (!window.confirm("Markdown 有未保存的修改，确定放弃吗？")) return false;
     artifactDirtyRef.current = false;
+    dispatch({ type: "clear_artifact" });
+    setFileBrowser(current => current ? { ...current, preview: false } : current);
+    setSessionArtifacts(current => current ? { ...current, selected: null } : current);
     return true;
   }, []);
   const setBtwOpeningFor = useCallback((parentSid: string, opening: boolean) => {
@@ -984,6 +1007,7 @@ export default function App() {
     localStorage.setItem(MACHINE_KEY, machineId);
     pendingCreateRef.current = null;
     createRequestsRef.current.clear();
+    pendingSessionDeletes.current.clear();
     pendingSessionMigrationRef.current = null;
     clearForkFocusLease(false);
     setMigrateSession(null);
@@ -1125,6 +1149,7 @@ export default function App() {
       : visibleRightPanel === "files" ? fileBrowser?.id
       : visibleRightPanel === "agent" ? agentPanel?.runId : undefined) : null;
   const btwScope = panelScope("btw");
+  const btwChatViewRef = useMemo(() => ({ scope: btwScope, current: null as ChatViewHandle | null }), [btwScope]);
   // Keep each surface's presentation when navigating away; only an explicit
   // open/close changes it. Returning must not request composer autofocus.
   const setCenteredBtw = (visible: boolean) => setCenteredBtwScopes(
@@ -1323,7 +1348,8 @@ export default function App() {
       : rt.ccSessionId);
   const focusedCatalog = catalogForEngineProfile(
     state.catalog, focusedEngine, focusedAccountProfileId,
-    space === "code" ? focusedSession?.cwd || currentCwd : undefined);
+    space === "code" ? focusedSession?.cwd || currentCwd : undefined,
+    focusedEngine === "codex" ? focusedSid : undefined);
   const completedGoalRetired = completedGoalHasNewerUserTurn(
     rt.goal, rt.turns,
   ) || completedGoalHasNewerUserTurn(rt.goal, historyView.turns);
@@ -1363,7 +1389,8 @@ export default function App() {
   const capabilityCwd = focusedSession?.cwd || currentCwd;
   const requestFocusedModels = () => wsRef.current?.sendGetModels(
     focusedEngine, focusedEngine === "claude" && space === "code" ? capabilityCwd : undefined,
-    focusedCodexProfileId, focusedClaudeProfileId);
+    focusedCodexProfileId, focusedClaudeProfileId,
+    focusedEngine === "codex" ? focusedSid : undefined);
   const focusedComposerDraftKey = composerDraftKey(
     machineId, space, focusedEngine, focusedSid ?? "",
   );
@@ -2176,9 +2203,11 @@ export default function App() {
       focusedEngine,
       focusedEngine === "claude" && space === "code" ? capabilityCwd : undefined,
       focusedCodexProfileId,
-      focusedClaudeProfileId);
+      focusedClaudeProfileId,
+      focusedEngine === "codex" ? focusedSid : undefined);
   }, [
     capabilityCwd,
+    focusedSid,
     focusedAccountProfileId,
     focusedClaudeProfileId,
     focusedCodexProfileId,
@@ -3575,6 +3604,10 @@ export default function App() {
             setMigrateSession(null);
           }
           if (msg.type === "error"
+              && msg.request_id && msg.code !== "wrapper_offline") {
+            pendingSessionDeletes.current.delete(msg.request_id);
+          }
+          if (msg.type === "error"
               && isTerminalSessionMigrationError(msg.code)
               && matchesSessionMigrationRequest(
                 pendingSessionMigrationRef.current,
@@ -3786,6 +3819,22 @@ export default function App() {
               stateRef.current.defaultCodexProfileId,
               msg,
             );
+            // The correlated refresh follows the native delete result. Sending
+            // the command alone is not enough to discard a draft.
+            const deletion = msg.request_id
+              ? pendingSessionDeletes.current.get(msg.request_id) : undefined;
+            if (msg.request_id && deletion && deletion.scope === ownership?.scopeKey
+                && !normalized.sessions.some(session => session.session_id === deletion.sid)) {
+              pendingSessionDeletes.current.delete(msg.request_id);
+              composerDraftsRef.current.delete(composerDraftKey(
+                machineId, listedSpace, msg.engine, deletion.sid,
+              ));
+              invalidateHistoryPageScopes(deletion.sid);
+              if (forkFocusLeaseRef.current?.childSessionId === deletion.sid) {
+                clearForkFocusLease(false);
+              }
+              if (stateRef.current.focusedSid === deletion.sid) clearHistoryDetailRequests();
+            }
             const lease = forkFocusLeaseSession(
               forkFocusLeaseRef.current,
               normalized.sessions,
@@ -3950,12 +3999,13 @@ export default function App() {
                 && msg.request_id === statusRuntimeBeforeEvent.statusRequestId)
             );
           if (msg.type === "session_artifacts") {
-            artifactsListenerRef.current?.(msg);
+            for (const listener of artifactsListenerRef.current) listener(msg);
             return;
           }
-          if (msg.type === "file_preview" && artifactsListenerRef.current?.(msg)) return;
+          if (msg.type === "file_preview"
+              && [...artifactsListenerRef.current].some(listener => listener(msg))) return;
           if (msg.type === "files_listed") {
-            filesListenerRef.current?.(msg);
+            for (const listener of filesListenerRef.current) listener(msg);
             return;
           }
           if (msg.type === "file_preview" && msg.directory && !msg.error) {
@@ -3969,7 +4019,7 @@ export default function App() {
             return;
           }
           if (msg.type === "agent_detail") {
-            agentDetailListenerRef.current?.(msg);
+            for (const listener of agentDetailListenerRef.current) listener(msg);
             // Requester-scoped details never belong in the conversation
             // reducer or another browser's side panel.
             return;
@@ -4135,6 +4185,7 @@ export default function App() {
           clearLegacyAuthMarkers(localStorage);
           pendingCreateRef.current = null;
           createRequestsRef.current.clear();
+          pendingSessionDeletes.current.clear();
           pendingBtwByParentRef.current.clear();
           pendingSessionForkRef.current = null;
           pendingWorktreeForkRef.current = null;
@@ -4207,7 +4258,7 @@ export default function App() {
           if (!acceptsLifecycle()) return;
           turnFileRequestsRef.current.clear();
           setAgentPanel(null);
-          agentDetailListenerRef.current = null;
+          agentDetailListenerRef.current.clear();
           clearHistoryDetailRequests();
           inlineImageAssetsRef.current.clear();
           historyImageAssetsRef.current.clear();
@@ -6010,6 +6061,7 @@ export default function App() {
       wsRef.current?.stop();
       pendingCreateRef.current = null;
       createRequestsRef.current.clear();
+      pendingSessionDeletes.current.clear();
       pendingBtwByParentRef.current.clear();
       pendingSessionForkRef.current = null;
       pendingWorktreeForkRef.current = null;
@@ -6127,6 +6179,14 @@ export default function App() {
     ? activeTurnCandidates[0] : null;
   const ambiguousActiveTurnIds = activeTurnCandidates.length > 1
     ? activeTurnCandidates : [];
+  const liveSessionStates = Object.fromEntries(state.sessions.map((session) => {
+    const runtime = state.runtimes[session.session_id];
+    return [session.session_id, mergeSessionActivityState(
+      session.state,
+      runtime?.state,
+      runtime?.mirroredRunning,
+    ) ?? "idle"];
+  }));
 
   const headerMenu = <Suspense fallback={<span className="iconbtn" aria-hidden="true"><Icon name="dots" /></span>}>
     <HeaderMenu engine={themeEngine} appearance={appearance}
@@ -6222,14 +6282,7 @@ export default function App() {
         defaultCodexProfileId={state.defaultCodexProfileId}
         onSpaceChange={switchSpace}
         sessions={state.sessions}
-        liveStates={Object.fromEntries(state.sessions.map((session) => {
-          const runtime = state.runtimes[session.session_id];
-          return [session.session_id, mergeSessionActivityState(
-            session.state,
-            runtime?.state,
-            runtime?.mirroredRunning,
-          ) ?? "idle"];
-        }))}
+        liveStates={liveSessionStates}
         completionBadges={completionBadges}
         activeSessionId={focusedSid}
         machineId={machineId}
@@ -6282,23 +6335,18 @@ export default function App() {
       /></Suspense>}</SidebarState>
       {deleteSession?.scope === activeScopeKey && <Suspense fallback={null}>
         <SessionDeleteSheet key={deleteSession.id} title={deleteSession.title} cwd={deleteSession.cwd}
+        disabledReason={appUpdates.maintenance ? "设备正在更新"
+          : isSessionDeleteBlockedByState(liveSessionStates[deleteSession.id]) ? "会话空闲后可删除" : undefined}
           work={deleteSession.space === "work"} onClose={() => setDeleteSession(null)} onConfirm={() => {
           const { id, engine: targetEngine, space: targetSpace } = deleteSession;
-          if (!wsRef.current?.sendDeleteSession(id, targetEngine, targetSpace)) return false;
-          setDeleteSession(null);
-          if (forkFocusLeaseRef.current?.childSessionId === id) {
-            clearForkFocusLease(false);
-          }
-          composerDraftsRef.current.delete(composerDraftKey(
-            machineId, targetSpace, targetEngine, id,
-          ));
-          invalidateHistoryPageScopes(id);
-          if (focusedSid === id) clearHistoryDetailRequests();
-          if (focusedSid === id) dispatch({
-            type: "enter_new_chat", cwd: "~", cwdSource: "default",
-            claudeProfileId: newChatClaudeProfileId,
-            codexProfileId: newChatCodexProfileId,
+          const requestId = wsRef.current?.sendDeleteSession(id, targetEngine, targetSpace);
+          if (!requestId) return false;
+          const pending = pendingSessionDeletes.current;
+          pending.set(requestId, {
+            sid: id, scope: sessionScopeKey(machineId, targetEngine, targetSpace),
           });
+          if (pending.size > 64) pending.delete(pending.keys().next().value!);
+          setDeleteSession(null);
           return true;
         }} />
       </Suspense>}
@@ -6409,6 +6457,7 @@ export default function App() {
           </div>
         ) : state.newChat ? (
           <Suspense fallback={null}><NewChatView cwd={state.newChat.cwd}
+            voiceEnabled={voiceConfig?.transcription && state.wrapperOnline && !appUpdates.maintenance}
             draftKey={composerDraftKey(machineId, space, engine, "new")}
             draftStore={composerDraftsRef.current}
             editPrompt={editPrompt} onEditConsumed={() => setEditPrompt(null)}
@@ -6488,6 +6537,7 @@ export default function App() {
             <Suspense fallback={<div className="thread" />}><ChatView key={`${activeScopeKey}\u0000${focusedSid ?? ""}`}
               {...chatReadingMemory}
               sid={focusedSid} turns={historyView.turns}
+              voiceSpeech={voiceConfig?.speech}
               dshApi={focusedEngine === "dsh" ? dshApi : undefined}
               onDshPlugin={focusedEngine === "dsh" && focusedSid ? name => setDshPanel({ sid: focusedSid, scope: activeScopeKey, selection: { kind: "bundles", query: name } }) : undefined}
               sessionLink={(nativeId) => {
@@ -6710,7 +6760,7 @@ export default function App() {
               />
             </Suspense>}
 
-            <Composer maintenance={appUpdates.maintenance}
+            <Composer maintenance={appUpdates.maintenance} voiceEnabled={voiceConfig?.transcription}
           dsh={rt.dsh}
           dshSid={focusedSid ?? undefined}
           readDsh={dshApi.read}
@@ -6842,6 +6892,7 @@ export default function App() {
       </section>
       {/* Share the layout's selection: retained hidden chats reserve no space. */}
       <ArtifactReadingMemory.Provider value={artifactReadingMemory.entries}>
+      <RetainedPanelData.Provider value={state}>
       <RightPanelPresentation.Provider value={{ expanded: panelExpanded, covered: btwExpanded, layer: 0, chat: false,
         onOpenChat: toggleCenteredBtw, onExpand: togglePanelExpanded, onDock: dockPanel, onDismiss: togglePanelExpanded }}>
       {Object.keys(viewerSelections).length > 0 && <Suspense fallback={null}>
@@ -6877,6 +6928,15 @@ export default function App() {
             if (selected && confirmArtifactDiscard()) { focusListedSession(selected); setDshPanel(null); }
           }} />
       </Suspense>}
+      <RetainedPanel key={`files:${machineId}`} scope={visibleParentSid
+        ? JSON.stringify([space, engine, visibleParentSid]) : null}
+        retain={scope => {
+          const [savedSpace, savedEngine, sid] = JSON.parse(scope);
+          const saved = panelViewsBySurfaceRef.current.get(sessionScopeKey(machineId, savedEngine, savedSpace));
+          return !!state.retainedArtifacts?.[sid]
+            || fileBrowser?.sid === sid || sessionArtifacts?.parentSid === sid
+            || saved?.fileBrowser?.sid === sid || saved?.sessionArtifacts?.parentSid === sid;
+        }}>
       {(() => {
         if (visibleRightPanel === "artifacts" && sessionArtifacts) {
           const owner = sessionArtifacts;
@@ -6909,9 +6969,9 @@ export default function App() {
             dispatch({ type: "clear_artifact" });
           };
           return <Suspense fallback={<div className="artifact-panel" role="status">加载目录…</div>}>
-            <SessionFilesPanel key={fileBrowser.id} showingPreview={fileBrowser.preview}
+            <SessionFilesPanel key={fileBrowser.id} showingPreview={fileBrowser.preview && !!state.artifact}
               browser={{ sid: fileBrowser.sid, initialPath: fileBrowser.path, ws: wsRef.current,
-                hidden: fileBrowser.preview, onListen: listenFiles, onClose: closeFiles,
+                hidden: fileBrowser.preview && !!state.artifact, onListen: listenFiles, onClose: closeFiles,
                 onOpenFile: (path) => {
                   if (previewFileForSid(fileBrowser.sid, path, undefined, true))
                     setFileBrowser({ ...fileBrowser, preview: true });
@@ -6957,11 +7017,18 @@ export default function App() {
           </Suspense>;
         return null;
       })()}
+      </RetainedPanel>
       </RightPanelPresentation.Provider>
-      </ArtifactReadingMemory.Provider>
       <RightPanelPresentation.Provider value={{ expanded: btwExpanded, covered: false, layer: 1, chat: true,
         onOpenChat: toggleCenteredBtw, onExpand: showCenteredBtw, onDock: dockBtw, onDismiss: dismissCenteredBtw }}>
-        {btwRendered && (<Suspense fallback={null}>
+        <RetainedPanel key={`btw:${machineId}`} scope={visibleParentSid
+          ? JSON.stringify([space, engine, visibleParentSid]) : null}
+          retain={scope => {
+            const [savedSpace, savedEngine, sid] = JSON.parse(scope);
+            return btwPanelScopes.includes(btwPanelScopeKey(machineId, savedSpace, savedEngine, sid))
+              && !!state.btwByParentSid[sid];
+          }}>
+        {btwRendered ? (<Suspense fallback={null}>
             <BtwPanel sid={activeBtwSid ?? undefined} rt={activeBtwSid ? state.runtimes[activeBtwSid] : undefined}
             engine={activeBtw?.engine ?? focusedEngine} opening={btwOpening}
             questionErrorRevision={`${state.connState}:${state.wrapperOnline}:${state.bannerRevision}`}
@@ -7034,6 +7101,9 @@ export default function App() {
             }}
             onSetAutoCompact={(selection) => activeBtwSid
               ? setBtwAutoCompact(activeBtwSid, selection) : false}
+            onContext={() => {
+              if (activeBtwSid) sendContextRequestTo(activeBtwSid, true);
+            }}
             onOpenFile={previewBtwFile} onCollapse={collapseBtw}
             imageAssets={btwInlineImageAssets}
             onLoadImage={loadBtwMessageImage}
@@ -7053,8 +7123,11 @@ export default function App() {
             onDismissNotice={(noticeId) => {
               if (activeBtwSid) dispatch({ type: "dismiss_notice", sid: activeBtwSid, noticeId });
             }} />
-          </Suspense>)}
+          </Suspense>) : null}
+        </RetainedPanel>
       </RightPanelPresentation.Provider>
+      </RetainedPanelData.Provider>
+      </ArtifactReadingMemory.Provider>
       {queuedQueryEditor && <Suspense fallback={null}><QueuedQueryDialog
         key={queuedQueryEditor
           ? `${queuedQueryEditor.sid}:${queuedQueryEditor.msgId}`
