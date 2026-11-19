@@ -28,7 +28,7 @@ import { CommandSheet } from "./CommandSheet";
 import { CenteredSheet } from "./CenteredSheet";
 import { ChoicePicker } from "./ChoicePicker";
 import { AttachmentPicker } from "./AttachmentPicker";
-import { VoiceInputButton } from "./VoiceInputButton";
+import { VoiceInputButton, VoiceInputStatus } from "./VoiceInputButton";
 import { useVoiceInput, voiceInputAvailable } from "../use-voice-input";
 import { permissionProfileLabel } from "../data";
 import { codexProfilePresentation } from "../codex-profile-presentation";
@@ -742,9 +742,9 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
       disabled={creating || importing} />
   );
   const sendButton = canTalk || voiceActive ? (
-    <VoiceInputButton recording={voice.stage === "starting" || voice.stage === "recording"}
-      finishing={voice.stage === "finishing"}
-      start={() => { setVoiceError(null); voice.start(); }} release={voice.release} cancel={voice.cancel} />
+    <VoiceInputButton stage={voice.stage}
+      start={(gesture) => { setVoiceError(null); voice.start(gesture); }}
+      release={voice.release} cancel={voice.cancel} />
   ) : (
     <button className="newchat-send" aria-label="开始" title="开始新对话"
       onPointerDown={() => {
@@ -855,6 +855,7 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
         )}
 
         <div className="newchat-editor">
+          <VoiceInputStatus stage={voice.stage} />
           {suggestionOpen && !creating && !importing && (
             <div className="cmd-pop" role="listbox" aria-label={skillOpen ? "Skills" : "命令"} data-lock-horizontal-swipe>
               {commandMatches.map(command => (

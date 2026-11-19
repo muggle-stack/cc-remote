@@ -5,6 +5,7 @@ import { util } from '@kit.ArkTS';
 import { notificationManager } from '@kit.NotificationKit';
 import { pushService } from '@kit.PushKit';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { vibrator } from '@kit.SensorServiceKit';
 import { sameOrigin } from './UrlPolicy';
 
 interface PushRequest { id: number; method: string }
@@ -15,6 +16,7 @@ export class PushBridge {
   private port: webview.WebMessagePort | undefined = undefined;
   private queue: Promise<void> = Promise.resolve();
   private pending: number = 0;
+  private lastRecordingHaptic: number = 0;
 
   private context: common.UIAbilityContext;
   private store: preferences.Preferences;
@@ -41,7 +43,17 @@ export class PushBridge {
     this.port = ports[1];
     ports[1].onMessageEvent(value => {
       if (generation !== this.generation || typeof value !== 'string' || value.length > 256
-        || !sameOrigin(origin, controller.getUrl()) || this.pending >= 8) return;
+        || !sameOrigin(origin, controller.getUrl())) return;
+      if (value === 'recording-haptic') {
+        const now = Date.now();
+        if (now - this.lastRecordingHaptic < 500) return;
+        this.lastRecordingHaptic = now;
+        try {
+          vibrator.startVibration({ type: 'time', duration: 25 }, { id: 0, usage: 'touch' }).catch(() => {});
+        } catch (_) { /* Some devices do not have a vibrator. */ }
+        return;
+      }
+      if (this.pending >= 8) return;
       let request: PushRequest;
       try { request = JSON.parse(value) as PushRequest; } catch (_) { return; }
       if (!request || typeof request !== 'object' || !Number.isSafeInteger(request.id) || request.id <= 0

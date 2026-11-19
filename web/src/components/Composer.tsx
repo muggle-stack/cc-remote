@@ -62,7 +62,7 @@ import {
 import { PendingImageAttachments } from "./PendingImageAttachments";
 import { QueuedQueryChip } from "./QueuedQueryChip";
 import { UsageMeter } from "./UsageMeter";
-import { VoiceInputButton } from "./VoiceInputButton";
+import { VoiceInputButton, VoiceInputStatus } from "./VoiceInputButton";
 import { useVoiceInput, voiceInputAvailable } from "../use-voice-input";
 const SpeedPicker = lazy(() => import("./SpeedPicker").then(m => ({ default: m.SpeedPicker })));
 import { PasteCards } from "./PasteCards";
@@ -918,8 +918,7 @@ export function Composer(p: Props) {
   );
 
   const sendControl = canTalk || voiceActive ? (
-    <VoiceInputButton recording={voice.stage === "starting" || voice.stage === "recording"}
-      finishing={voice.stage === "finishing"}
+    <VoiceInputButton stage={voice.stage}
       start={voice.start} release={voice.release} cancel={voice.cancel} />
   ) : (
     <button className={sendClass}
@@ -967,7 +966,8 @@ export function Composer(p: Props) {
             )}
           </div>
         )}
-        {notice && <div className="composer-notice">{notice}</div>}
+        {voiceActive ? <VoiceInputStatus stage={voice.stage} />
+          : notice && <div className="composer-notice">{notice}</div>}
         {p.engine === "dsh" && <Suspense fallback={null}><DshCommandFeedback
           scope={p.draftKey} state={p.dsh} result={dshResult} /></Suspense>}
         {(p.queue.length > 0 || p.pendingSend || p.failedDeferred.length > 0) && (
