@@ -3247,7 +3247,7 @@ def test_reloaded_picker_discovers_new_model_before_internal_cache_expires(
     raw = [{"id": "old", "isDefault": True}]
     calls = []
 
-    async def query(codex_home):
+    async def query(codex_home, *, model_provider=None):
         calls.append(codex_home)
         return list(raw)
 

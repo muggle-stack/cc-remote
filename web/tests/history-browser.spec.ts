@@ -1375,13 +1375,104 @@ for (const [engine, space] of [["claude", "code"], ["codex", "code"], ["claude",
   });
 }
 
+test("Codex session deletion disables running sessions and preserves drafts when rejected", async ({ page, isMobile }) => {
+  const parentSid = "delete-parent";
+  const sessions = [
+    { session_id: parentSid, engine: "codex" as const, state: "idle" as const,
+      summary: "父会话", cwd: "/tmp/delete-test" },
+    { session_id: "delete-running", engine: "codex" as const, state: "running" as const,
+      summary: "运行中的会话", cwd: "/tmp/delete-test" },
+  ];
+  const relay = await mockRightPanelRelay(page, {
+    parentSid,
+    retained: false,
+    listReply: command => command.engine === "codex" && command.space !== "work"
+      ? { type: "session_list", engine: "codex", space: "code",
+        request_id: String(command.cmd_id), sessions }
+      : undefined,
+  });
+  const showSidebar = async () => {
+    if (await page.locator(".shell.sidebar-open").count() === 0) {
+      await page.getByLabel("显示会话侧栏", { exact: true }).click();
+    }
+  };
+  const card = (title: string) => page.locator(".scard").filter({ hasText: title });
+  const deleteButton = page.locator(".card-menu").getByRole("button", { name: "删除会话", exact: true });
+  const composer = page.locator(".composer textarea");
+  const openMenu = async (title: string) => {
+    if (isMobile) {
+      const touch = (type: "touchstart" | "touchend") => card(title).evaluate((target, eventType) => {
+        const { x, y, width, height } = target.getBoundingClientRect();
+        const point = { identifier: 1, target, clientX: x + width / 2, clientY: y + height / 2 };
+        const event = new Event(eventType, { bubbles: true, cancelable: true });
+        Object.defineProperties(event, {
+          touches: { value: eventType === "touchstart" ? [point] : [] },
+          changedTouches: { value: [point] },
+        });
+        target.dispatchEvent(event);
+      }, type);
+      await touch("touchstart");
+      await expect(deleteButton).toBeVisible();
+      await touch("touchend");
+      return;
+    }
+    const more = card(title).getByRole("button", { name: "更多操作" });
+    await more.focus();
+    await more.click();
+  };
+  await page.goto("/");
+  await showSidebar();
+  await openMenu("运行中的会话");
+  await expect(deleteButton).toBeDisabled();
+  expect(relay.commands.some(command => command.type === "delete_session")).toBe(false);
+  await page.keyboard.press("Escape");
+
+  await card("父会话").getByText("父会话", { exact: true }).click();
+  await composer.fill("保留未发送的草稿");
+  await showSidebar();
+  const requests = () => relay.commands.filter(command => command.type === "delete_session");
+  const submit = async () => {
+    const count = requests().length;
+    await openMenu("父会话");
+    await deleteButton.click();
+    const confirm = page.getByRole("dialog", { name: "删除这条会话？" })
+      .getByRole("button", { name: "删除会话", exact: true });
+    if (count === 0) {
+      relay.emit({ type: "state", sid: parentSid, seq: 1, state: "running" });
+      await expect(confirm).toBeDisabled();
+      relay.emit({ type: "state", sid: parentSid, seq: 2, state: "idle" });
+      await expect(confirm).toBeEnabled();
+    }
+    await confirm.click();
+    await expect.poll(() => requests().length).toBe(count + 1);
+    return String(requests().at(-1)?.cmd_id);
+  };
+  for (const [code, message, label] of [
+    ["busy", "该会话仍有派生会话；请先从最深层派生会话开始删除，再删除父会话", "先删子会话"],
+    ["not_running", "Codex 删除通道连接失败，请稍后重试", "服务未连接"],
+  ]) {
+    const request_id = await submit();
+    relay.emit({ type: "error", sid: parentSid, request_id, code, message });
+    const status = page.locator(".header-feedback-text");
+    await expect(status).toHaveText(label);
+    expect(await status.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+    await expect(composer).toHaveValue("保留未发送的草稿");
+    await expect(card("父会话")).toHaveCount(1);
+  }
+  const request_id = await submit();
+  relay.emit({ type: "session_list", engine: "codex", space: "code", request_id,
+    sessions: sessions.filter(session => session.session_id !== parentSid) });
+  await expect(card("父会话")).toHaveCount(0);
+  await expect(composer).toHaveValue("");
+});
+
 for (const engine of ["claude", "codex"] as const) {
   test(`side chat scope shows ${engine} background tasks independently of the parent and siblings`, async ({ page, isMobile }, testInfo) => {
     await page.setViewportSize(isMobile ? { width: 390, height: 844 } : { width: 1568, height: 900 });
     const relay = await mockRightPanelRelay(page, { visible: true, engine });
     const sid = "btw-layout-child";
     const sibling = "btw-second-child";
-    const panel = page.locator(".btw-panel");
+    const panel = page.locator(".btw-panel:visible");
     const trigger = panel.getByRole("button", { name: /^后台任务，/ });
     const dialog = page.getByRole("dialog", { name: "后台任务", exact: true });
     const expectPopoverInsideBtw = async () => {
@@ -1470,7 +1561,7 @@ for (const engine of ["claude", "codex"] as const) {
     await page.setViewportSize({ width: 1400, height: 900 });
     const relay = await mockRightPanelRelay(page, { visible: true, engine, secondParent: true });
     const sid = "btw-layout-child";
-    const panel = page.locator(".btw-panel");
+    const panel = page.locator(".btw-panel:visible");
     const parent = page.locator(".scard").filter({ hasText: "Layout parent" });
     const badge = parent.getByText("BTW 完成", { exact: true });
     const selectSession = async (name: string) => {
@@ -1636,7 +1727,7 @@ for (const engine of ["claude", "codex"] as const) {
 test("side chat scope restores long Claude history atomically at the bottom with a completion spark", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { visible: true, engine: "claude" });
   const sid = "btw-layout-child";
-  const panel = page.locator(".btw-panel");
+  const panel = page.locator(".btw-panel:visible");
   for (let attempt = 0; attempt < 2; attempt++) {
     const syncs = relay.commands.filter(c => c.type === "sync_btw").length;
     if (attempt) await page.reload();
@@ -1859,7 +1950,7 @@ for (const engine of ["claude", "codex"] as const) {
   test(`side chat scope reopens ${engine} history without a blank frame during sync`, async ({ page }) => {
     const relay = await mockRightPanelRelay(page, { visible: true, engine });
     const sid = "btw-layout-child";
-    const panel = page.locator(".btw-panel");
+    const panel = page.locator(".btw-panel:visible");
     await page.goto("/");
     await expect.poll(() => relay.commands.some(c => c.type === "sync_btw")).toBe(true);
     const replayStart = () => relay.emit({ type: "replay_start", sid,
@@ -1909,7 +2000,7 @@ for (const engine of ["claude", "codex"] as const) {
 test("side chat scope keeps Claude's running spark on a successor after replay", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { visible: true, engine: "claude" });
   const sid = "btw-layout-child";
-  const panel = page.locator(".btw-panel");
+  const panel = page.locator(".btw-panel:visible");
   await page.goto("/");
   await expect.poll(() => relay.commands.some(c => c.type === "sync_btw")).toBe(true);
   const replay = (second = false) => {
@@ -1956,7 +2047,7 @@ test("side chat scope keeps Claude's running spark on a successor after replay",
 test("side chat scope keeps Claude's running spark after hide, reopen and cold replay", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { visible: true, engine: "claude" });
   const sid = "btw-layout-child";
-  const panel = page.locator(".btw-panel");
+  const panel = page.locator(".btw-panel:visible");
   await page.goto("/");
   await expect.poll(() => relay.commands.some(c => c.type === "sync_btw")).toBe(true);
   relay.emit({ type: "user_msg", sid, msg_id: "active-question", prompt: "正在执行的侧聊", seq: 1 });
@@ -2040,6 +2131,7 @@ for (const side of [false, true]) {
     const surface = page.locator(side ? ".btw-panel" : ".composer");
     const input = surface.locator("textarea");
     await expect(input).toBeVisible();
+    await expect.poll(() => relay.connections.length).toBeGreaterThan(0);
     await expect(surface.getByRole("button", { name: "引导", exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "打断并发送", exact: true })).toHaveCount(0);
     relay.emit({ type: "user_msg", sid, msg_id: "claude-root", prompt: "检查输入" });
@@ -2232,7 +2324,7 @@ test("session workspace directory links open the browser and keep original downl
   const preview = relay.commands.filter(c => c.type === "get_file_preview").at(-1)!;
   relay.emit({ type: "file_preview", sid: "layout-parent", request_id: String(preview.request_id),
     path: `${path}/README.md`, format: "text", content: "Directory preview", size: 17, writable: false });
-  await expect(page.locator(".artifact-panel")).toContainText("Directory preview");
+  await expect(page.locator(".artifact-panel:visible")).toContainText("Directory preview");
   const downloadEvent = page.waitForEvent("download");
   await page.getByRole("link", { name: "下载原文件", exact: true }).click();
   expect((await downloadEvent).suggestedFilename()).toBe("README.md");
@@ -2385,6 +2477,7 @@ test("session workspace Codex capacity rejects oversize and sends a session pref
     context_window_tokens: null, limit_tokens: 19000, pending: false, mutable: true, error: null });
   const setting = page.getByRole("dialog", { name: "Codex 上下文上限", exact: true });
   await expect(setting).toBeVisible();
+  await setting.getByRole("button", { name: "自定义", exact: true }).click();
   await setting.getByLabel("上下文上限（tokens）").fill("20k");
   await setting.getByRole("button", { name: "应用", exact: true }).click();
   await expect(setting.getByRole("alert")).toContainText("19,000");
@@ -2398,7 +2491,7 @@ test("session workspace Codex capacity rejects oversize and sends a session pref
     max_context_tokens: 12000, applied_max_context_tokens: null, applied_threshold_tokens: null, model_max_tokens: 20000,
     context_window_tokens: 12632, limit_tokens: 19000, pending: true, mutable: true, error: null });
   await expect(setting.getByRole("status")).toContainText("已保存上限 12,000");
-  await setting.getByRole("button", { name: "恢复 Codex 默认值" }).click();
+  await setting.getByRole("button", { name: "跟随 Codex", exact: true }).click();
   await expect.poll(() => relay.commands.filter((c) => c.type === "set_codex_context").length).toBe(2);
   expect(relay.commands.filter((c) => c.type === "set_codex_context").at(-1)?.max_context_tokens).toBeNull();
   expect(relay.commands.some((c) => c.type === "query")).toBe(false);
@@ -2424,7 +2517,7 @@ test("session workspace context ring refreshes applied capacity and distinguishe
   await ring.click();
   const popover = page.getByRole("dialog", { name: "上下文占用", exact: true });
   await expect(popover).toContainText("142,045 / 258,400 (55%)");
-  await expect(popover).toContainText("已保存上限 400,000，等待生效");
+  await expect(popover).toContainText("已保存上限 400,000，等待原生确认");
   relay.emit({ ...setting, applied_max_context_tokens: 400000, applied_threshold_tokens: 378947, pending: false });
   await expect(popover).not.toContainText("258,400");
   const request = relay.commands.filter((c) => c.type === "get_context").at(-1)!;
@@ -2436,7 +2529,7 @@ test("session workspace context ring refreshes applied capacity and distinguishe
   expect(relay.commands.some((c) => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
 });
 
-test("session workspace reconciles pending 400k with native runtime in both context surfaces", async ({ page }) => {
+test("session workspace reconciles pending 400k with native runtime in both context surfaces", async ({ page }, testInfo) => {
   const relay = await mockRightPanelRelay(page, { retained: false });
   await page.goto("/");
   await expect(page.locator(".scard.active .scard-title")).toHaveText("Layout parent");
@@ -2455,30 +2548,45 @@ test("session workspace reconciles pending 400k with native runtime in both cont
   const ring = page.getByRole("button", { name: "上下文占用", exact: true });
   await ring.click();
   const popover = page.getByRole("dialog", { name: "上下文占用", exact: true });
-  await expect(popover).toContainText("待原生运行数据确认");
+  await expect(popover).toContainText("等待原生运行数据");
   relay.emit({ ...report, source: "native_estimate" });
   await expect(popover).toContainText("371,048 / 400,000 (93%)");
   await expect(popover).toContainText("原生上限 400,000，与已保存设置一致");
   await expect(popover).not.toContainText("等待生效");
-  await popover.getByRole("button", { name: "设置上下文上限" }).click();
+  await expect(popover.getByRole("button")).toHaveCount(0);
+  await ring.click();
+  const input = page.locator("textarea").first();
+  await input.fill("/autocompact ");
+  await input.press("Enter");
   const editor = page.getByRole("dialog", { name: "Codex 上下文上限", exact: true });
   await expect(editor.getByRole("status")).toContainText("与已保存设置一致");
-  await expect(editor).toContainText("当前生效上限：400,000");
-  await expect(editor).toContainText("当前生效阈值：378,947");
+  await expect(editor).toContainText("生效上限 400K");
+  await expect(editor).toContainText("实际阈值 378,947");
+  await expect(editor.locator(".codex-context-limits")).toContainText("模型最大窗口872,000");
+  await expect(editor.locator(".codex-context-limits")).toContainText("可设置上限828,400");
   // Periodic readings must not overwrite an unsent draft or reload the thread.
+  await editor.getByRole("button", { name: "自定义", exact: true }).click();
   await editor.getByLabel("上下文上限（tokens）").fill("350k");
   relay.emit({ ...report, source: "native_estimate", total_tokens: 372000, percentage: 93 });
   await expect(editor.getByLabel("上下文上限（tokens）")).toHaveValue("350k");
   relay.emit({ ...state, max_context_tokens: 300000, context_window_tokens: 315790 });
-  await expect(editor.getByRole("status")).toContainText("已保存上限 300,000，等待生效");
-  await expect(editor.getByRole("status")).toContainText("当前生效上限：400,000");
+  await expect(editor.getByRole("status")).toContainText("已保存上限 300,000，等待原生确认");
+  await expect(editor).toContainText("生效上限 400K");
   // A real application failure must remain visible even if the latest runtime
   // happens to match a saved preference. Lack of a receipt is not that error.
   relay.emit({ ...state, error: "connection lost" });
   await expect(editor.getByRole("alert")).toContainText("connection lost");
   await expect(editor.getByRole("status")).toContainText("与已保存设置一致");
   relay.emit({ ...state, max_context_tokens: null, context_window_tokens: null });
-  await expect(editor.getByRole("status")).toContainText("默认值，待原生运行数据确认");
+  await expect(editor.getByRole("status")).toContainText("默认值，等待原生确认");
+  relay.emit({ ...state, max_context_tokens: null, context_window_tokens: null,
+    pending: false, applied_max_context_tokens: 475000, applied_threshold_tokens: 450000 });
+  relay.emit({ ...report, source: "native_estimate", max_tokens: 475000,
+    auto_compact_threshold_tokens: 450000, percentage: 78.1 });
+  await expect(editor.getByRole("status")).toHaveCount(0);
+  await expect(editor.getByRole("button", { name: "跟随 Codex", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(editor).toContainText("生效上限 475K · 实际阈值 450K");
+  await page.screenshot({ path: testInfo.outputPath("context-default-confirmed.png"), animations: "disabled" });
   expect(relay.commands.some(c => ["query", "steer", "new_session", "set_codex_context", "reconnect"].includes(String(c.type)))).toBe(false);
 });
 
@@ -2498,16 +2606,15 @@ test("session workspace distinguishes 300k capacity from native usage and compac
   };
   relay.emit(state);
   const setting = page.getByRole("dialog", { name: "Codex 上下文上限", exact: true });
-  await expect(setting).toContainText("可设置上限 828,400");
+  await expect(setting.getByRole("button", { name: "最大值", exact: true })).toHaveAttribute("title", "828,400 tokens");
   await expect(setting.getByRole("status")).toContainText("已保存上限 300,000");
-  await expect(setting.getByRole("status")).toContainText("当前生效上限：400,000");
-  await expect(setting).toContainText("进度按 Codex 原生上下文估算显示");
+  await expect(setting).toContainText("生效上限 400K");
 
   relay.emit({ ...state, applied_max_context_tokens: 300000,
     applied_threshold_tokens: 284211, pending: false });
-  await expect(setting.getByRole("status")).toContainText("设定上限：300,000");
-  await expect(setting.getByRole("status")).toContainText("当前生效上限：300,000");
-  await expect(setting.getByRole("status")).toContainText("当前生效阈值：284,211");
+  await expect(setting.getByRole("status")).toHaveCount(0);
+  await expect(setting.getByRole("button", { name: "300K", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(setting).toContainText("生效上限 300K · 实际阈值 284,211");
   await expect(setting).not.toContainText("400,000");
   expect(await setting.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("context-300k-settings.png"), animations: "disabled" });
@@ -2705,7 +2812,7 @@ test("session workspace harness shortcuts preserve centered side chat and compos
   await expect(completedMark.locator(".claude-working-mark")).toHaveCount(0);
   await page.emulateMedia({ reducedMotion: "no-preference" });
   await page.keyboard.press("Meta+Shift+e");
-  const panel = page.locator(".btw-panel");
+  const panel = page.locator(".btw-panel:visible");
   await expect(panel).toHaveAttribute("aria-modal", "true");
   await panel.locator("textarea").fill("Claude 侧聊草稿");
   await page.keyboard.press("Meta+2");
@@ -2760,7 +2867,7 @@ for (const sideChat of [false, true]) {
     await expect(page.locator("textarea[data-chat-composer]")).toBeEnabled();
     if (sideChat) {
       await page.keyboard.press("Meta+Shift+e");
-      await expect(page.locator(".btw-panel")).toHaveAttribute("aria-modal", "true");
+      await expect(page.locator(".btw-panel:visible")).toHaveAttribute("aria-modal", "true");
     }
     const sid = sideChat ? "btw-layout-child" : "layout-parent";
     relay.emit({ type: "ask_user", sid, seq: 1, ask_id: "shared-ask-id",
@@ -2789,7 +2896,7 @@ for (const sideChat of [false, true]) {
     await expect(dialog.getByPlaceholder("输入回答")).toHaveValue("Claude 未提交的回答");
     await expect(dialog.getByRole("button", { name: "保留选择", exact: true })).toHaveAttribute("aria-pressed", "true");
     await expect.poll(() => dialog.locator(".sheet-scroll").evaluate(node => node.scrollTop)).toBeCloseTo(scroll, 0);
-    if (sideChat) await expect(page.locator(".btw-panel")).toHaveAttribute("aria-modal", "true");
+    if (sideChat) await expect(page.locator(".btw-panel:visible")).toHaveAttribute("aria-modal", "true");
     expect(relay.commands.some(c => ["query", "steer", "interrupt", "open_btw", "close_btw", "answer_question"].includes(String(c.type)))).toBe(false);
     await dialog.locator(".qa-text-answer").getByRole("button", { name: "确定", exact: true }).click();
     await expect(dialog).toHaveCount(0);
@@ -2877,6 +2984,42 @@ for (const batch of [false, true]) {
     await expect(page.locator(".question-resume")).toHaveCount(0);
   });
 }
+
+test("session workspace Claude context window limits constrain presets and custom input", async ({ page }, testInfo) => {
+  const relay = await mockRightPanelRelay(page, { retained: false, engine: "claude" });
+  await page.goto("/");
+  await expect(page.locator(".scard.active .scard-title")).toHaveText("Layout parent");
+  relay.emit({ type: "auto_compact", sid: "layout-parent", mode: "inherit",
+    applied_mode: "inherit", pending: false, phase: "stable", mutable: true });
+  relay.emit({ type: "context_report", sid: "layout-parent", model: "claude-small",
+    total_tokens: 110000, max_tokens: 150000, raw_max_tokens: 150000,
+    model_max_tokens: 200000, auto_compact_threshold_tokens: 117000,
+    percentage: 73.3333, source: "control", categories: [] });
+  const ring = page.getByRole("button", { name: "上下文占用", exact: true });
+  await ring.click();
+  const details = page.getByRole("dialog", { name: "上下文占用", exact: true });
+  await expect(details.getByRole("button")).toHaveCount(0);
+  await ring.click();
+  const input = page.locator("textarea").first();
+  await input.fill("/autocompact ");
+  await input.press("Enter");
+  const editor = page.getByRole("dialog", { name: "自动压缩", exact: true });
+  await expect(editor).toContainText("模型最大窗口 200K");
+  await expect(editor).toContainText("实际阈值 117K · 当前窗口 150K");
+  await expect(editor.getByRole("button", { name: "200K", exact: true })).toBeEnabled();
+  await expect(editor.getByRole("button", { name: "500K", exact: true })).toBeDisabled();
+  await expect(editor.getByRole("button", { name: "1M", exact: true })).toBeDisabled();
+  await editor.getByRole("button", { name: "自定义", exact: true }).click();
+  await editor.getByLabel("自动压缩阈值（K tokens）").fill("201");
+  await expect(editor.getByRole("button", { name: "应用", exact: true })).toBeDisabled();
+  await expect(editor.getByRole("alert")).toContainText("不能超过模型最大窗口 200K");
+  await editor.getByLabel("自动压缩阈值（K tokens）").fill("200");
+  await editor.getByRole("button", { name: "应用", exact: true }).click();
+  await expect.poll(() => relay.commands.filter(c => c.type === "set_auto_compact").length).toBe(1);
+  expect(relay.commands.find(c => c.type === "set_auto_compact")?.threshold_tokens).toBe(200000);
+  await page.screenshot({ path: testInfo.outputPath("claude-context-model-limits.png"), animations: "disabled" });
+  expect(relay.commands.some(c => c.type === "query" || c.type === "reconnect")).toBe(false);
+});
 
 test("session workspace Claude context refreshes while running and keeps its last reading silently", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, {
@@ -3018,7 +3161,7 @@ for (const [engine, delivery] of [
   test(`side chat scope attachments send complete payloads through ${engine} ${delivery}`, async ({ page }) => {
     const relay = await mockRightPanelRelay(page, { visible: true, engine });
     await page.goto("/");
-    const panel = page.locator(".btw-panel");
+    const panel = page.locator(".btw-panel:visible");
     await expect(panel.getByRole("textbox")).toBeEnabled();
     await expect(panel.locator(".btw-runbar")).toHaveCount(0);
     if (delivery === "query") {
@@ -3065,7 +3208,7 @@ test("side chat scope attachments follow the drop location and accept clipboard 
   await page.setViewportSize({ width: 1400, height: 850 });
   await mockRightPanelRelay(page, { visible: true });
   await page.goto("/");
-  const panel = page.locator(".btw-panel");
+  const panel = page.locator(".btw-panel:visible");
   await expect(panel.getByRole("textbox")).toBeEnabled();
   const main = page.locator(".composer");
   await main.getByRole("textbox").fill("main draft");
@@ -3111,7 +3254,7 @@ test("side chat scope attachments stay with the original tab while importing", a
     };
   });
   await page.goto("/");
-  const panel = page.locator(".btw-panel");
+  const panel = page.locator(".btw-panel:visible");
   await expect(panel.getByRole("textbox")).toBeEnabled();
   await panel.getByLabel("添加文件", { exact: true }).setInputFiles({
     name: "slow.txt", mimeType: "text/plain", buffer: Buffer.from("original tab"),
@@ -3138,7 +3281,7 @@ test("side chat scope attachments stay with the original tab while importing", a
 test("side chat scope service tier toggles only its fork and waits for the reported value", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { visible: true });
   await page.goto("/");
-  const panel = page.locator(".btw-panel");
+  const panel = page.locator(".btw-panel:visible");
   const control = panel.getByRole("button", { name: /^速度：/ });
   await expect(control).toBeEnabled();
   relay.emit({ type: "fast", sid: "layout-parent", on: false });
@@ -3162,7 +3305,7 @@ test("side chat scope service tier toggles only its fork and waits for the repor
 test("destroyed BTW stays readable after refresh with disabled input and a working new-chat button", async ({ page }, testInfo) => {
   const relay = await mockRightPanelRelay(page, { visible: true, btwReadOnly: true });
   await page.goto("/");
-  const panel = page.locator(".btw-panel");
+  const panel = page.locator(".btw-panel:visible");
   const reason = "当前临时对话已经销毁，请创建新的临时对话";
   for (let i = 0; i < 2; i++) {
     if (i) await page.reload();
@@ -3195,7 +3338,7 @@ test("destroyed BTW stays readable after refresh with disabled input and a worki
 test("destroyed BTW live control preserves drafts and rejects stale writable snapshots", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { visible: true });
   await page.goto("/");
-  const panel = page.locator(".btw-panel");
+  const panel = page.locator(".btw-panel:visible");
   const input = panel.getByRole("textbox");
   await expect(input).toBeEnabled();
   await input.fill("失效时不要清除我的草稿");
@@ -3225,7 +3368,7 @@ test("destroyed BTW live control preserves drafts and rejects stale writable sna
 test("transient BTW reconnect notice does not permanently disable the composer", async ({ page }) => {
   const relay = await mockRightPanelRelay(page, { visible: true });
   await page.goto("/");
-  const panel = page.locator(".btw-panel");
+  const panel = page.locator(".btw-panel:visible");
   await expect(panel.getByRole("textbox")).toBeEnabled();
   relay.emit({ type: "session_control", sid: "btw-layout-child", generation: "layout-generation",
     revision: 1, control_mode: "codex_shared", write_state: "writable",
@@ -3919,7 +4062,7 @@ for (const extension of ["mmd", "MERMAID"]) {
     await expect(file).toBeEnabled();
     await expect(file).toContainText("Mermaid 图表");
     await file.click();
-    const panel = page.locator(".artifact-panel");
+    const panel = page.locator(".artifact-panel:visible");
     await expect(panel.locator(".mermaid-svg svg")).toBeVisible();
     await expect(panel.locator(".mermaid-svg")).toContainText("双目相机");
     await expect(panel.locator(".mermaid-svg")).toContainText("路径规划");
@@ -3961,6 +4104,62 @@ test("Claude agent detail stops waiting on a lost response and retries", async (
   await expect(panel).not.toContainText("正在读取协作代理过程");
   await panel.getByRole("button", { name: "重试", exact: true }).click();
   await expect.poll(() => relay.commands.filter((c) => c.type === "get_agent_detail").length).toBe(2);
+});
+
+test("viewed image previews remain clickable after completion and history reload", async ({ page }) => {
+  const sid = "layout-parent";
+  const turns: NonNullable<Extract<ServerEvent, { type: "history" }>["turns"]> = [];
+  const relay = await mockRightPanelRelay(page, { imageAssets: true, seedTurns: turns });
+  await page.goto("/");
+  await expect.poll(() => relay.commands.some(c => c.type === "get_history")).toBe(true);
+  relay.emit({ type: "user_msg", sid, msg_id: "view-user", prompt: "检查图片" });
+  relay.emit({ type: "turn_binding", sid, msg_id: "view-user", turn_id: "view-native" });
+  relay.emit({ type: "state", sid, state: "running" });
+  relay.emit({ type: "process", sid, item_id: "live-view", turn_id: "view-native",
+    kind: "server_tool", phase: "end", status: "succeeded", title: "查看图片", tool: "view_image",
+    input: { file_path: "/missing/chart.png", preview_id: "live-view" } });
+  const turn = page.locator('.turn[data-turn-id="view-user"]');
+  const liveHead = turn.getByRole("button", { name: /正在处理/ }).first();
+  await expect(liveHead).toBeVisible();
+  if (await liveHead.getAttribute("aria-expanded") !== "true") await liveHead.click();
+  await turn.locator(".process-activity > summary").click();
+  await expect(turn.getByRole("button", { name: "预览查看过的图片" })).toBeEnabled();
+
+  const blocks = [0, 1].map(index => ({
+    kind: "process" as const, item_id: `exec-call.image-${index}`, processKind: "server_tool" as const,
+    phase: "end" as const, status: "succeeded" as const, done: true, title: "查看图片", tool: "view_image",
+    input: { history_image: { image_id: `img-batch-${index}`, media_type: "image/png",
+      width: 1, height: 1, byte_size: 68 } },
+  }));
+  turns.push({ id: "view-user", forkPointId: "view-native", prompt: "检查图片", done: true,
+    detailLoaded: true, processDetailState: "present", blocks });
+  relay.emit({ type: "turn_end", sid, turn_id: "view-native", result: { subtype: "success" } });
+  relay.emit({ type: "state", sid, state: "idle" });
+  relay.emit({ type: "history", sid, session_id: sid, revision: "layout-history",
+    generation: "layout-generation", detail: "summary", events: [], has_more: false, turns });
+  for (const reload of [false, true]) {
+    if (reload) await page.reload();
+    const head = turn.getByRole("button", { name: /已处理/ }).first();
+    await expect(head).toBeVisible();
+    if (await head.getAttribute("aria-expanded") !== "true") await head.click();
+    for (const selector of [".tool-group", ".process-activity"]) {
+      for (const disclosure of await turn.locator(`details${selector}`).all()) {
+        if (await disclosure.getAttribute("open") === null) {
+          await disclosure.locator(":scope > summary").click();
+        }
+      }
+    }
+    const images = turn.getByRole("button", { name: "预览查看过的图片" });
+    await expect(images).toHaveCount(2);
+    for (let index = 0; index < 2; index++) {
+      await expect(images.nth(index)).toBeEnabled();
+      await images.nth(index).click();
+      await expect(page.locator(".image-lightbox-image")).toBeVisible();
+      await page.locator(".image-lightbox-close").click();
+    }
+  }
+  expect(relay.commands.filter(c => c.type === "get_history_image")
+    .every(c => c.turn_id === "view-user")).toBe(true);
 });
 
 test("generated image live snapshot renders outside collapsed process and duplicate events stay idempotent", async ({ page }) => {
@@ -4887,7 +5086,7 @@ for (const type of ["file", "image"] as const) {
     await page.goto("/");
     if (type === "file") {
       await page.getByRole("button", { name: "在 Remote 中打开 /tmp/external.md" }).click();
-      await expect(page.locator(".artifact-panel")).toContainText("外部预览已经打开");
+      await expect(page.locator(".artifact-panel:visible")).toContainText("外部预览已经打开");
       await expect(page.getByRole("button", { name: "保存", exact: true })).toBeDisabled();
     } else {
       await expect(page.getByRole("img", { name: "外部生成图", exact: true })).toBeVisible();
@@ -4907,13 +5106,13 @@ test("external preview replacement stops automatic grant retries and allows a fr
   }] });
   await page.goto("/");
   await page.getByRole("button", { name: "在 Remote 中打开 /tmp/external.md" }).click();
-  await expect(page.locator(".artifact-panel")).toContainText("读取未完成");
+  await expect(page.locator(".artifact-panel:visible")).toContainText("读取未完成");
   expect(relay.commands.filter(c => c.type === "authorize_preview")).toHaveLength(1);
   expect(relay.commands.filter(c => c.type === "get_file_preview")).toHaveLength(2);
   await page.locator(".artifact-file-trigger").click();
   await page.getByRole("button", { name: "重新读取", exact: true }).click();
   await expect.poll(() => relay.commands.filter(c => c.type === "authorize_preview").length).toBe(2);
-  await expect(page.locator(".artifact-panel")).toContainText("读取未完成");
+  await expect(page.locator(".artifact-panel:visible")).toContainText("读取未完成");
   expect(relay.commands.filter(c => c.type === "get_file_preview")).toHaveLength(4);
 });
 
@@ -5354,7 +5553,7 @@ test("async question from a hidden side chat never steals the main view", async 
   relay.emit({ type: "assistant_msg_end", sid, message_id: "async-item", channel: "final",
     delivery: "async", questions: [ASYNC_QUESTIONS[1]] });
   await expect(page.locator(".question-resume")).toHaveCount(0);
-  await expect(page.locator(".btw-panel")).toHaveCount(0);
+  await expect(page.locator(".btw-panel:visible")).toHaveCount(0);
   await page.keyboard.press("Control+Shift+k");
   await expect(page.getByRole("dialog", { name: "Codex 想确认一下", exact: true })).toBeVisible();
   const card = await openAsyncQuestion(page);
@@ -5377,7 +5576,7 @@ for (const sideChat of [false, true]) {
     });
     await page.goto("/");
     if (sideChat) {
-      await expect(page.locator(".btw-panel")).toBeVisible();
+      await expect(page.locator(".btw-panel:visible")).toBeVisible();
       await expect.poll(() => relay.commands.some((c) => c.type === "sync_btw")).toBe(true);
       relay.emit({ type: "user_msg", sid: "btw-layout-child", msg_id: "btw-ask",
         prompt: "two questions", seq: 1 });
@@ -5682,7 +5881,7 @@ for (const engine of ["claude", "codex"] as const) {
       })),
     });
     await page.goto("/");
-    const panel = page.locator(".btw-panel");
+    const panel = page.locator(".btw-panel:visible");
     const input = panel.getByRole("textbox");
     await expect(input).toBeEnabled();
     // BTW restores through live-tail replay, independently of main history.
@@ -5792,7 +5991,7 @@ for (const engine of ["claude", "codex"] as const) {
     const relay = await mockRightPanelRelay(page, { visible: false, engine });
     await page.goto("/");
     await expect(page.getByText("session layout-p", { exact: true })).toBeVisible();
-    const panel = page.locator(".btw-panel");
+    const panel = page.locator(".btw-panel:visible");
     await expect(panel).toHaveCount(0);
 
     for (const origin of ["hidden", "docked"] as const) {
@@ -5847,7 +6046,7 @@ for (const engine of ["claude", "codex"] as const) {
     await page.setViewportSize({ width: 1568, height: 1000 });
     const relay = await mockRightPanelRelay(page, { engine, secondParent: true });
     await page.goto("/");
-    const panel = page.locator(".btw-panel");
+    const panel = page.locator(".btw-panel:visible");
     const sideInput = panel.getByRole("textbox");
     const mainInput = page.locator("textarea[data-chat-composer]").first();
     await expect(mainInput).toBeEnabled();
@@ -5885,7 +6084,7 @@ for (const engine of ["claude", "codex"] as const) {
     await page.setViewportSize({ width: 1568, height: 1000 });
     const relay = await mockRightPanelRelay(page, { engine });
     await page.goto("/");
-    const panel = page.locator(".btw-panel");
+    const panel = page.locator(".btw-panel:visible");
     const sideInput = panel.getByRole("textbox");
     const mainInput = page.locator("textarea[data-chat-composer]").first();
     await expect(mainInput).toBeEnabled();
@@ -5932,7 +6131,7 @@ for (const engine of ["claude", "codex"] as const) {
     await page.setViewportSize({ width: 1568, height: 1000 });
     const relay = await mockRightPanelRelay(page, { visible: true, engine });
     await page.goto("/");
-    const panel = page.locator(".btw-panel");
+    const panel = page.locator(".btw-panel:visible");
     const sideInput = panel.getByRole("textbox");
     const mainInput = page.locator("textarea[data-chat-composer]").first();
     const close = panel.getByRole("button", { name: "收起侧边对话", exact: true });
@@ -6004,7 +6203,7 @@ for (const afterOpen of ["wait", "type-main", "close"] as const) {
     const mainInput = page.locator("textarea[data-chat-composer]").first();
     await expect(mainInput).toBeEnabled();
     await page.keyboard.press("Control+Shift+k");
-    const panel = page.locator(".btw-panel");
+    const panel = page.locator(".btw-panel:visible");
     await expect(panel.getByRole("textbox")).toBeDisabled();
     await expect.poll(() => relay.commands.filter(c => c.type === "open_btw").length).toBe(1);
     const open = relay.commands.find(c => c.type === "open_btw")!;
@@ -6040,7 +6239,7 @@ test("side chat scope slash never falls through a read-only centered chat", asyn
   await page.setViewportSize({ width: 1568, height: 1000 });
   await mockRightPanelRelay(page, { visible: true, btwReadOnly: true });
   await page.goto("/");
-  const panel = page.locator(".btw-panel");
+  const panel = page.locator(".btw-panel:visible");
   await expect(panel.getByRole("textbox")).toBeDisabled();
   await page.keyboard.press("Meta+Shift+e");
   await expect(panel).toHaveClass(/btw-expanded/);
@@ -6056,7 +6255,7 @@ for (const engine of ["claude", "codex"] as const) {
     await page.setViewportSize({ width: 1568, height: 1000 });
     const relay = await mockRightPanelRelay(page, { visible: true, engine });
     await page.goto("/");
-    const panel = page.locator(".btw-panel");
+    const panel = page.locator(".btw-panel:visible");
     const input = panel.getByRole("textbox");
     await expect(input).toBeEnabled();
     await panel.getByRole("button", { name: "居中展开侧边对话", exact: true }).click();
@@ -6080,12 +6279,12 @@ for (const engine of ["claude", "codex"] as const) {
 }
 
 for (const engine of ["claude", "codex"] as const) {
-  for (const popover of ["Token 用量", "计划进度"]) {
+  for (const popover of ["计划进度"]) {
     test(`side chat scope centered ${engine} ${popover} keeps backward navigation and Escape scoped`, async ({ page }) => {
       await page.setViewportSize({ width: 1568, height: 1000 });
       const relay = await mockRightPanelRelay(page, { visible: true, engine });
       await page.goto("/");
-      const panel = page.locator(".btw-panel");
+      const panel = page.locator(".btw-panel:visible");
       await expect(panel.getByRole("textbox")).toBeEnabled();
       const sid = "btw-layout-child";
       relay.emit({ type: "user_msg", sid, msg_id: "popover-user", prompt: "检查浮层键盘操作" });
@@ -6096,8 +6295,7 @@ for (const engine of ["claude", "codex"] as const) {
       relay.emit({ type: "turn_plan", sid, turn_id: "popover-turn", item_id: "popover-plan",
         plan: [{ step: "验证浮层", status: "inProgress" }] });
       await panel.getByRole("button", { name: "居中展开侧边对话", exact: true }).click();
-      const trigger = panel.getByRole("button", { name: popover === "Token 用量"
-        ? "查看 token 用量" : /查看计划进度/ });
+      const trigger = panel.getByRole("button", { name: /查看计划进度/ });
       const card = page.getByRole("dialog", { name: popover, exact: true });
       await trigger.click();
       await expect(card).toBeVisible();
@@ -6134,7 +6332,7 @@ for (const expanded of [false, true]) {
     await page.setViewportSize({ width: 1568, height: 1000 });
     const relay = await mockRightPanelRelay(page, { visible: true, engine: "codex" });
     await page.goto("/");
-    const panel = page.locator(".btw-panel");
+    const panel = page.locator(".btw-panel:visible");
     await expect(panel.getByRole("textbox")).toBeEnabled();
     if (expanded) await page.keyboard.press("Control+Shift+e");
     await panel.getByRole("button", { name: /^速度：/ }).click();
@@ -6162,7 +6360,7 @@ test("side chat scope centered speed menu keeps keyboard focus inside its owner"
   await page.setViewportSize({ width: 1568, height: 1000 });
   const relay = await mockRightPanelRelay(page, { visible: true, engine: "codex" });
   await page.goto("/");
-  const panel = page.locator(".btw-panel");
+  const panel = page.locator(".btw-panel:visible");
   await expect(panel.getByRole("textbox")).toBeEnabled();
   await panel.getByRole("button", { name: "居中展开侧边对话", exact: true }).click();
   const trigger = panel.getByRole("button", { name: /^速度：/ });
@@ -6187,7 +6385,7 @@ test("side chat scope centered attachments fit a narrow viewport", async ({ page
   await page.setViewportSize({ width: 390, height: 844 });
   await mockRightPanelRelay(page, { visible: true });
   await page.goto("/");
-  const panel = page.locator(".btw-panel");
+  const panel = page.locator(".btw-panel:visible");
   await panel.getByRole("button", { name: "居中展开侧边对话", exact: true }).click();
   await panel.getByLabel("添加文件", { exact: true }).setInputFiles([
     { name: "一份名称很长的侧聊附件-验证窄屏输入区不溢出.txt", mimeType: "text/plain", buffer: Buffer.from("notes") },
@@ -6329,14 +6527,20 @@ for (const duringProbe of [false, true]) {
     const request = relay.commands.find(c => c.type === "get_file_preview")!;
     relay.emit({ type: "file_preview", sid: "layout-parent", path, request_id: String(request.request_id),
       format: "markdown", content: "# 技术方案", size: 16, mtime_ns: "1", revision: "a".repeat(64), writable: true });
-    const file = page.locator(".artifact-panel");
+    const file = page.locator(".artifact-panel:visible");
     await file.getByRole("button", { name: "源码", exact: true }).click();
     const editor = file.getByRole("textbox", { name: "Markdown 源码编辑器" });
     const draft = "# 未保存的草稿\n\n更新时必须保留";
     const status = page.getByRole("button", { name: "状态详情：有更新", exact: true });
-    const update = page.getByRole("button", { name: "更新页面", exact: true });
+    const updateSheet = page.getByRole("dialog", { name: "检查更新", exact: true });
+    const update = updateSheet.getByRole("button", { name: "刷新页面", exact: true });
+    const openUpdate = async () => {
+      await status.click();
+      await page.getByRole("button", { name: "查看更新", exact: true }).click();
+      await expect(update).toBeVisible();
+    };
     if (!duringProbe) await editor.fill(draft);
-    await status.click();
+    await openUpdate();
     holdProbe = duringProbe;
     await update.click();
     if (duringProbe) {
@@ -6344,9 +6548,9 @@ for (const duringProbe of [false, true]) {
       await page.keyboard.press("Escape");
       await editor.fill(draft);
       releaseProbe!();
-      await status.click();
+      await openUpdate();
     }
-    await expect(page.getByRole("dialog", { name: "状态详情", exact: true }))
+    await expect(updateSheet)
       .toContainText("Markdown 有未保存的修改，请先保存或放弃修改，再更新页面。");
     await expect(update).toBeEnabled();
     await expect(editor).toHaveValue(draft);
@@ -6359,7 +6563,7 @@ for (const duringProbe of [false, true]) {
     relay.emit({ type: "file_save_result", sid: "layout-parent", path, request_id: String(save.request_id),
       status: "saved", size: 64, mtime_ns: "2", revision: "b".repeat(64) });
     await expect(file.locator(".markdown-save-state")).toHaveText("已保存");
-    await status.click();
+    await openUpdate();
     // The earlier refusal must not strand the hook's updating/pending state.
     const navigation = page.waitForEvent("framenavigated", frame => frame === page.mainFrame());
     await update.click();
@@ -6367,6 +6571,234 @@ for (const duringProbe of [false, true]) {
     expect(unloadDialogs).toBe(0);
   });
 }
+
+test("right panel layout retains the actual file preview across harness switches and releases it on close", async ({ page }) => {
+  await page.setViewportSize({ width: 1568, height: 1000 });
+  const path = "/tmp/layout/retained.html";
+  const relay = await mockRightPanelRelay(page, { engine: "claude", listReply: otherHarnessList,
+    seedTurns: [{ id: "retained-preview", prompt: "查看文件", done: true,
+      blocks: [{ kind: "text", message_id: "retained-link", done: true,
+        text: `[文件](${path})` }] }] });
+  await page.goto("/");
+  await page.getByRole("button", { name: `在 Remote 中打开 ${path}`, exact: true }).click();
+  await expect.poll(() => relay.commands.some(command => command.type === "get_file_preview")).toBe(true);
+  const request = relay.commands.find(command => command.type === "get_file_preview")!;
+  relay.emit({ type: "file_preview", sid: "layout-parent", request_id: String(request.request_id),
+    path, format: "html", content: '<input aria-label="Preview draft"><p>保留交互页面</p>',
+    size: 100, mtime_ns: "1" });
+  const panel = page.locator('.artifact-panel:visible');
+  const frame = panel.frameLocator('iframe');
+  await frame.getByRole("textbox", { name: "Preview draft" }).fill("还没提交的内容");
+  const original = (await panel.locator("iframe").elementHandle())!;
+  await page.locator(".composer textarea").focus();
+  await page.keyboard.press("Meta+2");
+  await expect(panel).toHaveCount(0);
+  expect(await original.evaluate(node => node.isConnected)).toBe(true);
+  await page.keyboard.press("Meta+1");
+  await expect(frame.getByRole("textbox", { name: "Preview draft" })).toHaveValue("还没提交的内容");
+  expect(await original.evaluate(node => node === document.querySelector('.artifact-panel iframe'))).toBe(true);
+  await panel.getByRole("button", { name: "收起", exact: true }).click();
+  expect(await original.evaluate(node => node.isConnected)).toBe(false);
+  await page.keyboard.press("Meta+2");
+  await page.keyboard.press("Meta+1");
+  await expect(page.locator(".artifact-panel:visible")).toHaveCount(0);
+  expect(relay.commands.filter(command => command.type === "get_file_preview")).toHaveLength(1);
+});
+
+test("side chat scope retains the mounted chat across harness switches and releases it on collapse", async ({ page }) => {
+  await page.setViewportSize({ width: 1568, height: 1000 });
+  const relay = await mockRightPanelRelay(page, { visible: true, engine: "claude", listReply: otherHarnessList });
+  await page.goto("/");
+  const panel = page.locator('.btw-panel:visible');
+  await expect(panel.getByRole("textbox")).toBeEnabled();
+  relay.emit({ type: "user_msg", sid: "btw-layout-child", msg_id: "retained-chat", prompt: "侧聊问题" });
+  relay.emit({ type: "delta", sid: "btw-layout-child", message_id: "retained-answer", text: "侧聊回答" });
+  await expect(panel.locator(".thread")).toBeVisible();
+  const original = (await panel.elementHandle())!;
+  const input = panel.getByRole("textbox");
+  await input.fill("尚未发送的侧聊草稿");
+  await input.evaluate(node => (node as HTMLTextAreaElement).setSelectionRange(3, 6));
+  await page.keyboard.press("Meta+2");
+  await expect(panel).toHaveCount(0);
+  expect(await original.evaluate(node => node.isConnected)).toBe(true);
+  relay.emit({ type: "delta", sid: "btw-layout-child", message_id: "retained-answer", text: "，后台继续输出" });
+  await page.keyboard.press("Meta+1");
+  await expect(panel).toContainText("后台继续输出");
+  await expect(input).toHaveValue("尚未发送的侧聊草稿");
+  expect(await input.evaluate(node => [(node as HTMLTextAreaElement).selectionStart,
+    (node as HTMLTextAreaElement).selectionEnd])).toEqual([3, 6]);
+  expect(await original.evaluate(node => node === document.querySelector('.btw-panel'))).toBe(true);
+  await panel.getByRole("button", { name: "收起侧边对话", exact: true }).click();
+  expect(await original.evaluate(node => node.isConnected)).toBe(false);
+});
+
+test("side chat scope keeps its reading position through hidden live output", async ({ page }) => {
+  await page.setViewportSize({ width: 1568, height: 1000 });
+  const relay = await mockRightPanelRelay(page, { visible: true, engine: "claude", listReply: otherHarnessList });
+  await page.goto("/");
+  const panel = page.locator(".btw-panel:visible");
+  await expect(panel.getByRole("textbox")).toBeEnabled();
+  relay.emit({ type: "user_msg", sid: "btw-layout-child", msg_id: "reading-chat", prompt: "长回复" });
+  relay.emit({ type: "delta", sid: "btw-layout-child", message_id: "reading-answer",
+    text: Array.from({ length: 60 }, (_, index) => `Paragraph ${index} ${"保留阅读位置。".repeat(8)}`).join("\n\n") });
+  const thread = panel.locator(".thread");
+  await expect.poll(() => thread.evaluate(node => node.scrollHeight - node.clientHeight)).toBeGreaterThan(1000);
+  await thread.evaluate(node => {
+    node.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -350 }));
+    node.scrollTop -= 350;
+    node.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await expect.poll(() => thread.evaluate(node => node.scrollHeight - node.clientHeight - node.scrollTop)).toBeGreaterThan(100);
+  await page.waitForTimeout(250);
+  const position = await thread.evaluate(node => node.scrollTop);
+  const original = (await thread.elementHandle())!;
+  await page.keyboard.press("Meta+2");
+  await expect(panel).toHaveCount(0);
+  relay.emit({ type: "delta", sid: "btw-layout-child", message_id: "reading-answer", text: "\n\n新的后台内容。" });
+  await page.keyboard.press("Meta+1");
+  await expect(panel).toContainText("新的后台内容。");
+  await expect.poll(() => thread.evaluate(node => node.scrollTop)).toBeCloseTo(position, 0);
+  expect(await original.evaluate(node => node === document.querySelector(".btw-panel .thread"))).toBe(true);
+  await thread.evaluate(node => {
+    node.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: 100 }));
+    node.scrollTop += 100;
+    node.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await expect.poll(() => thread.evaluate(node => node.scrollTop)).toBeGreaterThan(position + 20);
+});
+
+test("right panel layout releases retained frames when switching devices", async ({ page }) => {
+  await page.setViewportSize({ width: 1568, height: 1000 });
+  const path = "/tmp/layout/device-preview.html";
+  const relay = await mockRightPanelRelay(page, { engine: "claude", retained: false,
+    devices: [{ machine_id: "layout-machine", label: "Mac", online: true },
+      { machine_id: "second-machine", label: "VPS", online: true }],
+    seedTurns: [{ id: "device-preview", prompt: "查看文件", done: true,
+      blocks: [{ kind: "text", message_id: "device-link", done: true, text: `[文件](${path})` }] }] });
+  await page.goto("/");
+  await page.getByRole("button", { name: `在 Remote 中打开 ${path}`, exact: true }).click();
+  await expect.poll(() => relay.commands.some(command => command.type === "get_file_preview")).toBe(true);
+  const request = relay.commands.find(command => command.type === "get_file_preview")!;
+  relay.emit({ type: "file_preview", sid: "layout-parent", request_id: String(request.request_id),
+    path, format: "html", content: "<p>设备专属预览</p>", size: 100, mtime_ns: "1" });
+  const frame = page.locator(".artifact-panel:visible iframe");
+  await expect(frame).toBeVisible();
+  const original = (await frame.elementHandle())!;
+  await page.getByRole("button", { name: "设备中心", exact: true }).click();
+  await page.getByRole("dialog", { name: "设备中心" }).getByRole("button", { name: /VPS/ }).click();
+  await expect.poll(() => original.evaluate(node => node.isConnected)).toBe(false);
+  await expect(page.locator(".artifact-panel iframe")).toHaveCount(0);
+});
+
+test("right panel layout retains directory requests with their owner while another harness opens files", async ({ page }) => {
+  await page.setViewportSize({ width: 1568, height: 1000 });
+  const relay = await mockRightPanelRelay(page, { engine: "claude", listReply: otherHarnessList });
+  await page.goto("/");
+  const openFiles = async () => {
+    await page.getByRole("button", { name: "更多设置", exact: true }).click();
+    await page.getByRole("button", { name: "打开会话文件", exact: true }).click();
+  };
+  await openFiles();
+  await expect.poll(() => relay.commands.filter(command => command.type === "browse_files").length).toBe(1);
+  const claude = relay.commands.find(command => command.type === "browse_files")!;
+  const original = (await page.locator('.file-browser-shell').elementHandle())!;
+  await page.keyboard.press("Meta+2");
+  await openFiles();
+  await expect.poll(() => relay.commands.filter(command => command.type === "browse_files").length).toBe(2);
+  const codex = relay.commands.filter(command => command.type === "browse_files")[1];
+  for (const [request, name] of [[codex, "codex.txt"], [claude, "claude.txt"]] as const) {
+    relay.emit({ type: "files_listed", sid: String(request.sid), request_id: String(request.request_id),
+      root: "/tmp/layout", path: "/tmp/layout", parent: null, kind: "directory", revision: "dir",
+      next_offset: null, entries: [{ name, path: `/tmp/layout/${name}`, kind: "file" }] });
+  }
+  await expect(page.locator('.file-browser-shell:visible')).toContainText("codex.txt");
+  await page.keyboard.press("Meta+1");
+  const files = page.locator('.file-browser-shell:visible');
+  await expect(files).toContainText("claude.txt");
+  await expect(files).not.toContainText("codex.txt");
+  expect(await original.evaluate(node => node === document.querySelector('.file-browser-shell:not([hidden])'))).toBe(true);
+  await files.getByRole("button", { name: "关闭文件浏览", exact: true }).click();
+  expect(await original.evaluate(node => node.isConnected)).toBe(false);
+  expect(relay.commands.filter(command => command.type === "browse_files")).toHaveLength(2);
+});
+
+test("right panel layout pauses retained video without resetting it and releases the source on close", async ({ page }) => {
+  await page.setViewportSize({ width: 1568, height: 1000 });
+  const path = "/tmp/layout/sample.mp4";
+  const relay = await mockRightPanelRelay(page, { engine: "claude", listReply: otherHarnessList,
+    seedTurns: [{ id: "video-preview", prompt: "查看视频", done: true,
+      blocks: [{ kind: "text", message_id: "video-link", done: true, text: `[视频](${path})` }] }] });
+  const bytes = readFileSync(new URL("../../tests/fixtures/video-preview.mp4", import.meta.url));
+  await page.route("**/api/media/**", route => {
+    const range = route.request().headers().range?.match(/^bytes=(\d+)-(\d*)$/);
+    const start = Number(range?.[1] ?? 0);
+    const end = range?.[2] ? Math.min(Number(range[2]), bytes.length - 1) : bytes.length - 1;
+    return route.fulfill({ status: range ? 206 : 200, contentType: "video/mp4",
+      headers: { "accept-ranges": "bytes", ...(range ? { "content-range": `bytes ${start}-${end}/${bytes.length}` } : {}) },
+      body: bytes.subarray(start, end + 1) });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: `在 Remote 中打开 ${path}`, exact: true }).click();
+  await expect.poll(() => relay.commands.some(command => command.type === "get_file_preview")).toBe(true);
+  const request = relay.commands.find(command => command.type === "get_file_preview")!;
+  relay.emit({ type: "file_preview", sid: "layout-parent", request_id: String(request.request_id),
+    path, format: "video", media_id: "a".repeat(32), size: bytes.length, mtime_ns: "1" });
+  const video = page.locator("video:visible");
+  await expect.poll(() => video.evaluate(node => (node as HTMLVideoElement).readyState)).toBeGreaterThanOrEqual(1);
+  await video.evaluate(async node => {
+    const media = node as HTMLVideoElement;
+    media.muted = true;
+    await media.play();
+    media.currentTime = 2;
+  });
+  await expect.poll(() => video.evaluate(node => (node as HTMLVideoElement).currentTime)).toBeGreaterThanOrEqual(2);
+  const original = (await video.elementHandle())!;
+  await page.keyboard.press("Meta+2");
+  await expect(video).toHaveCount(0);
+  await expect.poll(() => original.evaluate(node => (node as HTMLVideoElement).paused)).toBe(true);
+  const time = await original.evaluate(node => (node as HTMLVideoElement).currentTime);
+  expect(time).toBeGreaterThanOrEqual(2);
+  await page.keyboard.press("Meta+1");
+  expect(await video.evaluate(node => (node as HTMLVideoElement).currentTime)).toBeCloseTo(time, 1);
+  expect(await original.evaluate(node => node === document.querySelector("video"))).toBe(true);
+  await page.locator('.artifact-panel:visible').getByRole("button", { name: "收起", exact: true }).click();
+  expect(await original.evaluate(node => ({ connected: node.isConnected,
+    src: node.getAttribute("src"), paused: (node as HTMLVideoElement).paused })))
+    .toEqual({ connected: false, src: null, paused: true });
+});
+
+test("right panel layout bounds retained previews and drops invalidated hidden content", async ({ page }) => {
+  await page.setViewportSize({ width: 1568, height: 1000 });
+  const path = "/tmp/layout/bounded.html";
+  const relay = await mockRightPanelRelay(page, { engine: "claude", retained: false,
+    listReply: command => ({ type: "session_list", engine: "claude", space: "code",
+      request_id: String(command.cmd_id), sessions: Array.from({ length: 4 }, (_, index) => ({
+        session_id: `bounded-${index}`, engine: "claude", space: "code",
+        summary: `Bounded parent ${index}`, cwd: "/tmp/layout", state: "idle", last_modified: String(100 - index),
+      })) }),
+    seedTurns: [{ id: "bounded-preview", prompt: "查看文件", done: true,
+      blocks: [{ kind: "text", message_id: "bounded-link", done: true, text: `[文件](${path})` }] }] });
+  await page.goto("/");
+  const originalFrames: import("@playwright/test").ElementHandle[] = [];
+  for (let index = 0; index < 4; index++) {
+    if (index === 0 && !await page.locator(".sessions.show").count()) await page.keyboard.press("Control+b");
+    await page.locator(".scard").filter({ hasText: `Bounded parent ${index}` }).click();
+    await page.getByRole("button", { name: `在 Remote 中打开 ${path}`, exact: true }).click();
+    await expect.poll(() => relay.commands.filter(command => command.type === "get_file_preview").length).toBe(index + 1);
+    const request = relay.commands.filter(command => command.type === "get_file_preview")[index];
+    relay.emit({ type: "file_preview", sid: String(request.sid), request_id: String(request.request_id),
+      path, format: "html", content: `<p>bounded-content-${index}</p>`, size: 100, mtime_ns: "1" });
+    const frame = page.locator('.artifact-panel:visible iframe');
+    await expect(frame).toBeVisible();
+    originalFrames.push((await frame.elementHandle())!);
+  }
+  await expect(page.locator('.artifact-panel iframe')).toHaveCount(3);
+  expect(await originalFrames[0].evaluate(node => node.isConnected)).toBe(false);
+  relay.emit({ type: "artifact_invalidated", session_id: "bounded-1" });
+  await expect.poll(() => originalFrames[1].evaluate(node => node.isConnected)).toBe(false);
+  await page.locator('.artifact-panel:visible').getByRole("button", { name: "收起", exact: true }).click();
+  expect(await originalFrames[3].evaluate(node => node.isConnected)).toBe(false);
+});
 
 for (const centered of [false, true]) {
   test(`right panel layout restores ${centered ? "centered" : "docked"} file preview across engines`, async ({ page }) => {
@@ -6383,7 +6815,7 @@ for (const centered of [false, true]) {
     // A response arriving while the owner is hidden must be retained, not lost
     // or displayed over the other engine's conversation.
     await page.keyboard.press("Meta+2");
-    const panel = page.locator(".artifact-panel");
+    const panel = page.locator(".artifact-panel:visible");
     await expect(panel).toHaveCount(0);
     const content = "# Preview\n\n" + Array.from({ length: 100 }, (_, n) => `Paragraph ${n}\n\n`).join("");
     relay.emit({ type: "file_preview", sid: "layout-parent", request_id: String(request.request_id),
@@ -6513,9 +6945,9 @@ test("right panel layout centered diff and agent details keep their own content"
   await page.setViewportSize({ width: 1568, height: 1000 });
   const relay = await mockRightPanelRelay(page, { visible: true, engine: "claude" });
   await page.goto("/");
-  await expect(page.locator(".btw-panel")).toBeVisible();
+  await expect(page.locator(".btw-panel:visible")).toBeVisible();
   await page.keyboard.press("Control+Shift+b");
-  const diff = page.locator(".artifact-panel");
+  const diff = page.locator(".artifact-panel:visible");
   await expect(diff).toBeVisible();
   await diff.getByRole("button", { name: "居中展开改动", exact: true }).click();
   await expect(diff).toHaveClass(/panel-expanded/);
@@ -6528,12 +6960,12 @@ test("right panel layout centered diff and agent details keep their own content"
   const original = await diff.elementHandle();
   await page.keyboard.press("Control+Shift+e");
   await expect(diff).toHaveClass(/panel-expanded/);
-  await expect(page.locator(".btw-panel")).toHaveClass(/panel-expanded/);
+  await expect(page.locator(".btw-panel:visible")).toHaveClass(/panel-expanded/);
   expect(await original!.evaluate(node => node.isConnected)).toBe(true);
   await page.keyboard.press("Control+Shift+e");
   await diff.getByRole("button", { name: "收起", exact: true }).click();
-  await expect(page.locator(".btw-panel")).toBeVisible();
-  await expect(page.locator(".btw-panel")).not.toHaveClass(/panel-expanded/);
+  await expect(page.locator(".btw-panel:visible")).toBeVisible();
+  await expect(page.locator(".btw-panel:visible")).not.toHaveClass(/panel-expanded/);
   relay.emit({ type: "background_process_sync", sid: "layout-parent",
     items: [{ item_id: "center-agent", kind: "agent", status: "succeeded", title: "Centered child" }] });
   await page.getByRole("button", { name: /后台任务/ }).click();
@@ -6572,7 +7004,7 @@ for (const key of ["Tab", "Escape"]) {
     const request = relay.commands.find(c => c.type === "get_file_preview")!;
     relay.emit({ type: "file_preview", sid: "layout-parent", request_id: String(request.request_id),
       path, format: "html", content: '<input aria-label="Draft"><button>Last control</button>', size: 62 });
-    const panel = page.locator(".artifact-panel");
+    const panel = page.locator(".artifact-panel:visible");
     const frame = panel.frameLocator("iframe");
     await frame.getByRole("textbox").fill("keep this");
     const original = await panel.locator("iframe").elementHandle();
@@ -6660,30 +7092,30 @@ test("side chat scope follows its parent through navigation and refresh without 
   await page.setViewportSize({ width: 1568, height: 881 });
   const relay = await mockRightPanelRelay(page, { visible: true, secondParent: true });
   await page.goto("/");
-  await expect(page.locator(".btw-panel")).toBeVisible();
+  await expect(page.locator(".btw-panel:visible")).toBeVisible();
   await page.locator(".btw-panel textarea").fill("只属于原会话的草稿");
   await page.keyboard.press("Control+b");
   await page.getByText("Second parent", { exact: true }).click();
   await expect(page.getByText("session layout-o", { exact: true })).toBeVisible();
-  await expect(page.locator(".btw-panel")).toHaveCount(0);
+  await expect(page.locator(".btw-panel:visible")).toHaveCount(0);
   await expectRightPanelSpace(page, false);
   relay.emit({ type: "user_msg", sid: "btw-layout-child", msg_id: "bg-scoped",
     prompt: "原会话的侧聊仍在运行", seq: 1 });
-  await expect(page.locator(".btw-panel")).toHaveCount(0);
+  await expect(page.locator(".btw-panel:visible")).toHaveCount(0);
   await page.getByText("Layout parent", { exact: true }).click();
-  await expect(page.locator(".btw-panel")).toContainText("原会话的侧聊仍在运行");
+  await expect(page.locator(".btw-panel:visible")).toContainText("原会话的侧聊仍在运行");
   await expect(page.locator(".btw-panel textarea")).toHaveValue("只属于原会话的草稿");
   await page.getByText("Second parent", { exact: true }).click();
   await page.reload();
   // The cold catalog chooses its newest parent, not the last browser focus.
   // Restored visibility must still belong only to the explicitly opened one.
   await expect(page.getByText("session layout-p", { exact: true })).toBeVisible();
-  await expect(page.locator(".btw-panel")).toBeVisible();
+  await expect(page.locator(".btw-panel:visible")).toBeVisible();
   await page.keyboard.press("Control+b");
   await page.getByText("Second parent", { exact: true }).click();
-  await expect(page.locator(".btw-panel")).toHaveCount(0);
+  await expect(page.locator(".btw-panel:visible")).toHaveCount(0);
   await page.getByText("Layout parent", { exact: true }).click();
-  await expect(page.locator(".btw-panel")).toBeVisible();
+  await expect(page.locator(".btw-panel:visible")).toBeVisible();
   expect(relay.commands.filter((command) =>
     ["open_btw", "close_btw", "query", "interrupt"].includes(String(command.type))))
     .toEqual([]);
@@ -6700,26 +7132,26 @@ test("side chat scope keeps late fork creation and sibling visibility with the o
   const open = relay.commands.find((c) => c.type === "open_btw")!;
   await page.keyboard.press("Control+b");
   await page.getByText("Second parent", { exact: true }).click();
-  await expect(page.locator(".btw-panel")).toHaveCount(0);
+  await expect(page.locator(".btw-panel:visible")).toHaveCount(0);
   relay.emit({ type: "btw_opened", sid: "btw-layout-child",
     btw_sid: "btw-layout-child", parent_sid: "layout-parent", engine: "codex",
     created_at: 1, revision: 2, request_id: String(open.request_id) });
-  await expect(page.locator(".btw-panel")).toHaveCount(0);
+  await expect(page.locator(".btw-panel:visible")).toHaveCount(0);
   await page.keyboard.press("Control+Shift+k");
   await expect.poll(() => relay.commands.filter((c) => c.type === "open_btw").length).toBe(2);
   const secondOpen = relay.commands.filter((c) => c.type === "open_btw")[1];
   expect(secondOpen.sid).toBe("layout-other");
   await page.getByRole("button", { name: "收起侧边对话", exact: true }).click();
   await page.getByText("Layout parent", { exact: true }).click();
-  await expect(page.locator(".btw-chat-tab")).toHaveCount(1);
+  await expect(page.locator(".btw-panel:visible .btw-chat-tab")).toHaveCount(1);
   relay.emit({ type: "btw_opened", sid: "btw-other-child",
     btw_sid: "btw-other-child", parent_sid: "layout-other", engine: "codex",
     created_at: 2, revision: 3, request_id: String(secondOpen.request_id) });
-  await expect(page.locator(".btw-chat-tab")).toHaveCount(1);
+  await expect(page.locator(".btw-panel:visible .btw-chat-tab")).toHaveCount(1);
   await page.getByText("Second parent", { exact: true }).click();
-  await expect(page.locator(".btw-panel")).toHaveCount(0);
+  await expect(page.locator(".btw-panel:visible")).toHaveCount(0);
   await page.keyboard.press("Control+Shift+k");
-  await expect(page.locator(".btw-chat-tab")).toHaveCount(1);
+  await expect(page.locator(".btw-panel:visible .btw-chat-tab")).toHaveCount(1);
   expect(relay.commands.filter((c) => c.type === "open_btw")).toHaveLength(2);
   expect(relay.commands.filter((c) => c.type === "close_btw")).toHaveLength(0);
 });
@@ -6764,7 +7196,7 @@ test("right panel layout avoids repeated paragraph reflow while side chat opens 
     });
     await expectRightPanelSpace(page, open);
     if (open) {
-      expect(await page.locator(".btw-panel").evaluate(node => node.getBoundingClientRect().width)).toBe(520);
+      expect(await page.locator(".btw-panel:visible").evaluate(node => node.getBoundingClientRect().width)).toBeCloseTo(520, 2);
     }
     // Text gets one final layout; only the floating panel animates into place.
     expect(new Set(frames.map(frame => frame.width)).size).toBeLessThanOrEqual(2);
@@ -6775,14 +7207,14 @@ test("right panel layout avoids repeated paragraph reflow while side chat opens 
   await handle.focus();
   await handle.press("ArrowLeft");
   await expectRightPanelSpace(page, true, true, 544);
-  expect(await page.locator(".btw-panel").evaluate(node => node.getBoundingClientRect().width)).toBe(544);
+  expect(await page.locator(".btw-panel:visible").evaluate(node => node.getBoundingClientRect().width)).toBeCloseTo(544, 2);
   await page.keyboard.press("Control+Shift+k");
   await expectRightPanelSpace(page, false);
   await page.keyboard.press("Control+Shift+k");
-  expect(await page.locator(".btw-panel").evaluate(node => node.getBoundingClientRect().width)).toBe(544);
+  expect(await page.locator(".btw-panel:visible").evaluate(node => node.getBoundingClientRect().width)).toBeCloseTo(544, 2);
   await page.reload();
   await expectRightPanelSpace(page, true, true, 544);
-  expect(await page.locator(".btw-panel").evaluate(node => node.getBoundingClientRect().width)).toBe(544);
+  expect(await page.locator(".btw-panel:visible").evaluate(node => node.getBoundingClientRect().width)).toBeCloseTo(544, 2);
 });
 
 test("right panel layout releases collapsed and reload-restored side chat space", async ({
@@ -6792,42 +7224,42 @@ test("right panel layout releases collapsed and reload-restored side chat space"
   const relay = await mockRightPanelRelay(page);
   await page.goto("/");
   await expect(page.getByText("session layout-p", { exact: true })).toBeVisible();
-  await expect(page.locator(".btw-panel")).toHaveCount(0);
+  await expect(page.locator(".btw-panel:visible")).toHaveCount(0);
   await expectRightPanelSpace(page, false);
 
   await page.keyboard.press("Control+Shift+k");
-  await expect(page.locator(".btw-panel")).toBeVisible();
+  await expect(page.locator(".btw-panel:visible")).toBeVisible();
   await expectRightPanelSpace(page, true);
   await expect(page.locator(".btw-chat-state.running")).toHaveCount(1);
   await page.getByRole("button", { name: "收起侧边对话", exact: true }).click();
-  await expect(page.locator(".btw-panel")).toHaveCount(0);
+  await expect(page.locator(".btw-panel:visible")).toHaveCount(0);
   await expectRightPanelSpace(page, false);
 
   // Background frames remain routed while hidden; expanding is not a new fork.
   relay.emit({ type: "user_msg", sid: "btw-layout-child",
     msg_id: "background-message", prompt: "侧聊仍在后台运行", seq: 1 });
   await page.keyboard.press("Control+Shift+k");
-  await expect(page.locator(".btw-panel")).toContainText("侧聊仍在后台运行");
+  await expect(page.locator(".btw-panel:visible")).toContainText("侧聊仍在后台运行");
   await expectRightPanelSpace(page, true);
   await page.keyboard.press("Control+Shift+k");
   await expectRightPanelSpace(page, false);
 
   await page.reload();
   await expect(page.getByText("session layout-p", { exact: true })).toBeVisible();
-  await expect(page.locator(".btw-panel")).toHaveCount(0);
+  await expect(page.locator(".btw-panel:visible")).toHaveCount(0);
   await expectRightPanelSpace(page, false);
   await page.keyboard.press("Control+Shift+k");
-  await expect(page.locator(".btw-chat-tab")).toHaveCount(1);
+  await expect(page.locator(".btw-panel:visible .btw-chat-tab")).toHaveCount(1);
   await expectRightPanelSpace(page, true);
   await page.reload();
-  await expect(page.locator(".btw-panel")).toBeVisible();
+  await expect(page.locator(".btw-panel:visible")).toBeVisible();
   await expectRightPanelSpace(page, true);
   await page.keyboard.press("Control+b");
   await page.getByRole("button", { name: "新会话", exact: true }).click();
-  await expect(page.locator(".btw-panel")).toHaveCount(0);
+  await expect(page.locator(".btw-panel:visible")).toHaveCount(0);
   await expectRightPanelSpace(page, false);
   await page.getByText("Layout parent", { exact: true }).click();
-  await expect(page.locator(".btw-chat-tab")).toHaveCount(1);
+  await expect(page.locator(".btw-panel:visible .btw-chat-tab")).toHaveCount(1);
   await expectRightPanelSpace(page, true);
   expect(relay.commands.filter((command) =>
     ["open_btw", "close_btw", "query", "interrupt"].includes(String(command.type))))
@@ -6840,10 +7272,10 @@ test("right panel layout allocates empty and opening side chats only while visib
   await page.setViewportSize({ width: 1568, height: 881 });
   const relay = await mockRightPanelRelay(page, { visible: true, retained: false });
   await page.goto("/");
-  await expect(page.locator(".btw-panel")).toContainText("暂无侧边对话");
+  await expect(page.locator(".btw-panel:visible")).toContainText("暂无侧边对话");
   await expectRightPanelSpace(page, true);
   await page.getByRole("button", { name: "新建侧边对话", exact: true }).click();
-  await expect(page.locator(".btw-panel")).toContainText("正在打开侧边对话");
+  await expect(page.locator(".btw-panel:visible")).toContainText("正在打开侧边对话");
   await expectRightPanelSpace(page, true);
   await page.getByRole("button", { name: "收起侧边对话", exact: true }).click();
   await expectRightPanelSpace(page, false);
@@ -6852,10 +7284,10 @@ test("right panel layout allocates empty and opening side chats only while visib
   relay.emit({ type: "btw_opened", sid: "btw-layout-child",
     btw_sid: "btw-layout-child", parent_sid: "layout-parent", engine: "codex",
     created_at: 1, revision: 2, request_id: String(open.request_id) });
-  await expect(page.locator(".btw-panel")).toHaveCount(0);
+  await expect(page.locator(".btw-panel:visible")).toHaveCount(0);
   await expectRightPanelSpace(page, false);
   await page.keyboard.press("Control+Shift+k");
-  await expect(page.locator(".btw-chat-tab")).toHaveCount(1);
+  await expect(page.locator(".btw-panel:visible .btw-chat-tab")).toHaveCount(1);
   await expectRightPanelSpace(page, true);
 });
 
@@ -6865,25 +7297,25 @@ test("right panel layout shares the diff slot and keeps mobile as an overlay", a
   await page.setViewportSize({ width: 1568, height: 881 });
   await mockRightPanelRelay(page, { visible: true });
   await page.goto("/");
-  await expect(page.locator(".btw-panel")).toBeVisible();
+  await expect(page.locator(".btw-panel:visible")).toBeVisible();
   await expectRightPanelSpace(page, true);
   await page.keyboard.press("Control+Shift+b");
-  await expect(page.locator(".artifact-panel")).toBeVisible();
-  await expect(page.locator(".btw-panel")).toHaveCount(0);
+  await expect(page.locator(".artifact-panel:visible")).toBeVisible();
+  await expect(page.locator(".btw-panel:visible")).toHaveCount(0);
   await expectRightPanelSpace(page, true);
-  await page.locator(".artifact-panel").getByRole("tab", { name: "btw" }).click();
-  await expect(page.locator(".btw-panel")).toBeVisible();
+  await page.locator(".artifact-panel:visible").getByRole("tab", { name: "btw" }).click();
+  await expect(page.locator(".btw-panel:visible")).toBeVisible();
   await expectRightPanelSpace(page, true);
   // Collapse BTW with an artifact still available: the diff becomes visible.
   await page.getByRole("button", { name: "收起侧边对话", exact: true }).click();
-  await expect(page.locator(".artifact-panel")).toBeVisible();
+  await expect(page.locator(".artifact-panel:visible")).toBeVisible();
   await expectRightPanelSpace(page, true);
-  await page.locator(".artifact-panel").getByRole("button", { name: "收起", exact: true }).click();
+  await page.locator(".artifact-panel:visible").getByRole("button", { name: "收起", exact: true }).click();
   await expectRightPanelSpace(page, false);
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.keyboard.press("Control+Shift+k");
-  await expect(page.locator(".btw-panel")).toBeVisible();
+  await expect(page.locator(".btw-panel:visible")).toBeVisible();
   await expectRightPanelSpace(page, true, false);
   await page.getByRole("button", { name: "收起侧边对话", exact: true }).click();
   await expectRightPanelSpace(page, false, false);
@@ -6897,7 +7329,7 @@ test("right panel layout preserves Claude agent detail priority over side chats"
   await page.setViewportSize({ width: 1568, height: 881 });
   const relay = await mockRightPanelRelay(page, { visible: true, engine: "claude" });
   await page.goto("/");
-  await expect(page.locator(".btw-panel")).toBeVisible();
+  await expect(page.locator(".btw-panel:visible")).toBeVisible();
   relay.emit({ type: "background_process_sync", sid: "layout-parent",
     items: [{ item_id: "layout-agent", kind: "agent", status: "running",
       title: "Layout child agent" }] });
@@ -6905,10 +7337,10 @@ test("right panel layout preserves Claude agent detail priority over side chats"
   await page.getByRole("button", { name: /后台任务，\d+ 项进行中/ }).click();
   await agentCard.click();
   await expect(page.locator(".agent-detail-panel")).toBeVisible();
-  await expect(page.locator(".btw-panel")).toHaveCount(0);
+  await expect(page.locator(".btw-panel:visible")).toHaveCount(0);
   await expectRightPanelSpace(page, true);
   await page.getByRole("button", { name: "关闭协作代理详情", exact: true }).click();
-  await expect(page.locator(".btw-panel")).toBeVisible();
+  await expect(page.locator(".btw-panel:visible")).toBeVisible();
   await expectRightPanelSpace(page, true);
   await page.getByRole("button", { name: "收起侧边对话", exact: true }).click();
   await expectRightPanelSpace(page, false);
@@ -6917,7 +7349,7 @@ test("right panel layout preserves Claude agent detail priority over side chats"
   await expect(page.locator(".agent-detail-panel")).toBeVisible();
   await expectRightPanelSpace(page, true);
   await page.getByRole("button", { name: "关闭协作代理详情", exact: true }).click();
-  await expect(page.locator(".btw-panel")).toHaveCount(0);
+  await expect(page.locator(".btw-panel:visible")).toHaveCount(0);
   await expectRightPanelSpace(page, false);
   expect(relay.commands.some((command) => command.type === "close_btw"))
     .toBe(false);
@@ -6937,12 +7369,12 @@ async function coverBtwPanel(
     await expect(page.locator(".agent-detail-panel")).toBeVisible();
   } else {
     await page.keyboard.press("Control+Shift+b");
-    await expect(page.locator(".artifact-panel")).toBeVisible();
+    await expect(page.locator(".artifact-panel:visible")).toBeVisible();
   }
-  await expect(page.locator(".btw-panel")).toHaveCount(0);
+  await expect(page.locator(".btw-panel:visible")).toHaveCount(0);
   return cover === "agent"
     ? page.getByRole("button", { name: "关闭协作代理详情", exact: true })
-    : page.locator(".artifact-panel").getByRole("button", { name: "收起", exact: true });
+    : page.locator(".artifact-panel:visible").getByRole("button", { name: "收起", exact: true });
 }
 
 test("native question centers long Claude prompts and retains answers above the keyboard", async ({ page }, testInfo) => {
@@ -7195,7 +7627,7 @@ test("async question tool approval survives idle focus after each page refresh",
 test("native question batch scrolls long text with fixed navigation and routes side chat answers", async ({ page }, testInfo) => {
   const relay = await mockRightPanelRelay(page, { engine: "claude", visible: true });
   await page.goto("/");
-  await expect(page.locator(".btw-panel")).toBeVisible();
+  await expect(page.locator(".btw-panel:visible")).toBeVisible();
   const questions = [{ question: "请确认这组要求。\n".repeat(60), header: "需求", allow_text: true,
     options: [{ label: "同意" }, { label: "需要调整" }] }];
   relay.emit({ type: "ask_user", sid: "btw-layout-child", seq: 1, ask_id: "batch-child", ...questions[0], questions });
@@ -7212,7 +7644,7 @@ test("native question batch scrolls long text with fixed navigation and routes s
   const beforeCollapse = relay.commands.length;
   await dialog.getByRole("button", { name: "收起问题", exact: true }).click();
   await expect(dialog).toHaveCount(0);
-  const resume = page.locator(".btw-panel").getByRole("button", { name: "等待你回答 继续回答" });
+  const resume = page.locator(".btw-panel:visible").getByRole("button", { name: "等待你回答 继续回答" });
   await expect(resume).toBeVisible();
   const barBox = (await resume.boundingBox())!;
   const composerBox = (await page.locator(".btw-composer").boundingBox())!;
@@ -7307,7 +7739,7 @@ for (const cover of ["agent", "diff"] as const) {
       visible: true, engine: cover === "agent" ? "claude" : "codex",
     });
     await page.goto("/");
-    await expect(page.locator(".btw-panel")).toBeVisible();
+    await expect(page.locator(".btw-panel:visible")).toBeVisible();
     const closeCover = await coverBtwPanel(page, relay, cover);
 
     // Emit the parent's question last: seeing it proves the hidden side-chat
@@ -7326,7 +7758,7 @@ for (const cover of ["agent", "diff"] as const) {
 
     // Revealing the side chat must preserve its pending ask and its routing.
     await closeCover.click();
-    await expect(page.locator(".btw-panel")).toBeVisible();
+    await expect(page.locator(".btw-panel:visible")).toBeVisible();
     await expect(page.getByText("侧聊等待确认", { exact: true })).toBeVisible();
     await expect(page.getByRole("dialog", { name: "操作确认" })).toHaveCount(1);
     await page.getByRole("button", { name: "确认侧聊", exact: true }).click();
@@ -7348,7 +7780,7 @@ for (const cover of ["agent", "diff"] as const) {
       visible: true, engine: cover === "agent" ? "claude" : "codex",
     });
     await page.goto("/");
-    await expect(page.locator(".btw-panel")).toBeVisible();
+    await expect(page.locator(".btw-panel:visible")).toBeVisible();
     const closeCover = await coverBtwPanel(page, relay, cover);
     relay.emit({ type: "user_msg", sid: "btw-layout-child", seq: 1,
       msg_id: "hidden-work", prompt: "后台侧聊任务" });
@@ -7366,7 +7798,7 @@ for (const cover of ["agent", "diff"] as const) {
     await expect(badge).toHaveCount(1);
     await page.getByRole("button", { name: "继续查看", exact: true }).click();
     await closeCover.click();
-    await expect(page.locator(".btw-panel")).toBeVisible();
+    await expect(page.locator(".btw-panel:visible")).toBeVisible();
     await expect(badge).toHaveCount(0);
 
     // Conversely, finishing in the actually visible side chat is already seen.
@@ -7392,10 +7824,10 @@ for (const parentState of ["running", "interrupting"] as const) {
     if (!mobile) await page.setViewportSize({ width: 1568, height: 881 });
     const relay = await mockRightPanelRelay(page, { visible: true });
     await page.goto("/");
-    await expect(page.locator(".btw-panel")).toBeVisible();
+    await expect(page.locator(".btw-panel:visible")).toBeVisible();
     relay.emit({ type: "state", sid: "layout-parent", state: parentState });
     await page.getByRole("button", { name: "收起侧边对话", exact: true }).click();
-    await expect(page.locator(".btw-panel")).toHaveCount(0);
+    await expect(page.locator(".btw-panel:visible")).toHaveCount(0);
     const parent = page.locator(".scard").filter({ hasText: "Layout parent" });
     await expect(parent).toBeAttached();
     if (!await page.locator(".sessions.show").count()) await page.keyboard.press("Control+b");
@@ -7431,7 +7863,7 @@ for (const parentState of ["running", "interrupting"] as const) {
 
     if (mobile) await page.keyboard.press("Control+b");
     await page.keyboard.press("Control+Shift+k");
-    await expect(page.locator(".btw-panel")).toBeVisible();
+    await expect(page.locator(".btw-panel:visible")).toBeVisible();
     await expect(badge).toHaveCount(0);
     await expect(parent.locator(`.pill.${parentState}`)).toHaveCount(1);
     expect(relay.commands.some((command) =>
@@ -7444,7 +7876,7 @@ test("right panel visibility acknowledges only the selected side chat", async ({
   await page.setViewportSize({ width: 1568, height: 881 });
   const relay = await mockRightPanelRelay(page, { visible: true });
   await page.goto("/");
-  await expect(page.locator(".btw-panel")).toBeVisible();
+  await expect(page.locator(".btw-panel:visible")).toBeVisible();
   relay.emit({ type: "btw_sync", generation: "layout-generation", revision: 2,
     sessions: [
       { btw_sid: "btw-layout-child", parent_sid: "layout-parent",
@@ -7452,7 +7884,7 @@ test("right panel visibility acknowledges only the selected side chat", async ({
       { btw_sid: "btw-other-child", parent_sid: "layout-parent",
         engine: "codex", created_at: 2, state: "running" },
     ] });
-  await expect(page.locator(".btw-chat-tab")).toHaveCount(2);
+  await expect(page.locator(".btw-panel:visible .btw-chat-tab")).toHaveCount(2);
   relay.emit({ type: "user_msg", sid: "btw-other-child", seq: 1,
     msg_id: "other-work", prompt: "另一个侧聊任务" });
   relay.emit({ type: "turn_end", sid: "btw-other-child", seq: 2,
@@ -12350,6 +12782,60 @@ test("goal editor stays inside the tablet visual viewport above the keyboard", a
   )).toBeLessThan(2);
 });
 
+test("chat keyboard opening keeps the shell offset independent of document scroll", async ({ page }, info) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/tests/history-browser.html?mobile-scroll=1&quota-composer=1");
+  const shell = page.locator(".shell");
+  const composer = page.getByTestId("quota-composer");
+  const input = composer.locator("textarea");
+  await input.fill("保留中文输入和草稿");
+  await input.focus();
+  await page.evaluate(() => {
+    Object.defineProperties(window.visualViewport!, {
+      height: { configurable: true, value: 420 },
+      offsetTop: { configurable: true, value: 24 },
+    });
+    window.visualViewport!.dispatchEvent(new Event("resize"));
+  });
+  await expect.poll(() => shell.evaluate(element => ({
+    top: getComputedStyle(element).top,
+    height: element.getBoundingClientRect().height,
+  }))).toEqual({ top: "24px", height: 420 });
+  const padding = await composer.evaluate(element => getComputedStyle(element).paddingBottom);
+
+  // Safari may pan its document repeatedly while keeping the editor visible.
+  // Feeding that pan back into shell.top moves the whole page again, so the
+  // shell must continue to use the visual viewport offset on every event.
+  await page.addStyleTag({ content: "html { overflow:auto!important; } body { min-height:1800px!important; }" });
+  for (const scrollTop of [60, 120, 240, 360]) {
+    await page.evaluate(top => {
+      window.scrollTo(0, top);
+      window.visualViewport!.dispatchEvent(new Event("scroll"));
+    }, scrollTop);
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(scrollTop);
+    await expect.poll(() => shell.evaluate(element => getComputedStyle(element).top)).toBe("24px");
+  }
+  await expect(input).toBeFocused();
+  await expect(input).toHaveValue("保留中文输入和草稿");
+
+  await input.evaluate(element => element.blur());
+  await page.evaluate(() => {
+    Object.defineProperties(window.visualViewport!, {
+      height: { configurable: true, value: 844 },
+      offsetTop: { configurable: true, value: 0 },
+    });
+    window.visualViewport!.dispatchEvent(new Event("resize"));
+  });
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+  await expect.poll(() => shell.evaluate(element => ({
+    top: element.getBoundingClientRect().top,
+    height: element.getBoundingClientRect().height,
+  }))).toEqual({ top: 0, height: 844 });
+  expect(await composer.evaluate(element => getComputedStyle(element).paddingBottom)).toBe(padding);
+  await expect(input).toHaveValue("保留中文输入和草稿");
+  await page.screenshot({ path: info.outputPath("chat-keyboard-restored.png") });
+});
+
 test("the compact Goal monitor yields while the mobile keyboard is open", async ({
   page,
 }) => {
@@ -14521,7 +15007,7 @@ test("new-chat controls pass native prompts and preserve command arguments", asy
 });
 
 test("new-chat controls keep attachments through local commands and IME confirmation", async ({ page }) => {
-  await page.goto("/tests/history-browser.html?newchat-controls=1");
+  await page.goto("/tests/history-browser.html?newchat-controls=1&newchat-commands=1");
   const input = page.locator(".newchat-input");
   await page.getByLabel("添加文件", { exact: true }).setInputFiles({
     name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("inspect these notes"),
@@ -14590,6 +15076,91 @@ test("new-chat controls omit Code-directory skills in a new Work session", async
   await expect(requests).toHaveText("1");
 });
 
+for (const width of [390, 1280]) {
+  test(`new-chat controls use the native Codex model list across all pickers at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const relay = await mockRightPanelRelay(page, { retained: false, visible: false });
+    await page.goto("/");
+    const activeModel = page.locator('.composer button[title="选择模型"]');
+    await expect(activeModel).toBeVisible();
+    await expect.poll(() => relay.commands.some(command => command.type === "get_models")).toBe(true);
+    relay.emit({ type: "model", sid: "layout-parent", seq: 1, model: "custom-current-model" });
+    await expect(activeModel).toHaveText("custom-current-model");
+    await activeModel.click();
+    const picker = page.getByRole("dialog", { name: "选择模型", exact: true });
+    await expect(picker).toContainText("暂未读取到模型列表");
+    await expect(picker).not.toContainText("GPT-5.6");
+    let requests = relay.commands.filter(command => command.type === "get_models").length;
+    await picker.getByRole("button", { name: "重新读取模型列表" }).click();
+    await expect.poll(() => relay.commands.filter(command => command.type === "get_models").length).toBeGreaterThan(requests);
+    const nativeModels = [
+      { id: "gpt-future", display_name: "Native future", description: "Newest server description",
+        efforts: ["adaptive", "low"], default_effort: "adaptive",
+        effort_descriptions: { adaptive: "Native adaptive reasoning", low: "Native future low" } },
+      { id: "gpt-5.6-sol", display_name: "Native Sol", description: "Updated server description",
+        efforts: ["low"], default_effort: "low",
+        effort_descriptions: { low: "Native Sol low reasoning" } },
+    ];
+    relay.emit({ type: "models", engine: "codex", sid: "layout-parent", models: nativeModels });
+    await expect(picker.locator(".cmd-nm")).toHaveText(["Native future", "Native Sol"]);
+    await expect(picker.locator(".cmd-ds")).toHaveText(["Newest server description", "Updated server description"]);
+    await expect(picker.locator(".cmd-ic")).toHaveCount(0);
+    relay.emit({ type: "models", engine: "codex", sid: "layout-parent", models: [] });
+    await expect(picker.locator(".cmd-nm")).toHaveText(["Native future", "Native Sol"]);
+    await picker.getByRole("button", { name: "Native Sol Updated server description" }).click();
+    await expect.poll(() => relay.commands.filter(command => command.type === "set_model").at(-1)?.model).toBe("gpt-5.6-sol");
+    relay.emit({ type: "model", sid: "layout-parent", seq: 2, model: "gpt-5.6-sol" });
+    await expect(activeModel).toHaveText("Native Sol");
+    await page.locator('.composer button[title="思考强度"]').click();
+    const effortPicker = page.getByRole("dialog", { name: "选择思考强度", exact: true });
+    await expect(effortPicker.locator(".cmd-nm")).toHaveText(["low"]);
+    await expect(effortPicker.locator(".cmd-ds")).toHaveText(["Native Sol low reasoning"]);
+    await effortPicker.getByRole("button", { name: "low Native Sol low reasoning" }).click();
+    await expect.poll(() => relay.commands.filter(command => command.type === "set_effort").at(-1)?.effort).toBe("low");
+    relay.emit({ type: "effort", sid: "layout-parent", seq: 3, effort: "low" });
+
+    const showSidebar = page.getByLabel("显示会话侧栏", { exact: true });
+    if (await showSidebar.isVisible()) await showSidebar.click();
+    await page.getByRole("button", { name: "新会话", exact: true }).click();
+    await page.getByTitle("选择模型", { exact: true }).click();
+    relay.emit({ type: "models", engine: "codex", models: nativeModels });
+    await expect(picker.locator(".cmd-nm")).toHaveText(["本机默认", "Native future", "Native Sol"]);
+    await expect(picker.locator(".cmd-ic")).toHaveCount(0);
+    await picker.getByRole("button", { name: "Native future Newest server description" }).click();
+    await page.getByTitle("选择思考强度", { exact: true }).click();
+    await expect(effortPicker.locator(".cmd-nm")).toHaveText(["默认", "adaptive", "low"]);
+    await expect(effortPicker.locator(".cmd-ds").nth(1)).toHaveText("Native adaptive reasoning");
+    await effortPicker.getByRole("button", { name: "adaptive Native adaptive reasoning" }).click();
+    await page.locator(".newchat-input").fill("hello");
+    await page.getByRole("button", { name: "开始", exact: true }).click();
+    await expect.poll(() => relay.commands.filter(command => command.type === "new_session").at(-1)?.model).toBe("gpt-future");
+    await expect.poll(() => relay.commands.filter(command => command.type === "new_session").at(-1)?.effort).toBe("adaptive");
+  });
+
+  test(`new-chat controls retry an unavailable native Codex catalog at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const relay = await mockRightPanelRelay(page, { retained: false, visible: false });
+    await page.goto("/");
+    await expect.poll(() => relay.commands.some(command => command.type === "get_models")).toBe(true);
+    const showSidebar = page.getByLabel("显示会话侧栏", { exact: true });
+    if (await showSidebar.isVisible()) await showSidebar.click();
+    await page.getByRole("button", { name: "新会话", exact: true }).click();
+    await page.getByTitle("选择模型", { exact: true }).click();
+    const picker = page.getByRole("dialog", { name: "选择模型", exact: true });
+    await expect(picker).toContainText("暂未读取到模型列表，可使用本机默认配置");
+    await expect(picker).not.toContainText("GPT-");
+    const requests = relay.commands.filter(command => command.type === "get_models").length;
+    await picker.getByRole("button", { name: "重新读取模型列表" }).click();
+    await expect.poll(() => relay.commands.filter(command => command.type === "get_models").length).toBeGreaterThan(requests);
+    relay.emit({ type: "models", engine: "codex", models: [{
+      id: "native-model", display_name: "Recovered model", description: "From app-server", efforts: [],
+    }] });
+    await expect(picker.locator(".cmd-nm")).toHaveText(["本机默认", "Recovered model"]);
+    await expect(picker).not.toContainText("暂未读取到模型列表");
+    await expect(picker.getByRole("button", { name: "重新读取模型列表" })).toHaveCount(0);
+  });
+}
+
 for (const engine of ["claude", "codex"] as const) {
   test(`new-chat controls preserve raw ${engine} model IDs through catalog refresh and creation`, async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
@@ -14645,7 +15216,7 @@ for (const engine of ["claude", "codex"] as const) {
     relay.emit({ type: "models", engine, cwd: request.cwd as string | undefined,
       models: [{ id: model, display_name: "Discovered model", description: "", efforts: ["low", "high"] }] });
     await expect(efforts.locator(".sheet-scroll .cmd-nm")).toHaveText(["默认", "low", "high"]);
-    await efforts.getByRole("button", { name: /^high / }).click();
+    await efforts.getByRole("button", { name: /^high(?: |$)/ }).click();
     await expect(efforts).not.toBeVisible();
     await expect(effortButton).toHaveText("high");
     // A catalog refresh must not silently clear a supported explicit choice.
@@ -16225,7 +16796,7 @@ test("right panel layout session Artifacts list and preview stay separate and re
   expect(scan.scan_history).toBe(true);
   relay.emit({ type: "session_artifacts", sid: "layout-parent", request_id: String(scan.request_id),
     entries, next_before: 1, has_more: false, history_more: true });
-  const panel = page.locator(".session-artifacts-panel");
+  const panel = page.locator(".session-artifacts-panel:visible");
   await expect(panel.locator(".session-artifact-row")).toHaveCount(3);
   await expect(panel.locator(".artifact-panel")).toHaveCount(0);
   await expect(panel.locator(".session-artifacts-date")).toHaveText(["今天", "昨天"]);
@@ -16315,7 +16886,7 @@ test("right panel layout Artifacts thumbnails load visible rows without replacin
       path: entries.find(e => e.id === request.artifact_id)!.path, format: "image", media_type: "image/webp",
       ...(error ? { error: "unavailable" } : { data: ARTIFACT_THUMBNAIL }), size: 740, writable: false });
   };
-  const panel = page.locator(".session-artifacts-panel");
+  const panel = page.locator(".session-artifacts-panel:visible");
   // Even an otherwise matching request ID cannot accept a foreign session's bytes.
   respond(thumbs()[0], false, "layout-other");
   await expect(panel.locator("img")).toHaveCount(0);
@@ -16382,7 +16953,7 @@ test("right panel layout Artifacts retries the failed history page and retains t
   await expect.poll(() => requests().length).toBe(2);
   relay.emit({ type: "session_artifacts", sid: "layout-parent", request_id: String(requests()[1].request_id),
     entries: [], has_more: false, history_more: false, error: "历史暂时不可用" });
-  const panel = page.locator(".session-artifacts-panel");
+  const panel = page.locator(".session-artifacts-panel:visible");
   await panel.getByRole("button", { name: "重试", exact: true }).click();
   await expect.poll(() => requests().length).toBe(3);
   expect(requests()[2].scan_history).toBe(true);
@@ -16431,7 +17002,7 @@ for (const settlement of ["success", "error", "timeout"] as const) {
     respond(0, [entry("head", 100)], 40);
     await expect.poll(() => requests().length).toBe(2);
     respond(1, [], 40);
-    const panel = page.locator(".session-artifacts-panel");
+    const panel = page.locator(".session-artifacts-panel:visible");
     await panel.getByRole("button", { name: "查看更早的文件", exact: true }).click();
     await expect.poll(() => requests().length).toBe(3);
     respond(2, [entry("older", 50)], 20);
@@ -16441,7 +17012,7 @@ for (const settlement of ["success", "error", "timeout"] as const) {
     // Multiple live revisions must coalesce, leaving the page request intact.
     for (const state of ["running", "idle"] as const) {
       relay.emit({ type: "state", sid: "layout-parent", state });
-      await expect(page.getByText(state, { exact: true }).first()).toBeVisible();
+      await expect(page.getByRole("status", { name: state === "running" ? "会话状态：运行" : "会话状态：空闲" })).toBeVisible();
     }
     expect(requests()).toHaveLength(4);
     if (settlement === "timeout") await page.clock.fastForward(30_001);
@@ -16491,7 +17062,7 @@ test("right panel layout Artifacts retries expired thumbnails and ignores their 
       path: entries.find(e => e.id === request.artifact_id)!.path,
       format: "image", media_type: "image/webp", data: ARTIFACT_THUMBNAIL, size: 740, writable: false });
   };
-  const panel = page.locator(".session-artifacts-panel");
+  const panel = page.locator(".session-artifacts-panel:visible");
   respond(0);
   respond(1);
   await expect(panel.locator(".session-artifact-icon img")).toHaveCount(0);
@@ -16984,8 +17555,10 @@ test(`Claude model fallback ${choice} uses the native pending dialog on desktop 
       turn_id: "original-turn", original_prompt: "分析这个仓库，并保留原模型重试" },
   };
   relay.emit(ask);
-  const dialog = page.getByRole("dialog", { name: "是否允许模型回退？" });
+  const dialog = page.getByRole("dialog", { name: "是否切换到备用模型？" });
   await expect(dialog).toBeVisible();
+  await expect(dialog.locator(".question-dialog-title")).toHaveText("Claude 想确认一下");
+  await expect(dialog.locator(".fallback-identity, .fallback-session")).toHaveCount(0);
   await expect(page.locator(".hstat")).toHaveText("待确认");
   await expect(dialog.getByText("Opus 5.6", { exact: true })).toBeVisible();
   await expect(dialog.getByText("Opus 5.5", { exact: true })).toBeVisible();
@@ -16999,18 +17572,34 @@ test(`Claude model fallback ${choice} uses the native pending dialog on desktop 
   await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
   await page.screenshot({ path: testInfo.outputPath("model-fallback-dark.png") });
   await automatic.check();
-  await dialog.getByRole("button", { name: "收起回退确认", exact: true }).click();
+  await dialog.getByRole("button", { name: "收起问题", exact: true }).click();
   await expect(dialog).toBeHidden();
-  const resume = page.getByRole("button", { name: /等待确认模型切换.*处理/ });
+  const resume = page.getByRole("button", { name: /等待确认模型切换.*继续回答/ });
   await expect(resume).toBeVisible();
   await page.setViewportSize({ width: 320, height: 740 });
   expect((await resume.boundingBox())!.height).toBeLessThanOrEqual(48);
   expect(await resume.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
-  await page.setViewportSize(viewport);
   expect(relay.commands.filter(command => command.type === "answer_question")).toHaveLength(0);
   await page.screenshot({ path: testInfo.outputPath("model-fallback-collapsed.png") });
   await resume.click();
   await expect(automatic).toBeChecked();
+  const actionBounds = await dialog.locator(".fallback-actions button").evaluateAll(buttons => buttons.map(button => {
+    const rect = button.getBoundingClientRect();
+    return { top: rect.top, height: rect.height, fits: button.scrollWidth <= button.clientWidth };
+  }));
+  expect(actionBounds).toHaveLength(3);
+  for (const bounds of actionBounds) {
+    expect(Math.abs(bounds.top - actionBounds[0].top)).toBeLessThan(1);
+    expect(bounds.height).toBeGreaterThanOrEqual(44);
+    expect(bounds.fits).toBe(true);
+  }
+  await page.screenshot({ path: testInfo.outputPath("model-fallback-narrow.png") });
+  await page.setViewportSize({ width: 320, height: 400 });
+  await expect(dialog.locator(".fallback-actions")).toBeInViewport();
+  await expect(dialog.getByRole("button", { name: "同意回退", exact: true })).toBeInViewport();
+  expect(await dialog.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+  expect(await dialog.locator(".fallback-body").evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
+  await page.setViewportSize(viewport);
   if (choice !== "同意回退") await automatic.uncheck();
   await dialog.getByRole("button", { name: choice, exact: true }).click();
   await expect.poll(() => relay.commands.filter(command => command.type === "answer_question").length).toBe(1);
@@ -17030,7 +17619,12 @@ test(`Claude model fallback ${choice} uses the native pending dialog on desktop 
       severity: "warning", category: "runtime", title: "模型已回退",
       message: "claude-opus-5-6 → claude-opus-5-5。原模型拒绝响应，已切换备用模型。",
       detail: "切换时间 2026-11-14T01:00:00Z" });
+    relay.emit({ type: "process", sid: "layout-parent", seq: 5, item_id: "native-fallback",
+      kind: "model", phase: "snapshot", status: "succeeded", tool: "model_refusal_fallback",
+      title: "模型已回退", summary: "claude-opus-5-6 → claude-opus-5-5。原模型拒绝响应，已切换备用模型。" });
     await expect(page.getByTitle("选择模型", { exact: true })).toContainText("claude-opus-5-5");
+    await expect(page.getByRole("region", { name: "对话记录", exact: true }).getByText(/原模型拒绝响应/)).toHaveCount(0);
+    await expect(page.locator(".turn-model-notice")).toHaveCount(0);
     await expect(page.locator(".header-feedback")).toHaveText("模型已回退");
     await page.locator(".header-feedback").click();
     const details = page.getByRole("dialog", { name: "状态详情" });
@@ -17041,6 +17635,28 @@ test(`Claude model fallback ${choice} uses the native pending dialog on desktop 
   expect(relay.commands.some(command => ["query", "steer", "interrupt", "set_model"].includes(String(command.type)))).toBe(false);
 });
 }
+
+test("Claude model fallback history keeps switch metadata out of the transcript", async ({ page }) => {
+  const relay = await mockRightPanelRelay(page, {
+    engine: "claude", seedTurns: [{ id: "historical-fallback", prompt: "继续分析", done: true,
+      blocks: [
+        { kind: "process", item_id: "historical-switch", processKind: "model",
+          tool: "model_refusal_fallback", phase: "snapshot", status: "succeeded", done: true,
+          title: "模型已回退", summary: "claude-opus-5-6 → claude-opus-5-5。原模型拒绝响应，已切换备用模型。" },
+        { kind: "text", message_id: "historical-answer", channel: "final", text: "已继续完成分析。", done: true },
+      ],
+    }],
+  });
+  await page.goto("/");
+  await expect(page.getByText("已继续完成分析。", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "对话记录", exact: true }).getByText(/原模型拒绝响应/)).toHaveCount(0);
+  await expect(page.locator(".turn-model-notice, .process-timeline, .turn-process")).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByText("已继续完成分析。", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "对话记录", exact: true }).getByText(/原模型拒绝响应/)).toHaveCount(0);
+  await expect(page.locator(".turn-model-notice, .process-timeline, .turn-process")).toHaveCount(0);
+  expect(relay.commands.some(command => ["query", "steer", "interrupt", "set_model"].includes(String(command.type)))).toBe(false);
+});
 
 test("notification click refreshes stale device validation and keeps the current session intact", async ({ page }) => {
   const relay = await mockRightPanelRelay(page);

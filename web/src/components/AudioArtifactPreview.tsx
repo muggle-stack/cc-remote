@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
+import { PanelVisible } from "../right-panel-presentation";
 
 const AUDIO_TYPES: Record<string, string> = {
   "audio/wav": "WAV", "audio/mpeg": "MP3", "audio/mp4": "M4A",
@@ -14,9 +15,13 @@ export function AudioArtifactPreview({ data, mediaType, title, size }: {
   title: string;
   size?: number;
 }) {
+  const visible = useContext(PanelVisible);
   const audioRef = useRef<HTMLAudioElement>(null);
   const [url, setUrl] = useState<string>();
   const [error, setError] = useState<string>();
+  useEffect(() => {
+    if (!visible) audioRef.current?.pause();
+  }, [visible]);
 
   useEffect(() => {
     const audio = audioRef.current;

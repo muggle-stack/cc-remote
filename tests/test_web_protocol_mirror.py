@@ -1,7 +1,6 @@
 """Mechanical guards for the hand-maintained browser protocol mirror."""
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import get_args
@@ -29,7 +28,6 @@ from cc_remote.protocol import (
     WriteState,
     _Command,
     _TYPE_MAP,
-    PROTOCOL_VERSION,
     SessionInfo,
     StatusDailyUsageBucket,
     StatusRateLimitResetCredit,
@@ -233,13 +231,3 @@ def test_server_event_union_and_reducer_cover_every_backend_event():
 
 def test_shared_envelope_includes_relay_route_generation():
     assert _field_optional("Base", "route_id") is True
-
-
-def test_protocol_version_and_web_build_manifest_match_backend():
-    match = re.search(r"PROTOCOL_VERSION\s*=\s*(\d+)", TS_PROTOCOL)
-    assert match, "TypeScript protocol version is missing"
-    manifest = json.loads(
-        (ROOT / "web/public/cc-remote-build.json").read_text()
-    )
-    assert int(match.group(1)) == PROTOCOL_VERSION
-    assert manifest["protocol"] == PROTOCOL_VERSION

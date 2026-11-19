@@ -1197,6 +1197,7 @@ export class RelayWs {
     cwd?: string | null,
     codexProfileId?: string | null,
     claudeProfileId?: string | null,
+    sessionId?: string | null,
   ): void {
     const frame: Record<string, unknown> = {
       v: PROTOCOL_VERSION, type: "get_models", engine,
@@ -1206,6 +1207,7 @@ export class RelayWs {
     if (engine === "codex" && codexProfileId) {
       frame.codex_profile_id = codexProfileId;
     }
+    if (engine === "codex" && sessionId) frame.sid = sessionId;
     if (engine === "claude" && claudeProfileId) {
       frame.claude_profile_id = claudeProfileId;
     }
@@ -1651,11 +1653,11 @@ export class RelayWs {
   }
 
   sendDeleteSession(sessionId: string, engine: "claude" | "codex" | "dsh",
-                    space: Space = "code"): boolean {
+                    space: Space = "code"): string | null {
     return this.sendListRefreshingCommand({
       v: PROTOCOL_VERSION, type: "delete_session", session_id: sessionId,
       engine, space, ts: nowTs(),
-    }, engine, space) !== null;
+    }, engine, space);
   }
 
   sendPrepareDirectoryAction(scope: import("./protocol").DirectoryActionScope): string | null {

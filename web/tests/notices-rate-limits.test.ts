@@ -417,6 +417,14 @@ try {
   assert.doesNotMatch(safeStatusNotices.map((notice: Notice) =>
     [notice.title, notice.message, notice.detail ?? ""].join(" ")).join(" "),
     /crash|warning|wrapper|private|traceback|secret/i);
+  const recognizedDiagnostic = {
+    ...officialDiagnostic, notice_id: "codex-notice-diagnostic-notify",
+    category: "config" as const, title: "项目通知配置被忽略",
+    message: "notify 需要配置在当前账号的用户级 config.toml。",
+  };
+  assert.deepEqual(statusNotices([recognizedDiagnostic]), [
+    { ...recognizedDiagnostic, detail: null },
+  ]);
 
   const hiddenDiagnostic = "provider crash at /private/token; see wrapper logs";
   const stopTimeoutMessage = "停止确认超时，本轮未确认完成。";
@@ -811,7 +819,7 @@ try {
   const freeQuotaReport = {
     ...quotaReport,
     account: {
-      auth_type: "chatgpt", plan_type: "free", requires_openai_auth: true,
+      auth_type: "chatgpt", plan_type: "pro", requires_openai_auth: true,
     },
     rate_limits: [{
       limit_id: "codex", limit_name: "codex", plan_type: "free",
@@ -828,6 +836,10 @@ try {
   assert.equal(remainingPercent(freeQuota.overall), 89);
   assert.equal(freeQuota.fiveHour, null);
   assert.equal(freeQuota.weekly, null);
+  const freeStatusMarkup = renderToStaticMarkup(createElement(StatusSheet, {
+    open: true, report: freeQuotaReport, onClose: () => {}, onRefresh: () => {},
+  }));
+  assert.match(freeStatusMarkup, /订阅计划<\/span><b class="">Free<\/b>/);
   const unknownWindows = accountQuotaWindows({
     ...quotaReport,
     rate_limits: [{
@@ -937,6 +949,21 @@ try {
   }));
   assert.match(claudeUsageMarkup, /5 小时额度/);
   assert.match(claudeUsageMarkup, /每周额度/);
+  const claudeFableMarkup = renderToStaticMarkup(createElement(UsageMeter, {
+    engine: "claude",
+    open: true,
+    report: null,
+    rateLimits: [
+      { limit_id: "claude", plan_type: "Ultra" },
+      { limit_id: "claude-seven-day-fable", limit_name: "Fable", primary: {
+        used_percent: 15, resets_at: 1_900_000_000, window_duration_mins: 10_080,
+      } },
+    ],
+    onToggle: () => {},
+  }));
+  assert.match(claudeFableMarkup, /<em>Ultra<\/em>/);
+  assert.match(claudeFableMarkup, /Fable 专项周额度/);
+  assert.match(claudeFableMarkup, /剩余 85%/);
   assert.match(claudeUsageMarkup, /Opus 专项周额度/);
   assert.match(claudeUsageMarkup, /剩余 65%/);
   assert.match(claudeUsageMarkup, /剩余 30%/);
@@ -1021,6 +1048,7 @@ try {
     onOpenStatus: () => {},
   }));
   assert.match(freeUsageMarkup, /Codex 总额度/);
+  assert.match(freeUsageMarkup, /<em>Free<\/em>/);
   assert.match(freeUsageMarkup, /剩余 89%/);
   assert.match(freeUsageMarkup, /43200 分钟窗口/);
   assert.doesNotMatch(

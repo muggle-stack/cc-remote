@@ -4,7 +4,7 @@
 
 自托管 · 多会话 · 多设备 · 实时工具过程 · Code / Work / 协作 · Web / PWA / TUI
 
-**产品版本：v5.3.33** · Wire protocol v95
+**产品版本：v5.3.52** · Wire protocol v98
 
 [English](README_en.md) · [协作聊天室](#collaboration) · [Release 安装（推荐）](#安装与升级) · [功能对照](#引擎与功能) · [源码体验](#快速开始) ·
 [界面导览](#界面导览) · [终端工作台](#terminal-workspace) · [文档](#文档) · [更新记录](CHANGELOG_zh.md)
@@ -109,7 +109,7 @@ cc-remote 把本机 agent 的会话、工具过程、文件和运行控制带到
 运行配置可在对应原生会话中继续调整。
 
 体验此分支时，在[源码安装步骤](#快速开始)中切换到 `feat/multi-agent-collaboration`。
-此源码使用 **wire protocol v95**，Relay、Web 和所有连接的 Wrapper 需要来自同一源码
+此源码使用 **wire protocol v98**，Relay、Web 和所有连接的 Wrapper 需要来自同一源码
 快照。已有部署请按仓库部署流程同步升级各层，私有状态通过部署快照保留。
 使用稳定 Release 的安装与更新方式时，功能范围以所安装 tag 为准。
 [部署流程](deploy/README.md)
@@ -282,6 +282,14 @@ Wrapper 主动出站连接 Relay，设备不需要开放公网入站端口。Rel
 - **DSH（可选）**：Node 24 与 `@deepseek-ai/dsh@0.2.2-rc.1`。先按 [DSH 接入说明](docs/dsh-integration.md)
   启动本地 API、加载元数据插件并完成配对；普通 Wrapper 安装不会自动安装或升级 DSH。
 
+Codex 和 Claude 的 Code 会话可以用 `inspect_file` 在后台查看当前工作目录中的文件。
+
+- **图片**：PNG、JPEG、WebP、GIF、AVIF、HEIC/HEIF、TIFF、BMP、SVG。动图或多帧图片可以用 `frame` 选择帧。
+- **文档和网页**：PPTX、PDF、DOCX、静态 HTML、Markdown 和 Mermaid。用 `page` 选择幻灯片、文档页或网页视口。HTML 和 Markdown 可以加载工作目录内的相对资源，HTML 预览禁用页面脚本。DOCX 的分页和版式以浏览器渲染为准。
+- **表格**：XLSX、UTF-8 CSV、TSV。用 `sheet` 选择 XLSX 工作表，用 `range` 选择区域，例如 `B2:H15`。默认返回选区截图，`view: "data"` 返回保存的单元格值和公式文本。
+
+图片解码和表格数据读取在本机完成。截图渲染使用 Wrapper 机器上的沙箱无头 Chrome 或 Chromium，也支持为 Wrapper 用户安装的 Playwright Chromium。
+
 ### 1. 安装依赖并构建
 
 ```bash
@@ -389,7 +397,7 @@ Codex 需核对每个账号的 CLI 与 Wrapper 共用官方 daemon；已安装�
 ### Web、PWA 与 Desktop
 
 Web / PWA 是正式发布的图形客户端，三种引擎共用同一套页面。既有的 macOS Desktop
-是实验性 Electron 壳，v5.3.33 Release 不包含新的 Desktop 安装包。修复后的旧壳从配置的
+是实验性 Electron 壳，v5.3.52 Release 不包含新的 Desktop 安装包。修复后的旧壳从配置的
 Relay 加载页面，避免内置旧页面导致“等待服务端完成部署”的循环；登录和原生集成保留。
 `cc-remote update` 更新 Relay、Web 和 Wrapper，不替换 Electron 本体。
 

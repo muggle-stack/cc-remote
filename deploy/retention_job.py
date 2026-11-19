@@ -36,10 +36,15 @@ def service_files(root: Path, home: Path, system: str) -> dict[Path, bytes]:
             'StandardOutPath': '/dev/null', 'StandardErrorPath': '/dev/null',
         })}
     from deploy.ui_update_broker import unit_argument
+    if not home.is_absolute() or any(ord(char) < 32 for char in str(home)):
+        raise ValueError('invalid retention working directory')
+    # WorkingDirectory is a scalar path. systemd keeps surrounding quotes here,
+    # unlike the argument list in ExecStart.
+    working_directory = str(home).replace('\\', '\\\\').replace('%', '%%')
     return {
         SYSTEM_UNITS / (name + '.service'): (MARKER + '[Unit]\nDescription=cc-remote release cleanup\n'
             '[Service]\nType=oneshot\nUMask=0077\nNoNewPrivileges=yes\nTimeoutStartSec=infinity\n'
-            'WorkingDirectory=' + unit_argument(str(home), expand_environment=False) + '\n'
+            'WorkingDirectory=' + working_directory + '\n'
             'ExecStart=' + ' '.join(unit_argument(p) for p in runner) + '\n').encode(),
         SYSTEM_UNITS / (name + '.timer'): (MARKER + '[Unit]\nDescription=cc-remote deferred cleanup\n'
             '[Timer]\nOnBootSec=2min\nOnUnitInactiveSec=5min\n'
@@ -94,8 +99,10 @@ def install(root: Path) -> None:
             return  # Its stable runner resolves the active release on each tick.
         commands = [['/bin/launchctl', 'bootstrap', f'gui/{account.pw_uid}', str(next(iter(files)))]]
     else:
-        commands = [['/usr/bin/systemctl', 'daemon-reload'],
-                    ['/usr/bin/systemctl', 'enable', '--now', label(root) + '.timer']]
+        commands = [['/usr/bin/systemd-analyze', 'verify', *map(str, files)],
+                    ['/usr/bin/systemctl', 'daemon-reload'],
+                    ['/usr/bin/systemctl', 'enable', '--now', label(root) + '.timer'],
+                    ['/usr/bin/systemctl', 'is-active', '--quiet', label(root) + '.timer']]
     for command in commands:
         subprocess.run(command, capture_output=True, timeout=30, check=True)
 

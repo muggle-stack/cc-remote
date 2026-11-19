@@ -342,3 +342,326 @@ def test_authenticated_offline_update_is_delivered_over_the_independent_socket(t
                 }})
                 result = status.result(timeout=3)
                 assert result.status_code == 200 and result.json()['job']['phase'] == 'waiting_network'
+
+
+class ManagedServer:
+    def __init__(self):
+        self.current = '5.3.26'
+        self.job = None
+        self.starts = []
+
+    async def status(self, **_kwargs):
+        return {'enabled': True, 'current': self.current, 'job': self.job,
+                'latest': STATUS['latest']}
+
+    async def handle(self, command):
+        if command['op'] == 'lookup':
+            job = self.job if self.job and self.job['id'] == command['job_id'] else None
+            return {'ok': True, 'job': job, 'receipt': 'found' if job else 'missing'}
+        self.starts.append(command)
+        self.job = {'id': command['job_id'], 'version': command['version'],
+                    'previous': self.current, 'phase': 'installing'}
+        return {'ok': True, 'job': self.job}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('catalog', [
+    {'managed': False, 'enabled': False, 'latest': None, 'reason': 'unsupported'},
+    {'managed': True, 'enabled': True, 'latest': None, 'catalog_error': 'network'},
+])
+async def test_device_checks_its_catalog_when_relay_has_none(hub, catalog):
+    hub.server_updates = SimpleNamespace(status=AsyncMock(return_value=catalog))
+    hub.peers['device-a'] = Peer(SimpleNamespace(), AsyncMock(return_value=True))
+    hub._request = AsyncMock(return_value={**STATUS})
+    result = await hub.request('device-a', {'op': 'check'})
+    hub._request.assert_awaited_once_with('device-a', {'op': 'check'})
+    assert result['latest'] == STATUS['latest']
+    assert result['reason'] is None
+
+
+@pytest.mark.asyncio
+async def test_shared_catalog_keeps_device_checks_local_to_relay(hub):
+    catalog = {**STATUS['latest'], 'version': '5.3.29'}
+    hub.server_updates = SimpleNamespace(status=AsyncMock(return_value={'latest': catalog}))
+    hub.peers['device-a'] = Peer(SimpleNamespace(), AsyncMock(return_value=True))
+    hub._request = AsyncMock(return_value={**STATUS, 'latest': None})
+    result = await hub.request('device-a', {'op': 'check'})
+    hub._request.assert_awaited_once_with('device-a', {'op': 'status'})
+    assert result['latest'] == catalog
+
+
+@pytest.mark.asyncio
+async def test_coordinated_update_survives_restart_then_delivers_device_once(hub):
+    native = ManagedServer()
+    hub.server_updates = native
+    hub.wake_coordinator = lambda: None
+    result = await hub.request('device-a', {**START, 'op': 'upgrade'})
+    assert result['job']['coordinated']
+    await hub._advance_upgrade('device-a', ID)
+    assert hub.queue.job('device-a', ID)['phase'] == 'updating_relay'
+    assert len(native.starts) == 1
+    restored = UpdateRelay(hub.queue.devices, native)
+    await restored._advance_upgrade('device-a', ID)
+    assert len(native.starts) == 1
+    native.current = START['version']
+    native.job['phase'] = 'succeeded'
+    await restored._advance_upgrade('device-a', ID)
+    assert restored.queue.job('device-a', ID)['phase'] == 'waiting_device'
+    restored.peers['device-a'] = Peer(SimpleNamespace(), AsyncMock(return_value=True))
+    commands = []
+    job = None
+
+    async def respond(machine, command):
+        nonlocal job
+        commands.append((machine, command))
+        if command['op'] == 'status':
+            return {**STATUS, 'job': job}
+        job = {**result['job'], 'phase': 'downloading'}
+        return {'ok': True, 'job': job}
+
+    restored._request = respond
+    await restored._advance_upgrade('device-a', ID)
+    await restored._advance_upgrade('device-a', ID)
+    assert [command for _, command in commands if command['op'] == 'start'] == [START]
+    assert restored.queue.job('device-a', ID)['server_phase'] == 'succeeded'
+    assert restored.queue.job('device-a', ID)['phase'] == 'downloading'
+
+
+@pytest.mark.asyncio
+async def test_two_devices_share_one_server_update_and_cancel_stops_device_delivery(hub):
+    native = ManagedServer()
+    hub.server_updates = native
+    hub.wake_coordinator = lambda: None
+    hub.queue.remember('device-b', STATUS)
+    for machine in ('device-a', 'device-b'):
+        await hub.request(machine, {**START, 'op': 'upgrade'})
+        await hub._advance_upgrade(machine, ID)
+    assert len(native.starts) == 1
+    cancelled = await hub.request('device-a', {'op': 'cancel', 'job_id': ID})
+    assert cancelled['job']['phase'] == 'cancelled'
+    native.current = START['version']
+    native.job['phase'] = 'succeeded'
+    await hub._advance_upgrade('device-a', ID)
+    await hub._advance_upgrade('device-b', ID)
+    assert hub.queue.job('device-a', ID)['phase'] == 'cancelled'
+    assert hub.queue.job('device-b', ID)['phase'] == 'waiting_device'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('device_version', [START['version'], '5.3.99'])
+async def test_coordinated_update_can_finish_when_device_is_already_current(hub, device_version):
+    native = ManagedServer()
+    native.current = START['version']
+    hub.server_updates = native
+    hub.wake_coordinator = lambda: None
+    hub.queue.remember('device-a', {**STATUS, 'current': device_version})
+    await hub.request('device-a', {**START, 'op': 'upgrade'})
+    hub.peers['device-a'] = Peer(SimpleNamespace(), AsyncMock(return_value=True))
+    hub._request = AsyncMock(return_value={**STATUS, 'current': device_version})
+    await hub._advance_upgrade('device-a', ID)
+    assert hub.queue.job('device-a', ID)['phase'] == 'succeeded'
+    assert not native.starts
+
+
+@pytest.mark.asyncio
+async def test_connected_device_reports_queued_server_work_over_its_old_receipt(hub):
+    native = ManagedServer()
+    hub.server_updates = native
+    hub.wake_coordinator = lambda: None
+    await hub.request('device-a', {**START, 'op': 'upgrade'})
+    hub.peers['device-a'] = Peer(SimpleNamespace(), AsyncMock(return_value=True))
+    hub._request = AsyncMock(return_value={**STATUS, 'job': {
+        'id': 'b' * 32, 'version': STATUS['current'], 'previous': '5.3.25', 'phase': 'succeeded',
+    }})
+    status = await hub.request('device-a', {'op': 'status'})
+    assert status['job']['id'] == ID and status['job']['phase'] == 'updating_relay'
+    lookup = await hub.request('device-a', {'op': 'lookup', 'job_id': ID})
+    assert lookup['receipt'] == 'found' and lookup['job']['id'] == ID
+    assert hub._request.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_lost_server_start_reply_reuses_the_original_identity(hub):
+    native = ManagedServer()
+    hub.server_updates = native
+    hub.wake_coordinator = lambda: None
+    await hub.request('device-a', {**START, 'op': 'upgrade'})
+    original = native.handle
+
+    async def lose_reply(command):
+        reply = await original(command)
+        if command['op'] == 'start':
+            return {'ok': False, 'reason': 'outcome_pending'}
+        return reply
+
+    native.handle = lose_reply
+    await hub._advance_upgrade('device-a', ID)
+    await hub._advance_upgrade('device-a', ID)
+    assert len(native.starts) == 1
+    assert hub.queue.job('device-a', ID)['phase'] == 'updating_relay'
+
+
+@pytest.mark.asyncio
+async def test_shared_server_failure_does_not_automatically_start_a_second_attempt(hub):
+    native = ManagedServer()
+    hub.server_updates = native
+    hub.wake_coordinator = lambda: None
+    hub.queue.remember('device-b', STATUS)
+    for machine in ('device-a', 'device-b'):
+        await hub.request(machine, {**START, 'op': 'upgrade'})
+        await hub._advance_upgrade(machine, ID)
+    native.job.update(phase='failed', reason='rolled_back')
+    for machine in ('device-a', 'device-b'):
+        await hub._advance_upgrade(machine, ID)
+        assert hub.queue.job(machine, ID)['phase'] == 'blocked'
+        assert hub.queue.job(machine, ID)['reason'] == 'rolled_back'
+    assert len(native.starts) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('version', ['5.3.27', START['version']])
+@pytest.mark.parametrize('legacy_record', [False, True])
+async def test_reconcile_uses_the_blocking_server_receipt_after_restart(hub, version, legacy_record):
+    native = ManagedServer()
+    native.job = {'id': 'b' * 32, 'version': version, 'phase': 'unknown', 'reason': 'job_unknown'}
+    hub.server_updates = native
+    hub.wake_coordinator = lambda: None
+    await hub.request('device-a', {**START, 'op': 'upgrade'})
+    target_id = hub.queue.job('device-a', ID)['server_job_id']
+    await hub._advance_upgrade('device-a', ID)
+    state = hub.queue.job('device-a', ID)
+    if legacy_record:
+        state.pop('blocking_server_job_id', None)
+        hub.queue.save('device-a', state)
+    else:
+        assert state['blocking_server_job_id'] == native.job['id']
+    reconciled = []
+    original = native.handle
+
+    async def recover(command):
+        if command['op'] == 'reconcile':
+            reconciled.append(command['job_id'])
+            assert command['job_id'] == 'b' * 32
+            native.job.update(phase='failed', reason='rolled_back')
+            return {'ok': True, 'job': native.job}
+        return await original(command)
+
+    native.handle = recover
+    restored = UpdateRelay(hub.queue.devices, native)
+    result = await restored.request('device-a', {'op': 'reconcile', 'job_id': ID},
+                                    authorize_server=AsyncMock(return_value=True))
+    assert result['ok'] is True
+    assert reconciled == ['b' * 32]
+    if version == START['version']:
+        assert result['job']['phase'] == 'blocked'
+        assert result['job']['reason'] == 'rolled_back'
+        assert not native.starts
+    else:
+        assert result['job']['phase'] == 'updating_relay'
+        assert native.starts == [{'op': 'start', 'job_id': target_id, 'version': START['version']}]
+        assert restored.queue.job('device-a', ID)['server_job_id'] == target_id
+        await restored._advance_upgrade('device-a', ID)
+        assert len(native.starts) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reason', ['permission_required', 'outcome_pending'])
+async def test_blocking_server_reconcile_error_is_returned_without_starting_another_job(hub, reason):
+    native = ManagedServer()
+    native.job = {'id': 'b' * 32, 'version': '5.3.27', 'phase': 'unknown', 'reason': 'job_unknown'}
+    hub.server_updates = native
+    hub.wake_coordinator = lambda: None
+    await hub.request('device-a', {**START, 'op': 'upgrade'})
+    await hub._advance_upgrade('device-a', ID)
+    native.handle = AsyncMock(return_value={'ok': False, 'reason': reason})
+    result = await hub.request('device-a', {'op': 'reconcile', 'job_id': ID},
+                               authorize_server=AsyncMock(return_value=True))
+    assert result['ok'] is False and result['reason'] == reason
+    assert result['job']['id'] == ID and result['job']['phase'] == 'unknown'
+    native.handle.assert_awaited_once_with({'op': 'reconcile', 'job_id': 'b' * 32})
+    assert not native.starts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('receipt', [None, {'id': 'c' * 32, 'phase': 'succeeded'}])
+async def test_blocking_server_reconcile_requires_the_exact_receipt(hub, receipt):
+    native = ManagedServer()
+    native.job = {'id': 'b' * 32, 'version': '5.3.27', 'phase': 'unknown', 'reason': 'job_unknown'}
+    hub.server_updates = native
+    hub.wake_coordinator = lambda: None
+    await hub.request('device-a', {**START, 'op': 'upgrade'})
+    await hub._advance_upgrade('device-a', ID)
+    native.handle = AsyncMock(return_value={'ok': True, 'job': receipt})
+    result = await hub.request('device-a', {'op': 'reconcile', 'job_id': ID},
+                               authorize_server=AsyncMock(return_value=True))
+    assert result['ok'] is False and result['reason'] == 'outcome_pending'
+    assert result['job']['phase'] == 'unknown'
+    assert not native.starts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('authorize', [None, False])
+async def test_blocking_server_recovery_denies_absent_or_revoked_authorization(hub, authorize):
+    native = ManagedServer()
+    native.job = {'id': 'b' * 32, 'version': '5.3.27', 'phase': 'unknown'}
+    hub.server_updates = native
+    hub.wake_coordinator = lambda: None
+    await hub.request('device-a', {**START, 'op': 'upgrade'})
+    await hub._advance_upgrade('device-a', ID)
+    native.handle = AsyncMock()
+    callback = None if authorize is None else AsyncMock(return_value=authorize)
+    with pytest.raises(UpdateChannelError, match='server_forbidden'):
+        await hub.request('device-a', {'op': 'reconcile', 'job_id': ID}, authorize_server=callback)
+    native.handle.assert_not_awaited()
+    assert hub.queue.job('device-a', ID)['phase'] == 'unknown'
+
+
+@pytest.mark.asyncio
+async def test_legacy_blocking_receipt_discovery_precedes_authorization_check(hub):
+    native = ManagedServer()
+    native.job = {'id': 'b' * 32, 'version': '5.3.27', 'phase': 'unknown'}
+    hub.server_updates = native
+    hub.wake_coordinator = lambda: None
+    await hub.request('device-a', {**START, 'op': 'upgrade'})
+    state = hub.queue.job('device-a', ID)
+    hub.queue.save('device-a', {**state, 'phase': 'unknown', 'server_phase': 'unknown'})
+    authorized = True
+    original_status = native.status
+
+    async def discover(**kwargs):
+        nonlocal authorized
+        authorized = False
+        return await original_status(**kwargs)
+
+    async def check_authorization():
+        return authorized
+
+    native.status = discover
+    native.handle = AsyncMock()
+    with pytest.raises(UpdateChannelError, match='server_forbidden'):
+        await hub.request('device-a', {'op': 'reconcile', 'job_id': ID},
+                          authorize_server=check_authorization)
+    native.handle.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_device_rejection_remains_visible_after_server_succeeds(hub):
+    native = ManagedServer()
+    native.current = START['version']
+    hub.server_updates = native
+    hub.wake_coordinator = lambda: None
+    await hub.request('device-a', {**START, 'op': 'upgrade'})
+    hub.peers['device-a'] = Peer(SimpleNamespace(), AsyncMock(return_value=True))
+
+    async def respond(_machine, command):
+        if command['op'] == 'start':
+            return {'ok': False, 'reason': 'permission_required'}
+        return {**STATUS, 'job': {'id': 'b' * 32, 'version': STATUS['current'],
+                                 'previous': '5.3.25', 'phase': 'succeeded'}}
+
+    hub._request = respond
+    await hub._advance_upgrade('device-a', ID)
+    state = await hub.request('device-a', {'op': 'status'})
+    assert state['job']['id'] == ID
+    assert state['job']['phase'] == 'blocked'
+    assert state['job']['reason'] == 'permission_required'

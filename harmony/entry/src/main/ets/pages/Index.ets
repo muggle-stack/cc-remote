@@ -1,4 +1,4 @@
-import { common } from '@kit.AbilityKit';
+import { abilityAccessCtrl, common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { webview } from '@kit.ArkWeb';
 import { util } from '@kit.ArkTS';
@@ -6,7 +6,7 @@ import { PushBridge } from '../model/PushBridge';
 import { ExternalBrowser } from '../model/ExternalBrowser';
 import { Downloads } from '../model/Downloads';
 import { PushTarget } from '../model/PushRoute';
-import { httpsOrigin, navigationAction, newWindowAction, sameOrigin, serverOrigin } from '../model/UrlPolicy';
+import { httpsOrigin, microphoneRequest, navigationAction, newWindowAction, sameOrigin, serverOrigin } from '../model/UrlPolicy';
 
 @Entry
 @Component
@@ -144,7 +144,7 @@ struct Index {
       }
       if (result.index === 2) this.getUIContext().getPromptAction().showDialog({
         title: 'cc-remote · 鸿蒙版',
-        message: '0.1.0-preview.6\n直接使用鸿蒙 ArkWeb。聊天与任务仍在你的设备上运行。',
+        message: '0.1.0-preview.7\n直接使用鸿蒙 ArkWeb。聊天与任务仍在你的设备上运行。',
         buttons: [{ text: '知道了', color: '#2962E8' }]
       });
     }).catch(() => {}).finally(() => { this.settingsOpen = false; });
@@ -266,6 +266,27 @@ struct Index {
     }).catch(() => {});
   }
 
+  private async requestMicrophone(request: PermissionRequest, isChat: boolean): Promise<void> {
+    if (isChat && !this.configuring && !this.browserOpen) {
+      try {
+        const server = this.server;
+        const context = this.getUIContext().getHostContext();
+        if (context && microphoneRequest(server, this.chat.getUrl(),
+          request.getOrigin(), request.getAccessibleResource())) {
+          const result = await abilityAccessCtrl.createAtManager()
+            .requestPermissionsFromUser(context, ['ohos.permission.MICROPHONE']);
+          if (result.authResults[0] === abilityAccessCtrl.GrantStatus.PERMISSION_GRANTED
+            && this.server === server && !this.configuring && !this.browserOpen
+            && sameOrigin(server, this.chat.getUrl())) {
+            request.grant([ProtectedResourceType.AUDIO_CAPTURE]);
+            return;
+          }
+        }
+      } catch (_) { /* An expired request or unavailable system prompt is denied. */ }
+    }
+    request.deny();
+  }
+
   @Builder
   private webPage(isChat: boolean) {
     Web({ src: isChat ? this.server + '/' : this.browserInitialUrl,
@@ -284,6 +305,7 @@ struct Index {
       .onControllerAttached(() => this.attached(isChat))
       .onLoadIntercept(event => event ? this.intercept(event.data, isChat) : true)
       .onOverrideUrlLoading(request => this.intercept(request, isChat))
+      .onPermissionRequest(event => this.requestMicrophone(event.request, isChat).catch(() => {}))
       .onWindowNew(event => this.newWindow(event))
       .onWindowExit(() => { if (!isChat) this.closeBrowser(); })
       .onPageBegin(event => {

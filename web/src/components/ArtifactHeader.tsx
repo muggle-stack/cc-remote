@@ -1,5 +1,6 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Icon } from "../icons";
+import { PanelVisible } from "../right-panel-presentation";
 import "./ArtifactHeader.css";
 
 /** Keep preview navigation separate from mode controls; media needs only one row. */
@@ -10,13 +11,14 @@ export function ArtifactHeader({ title, path, onBack, backLabel, onClose, onRelo
   onClose: () => void; onReload?: () => void; reloadDisabled?: boolean;
   tabs?: ReactNode; modes?: ReactNode; actions: ReactNode; convertedFrom?: string;
 }) {
+  const visible = useContext(PanelVisible);
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
   const id = useId();
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || !visible) return;
     const node = menu.current!;
     node.focus({ preventScroll: true });
     const outside = (event: PointerEvent | FocusEvent) => {
@@ -40,7 +42,8 @@ export function ArtifactHeader({ title, path, onBack, backLabel, onClose, onRelo
       document.removeEventListener("keydown", escape, true);
       window.removeEventListener("blur", blur);
     };
-  }, [open]);
+  }, [open, visible]);
+  useEffect(() => { if (!visible) setOpen(false); }, [visible]);
 
   const controls = <div className="artifact-preview-actions">{actions}</div>;
   return <header className="artifact-preview-head">

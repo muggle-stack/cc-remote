@@ -18,6 +18,26 @@ const CODEX_METADATA_PROBLEMS = new Set([
   "已读状态暂未确认，请重新打开会话确认。",
   "Codex 置顶状态暂未确认，请刷新列表查看。",
 ]);
+const DELETE_FORKS_FIRST = "请先删除此会话的派生会话，从最深层删起，再删除父会话。";
+const DELETE_DAEMON_UNAVAILABLE = "无法连接 Codex daemon，暂时无法删除会话。";
+const DELETE_OUTCOME_UNKNOWN = "删除结果尚未确认，请刷新会话列表查看。";
+const SESSION_DELETE_BUSY_PROBLEMS = new Map([
+  ["该会话仍有派生会话；请先从最深层派生会话开始删除，再删除父会话",
+    DELETE_FORKS_FIRST],
+  ["派生会话仍在运行、排队或由其他 Codex 客户端使用",
+    "派生会话仍在运行、有排队消息或正被使用，暂时无法删除父会话。"],
+  ["会话仍在运行或有排队消息，请先停止并取消排队后再删除",
+    "会话仍在运行或有排队消息，请先停止并取消排队后再删除。"],
+  ["Work 会话仍在运行或有排队消息，请先停止并取消排队后再删除",
+    "会话仍在运行或有排队消息，请先停止并取消排队后再删除。"],
+  ["会话状态已变化，请等待当前回合结束后再删除",
+    "会话状态已变化，请等待当前回合结束后再删除。"],
+]);
+const CODEX_DELETE_CONNECTION_PROBLEMS = new Set([
+  "Codex 删除通道连接失败，请稍后重试",
+  "Codex 共享删除通道不可用，请重试",
+  "Codex 共享通道重连失败，无法删除会话；请重试",
+]);
 // Exact authored causes only; never expose an arbitrary upstream diagnostic.
 const STEER_REJECTION_MESSAGES = /^(?:该会话(?:未启动，无法引导当前任务|当前为只读状态，无法从 Remote 引导)|本次引导已取消。|Claude 当前无法接收引导，本次未发送；请稍后重试或排队。|Codex (?:(?:自动压缩|Review|当前阶段)不支持引导，或任务已经切换；本次未发送。|正在核对当前回合归属，本次引导未发送；请稍后重试。|当前回合不支持引导，请等待后重试。)|消息内容为空，请输入内容或添加附件。|附件不符合要求，请调整后重试。)$/;
 const CODEX_USAGE_LIMIT_FAILURE =
@@ -128,6 +148,10 @@ export function presentCommandProblem(
   if ((error.code === "cc_crash" || error.code === "not_steerable")
       && error.message === CODEX_PROVIDER_MISMATCH) return CODEX_PROVIDER_MISMATCH;
   if (error.code === "busy" && CODEX_METADATA_PROBLEMS.has(error.message)) return error.message;
+  if (error.code === "internal"
+      && error.message === "会话删除结果暂时无法确认，请刷新后重试") {
+    return DELETE_OUTCOME_UNKNOWN;
+  }
   switch (error.code) {
     case "collaboration_answer_failed":
       return "回答未送达，请重试。";
@@ -159,11 +183,15 @@ export function presentCommandProblem(
     case "invalid_cwd":
       return "所选目录不存在或不可用，请重新选择。";
     case "busy":
-      return ownershipMessage(error.message)
+      return SESSION_DELETE_BUSY_PROBLEMS.get(error.message)
+        ?? ownershipMessage(error.message)
         ?? "当前操作暂时无法执行，请稍后重试。";
     case "not_running":
       if (error.message === INCOMPLETE_CLAUDE_SESSION) {
         return INCOMPLETE_CLAUDE_SESSION;
+      }
+      if (CODEX_DELETE_CONNECTION_PROBLEMS.has(error.message)) {
+        return DELETE_DAEMON_UNAVAILABLE;
       }
       return "当前会话暂时不可用，请重新进入后重试。";
     case "bad_prompt":
@@ -190,6 +218,13 @@ export function presentCommandProblem(
     default:
       return "操作未完成，请稍后重试。";
   }
+}
+
+export function commandProblemLabel(problem: string): string {
+  if (problem === DELETE_FORKS_FIRST) return "先删子会话";
+  if (problem === DELETE_DAEMON_UNAVAILABLE) return "服务未连接";
+  if (problem === DELETE_OUTCOME_UNKNOWN) return "删除待确认";
+  return "操作未完成";
 }
 
 export function presentHistoricalTurnProblem(message: string, continuing = false): string | null {

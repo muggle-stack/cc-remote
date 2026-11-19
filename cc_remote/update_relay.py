@@ -399,7 +399,7 @@ def installer_main(argv: list[str] | None = None) -> int:
             raise UpdateError("upstream preflight requires matching Wrapper installations")
         if args.previous_root or args.linux_service:
             from cc_remote.update import _claude_contract
-            if old["os"] != "linux" or _claude_contract(previous) != _claude_contract(args.bundle):
+            if old["os"] != "linux" or (args.previous_root and _claude_contract(previous) != _claude_contract(args.bundle)):
                 raise UpdateError("migration requires a compatible Claude SDK/service contract")
         metadata = {"schema": 1, "role": "wrapper", "user": args.user}
         if args.service_label:

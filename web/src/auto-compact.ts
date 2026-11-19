@@ -11,11 +11,11 @@ export interface AutoCompactSelection {
 
 export const AUTO_COMPACT_PRESETS = [200_000, 500_000, 1_000_000] as const;
 
-export function validAutoCompactThreshold(value: unknown): value is number {
+export function validAutoCompactThreshold(value: unknown, maximum?: number | null): value is number {
   return typeof value === "number"
     && Number.isSafeInteger(value)
     && value >= MIN_AUTO_COMPACT_TOKENS
-    && value <= MAX_AUTO_COMPACT_TOKENS;
+    && value <= Math.min(MAX_AUTO_COMPACT_TOKENS, maximum ?? MAX_AUTO_COMPACT_TOKENS);
 }
 
 export function normalizeAutoCompactSelection(
@@ -53,6 +53,7 @@ export type ParsedAutoCompactArgument =
 /** Parse the Web-owned slash syntax without forwarding it to the model. */
 export function parseAutoCompactArgument(
   argument: string,
+  maximum?: number | null,
 ): ParsedAutoCompactArgument {
   const value = argument.trim().toLowerCase();
   if (value === "inherit") {
@@ -72,10 +73,12 @@ export function parseAutoCompactArgument(
   const scale = match[2] === "m" ? 1_000_000
     : match[2] === "k" ? 1_000 : 1;
   const thresholdTokens = numeric * scale;
-  if (!validAutoCompactThreshold(thresholdTokens)) {
+  if (!validAutoCompactThreshold(thresholdTokens, maximum)) {
     return {
       ok: false,
-      error: "自动压缩阈值需为 100K–1M 的整数 token 数。",
+      error: maximum != null && thresholdTokens > maximum
+        ? `自动压缩阈值不能超过模型最大窗口 ${formatAutoCompactTokens(maximum)}。`
+        : "自动压缩阈值需为 100K–1M 的整数 token 数。",
     };
   }
   return {

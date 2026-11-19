@@ -1,14 +1,9 @@
 import type { AutoCompact, CodexContext, ContextReport } from "../protocol";
 import { workContextMetrics } from "../work-context";
 import { codexContextPresentation } from "../codex-context";
-export const CODEX_CONTEXT_USAGE_NOTE =
-  "进度按 Codex 原生上下文估算显示；后台刷新期间保留最近有效读数。";
-
-
 interface Props {
   report: ContextReport | null;
   work?: boolean;
-  onAutoCompact?: () => void;
   codexContext?: CodexContext | null;
   autoCompact?: AutoCompact | null;
   codex?: boolean;
@@ -22,6 +17,7 @@ export default function ContextPopover(p: Props) {
   const recentCodex = p.codex && p.report?.source !== "native_estimate";
   const hasCapacity = !recentCodex && (p.report?.max_tokens ?? 0) > 0;
   const codexContext = codexContextPresentation(p.codexContext, p.report);
+  const nativeCodex = p.codex && !recentCodex && hasCapacity;
   const usage = (tokens: number, percentage: number) => hasCapacity
     ? `${tokens.toLocaleString()} / ${p.report!.max_tokens.toLocaleString()} (${p.dsh && percentage > 0 && percentage < 1 ? "<1" : percentage.toFixed(0)}%)`
     : `${tokens.toLocaleString()} tokens`;
@@ -61,7 +57,7 @@ export default function ContextPopover(p: Props) {
         </>
       ) : (
         <>
-          <div className="ctx-pop-row"><span>{recentCodex ? "最近请求用量" : p.codex || (p.dsh && p.report.source === "native_estimate") ? "上下文估算" : "上下文窗口"}</span>
+          <div className="ctx-pop-row"><span>{recentCodex ? "最近请求用量" : p.dsh && p.report.source === "native_estimate" ? "上下文估算" : "上下文窗口"}</span>
             <span className="ctx-pop-nums">
               {usage(p.report.total_tokens, p.report.percentage)}
             </span>
@@ -85,6 +81,14 @@ export default function ContextPopover(p: Props) {
               ))}
             </div>
           )}
+          {nativeCodex && <div className="ctx-pop-cats">
+            <div className="ctx-pop-cat"><span className="ctx-pop-cat-name">剩余空间</span>
+              <span className="ctx-pop-cat-tok">{Math.max(0, p.report.max_tokens - p.report.total_tokens).toLocaleString()}</span></div>
+            {codexContext.threshold != null && <div className="ctx-pop-cat">
+              <span className="ctx-pop-cat-name">压缩预留</span>
+              <span className="ctx-pop-cat-tok">{Math.max(0, p.report.max_tokens - codexContext.threshold).toLocaleString()}</span>
+            </div>}
+          </div>}
           {p.report.model && <div className="ctx-pop-foot">{p.report.model}</div>}
         </>
       ) : <div className="ctx-pop-row"><span>上下文窗口</span><span className="ctx-pop-nums">—</span></div>}
@@ -111,7 +115,6 @@ export default function ContextPopover(p: Props) {
           {codexContext.status}
         </div>}
       </>}
-      {p.onAutoCompact && <button className="context-settings-link" onClick={p.onAutoCompact}>设置上下文上限</button>}
     </div>
   );
 }

@@ -10,6 +10,7 @@ import { Icon } from "../icons";
 import { CenteredSheet } from "./CenteredSheet";
 import { PanelCloseButton } from "./PanelActions";
 import { accountStatsNote } from "../status-capabilities";
+import { codexAccountPlan } from "../rate-limit-usage";
 import {
   buildUsageActivityCalendar,
   compactTokenCount,
@@ -76,6 +77,7 @@ export function UsageActivitySheet({
   if (!open) return null;
   const selected = calendar.days.find((day) => day.date === selectedDate);
   const statsNote = accountStatsNote(report?.account);
+  const plan = error ? null : codexAccountPlan(report);
   const style = {
     "--usage-activity-weeks": USAGE_ACTIVITY_WEEKS,
   } as CSSProperties;
@@ -88,9 +90,7 @@ export function UsageActivitySheet({
           <b>使用活动</b>
           <small>当前 Codex 账户 · 最近 53 周</small>
         </span>
-        {report?.account?.plan_type && (
-          <em>{report.account.plan_type}</em>
-        )}
+        {plan && <em>{plan}</em>}
         <span className="usage-activity-update" role="status" aria-label={loading ? "正在更新使用活动" : "打开时自动更新"}>
           {loading && <span className="usage-activity-spinner" aria-hidden="true" />}
         </span>

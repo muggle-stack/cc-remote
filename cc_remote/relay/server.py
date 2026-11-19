@@ -41,6 +41,8 @@ from cc_remote.relay.auth import (
 from cc_remote.relay.devices import DeviceStore
 from cc_remote.relay.updates import UpdateRelay, UpdateChannelError
 from cc_remote.relay.server_updates import ServerUpdates
+from cc_remote.relay.voice import DoubaoVoice
+from cc_remote.relay.voice_routes import voice_router
 from cc_remote.relay.harmony_push import (
     HarmonyPushDispatcher, HarmonyPushStore, HarmonySubscription, HuaweiPushSender,
     TOKEN_RE as HARMONY_TOKEN_RE,
@@ -581,9 +583,11 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app):
         await server_updates.start()
+        await updates.start()
         try:
             yield
         finally:
+            await updates.close()
             await server_updates.close()
 
     app = FastAPI(title="cc-remote relay", lifespan=lifespan)
@@ -591,6 +595,14 @@ def create_app(
     link_previews = LinkPreviewService()
     link_preview_limiter = LoginRateLimiter(max_per_ip=120)
     devices = device_store or DeviceStore(cfg.device_db_path)
+
+    async def authorize_voice(req: Request | WebSocket) -> bool:
+        return (_request_origin_allowed(req, cfg, allow_missing=(
+            isinstance(req, Request) and req.method == "GET"
+        )) and await _active_claims(req, cfg, sessions) is not None)
+
+    voice = DoubaoVoice(cfg.doubao_voice_api_key) if cfg.doubao_voice_api_key else None
+    app.include_router(voice_router(voice, authorize_voice, _read_json_limited, cfg.max_clients))
 
     async def push_session_active(subscription: PushSubscription | HarmonySubscription) -> bool:
         claims = await sessions.claims_for_session(subscription.session_jti, subscription.expires_at)
@@ -664,10 +676,47 @@ def create_app(
         lambda req: _request_origin_allowed(req, cfg),
     )
     app.state.viewers = viewers
-    updates = UpdateRelay(devices)
+    updates = UpdateRelay(devices, server_updates)
     update_limiter = LoginRateLimiter(max_per_ip=180)
     app.state.updates = updates
     app.state.server_updates = server_updates
+
+    def update_authorized(req: Request, claims: SessionClaims) -> bool:
+        if claims.machines == ("*",):
+            return True
+        grant = session_token_claims(req.cookies.get(main_cookie_name(cfg, req) + "_updates", ""), cfg.session_secret)
+        return bool(grant and grant.expires_at > time.time() and grant.subject == claims.jti
+                    and grant.machines == ("*",))
+
+    @app.post("/api/update-authorization")
+    async def authorize_updates(req: Request):
+        headers = {"Cache-Control": "no-store"}
+        claims = await _active_claims(req, cfg, sessions)
+        if claims is None:
+            return JSONResponse({"reason": "unauthorized"}, status_code=401, headers=headers)
+        if not _request_origin_allowed(req, cfg, allow_missing=False) or _rate_limited(_request_ip(req)):
+            return JSONResponse({"reason": "forbidden"}, status_code=403, headers=headers)
+        try:
+            async with asyncio.timeout(cfg.login_read_timeout):
+                body = await _read_json_limited(req, cfg.login_body_max_bytes)
+            if not isinstance(body, dict) or set(body) - {"username", "password"}:
+                raise ValueError("invalid credentials")
+            username, password = body.get("username", ""), body.get("password", "")
+            if not isinstance(username, str) or not isinstance(password, str):
+                raise ValueError("invalid credentials")
+            access = authenticate_login(username, password, cfg)
+        except (ValueError, _BodyTooLarge, asyncio.TimeoutError):
+            access = None
+        if access is None or access[1] != ("*",):
+            return JSONResponse({"reason": "invalid_credentials"}, status_code=403, headers=headers)
+        if await _active_claims(req, cfg, sessions) is None:
+            return JSONResponse({"reason": "unauthorized"}, status_code=401, headers=headers)
+        token, _ = make_session_token(cfg.session_secret, max(1, claims.expires_at - int(time.time())), subject=claims.jti)
+        response = JSONResponse({"ok": True}, headers=headers)
+        response.set_cookie(main_cookie_name(cfg, req) + "_updates", token,
+                            max_age=max(1, claims.expires_at - int(time.time())), path="/",
+                            secure=_request_cookie_secure(req), httponly=True, samesite="strict")
+        return response
 
     async def application_update(req: Request, machine_id: str | None = None):
         headers = {"Cache-Control": "no-store"}
@@ -676,7 +725,7 @@ def create_app(
             return JSONResponse({"reason": "unauthorized"}, status_code=401, headers=headers)
         # Server maintenance is a separate administrative boundary. Owning an
         # enrolled device does not grant permission over the shared Relay.
-        permitted = (claims.machines == ("*",) if machine_id is None else
+        permitted = (update_authorized(req, claims) if machine_id is None else
                      await _claims_allow_machine(claims, machine_id, devices))
         if (not _request_origin_allowed(req, cfg, allow_missing=req.method == "GET") or not permitted):
             return JSONResponse({"reason": "forbidden"}, status_code=403, headers=headers)
@@ -692,24 +741,37 @@ def create_app(
                 operation = command.get("op")
                 if not isinstance(operation, str):
                     raise ValueError("invalid update operation")
-                expected = ({"op", "job_id", "version"} if operation == "start"
+                expected = ({"op", "job_id", "version"} if operation in {"start", "upgrade"}
                             else {"op", "job_id"} if operation in {"cancel", "lookup", "reconcile"} else {"op"})
-                if operation not in {"check", "start", "cancel", "lookup", "reconcile"} or set(command) != expected:
+                if operation not in {"check", "start", "upgrade", "authorize", "cancel", "lookup", "reconcile"} or set(command) != expected:
                     raise ValueError("invalid update operation")
-                if operation in {"start", "cancel", "lookup", "reconcile"}:
+                if operation in {"start", "upgrade", "cancel", "lookup", "reconcile"}:
                     from cc_remote.update_jobs import job_id
                     job_id(command["job_id"])
-                if operation == "start":
+                if operation in {"start", "upgrade"}:
                     from cc_remote.update import version_tuple
                     version_tuple(command["version"])
-            result = (await server_updates.handle(command) if machine_id is None else
-                      await updates.request(machine_id, command))
+                if operation == "upgrade" and (machine_id is None or not update_authorized(req, claims)):
+                    return JSONResponse({"reason": "server_forbidden"}, status_code=403, headers=headers)
+                if operation == "authorize" and machine_id is None:
+                    raise ValueError("device authorization requires a device")
+            if machine_id is None:
+                result = await server_updates.handle(command)
+            elif command["op"] == "reconcile":
+                async def authorize_server_recovery():
+                    current = await _active_claims(req, cfg, sessions)
+                    return current is not None and update_authorized(req, current)
+
+                result = await updates.request(machine_id, command, authorize_server=authorize_server_recovery)
+            else:
+                result = await updates.request(machine_id, command)
             # Browser sessions may expire/revoke while an OS launch is pending.
             if await _active_claims(req, cfg, sessions) is None:
                 return JSONResponse({"reason": "unauthorized"}, status_code=401, headers=headers)
             return JSONResponse({**result, "relay_version": __version__, "relay_protocol": PROTOCOL_VERSION}, headers=headers)
         except UpdateChannelError as exc:
-            return JSONResponse({"reason": exc.code}, status_code=503, headers=headers)
+            return JSONResponse({"reason": exc.code},
+                                status_code=403 if exc.code == "server_forbidden" else 503, headers=headers)
         except (ValueError, _BodyTooLarge, asyncio.TimeoutError):
             return JSONResponse({"reason": "invalid_request"}, status_code=400, headers=headers)
 
@@ -780,6 +842,9 @@ def create_app(
             return response
         response = await call_next(req)
         path = req.url.path
+        if path in {"/", "/index.html"} and response.status_code in {200, 304}:
+            microphone = "(self)" if voice is not None else "()"
+            response.headers["Permissions-Policy"] = f"camera=(), microphone={microphone}, geolocation=()"
         if path in {"/", "/index.html", "/sw.js", "/cc-remote-build.json", "/cc-remote-viewer-runner.js", "/cc-remote-viewer-zoom.js"}:
             response.headers["Cache-Control"] = "no-cache, must-revalidate"
         elif (
@@ -1057,6 +1122,8 @@ def create_app(
             httponly=True,
             samesite="strict",
         )
+        response.delete_cookie(main_cookie_name(cfg, req) + "_updates", path="/",
+                               secure=_request_cookie_secure(req), httponly=True, samesite="strict")
         return response
 
     @app.get("/api/devices")

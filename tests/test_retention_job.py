@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import os
 import plistlib
+import shutil
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -50,12 +53,47 @@ def test_install_is_idempotent_and_resolves_current_on_each_tick(installation, m
         timer = units / (worker.label(root) + '.timer')
         assert 'OnUnitInactiveSec=5min' in timer.read_text()
         assert 'TimeoutStartSec=infinity' in timer.with_suffix('.service').read_text()
+        assert f'WorkingDirectory={home}\n' in timer.with_suffix('.service').read_text()
+        assert ['/usr/bin/systemd-analyze', 'verify', str(timer.with_suffix('.service')), str(timer)] in calls
+        assert ['/usr/bin/systemctl', 'is-active', '--quiet', timer.name] in calls
     else:
         path = home / 'Library/LaunchAgents' / (worker.label(root) + '.plist')
         value = plistlib.loads(path.read_bytes())
         assert value['StartInterval'] == 300
         assert value['WorkingDirectory'] == str(home)
         assert value['ProgramArguments'] == ['/bin/sh', str(root / '.retention-runner.sh')]
+
+
+@pytest.mark.skipif(sys.platform != 'linux' or not shutil.which('systemd-analyze'),
+                    reason='systemd unit verification requires Linux')
+@pytest.mark.parametrize('home_name', ['home', 'home with spaces', 'home%with"quotes'])
+def test_generated_linux_units_pass_systemd_verification(tmp_path, home_name):
+    root = tmp_path / 'install'
+    home = tmp_path / home_name
+    root.mkdir()
+    home.mkdir()
+    paths = worker.service_files(root, home, 'linux')
+    units = []
+    for path, content in paths.items():
+        destination = tmp_path / path.name
+        destination.write_bytes(content)
+        units.append(str(destination))
+    result = subprocess.run(['systemd-analyze', 'verify', *units],
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
+def test_invalid_linux_unit_stops_before_manager_reload(installation, monkeypatch):
+    root, _, _, _, calls = installation
+
+    def invalid(command, **kwargs):
+        calls.append(command)
+        raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(worker.subprocess, 'run', invalid)
+    with pytest.raises(subprocess.CalledProcessError):
+        worker.install(root)
+    assert len(calls) == 1 and calls[0][0] == '/usr/bin/systemd-analyze'
 
 
 @pytest.mark.parametrize('kind', ['dangling-link', 'unrelated', 'writable'])

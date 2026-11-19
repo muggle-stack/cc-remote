@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FocusEvent, type PointerEvent } from "react";
+import { useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type FocusEvent, type PointerEvent } from "react";
+import { PanelVisible } from "./right-panel-presentation";
 
 // A single owner spans messages, BTW, and file previews. Switching links also
 // cancels the old owner's leave/open timers; it never waits for an exit animation.
 let activePopover: (() => void) | null = null;
 
 export function useLinkPopover(delay = 0) {
+  const visible = useContext(PanelVisible);
   const id = useId();
   const anchor = useRef<HTMLSpanElement>(null);
   const panel = useRef<HTMLDivElement>(null);
@@ -19,6 +21,7 @@ export function useLinkPopover(delay = 0) {
     clear(); setShown(false);
     if (activePopover === close) activePopover = null;
   }, [clear]);
+  useEffect(() => { if (!visible) close(); }, [visible, close]);
   const open = (immediate = false) => {
     clear();
     if (activePopover !== close) activePopover?.();
@@ -75,6 +78,6 @@ export function useLinkPopover(delay = 0) {
     };
   }, [shown, close]);
   const enter = (event: PointerEvent) => { if (event.pointerType !== "touch") open(); };
-  return { id, anchor, panel, shown, position, open, close, enter, leave,
+  return { id, anchor, panel, shown: visible && shown, position, open, close, enter, leave,
     keep: () => { clear(); }, focus: () => open(true) };
 }

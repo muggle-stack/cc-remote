@@ -87,6 +87,10 @@ async function attachPush(page, options = {}) {
     window.invalidatedPushTokens = [];
     window.failPushDelete = false;
     channel.port1.onmessage = (event) => {
+      if (event.data === 'recording-haptic') {
+        window.pushCalls.push(event.data);
+        return;
+      }
       const request = JSON.parse(event.data);
       window.pushCalls.push(request.method);
       const result = { id: request.id };
@@ -117,6 +121,7 @@ test('native push bridge rejects wrong origin, iframe and forged port handshake'
   await page.goto('/tests/history-browser.html?header-menu=1');
   await page.evaluate(`${pushAdapter}('https://wrong.example', 'known');`);
   expect(await page.evaluate(() => !!window.ccRemoteHarmonyPush)).toBe(false);
+  expect(await page.evaluate(() => !!window.ccRemoteHarmonyRecordingHaptic)).toBe(false);
   await page.evaluate(`${pushAdapter}(location.origin, 'unpredictable');`);
   await page.evaluate(() => {
     const fake = new MessageChannel();
@@ -133,7 +138,10 @@ test('native push bridge rejects wrong origin, iframe and forged port handshake'
   await frame.waitForLoadState();
   await frame.evaluate(`${pushAdapter}(location.origin, 'frame');`);
   expect(await frame.evaluate(() => !!window.ccRemoteHarmonyPush)).toBe(false);
+  expect(await frame.evaluate(() => !!window.ccRemoteHarmonyRecordingHaptic)).toBe(false);
   await attachPush(page);
+  await page.evaluate(() => window.ccRemoteHarmonyRecordingHaptic());
+  await expect.poll(() => page.evaluate(() => window.pushCalls)).toContain('recording-haptic');
   expect(await page.evaluate(async () => {
     try { await window.ccRemoteHarmonyPush.request('readFiles'); return false; } catch { return true; }
   })).toBe(true);

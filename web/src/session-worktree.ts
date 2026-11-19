@@ -120,6 +120,10 @@ export function isSessionArchiveBlockedByState(state?: State | null): boolean {
     || state === "draining";
 }
 
+export function isSessionDeleteBlockedByState(state?: State | null): boolean {
+  return isWorktreeForkBlockedByState(state) || state === "draining";
+}
+
 export function normalizeWorktreeForkName(value: string): string {
   return value.trim();
 }

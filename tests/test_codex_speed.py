@@ -127,7 +127,8 @@ def test_native_speed_notifications_preserve_cycles_and_ignore_foreign_threads(t
 
 
 @pytest.mark.parametrize("repeat_cursor", [False, True])
-def test_catalog_reads_later_pages_and_rejects_cursor_loops(monkeypatch, repeat_cursor):
+@pytest.mark.parametrize("provider", [None, 'local-"quoted"'])
+def test_catalog_reads_later_pages_and_rejects_cursor_loops(monkeypatch, repeat_cursor, provider):
     import json
     from types import SimpleNamespace
 
@@ -135,6 +136,7 @@ def test_catalog_reads_later_pages_and_rejects_cursor_loops(monkeypatch, repeat_
         replies = asyncio.StreamReader()
         requests = []
         closed = []
+        argv = []
 
         def write(raw):
             request = json.loads(raw)
@@ -157,7 +159,8 @@ def test_catalog_reads_later_pages_and_rejects_cursor_loops(monkeypatch, repeat_
             stdout=replies, terminate=lambda: None, wait=lambda: asyncio.sleep(0),
         )
 
-        async def spawn(*_args, **_kwargs):
+        async def spawn(*args, **_kwargs):
+            argv.extend(args)
             return process
 
         monkeypatch.setattr(models, "_resolve_codex_bin", lambda: "/fake/codex")
@@ -165,12 +168,16 @@ def test_catalog_reads_later_pages_and_rejects_cursor_loops(monkeypatch, repeat_
         monkeypatch.setattr(models.asyncio, "create_subprocess_exec", spawn)
         if repeat_cursor:
             with pytest.raises(RuntimeError, match="pagination"):
-                await models._rpc_model_list("/isolated/account")
+                await models._rpc_model_list("/isolated/account", model_provider=provider)
         else:
-            rows = models._normalize(await models._rpc_model_list("/isolated/account"))
+            rows = models._normalize(await models._rpc_model_list(
+                "/isolated/account", model_provider=provider))
             assert [row["id"] for row in rows] == ["astra", "sol"]
             assert rows[-1]["service_tiers"] == []
-        assert requests == [{"limit": 256}, {"limit": 256, "cursor": "next"}]
+        base = {"limit": 256, **({"modelProvider": provider} if provider else {})}
+        assert requests == [base, {**base, "cursor": "next"}]
+        assert argv == ["/fake/codex", "app-server", "--stdio", *(
+            ["-c", "model_provider=" + json.dumps(provider)] if provider else [])]
         assert closed == [True]
 
     asyncio.run(run())

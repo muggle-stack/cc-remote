@@ -1343,7 +1343,7 @@ def test_capability_completion_cache_retains_names_with_bounded_directories():
 
 
 @pytest.mark.asyncio
-async def test_sidless_native_catalog_replies_reach_the_requested_panel_only():
+async def test_native_catalog_replies_reach_the_requested_scope_only():
     _, c = app_client()
     c.workspace.catalog["s"].update(codex_profile_id="account-one")
     await c.refresh_panel("s", "Settings")
@@ -1352,6 +1352,7 @@ async def test_sidless_native_catalog_replies_reach_the_requested_panel_only():
             p.serialize(
                 p.Models(
                     engine="codex",
+                    sid="s",
                     codex_profile_id="account-two",
                     models=[{"id": "other"}],
                 )
@@ -1359,11 +1360,17 @@ async def test_sidless_native_catalog_replies_reach_the_requested_panel_only():
         )
     )
     assert "models" not in c.workspace.view("s").presentation.reports
+    c._handle(json.loads(p.serialize(p.Models(
+        engine="codex", codex_profile_id="account-one",
+        models=[{"id": "new-session-default"}],
+    ))))
+    assert "models" not in c.workspace.view("s").presentation.reports
     c._handle(
         json.loads(
             p.serialize(
                 p.Models(
                     engine="codex",
+                    sid="s",
                     codex_profile_id="account-one",
                     models=[{"id": "wanted"}],
                 )

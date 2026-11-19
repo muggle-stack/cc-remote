@@ -29,7 +29,7 @@ from cc_remote.attachments import (
 )
 from cc_remote.collaboration import CollaborationMemberSpec, MAX_ROOM_MESSAGE
 
-PROTOCOL_VERSION = 95
+PROTOCOL_VERSION = 98
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -1917,7 +1917,9 @@ class DirList(_Base):
 class GetModels(_Command):
     """client -> wrapper: what models does this engine actually offer?
 
-    Codex answers with app-server's model/list. Claude reads the native picker
+    Codex answers with app-server's model/list. A sid selects that thread's
+    provider; no sid selects the account's current default provider.
+    Claude reads the native picker
     from a prompt-free initialization and resolves no-override settings for cwd.
     """
     type: Literal["get_models"] = "get_models"
@@ -2122,11 +2124,14 @@ class Models(_Base):
     seq'd/buffered). Each entry: {id, display_name, description, efforts,
     default_effort, is_default}. `efforts` is authoritative: turn/start does NOT
     validate the level (it accepts `bogus-zzz`), so offering one the model lacks
-    only fails later inside the model API. Empty list = we couldn't read it; the
-    client falls back to its static table rather than rendering nothing.
+    only fails later inside the model API. `effort_descriptions` preserves the
+    native per-level descriptions. An unavailable Codex catalog retains the
+    client's last native catalog or shows a retry action before first discovery.
 
-    `default_model`/`default_effort` are what a NEW no-override session starts on.
-    They are NOT the focused session's controls (those are per-session events)."""
+    For Codex, sid echoes a thread-scoped provider catalog and its catalog
+    defaults. Without sid, `default_model`/`default_effort` describe a NEW
+    no-override session. Neither replaces the focused thread's controls.
+    """
     type: Literal["models"] = "models"
     dsh_permissions: list[DshPermissionOption] = Field(default_factory=list, max_length=256)
     dsh_presets: list[DshPreset] = Field(default_factory=list, max_length=256)
@@ -2347,6 +2352,7 @@ class ContextReport(_Base):
     # for the desired/applied session control carried by AutoCompact.
     auto_compact_threshold_tokens: Optional[int] = Field(default=None, ge=0)
     raw_max_tokens: Optional[int] = Field(default=None, ge=0)
+    model_max_tokens: Optional[int] = Field(default=None, gt=0)
     categories: list[dict[str, Any]] = []
 
 
@@ -2699,20 +2705,22 @@ class FilePreview(_Base):
 
     Binary previews are transported directly through the authenticated relay;
     the relay never writes them to disk. Video carries only an owner-bound
-    media_id; authenticated HTTP Range reads use the separate Viewer channel. Office files are converted by the
-    wrapper host and report their original extension in ``converted_from``.
+    media_id; authenticated HTTP Range reads use the separate Viewer channel.
+    PPTX carries the original package for browser rendering. Other converted
+    Office files report their original extension in ``converted_from``.
     """
     type: Literal["file_preview"] = "file_preview"
     directory: bool = False
     path: PreviewPath
     request_id: WireId
-    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "video", "spreadsheet"] = "text"
+    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "video", "spreadsheet", "presentation"] = "text"
     content: PreviewContent = ""
     media_type: Optional[Literal[
         "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
         "image/svg+xml", "application/pdf", "video/mp4",
         "audio/wav", "audio/mpeg", "audio/mp4", "audio/aac", "audio/flac",
         "audio/ogg", "audio/webm",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ]] = None
     media_id: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{32}$")
     data: Optional[ArtifactPreviewData] = None
@@ -2784,7 +2792,7 @@ class PreviewAuthorizationRequired(_Base):
     operation: Literal["file_preview", "preview_asset"]
     path: PreviewPath
     resolved_path: PreviewPath
-    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "video", "spreadsheet"] = "text"
+    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "video", "spreadsheet", "presentation"] = "text"
     preview_id: Optional[WireId] = None
 
 

@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 import time
 from urllib.parse import urlsplit, urlunsplit
@@ -32,7 +33,7 @@ class UIUpdates(InstallationUpdates):
         # activation receipt by guarded(). UI task status cannot close chat.
         self.reserved = None
 
-    def busy_count(self) -> int:
+    def busy_count(self, *, replacing_claude_service: bool = False) -> int:
         """Count work that would lose ownership/state when this Wrapper exits.
 
         A live model turn is not itself an activation blocker. Only proven
@@ -49,6 +50,13 @@ class UIUpdates(InstallationUpdates):
             if self._local_session_work(ctx):
                 count += 1
                 continue
+            replacing_owner = replacing_claude_service and ctx.engine == "claude"
+            if replacing_owner and (
+                getattr(ctx.sdk, "autonomous_steer_pending", False)
+                or getattr(getattr(ctx.sdk, "client", None), "callback_tasks", None)
+            ):
+                count += 1
+                continue
             tasks = [getattr(ctx, name, None) for name in ("turn_task", "codex_spontaneous_task")]
             backgrounds = (getattr(ctx, "codex_background_processes", None) or {}).values()
             if (ctx.state != "idle" or ctx.pending_asks
@@ -59,7 +67,7 @@ class UIUpdates(InstallationUpdates):
                     or self.machine._claude_has_background_work(ctx)
                     or any(getattr(item, "status", None) in {"running", "pending", "unknown"}
                            for item in backgrounds)):
-                count += not self._independent_session(ctx)
+                count += replacing_owner or not self._independent_session(ctx)
         count += sum(not task.done() for task in getattr(self.machine, "_work_schedule_runs", ()))
         count += bool(getattr(self.machine, "_ui_schedule_scanning", False))
         for name in ("_interactive_control_tasks", "_codex_fork_tasks", "_claude_fork_tasks", "_codex_archive_tasks"):
@@ -182,7 +190,7 @@ class UIUpdates(InstallationUpdates):
             pass
         return True
 
-    def reserve_activation(self, identity: str) -> dict:
+    async def reserve_activation(self, identity: str) -> dict:
         """Common CLI/UI installer admission; no UI job or policy is required."""
         from cc_remote.activation import install_locked, receipt
         if self.root is None:
@@ -192,10 +200,48 @@ class UIUpdates(InstallationUpdates):
                 or value["phase"] not in {"waiting", "quiesced"}
                 or not install_locked(self.root)):
             return {"status": "rejected"}
-        if self.busy_count():
+        replacing_claude_service = value.get("claude_upgrade") is True
+        if self.busy_count(replacing_claude_service=replacing_claude_service):
             return {"status": "busy"}
+        result = {"status": "ready"}
+        if replacing_claude_service:
+            cfg = self.machine.cfg
+            if cfg.claude_service_drain_socket:
+                return {"status": "service_migration"}
+            socket = os.path.expanduser(cfg.claude_service_socket)
+            if socket:
+                from cc_remote.claude_service.client import RemoteClient, upgrade_inventory, worker_busy_for_upgrade
+                try:
+                    hello, workers = await upgrade_inventory(socket)
+                    if any(worker_busy_for_upgrade(worker) for worker in workers):
+                        return {"status": "busy"}
+                    # Older services cannot report callbacks directly. Every
+                    # legacy worker must have its original callback reader.
+                    attached = {
+                        client.id for ctx in self.machine.sessions.values()
+                        if isinstance(client := getattr(ctx.sdk, "client", None), RemoteClient)
+                        and client.connection.socket_path == socket
+                        and client.callback_task is not None and not client.callback_task.done()
+                    }
+                    if any("callbacks_pending" not in worker and worker["id"] not in attached
+                           for worker in workers):
+                        return {"status": "service_migration"}
+                    result["claude_service"] = {
+                        "socket": socket, "source": hello["source"],
+                        "sdk": hello["sdk_version"], "pid": hello["pid"],
+                    }
+                except (OSError, TimeoutError, RuntimeError, ValueError, KeyError, TypeError):
+                    return {"status": "unavailable"}
+            else:
+                result["claude_service"] = None
+            # The socket reads above yield to active work. Check again before
+            # closing admission for this exact transaction.
+            if receipt(self.root) != value or not install_locked(self.root):
+                return {"status": "rejected"}
+            if self.busy_count(replacing_claude_service=True):
+                return {"status": "busy"}
         self.activation_admitted = identity
-        return {"status": "ready"}
+        return result
 
     async def reject(self, cmd):
         if cmd.type == "collaboration" and cmd.operation in {"list", "read", "catalog", "sessions", "reconcile", "stop", "answer"}:
@@ -222,6 +268,33 @@ class UIUpdates(InstallationUpdates):
             return {"status": "busy"}
         self.reserved = identity
         return {"status": "ready"}
+
+    async def handle(self, request: dict) -> dict:
+        if request != {"op": "authorize"}:
+            return await super().handle(request)
+        if self.root is None:
+            return {"ok": False, "reason": "unsupported"}
+        current = read_installation(self.root, *host_platform())
+        command = [str(current.release / ".venv/bin/python"), "-I", "-B",
+                   str(current.release / "deploy/ui_update_job.py"), "--root", str(self.root), "authorize"]
+        async with self.request_lock:
+            try:
+                environment = None
+                if host_platform()[0] == "linux":
+                    from deploy.linux_service import trusted
+                    for path in (self.root, current.release, Path(command[0]).resolve(), Path(command[3])):
+                        trusted(path)
+                    if os.geteuid() != 0:
+                        from cc_remote.wrapper.codex_service import user_manager_environment
+                        environment = user_manager_environment()
+                        command = ["/usr/bin/systemd-run", "--user", "--collect", "--wait", "--pipe",
+                                   "/usr/bin/pkexec", *command]
+                result = await asyncio.to_thread(subprocess.run, command,
+                    stdin=subprocess.DEVNULL, capture_output=True, timeout=90, check=False, env=environment)
+                value = json.loads(result.stdout)
+                return value if isinstance(value, dict) else {"ok": False, "reason": "permission_required"}
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                return {"ok": False, "reason": "permission_required"}
 
     async def status(self, *, check: bool = False) -> dict:
         result = {"schema": 1, "managed": False, "enabled": False, "reason": "unsupported",
@@ -253,9 +326,15 @@ class UIUpdates(InstallationUpdates):
                             repository = store.policy()["repository"]
                         except FileNotFoundError:
                             repository = release_repository()
-                        self.catalog = await asyncio.to_thread(release_catalog, repository)
                         self.checked_at = time.monotonic()
+                        try:
+                            self.catalog = await asyncio.to_thread(release_catalog, repository)
+                            self.catalog_error = None
+                        except (OSError, ValueError) as exc:
+                            self.catalog_error = failure_reason(exc)
                 result["latest"] = self.catalog
+            if self.catalog_error and result["reason"] is None:
+                result["reason"] = self.catalog_error
         except (OSError, ValueError) as exc:
             result["reason"] = failure_reason(exc)
         result["maintenance"] = self.guarded()

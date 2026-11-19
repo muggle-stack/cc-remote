@@ -384,8 +384,8 @@ class WorkspaceClient(Tui):
         ):
             self.capability_requests.discard(self.capability_key(read))
         if kind == "models":
-            # Models has no request_id/sid on the wire. Its native engine,
-            # profile and (for Claude) cwd identify the pending read surfaces.
+            # Codex session catalogs belong to the exact requesting thread.
+            # New-session and Claude catalogs retain their profile/cwd scope.
             for request_id, source in list(self.catalog_reads.items()):
                 if source["type"] != "get_models" or source.get(
                     "engine"
@@ -403,6 +403,10 @@ class WorkspaceClient(Tui):
                     ).get("default_" + profile)
                 if expected_profile != event.get(profile):
                     continue
+                if event["engine"] == "codex" and event.get("sid") != (
+                    self.workspace.rekeys.get(source.get("sid"), source.get("sid"))
+                ):
+                    continue
                 if event["engine"] == "claude" and source.get(
                     "cwd"
                 ) != event.get("cwd"):
@@ -411,13 +415,19 @@ class WorkspaceClient(Tui):
                     self.workspace.view(source["sid"]).presentation.reports[
                         "models"
                     ] = bounded(event)
-                self.settings_catalogs[(kind, *self.capability_key(source))] = (
+                else:
+                    self.workspace.reports["models"] = bounded(event)
+                self.settings_catalogs[(kind, *self.capability_key(source, session=True))] = (
                     bounded(event)
                 )
                 self.catalog_reads.pop(request_id)
         self.settings_catalogs = dict(
             list(self.settings_catalogs.items())[-64:]
         )
+        if kind == "models":
+            # Only the matching request above may populate a model report.
+            # Generic sid-based report routing would bypass its account check.
+            return
         if sid in self._history_replay_suppressed and kind in {
             "process",
             "turn_plan",
@@ -787,8 +797,8 @@ class WorkspaceClient(Tui):
                 await self.prefetch_capabilities(sid)
 
     @staticmethod
-    def capability_key(row: dict) -> tuple:
-        return tuple(
+    def capability_key(row: dict, *, session: bool = False) -> tuple:
+        key = tuple(
             row.get(k)
             for k in (
                 "engine",
@@ -798,6 +808,7 @@ class WorkspaceClient(Tui):
                 "codex_profile_id",
             )
         )
+        return key + (row.get("sid"),) if session and row.get("engine") == "codex" else key
 
     async def prefetch_capabilities(self, sid: str) -> None:
         row = self.workspace.catalog.get(sid, {})
@@ -1583,8 +1594,10 @@ class WorkspaceApp(App, inherit_bindings=False):
                             {"id": ":danger-full-access", "allowed": True},
                         ]
                     }
-                key = (kind, *self.client.capability_key(args))
-                self.client.settings_catalogs[key] = data
+                for sid in (None, row.get("session_id")):
+                    key = (kind, *self.client.capability_key(
+                        {**args, "sid": sid}, session=kind == "models"))
+                    self.client.settings_catalogs[key] = data
 
     def suggestions(self) -> tuple[int, list[str]]:
         editor = self.query_one(Composer)

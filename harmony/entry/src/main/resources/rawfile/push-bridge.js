@@ -35,6 +35,10 @@
       }
     });
     Object.defineProperty(window, 'ccRemoteHarmonyPush', { value: bridge, configurable: true });
+    Object.defineProperty(window, 'ccRemoteHarmonyRecordingHaptic', {
+      value: () => { if (!closed) port.postMessage('recording-haptic'); },
+      configurable: true
+    });
     window.addEventListener('pagehide', () => {
       closed = true;
       port.close();
@@ -44,6 +48,7 @@
       }
       pending.clear();
       delete window.ccRemoteHarmonyPush;
+      delete window.ccRemoteHarmonyRecordingHaptic;
     }, { once: true });
     window.dispatchEvent(new Event('cc-remote-harmony-ready'));
   }

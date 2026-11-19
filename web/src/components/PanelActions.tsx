@@ -38,32 +38,42 @@ export function RefreshButton({ busy, failed = false, label, disabled, className
   </button>;
 }
 
-export function PanelRowMenu({ label, disabled, items }: {
-  label: string; disabled?: boolean;
-  items: { label: string; onClick: () => void; danger?: boolean }[];
+export function PanelRowMenu({ label, disabled, items, className = "" }: {
+  label: string; disabled?: boolean; className?: string;
+  items: { label: string; onClick: () => void; danger?: boolean; disabled?: boolean; icon?: string; className?: string }[];
 }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!open) return;
-    root.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+    const focusFirst = () => [...(root.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? [])]
+      .find(button => button.getClientRects().length)?.focus({ preventScroll: true });
+    focusFirst();
+    const resize = new ResizeObserver(() => {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && root.current?.contains(active) && !active.getClientRects().length) focusFirst();
+    });
+    const menu = root.current?.querySelector<HTMLElement>('[role="menu"]');
+    if (menu) resize.observe(menu);
     const outside = (event: PointerEvent | FocusEvent) => {
       if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false);
     };
     document.addEventListener("pointerdown", outside);
     document.addEventListener("focusin", outside);
     return () => {
+      resize.disconnect();
       document.removeEventListener("pointerdown", outside);
       document.removeEventListener("focusin", outside);
     };
   }, [open]);
-  return <div className="panel-row-menu" ref={root} onKeyDown={event => {
+  return <div className={`panel-row-menu ${className}`} ref={root} onKeyDown={event => {
     if (event.key === "Escape" && open) {
       event.preventDefault(); event.stopPropagation(); setOpen(false); trigger.current?.focus();
     } else if (open && ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
       event.preventDefault();
-      const buttons = [...root.current!.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+      const buttons = [...root.current!.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')]
+        .filter(button => button.getClientRects().length);
       const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
       const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
         : (index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
@@ -79,9 +89,9 @@ export function PanelRowMenu({ label, disabled, items }: {
     </button>
     {open && <div className="panel-row-menu-items" role="menu" aria-label={label}>
       {items.map(item => <button key={item.label} type="button" role="menuitem"
-        className={item.danger ? "danger" : undefined} onClick={() => {
+        disabled={item.disabled} className={`${item.danger ? "danger" : ""} ${item.className ?? ""}`} onClick={() => {
           setOpen(false); trigger.current?.focus(); item.onClick();
-        }}>{item.label}</button>)}
+        }}>{item.icon && <Icon name={item.icon} size={16} />}{item.label}</button>)}
     </div>}
   </div>;
 }

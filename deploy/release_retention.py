@@ -155,6 +155,16 @@ def generation(root: Path, identity: str) -> tuple[dict, dict]:
     return data, rows[0]
 
 
+def retain_claude_rollback(root: Path, identity: str, source: Path) -> None:
+    """The old independent service may be older than the previous Wrapper."""
+    source = retirement.absolute_path(str(source))
+    if source.parent == root / "releases":
+        data, row = generation(root, identity)
+        require(row["phase"] == "prepared" and source.is_dir(), "invalid Claude service rollback source")
+        row["claude_rollback"] = str(source)
+        retirement.write_journal(root / LEDGER, data)
+
+
 def command(argv: list[str]) -> str:
     result = subprocess.run(argv, capture_output=True, text=True, timeout=45, check=False)
     require(result.returncode == 0, f"read-only acceptance failed: {Path(argv[0]).name}")
@@ -790,10 +800,19 @@ def inspect_service_files(files: set[Path], candidates: list[Path], *,
             inspect_plist(value)
             raw = json.dumps(value, default=str).encode()
         else:
+            section = b''
             for line in service_lines(raw):
+                if re.fullmatch(rb'\[[A-Za-z]+\]', line.strip()):
+                    section = line.strip()[1:-1]
+                    continue
                 key, separator, value = line.partition(b'=')
                 key = key.strip()
                 text = value.strip().decode('utf-8')
+                if ((section == b'Unit' and key in {b'Description', b'Documentation'})
+                        or (section == b'Timer' and key == b'OnCalendar')):
+                    # Human-readable metadata and calendar expressions contain
+                    # punctuation/specifiers without introducing file inputs.
+                    continue
                 if key in {b'RuntimeDirectory', b'StateDirectory', b'CacheDirectory',
                            b'LogsDirectory', b'ConfigurationDirectory'}:
                     try:
@@ -922,6 +941,11 @@ def inventory(root: Path, data: dict, row: dict) -> dict | None:
         rollback.insert(0, str(previous))
     if row.get("snapshot"):
         rollback.append(row["snapshot"])
+    if row.get("claude_rollback"):
+        source = retirement.absolute_path(row["claude_rollback"])
+        require(source.parent == root / "releases" and source.is_dir(), "missing Claude service rollback source")
+        if str(source) not in rollback:
+            rollback.append(str(source))
     candidates, protected = set(), set()
     for record in data["generations"]:
         paths = [record["release"], record["backup"]]

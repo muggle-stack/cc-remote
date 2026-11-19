@@ -92,6 +92,7 @@ def test_codex_work_btw_uses_private_profile_bound_runtime(
         async def connect(self, **kwargs):
             self.connect_call = kwargs
             self.thread_id = "forked-work"
+            self.effort = self.applied_effort = "adaptive"
             # Model the app-server echoing controls from the parent rollout.
             self.approval = "on-request"
             self.approval_policy = "on-request"
@@ -162,8 +163,8 @@ def test_codex_work_btw_uses_private_profile_bound_runtime(
         assert handle.permission_profile == ":workspace"
         assert handle.web_search_override == "live"
         assert handle.web_search == "live"
-        assert handle.effort == handle.applied_effort == "xhigh"
-        assert handle.display_effort == "xhigh"
+        assert handle.effort == handle.applied_effort == "adaptive"
+        assert handle.display_effort == "adaptive"
 
     asyncio.run(run())
 
@@ -205,6 +206,7 @@ def test_codex_code_btw_keeps_parent_controls_and_shared_mode(monkeypatch):
 
     async def run():
         monkeypatch.setattr(machine_module, "CodexHandle", FakeCodexHandle)
+        monkeypatch.setattr(machine_module, "default_effort_for", AsyncMock(return_value="balanced"))
         machine, _ = _mk_machine()
         parent = _mk_ctx("parent-code", "parent-code")
         parent.engine = "codex"
@@ -234,6 +236,9 @@ def test_codex_code_btw_keeps_parent_controls_and_shared_mode(monkeypatch):
         assert handle.approval == handle.approval_policy == "on-request"
         assert handle.permission_profile == ":read-only"
         assert handle.web_search_override == handle.web_search == "live"
+        assert handle.effort is None
+        assert handle.applied_effort is None
+        assert handle.display_effort == "balanced"
 
     asyncio.run(run())
 
@@ -971,6 +976,9 @@ def test_codex_work_thread_config_disables_context_without_model_or_auth_overrid
     assert config["features"] == {
         name: False for name in codex_handle_module._WORK_DISABLED_FEATURES
     }
+    assert config["features"]["multi_agent"] is False
+    assert config["features"]["multi_agent_v2"] is False
+    assert config["agents"] == {"enabled": False}
     assert config["skills"]["config"] == [
         {"path": "/home/test/.codex/skills/private/SKILL.md", "enabled": False},
         {"path": "/system/skills/official/SKILL.md", "enabled": False},
@@ -3148,8 +3156,7 @@ def test_machine_resolves_nullable_codex_effort_without_loading_forever(
         assert ctx.sdk.display_effort == "xhigh"
         assert ctx.sdk.display_effort_model == "gpt-default"
 
-        # thread/fork may echo the parent's explicit setting. BTW's wrapper-
-        # owned xhigh choice must still win before its first query.
+        # An explicit user selection must still apply to a native fork.
         ctx.sdk.effort = "high"
         ctx.sdk.applied_effort = "high"
         assert await machine._resolve_codex_session_effort(
@@ -3420,14 +3427,20 @@ def test_machine_forced_model_effort_publish_falls_back_after_probe_churn():
         ("current-model", "selected-model", None, "selected-model", []),
         (None, "retired-model", None, "current-model", ["current-model"]),
         (None, "selected-model", "current-model", "current-model", ["current-model"]),
+        (None, "selected-model", "unavailable", None, []),
     ],
 )
+@pytest.mark.parametrize("known_provider", [True, False])
 def test_codex_resume_preserves_native_model_and_restores_nullable_effort(
         monkeypatch, tmp_path, rollout_model, native_model, explicit_model,
-        expected_model, expected_updates):
+        expected_model, expected_updates, known_provider):
+    handles = []
+
     class FakeCodexHandle:
         def __init__(self, _cfg, cwd=None, daemon_mode=None,
                      daemon_manager=None):
+            handles.append(self)
+            self.connect_calls = []
             self.cwd = cwd
             self._cwd = cwd
             self._generation = 1
@@ -3466,12 +3479,14 @@ def test_codex_resume_preserves_native_model_and_restores_nullable_effort(
             self.approval_policy = value
 
         async def connect(self, **kwargs):
+            self.connect_calls.append(kwargs)
             self.thread_id = kwargs["resume_id"]
             self.preconnect_effort = self.effort
             self.preconnect_model = self.model
             # The native selection can be newer than a stale or unreadable
             # rollout tail; availability must be decided after this receipt.
             self.model = native_model
+            self.model_provider = "openai"
             # Some app-server versions omit the effective override on resume.
             self.effort = None
             self.applied_effort = None
@@ -3496,6 +3511,10 @@ def test_codex_resume_preserves_native_model_and_restores_nullable_effort(
         machine.cfg.cc_cwd = str(tmp_path)
         monkeypatch.setattr(machine_module, "CodexHandle", FakeCodexHandle)
         monkeypatch.setattr(
+            machine_module, "codex_session_provider",
+            lambda *_args, **_kwargs: "openai" if known_provider else None,
+        )
+        monkeypatch.setattr(
             machine_module,
             "codex_session_cwd",
             lambda _thread_id: str(tmp_path),
@@ -3509,7 +3528,8 @@ def test_codex_resume_preserves_native_model_and_restores_nullable_effort(
             },
         )
 
-        async def catalog(*, codex_home=None):
+        async def catalog(*, codex_home=None, model_provider=None):
+            assert model_provider == "openai"
             return [{
                 "id": "current-model",
                 "efforts": ["high"],
@@ -3539,10 +3559,18 @@ def test_codex_resume_preserves_native_model_and_restores_nullable_effort(
             engine="codex",
             space="code",
             model=explicit_model,
+            bootstrap=expected_model is None,
         )
 
+        if expected_model is None:
+            assert ctx is None
+            assert _transport.sent[-1].code == machine_module.ERR_BAD_PROMPT
+            assert len(handles[0].connect_calls) == (0 if known_provider else 1)
+            return
         assert ctx is not None
-        assert ctx.sdk.preconnect_model == "current-model"
+        assert ctx.sdk.preconnect_model == (
+            "current-model" if known_provider else explicit_model or rollout_model or "gpt-test"
+        )
         assert ctx.sdk.set_model_calls == expected_updates
         assert ctx.sdk.model == expected_model
         assert ctx.sdk.preconnect_effort == "high"
@@ -3590,6 +3618,48 @@ def test_machine_effort_apply_preserves_authoritative_app_server_clamp(
         assert await machine._apply_codex_effort(ctx, "high") == "medium"
         assert ctx.sdk.effort == ctx.sdk.applied_effort == "medium"
         assert ctx.sdk.display_effort == "medium"
+
+    asyncio.run(run())
+
+
+def test_codex_effort_can_return_to_native_default():
+    async def run():
+        handle = CodexHandle(_Cfg())
+        handle.thread_id = "thread-effort-default"
+        handle.effort = handle.applied_effort = handle.display_effort = "retired"
+        handle._request = AsyncMock(return_value={})
+
+        assert await handle.set_effort(None) is False
+        handle._request.assert_awaited_once_with("thread/settings/update", {
+            "threadId": "thread-effort-default", "effort": None,
+        })
+        assert handle.effort is None
+        assert handle.applied_effort is None
+        assert handle.display_effort is None
+
+    asyncio.run(run())
+
+
+def test_machine_unsupported_effort_without_default_clears_stale_override(monkeypatch):
+    async def run():
+        machine, _transport = _mk_machine()
+        ctx = _mk_ctx("native-default", "native-default")
+        ctx.engine = "codex"
+        ctx.sdk = CodexHandle(_Cfg())
+        ctx.sdk.thread_id = "native-default"
+        ctx.sdk.model = "native-model"
+        ctx.sdk.effort = ctx.sdk.applied_effort = "retired"
+        ctx.sdk._request = AsyncMock(return_value={"config": {}})
+        monkeypatch.setattr(machine_module, "clamp_effort", AsyncMock(return_value=None))
+        monkeypatch.setattr(machine_module, "default_effort_for", AsyncMock(return_value=None))
+
+        assert await machine._apply_codex_effort(ctx, "retired") == "model-default"
+        assert ctx.sdk.effort is None
+        assert ctx.sdk.applied_effort is None
+        assert ctx.sdk.display_effort == "model-default"
+        assert ctx.sdk._request.call_args_list[0].args == (
+            "thread/settings/update", {"threadId": "native-default", "effort": None},
+        )
 
     asyncio.run(run())
 

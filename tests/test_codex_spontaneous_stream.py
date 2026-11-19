@@ -1177,6 +1177,167 @@ def test_cross_turn_identity_retries_when_rollout_path_appears_late(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("persisted_first", [False, True])
+def test_repeated_codex_identity_does_not_block_idle_update(tmp_path, persisted_first):
+    async def run():
+        machine, _transport = _mk_machine()
+        rollout = tmp_path / "rollout.jsonl"
+        rollout.write_text("{}\n", encoding="utf-8")
+        machine._codex_rollout_for_wire = lambda _sid: str(rollout)
+        machine._schedule_history_refresh = lambda *args, **kwargs: None
+        ctx = _mk_ctx("thread-spontaneous", "thread-spontaneous")
+        ctx.engine = "codex"
+        handle = CodexHandle(machine.cfg)
+        handle.thread_id = ctx.session_id
+        ctx.sdk = handle
+        ctx.codex_published_steers["remote-client-message"] = "control-turn"
+        machine.sessions[ctx.key] = ctx
+        proof = CodexSteerUserIdentityProof(
+            thread_id=ctx.session_id,
+            expected_turn_id="control-turn",
+            native_turn_id="native-turn",
+            native_message_id="native-user",
+            client_message_id="remote-client-message",
+            generation=handle._generation,
+        )
+        if persisted_first:
+            machine._codex_client_messages.put(
+                rollout, "native-turn", "remote-client-message",
+                native_message_id="native-user")
+
+        assert await machine._apply_codex_steer_user_identity(ctx, proof)
+        assert await machine._apply_codex_steer_user_identity(ctx, proof)
+        await machine._cleanup_codex_steer_attachments(ctx)
+
+        assert ctx.codex_pending_steer_user_identities == {}
+        assert machine._ui_updates.busy_count() == 0
+        assert machine._codex_client_messages.get(rollout).native_messages == {
+            "native-user": "remote-client-message",
+        }
+        await machine._command_scheduler.close()
+
+    asyncio.run(run())
+
+
+def test_retained_initial_codex_identity_settles_after_owner_released(tmp_path):
+    async def run():
+        machine, _transport = _mk_machine()
+        rollout = tmp_path / "rollout.jsonl"
+        rollout.write_text("{}\n", encoding="utf-8")
+        machine._codex_rollout_for_wire = lambda _sid: str(rollout)
+        machine._schedule_history_refresh = lambda *args, **kwargs: None
+        ctx = _mk_ctx("thread-spontaneous", "thread-spontaneous")
+        ctx.engine = "codex"
+        handle = CodexHandle(machine.cfg)
+        handle.thread_id = ctx.session_id
+        ctx.sdk = handle
+        machine.sessions[ctx.key] = ctx
+        proof = CodexSteerUserIdentityProof(
+            thread_id=ctx.session_id,
+            expected_turn_id="control-turn",
+            native_turn_id="native-turn",
+            native_message_id="native-user",
+            client_message_id="remote-client-message",
+            generation=handle._generation,
+            kind="query",
+        )
+        ctx.codex_pending_steer_user_identities["native-user"] = proof
+        machine._codex_client_messages.put(
+            rollout, "native-turn", "remote-client-message",
+            native_message_id="native-user")
+        assert machine._ui_updates.busy_count() == 1
+
+        await machine._cleanup_codex_steer_attachments(ctx)
+
+        assert ctx.codex_pending_steer_user_identities == {}
+        assert machine._ui_updates.busy_count() == 0
+        await machine._command_scheduler.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["write", "conflict", "generation"])
+def test_unsettled_codex_identity_keeps_update_blocked(tmp_path, failure, monkeypatch):
+    async def run():
+        machine, _transport = _mk_machine()
+        rollout = tmp_path / "rollout.jsonl"
+        rollout.write_text("{}\n", encoding="utf-8")
+        machine._codex_rollout_for_wire = lambda _sid: str(rollout)
+        machine._schedule_history_refresh = lambda *args, **kwargs: None
+        ctx = _mk_ctx("thread-spontaneous", "thread-spontaneous")
+        ctx.engine = "codex"
+        handle = CodexHandle(machine.cfg)
+        handle.thread_id = ctx.session_id
+        ctx.sdk = handle
+        machine.sessions[ctx.key] = ctx
+        proof = CodexSteerUserIdentityProof(
+            thread_id=ctx.session_id,
+            expected_turn_id="control-turn",
+            native_turn_id="native-turn",
+            native_message_id="native-user",
+            client_message_id="remote-client-message",
+            generation=handle._generation,
+            kind="query",
+        )
+        ctx.codex_pending_steer_user_identities["native-user"] = proof
+        if failure == "write":
+            def fail(*args, **kwargs):
+                raise OSError("read-only fixture")
+            monkeypatch.setattr(machine._codex_client_messages, "put", fail)
+        elif failure == "conflict":
+            machine._codex_client_messages.put(
+                rollout, "native-turn", "another-message",
+                native_message_id="native-user")
+        else:
+            handle._generation += 1
+
+        await machine._cleanup_codex_steer_attachments(ctx)
+
+        assert ctx.codex_pending_steer_user_identities == {"native-user": proof}
+        assert machine._ui_updates.busy_count() == 1
+        await machine._command_scheduler.close()
+
+    asyncio.run(run())
+
+
+def test_history_settles_already_persisted_pending_codex_identity(tmp_path):
+    async def run():
+        machine, _transport = _mk_machine()
+        rollout = tmp_path / "rollout.jsonl"
+        rollout.write_text("{}\n", encoding="utf-8")
+        ctx = _mk_ctx("thread-spontaneous", "thread-spontaneous")
+        ctx.engine = "codex"
+        ctx.sdk = CodexHandle(machine.cfg)
+        ctx.sdk.thread_id = ctx.session_id
+        machine.sessions[ctx.key] = ctx
+        proof = CodexSteerUserIdentityProof(
+            thread_id=ctx.session_id,
+            expected_turn_id="control-turn",
+            native_turn_id="native-turn",
+            native_message_id="native-user",
+            client_message_id="remote-client-message",
+            generation=ctx.sdk._generation,
+        )
+        ctx.codex_pending_steer_user_identities["native-user"] = proof
+        machine._codex_client_messages.put(
+            rollout, "native-turn", "remote-client-message",
+            native_message_id="native-user")
+        revision = machine._history_revision(ctx.key)
+
+        await machine._backfill_official_codex_client_message_ids(
+            ctx, ctx.key, str(rollout), HistorySourceFingerprint.capture(rollout),
+            {"remote-client-message"},
+            (("native-turn", "native-user", "remote-client-message"),),
+        )
+
+        assert ctx.codex_pending_steer_user_identities == {}
+        assert machine._ui_updates.busy_count() == 0
+        assert machine._history_revision(ctx.key) == revision
+        await machine._command_scheduler.close()
+
+    asyncio.run(run())
+
+
 def test_official_history_backfills_known_cross_turn_alias_while_cold(tmp_path):
     async def run():
         machine, _transport = _mk_machine()
@@ -3064,6 +3225,28 @@ def test_foreign_cli_thread_started_is_only_a_catalog_hint():
         assert handle.thread_id == "thread-current"
         assert handle.turn_id is None
         assert handle.turn_active is False
+
+    asyncio.run(run())
+
+
+def test_app_lifecycle_notifications_are_only_catalog_hints():
+    async def run():
+        hints = []
+        handle = CodexHandle(_Cfg())
+        handle.metadata_changed_callback = hints.append
+        handle._using_daemon_proxy = True
+        handle.thread_id = "current"
+        for method in ("thread/archived", "thread/unarchived", "thread/deleted"):
+            await handle._dispatch({
+                "method": method, "params": {"threadId": "another-thread"},
+            })
+        handle._control_only_connection = True
+        await handle._dispatch({
+            "method": "thread/deleted", "params": {"threadId": "unrelated"},
+        })
+        assert hints == ["another-thread"] * 3
+        assert handle.thread_id == "current"
+        assert handle.turn_id is None
 
     asyncio.run(run())
 

@@ -6,6 +6,7 @@ export interface UpdateJob {
   cleanup_pending?: boolean; cancel_requested?: boolean;
   cleanup_reason?: string | null;
   updated_at?: number;
+  coordinated?: boolean; server_phase?: UpdatePhase | null;
 }
 
 export function cleanupNotice(reason: string | null | undefined): string {
@@ -38,13 +39,13 @@ export const UPDATE_LABELS: Record<UpdatePhase, string> = {
 };
 const REASONS: Record<string, string> = {
   unsupported: "当前安装方式暂不支持应用内更新。页面更新仍可单独使用。",
-  setup_required: "需要先在这台设备上启用应用内更新权限。",
-  server_setup_required: "需要管理员在服务器上启用一次应用内更新权限，之后可从任意设备操作。",
+  setup_required: "本次更新需要一次设备管理员认证。",
+  server_setup_required: "服务器的更新授权需要管理员认证。",
   server_forbidden: "当前账号仅有设备访问权限，服务器更新需要具有全部设备权限的管理员账号。",
   control_unavailable: "设备的更新配置与本地控制连接不一致，需要检查安装配置。",
   permission_required: "设备尚未获得所需的升级权限，请先由管理员完成配置。",
   protocol_change: "当前更新器需要先完成一次升级。新版本支持通过独立维护通道跨协议更新。",
-  service_migration: "这个版本涉及 Claude 服务迁移，需要完成现有任务后统一升级。",
+  service_migration: "这台设备的 Claude 服务需要通过兼容版本或管理员维护完成迁移。",
   relay_permission: "服务器也需要升级，但尚未为当前设备授权服务器升级。",
   device_unavailable: "设备未连接更新服务，或尚未安装支持应用内更新的版本。",
   outcome_pending: "尚未收到完整结果，请继续检查原更新任务。不要重复创建更新。",
@@ -64,6 +65,7 @@ const REASONS: Record<string, string> = {
   disk_space: "安装空间不足，请释放设备磁盘空间后重试。",
   network: "暂时无法连接更新服务，请稍后重新检查。",
   update_failed: "更新没有完成，请检查设备上的升级记录后再继续。",
+  rate_limited: "版本查询暂时受到 GitHub 限流，已保留当前状态，请稍后重试。",
   busy: "已有更新或其他操作正在处理，请稍后检查。",
   receipt_limit: "升级记录需要管理员维护，本次未启动新的更新。",
   release_changed: "可用版本已变化，请重新检查更新。",
@@ -99,17 +101,16 @@ export function currentUpdateJob(state: AppUpdateState | null | undefined): Upda
   const job = state?.job;
   const current = state?.current;
   if (job && UPDATE_TERMINAL.has(job.phase) && job.phase !== "succeeded"
-    && validVersion(current) && !newerVersion(job.version, current)) return null;
+    && validVersion(current) && !newerVersion(job.version, current)
+    && (!job.coordinated || (validVersion(state?.relay_version)
+      && !newerVersion(job.version, state?.relay_version)))) return null;
   return job ?? null;
 }
 /** A running device job keeps its own view; server work survives device switches. */
 export function preferServerUpdate(device: AppUpdateState | null, server: AppUpdateState | null,
   devicePending: boolean, serverPending: boolean): boolean {
   if (devicePending || (device?.job && !UPDATE_TERMINAL.has(device.job.phase))) return false;
-  if (serverPending || (server?.job && !UPDATE_TERMINAL.has(server.job.phase))) return true;
-  const version = server?.latest?.version ?? device?.latest?.version;
-  return newerVersion(version, server?.relay_version ?? device?.relay_version)
-    && (!device?.enabled || !device.allow_relay_update);
+  return device?.online === false && (!!serverPending || !!(server?.job && !UPDATE_TERMINAL.has(server.job.phase)));
 }
 export function parseUpdateJob(raw: unknown): UpdateJob | null {
   if (!raw || typeof raw !== "object") return null;
@@ -121,7 +122,9 @@ export function parseUpdateJob(raw: unknown): UpdateJob | null {
     reason: typeof value.reason === "string" ? value.reason : null,
     cleanup_pending: value.cleanup_pending === true, cancel_requested: value.cancel_requested === true,
     cleanup_reason: typeof value.cleanup_reason === "string" ? value.cleanup_reason : null,
-    updated_at: typeof value.updated_at === "number" ? value.updated_at : undefined };
+    updated_at: typeof value.updated_at === "number" ? value.updated_at : undefined,
+    coordinated: value.coordinated === true,
+    server_phase: PHASES.has(value.server_phase as UpdatePhase) ? value.server_phase as UpdatePhase : null };
 }
 export function parseAppUpdate(raw: unknown): AppUpdateState {
   if (!raw || typeof raw !== "object") throw new Error("invalid_request");
@@ -154,7 +157,7 @@ export class AppUpdateClient {
   close() { this.controller.abort(); }
   async call(command?: Record<string, string>): Promise<Record<string, unknown>> {
     const timeout = new AbortController();
-    const timer = setTimeout(() => timeout.abort(), 35_000);
+    const timer = setTimeout(() => timeout.abort(), command?.op === "authorize" ? 105_000 : 35_000);
     try {
       const response = await this.fetcher.call(globalThis, this.scope === "server" ? "/api/server-updates" : `/api/updates/${encodeURIComponent(this.machine)}`, {
         method: command ? "POST" : "GET", credentials: "same-origin", cache: "no-store",
@@ -164,7 +167,10 @@ export class AppUpdateClient {
       });
       if (response.status === 404) throw new Error("unsupported");
       if (response.status === 401) throw new Error("unauthorized");
-      if (response.status === 403) throw new Error(this.scope === "server" ? "server_forbidden" : "forbidden");
+      if (response.status === 403) {
+        const body = await response.json().catch(() => null) as Record<string, unknown> | null;
+        throw new Error(body?.reason === "server_forbidden" || this.scope === "server" ? "server_forbidden" : "forbidden");
+      }
       const body = await response.json() as Record<string, unknown>;
       if (!body || typeof body !== "object") throw new Error("invalid_request");
       if (!response.ok || body.ok === false) throw new Error(typeof body.reason === "string" ? body.reason : "network");
@@ -195,7 +201,7 @@ export function appUpdateFeedback(state: AppUpdateState | null, now = Date.now()
   return undefined;
 }
 
-export interface UpdateIntent { id: string; version: string; reason?: string }
+export interface UpdateIntent { id: string; version: string; reason?: string; coordinated?: boolean }
 export type UpdateReceipt = { status: "found"; job: UpdateJob } | { status: "missing" };
 export function parseUpdateReceipt(raw: Record<string, unknown>, intent: UpdateIntent): UpdateReceipt {
   if (raw.job_id === intent.id) {
@@ -216,7 +222,7 @@ export class UpdateIntentStore {
     try {
       const value = JSON.parse(this.storage?.getItem(this.key) ?? "null") as UpdateIntent | null;
       return value && typeof value.id === "string" && /^[a-f0-9]{32}$/.test(value.id) && validVersion(value.version)
-        ? { id: value.id, version: value.version,
+        ? { id: value.id, version: value.version, ...(value.coordinated === true ? { coordinated: true } : {}),
           ...(typeof value.reason === "string" && value.reason.length <= 64 ? { reason: value.reason } : {}) } : null;
     } catch { return null; }
   }

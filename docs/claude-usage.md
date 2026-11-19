@@ -4,6 +4,10 @@ The quota meter reads the Wrapper's account cache on session focus/reconnect,
 when opened or refreshed, and once per minute while the Claude page is visible.
 Native `RateLimitEvent` updates remain enabled. Active helper queries are **off
 by default**, even if a helper is already configured or the cache is empty.
+The subscription badge can use Claude Code's saved account display name for the
+selected profile while active queries are disabled. Only the display name is
+sent to the browser. It reflects the last account information saved by Claude
+Code, and a display name from a successful helper read takes precedence.
 For an opted-in account, these same reads also refresh through its helper, with
 a 15-second minimum interval, including failures, across sessions and clients.
 Neither path sends a prompt, resumes an engine, modifies history, interrupts
@@ -63,11 +67,13 @@ and stdout to 64 KiB. Stderr and raw errors are never shown or logged.
 
 ```json
 {
+  "plan_display_name": "Ultra",
   "five_hour": {"utilization": 37, "resets_at": "2026-10-01T12:00:00Z"},
   "seven_day": {"utilization": 12.5, "resets_at": "2026-10-05T12:00:00Z"},
   "monthly": {"utilization": 16, "resets_at": "2026-11-01T00:00:00Z"},
   "seven_day_opus": null,
-  "seven_day_sonnet": null
+  "seven_day_sonnet": null,
+  "seven_day_fable": {"utilization": 20, "resets_at": "2026-10-05T12:00:00Z"}
 }
 ```
 
@@ -77,6 +83,13 @@ null means unknown. A null window clears its cached value. Unknown fields,
 account details and paid-credit balances are discarded. Newer native events
 win over older in-flight HTTP results. Invalid results do not replace valid
 observations. Cached windows expire individually at their reset time.
+
+The optional `plan_display_name` comes from the provider's current account
+response for this same login. The Wrapper accepts known display names and
+keeps them in memory for successful helper reads. A helper that only returns
+usage can omit this field. Fable appears with a reported percentage and reset
+time, either as `seven_day_fable` or in the provider's `limits` array as a
+`weekly_scoped` entry with `scope.model.display_name` set to `Fable`.
 
 `monthly` is optional and uses the same percentage/reset fields. It represents
 the provider's actual subscription cycle, never a guessed 30-day duration. A

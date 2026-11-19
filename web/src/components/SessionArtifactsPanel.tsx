@@ -1,4 +1,5 @@
-import { Fragment, lazy, Suspense, useCallback, useEffect, useRef, useState, type ComponentProps } from "react";
+import { Fragment, lazy, Suspense, useCallback, useContext, useEffect, useRef, useState, type ComponentProps } from "react";
+import { PanelVisible } from "../right-panel-presentation";
 import { Icon } from "../icons";
 import { uuid } from "../util";
 import type { Engine, FilePreview, Space, SessionArtifactInfo, SessionArtifacts } from "../protocol";
@@ -32,11 +33,14 @@ type PreviewProps = Omit<ComponentProps<typeof ArtifactPanelType>, "active" | "h
 export default function SessionArtifactsPanel({ sid, engine, space, ws, revision, onListen,
   selected, onSelect, onBack, onClose, preview }: {
   sid: string; engine: Engine; space: Space; ws: RelayWs | null; revision: string;
-  onListen: (listener: ((message: SessionArtifacts | FilePreview) => boolean) | null) => void;
+  onListen: (listener: (message: SessionArtifacts | FilePreview) => boolean) => () => void;
   selected: SessionArtifactInfo | null;
   onSelect: (entry: SessionArtifactInfo) => void; onBack: () => void; onClose: () => void;
   preview: PreviewProps;
 }) {
+  const visible = useContext(PanelVisible);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
   const [entries, setEntries] = useState<SessionArtifactInfo[]>([]);
   const [filter, setFilter] = useState<SessionArtifactInfo["kind"] | "all">("all");
   const [busy, setBusy] = useState(false);
@@ -48,12 +52,14 @@ export default function SessionArtifactsPanel({ sid, engine, space, ws, revision
   const refreshPending = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const firstScan = useRef(false);
+  const catalogLoaded = useRef(false);
+  const requestedRevision = useRef<string | null>(null);
   const paged = useRef(false);
   const lastRequest = useRef<[number | null, boolean, string | null]>([null, false, null]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const hasPreview = !!selected && !!preview.artifact;
   const visibleEntries = filter === "all" ? entries : entries.filter(entry => entry.kind === filter);
-  const thumbnails = useArtifactThumbnails(scrollRef, visibleEntries, !hasPreview, ws, sid, engine, space);
+  const thumbnails = useArtifactThumbnails(scrollRef, visibleEntries, visible && !hasPreview, ws, sid, engine, space);
   const receiveThumbnail = thumbnails.receive;
 
   const request = useCallback((before: number | null = null, scan = false, historyBefore: string | null = null) => {
@@ -77,7 +83,7 @@ export default function SessionArtifactsPanel({ sid, engine, space, ws, revision
   }, [ws, sid, engine, space]);
 
   useEffect(() => {
-    onListen(message => {
+    const unsubscribe = onListen(message => {
       if (message.type === "file_preview") return receiveThumbnail(message);
       const owner = pending.current;
       if (message.sid !== sid || owner?.id !== message.request_id) return false;
@@ -85,6 +91,7 @@ export default function SessionArtifactsPanel({ sid, engine, space, ws, revision
       pending.current = null;
       setBusy(false);
       if (message.error) { setError(message.error); return true; }
+      catalogLoaded.current = true;
       setEntries(current => {
         const merged = new Map(current.map(item => [item.id, item]));
         message.entries.forEach(item => merged.set(item.id, item));
@@ -97,27 +104,37 @@ export default function SessionArtifactsPanel({ sid, engine, space, ws, revision
       if (owner.append) paged.current = true;
       if (owner.scan) setHistory({ before: message.history_before ?? null, more: message.history_more });
       // Paint the durable catalog first; then inspect one bounded history page.
-      if (!firstScan.current) {
+      if (!firstScan.current && visibleRef.current) {
         firstScan.current = true;
         request(null, true);
       }
       return true;
     });
     return () => {
-      onListen(null);
+      unsubscribe();
       if (timer.current) clearTimeout(timer.current);
       pending.current = null;
       refreshPending.current = false;
     };
   }, [onListen, request, sid, receiveThumbnail]);
 
-  useEffect(() => { request(); }, [request, revision]);
   useEffect(() => {
-    if (!busy && !pending.current && refreshPending.current) {
+    if (!visible || requestedRevision.current === revision) return;
+    requestedRevision.current = revision;
+    request();
+  }, [request, revision, visible]);
+  useEffect(() => {
+    if (visible && !busy && !pending.current && catalogLoaded.current && !firstScan.current) {
+      firstScan.current = true;
+      request(null, true);
+    }
+  }, [busy, request, visible]);
+  useEffect(() => {
+    if (visible && !busy && !pending.current && refreshPending.current) {
       refreshPending.current = false;
       request();
     }
-  }, [busy, request]);
+  }, [busy, request, visible]);
   return <PanelFrame className="session-artifacts-panel" label="Artifacts">
     <PanelResizer ariaLabel="调整 Artifacts 面板宽度" />
     <div className="session-artifacts-list" hidden={hasPreview}>

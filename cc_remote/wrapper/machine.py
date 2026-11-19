@@ -63,7 +63,7 @@ from contextlib import AsyncExitStack, contextmanager
 from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from uuid import uuid4
-from typing import BinaryIO, Literal, Optional
+from typing import Literal, Optional
 
 from cc_remote.wrapper import codex_readiness
 from cc_remote.wrapper.artifact_service import ArtifactService
@@ -184,6 +184,7 @@ from cc_remote.wrapper.claude_controls import (
     claude_auto_compact_cli_value,
     valid_claude_alias,
     valid_claude_auto_compact,
+    validate_claude_auto_compact_window,
     valid_claude_model,
     valid_claude_permission,
 )
@@ -206,6 +207,7 @@ from cc_remote.wrapper.claude_runtime import UnsupportedClaudeCliVersion
 from cc_remote.wrapper.claude_rate_limits import (
     ClaudeRateLimitStore,
     ClaudeRateLimitStoreError,
+    read_cached_claude_plan,
 )
 from cc_remote.wrapper.claude_usage import ClaudeUsageError, ClaudeUsageReader
 from cc_remote.wrapper.codex_controls import (
@@ -362,6 +364,7 @@ from cc_remote.wrapper.codex_sessions import (
     CODEX_EXACT_CATALOG_MAX_IDS,
     list_codex_sessions, codex_exact_catalog_rows, codex_session_cwd,
     codex_rollout_path, codex_model, codex_effort, codex_session_settings,
+    codex_session_provider,
     codex_session_presence, codex_session_confirmed_missing,
     codex_missing_sidebar_sessions,
     codex_current_provider,
@@ -437,10 +440,16 @@ from cc_remote.wrapper.process_scan import (
 from cc_remote.wrapper.command_router import CommandRouter, UNHANDLED_COMMAND
 from cc_remote.wrapper.command_scheduler import CommandScheduler
 from cc_remote.wrapper.preview_capabilities import (
-    PREVIEW_PATH_MAX_BYTES,
     PreviewCapability,
     PreviewCapabilityError,
     PreviewCapabilityStore,
+)
+from cc_remote.wrapper.session_files import (
+    PreviewAuthorizationNeeded as _PreviewAuthorizationNeeded,
+    PreviewCapabilityChanged as _PreviewCapabilityChanged,
+    open_session_file,
+    path_is_below,
+    read_session_file,
 )
 from cc_remote.wrapper.transport import WrapperTransport
 
@@ -454,7 +463,7 @@ CODEX_COLLABORATION_MODES = frozenset({"default", "plan"})
 CODEX_FAST_SERVICE_TIERS = frozenset({"fast", "priority"})
 CODEX_EFFORT_RESOLVE_TIMEOUT_SECONDS = 1.0
 CODEX_EFFORT_RESOLVE_RETRY_SECONDS = 30.0
-BTW_DEFAULT_EFFORT = "xhigh"
+CLAUDE_BTW_DEFAULT_EFFORT = "xhigh"
 CODEX_DAEMON_RECOVERY_TIMEOUT_SECONDS = 45.0
 CODEX_TURN_START_RECONCILE_INTERVAL_SECONDS = 0.25
 CODEX_TURN_START_RECONCILE_DEADLINE_SECONDS = 120.0
@@ -1169,6 +1178,13 @@ def _merge_codex_history_image_views(
     if not views:
         return merged
 
+    replaced = {item_id for view in views for item_id in view.replaces_item_ids}
+    if replaced:
+        merged = [row for row in merged if not (
+            row.get("type") == "process" and row.get("item_id") in replaced
+            and _normalized_tool_name(row.get("tool")) == "viewimage"
+        )]
+
     official_indexes: list[int] = []
     for index, row in enumerate(merged):
         if (
@@ -1553,19 +1569,6 @@ class _FileRevisionConflict(RuntimeError):
         self.size = size
         self.mtime_ns = mtime_ns
         self.revision = revision
-
-
-class _PreviewAuthorizationNeeded(ValueError):
-    """An otherwise valid preview points outside cwd without a capability."""
-
-    def __init__(self, path: str, resolved_path: str):
-        super().__init__("外部文件需要确认后才能预览")
-        self.path = path
-        self.resolved_path = resolved_path
-
-
-class _PreviewCapabilityChanged(_PreviewAuthorizationNeeded):
-    """The exact file identity previously authorized no longer matches."""
 
 
 @dataclass(frozen=True)
@@ -2033,7 +2036,7 @@ class WrapperMachine:
     HTML_PREVIEW_SUFFIXES = frozenset({".htm", ".html"})
     OFFICE_PREVIEW_SUFFIXES = frozenset({
         ".doc", ".docx", ".odt", ".rtf", ".xls", ".xlsx", ".ods",
-        ".ppt", ".pptx", ".odp",
+        ".ppt", ".odp",
     })
     OFFICE_PREVIEW_INPUT_MAX_BYTES = 32 * 1024 * 1024
     OFFICE_PREVIEW_TIMEOUT_SECONDS = 45
@@ -2443,6 +2446,9 @@ class WrapperMachine:
         self._codex_session_list_cache: (
             tuple[float, list[dict], tuple[tuple[str, str], ...]] | None
         ) = None
+        self._codex_sidebar_archive_states: OrderedDict[
+            tuple[str, str], bool | None
+        ] = OrderedDict()
         self._codex_session_list_epoch = 0
         self._codex_session_list_reads: dict[
             tuple[int, bool], tuple[asyncio.Task, dict[str, int], int]
@@ -3348,6 +3354,37 @@ class WrapperMachine:
             return None
         return str(profile.home)
 
+    async def _known_codex_session_model_provider(
+        self, profile: CodexProfile, native_sid: str,
+        ctx: Optional[SessionContext] = None,
+    ) -> Optional[str]:
+        provider = getattr(ctx.sdk, "model_provider", None) if ctx is not None else None
+        if not provider:
+            provider = await asyncio.to_thread(
+                codex_session_provider, native_sid, codex_home=self._codex_home(profile))
+        if (not isinstance(provider, str) or not provider.strip()
+                or len(provider) > 256 or any(ord(char) < 32 for char in provider)):
+            return None
+        return "openai" if provider == "cc_remote_openai_http" else provider.strip()
+
+    async def _codex_session_model_provider(
+        self, profile: CodexProfile, native_sid: str,
+        ctx: Optional[SessionContext] = None,
+    ) -> str:
+        provider = await self._known_codex_session_model_provider(profile, native_sid, ctx)
+        if provider:
+            return provider
+        result = await self._codex_rpc_for_profile(
+            profile, "thread/read", {"threadId": native_sid, "includeTurns": False})
+        thread = result.get("thread") if isinstance(result, dict) else None
+        if not isinstance(thread, dict) or thread.get("id") != native_sid:
+            raise RuntimeError("Codex 未返回目标会话的模型提供方")
+        provider = thread.get("modelProvider")
+        if (not isinstance(provider, str) or not provider.strip()
+                or len(provider) > 256 or any(ord(char) < 32 for char in provider)):
+            raise RuntimeError("Codex 会话的模型提供方无法确认")
+        return "openai" if provider == "cc_remote_openai_http" else provider.strip()
+
     async def _resolve_codex_profile_model(
         self,
         profile: CodexProfile,
@@ -3355,8 +3392,9 @@ class WrapperMachine:
         *,
         explicit: bool = False,
         catalog: Optional[list[dict]] = None,
+        model_provider: Optional[str] = None,
     ) -> tuple[Optional[str], bool]:
-        """Resolve a model inside exactly one Codex account namespace.
+        """Resolve a model inside one Codex account/provider namespace.
 
         A non-empty catalog proves availability. Explicit unavailable choices
         fail closed; implicit/retired values follow that account's advertised
@@ -3366,11 +3404,10 @@ class WrapperMachine:
         """
         if catalog is None:
             home = self._codex_home(profile)
-            catalog = (
-                await codex_catalog()
-                if home is None
-                else await codex_catalog(codex_home=home)
-            )
+            kwargs = {} if home is None else {"codex_home": home}
+            if model_provider is not None:
+                kwargs["model_provider"] = model_provider
+            catalog = await codex_catalog(**kwargs)
         catalog_ids = {
             item["id"] for item in catalog
             if isinstance(item.get("id"), str) and item["id"]
@@ -3381,7 +3418,7 @@ class WrapperMachine:
             raise _UnsupportedCodexModel(candidate)
         if candidate and catalog_ids:
             home = self._codex_home(profile)
-            provider = await asyncio.to_thread(
+            provider = model_provider or await asyncio.to_thread(
                 codex_current_provider,
                 **({} if home is None else {"codex_home": home}),
             )
@@ -4703,6 +4740,14 @@ class WrapperMachine:
             # app-server. Discard an alias-free materialized page and advance
             # the browser revision before it can race this identity update.
             self._bump_codex_projection_revision(session_id, aliases_only=True)
+        if native_message_id is not None:
+            # A validated no-op from put() also proves this exact identity is
+            # durable. Retire the matching pending proof in either case.
+            proof = ctx.codex_pending_steer_user_identities.get(native_message_id)
+            if (isinstance(proof, CodexSteerUserIdentityProof)
+                    and proof.native_turn_id == native_turn_id
+                    and proof.client_message_id == client_message_id):
+                ctx.codex_pending_steer_user_identities.pop(native_message_id, None)
         return inserted
 
     async def _remember_codex_initial_turn_alias(
@@ -4782,18 +4827,16 @@ class WrapperMachine:
                 continue
             if (aliases.native_messages.get(native_message_id) == client_message_id
                     and aliases.native_message_turns.get(native_message_id) == native_turn_id):
-                continue
+                if ctx is None or native_message_id not in ctx.codex_pending_steer_user_identities:
+                    continue
             if ctx is not None:
-                inserted = await self._remember_codex_client_message_id(
+                await self._remember_codex_client_message_id(
                     ctx,
                     native_turn_id,
                     client_message_id,
                     native_message_id=native_message_id,
                     source_path=source_path,
                 )
-                if inserted:
-                    ctx.codex_pending_steer_user_identities.pop(
-                        native_message_id, None)
                 continue
             store = getattr(self, "_codex_client_messages", None)
             if store is None:
@@ -4853,7 +4896,13 @@ class WrapperMachine:
                 or uncertain_match
             )
         )
-        if not (initial_query_match or steer_match):
+        # A terminal retry keeps the proof already admitted by this generation
+        # even after its original turn/steer ownership has been released.
+        retained_match = (
+            ctx.codex_pending_steer_user_identities.get(proof.native_message_id)
+            is proof
+        )
+        if not (initial_query_match or steer_match or retained_match):
             return False
         if proof.kind == "steer" and uncertain_match:
             await self._confirm_uncertain_codex_steer_identity(
@@ -4909,7 +4958,6 @@ class WrapperMachine:
             source_path=source_path,
         )
         if inserted:
-            pending_identities.pop(proof.native_message_id, None)
             sid = self._ctx_wire_sid(ctx)
             if sid:
                 self._schedule_history_refresh(
@@ -7618,6 +7666,17 @@ class WrapperMachine:
         # enforce its own threshold when the next normal turn starts.
         return total is not None and target is not None and total >= target
 
+    @staticmethod
+    async def _claude_context_ceiling(ctx: SessionContext) -> int | None:
+        reader = getattr(ctx.sdk, "get_model_context_window", None)
+        if callable(reader):
+            try:
+                return await reader(ctx.cwd)
+            except Exception:
+                return None
+        maximum = getattr(ctx.sdk, "model_context_max_tokens", None)
+        return maximum if type(maximum) is int and maximum > 0 else None
+
     async def _compact_managed_claude_context(
         self,
         ctx: SessionContext,
@@ -7733,6 +7792,21 @@ class WrapperMachine:
             return await self._publish_claude_auto_compact(ctx, force=True)
         if ctx.auto_compact_phase == "blocked":
             return await self._publish_claude_auto_compact(ctx, force=True)
+
+        maximum = await self._claude_context_ceiling(ctx) if current.mode == "custom" else None
+        if (current.mode == "custom" and maximum is None
+                and isinstance(ctx.sdk, SdkHandle)):
+            ctx.auto_compact_phase = "blocked"
+            ctx.auto_compact_error = "尚未读取到模型最大窗口，请稍后重试或跟随 Claude"
+            event, _ = await self._publish_claude_auto_compact(ctx, force=True)
+            return event, False
+        try:
+            validate_claude_auto_compact_window(current.mode, current.threshold_tokens, maximum)
+        except ValueError as exc:
+            ctx.auto_compact_phase = "blocked"
+            ctx.auto_compact_error = str(exc)
+            event, _ = await self._publish_claude_auto_compact(ctx, force=True)
+            return event, False
 
         sdk = ctx.sdk
         old_applied = (current.applied_mode, current.applied_threshold_tokens)
@@ -10126,12 +10200,7 @@ class WrapperMachine:
 
     # ---- emit (per-ctx seq + buffer + best-effort send), serialized per ctx ----
 
-    @staticmethod
-    def _path_is_below(root: str, candidate: str) -> bool:
-        try:
-            return os.path.commonpath((root, candidate)) == root
-        except ValueError:
-            return False
+    _path_is_below = staticmethod(path_is_below)
 
     def _normalize_preview_write_event(self, msg) -> tuple[str, ...]:
         """Decorate one write ToolUse without granting filesystem access.
@@ -14818,6 +14887,7 @@ class WrapperMachine:
                             and ctx.session_id not in self._watch):
                         await self._watch_session(ctx.session_id)
                 await self._poll_watches_once()
+                await self._poll_codex_sidebar_archive_states()
                 await self._refresh_timed_tasks()
                 await self._refresh_codex_background_processes()
             except asyncio.CancelledError:
@@ -17584,8 +17654,15 @@ class WrapperMachine:
     ) -> list[dict]:
         """Add rollout-only image views while preserving official detail."""
         try:
-            locator = self._codex_history.rollout_fallback(
-                sid, visible_turn_id)
+            try:
+                locator = self._codex_history.rollout_fallback(sid, visible_turn_id)
+                native_turn_id, segment_index = locator.native_turn_id, locator.segment_index
+            except (AttributeError, CodexHistoryCursorError):
+                native_segment = self._codex_detail_pages.native_segment(
+                    sid, visible_turn_id, self._history_revision(sid))
+                if native_segment is None:
+                    return list(rows)
+                native_turn_id, segment_index = native_segment
             path = await asyncio.to_thread(
                 self._codex_rollout_for_wire, sid)
             if not path:
@@ -17595,8 +17672,8 @@ class WrapperMachine:
             cache_key = (
                 sid,
                 source.path,
-                locator.native_turn_id,
-                locator.segment_index,
+                native_turn_id,
+                segment_index,
             )
             cached = self._codex_history_image_views.get(cache_key)
             views: tuple[CodexHistoryImageView, ...] | None = None
@@ -17619,8 +17696,8 @@ class WrapperMachine:
                 views = await asyncio.to_thread(
                     codex_history_image_views,
                     path,
-                    locator.native_turn_id,
-                    segment_index=locator.segment_index,
+                    native_turn_id,
+                    segment_index=segment_index,
                 )
                 parsed = True
 
@@ -17654,8 +17731,8 @@ class WrapperMachine:
                     views = await asyncio.to_thread(
                         codex_history_image_views,
                         path,
-                        locator.native_turn_id,
-                        segment_index=locator.segment_index,
+                        native_turn_id,
+                        segment_index=segment_index,
                     )
                     parsed = True
             merged = _merge_codex_history_image_views(rows, views)
@@ -17710,6 +17787,8 @@ class WrapperMachine:
                             previous_item_id=view.previous_item_id,
                             next_item_id=view.next_item_id,
                             source_complete=view.source_complete,
+                            replaces_item_ids=view.replaces_item_ids,
+                            source_offset=view.source_offset,
                         )
                         for view in views
                     ),
@@ -17811,6 +17890,7 @@ class WrapperMachine:
                                       max(512 * 1024, self.cfg.ws_max_size_bytes // 2)),
                         tool_result_max=self.cfg.tool_result_max,
                         paginate=_turn_detail_page,
+                        supplement=_merge_codex_history_image_views,
                     )
                     if self._history_revision(sid) != revision:
                         raise CodexDetailCursorExpired("history revision changed")
@@ -18180,9 +18260,13 @@ class WrapperMachine:
                 rows = list(fallback_official_rows)
                 indexed_turn_id = cmd.turn_id
                 detail_snapshot = None
-        if is_codex and detail_snapshot is None:
-            rows = await self._supplement_codex_history_image_views(
-                sid, cmd.turn_id, rows)
+        if is_codex:
+            supplemented = await self._supplement_codex_history_image_views(sid, cmd.turn_id, rows)
+            if supplemented != rows:
+                # Added rows need their own stable event pagination rather than
+                # the unsupplemented SQLite snapshot's numeric coordinates.
+                detail_snapshot = None
+            rows = supplemented
         try:
             page, has_more, oldest, has_newer, newer = _turn_detail_page(
                 rows,
@@ -18592,8 +18676,8 @@ class WrapperMachine:
         engine = "codex" if is_codex else "claude"
         try:
             if is_codex:
-                official_rows = self._codex_history.summary_events(
-                    sid, cmd.turn_id)
+                summary_events = getattr(self._codex_history, "summary_events", None)
+                official_rows = summary_events(sid, cmd.turn_id) if callable(summary_events) else None
                 if official_rows is not None:
                     official_image = history_image_from_events(
                         official_rows, cmd.turn_id, cmd.image_id)
@@ -20072,7 +20156,7 @@ class WrapperMachine:
         return normalize_claude_model_selection(model), None
 
     async def _handle_get_models(self, cmd) -> None:
-        """Answer with the engine's catalog and effective new-session defaults.
+        """Answer with the requested account/thread provider's model catalog.
 
         Codex uses model/list; Claude exposes its picker in the initialization
         response. Neither discovery starts a model turn or resumes a session.
@@ -20081,6 +20165,8 @@ class WrapperMachine:
         claude_profile = None
         codex_profile = None
         codex_home = None
+        model_provider = None
+        models_sid = getattr(cmd, "sid", None) if engine == "codex" else None
         if engine in {"cc", "claude"}:
             try:
                 claude_profile = self._claude_profile(
@@ -20096,8 +20182,13 @@ class WrapperMachine:
                 return error
         if engine == "codex":
             try:
-                codex_profile = self._codex_profile(
-                    getattr(cmd, "codex_profile_id", None))
+                requested_profile = getattr(cmd, "codex_profile_id", None)
+                if models_sid:
+                    codex_profile, native_sid = self._codex_target(models_sid)
+                    if requested_profile is not None and requested_profile != codex_profile.id:
+                        raise ValueError("Codex session/profile mismatch")
+                else:
+                    codex_profile = self._codex_profile(requested_profile)
             except ValueError:
                 error = Error(
                     code=ERR_AUTH,
@@ -20108,19 +20199,35 @@ class WrapperMachine:
                 await self.transport.send(error)
                 return error
             codex_home = self._codex_home(codex_profile)
+            if models_sid:
+                try:
+                    model_provider = await self._codex_session_model_provider(
+                        codex_profile, native_sid, self.sessions.get(models_sid))
+                except Exception:
+                    msg = Models(
+                        engine=engine, sid=models_sid, models=[],
+                        codex_profile_id=codex_profile.id,
+                        error="模型提供方读取失败，请重试。",
+                        to=getattr(cmd, "client_id", None),
+                    )
+                    await self.transport.send(msg)
+                    return msg
         # Page reloads, reconnects and opening the picker are explicit reads.
         # They must bypass the internal effort cache so newly available models
-        # appear immediately. The catalog coalesces concurrent reads per home.
-        models = (
-            await codex_catalog(force=True)
-            if engine == "codex" and codex_home is None
-            else await codex_catalog(force=True, codex_home=codex_home)
-            if engine == "codex" else []
-        )
+        # appear immediately. Reads coalesce within the same home/provider.
+        catalog_kwargs = {} if codex_home is None else {"codex_home": codex_home}
+        if model_provider is not None:
+            catalog_kwargs["model_provider"] = model_provider
+        models = await codex_catalog(force=True, **catalog_kwargs) if engine == "codex" else []
         default_model = None
         default_effort = None
         defaults_cwd = None
-        if engine == "codex":
+        if engine == "codex" and models_sid:
+            default_model = _codex_catalog_default_model(models)
+            selected = next((item for item in models if item.get("id") == default_model), None)
+            if selected:
+                default_effort = selected.get("default_effort")
+        elif engine == "codex":
             # Report the same profile-scoped defaults _spawn will apply. A stale
             # configured model follows this account's catalog default; an empty
             # catalog preserves config because availability is then unknown.
@@ -20184,7 +20291,7 @@ class WrapperMachine:
             # No cwd is Work's catalog-only request. Its native policy owns the
             # default; do not read Code settings or overwrite Code's cwd cache.
         msg = Models(
-            engine=engine, models=models, default_model=default_model,
+            engine=engine, sid=models_sid, models=models, default_model=default_model,
             default_effort=default_effort, cwd=defaults_cwd,
             claude_profile_id=(
                 claude_profile.id if claude_profile else None),
@@ -20732,8 +20839,8 @@ class WrapperMachine:
         """Resolve app-server's nullable thread effort into a stable readout.
 
         ``reasoningEffort: null`` means "no thread override", not "the control
-        is still loading". Prefer a wrapper-owned explicit choice (notably BTW's
-        default), then app-server's effective configured fallback. If no
+        is still loading". Prefer a user-supplied explicit choice, then
+        app-server's effective configured fallback. If no
         configured level exists, publish a truthful model-default sentinel while
         leaving ``sdk.effort`` unset so turn/start keeps following app-server.
         """
@@ -20778,6 +20885,9 @@ class WrapperMachine:
         profile = self._codex_profile_for_ctx(ctx)
         home = self._codex_home(profile)
         kwargs = {} if home is None else {"codex_home": home}
+        provider = getattr(sdk, "model_provider", None)
+        if provider is not None:
+            kwargs["model_provider"] = provider
         resolved: Optional[str] = None
         if explicit:
             try:
@@ -20847,6 +20957,9 @@ class WrapperMachine:
             # model-default until the next scoped probe resolves it.
             return _session_effort(ctx) or MODEL_DEFAULT_EFFORT
 
+        if explicit and resolved is None:
+            sdk.effort = None
+            sdk.applied_effort = None
         if isinstance(resolved, str) and resolved.strip():
             resolved = resolved.strip()
             # A concrete configured default is presentation state, not a thread
@@ -20882,7 +20995,7 @@ class WrapperMachine:
         return MODEL_DEFAULT_EFFORT
 
     async def _apply_codex_effort(self, ctx, effort: Optional[str]) -> Optional[str]:
-        """Clamp `effort` to what ctx's codex model supports and apply it to the live
+        """Resolve `effort` against the native catalog and apply it to the live
         handle. Returns the APPLIED level (may differ from the request); the caller
         announces it. Doesn't touch ctx.announced_effort.
 
@@ -20893,13 +21006,15 @@ class WrapperMachine:
         config.toml either."""
         profile = self._codex_profile_for_ctx(ctx)
         home = self._codex_home(profile)
+        kwargs = {} if home is None else {"codex_home": home}
+        provider = getattr(ctx.sdk, "model_provider", None)
+        if provider is not None:
+            kwargs["model_provider"] = provider
         applied = await clamp_effort(
             getattr(ctx.sdk, "model", None),
             effort,
-            **({} if home is None else {"codex_home": home}),
+            **kwargs,
         )
-        if not applied:
-            return applied
         # Persist through app-server's official thread setting. turn/start repeats
         # it defensively, but a restart/eviction no longer loses the selection.
         authoritative_update = await ctx.sdk.set_effort(applied)
@@ -20927,7 +21042,7 @@ class WrapperMachine:
         if control_error is not None:
             return control_error
         if ctx.engine == "codex":
-            applied = await self._apply_codex_effort(ctx, cmd.effort) or cmd.effort
+            applied = await self._apply_codex_effort(ctx, cmd.effort) or MODEL_DEFAULT_EFFORT
             ctx.announced_effort = applied
             event = Effort(effort=applied)
             await self._emit(ctx, event)
@@ -21021,7 +21136,8 @@ class WrapperMachine:
                 await self._emit(ctx, error)
                 return error
             previous = (settings.max_tokens, settings.threshold, settings.window,
-                        settings.pending, settings.apply_attempted, settings.error)
+                        settings.pending, settings.apply_attempted, settings.error,
+                        settings.attempted_at, settings.attempted_model)
             try:
                 await settings.select(ctx.sdk, cmd.max_context_tokens)
                 if self._codex_controls is None:
@@ -21030,7 +21146,8 @@ class WrapperMachine:
                     self._ctx_wire_sid(ctx), settings.max_tokens, settings.window)
             except Exception as exc:
                 (settings.max_tokens, settings.threshold, settings.window,
-                 settings.pending, settings.apply_attempted, settings.error) = previous
+                 settings.pending, settings.apply_attempted, settings.error,
+                 settings.attempted_at, settings.attempted_model) = previous
                 settings.error = str(exc)[:1024]
                 return await self._publish_codex_context(ctx)
             if ctx.state == "idle":
@@ -21086,14 +21203,24 @@ class WrapperMachine:
                 await self._emit(ctx, error)
                 return event, error
 
-            setter = getattr(ctx.sdk, "set_auto_compact", None)
-            if callable(setter):
-                setter(cmd.mode, cmd.threshold_tokens)
-            else:
-                # Compatibility for narrow test/embedded adapters. Protocol
-                # validation has already bounded both values.
-                ctx.sdk.auto_compact_mode = cmd.mode
-                ctx.sdk.auto_compact_threshold_tokens = cmd.threshold_tokens
+            maximum = await self._claude_context_ceiling(ctx) if cmd.mode == "custom" else None
+            try:
+                if (cmd.mode == "custom" and maximum is None
+                        and isinstance(ctx.sdk, SdkHandle)):
+                    raise ValueError("尚未读取到模型最大窗口，请稍后重试或跟随 Claude")
+                validate_claude_auto_compact_window(cmd.mode, cmd.threshold_tokens, maximum)
+                setter = getattr(ctx.sdk, "set_auto_compact", None)
+                if callable(setter):
+                    setter(cmd.mode, cmd.threshold_tokens)
+                else:
+                    ctx.sdk.auto_compact_mode = cmd.mode
+                    ctx.sdk.auto_compact_threshold_tokens = cmd.threshold_tokens
+            except ValueError as exc:
+                error = Error(code=ERR_BAD_PROMPT, message=str(exc),
+                              request_id=getattr(cmd, "cmd_id", None),
+                              to=getattr(cmd, "client_id", None))
+                await self._emit(ctx, error)
+                return error
             ctx.auto_compact_error = None
             ctx.auto_compact_phase = "waiting_terminal"
             ctx.auto_compact_compaction_done = False
@@ -22414,8 +22541,6 @@ class WrapperMachine:
         prefer_cached_claude: bool = False,
         claude_summary: dict | None = None,
     ):
-        if ctx.engine == "codex":
-            await self._publish_codex_context(ctx)
         try:
             context_source: Literal[
                 "control", "cached_control", "recent_turn"
@@ -22620,6 +22745,10 @@ class WrapperMachine:
                         return event
             else:
                 usage = await ctx.sdk.get_context_usage()
+            if ctx.engine == "claude":
+                model_max = await self._claude_context_ceiling(ctx)
+                if model_max is not None:
+                    usage = {**usage, "modelMaxTokens": model_max}
             if ctx.engine == "claude" and context_source == "control":
                 await self._reconcile_claude_context_fallback(ctx, usage)
             work_fields: dict[str, int | float] = {}
@@ -22646,6 +22775,8 @@ class WrapperMachine:
                         "session_percentage": session_percentage,
                     }
             if ctx.engine == "codex":
+                # A fresh native sample may have confirmed a shared resume.
+                await self._publish_codex_context(ctx)
                 raw_used = usage.get("used_tokens")
                 raw_win = usage.get("context_window")
                 available = (
@@ -22697,6 +22828,7 @@ class WrapperMachine:
                 is_auto_compact_enabled=usage.get("isAutoCompactEnabled"),
                 auto_compact_threshold_tokens=auto_threshold,
                 raw_max_tokens=physical_max,
+                model_max_tokens=usage.get("modelMaxTokens"),
                 categories=usage.get("categories", []) or [],
                 **work_fields,
             )
@@ -22807,7 +22939,14 @@ class WrapperMachine:
             if failure == "usage helper unavailable":
                 query_state = "unconfigured"
                 failure = None
-        windows = await self._claude_rate_limit_snapshot(ctx)
+        native_plan = await asyncio.to_thread(
+            read_cached_claude_plan, self._claude_config_root(profile),
+            isolate_account_env=self._claude_profiles_explicit,
+        )
+        windows = await self._claude_rate_limit_snapshot(
+            ctx, include_plan=query_state == "enabled" and failure is None,
+            native_plan=native_plan,
+        )
         report = StatusReport(
             thread={"thread_id": ctx.session_id or ctx.key,
                     "session_id": ctx.session_id,
@@ -22815,6 +22954,7 @@ class WrapperMachine:
             runtime={}, context={},
             rate_limits=[{
                 "limit_id": update.limit_id, "limit_name": update.name,
+                "plan_type": update.plan_type,
                 "rate_limit_reached_type": update.reached_type,
                 "primary": update.primary, "secondary": update.secondary,
                 "monthly": update.monthly,
@@ -23008,18 +23148,23 @@ class WrapperMachine:
         await self._emit(ctx, event)
 
     async def _claude_rate_limit_snapshot(
-        self, ctx: SessionContext,
+        self, ctx: SessionContext, *, include_plan: bool = False,
+        native_plan: str | None = None,
     ) -> tuple[RateLimitUpdate, ...]:
         store = self._claude_rate_limit_stores.get(
             self._claude_profile_for_ctx(ctx).id)
-        if store is None:
+        if store is not None:
+            async with self._claude_rate_limit_lock:
+                try:
+                    return await asyncio.to_thread(
+                        store.snapshot, include_plan=include_plan,
+                        native_plan=native_plan,
+                    )
+                except ClaudeRateLimitStoreError:
+                    log.warning("Claude rate-limit snapshot unavailable")
+        if native_plan is None:
             return ()
-        async with self._claude_rate_limit_lock:
-            try:
-                return await asyncio.to_thread(store.snapshot)
-            except ClaudeRateLimitStoreError:
-                log.warning("Claude rate-limit snapshot unavailable")
-                return ()
+        return (RateLimitUpdate(limit_id="claude", name="Claude", plan_type=native_plan),)
 
     async def _seed_claude_rate_limits(
         self, ctx: SessionContext,
@@ -26972,7 +27117,9 @@ class WrapperMachine:
             if selected is None:
                 await self._record_claude_plan_permission(ctx, tool_input, permission_context, denied=True)
                 return PermissionResultDeny(message="用户要求继续修改计划。")
-            return PermissionResultAllow(updated_permissions=[PermissionUpdate(type="setMode", mode=selected)])
+            return PermissionResultAllow(updated_permissions=[PermissionUpdate(
+                type="setMode", mode=selected, destination="session",
+            )])
         if tool_name == "AskUserQuestion":
             return await self._on_claude_ask_user_question(ctx, tool_input)
 
@@ -27083,129 +27230,8 @@ class WrapperMachine:
             log.info("ask_user answered", ask_id=cmd.ask_id)
             return None
 
-    @staticmethod
-    def _open_session_file(
-        cwd: str,
-        path: str,
-        *,
-        allowed_suffixes: Optional[frozenset[str]],
-        max_bytes: int,
-        allow_truncate: bool,
-        allowed_external_paths: Optional[
-            dict[str, PreviewCapability]
-        ] = None,
-    ) -> tuple[str, BinaryIO, os.stat_result]:
-        """Open a bounded regular file below cwd without following an escape.
-
-        ``realpath`` contains relative or tool-reported absolute paths inside
-        the session root while rejecting symlinks that escape it. ``O_NONBLOCK``
-        prevents a malicious FIFO from hanging the wrapper before ``fstat`` can
-        reject the special file.
-        """
-        if path.startswith("~"):
-            raise ValueError("预览路径必须位于当前工作目录")
-        try:
-            path_bytes = len(path.encode("utf-8", "surrogatepass"))
-        except UnicodeEncodeError as exc:
-            raise ValueError("预览路径无效") from exc
-        if (
-            not path
-            or "\x00" in path
-            or path_bytes > PREVIEW_PATH_MAX_BYTES
-        ):
-            raise ValueError("预览路径过长")
-
-        root = os.path.realpath(cwd)
-        candidate = os.path.realpath(
-            path if os.path.isabs(path) else os.path.join(root, path))
-        if (
-            len(candidate.encode("utf-8", "surrogatepass"))
-            > PREVIEW_PATH_MAX_BYTES
-        ):
-            raise ValueError("预览路径过长")
-        inside_root = WrapperMachine._path_is_below(root, candidate)
-
-        suffix = os.path.splitext(candidate)[1].lower()
-        if allowed_suffixes is not None and suffix not in allowed_suffixes:
-            raise ValueError("不支持预览该文件类型")
-        capability = (
-            (allowed_external_paths or {}).get(candidate)
-            if not inside_root else None
-        )
-        if not inside_root and capability is None:
-            raise _PreviewAuthorizationNeeded(path, candidate)
-
-        access_root = root if inside_root else os.path.dirname(candidate)
-        relative = (os.path.relpath(candidate, root)
-                    if inside_root else os.path.basename(candidate))
-        display_path = relative.replace(os.sep, "/") if inside_root else candidate
-        if relative in ("", "."):
-            raise ValueError("预览目标必须是普通文件")
-        parts = relative.split(os.sep)
-        file_flags = os.O_RDONLY
-        file_flags |= getattr(os, "O_CLOEXEC", 0)
-        file_flags |= getattr(os, "O_NONBLOCK", 0)
-        file_flags |= getattr(os, "O_NOFOLLOW", 0)
-        dir_flags = os.O_RDONLY
-        dir_flags |= getattr(os, "O_CLOEXEC", 0)
-        dir_flags |= getattr(os, "O_DIRECTORY", 0)
-        dir_flags |= getattr(os, "O_NOFOLLOW", 0)
-        dir_fd: Optional[int] = None
-        try:
-            # Walk from an already-open cwd and refuse symlinks at every hop.
-            # This closes the realpath/open race where a parent directory could
-            # otherwise be replaced by an escaping symlink between both calls.
-            dir_fd = os.open(access_root, dir_flags)
-            for part in parts[:-1]:
-                next_fd = os.open(part, dir_flags, dir_fd=dir_fd)
-                os.close(dir_fd)
-                dir_fd = next_fd
-            fd = os.open(parts[-1], file_flags, dir_fd=dir_fd)
-        except FileNotFoundError as exc:
-            raise ValueError("文件不存在") from exc
-        except PermissionError as exc:
-            raise ValueError("没有权限读取该文件") from exc
-        except OSError as exc:
-            raise ValueError("无法打开该文件") from exc
-        finally:
-            if dir_fd is not None:
-                os.close(dir_fd)
-
-        try:
-            file_stat = os.fstat(fd)
-            if not stat.S_ISREG(file_stat.st_mode):
-                raise ValueError("预览目标必须是普通文件")
-            if (
-                not inside_root
-                and capability is not None
-                and not capability.matches(file_stat)
-            ):
-                raise _PreviewCapabilityChanged(path, candidate)
-            if not allow_truncate and file_stat.st_size > max_bytes:
-                raise ValueError(
-                    f"预览文件超过 {max_bytes // (1024 * 1024)} MiB 限制")
-            return display_path, os.fdopen(fd, "rb"), file_stat
-        except BaseException:
-            os.close(fd)
-            raise
-
-    @staticmethod
-    def _read_session_file(
-        cwd: str, path: str, *, allowed_suffixes: Optional[frozenset[str]],
-        max_bytes: int, allow_truncate: bool,
-        allowed_external_paths: Optional[dict[str, PreviewCapability]] = None,
-    ) -> tuple[str, bytes, os.stat_result, bool]:
-        display_path, handle, file_stat = WrapperMachine._open_session_file(
-            cwd, path, allowed_suffixes=allowed_suffixes, max_bytes=max_bytes,
-            allow_truncate=allow_truncate, allowed_external_paths=allowed_external_paths)
-        with handle:
-            data = handle.read(max_bytes + 1)
-
-        truncated = len(data) > max_bytes or file_stat.st_size > max_bytes
-        if truncated and not allow_truncate:
-            raise ValueError(
-                f"预览文件超过 {max_bytes // (1024 * 1024)} MiB 限制")
-        return display_path, data[:max_bytes], file_stat, truncated
+    _open_session_file = staticmethod(open_session_file)
+    _read_session_file = staticmethod(read_session_file)
 
     @classmethod
     def _read_text_preview(
@@ -27246,13 +27272,26 @@ class WrapperMachine:
             dict[str, PreviewCapability]
         ] = None,
     ) -> dict[str, object]:
-        """Read or render one artifact entirely on the wrapper host.
+        """Read or convert one artifact for the browser's embedded preview.
 
         The returned dictionary is short-lived and immediately serialized into
         a requester-routed WebSocket response. No artifact or converted preview
         is persisted by the relay/VPS.
         """
         suffix = os.path.splitext(path)[1].lower()
+        if suffix == ".pptx":
+            from cc_remote.wrapper.presentation_preview import validate_presentation_preview
+
+            relative, data, file_stat, _ = cls._read_session_file(
+                cwd, path, allowed_suffixes=frozenset({".pptx"}),
+                max_bytes=ARTIFACT_PREVIEW_MAX_BYTES, allow_truncate=False,
+                allowed_external_paths=allowed_external_paths)
+            validate_presentation_preview(data)
+            return {
+                "path": relative, "format": "presentation", "data": data,
+                "media_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "size": file_stat.st_size, "mtime_ns": file_stat.st_mtime_ns,
+            }
         if suffix == ".xlsx":
             from cc_remote.wrapper.spreadsheet_preview import spreadsheet_preview
 
@@ -27740,6 +27779,8 @@ class WrapperMachine:
             return "html"
         if suffix == ".xlsx":
             return "spreadsheet"
+        if suffix == ".pptx":
+            return "presentation"
         if suffix in cls.OFFICE_PREVIEW_SUFFIXES or suffix == ".pdf":
             return "pdf"
         if suffix in cls.PREVIEW_ASSET_MEDIA_TYPES:
@@ -28153,11 +28194,52 @@ class WrapperMachine:
                 await self._invalidate_session_list("codex", "code")
             except Exception as exc:
                 log.warning(
-                    "Codex CLI thread catalog hint could not be published",
+                    "Codex catalog hint could not be published",
                     profile_id=profile_id,
                     thread_id=native_thread_id,
                     error_type=type(exc).__name__,
                 )
+
+    async def _poll_codex_sidebar_archive_states(self) -> None:
+        """Notice App archive/delete operations even without a shared proxy."""
+        observed = self._codex_sidebar_archive_states
+        if not observed:
+            return
+        by_profile: dict[str, dict[str, bool | None]] = {}
+        for (profile_id, native_sid), archived in observed.items():
+            by_profile.setdefault(profile_id, {})[native_sid] = archived
+
+        changed = False
+        for profile in self._codex_profiles:
+            expected = by_profile.get(profile.id)
+            if not expected:
+                continue
+            native_sids = list(expected)
+            home = self._codex_home(profile)
+            batch_size = CODEX_EXACT_CATALOG_MAX_IDS
+            # One account can retain IDs from multiple sidebar snapshots.
+            for start in range(0, len(native_sids), batch_size):
+                batch = native_sids[start:start + batch_size]
+                current = await asyncio.to_thread(
+                    codex_thread_archive_states, batch, codex_home=home,
+                )
+                if current is None:
+                    continue
+                for native_sid in batch:
+                    archived = expected[native_sid]
+                    key = (profile.id, native_sid)
+                    if key not in observed or observed[key] != archived:
+                        continue
+                    actual = current.get(native_sid)
+                    if actual != archived:
+                        observed[key] = actual
+                        changed = True
+        if changed:
+            # Absence from the index is a read hint. Normal catalog refresh
+            # still verifies the rollout and protects live/pending threads.
+            self._invalidate_codex_session_catalog()
+            await self._invalidate_session_list("codex", "code")
+            await self._invalidate_session_list("codex", "work")
 
     async def _refresh_codex_session_catalog(self) -> list[dict]:
         """Share reads by generation and mode without delaying indexed replies."""
@@ -28287,6 +28369,19 @@ class WrapperMachine:
         self._codex_session_list_cache = (
             time.monotonic(), raw, profile_errors,
         )
+        # Preserve the last observed native state across catalog reads from
+        # other clients so they cannot mask an App change before this poll.
+        observed = self._codex_sidebar_archive_states
+        for row in raw:
+            profile_id = row.get("codex_profile_id")
+            native_sid = row.get("native_session_id")
+            if (isinstance(profile_id, str) and profile_id not in failed_profile_ids
+                    and isinstance(native_sid, str)):
+                key = (profile_id, native_sid)
+                observed.setdefault(key, row.get("tag") == "archived")
+                observed.move_to_end(key)
+        while len(observed) > 2 * self.CODEX_SESSION_LIST_MAX_ROWS:
+            observed.popitem(last=False)
         return raw
 
     @history_timed("codex_sidebar_prune")
@@ -33364,14 +33459,9 @@ class WrapperMachine:
         is_codex = await self._is_codex_session(sid)
         engine = "codex" if is_codex else "claude"
         if engine != requested_engine:
-            error = Error(
-                code=ERR_AUTH,
-                message="会话不属于请求的引擎",
-                sid=sid,
-                to=getattr(cmd, "client_id", None),
+            return await self._send_code_delete_error(
+                cmd, sid, ERR_AUTH, "会话不属于请求的引擎",
             )
-            await self.transport.send(error)
-            return error
         try:
             native_sid, work_profile_id = self._work_session_identity(engine, sid)
         except ValueError:
@@ -33390,14 +33480,9 @@ class WrapperMachine:
                 work_profile_id if engine == "codex" else None),
         )
         if work_record is not None:
-            error = Error(
-                code=ERR_AUTH,
-                message="Work 会话必须从 Work 空间删除",
-                sid=sid,
-                to=getattr(cmd, "client_id", None),
+            return await self._send_code_delete_error(
+                cmd, sid, ERR_AUTH, "Work 会话必须从 Work 空间删除",
             )
-            await self.transport.send(error)
-            return error
         claude_profile: ClaudeProfile | None = None
         if engine == "claude":
             try:
@@ -33540,14 +33625,9 @@ class WrapperMachine:
                 and self._claude_transcript_path(
                     claude_profile, native_sid) is None
             ):
-                error = Error(
-                    code=ERR_NOT_RUNNING,
-                    message="Claude 会话不存在",
-                    sid=sid,
-                    to=getattr(cmd, "client_id", None),
+                return await self._send_code_delete_error(
+                    cmd, sid, ERR_NOT_RUNNING, "Claude 会话不存在",
                 )
-                await self.transport.send(error)
-                return error
         fork_journal = (
             self._codex_forks if engine == "codex" else self._claude_forks)
         fork_delete_state = None
@@ -33564,15 +33644,10 @@ class WrapperMachine:
                 engine=engine,
                 session_id=sid,
             )
-            error = Error(
-                code=ERR_INTERNAL,
-                message="无法安全记录派生会话删除状态，未执行删除",
-                sid=sid,
-                to=getattr(cmd, "client_id", None),
-            )
             await cleanup_transient_codex_ctx()
-            await self.transport.send(error)
-            return error
+            return await self._send_code_delete_error(
+                cmd, sid, ERR_INTERNAL, "无法安全记录派生会话删除状态，未执行删除",
+            )
 
         async def abort_fork_delete() -> None:
             if fork_delete_state != "delete_pending":
@@ -35491,8 +35566,10 @@ class WrapperMachine:
         model = (
             _session_model(ctx) if ctx is not None else None
         ) or settings.get("model")
-        model, _ = await self._resolve_codex_profile_model(
-            codex_profile, model)
+        provider = await self._known_codex_session_model_provider(codex_profile, native_sid, ctx)
+        if provider is not None:
+            model, _ = await self._resolve_codex_profile_model(
+                codex_profile, model, model_provider=provider)
         approval: Optional[str] = None
         granular_approval = bool(settings.get("approval_policy_granular"))
         if ctx is not None:
@@ -36428,8 +36505,10 @@ class WrapperMachine:
         }
         parent_model = (entry.get("controls") or {}).get("model")
         if isinstance(parent_model, str) and parent_model:
-            parent_model, _ = await self._resolve_codex_profile_model(
-                codex_profile, parent_model)
+            provider = await self._known_codex_session_model_provider(codex_profile, _native_sid, ctx)
+            if provider is not None:
+                parent_model, _ = await self._resolve_codex_profile_model(
+                    codex_profile, parent_model, model_provider=provider)
             if parent_model:
                 params["model"] = parent_model
         parent_approval = (entry.get("controls") or {}).get(
@@ -37070,8 +37149,10 @@ class WrapperMachine:
             params["lastTurnId"] = cmd.last_turn_id
         parent_model = controls.get("model")
         if parent_model:
-            parent_model, _ = await self._resolve_codex_profile_model(
-                codex_profile, parent_model)
+            provider = await self._known_codex_session_model_provider(codex_profile, _native_sid, ctx)
+            if provider is not None:
+                parent_model, _ = await self._resolve_codex_profile_model(
+                    codex_profile, parent_model, model_provider=provider)
             if parent_model:
                 params["model"] = parent_model
         parent_approval = controls.get("approval_policy")
@@ -38222,7 +38303,11 @@ class WrapperMachine:
             auto_compact_threshold_tokens = None
 
         codex_resume_model_reconcile: Optional[str] = None
+        codex_provider: Optional[str] = None
         if engine == "codex":
+            if resume_id:
+                codex_provider = await self._known_codex_session_model_provider(
+                    codex_profile, resume_id)
             if not resume_id:
                 configured_model = await asyncio.to_thread(
                     codex_model,
@@ -38301,6 +38386,21 @@ class WrapperMachine:
                     saved_claude_controls.applied_auto_compact_mode,
                     saved_claude_controls.applied_auto_compact_threshold_tokens,
                 )
+            if explicit_claude_auto_compact and launch_auto_compact[0] == "custom":
+                from cc_remote.wrapper.claude_models import claude_context_window
+
+                maximum = await claude_context_window(
+                    claude_bin=self.cfg.claude_bin, model=model or "default", cwd=target_cwd,
+                    config_dir=self._claude_config_root(claude_profile),
+                    isolate_account_env=self._claude_profiles_explicit,
+                    work_only=space == "work")
+                try:
+                    if maximum is None:
+                        raise ValueError("尚未读取到模型最大窗口，请稍后重试或跟随 Claude")
+                    validate_claude_auto_compact_window(*launch_auto_compact, maximum)
+                except ValueError as exc:
+                    await reject(ERR_BAD_PROMPT, str(exc), route="sid", sid=wire_resume_id)
+                    return None
             set_auto_compact = getattr(sdk, "set_auto_compact", None)
             if callable(set_auto_compact):
                 set_auto_compact(*launch_auto_compact)
@@ -38339,6 +38439,8 @@ class WrapperMachine:
         # sees the first turn as already-applied (cc's connect re-syncs it anyway;
         # this is what keeps codex from a spurious first-turn reconnect).
         if engine == "codex":
+            if codex_provider is not None:
+                sdk.model_provider = codex_provider
             preserve_codex_controls = space == "work"
             preserve_codex_permission_profile = space == "work"
             if collaboration_mode in CODEX_COLLABORATION_MODES:
@@ -38355,13 +38457,25 @@ class WrapperMachine:
                 sdk.web_search = web_search
             if service_tier is not None:
                 try:
+                    if (resume_id and codex_provider is None
+                            and normalize_service_tier(service_tier) != "default"):
+                        codex_provider = await self._codex_session_model_provider(
+                            codex_profile, resume_id)
+                        sdk.model_provider = codex_provider
+                    speed_kwargs = {"codex_home": self._codex_home(codex_profile)}
+                    if codex_provider is not None:
+                        speed_kwargs["model_provider"] = codex_provider
                     speed_catalog = (
-                        await codex_catalog(codex_home=self._codex_home(codex_profile))
+                        await codex_catalog(**speed_kwargs)
                         if normalize_service_tier(service_tier) != "default" else [])
                     sdk.service_tier = resolve_service_tier(
                         model or sdk.model, service_tier, speed_catalog)
                 except ValueError as exc:
                     await reject(ERR_BAD_PROMPT, str(exc),
+                                 route="sid", sid=wire_resume_id)
+                    return None
+                except RuntimeError:
+                    await reject(ERR_BAD_PROMPT, "模型提供方读取失败，请重试。",
                                  route="sid", sid=wire_resume_id)
                     return None
             # Seed from the session's own bounded rollout tail, never config.toml.
@@ -38457,13 +38571,14 @@ class WrapperMachine:
                 if mode in CODEX_COLLABORATION_MODES:
                     sdk.collaboration_mode = mode
                 try:
-                    resolved_model, _ = (
-                        await self._resolve_codex_profile_model(
+                    resolved_model = model
+                    if codex_provider is not None:
+                        resolved_model, _ = await self._resolve_codex_profile_model(
                             codex_profile,
                             model,
                             explicit=explicit_codex_model,
+                            model_provider=codex_provider,
                         )
-                    )
                 except _UnsupportedCodexModel:
                     await reject(
                         ERR_BAD_PROMPT,
@@ -38477,17 +38592,16 @@ class WrapperMachine:
                     codex_resume_model_reconcile = model
             if model:
                 sdk.model = model
-                # A stale client can ask for a level this model doesn't have (it used
-                # to offer `minimal`, and `ultra` on luna). codex takes any string here
-                # and only fails inside the model API, so clamp against the real catalog.
-                effort = await clamp_effort(
-                    model,
-                    effort,
-                    **({} if self._codex_home(codex_profile) is None else {
+                # Validate stale client choices against native capabilities,
+                # using the model's advertised default when unsupported.
+                if not resume_id or codex_provider is not None:
+                    effort_kwargs = {} if self._codex_home(codex_profile) is None else {
                         "codex_home": self._codex_home(codex_profile),
-                    }),
-                )
-        if effort or engine == "claude":
+                    }
+                    if codex_provider is not None:
+                        effort_kwargs["model_provider"] = codex_provider
+                    effort = await clamp_effort(model, effort, **effort_kwargs)
+        if effort or engine == "claude" or explicit_codex_effort:
             # Both new and resumed Claude sessions inherit native defaults
             # unless this command supplied an explicit effort override.
             sdk.effort = effort
@@ -38600,18 +38714,25 @@ class WrapperMachine:
                 await ctx.sdk.connect(
                     **codex_connect_options,
                 )
-                if resume_id and not explicit_codex_model:
+                if resume_id:
                     # A missing/stale rollout tail cannot retire a live choice.
                     # Validate the authoritative resume model before deciding
                     # whether this account's advertised default must replace it.
-                    native_model = getattr(ctx.sdk, "model", None)
-                    resolved_model, model_replaced = (
-                        await self._resolve_codex_profile_model(
-                            codex_profile, native_model,
+                    native_model = (codex_resume_model_reconcile if explicit_codex_model
+                                    else getattr(ctx.sdk, "model", None))
+                    model_kwargs = {"explicit": explicit_codex_model}
+                    provider = getattr(ctx.sdk, "model_provider", None) or codex_provider
+                    # An old server may omit provider metadata. Never validate
+                    # its thread against the currently configured provider.
+                    if provider is not None:
+                        resolved_model, model_replaced = (
+                            await self._resolve_codex_profile_model(
+                                codex_profile, native_model,
+                                model_provider=provider, **model_kwargs,
+                            )
                         )
-                    )
-                    if native_model and model_replaced:
-                        codex_resume_model_reconcile = resolved_model
+                        if native_model and (model_replaced or explicit_codex_model):
+                            codex_resume_model_reconcile = resolved_model
                 if (
                     resume_id
                     and codex_resume_model_reconcile
@@ -38701,6 +38822,17 @@ class WrapperMachine:
                 "请确认该账号已登录后重试。",
                 route="sid",
                 sid=wire_resume_id,
+            )
+            return None
+        except _UnsupportedCodexModel:
+            try:
+                await ctx.sdk.disconnect()
+            except Exception:
+                log.warning("rejected Codex model spawn cleanup failed")
+            await reject(
+                ERR_BAD_PROMPT,
+                "所选模型不适用于当前 Codex 账号，请重新选择。",
+                route="sid", sid=wire_resume_id,
             )
             return None
         except Exception as e:
@@ -39192,11 +39324,10 @@ class WrapperMachine:
                 sdk.auto_compact_threshold_tokens = auto_threshold
                 sdk.applied_auto_compact_mode = auto_mode
                 sdk.applied_auto_compact_threshold_tokens = auto_threshold
-        # Side chats are independent working conversations, not disposable
-        # low-effort probes. Start them at the product default while preserving
-        # the existing per-session effort control. Claude applies this at
-        # connect; Codex clamps it against the forked model before its first turn.
-        sdk.effort = BTW_DEFAULT_EFFORT
+        # Codex inherits the official fork's settings. Claude applies its
+        # existing side-chat default at connect.
+        if engine != "codex":
+            sdk.effort = CLAUDE_BTW_DEFAULT_EFFORT
         ctx = SessionContext(
             session_id=None, sdk=sdk,
             buffer=RingBuffer(self.cfg.ring_max_events, self.cfg.ring_max_bytes),
@@ -39290,8 +39421,7 @@ class WrapperMachine:
                                 space=catalog_space,
                                 error_type=type(exc).__name__,
                             )
-                await self._resolve_codex_session_effort(
-                    ctx, preferred=BTW_DEFAULT_EFFORT)
+                await self._resolve_codex_session_effort(ctx)
             await self._stamp_codex_daemon_epoch(ctx)
         except asyncio.CancelledError:
             disconnected = False

@@ -1093,7 +1093,9 @@ async def test_plan_permission_selection_only_grants_selected_mode():
     machine._on_ask = AsyncMock(return_value="自动接受编辑")
     answer = await machine._on_claude_tool_permission(ctx, "ExitPlanMode", {"plan": "# Plan"}, SimpleNamespace(agent_id=None, suggestions=[]))
     assert len(answer.updated_permissions) == 1
-    assert answer.updated_permissions[0].mode == "acceptEdits"
+    assert answer.updated_permissions[0].to_dict() == {
+        "type": "setMode", "mode": "acceptEdits", "destination": "session",
+    }
     assert machine._on_ask.call_args.kwargs["plan_document"] == "# Plan"
     # Returning the permission result must not optimistically mutate actual mode.
     assert ctx.sdk.permission_mode == "bypassPermissions"

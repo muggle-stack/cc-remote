@@ -29,6 +29,9 @@ assert.equal(appUpdateFeedback({ ...state, job: null })?.label, "有更新");
 const adopted = { ...state, current: '5.3.15', job: { ...state.job!, phase: 'blocked' as const, reason: 'protocol_change' } };
 assert.equal(currentUpdateJob(adopted), null);
 assert.equal(appUpdateFeedback(adopted), undefined);
+const coordinated = { ...adopted, job: { ...adopted.job, coordinated: true } };
+assert.equal(currentUpdateJob(coordinated)?.phase, 'blocked');
+assert.equal(currentUpdateJob({ ...coordinated, relay_version: '5.3.15' }), null);
 assert.equal(appUpdateFeedback({ ...state, latest: null, job: { ...state.job!, phase: "succeeded", updated_at: 1 } }, 500_000), undefined);
 assert.match(updateReason("unknown secret"), /更新没有完成/);
 
@@ -102,11 +105,12 @@ await assert.rejects(scoped.call(), { message: "server_forbidden" }); scoped.clo
 
 const device = { ...state, job: null, relay_version: "5.3.14", allow_relay_update: false };
 const serverState = { ...device, managed: true, busy_count: 0 };
-assert(preferServerUpdate(device, serverState, false, false));
-assert(preferServerUpdate({ ...device, enabled: false }, serverState, false, false));
+assert(!preferServerUpdate(device, serverState, false, false));
+assert(!preferServerUpdate({ ...device, enabled: false }, serverState, false, false));
 assert(!preferServerUpdate({ ...device, allow_relay_update: true }, serverState, false, false));
 assert(!preferServerUpdate(device, { ...serverState, relay_version: "5.3.15" }, false, false));
-assert(preferServerUpdate(null, { ...serverState, job: state.job }, false, false));
+assert(preferServerUpdate({ ...device, online: false }, { ...serverState, job: state.job }, false, false));
+assert(!preferServerUpdate(device, { ...serverState, job: state.job }, false, false));
 assert(!preferServerUpdate({ ...device, job: state.job }, serverState, false, true));
 assert(!preferServerUpdate(device, serverState, true, true));
 assert.equal(appUpdateFeedback({ ...serverState, job: { ...state.job!, phase: "succeeded", updated_at: 10 } }, 10_000, "服务器")?.message,

@@ -6,6 +6,7 @@ import type {
 } from "../protocol";
 import {
   activeRateLimits,
+  codexAccountPlan,
   nextRateLimitReset,
   quotaTone,
   quotaWindowsForLimits,
@@ -134,6 +135,7 @@ export function UsageMeter({
     ? visibleLimits.filter((limit) =>
         limit.limit_id === "claude-seven-day-opus"
         || limit.limit_id === "claude-seven-day-sonnet"
+        || limit.limit_id === "claude-seven-day-fable"
       )
     : [];
   const specializedWindows = specializedLimits.flatMap((limit) => {
@@ -154,7 +156,9 @@ export function UsageMeter({
     null,
   );
   const summaryTone = quotaTone(minimum);
-  const plan = quotas.limit?.plan_type ?? visibleReport?.account?.plan_type;
+  const plan = error ? null : engine === "claude"
+    ? sourceLimits.find((limit) => limit.limit_id === "claude")?.plan_type
+    : codexAccountPlan(visibleReport, sourceLimits);
   const hasOverallQuota = quotas.overall != null;
   const hasAccountQuota = !!(
     quotas.fiveHour || quotas.weekly || quotas.monthly || quotas.overall

@@ -32,13 +32,13 @@ repository, install Node, or paste tokens into service definitions.
 ### 1) Download and verify the bootstrap
 
 Confirm the version and release attestation on GitHub, then download
-`install.sh` and `SHA256SUMS` from that same release. The example uses `5.3.33`;
+`install.sh` and `SHA256SUMS` from that same release. The example uses `5.3.52`;
 first confirm that it is published, or replace it with the published tag you
 selected (without the leading `v`). This
 does not select an unpublished development-branch build:
 
 ```bash
-export CC_REMOTE_VERSION=5.3.33
+export CC_REMOTE_VERSION=5.3.52
 release_base="https://github.com/muggle-stack/cc-remote/releases/download/v${CC_REMOTE_VERSION}"
 curl -fLO "$release_base/install.sh"
 curl -fLO "$release_base/SHA256SUMS"
@@ -187,9 +187,13 @@ and locked dependencies are used; users do not run CI, pytest or Node builds.
 Update the Electron application separately.
 An activated Wrapper upgrade prints the Codex connection result described above;
 `--check` does not configure or run local acceptance checks.
-The independent Claude service is never restarted. Finish in-process Claude,
-BTW and queued work before updating. SDK/service-protocol changes stop the command
-and require the [Claude service migration procedure](claude-session-service.md).
+Ordinary updates keep the independent Claude service running. Updates wait for
+in-process Claude, BTW and queued work. A managed Claude service SDK change
+waits for its own work to drain, then switches the service and Wrapper together
+and verifies their handshake. Idle sessions resume from their existing IDs.
+Older updaters first need a release with the same SDK and migration support.
+For local wire changes and custom service launchers, see the
+[Claude service migration procedure](claude-session-service.md).
 
 Starting with v4.0.10, installers record the previous code, service configuration and
 private-state snapshot before switching. After acceptance, retain the active

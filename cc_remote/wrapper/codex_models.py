@@ -1,19 +1,8 @@
-"""The codex app-server IS the model catalog — ask it, never hardcode it.
+"""Discover models and reasoning capabilities through Codex's app-server.
 
-`model/list` reports, per model, `supportedReasoningEfforts` and
-`defaultReasoningEffort`. That is the ONLY source of truth: `turn/start` does not
-validate `effort` at the RPC layer (measured — it happily accepts `bogus-zzz` and
-starts the turn), so an unsupported level only blows up later, inside the model
-API, as a failed turn.
-
-We learned this the hard way by hardcoding the GPT-5.6 effort table and getting it
-wrong twice: `minimal` doesn't exist on any model, and `gpt-5.6-luna` tops out at
-`max`, not `ultra`. The catalog also moves under us — 0.143.0 knew nothing of the
-5.6 family, 0.144.1 dropped `gpt-5.3-codex`.
-
-Presentation (Chinese blurbs, icons) stays in the web's data.ts, keyed by id; we
-ship `display_name`/`description` from the server as the fallback for models the
-web has never heard of. So a new codex model shows up in the UI on its own.
+`model/list` supplies model identifiers, descriptions, supported reasoning
+efforts and their defaults. Preserve these native values for validation and
+presentation, with account/provider-scoped caching when discovery is unavailable.
 """
 from __future__ import annotations
 
@@ -30,6 +19,7 @@ from cc_remote.wrapper.codex_runtime import (
     codex_env as _codex_env,
     resolve_codex_bin as _resolve_codex_bin,
 )
+from cc_remote.wrapper.codex_sessions import codex_current_provider
 
 log = logger("cc_remote.wrapper.codex_models")
 
@@ -92,33 +82,33 @@ def resolve_service_tier(
         raise ValueError("当前账号的所选模型不支持此速度档位，请重新选择。")
     return normalized
 
-_profile_cache: dict[str, tuple[list[dict], float]] = {}
-_inflight: dict[str, asyncio.Task[list[dict]]] = {}
+_profile_cache: dict[tuple[str, str], tuple[list[dict], float]] = {}
+_inflight: dict[tuple[str, str], asyncio.Task[list[dict]]] = {}
 
-# Cost/latency order, low -> high. Used only to clamp an unsupported request DOWN
-# to something the model accepts; unknown levels sort last so they never win.
-EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
 # Wire/display sentinel used only when app-server explicitly selected the
 # model's default but model/list is temporarily unavailable. It is never sent
 # back to turn/start as a reasoning effort.
 MODEL_DEFAULT_EFFORT = "model-default"
 
 
-def _rank(effort: str) -> int:
-    return EFFORT_ORDER.index(effort) if effort in EFFORT_ORDER else len(EFFORT_ORDER)
+def _profile_cache_key(codex_home: str | None, model_provider: str) -> tuple[str, str]:
+    home = os.path.realpath(os.path.expanduser(codex_home)) if codex_home else ""
+    return home, model_provider
 
 
-def _profile_cache_key(codex_home: str | None) -> str:
-    return (os.path.realpath(os.path.expanduser(codex_home))
-            if codex_home else "")
-
-
-async def _rpc_model_list(codex_home: str | None = None) -> list[dict]:
+async def _rpc_model_list(
+    codex_home: str | None = None, *, model_provider: str | None = None,
+) -> list[dict]:
     """One-shot `codex app-server --stdio` -> initialize -> model/list -> die.
     No thread, no turn, no tokens."""
     binp = await asyncio.to_thread(_resolve_codex_bin)
+    argv = [binp, "app-server", "--stdio"]
+    if model_provider:
+        # The process-only override also scopes discovery on older app-servers
+        # which predate model/list.modelProvider. User configuration is untouched.
+        argv.extend(["-c", "model_provider=" + json.dumps(model_provider)])
     proc = await asyncio.create_subprocess_exec(
-        binp, "app-server", "--stdio",
+        *argv,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
@@ -158,6 +148,8 @@ async def _rpc_model_list(codex_home: str | None = None) -> list[dict]:
         seen: set[str] = set()
         for rid in range(2, 18):
             params: dict = {"limit": _MAX_MODELS}
+            if model_provider:
+                params["modelProvider"] = model_provider
             if cursor:
                 params["cursor"] = cursor
             await send({"jsonrpc": "2.0", "id": rid,
@@ -199,14 +191,18 @@ def _normalize(raw: list[dict]) -> list[dict]:
         if not mid:
             continue
         mid = str(mid)[:256]
-        efforts = [str(e.get("reasoningEffort"))[:64]
-                   for e in (m.get("supportedReasoningEfforts") or [])
-                   if isinstance(e, dict) and e.get("reasoningEffort")][:_MAX_EFFORTS]
+        supported = [e for e in (m.get("supportedReasoningEfforts") or [])
+                     if isinstance(e, dict) and e.get("reasoningEffort")][:_MAX_EFFORTS]
+        efforts = [str(e["reasoningEffort"])[:64] for e in supported]
         out.append({
             "id": mid,
             "display_name": str(m.get("displayName") or mid)[:_MAX_CATALOG_TEXT],
             "description": str(m.get("description") or "")[:_MAX_CATALOG_TEXT],
             "efforts": efforts,
+            "effort_descriptions": {
+                effort: str(entry.get("description") or "")[:_MAX_CATALOG_TEXT]
+                for effort, entry in zip(efforts, supported)
+            },
             "default_effort": (
                 str(m.get("defaultReasoningEffort"))[:64]
                 if m.get("defaultReasoningEffort") else None),
@@ -225,29 +221,47 @@ async def codex_catalog(
     force: bool = False,
     *,
     codex_home: str | None = None,
+    model_provider: str | None = None,
 ) -> list[dict]:
-    """Refresh on explicit reads; cache internal lookups by account home.
+    """Refresh on explicit reads; cache by account home and native provider.
 
-    Concurrent readers share one native query per account. A disconnected
+    Concurrent readers share one native query per provider/account. A disconnected
     reader cannot cancel another reader's refresh, and a slow account cannot
-    block other accounts. Discovery failures retain only this account's last
+    block other providers/accounts. Failures retain only this scope's last
     good catalog (or []), without extending its cache lifetime.
     """
-    cache_key = _profile_cache_key(codex_home)
+    if model_provider is None:
+        configured_provider = await asyncio.to_thread(
+            codex_current_provider, **({"codex_home": codex_home} if codex_home else {}),
+        ) or "openai"
+        # Let app-server resolve native profiles and managed configuration for
+        # new sessions. A default read must never force our inferred provider
+        # onto the process or populate an explicit thread provider's cache.
+        cache_provider = "\0native-default:" + configured_provider
+    elif (not isinstance(model_provider, str) or not model_provider.strip()
+            or len(model_provider) > 256
+            or any(ord(char) < 32 for char in model_provider)):
+        raise ValueError("invalid Codex model provider")
+    else:
+        model_provider = model_provider.strip()
+        cache_provider = model_provider
+    cache_key = _profile_cache_key(codex_home, cache_provider)
     pending = _inflight.get(cache_key)
     if pending is None:
         cached, cached_ts = _profile_cache.get(cache_key, (None, 0.0))
         if not force and cached is not None and time.monotonic() - cached_ts < _TTL:
             return cached
-        pending = asyncio.create_task(_refresh_catalog(cache_key, codex_home))
+        pending = asyncio.create_task(_refresh_catalog(cache_key, codex_home, model_provider))
         _inflight[cache_key] = pending
     return await asyncio.shield(pending)
 
 
-async def _refresh_catalog(cache_key: str, codex_home: str | None) -> list[dict]:
+async def _refresh_catalog(
+    cache_key: tuple[str, str], codex_home: str | None, model_provider: str | None,
+) -> list[dict]:
     cached, _ = _profile_cache.get(cache_key, (None, 0.0))
     try:
-        data = _normalize(await _rpc_model_list(codex_home))
+        data = _normalize(await _rpc_model_list(codex_home, model_provider=model_provider))
         if not data:
             log.warning("codex model/list returned nothing")
             return cached or []
@@ -265,10 +279,11 @@ async def efforts_for(
     model: Optional[str],
     *,
     codex_home: str | None = None,
+    model_provider: str | None = None,
 ) -> list[str]:
     if not model:
         return []
-    for m in await codex_catalog(codex_home=codex_home):
+    for m in await codex_catalog(codex_home=codex_home, model_provider=model_provider):
         if m["id"] == model:
             return m["efforts"]
     return []
@@ -278,10 +293,11 @@ async def default_effort_for(
     model: Optional[str],
     *,
     codex_home: str | None = None,
+    model_provider: str | None = None,
 ) -> Optional[str]:
     if not model:
         return None
-    for candidate in await codex_catalog(codex_home=codex_home):
+    for candidate in await codex_catalog(codex_home=codex_home, model_provider=model_provider):
         if candidate["id"] == model:
             value = candidate.get("default_effort")
             return value if isinstance(value, str) and value else None
@@ -292,22 +308,26 @@ async def clamp_effort(
     model: Optional[str], effort: Optional[str],
     *,
     codex_home: str | None = None,
+    model_provider: str | None = None,
 ) -> Optional[str]:
-    """Coerce `effort` to something `model` actually supports.
+    """Keep supported choices, using the native default for a stale override.
 
-    Clamps DOWN — the highest supported level at or below the request — so we never
-    silently spend more than the user asked for. If the request is below everything
-    the model offers, take its lowest. An unknown model (custom provider, or a
-    catalog we couldn't read) passes through untouched: codex forwards it verbatim.
+    Unknown models or unavailable catalogs retain explicit choices for native
+    validation. If a known model has no advertised default, clear the unsupported
+    override so app-server can select its default without a local guess.
     """
-    if not effort:
+    if not effort or not model:
         return effort
-    supported = await efforts_for(model, codex_home=codex_home)
-    if not supported or effort in supported:
+    entry = next((m for m in await codex_catalog(codex_home=codex_home, model_provider=model_provider)
+                  if m["id"] == model), None)
+    if entry is None:
         return effort
-    want = _rank(effort)
-    below = [e for e in supported if _rank(e) <= want]
-    picked = max(below, key=_rank) if below else min(supported, key=_rank)
-    log.warning("codex effort not supported by model -> clamped",
+    supported = entry["efforts"]
+    if effort in supported:
+        return effort
+    picked = entry.get("default_effort")
+    if not picked or picked not in supported:
+        picked = None
+    log.warning("codex unsupported effort replaced with native default",
                 model=model, requested=effort, applied=picked, supported=supported)
     return picked

@@ -4,7 +4,7 @@ import { EngineIcon, Icon } from "../icons";
 
 export function QuestionCollapseButton({ onCollapse, onPointerDown }: {
   onCollapse: () => void;
-  onPointerDown: () => void;
+  onPointerDown?: () => void;
 }) {
   return <button type="button" className="qa-collapse" aria-label="收起问题"
     title="收起问题，查看聊天" onPointerDown={onPointerDown} onClick={onCollapse}>
@@ -13,19 +13,22 @@ export function QuestionCollapseButton({ onCollapse, onPointerDown }: {
 }
 
 /** Local presentation only. The owning native question remains unanswered. */
-export function QuestionResume({ engine, onResume, buttonRef, page, total, pending, sourceLabel }: {
+export function QuestionResume({
+  engine, onResume, buttonRef, page, total, pending, label = "等待你回答", sourceLabel,
+}: {
   engine: Engine;
   onResume: () => void;
   buttonRef: Ref<HTMLButtonElement>;
   page?: number;
   total?: number;
   pending?: boolean;
+  label?: string;
   sourceLabel?: string;
 }) {
   return <button type="button" className="question-resume" ref={buttonRef}
     onClick={onResume} aria-haspopup="dialog" data-lock-horizontal-swipe>
     <EngineIcon engine={engine} size={21} />
-    <span className="qa-resume-label">{pending ? "回答提交中…" : "等待你回答"}
+    <span className="qa-resume-label">{pending ? "回答提交中…" : label}
       {sourceLabel && <small className="qa-resume-source">{sourceLabel}</small>}
     </span>
     {total !== undefined && total > 1 && <span className="qa-resume-progress">{page} / {total}</span>}

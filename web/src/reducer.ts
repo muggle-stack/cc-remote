@@ -128,15 +128,17 @@ const MAX_LIVE_SPILL_ARCHIVE_CHARS = 16 * 1024 * 1024;
 // noisy app-server to grow every resident session indefinitely.
 export const MAX_SESSION_NOTICES = 8;
 
-/** Account-sensitive model/default cache key. */
+/** Separate thread-provider catalogs from account defaults. */
 export function modelCatalogScopeKey(
   engine: string,
   profileId?: string | null,
   cwd?: string | null,
+  sessionId?: string | null,
 ): string {
   const account = (engine === "codex" || engine === "claude") && profileId
     ? `${engine}\u0000${profileId}`
     : engine;
+  if (engine === "codex" && sessionId) return `${account}\u0000session:${sessionId}`;
   return engine === "claude" && cwd ? `${account}\u0000${cwd}` : account;
 }
 
@@ -176,14 +178,14 @@ export interface PreviewAuthorizationState {
   operation: PreviewAuthorizationOperation;
   path: string;
   resolvedPath: string;
-  format: "markdown" | "text" | "html" | "image" | "pdf" | "audio" | "video" | "spreadsheet";
+  format: "markdown" | "text" | "html" | "image" | "pdf" | "audio" | "video" | "spreadsheet" | "presentation";
   previewId?: string;
   status: "required" | "submitting" | "granted";
 }
 
 export interface Artifact {
   file: string;
-  kind: "diff" | "md" | "file" | "gitdiff" | "html" | "image" | "pdf" | "audio" | "video" | "spreadsheet";
+  kind: "diff" | "md" | "file" | "gitdiff" | "html" | "image" | "pdf" | "audio" | "video" | "spreadsheet" | "presentation";
   sid?: string | null;
   requestId?: string;
   diff?: DiffLine[];
@@ -5284,11 +5286,14 @@ function reduceEvent(
           : e.engine === "claude"
             ? (e.claude_profile_id ?? state.defaultClaudeProfileId)
             : null,
+        null,
+        e.engine === "codex" ? e.sid : null,
       );
       const catalogKey = e.engine === "claude" && e.cwd ? `${cacheKey}\u0000${e.cwd}` : cacheKey;
       const catalog = e.models.length || e.engine === "dsh"
         ? { ...state.catalog, [catalogKey]: e.models }
         : state.catalog;
+      if (e.engine === "codex" && e.sid) return { ...state, catalog };
       if (e.cwd && e.cwd !== state.newChat?.cwd) {
         // Cwd-aware reads run concurrently. Never let a late response for a
         // directory the user has left replace the still-current result.
@@ -5297,9 +5302,9 @@ function reduceEvent(
       let catalogDefault = state.catalogDefault;
       let catalogDefaultEffort = state.catalogDefaultEffort;
       let catalogDefaultCwd = state.catalogDefaultCwd;
-      if (e.cwd || e.engine === "dsh") {
-        // Cwd-aware Claude and all DSH responses replace defaults even when
-        // absent: do not reuse a prior directory's or removed provider's values.
+      if (e.cwd || e.engine === "dsh" || (e.engine === "codex" && e.models.length > 0)) {
+        // Successful native Codex reads, cwd-aware Claude and DSH responses
+        // replace defaults even when absent. Never reuse a removed default.
         catalogDefault = { ...catalogDefault };
         catalogDefaultEffort = { ...catalogDefaultEffort };
         if (e.default_model) {
@@ -5366,7 +5371,7 @@ function reduceEvent(
         kind: "gitdiff", sections: parseGitDiff(e.diff),
       } };
     case "file_preview":
-      if (!state.artifact || !["md", "file", "html", "image", "pdf", "audio", "video", "spreadsheet"].includes(state.artifact.kind)
+      if (!state.artifact || !["md", "file", "html", "image", "pdf", "audio", "video", "spreadsheet", "presentation"].includes(state.artifact.kind)
           || state.artifact.requestId !== e.request_id
           || state.artifact.sid !== (e.sid ?? state.focusedSid)) return state;
       return { ...state, artifact: {

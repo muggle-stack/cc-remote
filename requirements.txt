@@ -5,6 +5,8 @@ uvicorn==0.50.0
 pydantic==2.13.4
 python-dotenv==1.2.2
 Pillow==12.3.0
+pillow-heif==1.8.1
+playwright==1.62.0
 httpx==0.28.1
 pywebpush==2.3.0
 # cryptography 49 no longer publishes an Intel macOS wheel.

@@ -10,3 +10,4 @@
 .session-delete-buttons{display:flex;justify-content:flex-end;gap:8px;margin-top:24px}
 .session-delete-buttons button{padding:9px 14px;border:1px solid var(--border-strong);border-radius:10px;color:var(--text);background:var(--raised);font-size:13px}
 .session-delete-buttons .session-delete-danger{background:var(--danger,#c4554c);color:#fff;border-color:transparent}
+.session-delete-buttons .session-delete-danger:disabled{opacity:.42;cursor:not-allowed}

@@ -142,6 +142,7 @@ hook 和 Wrapper 应使用相同的 `CC_REMOTE_STATE_DIR`；日志默认为
 | `WRAPPER_TOKEN` | 占位值 | 单机器/兼容模式下的 wrapper Bearer token；未设置 `WRAPPER_TOKENS_JSON` 时必须配置。 |
 | `WRAPPER_TOKENS_JSON` | 空 | 可选机器绑定 token：`{"laptop":"…","server":"…"}`；设置后替代 relay 的通配 `WRAPPER_TOKEN`。 |
 | `WEB_STATIC_DIR` | 空 | 指向 `web/dist` 则同源托管网页；留空则只做 API/WS。 |
+| `DOUBAO_VOICE_API_KEY` | 空 | 可选。填写同时开通豆包流式语音识别 2.0（小时版）和语音合成 2.0 的项目 Key，启用实时转写和回复朗读。 |
 | `CLIENT_QUEUE_CAP` / `CLIENT_QUEUE_BYTES` | `4096` / `16777216` | 单客户端待发帧数/字节硬上限；超限断开慢客户端，不静默丢帧。 |
 | `MAX_CLIENTS` / `CLIENT_HELLO_TIMEOUT` | `8` / `10` | 已接受客户端总数和首个 Hello 帧等待秒数的硬上限。 |
 | `WS_MAX_SIZE_BYTES` | `16777216` | relay 与 wrapper 接受的单个 WebSocket 帧上限。 |
@@ -179,6 +180,16 @@ hook 和 Wrapper 应使用相同的 `CC_REMOTE_STATE_DIR`；日志默认为
 | `TURN_READER_QUEUE_CAP` | `4` | 单回合引擎事件消费队列；Codex app-server stdout 另有独立、有字节上限的突发缓冲，避免 Relay 变慢时阻塞 RPC 和终态。 |
 
 单次消息最多 8 个附件，单个最多 6 MiB，解码后合计最多 8 MiB；超限会在启动模型前拒绝。
+
+### 语音输入与朗读
+
+配置中继的 `DOUBAO_VOICE_API_KEY` 后，支持录音的客户端会在空草稿显示语音按钮。电脑上点击开始转写，再点一次结束。手机上长按开始，松手结束。转写实时显示在输入框，结束后的草稿可继续编辑。回复旁的喇叭按需发起流式朗读，音频只在播放时缓冲。
+
+录音开始后，按钮变红并显示“正在录音”。支持震动的 Android 浏览器和鸿蒙 App 也会短震一次，取决于系统的触感设置。
+
+录音需要 HTTPS（本机 loopback 也可）和用户授予麦克风权限。配置语音后，中继仅在主应用入口允许同源页面请求麦克风。使用自定义反代时，请保留主应用的 `Permissions-Policy` 响应头。
+
+两个路由均使用 cc-remote 的登录 Cookie 与同源校验。`/v1/realtime?intent=transcription` 使用 OpenAI Realtime 的会话、追加音频和提交事件，接收 24 kHz 单声道 PCM16，每条连接处理一段最长 5 分钟的录音。中间结果的 `transcript` 字段提供可修订的全文快照。`POST /v1/audio/speech` 接受 `tts-1`、`alloy` 与 `mp3` 或 `pcm`，使用豆包 Vivi 2.0 音色，PCM 流为 24 kHz。
 
 ## 鉴权模型
 
