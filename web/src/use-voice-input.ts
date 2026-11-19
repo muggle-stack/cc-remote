@@ -16,8 +16,14 @@ const UPDATE_SESSION = JSON.stringify({
   },
 });
 
-type Stage = "idle" | "starting" | "recording" | "finishing";
+export type VoiceInputStage = "idle" | "starting" | "recording" | "finishing";
 export type VoiceInputGesture = "hold" | "toggle";
+
+declare global {
+  interface Window {
+    ccRemoteHarmonyRecordingHaptic?: () => void;
+  }
+}
 
 type Recording = {
   scope: string;
@@ -46,11 +52,18 @@ function candidateError(error: unknown) {
   return "实时转写暂不可用。";
 }
 
+function playRecordingHaptic() {
+  try {
+    if (window.ccRemoteHarmonyRecordingHaptic) window.ccRemoteHarmonyRecordingHaptic();
+    else navigator.vibrate?.(25);
+  } catch { /* Feedback is optional on browsers and devices without vibration. */ }
+}
+
 export function useVoiceInput(
   enabled: boolean, scope: string, onDraft: (text: string) => void, onError: (message: string) => void,
 ) {
   const recordingRef = useRef<Recording | null>(null);
-  const [stage, setStage] = useState<Stage>("idle");
+  const [stage, setStage] = useState<VoiceInputStage>("idle");
   const [transcript, setTranscript] = useState("");
 
   const cancel = useCallback(() => {
@@ -175,10 +188,16 @@ export function useVoiceInput(
           channelCount: 1, channelCountMode: "explicit",
         });
         recording.node = node;
+        let captured = false;
         node.port.onmessage = (event) => {
           if (recordingRef.current !== recording) return;
           if (event.data.type === "audio") {
             const audio: ArrayBuffer = event.data.audio;
+            if (!captured && !recording.released) {
+              captured = true;
+              setStage("recording");
+              if (gesture === "hold") playRecordingHaptic();
+            }
             if (recording.ready && socket.readyState === WebSocket.OPEN) {
               if (socket.bufferedAmount > MAX_BUFFERED_AUDIO) { unavailable(); return; }
               sendAudio(audio);
@@ -196,7 +215,6 @@ export function useVoiceInput(
         // The worklet's output is silence. A connected output keeps the graph
         // scheduled on browsers that suspend unconnected capture nodes.
         node.connect(context.destination);
-        setStage("recording");
       } catch (error) {
         finish(recording, recording.transcript, candidateError(error));
       }

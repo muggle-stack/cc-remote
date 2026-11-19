@@ -1,6 +1,6 @@
 import { useRef, useSyncExternalStore } from "react";
 import { Icon } from "../icons";
-import type { VoiceInputGesture } from "../use-voice-input";
+import type { VoiceInputGesture, VoiceInputStage } from "../use-voice-input";
 
 const COARSE_POINTER = "(pointer: coarse)";
 
@@ -18,21 +18,29 @@ function useHoldGesture() {
   );
 }
 
-export function VoiceInputButton({ recording, finishing, start, release, cancel }: {
-  recording: boolean;
-  finishing: boolean;
+export function VoiceInputStatus({ stage }: { stage: VoiceInputStage }) {
+  if (stage === "idle") return null;
+  const text = stage === "starting" ? "正在打开麦克风"
+    : stage === "recording" ? "正在录音" : "正在完成语音转写";
+  return <div className="composer-notice voice-input-status" role="status" data-stage={stage}>{text}</div>;
+}
+
+export function VoiceInputButton({ stage, start, release, cancel }: {
+  stage: VoiceInputStage;
   start: (gesture: VoiceInputGesture) => void;
   release: () => void;
   cancel: () => void;
 }) {
   const pointer = useRef<number | null>(null);
   const hold = useHoldGesture();
+  const active = stage === "starting" || stage === "recording";
+  const finishing = stage === "finishing";
   const label = finishing ? "正在完成语音转写"
     : hold ? "按住说话"
-      : recording ? "停止语音转写" : "开始语音转写";
+      : active ? "停止语音转写" : "开始语音转写";
   return <button
     type="button"
-    className={"sendbtn voice-input" + (recording ? " voice-input-held" : "")}
+    className={"sendbtn voice-input" + (stage === "recording" ? " voice-input-held" : "")}
     aria-label={label}
     title={label}
     aria-busy={finishing || undefined}
@@ -73,10 +81,10 @@ export function VoiceInputButton({ recording, finishing, start, release, cancel 
     onContextMenu={(event) => { if (hold) event.preventDefault(); }}
     onClick={() => {
       if (hold || finishing) return;
-      if (recording) release();
+      if (active) release();
       else start("toggle");
     }}
   >
-    <Icon name={recording && !hold ? "stop" : "waveform"} size={19} />
+    <Icon name={active && !hold ? "stop" : "waveform"} size={19} />
   </button>;
 }

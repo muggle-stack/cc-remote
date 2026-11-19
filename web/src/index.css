@@ -1677,8 +1677,10 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .sendbtn.interrupt{ background:var(--danger); color:var(--on-danger,#fff); }
 .sendbtn.voice-input{ background:var(--accent-weak); color:var(--accent-ink); touch-action:none;
   user-select:none; -webkit-touch-callout:none; }
-.sendbtn.voice-input-held{ transform:scale(1.2); background:var(--accent); color:var(--on-accent,#fff); }
+.sendbtn.voice-input-held{ transform:scale(1.2); background:var(--danger); color:var(--on-danger,#fff); }
 .sendbtn.voice-input[aria-busy="true"]{ opacity:.65; }
+.voice-input-status{ pointer-events:none; }
+.voice-input-status[data-stage="recording"]{ background:var(--danger); color:var(--on-danger,#fff); }
 .ubub-act.voice-playing{ color:var(--accent-ink); background:var(--accent-weak); }
 .voice-playback-error{ color:var(--danger); }
 @media (prefers-reduced-motion: reduce){ .sendbtn.voice-input{ transition:none; } }

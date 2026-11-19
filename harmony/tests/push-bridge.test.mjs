@@ -7,11 +7,11 @@ const source = readFileSync(new URL('../entry/src/main/ets/model/PushBridge.ets'
 const js = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 }).outputText.replace(/^import .*;$/gm, '');
-const factory = new Function('util', 'notificationManager', 'pushService', 'sameOrigin',
+const factory = new Function('util', 'notificationManager', 'pushService', 'vibrator', 'sameOrigin',
   js.replace('export class PushBridge', 'class PushBridge') + ';return PushBridge;');
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 
-function setup(pushService) {
+function setup(pushService, vibrator = {}) {
   const prefs = new Map();
   const replies = [];
   let handler;
@@ -24,13 +24,32 @@ function setup(pushService) {
   };
   const PushBridge = factory({ generateRandomUUID: () => 'nonce' }, {
     isNotificationEnabled: async () => true, requestEnableNotification: async () => {},
-  }, pushService, (origin, current) => new URL(current).origin === origin);
+  }, pushService, vibrator, (origin, current) => new URL(current).origin === origin);
   const instance = new PushBridge({}, {
     getSync: (key, fallback) => prefs.get(key) ?? fallback,
     put: async (key, value) => { prefs.set(key, value); }, flush: async () => {},
   });
-  return { instance, prefs, replies, controller, send: (id, method) => handler(JSON.stringify({ id, method })) };
+  return { instance, prefs, replies, controller,
+    send: (id, method) => handler(JSON.stringify({ id, method })),
+    sendMessage: value => handler(value) };
 }
+
+test('recording haptics are a short touch pulse limited to the current origin and port', async () => {
+  const pulses = [];
+  const state = setup({}, { startVibration: async (effect, attribute) => pulses.push([effect, attribute]) });
+  await state.instance.attach(state.controller, 'https://remote.example', '');
+  state.controller.getUrl = () => 'https://outside.example/';
+  state.sendMessage('recording-haptic');
+  assert.deepEqual(pulses, []);
+  state.controller.getUrl = () => 'https://remote.example/';
+  state.sendMessage('recording-haptic');
+  state.sendMessage('recording-haptic');
+  assert.deepEqual(pulses, [[{ type: 'time', duration: 25 }, { id: 0, usage: 'touch' }]]);
+  state.instance.detach();
+  state.sendMessage('recording-haptic');
+  assert.equal(pulses.length, 1);
+  assert.deepEqual(state.replies, []);
+});
 
 test('unconfigured Push Kit leaves server switching usable without a phantom token', async () => {
   let deletes = 0;

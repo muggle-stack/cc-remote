@@ -24,9 +24,17 @@ for (const fresh of [false, true]) {
       });
     });
     await page.goto(`${url}?voice=1${fresh ? "&new=1" : ""}`);
-    await page.evaluate(() => {
-      const stats: { opened: number; track?: MediaStreamTrack } = { opened: 0 };
+    await page.evaluate((nativeHaptics) => {
+      const stats: { opened: number; track?: MediaStreamTrack; haptics: (number | string)[] } =
+        { opened: 0, haptics: [] };
       Object.assign(window, { voiceTest: stats });
+      Object.defineProperty(navigator, "vibrate", { value: (duration: number) => {
+        stats.haptics.push(duration);
+        return true;
+      } });
+      if (nativeHaptics) {
+        window.ccRemoteHarmonyRecordingHaptic = () => { stats.haptics.push("harmony"); };
+      }
       let syntheticMic: MediaStream | null = null;
       document.addEventListener("click", () => {
         const context = new AudioContext();
@@ -43,17 +51,22 @@ for (const fresh of [false, true]) {
         stats.track = syntheticMic.getAudioTracks()[0];
         return syntheticMic;
       } });
-    });
+    }, mobile && fresh);
     const mic = page.locator(".voice-input");
     const input = page.locator("textarea");
     const stats = () => page.evaluate(() => {
-      const stats = (window as Window & { voiceTest: { opened: number; track?: MediaStreamTrack } }).voiceTest;
-      return { opened: stats.opened, stopped: Number(stats.track?.readyState === "ended") };
+      const stats = (window as Window & {
+        voiceTest: { opened: number; track?: MediaStreamTrack; haptics: (number | string)[] };
+      }).voiceTest;
+      return {
+        opened: stats.opened, stopped: Number(stats.track?.readyState === "ended"), haptics: stats.haptics,
+      };
     });
     if (mobile) {
       await expect(mic).toHaveAccessibleName("按住说话");
       await mic.click();
-      expect(await stats()).toEqual({ opened: 0, stopped: 0 });
+      expect(await stats()).toEqual({ opened: 0, stopped: 0, haptics: [] });
+      await expect(page.locator(".voice-input-status")).toHaveCount(0);
       const box = (await mic.boundingBox())!;
       await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
       await page.mouse.down();
@@ -64,6 +77,8 @@ for (const fresh of [false, true]) {
     await expect.poll(async () => (await stats()).opened).toBe(1);
     await expect(input).toHaveValue("实时中间结果");
     await expect(mic).toHaveClass(/voice-input-held/);
+    await expect(page.locator(".voice-input-status")).toHaveText("正在录音");
+    await expect(page.locator(".voice-input-status")).toBeVisible();
     await expect(page.getByTestId("events")).toHaveText("[]");
     if (mobile) {
       await page.mouse.up();
@@ -72,10 +87,11 @@ for (const fresh of [false, true]) {
       await mic.click();
     }
     await expect(input).toHaveValue("最终转写草稿");
+    await expect(page.locator(".voice-input-status")).toHaveCount(0);
     await expect(mic).toHaveCount(0);
     await expect(page.getByRole("button", { name: fresh ? "开始" : "发送", exact: true })).toBeEnabled();
     await expect(page.getByTestId("events")).toHaveText("[]");
-    expect(await stats()).toEqual({ opened: 1, stopped: 1 });
+    expect(await stats()).toEqual({ opened: 1, stopped: 1, haptics: mobile ? [fresh ? "harmony" : 25] : [] });
   });
 }
 
@@ -102,6 +118,7 @@ test("voice desktop stop cancels a pending microphone request", async ({ page },
   const mic = page.locator(".voice-input");
   await mic.press("Enter");
   await expect(mic).toHaveAccessibleName("停止语音转写");
+  await expect(page.locator(".voice-input-status")).toHaveText("正在打开麦克风");
   await mic.press("Enter");
   await expect(mic).toHaveAccessibleName("开始语音转写");
   const state = await page.evaluate(async () => {

@@ -185,6 +185,8 @@ hook 和 Wrapper 应使用相同的 `CC_REMOTE_STATE_DIR`；日志默认为
 
 配置中继的 `DOUBAO_VOICE_API_KEY` 后，支持录音的客户端会在空草稿显示语音按钮。电脑上点击开始转写，再点一次结束。手机上长按开始，松手结束。转写实时显示在输入框，结束后的草稿可继续编辑。回复旁的喇叭按需发起流式朗读，音频只在播放时缓冲。
 
+录音开始后，按钮变红并显示“正在录音”。支持震动的 Android 浏览器和鸿蒙 App 也会短震一次，取决于系统的触感设置。
+
 录音需要 HTTPS（本机 loopback 也可）和用户授予麦克风权限。配置语音后，中继仅在主应用入口允许同源页面请求麦克风。使用自定义反代时，请保留主应用的 `Permissions-Policy` 响应头。
 
 两个路由均使用 cc-remote 的登录 Cookie 与同源校验。`/v1/realtime?intent=transcription` 使用 OpenAI Realtime 的会话、追加音频和提交事件，接收 24 kHz 单声道 PCM16，每条连接处理一段最长 5 分钟的录音。中间结果的 `transcript` 字段提供可修订的全文快照。`POST /v1/audio/speech` 接受 `tts-1`、`alloy` 与 `mp3` 或 `pcm`，使用豆包 Vivi 2.0 音色，PCM 流为 24 kHz。
