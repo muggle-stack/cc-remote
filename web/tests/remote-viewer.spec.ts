@@ -173,8 +173,8 @@ test("Bridge loads images assigned by the page and honors src changes during a r
   await page.getByRole("button", { name: /^动态图片测试/ }).click();
   const frame = page.frameLocator(".viewer-stage iframe");
   const image = frame.locator("#runtime-photo");
-  await expect(image).toHaveAttribute("data-loaded", "yes", { timeout: 5000 });
-  await expect(image).toHaveJSProperty("naturalWidth", 16);
+  await expect(image).toHaveAttribute("data-loaded-width", "16", { timeout: 5000 });
+  await expect(image).toHaveJSProperty("complete", true);
 
   const state = await frame.locator("#gallery").evaluate(async gallery => {
     const current = new Image();
@@ -191,12 +191,12 @@ test("Bridge loads images assigned by the page and honors src changes during a r
     gallery.append(removed);
     return {
       stale: await stale, cancelled: await cancelled, width: current.naturalWidth,
-      source: current.getAttribute("src"), removed: removed.getAttribute("src"),
+      source: current.getAttribute("src"), removed: removed.getAttribute("src"), removedComplete: removed.complete,
     };
   });
   expect(state).toEqual({
     stale: "EncodingError", cancelled: "EncodingError", width: 32,
-    source: expect.stringMatching(/^blob:/), removed: null,
+    source: expect.stringMatching(/^blob:/), removed: null, removedComplete: true,
   });
   await expect(page.locator(".viewer-error-banner")).toHaveCount(0);
 });
@@ -215,6 +215,7 @@ test("Bridge reports a runtime image read failure and notifies the page", async 
     document.body.append(image);
   });
   await expect(frame.locator("#unavailable-image")).toHaveAttribute("data-result", "error");
+  await expect(frame.locator("#unavailable-image")).toHaveJSProperty("complete", true);
   await expect(page.locator(".viewer-error-banner")).toContainText("/meshes/unavailable.svg");
 });
 

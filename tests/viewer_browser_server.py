@@ -101,8 +101,10 @@ for(const type of ['wheel','touchstart','touchmove','gesturestart','gesturechang
 <h1>动态图片</h1><div id="gallery"></div><script>
 const image = document.createElement('img');
 image.id = 'runtime-photo';
-image.onload = () => { image.dataset.loaded = 'yes'; };
+const recordLoadedImage = () => { image.dataset.loadedWidth = String(image.naturalWidth); };
 image.src = '../meshes/badge.svg';
+if (image.complete) recordLoadedImage();
+else image.onload = recordLoadedImage;
 document.getElementById('gallery').append(image);
 </script></body>''')
             (root / "meshes/runtime-wide.svg").write_text(

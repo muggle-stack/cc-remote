@@ -10,6 +10,7 @@ interface ImageLoad {
 export function installImages(resources: Resources, report: (message: string) => void) {
   const images = HTMLImageElement.prototype;
   const src = Object.getOwnPropertyDescriptor(images, "src")!;
+  const complete = Object.getOwnPropertyDescriptor(images, "complete")!;
   const { get: getSource, set: setSource } = src;
   const { setAttribute, removeAttribute, decode } = images;
   const pending = new WeakMap<HTMLImageElement, ImageLoad>();
@@ -65,6 +66,10 @@ export function installImages(resources: Resources, report: (message: string) =>
     ...src,
     get(this: HTMLImageElement) { return current(this)?.url ?? getSource!.call(this); },
     set(this: HTMLImageElement, value: string) { assign(this, value); },
+  });
+  Object.defineProperty(images, "complete", {
+    ...complete,
+    get(this: HTMLImageElement) { return current(this) ? false : complete.get!.call(this); },
   });
   images.setAttribute = function (name, value) {
     const key = String(name);
