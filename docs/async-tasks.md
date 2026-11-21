@@ -112,8 +112,10 @@ When a native result arrives, its follow-up is labeled **Codex 收到后台消�
 This source label also survives compact history restore; expanding the process
 shows the bounded result. Several receipts consumed together share one label.
 Tasks leave the panel after the callback turn completes successfully or a pending
-notification is cancelled. Accepted callbacks stay visible while processing;
-failed, rejected or unconfirmed callbacks show a retained-result warning. Their
+notification is cancelled. A matching live Codex completion updates the panel
+as it arrives. The worker continues to check delivery outcomes for recovery.
+Accepted callbacks stay visible while processing. Failed, rejected or
+unconfirmed callbacks show a retained-result warning. Their
 command output remains available through `task_result`. The panel is not a
 complete archive of successfully delivered tasks.
 

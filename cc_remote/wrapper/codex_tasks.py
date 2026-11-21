@@ -71,9 +71,15 @@ def read_task_activity(home: Path) -> dict[str, list[BackgroundProcessItem]]:
             status = "failed"
             summary = ("Codex 处理结果未确认，任务结果已保留" if delivery == "unknown"
                        else "Codex 未能处理通知，任务结果已保留")
+        callback_turn = None
+        if terminal and delivery in {"accepted", "failed", "unknown"} and row.get("delivery_turn_id"):
+            try:
+                callback_turn = thread_id(row["delivery_turn_id"])
+            except ValueError:
+                pass  # Legacy unverified IDs still use the worker's reconciliation.
         result.setdefault(sid, []).append(BackgroundProcessItem(
             item_id=f"{TASK_ITEM_PREFIX}{key}", kind="task",
-            title=row["title"], status=status, summary=summary,
+            title=row["title"], status=status, summary=summary, turn_id=callback_turn,
             started_at=row["created"], updated_at=row["updated"],
         ))
     return result

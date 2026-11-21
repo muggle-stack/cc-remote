@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from cc_remote.protocol import GetAgentDetail
+from cc_remote.protocol import GetAgentDetail, TurnEnd, TurnResult
 from cc_remote.task_store import TaskStore, public_task
 from cc_remote.wrapper.codex_tasks import read_task_activity, read_task_callbacks, read_task_parameters
 from cc_remote.wrapper.history_store import materialize_history_turns
@@ -235,6 +235,119 @@ async def test_wrapper_sync_routes_activity_and_never_reopens_idle(tmp_path, mon
     await machine._refresh_codex_background_processes()
     assert len(transport.sent) == 1 and transport.sent[0].items == []
     assert current.state == "idle"
+
+
+@pytest.mark.asyncio
+async def test_native_completion_retires_only_its_callbacks_before_the_worker_poll(tmp_path, monkeypatch):
+    sid, other_sid, turn_id = (str(uuid4()) for _ in range(3))
+    local_home, other_home = tmp_path / "local", tmp_path / "other"
+    store, first = task(local_home, sid, "First callback")
+    _, second = task(local_home, sid, "Second callback")
+    _, running = task(local_home, sid, "Still running")
+    _, other_thread = task(local_home, other_sid, "Other thread")
+    other_store, other_account = task(other_home, sid, "Other account")
+    for key in (first, second, other_thread):
+        store.update(key, state="completed", delivery="accepted", delivery_turn_id=turn_id)
+    other_store.update(other_account, state="completed", delivery="accepted", delivery_turn_id=turn_id)
+    store.update(running, state="running")
+
+    machine, transport = _mk_machine()
+    current = _mk_ctx(sid, sid)
+    different_thread = _mk_ctx(other_sid, other_sid)
+    different_account = _mk_ctx(f"other:{sid}", sid)
+    for ctx in (current, different_thread, different_account):
+        ctx.engine = "codex"
+        machine.sessions[ctx.key] = ctx
+    monkeypatch.setattr(machine, "_codex_profile_for_ctx", lambda ctx: SimpleNamespace(
+        home=other_home if ctx is different_account else local_home))
+    await machine._refresh_codex_background_processes()
+    assert set(current.codex_background_processes) == {f"async-task:{key}" for key in (first, second, running)}
+    cached = next(frame for frame in transport.sent if frame.type == "background_process_sync" and frame.sid == sid)
+
+    for target, trusted, is_error in (
+        (turn_id, False, False), (turn_id, True, True), (str(uuid4()), True, False),
+    ):
+        event = TurnEnd(turn_id=target, result=TurnResult(
+            subtype="error_during_execution" if is_error else "success",
+            duration_ms=1, is_error=is_error))
+        event._codex_authoritative_terminal = trusted
+        transport.sent.clear()
+        await machine._emit(current, event)
+        assert not any(frame.type == "background_process_sync" for frame in transport.sent)
+
+    from cc_remote.wrapper.codex_stream import CodexStreamTranslator
+    translator = CodexStreamTranslator(tool_result_max=8000)
+    for key in (first, second):
+        for event in translator.feed({"method": "item/completed", "params": {
+            "turnId": turn_id, "threadId": sid, "item": {
+                "id": f"receipt-{key}", "type": "functionCallOutput", "namespace": "cc_remote_tasks",
+                "name": "task_result", "output": json.dumps(public_task(store.get(key), output=True)),
+            },
+        }}):
+            await machine._emit(current, event)
+    transport.sent.clear()
+    for event in translator.feed({"method": "turn/completed", "params": {
+        "threadId": sid, "turn": {"id": turn_id, "status": "completed", "durationMs": 1},
+    }}):
+        await machine._emit(current, event)
+    frames = [frame for frame in transport.sent if frame.type == "background_process_sync"]
+    assert len(frames) == 1 and frames[0].sid == sid
+    assert [(item.item_id, item.status) for item in frames[0].items] == [(f"async-task:{running}", "running")]
+    assert store.get(first)["delivery"] == store.get(second)["delivery"] == "accepted"
+    assert list(different_thread.codex_background_processes) == [f"async-task:{other_thread}"]
+    assert list(different_account.codex_background_processes) == [f"async-task:{other_account}"]
+    assert machine._refresh_cached_response(cached).items == frames[0].items
+
+    transport.sent.clear()
+    await machine._refresh_codex_background_processes()
+    assert transport.sent == []
+
+
+@pytest.mark.asyncio
+async def test_completion_survives_a_stale_poll_and_late_callback_acceptance(tmp_path, monkeypatch):
+    sid, turn_id = str(uuid4()), str(uuid4())
+    store, accepted = task(tmp_path, sid)
+    _, late = task(tmp_path, sid)
+    store.update(accepted, state="completed", delivery="accepted", delivery_turn_id=turn_id)
+    store.update(late, state="completed")
+
+    machine, transport = _mk_machine()
+    ctx = _mk_ctx(sid, sid)
+    ctx.engine = "codex"
+    machine.sessions[sid] = ctx
+    monkeypatch.setattr(machine, "_codex_profile_for_ctx", lambda _: SimpleNamespace(home=tmp_path))
+    await machine._refresh_codex_background_processes()
+    read, release = asyncio.Event(), asyncio.Event()
+    to_thread = asyncio.to_thread
+
+    async def pause_task_read(fn, *args, **kwargs):
+        value = await to_thread(fn, *args, **kwargs)
+        if fn is read_task_activity:
+            read.set()
+            await release.wait()
+        return value
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(asyncio, "to_thread", pause_task_read)
+        poll = asyncio.create_task(machine._refresh_codex_background_processes())
+        try:
+            await asyncio.wait_for(read.wait(), 2)
+            event = TurnEnd(turn_id=turn_id, result=TurnResult(
+                subtype="success", duration_ms=1, is_error=False))
+            event._codex_authoritative_terminal = True
+            await machine._emit(ctx, event)
+            assert list(ctx.codex_background_processes) == [f"async-task:{late}"]
+            transport.sent.clear()
+        finally:
+            release.set()
+            await poll
+    assert transport.sent == []
+    assert list(ctx.codex_background_processes) == [f"async-task:{late}"]
+
+    store.update(late, delivery="accepted", delivery_turn_id=turn_id)
+    await machine._refresh_codex_background_processes()
+    assert ctx.codex_background_processes == {}
+    assert transport.sent[-1].type == "background_process_sync" and transport.sent[-1].items == []
 
 
 @pytest.mark.asyncio

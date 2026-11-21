@@ -6196,12 +6196,15 @@ class WrapperMachine:
             for turn_id in candidates:
                 if not available():
                     return False
+                key = (str(home), native_sid, turn_id)
+                if key in ctx.codex_completed_task_turns:
+                    continue
                 if await sdk.probe_owned_turn(turn_id) is None or not available():
                     continue
                 # Re-read the same private receipt after asynchronous native
                 # reads; account replacement/cancellation cannot transfer it.
                 current = await asyncio.to_thread(read_task_callbacks, home, native_sid)
-                if turn_id not in current or not available():
+                if turn_id not in current or not available() or key in ctx.codex_completed_task_turns:
                     continue
                 if await sdk.recover_owned_turn(turn_id):
                     log.info("recovered shared Codex task callback",
@@ -7057,11 +7060,39 @@ class WrapperMachine:
             ],
         )
 
+    def _observe_completed_codex_task_turn(self, ctx: SessionContext, turn_id: str) -> bool:
+        """Retire this account/thread's callback cards under the emission lock."""
+        from cc_remote.task_store import MAX_RECORDS
+        from cc_remote.wrapper.codex_tasks import TASK_ITEM_PREFIX
+
+        if ctx.space != "code" or not ctx.session_id or not self._is_resident_context(ctx):
+            return False
+        scope = (str(self._codex_profile_for_ctx(ctx).home), ctx.session_id)
+        key = (*scope, turn_id)
+        completed = ctx.codex_completed_task_turns
+        completed.pop(key, None)
+        completed[key] = None
+        if len(completed) > MAX_RECORDS:
+            completed.pop(next(iter(completed)))
+
+        previous = ctx.codex_background_processes
+        # Let the next full read fill any slots hidden by a capped snapshot.
+        if ctx.codex_background_scope != scope or not previous or len(previous) >= MAX_BACKGROUND_PROCESS_ITEMS:
+            return False
+        remaining = {
+            item_id: item for item_id, item in previous.items()
+            if not (item_id.startswith(TASK_ITEM_PREFIX) and item.turn_id == turn_id)
+        }
+        if len(remaining) == len(previous):
+            return False
+        ctx.codex_background_processes = remaining
+        return True
+
     async def _refresh_codex_background_processes(
         self, contexts: list[SessionContext] | None = None,
     ) -> None:
         """Project detached task state without querying or waking an engine."""
-        from cc_remote.wrapper.codex_tasks import read_task_activity
+        from cc_remote.wrapper.codex_tasks import TASK_ITEM_PREFIX, read_task_activity
         from cc_remote.wrapper.codex_agent_activity import CodexAgentActivity
 
         async with self._codex_task_sync_lock:
@@ -7106,33 +7137,39 @@ class WrapperMachine:
                 if activity is None and agents is None:
                     continue
                 for ctx, native_sid in residents:
-                    if (not self._is_resident_context(ctx) or ctx.session_id != native_sid
-                            or self._codex_profile_for_ctx(ctx).home != home):
-                        continue
-                    previous = ctx.codex_background_processes
-                    retained = (previous or {}).values()
-                    tasks = (activity.get(native_sid, []) if activity is not None else
-                             [item for item in retained if item.item_id.startswith("async-task:")])
-                    native_agents = (agents.get(native_sid, []) if agents is not None else
-                                     [item for item in retained if item.item_id.startswith("codex-agent:")])
-                    combined = tasks + native_agents
-                    # Active native agents must not be hidden behind retained
-                    # MCP delivery warnings when the public snapshot is full.
-                    combined.sort(key=lambda item: item.status not in {"running", "pending"})
-                    replacement = {item.item_id: item for item in
-                                   combined[:MAX_BACKGROUND_PROCESS_ITEMS]}
+                    # Serialize with live terminal publication so a read taken
+                    # before completion cannot reintroduce a retired callback.
+                    async with ctx.emit_lock:
+                        if (not self._is_resident_context(ctx) or ctx.session_id != native_sid
+                                or self._codex_profile_for_ctx(ctx).home != home):
+                            continue
+                        scope = (str(home), native_sid)
+                        previous = ctx.codex_background_processes
+                        retained = (previous or {}).values() if ctx.codex_background_scope == scope else ()
+                        tasks = (activity.get(native_sid, []) if activity is not None else
+                                 [item for item in retained if item.item_id.startswith(TASK_ITEM_PREFIX)])
+                        tasks = [item for item in tasks
+                                 if (*scope, item.turn_id) not in ctx.codex_completed_task_turns]
+                        native_agents = (agents.get(native_sid, []) if agents is not None else
+                                         [item for item in retained if item.item_id.startswith("codex-agent:")])
+                        combined = tasks + native_agents
+                        # Active native agents must not be hidden behind retained
+                        # MCP delivery warnings when the public snapshot is full.
+                        combined.sort(key=lambda item: item.status not in {"running", "pending"})
+                        replacement = {item.item_id: item for item in
+                                       combined[:MAX_BACKGROUND_PROCESS_ITEMS]}
+                        ctx.codex_background_scope = scope
+                        if replacement != previous:
+                            ctx.codex_background_processes = replacement
+                            # A first empty read needs no live transition. Hello
+                            # and focus still seed the authoritative level.
+                            if previous is not None or replacement:
+                                await self._emit_locked(ctx, self._background_process_sync(ctx))
                     if tasks:
                         # A callback can start while the Wrapper is offline or
                         # before the fresh proxy subscribes. Activity alone does
                         # not reopen a turn: recovery proves its exact native ID.
                         await self._recover_unleased_codex_callback(ctx, ctx.key)
-                    if replacement == previous:
-                        continue
-                    ctx.codex_background_processes = replacement
-                    # A first empty read has no live transition to broadcast.
-                    # Hello/focus still seed it after their ordered envelope.
-                    if previous is not None or replacement:
-                        await self._emit(ctx, self._background_process_sync(ctx))
 
     async def _publish_claude_background_processes(
         self, ctx: SessionContext,
@@ -10804,17 +10841,17 @@ class WrapperMachine:
         self,
         ctx: SessionContext,
         msg: TurnEnd,
-    ) -> None:
+    ) -> CodexTerminalFence | None:
         """Normalize and retain an authoritative live app-server terminal."""
         if (
             ctx.engine != "codex"
             or ctx.btw
             or not msg._codex_authoritative_terminal
         ):
-            return
+            return None
         fence = self._codex_terminal_fence_from_event(msg)
         if fence is None:
-            return
+            return None
         if (
             fence.status == "interrupted"
             and fence.turn_id in _codex_compaction_continuation_ids(ctx)
@@ -10822,12 +10859,13 @@ class WrapperMachine:
             # The app-server uses an interrupted native boundary while compact
             # immediately continues the same visible logical turn.  Its final
             # replacement terminal will be recorded normally.
-            return
+            return None
         sid = self._ctx_wire_sid(ctx) or ctx.key
         watch = self._watch.get(sid)
         source_identity = self._codex_watch_source_identity(watch)
         self._remember_codex_terminal_fence(
             sid, fence, source_identity=source_identity)
+        return fence
 
     async def _codex_terminal_snapshot(
         self,
@@ -11023,7 +11061,9 @@ class WrapperMachine:
             # copy sent on this live call receives presentation metadata.
             msg.notification_context = None
             try:
-                self._remember_codex_terminal_event(ctx, msg)
+                fence = self._remember_codex_terminal_event(ctx, msg)
+                if fence is not None and fence.status == "completed":
+                    background_membership_changed = self._observe_completed_codex_task_turn(ctx, fence.turn_id)
             except Exception as exc:
                 # Lifecycle recovery is optional. No cache/ledger failure may
                 # suppress the engine's authoritative live terminal.
@@ -12323,6 +12363,13 @@ class WrapperMachine:
                 replay.cc_session_id = self._ctx_wire_sid(ctx)
                 replay.cwd = ctx.cwd
                 replay.generation = self.instance_id
+        if isinstance(replay, BackgroundProcessSync) and replay.sid:
+            ctx = self._ctx_for(replay.sid)
+            if ctx is not None and ctx.engine == "codex":
+                current = self._background_process_sync(ctx)
+                replay.items = current.items
+                replay.generation = current.generation
+                replay.ts = current.ts
         return replay
 
     async def _fork_entry_for_cached_command(
@@ -29608,14 +29655,13 @@ class WrapperMachine:
         await self._emit(ctx, focus)
         cached_responses = [snap, focus] if snap is not None else [focus]
         await self._refresh_codex_background_processes([ctx])
-        if ctx.engine == "claude" or ctx.codex_background_processes is not None:
-            # This wrapper instance may have respawned the native Claude child
-            # without changing its generation.  Re-seed the exact current level
-            # on every focus so an empty replacement clears cards retained from
-            # the previous child/runtime.
-            background_event = self._background_process_sync(ctx)
-            await self._emit(ctx, background_event)
-            cached_responses.append(background_event)
+        async with ctx.emit_lock:
+            if ctx.engine == "claude" or ctx.codex_background_processes is not None:
+                # Seed the current level on focus. An empty snapshot clears
+                # retained cards, including after a Claude child respawn.
+                background_event = self._background_process_sync(ctx)
+                await self._emit_locked(ctx, background_event)
+                cached_responses.append(background_event)
         control_event = self._session_control(ctx)
         await self._emit(ctx, control_event)
         cached_responses.append(control_event)
