@@ -97,6 +97,20 @@ for(const type of ['wheel','touchstart','touchmove','gesturestart','gesturechang
                 "id": "wide", "label": "宽页面缩放测试", "entry": "/viewer/wide.html",
                 "paths": ["/viewer/wide.html"],
             }))
+            (root / "viewer/runtime-images.html").write_text('''<!doctype html><body>
+<h1>动态图片</h1><div id="gallery"></div><script>
+const image = document.createElement('img');
+image.id = 'runtime-photo';
+image.onload = () => { image.dataset.loaded = 'yes'; };
+image.src = '../meshes/badge.svg';
+document.getElementById('gallery').append(image);
+</script></body>''')
+            (root / "meshes/runtime-wide.svg").write_text(
+                '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16"><rect width="32" height="16"/></svg>')
+            sites.append(site.model_copy(update={
+                "id": "runtime-images", "label": "动态图片测试", "entry": "/viewer/runtime-images.html",
+                "paths": ["/viewer/runtime-images.html", "/meshes/badge.svg", "/meshes/runtime-wide.svg"],
+            }))
             with wave.open(str(root / "viewer/narration.wav"), "wb") as sound:
                 sound.setnchannels(1)
                 sound.setsampwidth(2)

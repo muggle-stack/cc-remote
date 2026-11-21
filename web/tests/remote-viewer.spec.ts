@@ -167,6 +167,57 @@ test("Bridge reports a stale runner immediately and reconnects with the current 
   await expect(page.locator(".viewer-error-banner")).toHaveCount(0);
 });
 
+test("Bridge loads images assigned by the page and honors src changes during a read", async ({ page }) => {
+  test.skip(process.env.VIEWER_TEST_MODE === "isolated", "Bridge image transport.");
+  await page.getByRole("button", { name: "打开远程预览" }).click();
+  await page.getByRole("button", { name: /^动态图片测试/ }).click();
+  const frame = page.frameLocator(".viewer-stage iframe");
+  const image = frame.locator("#runtime-photo");
+  await expect(image).toHaveAttribute("data-loaded", "yes", { timeout: 5000 });
+  await expect(image).toHaveJSProperty("naturalWidth", 16);
+
+  const state = await frame.locator("#gallery").evaluate(async gallery => {
+    const current = new Image();
+    current.src = "../meshes/badge.svg?stale";
+    const stale = current.decode().then(() => "decoded", error => error.name);
+    current.setAttribute("SRC", "../meshes/runtime-wide.svg");
+    gallery.append(current);
+    await current.decode();
+
+    const removed = new Image();
+    removed.src = "../meshes/badge.svg?removed";
+    const cancelled = removed.decode().then(() => "decoded", error => error.name);
+    removed.removeAttribute("src");
+    gallery.append(removed);
+    return {
+      stale: await stale, cancelled: await cancelled, width: current.naturalWidth,
+      source: current.getAttribute("src"), removed: removed.getAttribute("src"),
+    };
+  });
+  expect(state).toEqual({
+    stale: "EncodingError", cancelled: "EncodingError", width: 32,
+    source: expect.stringMatching(/^blob:/), removed: null,
+  });
+  await expect(page.locator(".viewer-error-banner")).toHaveCount(0);
+});
+
+test("Bridge reports a runtime image read failure and notifies the page", async ({ page }) => {
+  test.skip(process.env.VIEWER_TEST_MODE === "isolated", "Bridge image transport.");
+  await page.getByRole("button", { name: "打开远程预览" }).click();
+  await page.getByRole("button", { name: /^动态图片测试/ }).click();
+  const frame = page.frameLocator(".viewer-stage iframe");
+  await frame.locator("h1").evaluate(() => {
+    const image = new Image();
+    image.onload = () => { image.dataset.result = "loaded"; };
+    image.onerror = () => { image.dataset.result = "error"; };
+    image.id = "unavailable-image";
+    image.src = "../meshes/unavailable.svg";
+    document.body.append(image);
+  });
+  await expect(frame.locator("#unavailable-image")).toHaveAttribute("data-result", "error");
+  await expect(page.locator(".viewer-error-banner")).toContainText("/meshes/unavailable.svg");
+});
+
 test("remote Viewer loads modules and binary models without exposing main cookies", async ({ page }) => {
   await page.getByRole("button", { name: "打开远程预览" }).click();
   await page.getByRole("button", { name: /^机器人结构/ }).click();
