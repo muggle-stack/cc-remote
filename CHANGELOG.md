@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+## v5.3.53
+
+Expand a Codex background task to see its launch command and arguments, working directory, and timeout. Task details load from the current account and session, and the preview masks common credentials in command arguments and shell headers. Wire protocol v97.
+
+See the bilingual [release notes](docs/releases/v5.3.53.md).
+
 ## v5.3.52
 
 Disable deletion while a session is active and show why a fork or an unavailable Codex daemon blocks deletion. Preserve drafts when deletion fails. The sidebar refreshes automatically after archive, restore, or permanent deletion in Codex App. Wire protocol v97.
