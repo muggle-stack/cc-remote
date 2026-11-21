@@ -4,10 +4,15 @@
 
 ## Unreleased
 
+## v5.3.54
+
 HTML previews fit narrow panels and retain zoom across refreshes. File previews
 add PDF zoom and text search, improve mobile slide navigation, and support
-DOCX, WebM video, more image formats, and paged spreadsheets. Original downloads
-preserve the file bytes. Wire protocol v98.
+DOCX, WebM video, more image formats, and paged spreadsheets. Long CSV and TSV
+cells are shortened for display while the rest of the table remains visible.
+Original downloads preserve the file bytes. Wire protocol v98.
+
+See the bilingual [release notes](docs/releases/v5.3.54.md).
 
 ## v5.3.53
 
