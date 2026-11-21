@@ -31,12 +31,10 @@ test("HTML page zoom fits wide content and preserves controls and retained state
   const frame = page.frameLocator(".viewer-stage iframe");
   const zoom = page.getByRole("button", { name: "页面缩放", exact: true });
   await expect(zoom).toBeEnabled();
-  await expect(zoom).toHaveText("100%");
   const source = await page.locator(".viewer-stage iframe").getAttribute("src");
   const viewportScale = await page.evaluate(() => visualViewport?.scale);
-  await zoom.click();
-  await page.getByRole("button", { name: "适应宽度", exact: true }).click();
   await expect.poll(() => frame.locator("html").evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1);
+  await expect(zoom).not.toHaveText("100%");
   await frame.getByRole("button", { name: "计数 0", exact: true }).click();
   await expect(frame.locator("#counter")).toHaveText("计数 1");
   const range = frame.locator("#range");
@@ -59,8 +57,15 @@ test("HTML page zoom fits wide content and preserves controls and retained state
   await expect(zoom).toHaveText(percentage!);
   await expect(frame.locator("#counter")).toHaveText("计数 1");
   await expect(page.locator(".viewer-stage iframe")).toHaveAttribute("src", source!);
+  await page.getByRole("button", { name: "刷新预览", exact: true }).click();
+  await expect(zoom).toBeEnabled();
+  await expect(zoom).toHaveText(percentage!);
+  await expect.poll(() => frame.locator("html").evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1);
   await zoom.click();
   await page.getByRole("button", { name: "恢复 100%" }).click();
+  await expect(zoom).toHaveText("100%");
+  await page.getByRole("button", { name: "刷新预览", exact: true }).click();
+  await expect(zoom).toBeEnabled();
   await expect(zoom).toHaveText("100%");
   expect(await page.evaluate(() => visualViewport?.scale)).toBe(viewportScale);
   await expect(page.locator(".viewer-error-banner")).toHaveCount(0);
@@ -72,6 +77,9 @@ test("HTML pinch zoom stays inside the frame and respects page-owned gestures", 
   const frame = page.frameLocator(".viewer-stage iframe");
   const zoom = page.getByRole("button", { name: "页面缩放", exact: true });
   await expect(zoom).toBeEnabled();
+  await zoom.click();
+  await page.getByRole("button", { name: "恢复 100%" }).click();
+  await expect(zoom).toHaveText("100%");
   const viewportScale = await page.evaluate(() => visualViewport?.scale);
   await frame.locator("body").evaluate(el => {
     el.dispatchEvent(new WheelEvent("wheel", { ctrlKey: true, deltaY: 30, clientX: 150, clientY: 150, bubbles: true, cancelable: true }));
@@ -114,7 +122,11 @@ test("HTML browser touch input zooms locally while ordinary wheel scrolling rema
   test.skip(info.project.name !== "chromium", "CDP touch injection is Chromium-only.");
   await page.getByRole("button", { name: "打开远程预览" }).click();
   await page.getByRole("button", { name: /^宽页面缩放测试/ }).click();
-  await expect(page.getByRole("button", { name: "页面缩放", exact: true })).toBeEnabled();
+  const zoom = page.getByRole("button", { name: "页面缩放", exact: true });
+  await expect(zoom).toBeEnabled();
+  await zoom.click();
+  await page.getByRole("button", { name: "恢复 100%" }).click();
+  await expect(zoom).toHaveText("100%");
   const frame = page.frameLocator(".viewer-stage iframe");
   const viewportScale = await page.evaluate(() => visualViewport?.scale);
   const box = await page.locator(".viewer-stage iframe").boundingBox();

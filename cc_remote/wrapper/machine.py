@@ -2034,6 +2034,11 @@ class WrapperMachine:
     UNCERTAIN_FORK_CAP = 4096
     MARKDOWN_PREVIEW_SUFFIXES = frozenset({".md", ".markdown"})
     HTML_PREVIEW_SUFFIXES = frozenset({".htm", ".html"})
+    HTML_PREVIEW_MAX_BYTES = 2 * 1024 * 1024
+    DELIMITED_PREVIEW_SUFFIXES = frozenset({".csv", ".tsv"})
+    RASTER_CONVERSION_FORMATS = {
+        ".heic": "HEIF", ".heif": "HEIF", ".tif": "TIFF", ".tiff": "TIFF", ".bmp": "BMP",
+    }
     OFFICE_PREVIEW_SUFFIXES = frozenset({
         ".doc", ".docx", ".odt", ".rtf", ".xls", ".xlsx", ".ods",
         ".ppt", ".odp",
@@ -26164,27 +26169,63 @@ class WrapperMachine:
     async def _handle_get_session_artifact_preview(self, cmd):
         return await self._artifacts.preview(cmd)
 
-    def _video_file_preview(self, cwd, path, engine, space, sid, owner_id, caps=None):
+    def _streamed_file_preview(
+        self, cwd, path, engine, space, sid, owner_id, caps=None, *, download_identity=None,
+    ):
         from cc_remote.viewer import MAX_FILE_BYTES
-        from cc_remote.wrapper.media_preview import VIDEO_SUFFIXES
+        from cc_remote.wrapper.media_preview import STREAMED_MEDIA_SUFFIXES
 
         # Freeze the resolved file, while rechecking current external capabilities
         # and its exact identity on every range request. A new engine is never started.
-        resolved = os.path.realpath(os.path.join(cwd, path))
+        root = os.path.realpath(cwd)
+        resolved = os.path.realpath(os.path.join(root, path))
+        root_stat = os.stat(root)
+        inside = self._path_is_below(root, resolved)
+
         def opener():
             allowed = (caps if caps is not None else
                        self._preview_capability_store.snapshot(engine, space, sid))
             return self._open_session_file(
-                cwd, resolved, allowed_suffixes=VIDEO_SUFFIXES,
-                max_bytes=MAX_FILE_BYTES, allow_truncate=False, allowed_external_paths=allowed)
+                root, resolved,
+                allowed_suffixes=None if download_identity is not None else STREAMED_MEDIA_SUFFIXES,
+                max_bytes=MAX_FILE_BYTES, allow_truncate=False, allowed_external_paths=allowed,
+                workspace_identity=(root_stat.st_dev, root_stat.st_ino) if inside else None)
+
         def authorize(info):
-            if not self._path_is_below(os.path.realpath(cwd), resolved):
+            if not inside:
                 allowed = (caps if caps is not None else
                            self._preview_capability_store.snapshot(engine, space, sid))
                 capability = allowed.get(resolved)
                 if capability is None or not capability.matches(info):
-                    raise PermissionError("video permission revoked")
-        return self.media_previews.create(owner_id, engine, sid, opener, authorize)
+                    raise PermissionError("file permission revoked")
+
+        return self.media_previews.create(
+            owner_id, engine, sid, opener, authorize, download_identity=download_identity)
+
+    async def _load_artifact_preview(self, cwd, path, engine, space, sid, owner_id, caps, *, frozen_caps=None):
+        from cc_remote.wrapper.media_preview import STREAMED_MEDIA_SUFFIXES, fingerprint
+
+        suffix = os.path.splitext(path)[1].lower()
+        if suffix in STREAMED_MEDIA_SUFFIXES:
+            return await asyncio.to_thread(
+                self._streamed_file_preview, cwd, path, engine, space, sid, owner_id, frozen_caps)
+        if suffix in self.OFFICE_PREVIEW_SUFFIXES or suffix in self.RASTER_CONVERSION_FORMATS:
+            async with self._preview_conversion_limit:
+                preview = await asyncio.to_thread(self._read_file_preview, cwd, path, caps)
+        else:
+            preview = await asyncio.to_thread(self._read_file_preview, cwd, path, caps)
+        original_stat = preview.pop("original_stat", None)
+        if original_stat is not None and owner_id:
+            try:
+                descriptor = await asyncio.to_thread(
+                    self._streamed_file_preview, cwd, path, engine, space, sid, owner_id,
+                    frozen_caps, download_identity=fingerprint(original_stat))
+                preview.update(descriptor)
+            except (ValueError, OSError):
+                # The preview remains useful if the original changed or is too
+                # large for the download channel. Never link to a different file.
+                pass
+        return preview
 
     async def _handle_get_file_preview(self, cmd):
         sid = getattr(cmd, "sid", None)
@@ -26230,21 +26271,10 @@ class WrapperMachine:
                     ctx.engine, ctx.space, self._ctx_wire_sid(ctx),
                     resolved_path, mode="read", source="user_approved",
                     persist=not ctx.btw)
-            suffix = os.path.splitext(requested_path)[1].lower()
             external_paths = self._preview_capabilities(ctx)
-            if self._preview_format(requested_path) == "video":
-                preview = await asyncio.to_thread(
-                    self._video_file_preview, ctx.cwd, requested_path, ctx.engine, ctx.space,
-                    self._ctx_wire_sid(ctx), cmd.owner_id)
-            elif suffix in self.OFFICE_PREVIEW_SUFFIXES:
-                async with self._preview_conversion_limit:
-                    preview = await asyncio.to_thread(
-                        self._read_file_preview, ctx.cwd, requested_path,
-                        external_paths)
-            else:
-                preview = await asyncio.to_thread(
-                    self._read_file_preview, ctx.cwd, requested_path,
-                    external_paths)
+            preview = await self._load_artifact_preview(
+                ctx.cwd, requested_path, ctx.engine, ctx.space,
+                self._ctx_wire_sid(ctx), cmd.owner_id, external_paths)
             external_capability = external_paths.get(resolved_path)
             response = FilePreview(
                 path=preview["path"],
@@ -27187,14 +27217,17 @@ class WrapperMachine:
             dict[str, PreviewCapability]
         ] = None,
     ) -> tuple[str, str, int, bool, int, str, Optional[str]]:
-        relative, data, file_stat, truncated = cls._read_session_file(
-            cwd,
-            path,
-            allowed_suffixes=None,
-            max_bytes=FILE_PREVIEW_MAX_BYTES,
-            allow_truncate=True,
-            allowed_external_paths=allowed_external_paths,
+        preview = cls._read_file_preview_text(cwd, path, allowed_external_paths, FILE_PREVIEW_MAX_BYTES)
+        return (
+            preview["path"], preview["content"], preview["size"], preview["truncated"],
+            preview["mtime_ns"], preview["format"], preview["revision"],
         )
+
+    @classmethod
+    def _read_file_preview_text(cls, cwd, path, caps, max_bytes, *, allowed_suffixes=None):
+        relative, data, file_stat, truncated = cls._read_session_file(
+            cwd, path, allowed_suffixes=allowed_suffixes, max_bytes=max_bytes, allow_truncate=True,
+            allowed_external_paths=caps)
         if b"\0" in data:
             raise ValueError("文件不是可预览的 UTF-8 文本")
         decoder = codecs.getincrementaldecoder("utf-8-sig")("strict")
@@ -27202,15 +27235,15 @@ class WrapperMachine:
             content = decoder.decode(data, final=not truncated)
         except UnicodeDecodeError as exc:
             raise ValueError("文件不是有效的 UTF-8 文本") from exc
-        return (
-            relative,
-            content,
-            file_stat.st_size,
-            truncated,
-            file_stat.st_mtime_ns,
-            cls._preview_format(relative),
-            None if truncated else hashlib.sha256(data).hexdigest(),
-        )
+        result = {
+            "path": relative, "content": content, "format": cls._preview_format(relative),
+            "size": file_stat.st_size, "mtime_ns": file_stat.st_mtime_ns, "truncated": truncated,
+            "revision": None if truncated else hashlib.sha256(data).hexdigest(),
+            "data": None if truncated else data,
+        }
+        if truncated:
+            result["original_stat"] = file_stat
+        return result
 
     @classmethod
     def _read_file_preview(
@@ -27248,34 +27281,48 @@ class WrapperMachine:
                 allowed_external_paths=allowed_external_paths)
             return {"path": relative, "format": "spreadsheet", "content": spreadsheet_preview(data),
                     "data": data, "size": file_stat.st_size, "mtime_ns": file_stat.st_mtime_ns}
+        if suffix in cls.DELIMITED_PREVIEW_SUFFIXES:
+            from cc_remote.wrapper.spreadsheet_preview import delimited_preview
+
+            preview = cls._read_file_preview_text(
+                cwd, path, allowed_external_paths, ARTIFACT_PREVIEW_MAX_BYTES,
+                allowed_suffixes=frozenset({suffix}))
+            preview["content"] = delimited_preview(preview["content"], suffix, preview["truncated"])
+            return preview
         if suffix in cls.OFFICE_PREVIEW_SUFFIXES:
-            return cls._convert_office_preview(
-                cwd, path, allowed_external_paths)
+            if suffix != ".docx":
+                return cls._convert_office_preview(cwd, path, allowed_external_paths)
+            if not shutil.which("bwrap"):
+                return cls._read_word_preview(cwd, path, allowed_external_paths)
+            try:
+                return cls._convert_office_preview(cwd, path, allowed_external_paths)
+            except (ValueError, OSError) as exc:
+                if isinstance(exc, _PreviewAuthorizationNeeded):
+                    raise
+                return cls._read_word_preview(cwd, path, allowed_external_paths)
 
         if suffix in cls.HTML_PREVIEW_SUFFIXES:
-            relative, data, file_stat, truncated = cls._read_session_file(
-                cwd,
-                path,
-                allowed_suffixes=cls.HTML_PREVIEW_SUFFIXES,
-                max_bytes=FILE_PREVIEW_MAX_BYTES,
-                allow_truncate=True,
-                allowed_external_paths=allowed_external_paths,
-            )
-            if b"\0" in data:
-                raise ValueError("HTML 文件不是有效的 UTF-8 文本")
-            decoder = codecs.getincrementaldecoder("utf-8-sig")("strict")
-            try:
-                content = decoder.decode(data, final=not truncated)
-            except UnicodeDecodeError as exc:
-                raise ValueError("HTML 文件不是有效的 UTF-8 文本") from exc
+            preview = cls._read_file_preview_text(
+                cwd, path, allowed_external_paths, cls.HTML_PREVIEW_MAX_BYTES,
+                allowed_suffixes=cls.HTML_PREVIEW_SUFFIXES)
+            if len(preview["content"].encode("utf-8")) > FILE_PREVIEW_MAX_BYTES:
+                # Complete HTML is carried in data; the text field remains bounded.
+                preview["content"] = (preview["content"].encode("utf-8")[:FILE_PREVIEW_MAX_BYTES]
+                                      .decode("utf-8", errors="ignore") if preview["truncated"] else "")
+            return preview
+
+        if suffix in cls.RASTER_CONVERSION_FORMATS:
+            from cc_remote.wrapper.artifact_inspection import render_raster_image
+
+            relative, data, file_stat, _ = cls._read_session_file(
+                cwd, path, allowed_suffixes=frozenset(cls.RASTER_CONVERSION_FORMATS),
+                max_bytes=ARTIFACT_PREVIEW_MAX_BYTES, allow_truncate=False,
+                allowed_external_paths=allowed_external_paths)
+            image, mime, _ = render_raster_image(data, cls.RASTER_CONVERSION_FORMATS[suffix])
             return {
-                "path": relative,
-                "format": "html",
-                "content": content,
-                "size": file_stat.st_size,
-                "truncated": truncated,
-                "mtime_ns": file_stat.st_mtime_ns,
-                "revision": None if truncated else hashlib.sha256(data).hexdigest(),
+                "path": relative, "format": "image", "media_type": mime, "data": image,
+                "size": file_stat.st_size, "mtime_ns": file_stat.st_mtime_ns, "original_stat": file_stat,
+                "converted_from": suffix[1:],
             }
 
         media_type = cls.ARTIFACT_PREVIEW_MEDIA_TYPES.get(suffix)
@@ -27299,16 +27346,23 @@ class WrapperMachine:
                 "mtime_ns": file_stat.st_mtime_ns,
             }
 
-        relative, content, size, truncated, mtime_ns, file_format, revision = (
-            cls._read_text_preview(cwd, path, allowed_external_paths))
+        return cls._read_file_preview_text(cwd, path, allowed_external_paths, FILE_PREVIEW_MAX_BYTES)
+
+    @classmethod
+    def _read_word_preview(cls, cwd, path, caps):
+        from cc_remote.wrapper.presentation_preview import prepare_word_preview
+
+        relative, data, file_stat, _ = cls._read_session_file(
+            cwd, path, allowed_suffixes=frozenset({".docx"}), max_bytes=ARTIFACT_PREVIEW_MAX_BYTES,
+            allow_truncate=False, allowed_external_paths=caps)
+        prepared = prepare_word_preview(data)
+        if len(prepared) > ARTIFACT_PREVIEW_MAX_BYTES:
+            raise ValueError("DOCX 渲染包超过 8 MiB 预览上限")
         return {
-            "path": relative,
-            "format": file_format,
-            "content": content,
-            "size": size,
-            "truncated": truncated,
-            "mtime_ns": mtime_ns,
-            "revision": revision,
+            "path": relative, "format": "document", "data": prepared,
+            "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "size": file_stat.st_size, "mtime_ns": file_stat.st_mtime_ns, "original_stat": file_stat,
+            "converted_from": "docx",
         }
 
     @staticmethod
@@ -27468,6 +27522,7 @@ class WrapperMachine:
                 "media_type": "application/pdf",
                 "data": preview,
                 "converted_from": suffix.removeprefix("."),
+                "original_stat": file_stat,
                 "size": file_stat.st_size,
                 "mtime_ns": file_stat.st_mtime_ns,
             }
@@ -27724,13 +27779,15 @@ class WrapperMachine:
             return "markdown"
         if suffix in cls.HTML_PREVIEW_SUFFIXES:
             return "html"
-        if suffix == ".xlsx":
+        if suffix == ".xlsx" or suffix in cls.DELIMITED_PREVIEW_SUFFIXES:
             return "spreadsheet"
         if suffix == ".pptx":
             return "presentation"
+        if suffix == ".docx":
+            return "document"
         if suffix in cls.OFFICE_PREVIEW_SUFFIXES or suffix == ".pdf":
             return "pdf"
-        if suffix in cls.PREVIEW_ASSET_MEDIA_TYPES:
+        if suffix in cls.PREVIEW_ASSET_MEDIA_TYPES or suffix in cls.RASTER_CONVERSION_FORMATS:
             return "image"
         if suffix in AUDIO_PREVIEW_MEDIA_TYPES:
             return "audio"

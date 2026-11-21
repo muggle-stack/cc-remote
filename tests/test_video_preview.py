@@ -12,7 +12,7 @@ from cc_remote.relay.auth import session_token_claims
 from cc_remote.relay.server import _btw_owner_id
 from cc_remote.relay.viewer import main_cookie_name
 from cc_remote.protocol import (
-    FilePreview, GetFilePreview, GetSessionArtifactPreview, deserialize, is_downstream, serialize,
+    FILE_PREVIEW_MAX_BYTES, FilePreview, GetFilePreview, GetSessionArtifactPreview, deserialize, is_downstream, serialize,
 )
 from cc_remote.viewer import MAX_FILE_BYTES, MAX_REQUESTS
 from cc_remote.wrapper.machine import WrapperMachine
@@ -180,6 +180,52 @@ def owner_for(client, cfg):
     cookie.load(f"session={client.cookies.get(main_cookie_name(cfg))}")
     claims = session_token_claims(cookie["session"].value, cfg.session_secret)
     return _btw_owner_id(claims, cfg.session_secret)
+
+
+def webm_header(*track_types):
+    def element(tag, data):
+        return bytes.fromhex(tag) + bytes([0x80 | len(data)]) + data
+
+    tracks = b"".join(element("ae", element("83", bytes([kind]))) for kind in track_types)
+    return element("1a45dfa3", element("4282", b"webm")) + bytes.fromhex("18538067ff") + element("1654ae6b", tracks)
+
+
+@pytest.mark.asyncio
+async def test_webm_and_original_download_use_the_correct_transport(tmp_path, publication):
+    machine, _ = _mk_machine()
+    ctx = _mk_ctx("session", session_id="session")
+    machine.sessions[ctx.key] = ctx
+    async with live_viewer(tmp_path, publication, mode="bridge", media_previews=machine.media_previews) as (
+        client, _app, cfg, site,
+    ):
+        root = Path(site.root)
+        ctx.cwd = str(root)
+        original = b"\xef\xbb\xbf" + b"hello\r\n" * (FILE_PREVIEW_MAX_BYTES // 4)
+        files = {"recording.webm": webm_header(2), "movie.webm": webm_header(2, 1), "source.txt": original}
+        previews = {}
+        for name, data in files.items():
+            (root / name).write_bytes(data)
+            previews[name] = await machine._handle_get_file_preview(GetFilePreview(
+                path=name, request_id="preview", client_id="browser", sid=ctx.key, owner_id=owner_for(client, cfg)))
+            assert previews[name].error is None
+        audio = previews["recording.webm"]
+        assert audio.format == "audio" and audio.media_type == "audio/webm"
+        assert base64.b64decode(audio.data) == files["recording.webm"] and audio.media_id is None
+        movie = previews["movie.webm"]
+        assert movie.format == "video" and movie.media_type == "video/webm"
+        text = previews["source.txt"]
+        assert text.truncated and text.data is None
+        async with httpx.AsyncClient(base_url=cfg.public_origin, cookies=client.cookies) as http:
+            response = await http.get(f"/api/media/device/{movie.media_id}", headers={"range": "bytes=0-7"})
+            assert response.status_code == 206 and response.headers["content-type"] == "video/webm"
+            assert response.content == files["movie.webm"][:8]
+            path = f"/api/media/device/{text.media_id}"
+            response = await http.get(path)
+            assert response.status_code == 200 and response.content == original
+            assert response.headers["content-type"] == "application/octet-stream"
+            assert response.headers["content-disposition"] == "attachment"
+            (root / "source.txt").write_text("Replacement", encoding="utf-8")
+            assert (await http.get(path)).status_code == 403
 
 
 @pytest.mark.asyncio

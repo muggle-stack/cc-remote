@@ -13,9 +13,9 @@ http://cc-remote.example.com {
 	}
 	header @entry Cache-Control "no-store"
 	@application {
-		not path /html-preview-runner.html /html-preview-runner.js /__cc_viewer/bridge/* /presentation-preview.html
+		not path /html-preview-runner.html /__cc_viewer/bridge/* /presentation-preview.html /word-preview.html
 	}
-	@html_preview path /html-preview-runner.html /html-preview-runner.js /presentation-preview.html
+	@html_preview path /html-preview-runner.html /presentation-preview.html /word-preview.html
 	# Bridge responses retain the relay's HTTP sandbox and per-publication CSP.
 	header @application {
 		# Match the TLS template's narrow HTTPS-only GitHub image allowlist.
@@ -27,7 +27,7 @@ http://cc-remote.example.com {
 	}
 	header @html_preview {
 		Cache-Control "no-store"
-		Content-Security-Policy "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data: blob:; media-src data: blob:; connect-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'"
+		Content-Security-Policy "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data: blob:; media-src data: blob:; connect-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "SAMEORIGIN"
 		Referrer-Policy "no-referrer"

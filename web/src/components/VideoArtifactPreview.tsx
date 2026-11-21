@@ -1,5 +1,6 @@
 import { useContext, useEffect, useRef, useState } from "react";
 import { PanelVisible } from "../right-panel-presentation";
+import { artifactMediaUrl } from "../preview-path";
 
 export function VideoArtifactPreview({ machineId, mediaId, title, size }: {
   machineId?: string | null;
@@ -7,10 +8,10 @@ export function VideoArtifactPreview({ machineId, mediaId, title, size }: {
   title: string;
   size?: number;
 }) {
-  if (!machineId || !mediaId || !/^[a-f0-9]{32}$/.test(mediaId)) {
+  const src = artifactMediaUrl(machineId, mediaId);
+  if (!src) {
     return <div className="preview-error">视频地址已失效，请刷新文件重试。</div>;
   }
-  const src = `/api/media/${encodeURIComponent(machineId)}/${mediaId}`;
   return <VideoPlayer key={src} src={src} title={title} size={size} />;
 }
 
@@ -40,7 +41,7 @@ function VideoPlayer({ src, title, size }: { src: string; title: string; size?: 
           : "视频读取中断，请确认设备在线后刷新文件重试。");
       }} />
     <div className="artifact-video-footer">
-      <span>{size != null ? `${(size / 1024 / 1024).toFixed(1)} MiB` : "MP4"}</span>
+      <span>{size != null ? `${(size / 1024 / 1024).toFixed(1)} MiB` : "视频"}</span>
       <a href={`${src}?download=1`} download={title}>下载视频</a>
     </div>
     {error && <p className="artifact-video-error" role="alert">{error}</p>}

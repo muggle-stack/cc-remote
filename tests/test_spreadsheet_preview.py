@@ -10,14 +10,16 @@ from cc_remote.wrapper.spreadsheet_preview import spreadsheet_preview
 from cc_remote.wrapper.machine import WrapperMachine
 
 
-def workbook(sheet=None, shared=None):
+def workbook(sheet=None, shared=None, styles=None, date_1904=False):
     target = BytesIO()
     with ZipFile(target, "w", ZIP_DEFLATED) as archive:
-        archive.writestr("xl/workbook.xml", '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="路线图" r:id="s1"/><sheet name="进展" r:id="s2"/></sheets></workbook>')
+        archive.writestr("xl/workbook.xml", f'<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><workbookPr date1904="{int(date_1904)}"/><sheets><sheet name="路线图" r:id="s1"/><sheet name="进展" r:id="s2"/></sheets></workbook>')
         archive.writestr("xl/_rels/workbook.xml.rels", '<Relationships><Relationship Id="s1" Type="x/worksheet" Target="worksheets/s1.xml"/><Relationship Id="s2" Type="x/worksheet" Target="worksheets/s2.xml"/></Relationships>')
         archive.writestr("xl/worksheets/s1.xml", sheet or '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1"><f>SUM(B2:B3)</f><v>42</v></c><c r="C1" t="inlineStr"><is><t>&lt;script&gt;alert(1)&lt;/script&gt;</t></is></c></row></sheetData></worksheet>')
         archive.writestr("xl/worksheets/s2.xml", '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>')
         archive.writestr("xl/sharedStrings.xml", shared or '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>本周进展</t></si></sst>')
+        if styles:
+            archive.writestr("xl/styles.xml", styles)
     return target.getvalue()
 
 
@@ -91,3 +93,28 @@ def test_visual_table_displays_literal_markup_as_text():
     markup = table.as_html().decode()
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in markup
     assert "<script>" not in markup
+
+
+@pytest.mark.parametrize(("date_1904", "date"), [(False, "1900-02-29"), (True, "1904-03-01")])
+def test_web_formats_dates_percentages_and_keeps_raw_values_for_data_views(date_1904, date):
+    data = workbook(date_1904=date_1904, sheet="""<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <sheetData><row r="1"><c r="A1" s="1"><v>60</v></c><c r="B1" s="2"><v>0.17555</v></c>
+        <c r="C1" s="3"><v>1.75</v></c></row></sheetData></worksheet>""",
+        styles="""<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+        <numFmts><numFmt numFmtId="164" formatCode="h:mm AM/PM"/></numFmts>
+        <cellXfs><xf numFmtId="0"/><xf numFmtId="14"/><xf numFmtId="10"/><xf numFmtId="164"/></cellXfs>
+        </styleSheet>""")
+    cells = json.loads(spreadsheet_preview(data))["sheets"][0]["cells"]
+    assert [cell["v"] for cell in cells] == [date, "17.56%", "6:00 PM"]
+    assert json.loads(inspect_table(data, ".xlsx", "路线图", "A1:C1", visual=False).as_json())["cells"]["A1"]["value"] == "60"
+
+
+@pytest.mark.parametrize(("suffix", "delimiter"), [(".csv", ","), (".tsv", "\t")])
+def test_delimited_preview_keeps_quoted_records_and_original_bytes(tmp_path, suffix, delimiter):
+    path = tmp_path / f"report{suffix}"
+    original = f'\ufeff名称{delimiter}值\r\n"a\r\nb"{delimiter}3\r\n'.encode()
+    path.write_bytes(original)
+    preview = WrapperMachine._read_file_preview(str(tmp_path), path.name)
+    assert preview["format"] == "spreadsheet" and preview["data"] == original
+    cells = json.loads(preview["content"])["sheets"][0]["cells"]
+    assert [(c["r"], c["c"], c["v"]) for c in cells][-2:] == [(2, 1, "a\r\nb"), (2, 2, "3")]

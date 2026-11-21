@@ -1810,7 +1810,7 @@ $$`,
 
   const artifactPanelSource = readFileSync(
     resolve(process.cwd(), "src/components/ArtifactPanel.tsx"), "utf8");
-  assert.match(artifactPanelSource, /new DOMParser\(\)\.parseFromString/);
+  assert.match(artifactPanelSource, /document\.createElement\("template"\)[\s\S]*template\.innerHTML/);
   assert.match(artifactPanelSource, /sandbox="allow-scripts"/);
   assert.doesNotMatch(artifactPanelSource, /allow-same-origin/);
   assert.match(artifactPanelSource, /iframe,object,embed,form,base,link,meta\[http-equiv\],script\[src\]/);
@@ -1822,7 +1822,7 @@ $$`,
   assert.match(htmlLoadingMarkup, /disabled="">预览<\/button>/);
   assert.match(htmlLoadingMarkup, /disabled="">源码<\/button>/);
   assert.match(artifactPanelSource, /artifact\.kind === "html" && mode === "preview"/);
-  assert.match(artifactPanelSource, /mode === "source"[\s\S]*?<SourceFile content=\{artifact\.content/);
+  assert.match(artifactPanelSource, /mode === "source"[\s\S]*?<SourceFile content=\{htmlContent\}/);
 } finally {
   await harness.close();
 }
