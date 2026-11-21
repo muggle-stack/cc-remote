@@ -4,6 +4,13 @@
 
 ## Unreleased
 
+## v5.3.56
+
+Codex background task counts update when the session finishes handling their
+callbacks. Tasks that are still running stay visible. Wire protocol v98.
+
+See the bilingual [release notes](docs/releases/v5.3.56.md).
+
 ## v5.3.55
 
 Bridge previews display authorized local images assigned by page scripts. Image
