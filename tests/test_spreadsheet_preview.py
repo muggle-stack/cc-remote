@@ -118,3 +118,23 @@ def test_delimited_preview_keeps_quoted_records_and_original_bytes(tmp_path, suf
     assert preview["format"] == "spreadsheet" and preview["data"] == original
     cells = json.loads(preview["content"])["sheets"][0]["cells"]
     assert [(c["r"], c["c"], c["v"]) for c in cells][-2:] == [(2, 1, "a\r\nb"), (2, 2, "3")]
+
+
+@pytest.mark.parametrize(("suffix", "delimiter"), [(".csv", ","), (".tsv", "\t")])
+def test_delimited_preview_truncates_long_field_and_keeps_following_cells(tmp_path, suffix, delimiter):
+    path = tmp_path / f"report{suffix}"
+    field = "文\r\n" + "x" * 131_070
+    original = f'\ufeff"{field}"{delimiter}same row\r\nnext row{delimiter}ok\r\n'.encode()
+    path.write_bytes(original)
+
+    preview = WrapperMachine._read_file_preview(str(tmp_path), path.name)
+
+    assert preview["format"] == "spreadsheet" and preview["data"] == original
+    sheet = json.loads(preview["content"])["sheets"][0]
+    assert sheet["truncated"]
+    assert sheet["cells"] == [
+        {"r": 1, "c": 1, "v": field[:2000]},
+        {"r": 1, "c": 2, "v": "same row"},
+        {"r": 2, "c": 1, "v": "next row"},
+        {"r": 2, "c": 2, "v": "ok"},
+    ]

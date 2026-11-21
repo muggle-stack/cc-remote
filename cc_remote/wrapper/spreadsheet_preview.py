@@ -1,4 +1,4 @@
-"""Portable, bounded XLSX value preview.
+"""Portable, bounded XLSX and delimited text previews.
 
 Never evaluates formulas, follows external relationships or extracts a ZIP to disk.
 """
@@ -17,7 +17,12 @@ import re
 import xml.etree.ElementTree as ET
 from zipfile import BadZipFile, ZipFile
 
-MAX_INPUT_BYTES = 8 * 1024 * 1024
+from cc_remote.protocol import ARTIFACT_PREVIEW_MAX_BYTES
+
+# The CSV field limit is shared across readers. Configure it once to match
+# the input byte cap so concurrent previews can parse and trim long fields.
+csv.field_size_limit(ARTIFACT_PREVIEW_MAX_BYTES)
+
 MAX_PART_BYTES = 16 * 1024 * 1024
 MAX_INFLATED_BYTES = 64 * 1024 * 1024
 MAX_CELLS = 10000
@@ -193,7 +198,7 @@ def _format_date(number: Decimal, code: str, date_1904: bool) -> str | None:
 
 @contextmanager
 def open_workbook(data: bytes) -> Iterator[Workbook]:
-    if len(data) > MAX_INPUT_BYTES:
+    if len(data) > ARTIFACT_PREVIEW_MAX_BYTES:
         raise ValueError("表格超过 8 MiB 预览上限")
     try:
         with ZipFile(BytesIO(data)) as archive:
