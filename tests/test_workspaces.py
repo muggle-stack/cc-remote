@@ -548,6 +548,8 @@ class WorkRegistryTests(unittest.TestCase):
         slides = workspace / "output" / "deck.pptx"
         slides.parent.mkdir()
         slides.write_bytes(b"presentation")
+        for name in ("photo.HEIC", "scan.tiff", "grid.tsv", "clip.webm", "tone.wav", "film.mp4"):
+            (workspace / name).touch()
         (workspace / ".private.txt").write_text("hidden", encoding="utf-8")
         (workspace / "资料库").mkdir(exist_ok=True)
         (workspace / "资料库" / "source.csv").write_text("input", encoding="utf-8")
@@ -559,6 +561,7 @@ class WorkRegistryTests(unittest.TestCase):
 
         self.assertEqual({item["path"] for item in artifacts}, {
             "report.md", "output/deck.pptx", "camera.mmd", "navigation.MERMAID",
+            "photo.HEIC", "scan.tiff", "grid.tsv", "clip.webm", "tone.wav", "film.mp4",
         })
         by_path = {item["path"]: item for item in artifacts}
         self.assertTrue(by_path["report.md"]["previewable"])
@@ -568,6 +571,10 @@ class WorkRegistryTests(unittest.TestCase):
             self.assertEqual(by_path[name]["kind"], "document")
         self.assertTrue(by_path["output/deck.pptx"]["previewable"])
         self.assertEqual(by_path["output/deck.pptx"]["kind"], "presentation")
+        for name in ("photo.HEIC", "scan.tiff", "grid.tsv", "clip.webm", "tone.wav", "film.mp4"):
+            self.assertTrue(by_path[name]["previewable"])
+        self.assertEqual(by_path["photo.HEIC"]["kind"], "image")
+        self.assertEqual(by_path["grid.tsv"]["kind"], "spreadsheet")
 
     def test_new_session_creates_private_uploads_inside_workspace(self):
         record = self.store.create_session()

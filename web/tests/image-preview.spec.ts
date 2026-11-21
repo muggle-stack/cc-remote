@@ -101,7 +101,8 @@ test("artifact-svg Safari gestures zoom once and reset for a different file", as
   await expect(page.getByRole("dialog", { name: "文件预览", exact: true })).toBeVisible();
   await expect.poll(async () => (await matrix(stage)).scale).toBeCloseTo(initial.scale * 2.25, 4);
   await page.getByRole("button", { name: "收回右侧", exact: true }).click();
-  await page.getByRole("button", { name: "换一张图片" }).click();
+  // The fixture control is behind the full-screen preview on mobile.
+  await page.getByRole("button", { name: "换一张图片" }).evaluate((button: HTMLButtonElement) => button.click());
   await expect.poll(() => stage.locator("img").evaluate(node => (node as HTMLImageElement).naturalHeight)).toBe(1200);
   await expect.poll(() => stage.evaluate(node => {
     const image = node.querySelector("img")!.getBoundingClientRect(), viewport = node.getBoundingClientRect();

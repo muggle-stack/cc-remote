@@ -4,7 +4,7 @@
 
 Self-hosted · Multiple sessions and devices · Live tool activity · Code / Work · Web / PWA / TUI
 
-**Product version: v5.3.53** · Wire protocol v97
+**Product version: v5.3.53** · Wire protocol v98
 
 [中文](README.md) · [Release install (recommended)](#install-and-upgrade) · [Engine comparison](#engines-and-features) · [Try from source](#quick-start) ·
 [Interface tour](#interface-tour) · [Terminal workspace](#terminal-workspace) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)
@@ -225,11 +225,13 @@ Symlinks and special files are not opened.
 | File | Preview and limits |
 |---|---|
 | Source, text, Markdown | Line navigation and rendered previews; Markdown successfully written by this session supports conflict-safe editing |
-| Images, PDF | Direct previews; images support a lightbox and zoom |
-| Audio | Playback, seeking, speed and download; up to 8 MiB, with codec support determined by the browser |
-| XLSX | Worksheet tabs and saved cell values on macOS/Linux without Office. No formula evaluation or external-link execution. Size, row/column and total-cell bounds apply; truncation is indicated and the original can be downloaded |
-| DOC/DOCX/ODT/RTF, XLS/ODS, PPT/PPTX/ODP | Temporary PDF conversion with LibreOffice + bubblewrap on a Linux Wrapper; unavailable without that conversion environment |
-| HTML | Sanitized, scriptless file preview; use [Remote Viewer](docs/remote-viewer.md) for interactive multi-file static pages |
+| Images | Lightbox and zoom. The device renders HEIC/HEIF, TIFF and BMP previews, with original-file downloads |
+| PDF | Fit to width, pagination, zoom, text selection and search. Search needs a text layer in the document |
+| Audio and video | Audio supports seeking and speed control up to 8 MiB. MP4/M4V and video WebM stream up to 256 MiB. Codec support depends on the browser |
+| XLSX and UTF-8 CSV/TSV | Paged cell previews. XLSX includes worksheet tabs and common date, time and percentage formats. Formulas use saved results. The preview indicates truncation |
+| PPTX and DOCX | Browser rendering for PPTX. DOCX uses sandboxed PDF conversion when available and falls back to browser rendering |
+| DOC/ODT/RTF, XLS/ODS, PPT/ODP | Temporary PDF conversion with LibreOffice and bubblewrap on a Linux Wrapper |
+| HTML | Fit to width, inline scripts in an opaque sandbox and authorized local images. A source excerpt appears above 2 MiB. Use [Remote Viewer](docs/remote-viewer.md) for pages with multiple scripts or stylesheets |
 
 Parsing/conversion happens on the Wrapper host or in the browser. Files return to
 the requester through an authenticated connection. The relay does not persist
@@ -547,8 +549,8 @@ web client for same-origin integration.
 ## FAQ
 
 - **Why can I list a file but not preview it?** Previews also require a regular
-  file, a supported format and size, and OS read permission. XLSX needs no Office;
-  other Office formats need the Linux conversion sandbox.
+  file, a supported format and size, and OS read permission. XLSX, PPTX and DOCX
+  work on macOS and Linux. Formats such as DOC and ODT need the Linux conversion sandbox.
 - **Does restarting Wrapper lose history?** Persisted history remains. Live-tail
   replay and ordinary pending messages are bounded in-memory state and are not
   guaranteed across a Wrapper restart. Work schedules have separate durable records.

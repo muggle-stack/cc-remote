@@ -19,10 +19,11 @@ from cc_remote.protocol import GetFilePreview, AuthorizePreview
 
 MAX_REFS = 64
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
-IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif"}
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".heic", ".heif", ".tif", ".tiff", ".bmp"}
 MARKDOWN_SUFFIXES = {".md", ".markdown"}
 PATH = re.compile(
-    r"[^\s`<>\[\]{}\"']+\.(?:markdown|md|png|jpe?g|gif|webp|avif)(?=$|[\s),;。:#!?])",
+    r"[^\s`<>\[\]{}\"']+(?:" + "|".join(re.escape(s) for s in sorted(IMAGE_SUFFIXES | MARKDOWN_SUFFIXES))
+    + r")(?=$|[\s),;。:#!?])",
     re.I,
 )
 

@@ -4,7 +4,7 @@
 
 自托管 · 多会话 · 多设备 · 实时工具过程 · Code / Work · Web / PWA / TUI
 
-**产品版本：v5.3.53** · Wire protocol v97
+**产品版本：v5.3.53** · Wire protocol v98
 
 [English](README_en.md) · [Release 安装（推荐）](#安装与升级) · [功能对照](#引擎与功能) · [源码体验](#快速开始) ·
 [界面导览](#界面导览) · [终端工作台](#terminal-workspace) · [文档](#文档) · [更新记录](CHANGELOG_zh.md)
@@ -174,11 +174,13 @@ Code 的 `/open` 从会话目录开始，可以进入上级目录、输入绝对
 | 文件 | 预览方式与边界 |
 |---|---|
 | 源码、文本、Markdown | 行号定位、渲染预览；本会话成功写入的 Markdown 可做冲突安全编辑 |
-| 图片、PDF | 直接预览；图片支持灯箱和缩放 |
-| 音频 | 播放、拖动进度、调速和下载；单文件最多 8 MiB，编码支持取决于浏览器 |
-| XLSX | macOS/Linux 均可直接看工作表和已保存的单元格值，无需 Office；不计算公式或执行外部链接。预览有大小、行列和总单元格上限，截断会提示，可下载原文件 |
-| DOC/DOCX/ODT/RTF、XLS/ODS、PPT/PPTX/ODP | Linux Wrapper 上使用 LibreOffice + bubblewrap 临时转换成 PDF；缺少转换环境时不可预览 |
-| HTML | 普通文件预览经过清理，禁用脚本；需要交互的多文件静态页面使用 [远程 Viewer](docs/remote-viewer.md) |
+| 图片 | 支持缩放和灯箱。HEIC/HEIF、TIFF、BMP 在设备上解码生成预览，可下载原图 |
+| PDF | 适应宽度、翻页、缩放、选择和搜索文字。扫描图片没有文字层时无法搜索 |
+| 音频、视频 | 音频支持进度和调速，上限 8 MiB。MP4/M4V 和视频 WebM 支持流式播放，上限 256 MiB。编码支持取决于浏览器 |
+| XLSX、UTF-8 CSV/TSV | 分页查看单元格。XLSX 支持切换工作表及常见日期、时间、百分比格式。公式使用已保存的结果。达到预览上限时会提示 |
+| PPTX、DOCX | PPTX 在浏览器渲染。DOCX 优先使用沙箱 PDF 转换，转换不可用时由浏览器渲染 |
+| DOC/ODT/RTF、XLS/ODS、PPT/ODP | Linux Wrapper 使用 LibreOffice + bubblewrap 临时转换成 PDF |
+| HTML | 普通预览会适应宽度，在沙箱中运行内联脚本并显示经授权的本地图片。超过 2 MiB 时提示并显示源码开头。依赖多个脚本或样式的页面可用 [远程 Viewer](docs/remote-viewer.md) |
 
 预览解析／转换发生在 Wrapper 主机或浏览器，文件通过鉴权连接返回给请求者。
 Relay 不落盘原文件或预览结果。Viewer 默认复用主站地址，不需要额外预览域名，
@@ -451,8 +453,8 @@ Playwright 不进入 CI 或必跑的本地 PR 检查，现有用例仅保留供�
 
 ## FAQ
 
-- **为什么文件能列出却不能预览？** 除系统读取权限外，预览还要求普通文件、支持的格式和
-  大小。XLSX 无需 Office；其他 Office 格式在缺少 Linux 转换沙箱时不能直接预览。
+- **为什么文件能列出却不能预览？** 预览需要系统读取权限、普通文件以及受支持的格式和大小。
+  XLSX、PPTX、DOCX 可以在 macOS 和 Linux 查看。DOC、ODT 等格式依赖 Linux 转换沙箱。
 - **重启后历史会丢吗？** 已落盘历史保留。实时尾流和普通待执行队列是有界内存状态，
   不保证跨 Wrapper 重启恢复；Work 定时任务另有持久化记录。
 - **Relay 重启或更换会怎样？** 浏览器需要重连、重新登录；设备上的会话保留。

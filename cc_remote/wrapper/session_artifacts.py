@@ -244,9 +244,9 @@ def local_links(text: str, cwd: str) -> list[str]:
 
 def artifact_kind(name: str) -> str:
     ext = Path(name).suffix.lower()
-    if ext in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".avif"}:
+    if ext in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".avif", ".heic", ".heif", ".tif", ".tiff", ".bmp"}:
         return "image"
-    if ext in {".md", ".txt", ".pdf", ".docx", ".doc", ".pptx", ".xlsx", ".csv"}:
+    if ext in {".md", ".txt", ".pdf", ".docx", ".doc", ".pptx", ".xlsx", ".csv", ".tsv"}:
         return "document"
     return "file"
 

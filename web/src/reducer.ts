@@ -178,14 +178,14 @@ export interface PreviewAuthorizationState {
   operation: PreviewAuthorizationOperation;
   path: string;
   resolvedPath: string;
-  format: "markdown" | "text" | "html" | "image" | "pdf" | "audio" | "video" | "spreadsheet" | "presentation";
+  format: import("./protocol").FilePreviewFormat;
   previewId?: string;
   status: "required" | "submitting" | "granted";
 }
 
 export interface Artifact {
   file: string;
-  kind: "diff" | "md" | "file" | "gitdiff" | "html" | "image" | "pdf" | "audio" | "video" | "spreadsheet" | "presentation";
+  kind: "diff" | "md" | "file" | "gitdiff" | "html" | "image" | "pdf" | "audio" | "video" | "spreadsheet" | "presentation" | "document";
   sid?: string | null;
   requestId?: string;
   diff?: DiffLine[];
@@ -2801,7 +2801,7 @@ function reduceCurrent(state: AppState, action: Action): AppState {
       } };
     case "begin_preview_asset": {
       const artifact = state.artifact;
-      if (!artifact || artifact.kind !== "md"
+      if (!artifact || (artifact.kind !== "md" && artifact.kind !== "html")
           || artifact.sid !== action.sid
           || artifact.requestId !== action.previewId) return state;
       return { ...state, artifact: {
@@ -5369,7 +5369,7 @@ function reduceEvent(
         kind: "gitdiff", sections: parseGitDiff(e.diff),
       } };
     case "file_preview":
-      if (!state.artifact || !["md", "file", "html", "image", "pdf", "audio", "video", "spreadsheet", "presentation"].includes(state.artifact.kind)
+      if (!state.artifact || state.artifact.kind === "diff" || state.artifact.kind === "gitdiff"
           || state.artifact.requestId !== e.request_id
           || state.artifact.sid !== (e.sid ?? state.focusedSid)) return state;
       return { ...state, artifact: {
@@ -5399,6 +5399,7 @@ function reduceEvent(
         return { ...state, artifact: {
           ...state.artifact,
           content: state.artifact.pendingContent ?? state.artifact.content,
+          data: undefined,
           size: e.size,
           mtimeNs: e.mtime_ns,
           revision: e.revision ?? state.artifact.revision,
@@ -5417,7 +5418,7 @@ function reduceEvent(
         pendingContent: undefined,
       } };
     case "preview_asset":
-      if (!state.artifact || state.artifact.kind !== "md"
+      if (!state.artifact || (state.artifact.kind !== "md" && state.artifact.kind !== "html")
           || state.artifact.requestId !== e.preview_id
           || state.artifact.sid !== (e.sid ?? state.focusedSid)) return state;
       {
@@ -5464,7 +5465,7 @@ function reduceEvent(
           authorization,
         } };
       }
-      if (artifact.kind !== "md"
+      if ((artifact.kind !== "md" && artifact.kind !== "html")
           || artifact.requestId !== e.preview_id) return state;
       const pending = artifact.assets?.[e.path];
       if (!pending

@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+HTML previews fit narrow panels and retain zoom across refreshes. File previews
+add PDF zoom and text search, improve mobile slide navigation, and support
+DOCX, WebM video, more image formats, and paged spreadsheets. Original downloads
+preserve the file bytes. Wire protocol v98.
+
 ## v5.3.53
 
 Expand a Codex background task to see its launch command and arguments, working directory, and timeout. Task details load from the current account and session, and the preview masks common credentials in command arguments and shell headers. Wire protocol v97.

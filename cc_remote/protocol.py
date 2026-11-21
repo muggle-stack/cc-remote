@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 97
+PROTOCOL_VERSION = 98
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -2702,23 +2702,23 @@ class FilePreview(_Base):
     """wrapper -> requesting client: bounded source or locally-rendered artifact.
 
     Binary previews are transported directly through the authenticated relay;
-    the relay never writes them to disk. Video carries only an owner-bound
-    media_id; authenticated HTTP Range reads use the separate Viewer channel.
-    PPTX carries the original package for browser rendering. Other converted
-    Office files report their original extension in ``converted_from``.
+    the relay never writes them to disk. An owner-bound media_id streams video
+    or the original of a converted or partial preview through the Viewer channel.
+    When preview bytes differ from the source, ``converted_from`` records its extension.
     """
     type: Literal["file_preview"] = "file_preview"
     directory: bool = False
     path: PreviewPath
     request_id: WireId
-    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "video", "spreadsheet", "presentation"] = "text"
+    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "video", "spreadsheet", "presentation", "document"] = "text"
     content: PreviewContent = ""
     media_type: Optional[Literal[
         "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
-        "image/svg+xml", "application/pdf", "video/mp4",
+        "image/svg+xml", "application/pdf", "video/mp4", "video/webm",
         "audio/wav", "audio/mpeg", "audio/mp4", "audio/aac", "audio/flac",
         "audio/ogg", "audio/webm",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ]] = None
     media_id: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{32}$")
     data: Optional[ArtifactPreviewData] = None
@@ -2790,7 +2790,7 @@ class PreviewAuthorizationRequired(_Base):
     operation: Literal["file_preview", "preview_asset"]
     path: PreviewPath
     resolved_path: PreviewPath
-    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "video", "spreadsheet", "presentation"] = "text"
+    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "video", "spreadsheet", "presentation", "document"] = "text"
     preview_id: Optional[WireId] = None
 
 
