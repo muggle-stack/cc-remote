@@ -4,6 +4,14 @@
 
 ## Unreleased
 
+## v5.3.55
+
+Bridge previews display authorized local images assigned by page scripts. Image
+completion follows the browser once the file is transferred, and failed reads
+show the resource path. Wire protocol v98.
+
+See the bilingual [release notes](docs/releases/v5.3.55.md).
+
 ## v5.3.54
 
 HTML previews fit narrow panels and retain zoom across refreshes. File previews
