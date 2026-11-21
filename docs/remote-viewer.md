@@ -222,9 +222,10 @@ Bridge 启动器负责通知父页面；Isolated 模式仅在浏览器导航到 
 
 Bridge 使用 HTML／CSS／JS 解析器构建本地模块依赖图，支持循环 ESM、export-from、
 字面量动态 import、精确及最长前缀 import map、`import.meta.url`、相对 URL／Request、资源查询串、
-CSS url／import 和 srcset。只在沙箱内生成 Blob，不改项目文件、不运行构建脚本。
-非字面量动态 import、scoped import map、XHR／Worker、动态纹理、复杂 WASM
-加载器、存储、多页导航、页面内下载和后台 API 不在兼容基线中。解析或策略错误会显示具体原因，
+CSS url／import 和 srcset。脚本通过 `img.src` 或 `img.setAttribute("src", ...)` 加载的图片
+也走已授权的资源通道。Bridge 只在沙箱内生成 Blob，不改项目文件、不运行构建脚本。
+非字面量动态 import、scoped import map、XHR／Worker、直接网络加载的纹理、复杂 WASM 加载器、
+存储、多页导航、页面内下载和后台 API 不在兼容基线中。解析或策略错误会显示具体原因，
 不会自动降低沙箱强度；glTF／WASM 文件可传输不等于任意对应 loader 已支持。
 
 - 登录、设备权限和会话绑定在 Relay 校验。主页面定时续租，未续租的实例在
