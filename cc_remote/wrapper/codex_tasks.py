@@ -3,13 +3,28 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
+import shlex
 
-from cc_remote.protocol import BackgroundProcessItem, ProcessEvent
-from cc_remote.task_store import TERMINAL, TaskStore, thread_id
+from cc_remote.log import redact_text
+from cc_remote.protocol import (
+    MAX_BACKGROUND_PROCESS_COMMAND_CHARS, MAX_BACKGROUND_PROCESS_CWD_CHARS,
+    BackgroundProcessItem, ProcessEvent,
+)
+from cc_remote.task_store import MAX_TASK_ARGV_CHARS, TERMINAL, TaskStore, thread_id
 from cc_remote.wrapper.sanitize import bounded_text
 
 TASK_SERVER = "cc_remote_tasks"
 TASK_RECEIPT_TOOL = "task_result"
+TASK_ITEM_PREFIX = "async-task:"
+_SECRET_OPTION = r"--[a-z0-9_-]*(?:token|password|passwd|secret|api[_-]?key|authorization|cookie|credential)"
+_TASK_SECRET_FLAG = re.compile(_SECRET_OPTION, re.IGNORECASE)
+_INLINE_SECRET_OPTION = re.compile(
+    rf'''(?i)(?<![\w-])({_SECRET_OPTION}(?:[ \t]+|=))(?:(?:"[^"\r\n]*"|'[^'\r\n]*')|[^\s;&]+)''',
+)
+_TASK_SECRET_HEADER = re.compile(
+    r"^((?:proxy-)?authorization|(?:set-)?cookie|x-api-key)\s*:[\s\S]*$", re.IGNORECASE,
+)
 TASK_STATES = {
     "completed": "succeeded", "failed": "failed", "timed_out": "failed",
     "interrupted": "interrupted", "cancelled": "cancelled",
@@ -48,11 +63,47 @@ def read_task_activity(home: Path) -> dict[str, list[BackgroundProcessItem]]:
             summary = ("Codex 处理结果未确认，任务结果已保留" if delivery == "unknown"
                        else "Codex 未能处理通知，任务结果已保留")
         result.setdefault(sid, []).append(BackgroundProcessItem(
-            item_id=f"async-task:{key}", kind="task",
+            item_id=f"{TASK_ITEM_PREFIX}{key}", kind="task",
             title=row["title"], status=status, summary=summary,
             started_at=row["created"], updated_at=row["updated"],
         ))
     return result
+
+
+def _sanitized_command(argv: list[str]) -> str:
+    parts = []
+    redact_next = False
+    for arg in argv:
+        if redact_next:
+            parts.append("***")
+            redact_next = False
+            continue
+        option, equals, _value = arg.partition("=")
+        if _TASK_SECRET_FLAG.fullmatch(option):
+            parts.append(f"{option}=***" if equals else option)
+            redact_next = not equals
+            continue
+        arg = _TASK_SECRET_HEADER.sub(r"\1: ***", arg)
+        arg = _INLINE_SECRET_OPTION.sub(r"\1***", arg)
+        # The store bounds the entire argv, so redact before clipping the preview.
+        parts.append(redact_text(arg, limit=MAX_TASK_ARGV_CHARS))
+    return shlex.join(parts)
+
+
+def read_task_parameters(home: Path, sid: str, item_id: str) -> ProcessEvent | None:
+    """One owner-scoped detail page, separate from replayed activity or output."""
+    spec = TaskStore(home).read_parameters(item_id.removeprefix(TASK_ITEM_PREFIX), sid)
+    if spec is None:
+        return None
+    command, shortened = bounded_text(
+        _sanitized_command(spec["argv"]), MAX_BACKGROUND_PROCESS_COMMAND_CHARS,
+    )
+    cwd, _ = bounded_text(redact_text(spec["cwd"]), MAX_BACKGROUND_PROCESS_CWD_CHARS)
+    return ProcessEvent(
+        item_id=item_id, kind="task", phase="snapshot", title=spec["title"],
+        command=command, cwd=cwd, input={"timeout_seconds": spec["timeout_seconds"]},
+        truncated=shortened or None,
+    )
 
 
 def task_receipt_event(item: dict, *, item_id: str, turn_id: str | None,

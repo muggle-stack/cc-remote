@@ -12,6 +12,7 @@ import time
 from uuid import UUID, uuid4
 
 OUTPUT_BYTES = 64 * 1024
+MAX_TASK_ARGV_CHARS = 32_768
 MAX_ACTIVE = 8
 MAX_RECORDS = 200
 DELIVERY_TRACK_SECONDS = 86400
@@ -120,7 +121,7 @@ class TaskStore:
         thread_id(sid)
         if (not isinstance(argv, list) or not 1 <= len(argv) <= 128
                 or any(not isinstance(a, str) or '\0' in a for a in argv)
-                or not argv[0] or sum(len(a) for a in argv) > 32768):
+                or not argv[0] or sum(len(a) for a in argv) > MAX_TASK_ARGV_CHARS):
             raise ValueError("argv must be a bounded, nonempty command vector")
         if not isinstance(cwd, str) or not Path(cwd).is_absolute() or not Path(cwd).is_dir():
             raise ValueError("cwd must be an existing absolute directory")
@@ -171,24 +172,21 @@ class TaskStore:
                                           (sid,))]
         return [public_task(self.get(key, sid)) for key in ids]
 
-    def activity_snapshot(self):
-        """Read public activity without creating state or starting a worker.
-
-        The Wrapper groups resident sessions by account and reads once per
-        polling pass. Output and command arguments never enter this projection.
-        Missing state is an authoritative empty level; unreadable state is not.
-        """
+    @contextmanager
+    def _read_activity_db(self):
         try:
             root = self.root.lstat()
         except FileNotFoundError:
-            return []
+            yield None
+            return
         if (not stat.S_ISDIR(root.st_mode) or root.st_uid != os.getuid()
                 or root.st_mode & 0o077):
             raise ValueError("Invalid task state directory")
         try:
             info = self.path.lstat()
         except FileNotFoundError:
-            return []
+            yield None
+            return
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                 or info.st_mode & 0o077):
             raise ValueError("Invalid task database")
@@ -196,6 +194,20 @@ class TaskStore:
         db.row_factory = sqlite3.Row
         try:
             db.execute("PRAGMA query_only=ON")
+            yield db
+        finally:
+            db.close()
+
+    def activity_snapshot(self):
+        """Read public activity without creating state or starting a worker.
+
+        The Wrapper groups resident sessions by account and reads once per
+        polling pass. Output and command arguments never enter this projection.
+        Missing state is an authoritative empty level; unreadable state is not.
+        """
+        with self._read_activity_db() as db:
+            if db is None:
+                return []
             columns = {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
             callback = ("delivery_turn_id" if "delivery_turn_id" in columns
                         else "NULL AS delivery_turn_id")
@@ -211,8 +223,18 @@ class TaskStore:
                 "created DESC LIMIT ?",
                 (MAX_RECORDS,),
             )]
-        finally:
-            db.close()
+
+    def read_parameters(self, task_id: str, sid: str) -> dict | None:
+        """Read one exact session's launch parameters through the read-only store."""
+        thread_id(task_id)
+        thread_id(sid)
+        with self._read_activity_db() as db:
+            if db is None:
+                return None
+            row = db.execute(
+                "SELECT spec FROM tasks WHERE id=? AND sid=?", (task_id, sid),
+            ).fetchone()
+        return json.loads(row["spec"]) if row is not None else None
 
     def update(self, task_id, **fields):
         if not fields or not fields.keys() <= {

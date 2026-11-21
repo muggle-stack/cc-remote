@@ -18289,7 +18289,9 @@ class WrapperMachine:
         )
 
     async def _handle_get_agent_detail(self, cmd) -> AgentDetail:
-        """Return one read-only Agent process page without resuming it."""
+        """Return one private process detail page without resuming an engine."""
+        from cc_remote.wrapper.codex_tasks import TASK_ITEM_PREFIX, read_task_parameters
+
         started_at = time.perf_counter()
         sid = self._resolve_session_alias(cmd.session_id) or cmd.session_id
         revision = self._history_revision(sid)
@@ -18329,6 +18331,7 @@ class WrapperMachine:
                 before=getattr(cmd, "before", None),
                 sid=sid,
                 to=client_id,
+                owner_id=getattr(cmd, "owner_id", None),
             )
             await self.transport.send(detail)
             log.info(
@@ -18341,6 +18344,25 @@ class WrapperMachine:
                 elapsed_ms=round((time.perf_counter() - started_at) * 1000),
             )
             return detail
+
+        if cmd.run_id.startswith(TASK_ITEM_PREFIX):
+            error = "后台任务参数暂不可用"
+            ctx = self._ctx_by_sid(sid)
+            if (not client_id or ctx is None or ctx.engine != "codex"
+                    or ctx.space != "code" or not ctx.session_id):
+                return await send(title="后台任务", error=error)
+            try:
+                home = self._codex_profile_for_ctx(ctx).home
+                native_sid = ctx.session_id
+                task = await asyncio.to_thread(read_task_parameters, home, native_sid, cmd.run_id)
+                if (task is None or not self._is_resident_context(ctx)
+                        or ctx.session_id != native_sid or self._codex_profile_for_ctx(ctx).home != home):
+                    return await send(title="后台任务", error=error)
+            except Exception as exc:
+                log.warning("Codex background task parameters unavailable", error_type=type(exc).__name__)
+                return await send(title="后台任务", error=error)
+            return await send([task.model_dump(mode="json", exclude_none=True)],
+                              title=task.title, detail_revision=cmd.run_id)
 
         requested_revision = getattr(cmd, "revision", None)
         if requested_revision and requested_revision != revision:

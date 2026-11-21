@@ -7,15 +7,19 @@ import { PanelVisible } from "../right-panel-presentation";
 import { useAnchoredPopoverGeometry } from "../chat-dialog-geometry";
 import type { ProcessBlock } from "../domain/conversation";
 import { Icon } from "../icons";
+import type { ProcessEvent } from "../protocol";
 import { CenteredSheet } from "./CenteredSheet";
 import { ProcessActivity } from "./ProcessTimeline";
 import "./BackgroundTaskControl.css";
+
+export type RequestTaskParameters = (itemId: string, receive: (event: ProcessEvent | null) => void) => () => void;
 
 interface Props {
   /** The runtime's authoritative active list; parent reply completion is unrelated. */
   processes: ProcessBlock[];
   onOpenFile?: (path: string, line?: number) => void;
   onOpenAgent?: (runId: string, title?: string) => void;
+  onRequestParameters?: RequestTaskParameters;
 }
 
 const MOBILE_QUERY = "(max-width: 600px)";
@@ -39,7 +43,39 @@ function taskStatus(process: ProcessBlock, now: number): string {
   return `${status} · ${duration}`;
 }
 
-function TaskList({ processes, preview = false, onOpenFile, onOpenAgent }: Props & {
+function TaskActivity({ process, onOpenFile, onOpenAgent, onRequestParameters }: Omit<Props, "processes"> & {
+  process: ProcessBlock;
+}) {
+  const [parameters, setParameters] = useState<ProcessEvent | "loading" | "unavailable" | null>(null);
+  const cancelRequest = useRef<(() => void) | null>(null);
+  useEffect(() => () => cancelRequest.current?.(), []);
+
+  const request = process.item_id.startsWith("async-task:") ? onRequestParameters : undefined;
+  const openChanged = (open: boolean) => {
+    cancelRequest.current?.();
+    cancelRequest.current = null;
+    setParameters(open ? "loading" : null);
+    if (open && request) {
+      cancelRequest.current = request(process.item_id, detail => setParameters(detail ?? "unavailable"));
+    }
+  };
+
+  let block = process;
+  if (parameters === "loading" || parameters === "unavailable") {
+    block = { ...process, detail: parameters === "loading" ? "正在读取任务参数…" : "任务参数暂不可用" };
+  } else if (parameters) {
+    const timeout = parameters.input?.timeout_seconds;
+    const summary = typeof timeout === "number"
+      ? [process.summary, `超时 ${timeout} 秒`].filter(Boolean).join(" · ")
+      : process.summary;
+    block = { ...process, command: parameters.command, cwd: parameters.cwd, summary,
+      detail: parameters.truncated ? "命令预览已截断" : process.detail };
+  }
+  return <ProcessActivity block={block} onOpenFile={onOpenFile} onOpenAgent={onOpenAgent}
+    onOpenChange={request ? openChanged : undefined} />;
+}
+
+function TaskList({ processes, preview = false, ...actions }: Props & {
   preview?: boolean;
 }) {
   const [now, setNow] = useState(Date.now);
@@ -51,8 +87,7 @@ function TaskList({ processes, preview = false, onOpenFile, onOpenAgent }: Props
   return <ul className={`background-task-list${preview ? " preview" : ""}`}>
     {visible.map(process => <li key={process.item_id}>
       {preview ? <strong>{process.title}</strong>
-        : <ProcessActivity block={process}
-            onOpenFile={onOpenFile} onOpenAgent={onOpenAgent} />}
+        : <TaskActivity process={process} {...actions} />}
       <span className="background-task-meta">{taskStatus(process, now)}</span>
     </li>)}
     {preview && processes.length > visible.length
