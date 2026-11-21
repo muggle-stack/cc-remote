@@ -50,10 +50,10 @@ def _is_redact_key(key: Any) -> bool:
     )
 
 
-def redact_text(value: str) -> str:
+def redact_text(value: str, *, limit: int = _MAX_LOG_STRING) -> str:
     """Redact common credential forms from log messages and scalar fields."""
-    truncated = len(value) > _MAX_LOG_STRING
-    value = value[:_MAX_LOG_STRING]
+    truncated = len(value) > limit
+    value = value[:limit]
     if _CC_STDERR_RE.match(value):
         return "cc stderr: ***"
     value = _BEARER_RE.sub(r"\1***", value)

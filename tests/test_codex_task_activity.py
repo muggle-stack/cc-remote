@@ -1,13 +1,15 @@
 """Async MCP activity and continuation rendering never drive model lifecycle."""
 import asyncio
 import json
+import shlex
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
+from cc_remote.protocol import GetAgentDetail
 from cc_remote.task_store import TaskStore, public_task
-from cc_remote.wrapper.codex_tasks import read_task_activity, read_task_callbacks
+from cc_remote.wrapper.codex_tasks import read_task_activity, read_task_callbacks, read_task_parameters
 from cc_remote.wrapper.history_store import materialize_history_turns
 from tests.test_multisession import _mk_ctx, _mk_machine
 
@@ -22,7 +24,94 @@ def task(home, sid, title="Background verification"):
 
 def test_absent_task_state_is_empty_without_writes(tmp_path):
     assert read_task_activity(tmp_path) == {}
+    assert read_task_parameters(tmp_path, str(uuid4()), f"async-task:{uuid4()}") is None
     assert list(tmp_path.iterdir()) == []
+
+
+def test_task_parameters_are_separate_and_command_credentials_are_redacted(tmp_path):
+    sid = str(uuid4())
+    store = TaskStore(tmp_path)
+    key = store.create(sid, argv=[
+        "python3", "verify job.py", "--target", "EP !11",
+        "--api-key", "PRIVATE_FLAG", "--token=PRIVATE_OPTION",
+        "Authorization: Basic PRIVATE_HEADER", "TOKEN='PRIVATE_ENV'",
+        'run --password "PRIVATE_INLINE"',
+    ], cwd=str(tmp_path), title="Verify build and card", request_id=str(uuid4()),
+        timeout_seconds=1140)
+    store.update(key, state="running", output=b"PRIVATE_OUTPUT")
+    snapshot, = read_task_activity(tmp_path)[sid]
+    assert snapshot.command is None and snapshot.cwd is None
+    assert "timeout_seconds" not in snapshot.model_dump_json()
+    detail = read_task_parameters(tmp_path, sid, snapshot.item_id)
+    assert detail and detail.command.startswith("python3 'verify job.py' --target 'EP !11'")
+    assert detail.cwd == str(tmp_path)
+    assert detail.input == {"timeout_seconds": 1140}
+    assert "PRIVATE" not in detail.model_dump_json() and "***" in detail.command
+    assert store.get(key, sid)["spec"]["argv"][5] == "PRIVATE_FLAG"
+    assert read_task_parameters(tmp_path, str(uuid4()), snapshot.item_id) is None
+    other_home = tmp_path / "other-account"
+    other_home.mkdir()
+    assert read_task_parameters(other_home, sid, snapshot.item_id) is None
+    assert list(other_home.iterdir()) == []
+
+
+@pytest.mark.parametrize(("script", "redacted"), [
+    (
+        "curl -H 'Cookie: session=PRIVATE_COOKIE; second=PRIVATE_SECOND' https://example.invalid",
+        "curl -H 'Cookie: ***' https://example.invalid",
+    ),
+    (
+        'curl --header "Authorization: Basic PRIVATE_BASIC" https://example.invalid',
+        'curl --header "Authorization: ***" https://example.invalid',
+    ),
+    (
+        """curl --header="X-API-Key: PRIVATE_FIRST"'PRIVATE_CONTINUATION' https://example.invalid""",
+        'curl --header="X-API-Key: ***',
+    ),
+    (
+        r"curl -HProxy-Authorization:\ Basic\ PRIVATE_PROXY https://example.invalid",
+        "curl -HProxy-Authorization: ***",
+    ),
+], ids=["cookie", "basic-auth", "concatenated-header", "attached-header"])
+def test_task_parameters_redact_headers_inside_shell_scripts(tmp_path, script, redacted):
+    sid = str(uuid4())
+    store = TaskStore(tmp_path)
+    argv = ["/bin/sh", "-c", script]
+    key = store.create(sid, argv=argv, cwd=str(tmp_path), title="HTTP request",
+                       request_id=str(uuid4()))
+    detail = read_task_parameters(tmp_path, sid, f"async-task:{key}")
+    assert detail is not None and detail.command is not None
+    assert "PRIVATE" not in detail.model_dump_json()
+    assert shlex.split(detail.command) == ["/bin/sh", "-c", redacted]
+    assert store.get(key, sid)["spec"]["argv"] == argv
+
+
+@pytest.mark.asyncio
+async def test_wrapper_sends_task_parameters_only_to_requester_without_waking_session(tmp_path, monkeypatch):
+    sid, other_sid = str(uuid4()), str(uuid4())
+    _, key = task(tmp_path, sid)
+    machine, transport = _mk_machine()
+    for target in (sid, other_sid):
+        ctx = _mk_ctx(target, target)
+        ctx.engine = "codex"
+        machine.sessions[ctx.key] = ctx
+    monkeypatch.setattr(machine, "_codex_profile_for_ctx", lambda _: SimpleNamespace(home=tmp_path))
+
+    async def unexpected_watch(_sid):
+        pytest.fail("Reading task parameters must not watch or resume a session")
+
+    monkeypatch.setattr(machine, "_watch_session", unexpected_watch)
+    cmd = GetAgentDetail(session_id=sid, run_id=f"async-task:{key}", owner_id="requesting-owner",
+                         client_id="requesting-client", request_id="parameters-request")
+    detail = await machine._handle_get_agent_detail(cmd)
+    assert transport.sent == [detail] and detail.to == cmd.client_id
+    assert detail.owner_id == cmd.owner_id
+    assert detail.sid == sid and detail.request_id == cmd.request_id
+    assert detail.events[0]["command"] == "echo PRIVATE_ARGUMENT"
+    assert detail.events[0]["input"] == {"timeout_seconds": 3600}
+    for fields in ({"session_id": other_sid}, {"client_id": None}):
+        denied = await machine._handle_get_agent_detail(cmd.model_copy(update=fields))
+        assert not denied.authoritative and denied.error and denied.events == []
 
 
 def test_callback_recovery_reads_only_exact_account_thread_acceptance(tmp_path):

@@ -104,6 +104,9 @@ time and current status. It remains available after the main reply ends and
 does not keep the main conversation busy. Wrapper reads the account-local task
 store without sending model requests; reconnecting or refreshing restores the
 current level. Tasks from another account or thread do not appear here.
+Expanding a Codex task reads its command and arguments, working directory and
+timeout from the current thread's task record. Common credentials are masked
+in the command preview. These parameters are returned only to the requester.
 
 When a native result arrives, its follow-up is labeled **Codex 收到后台消息，继续处理**.
 This source label also survives compact history restore; expanding the process

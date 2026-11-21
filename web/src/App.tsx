@@ -291,7 +291,7 @@ import {
   activeTurnCandidateIds,
   displayActiveTurnOwnerId,
 } from "./process-blocks";
-import type { AgentDetail, FilesListed, SessionArtifacts, SessionArtifactInfo } from "./protocol";
+import type { AgentDetail, FilesListed, ProcessEvent, SessionArtifacts, SessionArtifactInfo } from "./protocol";
 import type { AgentDetailSelection } from "./components/AgentDetailController";
 import type { RightPanelView } from "./components/PanelTabs";
 import { useTheme } from "./use-theme";
@@ -5745,6 +5745,39 @@ export default function App() {
   const previewBtwFile = (file: string, line?: number) =>
     previewFileForSid(activeBtwSid, file, line);
 
+  const requestBackgroundTaskParameters = (sid: string, itemId: string,
+    receive: (event: ProcessEvent | null) => void,
+  ) => {
+    const ws = wsRef.current;
+    if (!ws) {
+      receive(null);
+      return () => {};
+    }
+    const requestId = uuid();
+    const dispose = () => {
+      window.clearTimeout(timeout);
+      unsubscribe();
+    };
+    const finish = (detail: ProcessEvent | null) => {
+      dispose();
+      receive(detail);
+    };
+    const unsubscribe = setAgentDetailListener(message => {
+      if (message.request_id !== requestId || message.session_id !== sid
+          || message.run_id !== itemId || wsRef.current !== ws) return;
+      const detail = message.authoritative !== false && !message.error
+        ? message.events.find((event): event is ProcessEvent =>
+          event.type === "process" && event.kind === "task" && event.item_id === itemId)
+        : null;
+      finish(detail ?? null);
+    });
+    const timeout = window.setTimeout(() => finish(null), 8000);
+    if (!ws.sendGetAgentDetail(sid, itemId, undefined, undefined, undefined, 1, requestId)) {
+      finish(null);
+    }
+    return dispose;
+  };
+
   const openAgentDetail = (runId: string, title?: string) => {
     if (focusedEngine === "dsh" && focusedSid && !runId.startsWith("dsh@")) {
       setDshPanel({sid: focusedSid, scope: activeScopeKey, selection: {kind: runId.startsWith("dsh-job-") ? "jobs" : "subagents"}}); return;
@@ -6698,7 +6731,10 @@ export default function App() {
                 <BackgroundTaskControl key={focusedComposerDraftKey}
                   processes={rt.backgroundProcesses}
                   onOpenFile={historyView.recovering ? undefined : previewFile}
-                  onOpenAgent={space === "code" ? openAgentDetail : undefined} />
+                  onOpenAgent={space === "code" ? openAgentDetail : undefined}
+                  onRequestParameters={focusedEngine === "codex" && space === "code" && focusedSid
+                    ? (itemId, receive) => requestBackgroundTaskParameters(focusedSid, itemId, receive)
+                    : undefined} />
               </Suspense> : null}
           surface={space}
           state={rt.state}
@@ -7029,6 +7065,9 @@ export default function App() {
               if (activeBtwSid) sendContextRequestTo(activeBtwSid, true);
             }}
             onOpenFile={previewBtwFile} onCollapse={collapseBtw}
+            onRequestTaskParameters={activeBtwSid && activeBtw?.engine === "codex"
+              ? (itemId, receive) => requestBackgroundTaskParameters(activeBtwSid, itemId, receive)
+              : undefined}
             imageAssets={btwInlineImageAssets}
             onLoadImage={loadBtwMessageImage}
             onAuthorizeImage={authorizeMessageImage}

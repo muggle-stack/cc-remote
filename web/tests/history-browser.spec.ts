@@ -7316,6 +7316,57 @@ test("right panel layout shares the diff slot and keeps mobile as an overlay", a
   await expectRightPanelSpace(page, false);
 });
 
+for (const surface of ["main chat", "side chat"]) {
+  test(`Codex background task parameters are requested only on expansion (${surface})`, async ({ page }) => {
+    const sideChat = surface === "side chat";
+    const relay = await mockRightPanelRelay(page, { engine: "codex", visible: sideChat, retained: sideChat });
+    await page.goto("/");
+    await expect.poll(() => relay.commands.some(command => command.type === "hello")).toBe(true);
+    const chat = sideChat ? page.locator(".btw-panel:visible") : page;
+    if (sideChat) await expect(page.locator(".btw-panel:visible .btw-chat-tab")).toHaveCount(1);
+    const sid = sideChat ? "btw-layout-child" : "layout-parent";
+    const itemId = "async-task:active-test";
+    const title = "核对后台构建";
+    relay.emit({ type: "background_process_sync", sid,
+      items: [{ kind: "task", item_id: itemId, status: "running", title, summary: "后台执行中" }] });
+    const trigger = chat.getByRole("button", { name: /后台任务，\d+ 项进行中/ });
+    const requests = () => relay.commands.filter(command => command.type === "get_agent_detail");
+    await trigger.click();
+    const panel = page.getByRole("dialog", { name: "后台任务", exact: true });
+    const card = panel.locator("summary").filter({ hasText: title });
+    await expect(card).toBeVisible();
+    expect(requests()).toHaveLength(0);
+
+    await card.click();
+    await expect.poll(() => requests().length).toBe(1);
+    await expect(panel.getByText("正在读取任务参数…")).toBeVisible();
+    await card.click();
+    await card.click();
+    await expect.poll(() => requests().length).toBe(2);
+    const [closed, current] = requests();
+    expect(current).toMatchObject({ session_id: sid, run_id: itemId });
+    expect(current.request_id).not.toBe(closed.request_id);
+    const reply = (requestId: unknown, command: string, sessionId = sid) => {
+      relay.emit({ type: "agent_detail", sid: sessionId, session_id: sessionId,
+        run_id: itemId, request_id: String(requestId), revision: "layout-history",
+        detail_revision: itemId, authoritative: true, title, status: "unknown", through_seq: 0,
+        events: [{ v: PROTOCOL_VERSION, ts: Date.now() / 1000, type: "process", item_id: itemId,
+          kind: "task", phase: "snapshot", status: "unknown", title, command, cwd: "/tmp/layout",
+          input: { timeout_seconds: 1140 } }], });
+    };
+    reply(closed.request_id, "stale command");
+    reply(current.request_id, "other session command", "layout-other");
+    await expect(panel.getByText("正在读取任务参数…")).toBeVisible();
+    reply(current.request_id, "python3 verify.py --timeout 1140");
+    await expect(panel).toContainText("python3 verify.py --timeout 1140");
+    await expect(panel).toContainText("/tmp/layout");
+    await expect(panel.getByText(/超时 1140 秒/)).toBeVisible();
+    await expect(panel).not.toContainText("stale command");
+    await expect(panel).not.toContainText("other session command");
+    await expect(page.locator(".thread").getByText("python3 verify.py", { exact: false })).toHaveCount(0);
+  });
+}
+
 test("right panel layout preserves Claude agent detail priority over side chats", async ({
   page,
 }) => {
