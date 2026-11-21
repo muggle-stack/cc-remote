@@ -22,8 +22,17 @@ _TASK_SECRET_FLAG = re.compile(_SECRET_OPTION, re.IGNORECASE)
 _INLINE_SECRET_OPTION = re.compile(
     rf'''(?i)(?<![\w-])({_SECRET_OPTION}(?:[ \t]+|=))(?:(?:"[^"\r\n]*"|'[^'\r\n]*')|[^\s;&]+)''',
 )
+_SECRET_HEADER_NAME = r"(?:proxy-)?authorization|(?:set-)?cookie|x-api-key"
 _TASK_SECRET_HEADER = re.compile(
-    r"^((?:proxy-)?authorization|(?:set-)?cookie|x-api-key)\s*:[\s\S]*$", re.IGNORECASE,
+    rf"""
+    # Keep following arguments when a simple quoted header ends at a shell word boundary.
+    (?P<quote>["'])(?P<quoted_name>{_SECRET_HEADER_NAME})[ \t]*:
+        (?:(?!(?P=quote))[^\\$`])*(?P=quote)(?=\Z|[ \t\n;&|<>()])
+    |
+    # A direct argv header or an ambiguous shell word is masked to the end of the element.
+    (?:(?<![\w-])|(?<=-H))(?P<name>{_SECRET_HEADER_NAME})\s*:[\s\S]*\Z
+    """,
+    re.IGNORECASE | re.VERBOSE,
 )
 TASK_STATES = {
     "completed": "succeeded", "failed": "failed", "timed_out": "failed",
@@ -83,11 +92,17 @@ def _sanitized_command(argv: list[str]) -> str:
             parts.append(f"{option}=***" if equals else option)
             redact_next = not equals
             continue
-        arg = _TASK_SECRET_HEADER.sub(r"\1: ***", arg)
+        arg = _TASK_SECRET_HEADER.sub(_mask_task_secret_header, arg)
         arg = _INLINE_SECRET_OPTION.sub(r"\1***", arg)
         # The store bounds the entire argv, so redact before clipping the preview.
         parts.append(redact_text(arg, limit=MAX_TASK_ARGV_CHARS))
     return shlex.join(parts)
+
+
+def _mask_task_secret_header(match: re.Match[str]) -> str:
+    quote = match["quote"] or ""
+    name = match["quoted_name"] or match["name"]
+    return f"{quote}{name}: ***{quote}"
 
 
 def read_task_parameters(home: Path, sid: str, item_id: str) -> ProcessEvent | None:

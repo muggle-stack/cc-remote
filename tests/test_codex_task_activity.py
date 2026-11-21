@@ -1,6 +1,7 @@
 """Async MCP activity and continuation rendering never drive model lifecycle."""
 import asyncio
 import json
+import shlex
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -52,6 +53,37 @@ def test_task_parameters_are_separate_and_command_credentials_are_redacted(tmp_p
     other_home.mkdir()
     assert read_task_parameters(other_home, sid, snapshot.item_id) is None
     assert list(other_home.iterdir()) == []
+
+
+@pytest.mark.parametrize(("script", "redacted"), [
+    (
+        "curl -H 'Cookie: session=PRIVATE_COOKIE; second=PRIVATE_SECOND' https://example.invalid",
+        "curl -H 'Cookie: ***' https://example.invalid",
+    ),
+    (
+        'curl --header "Authorization: Basic PRIVATE_BASIC" https://example.invalid',
+        'curl --header "Authorization: ***" https://example.invalid',
+    ),
+    (
+        """curl --header="X-API-Key: PRIVATE_FIRST"'PRIVATE_CONTINUATION' https://example.invalid""",
+        'curl --header="X-API-Key: ***',
+    ),
+    (
+        r"curl -HProxy-Authorization:\ Basic\ PRIVATE_PROXY https://example.invalid",
+        "curl -HProxy-Authorization: ***",
+    ),
+], ids=["cookie", "basic-auth", "concatenated-header", "attached-header"])
+def test_task_parameters_redact_headers_inside_shell_scripts(tmp_path, script, redacted):
+    sid = str(uuid4())
+    store = TaskStore(tmp_path)
+    argv = ["/bin/sh", "-c", script]
+    key = store.create(sid, argv=argv, cwd=str(tmp_path), title="HTTP request",
+                       request_id=str(uuid4()))
+    detail = read_task_parameters(tmp_path, sid, f"async-task:{key}")
+    assert detail is not None and detail.command is not None
+    assert "PRIVATE" not in detail.model_dump_json()
+    assert shlex.split(detail.command) == ["/bin/sh", "-c", redacted]
+    assert store.get(key, sid)["spec"]["argv"] == argv
 
 
 @pytest.mark.asyncio
