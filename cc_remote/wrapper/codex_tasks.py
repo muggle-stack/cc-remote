@@ -1,7 +1,6 @@
 """Read-only presentation of the optional account-local async task MCP."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import re
 import shlex
@@ -11,11 +10,11 @@ from cc_remote.protocol import (
     MAX_BACKGROUND_PROCESS_COMMAND_CHARS, MAX_BACKGROUND_PROCESS_CWD_CHARS,
     BackgroundProcessItem, ProcessEvent,
 )
-from cc_remote.task_store import MAX_TASK_ARGV_CHARS, TERMINAL, TaskStore, thread_id
+from cc_remote.task_store import (
+    MAX_TASK_ARGV_CHARS, TASK_RECEIPT_TOOL, TASK_SERVER, TERMINAL, TaskStore, parse_task_receipt, thread_id,
+)
 from cc_remote.wrapper.sanitize import bounded_text
 
-TASK_SERVER = "cc_remote_tasks"
-TASK_RECEIPT_TOOL = "task_result"
 TASK_ITEM_PREFIX = "async-task:"
 _SECRET_OPTION = r"--[a-z0-9_-]*(?:token|password|passwd|secret|api[_-]?key|authorization|cookie|credential)"
 _TASK_SECRET_FLAG = re.compile(_SECRET_OPTION, re.IGNORECASE)
@@ -130,21 +129,10 @@ def read_task_parameters(home: Path, sid: str, item_id: str) -> ProcessEvent | N
 def task_receipt_event(item: dict, *, item_id: str, turn_id: str | None,
                        detail_limit: int) -> ProcessEvent | None:
     """Only native tool-output receipts establish a continuation boundary."""
-    if item.get("namespace") != TASK_SERVER or item.get("name") != TASK_RECEIPT_TOOL:
+    receipt = parse_task_receipt(item)
+    if receipt is None:
         return None
-    raw = item.get("output")
-    if not isinstance(raw, str) or len(raw) > 256 * 1024:
-        return None
-    try:
-        receipt = json.loads(raw)
-        if not isinstance(receipt, dict):
-            return None
-        key = thread_id(receipt.get("task_id"))
-        state = receipt.get("state")
-        if not isinstance(state, str) or state not in TASK_STATES:
-            return None
-    except (ValueError, TypeError):
-        return None
+    key, state = receipt["task_id"], receipt["state"]
     title, _ = bounded_text(receipt.get("title"), 120)
     detail, truncated = bounded_text(receipt.get("output"), detail_limit)
     return ProcessEvent(

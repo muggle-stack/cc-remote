@@ -12,16 +12,20 @@ import time
 from uuid import UUID, uuid4
 
 OUTPUT_BYTES = 64 * 1024
+# JSON escapes a control byte as six characters. Leave room for task metadata.
+_MAX_TASK_RECEIPT_CHARS = 6 * OUTPUT_BYTES + 4096
 MAX_TASK_ARGV_CHARS = 32_768
 MAX_ACTIVE = 8
 MAX_RECORDS = 200
 DELIVERY_TRACK_SECONDS = 86400
 TERMINAL = {"completed", "failed", "cancelled", "timed_out", "interrupted"}
-# Known legacy callback IDs (NULL deadline) get one reconciliation window;
-# 0 closes it durably. A lost acknowledgment without an ID is never guessed.
+TASK_SERVER = "cc_remote_tasks"
+TASK_RECEIPT_TOOL = "task_result"
+# Retained receipts (NULL deadline) get one read-only reconciliation window.
+# Zero closes it durably, even if acceptance never yielded a native turn ID.
 _PENDING_WORK = """(state IN ('queued','running') OR delivery IN ('pending','sending','accepted')
-    OR (delivery IN ('failed','unknown') AND delivery_turn_id IS NOT NULL
-        AND delivery_turn_id != ''
+    OR ((delivery='unknown' OR (delivery='failed' AND delivery_turn_id != ''))
+        AND cancel_requested=0
         AND (delivery_recheck_until IS NULL OR delivery_recheck_until > 0)))"""
 
 
@@ -272,6 +276,16 @@ class TaskStore:
             if not changed:
                 raise ValueError("Task completion is no longer pending")
 
+    def reject_delivery(self, task_id, *, retry_at=None):
+        if retry_at is None:
+            delivery, error = "rejected", "Official daemon rejected completion delivery"
+        else:
+            delivery, error = "pending", "Official daemon temporarily rejected completion. Waiting for retry"
+        with self.db() as db:
+            db.execute("UPDATE tasks SET delivery=?,delivery_error=?,next_attempt=?,updated=? "
+                       "WHERE id=? AND delivery IN ('pending','sending') AND cancel_requested=0",
+                       (delivery, error, retry_at or 0, time.time(), task_id))
+
     def recover(self):
         """Only the exclusive worker calls this after acquiring its lifetime lock.
 
@@ -305,3 +319,23 @@ def public_task(task, *, output=False):
     if output:
         result["output"] = task["output"].decode("utf-8", errors="replace")
     return result
+
+
+def parse_task_receipt(item: dict) -> dict | None:
+    """Recognize a terminal receipt by its native tool envelope and task ID."""
+    if item.get("namespace") != TASK_SERVER or item.get("name") != TASK_RECEIPT_TOOL:
+        return None
+    raw = item.get("output")
+    if not isinstance(raw, str) or len(raw) > _MAX_TASK_RECEIPT_CHARS:
+        return None
+    try:
+        receipt = json.loads(raw)
+        if not isinstance(receipt, dict):
+            return None
+        thread_id(receipt.get("task_id"))
+        state = receipt.get("state")
+        if isinstance(state, str) and state in TERMINAL:
+            return receipt
+    except (ValueError, RecursionError):
+        pass
+    return None

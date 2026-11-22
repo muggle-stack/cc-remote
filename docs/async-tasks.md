@@ -119,13 +119,20 @@ unconfirmed callbacks show a retained-result warning. Their
 command output remains available through `task_result`. The panel is not a
 complete archive of successfully delivered tasks.
 
-Disconnected delivery is retried every 30 seconds **only before submission**.
+The worker retries every 30 seconds after a pre-submission disconnect or a
+native overload or shutdown response that confirms the request was not accepted.
 A safely identified, active on-disk thread may be resumed on the same daemon
 without configuration overrides; archived/deleted or unverifiable threads are
-not revived. If transmission might have succeeded but its acknowledgment was
-lost, notification state becomes `unknown` and is not automatically resent.
-Inspect `task_result` and the conversation in that case. Native rejection is
-recorded as `rejected`, not success.
+not revived. Other native rejections remain `rejected`. Older rejection records
+without a structured cause also retain that status.
+
+If the acknowledgment is lost, the worker records `unknown` and checks bounded
+native history in the same account and original thread every 30 seconds for up
+to 24 hours. It looks for the `cc_remote_tasks/task_result` tool output with
+the exact `task_id` and binds the receipt to that existing turn. A missing item
+can mean the native input is still queued, so it leaves the result retained in
+`task_result` for an unconfirmed submission. Reconnection and these checks
+require no user message, and the command output comes from the saved result.
 
 An initial receipt records `accepted` plus `notification_turn_id`, not success.
 The worker checks that exact thread and turn through read-only, paginated
@@ -144,15 +151,13 @@ callback turn ended normally, not that the model semantically understood the
 result. If no outcome can be confirmed within 24 hours, the receipt becomes
 `unknown` and remains retained; a confirmed failure keeps its warning.
 
-Old failed/unconfirmed receipts with a known callback turn ID receive one
-24-hour reconciliation window when the upgraded worker checks them. MCP startup
-detects this work even if no commands remain active. Reconciliation only reads
-the existing daemon; it never resumes a thread, resends a callback or reruns a
-command. The deadline and failure observations survive restart, and one final
-read at the deadline ends tracking without renewing it on the next restart.
-Unavailable history keeps a warning. Lost acknowledgments without a known turn
-ID and explicit rejections are not guessed or retried.
-Neither accepted nor failed/unconfirmed callbacks are automatically resent.
+Retained uncertain receipts and failed receipts with a known callback turn
+receive one 24-hour reconciliation window if no deadline was recorded. MCP
+startup detects this work even if no commands remain active. Reconciliation
+only reads the existing daemon. The deadline and failure observations survive
+restart, and one final read at the deadline can confirm the receipt. Unavailable
+history keeps a warning. An unconfirmed submission stays retained when the
+window ends.
 Older `delivered` records without a turn ID retain their original meaning
 (acceptance only); upgrading does not invent an outcome for them.
 
@@ -183,10 +188,10 @@ deployment procedure. Private task state is not part of release cleanup.
 `tests/test_async_tasks.py` exercises execution, failures, cancellation, bounded
 output, caller isolation, ambiguous delivery, recovery and MCP calls using a
 local fake app-server and trivial subprocesses. Callback regressions cover
-acceptance followed by provider failure, transient startup interruption,
-late correction of failed callbacks, exact-turn pagination, recovery without
-resubmission, unavailable history, bounded tracking, legacy reconciliation and
-concurrent old-store migration. These tests spend no model tokens.
+confirmed unsent retries for success, failure and timeout, lost acknowledgments
+with delayed history, acceptance followed by provider failure, transient startup
+interruption, exact-turn pagination, bounded tracking, legacy reconciliation
+and concurrent old-store migration. These tests spend no model tokens.
 They do not establish real App/CLI rendering or native end-to-end inference;
 those require a separate, explicitly scoped live acceptance run. The caller
 regression covers both `_meta.threadId` from the official 0.159.2 app-server's
