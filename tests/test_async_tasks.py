@@ -60,7 +60,7 @@ async def daemon(store, *, delivery="ok", reject_exec=False, thread_state="idle"
         if actual != socket:
             socket.symlink_to(actual)
         calls, receipts, commands = [], [], []
-        outcomes = SimpleNamespace(status=turn_status, pages=None, reject=False, reads=[])
+        outcomes = SimpleNamespace(status=turn_status, pages=None, reject=False, reads=[], delivery=delivery)
 
         async def handle(ws):
             jobs = set()
@@ -120,11 +120,11 @@ async def daemon(store, *, delivery="ok", reject_exec=False, thread_state="idle"
                             proc.terminate()
                     elif method == "turn/start":
                         receipts.append(p)
-                        if delivery == "lost":
+                        if outcomes.delivery == "lost":
                             await ws.close()
                             break
-                        if delivery == "reject":
-                            await ws.send(json.dumps({"id": msg["id"], "error": {"code": -32600}}))
+                        if isinstance(outcomes.delivery, dict):
+                            await ws.send(json.dumps({"id": msg["id"], "error": outcomes.delivery}))
                             continue
                         result = {"turn": {"id": "native-turn", "status": "inProgress"}}
                     await ws.send(json.dumps({"id": msg["id"], "result": result}))
@@ -383,18 +383,154 @@ def test_execution_budget_is_rechecked_at_native_send(store, monkeypatch, phase,
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("mode,expected", [("lost", "unknown"), ("reject", "rejected")])
-def test_completion_ack_loss_is_not_replayed(store, mode, expected):
+@pytest.mark.parametrize("error", [{"code": -32600}, {"code": -32602}, {"code": -32603}])
+def test_unclassified_rejection_is_retained_without_retry(store, error):
     _, key = start(store)
     store.update(key, state="completed", output=b"retained result")
 
     async def run():
-        async with daemon(store, delivery=mode) as native:
-            await tasks.deliver(store, store.get(key))
-            assert store.get(key)["delivery"] == expected
-            store.recover()
-            await tasks.deliver(store, store.get(key))
-            assert len(native.receipts) == 1
+        async with daemon(store, delivery=error) as native:
+            await tasks.process_task(store, key)
+            assert store.get(key)["delivery"] == "rejected"
+            assert not store.has_pending()
+            native.outcomes.delivery = "ok"
+            await tasks.run_worker(TaskStore(store.home))
+            assert len(native.receipts) == 1 and not native.commands
+            assert store.get(key)["output"] == b"retained result"
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("state,exit_code", [("completed", 0), ("failed", 23), ("timed_out", 124)])
+@pytest.mark.parametrize("error", [
+    None,  # No connection before submission.
+    {"code": -32001},
+    {"code": -32600, "data": {"reason": "serverShuttingDown"}},
+])
+def test_confirmed_non_delivery_recovers_from_saved_result(store, delivery_clock, state, exit_code, error):
+    sid, key = start(store)
+    store.update(key, state=state, exit_code=exit_code, output=b"retained result")
+
+    async def run():
+        if error is None:
+            await tasks.process_task(store, key)
+        async with daemon(store, delivery=error or "ok") as native:
+            if error is not None:
+                await tasks.process_task(store, key)
+            assert store.get(key)["delivery"] == "pending"
+            assert store.has_pending() and key not in store.recoverable()
+            native.outcomes.delivery = "ok"
+            delivery_clock.now += tasks.RETRY_SECONDS
+            reopened = TaskStore(store.home)
+            await asyncio.wait_for(tasks.run_worker(reopened), 5)
+            row = public_task(reopened.get(key, sid), output=True)
+            assert row["notification"] == "delivered"
+            assert row["state"] == state and row["exit_code"] == exit_code
+            assert row["output"] == "retained result"
+            expected = {"task_id": key, "state": state, "exit_code": exit_code, "output": "retained result"}
+            for request in native.receipts:
+                assert request["threadId"] == sid and request["input"] == []
+                receipt = json.loads(request["toolOutput"]["output"])
+                assert all(receipt[field] == value for field, value in expected.items())
+            assert len(native.receipts) == (1 if error is None else 2)
+            assert not native.commands
+    asyncio.run(run())
+
+
+def test_cancellation_suppresses_retry_after_temporary_rejection(store, delivery_clock):
+    sid, key = start(store)
+    store.update(key, state="completed")
+
+    async def run():
+        async with daemon(store, delivery={"code": -32001}) as native:
+            await tasks.process_task(store, key)
+            assert store.get(key)["delivery"] == "pending"
+            store.cancel(key, sid)
+            native.outcomes.delivery = "ok"
+            delivery_clock.now += tasks.RETRY_SECONDS
+            await tasks.run_worker(TaskStore(store.home))
+            assert store.get(key)["delivery"] == "suppressed"
+            assert len(native.receipts) == 1 and not native.commands
+    asyncio.run(run())
+
+
+def test_socket_closed_after_thread_read_retries_without_reexecuting(store, delivery_clock, monkeypatch):
+    _, key = start(store)
+    store.update(key, state="completed")
+
+    async def run():
+        async with daemon(store) as native:
+            @asynccontextmanager
+            async def disconnect_before_send(home):
+                async with native.connect(home) as client:
+                    original_thread = client.thread
+
+                    async def read_then_close(sid):
+                        thread = await original_thread(sid)
+                        await client.ws.close()
+                        return thread
+
+                    client.thread = read_then_close
+                    yield client
+
+            with monkeypatch.context() as patch:
+                patch.setattr(task_rpc, "connect", disconnect_before_send)
+                await tasks.process_task(store, key)
+            assert store.get(key)["delivery"] == "pending" and not native.receipts
+            delivery_clock.now += tasks.RETRY_SECONDS
+            await asyncio.wait_for(tasks.run_worker(TaskStore(store.home)), 5)
+            assert store.get(key)["delivery"] == "delivered"
+            assert len(native.receipts) == 1 and not native.commands
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("state,exit_code", [("completed", 0), ("failed", 23), ("timed_out", 124)])
+def test_lost_ack_recovers_exact_receipt_from_later_history(store, delivery_clock, state, exit_code):
+    sid, key = start(store)
+    store.update(key, state=state, exit_code=exit_code, output=b"retained result")
+
+    async def run():
+        async with daemon(store, delivery="lost") as native:
+            await tasks.process_task(store, key)
+            assert store.get(key)["delivery"] == "unknown"
+            assert store.has_pending() and key not in store.recoverable()
+            assert len(native.receipts) == 1 and not native.commands
+
+            # The original app-server accepted the output, but its history
+            # projection lagged and the submission response was lost.
+            item = {"type": "functionCallOutput", **native.receipts[0]["toolOutput"]}
+            other_task = {**json.loads(item["output"]), "task_id": str(uuid4())}
+            native.outcomes.delivery = "ok"
+            native.outcomes.pages = {
+                None: {"data": [{"id": "other-turn", "status": "completed",
+                                 "items": [{**item, "namespace": "unrelated"},
+                                           {**item, "type": "userMessage"},
+                                           {**item, "output": json.dumps(other_task)}]}],
+                       "nextCursor": "receipt-page"},
+                "receipt-page": {"data": [{"id": "receipt-turn", "status": "inProgress", "items": [item]}],
+                                 "nextCursor": None},
+            }
+            reopened = TaskStore(store.home)
+            delivery_clock.now += tasks.RETRY_SECONDS
+            worker = asyncio.create_task(tasks.run_worker(reopened))
+            async with asyncio.timeout(5):
+                while reopened.get(key, sid)["delivery"] != "accepted":
+                    await asyncio.sleep(.01)
+            row = reopened.get(key, sid)
+            assert row["delivery"] == "accepted" and row["delivery_turn_id"] == "receipt-turn"
+            assert row["delivery_error"] is None
+            assert [p["cursor"] for p in native.outcomes.reads[-2:]] == [None, "receipt-page"]
+            assert all(p["itemsView"] == "full" for p in native.outcomes.reads)
+
+            native.outcomes.pages["receipt-page"]["data"][0]["status"] = "completed"
+            delivery_clock.now += tasks.RETRY_SECONDS
+            await asyncio.wait_for(worker, 5)
+            row = public_task(reopened.get(key, sid), output=True)
+            assert row["notification"] == "delivered" and row["notification_turn_id"] == "receipt-turn"
+            assert row["state"] == state and row["exit_code"] == exit_code and row["output"] == "retained result"
+            assert native.outcomes.reads[-1]["itemsView"] == "notLoaded"
+            assert all(p["threadId"] == sid for p in native.outcomes.reads)
+            assert len(native.receipts) == 1 and not native.commands
+            assert "thread/resume" not in native.calls
     asyncio.run(run())
 
 
@@ -625,7 +761,7 @@ def test_legacy_reconciliation_has_one_deadline_and_final_read(
 
 
 @pytest.mark.parametrize("delivery,turn_id", [
-    ("unknown", None), ("failed", None), ("unknown", ""),
+    ("failed", None), ("rejected", None),
     ("rejected", "native-turn"), ("delivered", "native-turn"), ("suppressed", "native-turn"),
 ])
 def test_reconciliation_never_guesses_receipt_identity_or_replays_delivery(store, delivery, turn_id):
@@ -709,20 +845,57 @@ def test_pre_submission_disconnect_retains_pending_without_executing(store):
     assert store.get(key)["delivery"] == "pending"
 
 
-def test_recovery_does_not_reexecute_running_or_resend_unknown(store):
+def test_recovery_does_not_reexecute_running_or_resend_unknown(store, delivery_clock):
     _, running = start(store)
     _, sending = start(store)
     store.update(running, state="running")
-    store.update(sending, state="completed", delivery="sending")
+    store.update(sending, state="completed", delivery="sending", output=b"original result")
     store.recover()
     assert store.get(running)["state"] == "interrupted"
     assert store.get(sending)["delivery"] == "unknown"
 
     async def run():
         async with daemon(store) as native:
-            await tasks.run_worker(store)
+            await tasks.process_task(store, sending)
+            deadline = store.get(sending)["delivery_recheck_until"]
+            assert deadline == delivery_clock.now + tasks.DELIVERY_TRACK_SECONDS
+            assert store.has_pending() and sending not in store.recoverable()
+
+            delivery_clock.now = deadline
+            reopened = TaskStore(store.home)
+            await asyncio.wait_for(tasks.run_worker(reopened), 5)
+            row = reopened.get(sending)
+            assert row["delivery"] == "unknown" and row["delivery_turn_id"] is None
+            assert row["output"] == b"original result" and row["delivery_recheck_until"] == 0
+            assert not reopened.has_pending()
+            assert len([p for p in native.outcomes.reads if p["itemsView"] == "full"]) == 2
             assert not native.commands
             assert len(native.receipts) == 1
+    asyncio.run(run())
+
+
+def test_worker_adopts_a_receipt_left_sending_at_restart(store):
+    sid, key = start(store)
+    output = b"\0" * OUTPUT_BYTES
+    store.update(key, state="failed", exit_code=23, delivery="sending", output=output)
+    payload = public_task(store.get(key), output=True)
+    item = {"type": "functionCallOutput", "namespace": "cc_remote_tasks", "name": "task_result",
+            "output": json.dumps(payload)}
+
+    async def run():
+        async with daemon(store) as native:
+            native.outcomes.pages = {None: {
+                "data": [{"id": "receipt-turn", "status": "completed", "items": [item]}],
+                "nextCursor": None,
+            }}
+            reopened = TaskStore(store.home)
+            await asyncio.wait_for(tasks.run_worker(reopened), 5)
+            row = reopened.get(key, sid)
+            assert row["delivery"] == "delivered" and row["delivery_turn_id"] == "receipt-turn"
+            assert row["state"] == "failed" and row["exit_code"] == 23
+            assert row["output"] == output
+            assert native.calls == ["initialize", "thread/read", "thread/turns/list"]
+            assert not native.receipts and not native.commands
     asyncio.run(run())
 
 
