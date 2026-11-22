@@ -465,6 +465,7 @@ CODEX_EFFORT_RESOLVE_TIMEOUT_SECONDS = 1.0
 CODEX_EFFORT_RESOLVE_RETRY_SECONDS = 30.0
 CLAUDE_BTW_DEFAULT_EFFORT = "xhigh"
 CODEX_DAEMON_RECOVERY_TIMEOUT_SECONDS = 45.0
+CODEX_RECEIPT_DRAIN_TIMEOUT_SECONDS = 1.0
 CODEX_TURN_START_RECONCILE_INTERVAL_SECONDS = 0.25
 CODEX_TURN_START_RECONCILE_DEADLINE_SECONDS = 120.0
 CODEX_TURN_START_RECONNECT_BACKOFF_MAX_SECONDS = 5.0
@@ -19417,9 +19418,12 @@ class WrapperMachine:
         if ctx.engine == "codex":
             await self._apply_codex_context(ctx)
             if ctx.state != "idle" or getattr(ctx.sdk, "turn_active", False):
-                error = Error(code=ERR_BUSY, message="会话已开始新回合，请稍后重试或排队发送",
-                              msg_id=getattr(cmd, "msg_id", None))
-                return await self._reject_query(ctx, cmd, error)
+                if launch_receipt is not None:
+                    return await self._reject_query(ctx, cmd, Error(
+                        code=ERR_BUSY, message="会话已开始新回合，请稍后重试或排队发送"))
+                collision = await self._handle_codex_query_collision(ctx, cmd)
+                if collision is not None:
+                    return collision
         # All synchronous rejection paths have passed. A new conversation may
         # now finish before the next sidebar catalog read, so remember its first
         # accepted prompt under the temporary key; capture migrates it to the
@@ -19463,7 +19467,75 @@ class WrapperMachine:
 
             turn_task.add_done_callback(settle_unstarted_launch)
 
-    async def _handle_steer(self, cmd):
+    async def _handle_codex_query_collision(
+        self, ctx: SessionContext, cmd: Query,
+    ) -> Error | TurnSteered | None:
+        """Resolve a direct send that passed the idle preflight before a receipt."""
+        sdk = ctx.sdk
+        turn_id = ctx.codex_spontaneous_turn_id
+        task = ctx.codex_spontaneous_task
+        generation = getattr(sdk, "_generation", None)
+        native_sid = ctx.session_id
+        wait_for_receipt = getattr(sdk, "wait_for_task_callback_turn", None)
+
+        def same_session() -> bool:
+            return (
+                self._is_resident_context(ctx) and ctx.sdk is sdk
+                and ctx.session_id == native_sid == getattr(sdk, "thread_id", None)
+                and getattr(sdk, "_generation", None) == generation
+                and self._codex_shared_live(ctx) and ctx.write_state == "writable"
+                and ctx.turn_task is None and not ctx.codex_account_handoff
+                and not ctx.codex_turn_start_reconciling
+            )
+
+        def ready_to_launch() -> bool:
+            return (
+                same_session() and ctx.state == "idle"
+                and ctx.codex_spontaneous_turn_id is None
+                and sdk.turn_id is None
+                and not getattr(sdk, "turn_active", False)
+            )
+
+        if (
+            turn_id and native_sid and cmd.sid == self._ctx_wire_sid(ctx)
+            and cmd.delivery == "immediate" and callable(wait_for_receipt)
+            and (self._session_messages is None or not self._session_messages.owns(cmd.msg_id))
+            and same_session() and ctx.state == "running"
+        ):
+            receipt = await wait_for_receipt(turn_id)
+            if (
+                receipt and same_session() and ctx.codex_spontaneous_turn_id == turn_id
+                and sdk.turn_active and sdk.turn_id == turn_id
+            ):
+                result = await self._handle_steer(cmd, task_callback_turn_id=turn_id)
+                if isinstance(result, TurnSteered) or result.code == ERR_STEER_UNKNOWN:
+                    return result
+            if (
+                task is not None and not task.done() and same_session()
+                and ctx.codex_spontaneous_turn_id == turn_id
+                and ctx.codex_spontaneous_next_id is None
+                and (receipt or ctx.codex_spontaneous_completed_id == turn_id)
+            ):
+                # A rejection can precede the native terminal or the bridge's
+                # final idle state. Keep the query lock and let that exact
+                # reader drain before deciding whether a normal launch is safe.
+                await asyncio.wait({task}, timeout=CODEX_RECEIPT_DRAIN_TIMEOUT_SECONDS)
+            if ready_to_launch():
+                # Local idle can lag a successor on another native client.
+                # Check the exact thread on the same transport before starting.
+                try:
+                    confirmation = await asyncio.wait_for(
+                        sdk.confirm_no_active_turn(native_sid, turn_id),
+                        timeout=CODEX_RECEIPT_DRAIN_TIMEOUT_SECONDS,
+                    )
+                except (OSError, RuntimeError, asyncio.TimeoutError):
+                    confirmation = None
+                if confirmation and confirmation.authoritative_terminal and ready_to_launch():
+                    return None
+        return await self._reject_query(ctx, cmd, Error(
+            code=ERR_BUSY, message="会话已开始新回合，请稍后重试或排队发送"))
+
+    async def _handle_steer(self, cmd, *, task_callback_turn_id: str | None = None):
         """Append one user instruction to the exact active engine turn.
 
         Steering is neither a new engine turn nor an interrupt.  The successful
@@ -19472,6 +19544,8 @@ class WrapperMachine:
         """
         sid = getattr(cmd, "sid", None)
         ctx = self._ctx_for(sid)
+        steer_sdk = ctx.sdk if ctx is not None else None
+        steer_generation = getattr(steer_sdk, "_generation", None)
 
         async def reject(code: str, message: str) -> Error:
             error = Error(
@@ -19493,7 +19567,8 @@ class WrapperMachine:
             # This is a correlated control rejection, not shared session
             # narrative. Buffering it would let a later client replay A's
             # targeted failure as its own after hello rewrites the recipient.
-            await self.transport.send(error)
+            if task_callback_turn_id is None:
+                await self.transport.send(error)
             return error
 
         if ctx is None:
@@ -19522,7 +19597,7 @@ class WrapperMachine:
             )
         if ctx.codex_uncertain_steer is not None:
             return await reject(
-                ERR_STEER_UNKNOWN,
+                ERR_STEER_UNKNOWN if task_callback_turn_id is None else ERR_NOT_STEERABLE,
                 "上一条 Codex 引导结果仍未确认，请等待当前任务结束或刷新历史。",
             )
         if not cmd.prompt and not cmd.images and not cmd.files:
@@ -19613,12 +19688,28 @@ class WrapperMachine:
                         ERR_NOT_STEERABLE,
                         "Codex 当前回合不支持引导，请等待后重试。",
                     )
+                callback_target = {}
+                if task_callback_turn_id is not None:
+                    if (
+                        not self._is_resident_context(ctx) or ctx.sdk is not steer_sdk
+                        or getattr(steer_sdk, "_generation", None) != steer_generation
+                        or ctx.write_state != "writable" or ctx.turn_task is not None
+                        or ctx.codex_account_handoff or ctx.interrupt_event.is_set()
+                        or ctx.codex_uncertain_steer is not None
+                        or ctx.codex_spontaneous_turn_id != task_callback_turn_id
+                        or ctx.active_msg_id not in {None, task_callback_turn_id}
+                        or ctx.codex_spontaneous_anchor_id not in {None, task_callback_turn_id}
+                        or sdk_turn_id != task_callback_turn_id
+                    ):
+                        return await reject(ERR_NOT_STEERABLE, "后台回执回合已切换，本次未发送。")
+                    callback_target["task_callback_turn_id"] = task_callback_turn_id
                 ctx.codex_steer_gate.clear()
                 steer_gate_held = True
                 steer_acceptance = await ctx.sdk.steer(
                     prompt,
                     images=image_paths,
                     client_user_message_id=cmd.msg_id,
+                    **callback_target,
                 )
                 turn_id = str(steer_acceptance)
                 candidate_fence = getattr(
@@ -19665,7 +19756,7 @@ class WrapperMachine:
             retain_attachments()
             ctx.codex_uncertain_steer = TurnSteered(
                 msg_id=cmd.msg_id,
-                turn_id=getattr(ctx.sdk, "turn_id", None) or sdk_turn_id,
+                turn_id=task_callback_turn_id or getattr(ctx.sdk, "turn_id", None) or sdk_turn_id,
                 prompt=original_prompt,
                 images=images,
                 files=file_meta,
@@ -19677,6 +19768,9 @@ class WrapperMachine:
             error = Error(
                 code=ERR_STEER_UNKNOWN,
                 message=(
+                    "Codex 尚未确认本次消息是否送达；请先观察后续输出或"
+                    "刷新历史，确认前不要重复发送。"
+                    if task_callback_turn_id is not None else
                     "Codex 尚未确认本次引导是否生效；请先观察后续输出或"
                     "刷新历史，确认前不要重复发送。"
                 ),
@@ -19694,7 +19788,7 @@ class WrapperMachine:
                     error_type=type(exc).__name__,
                 )
             log.warning(
-                "Codex steer outcome unknown after transport wait failure",
+                "Codex steer outcome unknown",
                 session_id=ctx.session_id,
             )
             return error

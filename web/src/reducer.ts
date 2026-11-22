@@ -6203,15 +6203,29 @@ function reduceEvent(
           || e.code === "steer_outcome_unknown") && e.msg_id) {
         const next = patch(state, e.sid, (rt) => {
           const kind = acceptanceKindFor(rt, e.msg_id!);
-          if (kind !== "steer" && kind !== "steer_unknown") return;
+          if (kind !== "steer" && kind !== "steer_unknown"
+              && !(kind === "query" && e.code === "steer_outcome_unknown")) return;
           if (e.code === "steer_outcome_unknown") {
             // Transport loss after submission is not a rejection. Keep both
             // the reliable acceptance latch and the optimistic row until a
             // narrative echo or an authoritative terminal boundary resolves it.
-            if (rt.acceptancePending === e.msg_id) rt.acceptanceKind = "steer_unknown";
-            else rt.additionalSteerAcceptances = {
-              ...rt.additionalSteerAcceptances, [e.msg_id!]: "steer_unknown",
-            };
+            if (rt.acceptancePending === e.msg_id) {
+              rt.acceptanceKind = "steer_unknown";
+              rt.acceptanceHistoryBaseline = null;
+              if (kind === "query") {
+                // A direct send can land inside a native callback turn. Move
+                // its unconfirmed row after the callback and require its ID.
+                const pending = rt.turns.find(turn => turn.id === e.msg_id);
+                if (pending) rt.turns = [
+                  ...rt.turns.filter(turn => turn !== pending),
+                  { ...pending, clientMsgId: pending.id },
+                ];
+              }
+            } else {
+              rt.additionalSteerAcceptances = {
+                ...rt.additionalSteerAcceptances, [e.msg_id!]: "steer_unknown",
+              };
+            }
             return;
           }
           // A definitive rejection is a control failure, not the terminal state
@@ -6431,7 +6445,7 @@ function reduceEvent(
         const stamp = eventTimestampMs(e.ts);
         const doneTs = stamp ?? Date.now();
         const acceptanceKind = acceptanceKindFor(rt, e.msg_id);
-        const localAcceptance = acceptanceKind === "steer" || acceptanceKind === "steer_unknown";
+        const localAcceptance = acceptanceKind !== null;
         const optimisticIndex = pendingOptimisticSteerIndex(rt, turns);
         let existing = turns.find((turn) =>
           turnHasIdentityAlias(turn, e.msg_id));
