@@ -4,6 +4,14 @@
 
 ## Unreleased
 
+## v5.3.57
+
+Codex background task receipts retry when the server confirms a temporary
+non-admission. The worker can recover a lost acknowledgment by matching the
+receipt in the original thread and tracking its existing turn. Wire protocol v98.
+
+See the bilingual [release notes](docs/releases/v5.3.57.md).
+
 ## v5.3.56
 
 Codex background task counts update when the session finishes handling their
