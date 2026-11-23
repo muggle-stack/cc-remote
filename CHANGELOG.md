@@ -4,6 +4,14 @@
 
 ## Unreleased
 
+## v5.3.58
+
+Direct Codex sends reach the original thread when a background task receipt
+wins the race. CC Remote uses the active receipt turn or starts a new turn
+once app-server confirms the thread is idle. Wire protocol v98.
+
+See the bilingual [release notes](docs/releases/v5.3.58.md).
+
 ## v5.3.57
 
 Codex background task receipts retry when the server confirms a temporary
