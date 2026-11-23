@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -27,6 +27,8 @@ const webBuild = {
   ...JSON.parse(readFileSync(join(root, "public/cc-remote-build.json"), "utf8")),
   build_id: digest.digest("hex"),
 };
+const pdfjsRoot = join(root, "node_modules/pdfjs-dist");
+const { version: pdfjsVersion } = JSON.parse(readFileSync(join(pdfjsRoot, "package.json"), "utf8"));
 
 // Dev: proxy /api + /ws to the local relay so the browser can use a same-origin
 // WebSocket (and we avoid CORS). Production: the relay serves the built
@@ -36,8 +38,14 @@ export default defineConfig({
   plugins: [react(), {
     name: "cc-remote-build-identity",
     writeBundle(options) {
-      writeFileSync(join(options.dir ?? join(root, "dist"), "cc-remote-build.json"),
+      const output = options.dir ?? join(root, "dist");
+      writeFileSync(join(output, "cc-remote-build.json"),
         JSON.stringify(webBuild, null, 2) + "\n");
+      const pdfResources = join(output, "assets", `pdfjs-${pdfjsVersion}`);
+      mkdirSync(pdfResources, { recursive: true });
+      for (const resource of ["cmaps", "standard_fonts", "LICENSE"]) {
+        cpSync(join(pdfjsRoot, resource), join(pdfResources, resource), { recursive: true });
+      }
     },
   }],
   build: {

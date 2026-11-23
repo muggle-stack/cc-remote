@@ -235,7 +235,10 @@ export class Resources {
     const url = this.url(value, base).href;
     let promise = this.blobs.get(url);
     if (!promise) {
-      promise = this.readAsset(url);
+      promise = this.readAsset(url).catch((error: unknown) => {
+        this.blobs.delete(url);
+        throw error;
+      });
       this.blobs.set(url, promise);
     }
     return promise;

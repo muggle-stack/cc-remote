@@ -169,3 +169,16 @@ test("a completed read cannot create a media URL after the frame closes", async 
   value.dispose(); complete(new Blob([]));
   await rejected;
 });
+
+test("asset loads share an in-flight read and can retry after a failure", async () => {
+  const responses = [unreadResponse(0, 503).response, textResponse("image")];
+  const value = resources(() => responses.shift()!);
+  const first = value.asset("photo.png", url);
+  assert.equal(value.asset("photo.png", url), first);
+  await assert.rejects(first, /无法读取/);
+  const blob = await value.asset("photo.png", url);
+  assert.equal(await (await fetch(blob)).text(), "image");
+  assert.equal(await value.asset("photo.png", url), blob);
+  assert.equal(responses.length, 0);
+  value.dispose();
+});

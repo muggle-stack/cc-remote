@@ -2,6 +2,7 @@ import { PROTOCOL_VERSION } from "../protocol";
 import { Compiler } from "./compiler";
 import { Resources, VIRTUAL_ORIGIN } from "./resources";
 import { installPreviewEscape } from "../preview-keyboard";
+import { installImages } from "./images";
 import { installMedia } from "./media";
 import { installViewerZoom } from "../viewer-zoom";
 
@@ -40,6 +41,7 @@ if (id && parent !== window && opaque) {
     document.head.prepend(logicalBase);
     window.fetch = resources.fetch;
     void new Compiler(resources, new Set<string>(value.script_origins), base).document().then(async ({ doc, scripts, imports, media }) => {
+      installImages(resources, report);
       document.documentElement.lang = doc.documentElement.lang;
       document.documentElement.className = doc.documentElement.className;
       // Keep the base in place: removing/reinserting it momentarily restores

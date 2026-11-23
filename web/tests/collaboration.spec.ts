@@ -2731,7 +2731,7 @@ for (const width of [390, 1280]) {
     await create.getByRole("button", { name: "创建聊天", exact: true }).click();
     const nativeBeforePreviews = relay.commands.length;
     relay.reply("member-0", "[同名文件](note.md)");
-    relay.reply("member-1", "[同名文件](note.md) · [音频](sound.wav) · [视频](clip.mp4) · [图片](result.png) · [HTML](report.html)\n\n![内嵌图片](inline.png)");
+    relay.reply("member-1", "[同名文件](note.md) · [音频](sound.wav) · [视频](clip.mp4) · [图片](result.png) · [HTML](< /tmp/other/report preview.html>)\n\n![内嵌图片](inline.png)");
     const first = page.locator('.collab-answer[data-engine="claude"]');
     const second = page.locator('.collab-answer[data-engine="codex"]');
     const preview = page.getByRole("dialog", { name: "文件预览", exact: true });
@@ -2739,7 +2739,7 @@ for (const width of [390, 1280]) {
     await expect(preview).toContainText("来自 native-0");
     await page.keyboard.press("Escape");
     for (const [path, selector] of [["note.md", ".markdown-preview"], ["sound.wav", "audio"], ["clip.mp4", "video"],
-      ["result.png", ".artifact-image-stage img"], ["report.html", ".artifact-html-stage iframe"]]) {
+      ["result.png", ".artifact-image-stage img"], ["report preview.html", ".artifact-html-stage iframe"]]) {
       await second.getByRole("button", { name: `在 Remote 中打开 /tmp/other/${path}`, exact: true }).click();
       await expect(preview.locator(selector)).toBeVisible();
       const request = relay.commands.findLast(command => command.type === "get_file_preview")!;

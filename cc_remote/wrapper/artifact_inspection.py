@@ -156,7 +156,7 @@ def _read_artifact(
     return relative, data
 
 
-def _image_result(data: bytes, expected_format: str, frame: int = 1) -> tuple[bytes, str, int]:
+def render_raster_image(data: bytes, expected_format: str, frame: int = 1) -> tuple[bytes, str, int]:
     """Return a bounded PNG or JPEG, including frames of other raster formats."""
     if expected_format == "HEIF":
         try:
@@ -226,7 +226,7 @@ async def inspect_artifact(
 
     summary = f"Viewed {relative}"
     if suffix in _IMAGE_FORMATS:
-        image, mime_type, count = await asyncio.to_thread(_image_result, data, _IMAGE_FORMATS[suffix], frame)
+        image, mime_type, count = await asyncio.to_thread(render_raster_image, data, _IMAGE_FORMATS[suffix], frame)
         if count > 1:
             summary += f", frame {frame} of {count}"
     else:
@@ -259,7 +259,7 @@ async def inspect_artifact(
                 summary += " (some elements could not be rendered)"
             if kind == "docx":
                 summary += " (browser layout)"
-        image, mime_type, _ = await asyncio.to_thread(_image_result, screenshot, "PNG")
+        image, mime_type, _ = await asyncio.to_thread(render_raster_image, screenshot, "PNG")
     return [
         types.TextContent(type="text", text=summary),
         types.ImageContent(type="image", data=base64.b64encode(image).decode("ascii"), mimeType=mime_type),

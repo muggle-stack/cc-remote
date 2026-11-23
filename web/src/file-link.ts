@@ -1,3 +1,6 @@
+import type { Nodes, Root } from "mdast";
+import type { Plugin } from "unified";
+
 export interface LocalFileTarget {
   path: string;
   line?: number;
@@ -63,3 +66,28 @@ export function parseLocalFileTarget(rawHref: string): LocalFileTarget | null {
   if (!value || value.includes("\0")) return null;
   return { path: value, line, column };
 }
+
+/** Remove literal padding before an absolute path in angle-bracket links.
+ * Check the source before URL escaping makes padding indistinguishable from
+ * an encoded space in a filename. */
+export const remarkLocalFileLinks: Plugin<[], Root> = function () {
+  return (tree, file) => {
+    const source = String(file.value);
+    if (!/<[ \t]+\//.test(source)) return;
+    const pending: Nodes[] = [tree];
+    while (pending.length) {
+      const node = pending.pop()!;
+      if (node.type === "link") {
+        const path = node.url.replace(/^[ \t]+(?=\/(?!\/))/, "");
+        if (path === node.url) continue;
+        const start = node.position?.start.offset;
+        const end = node.position?.end.offset;
+        if (start == null || end == null) continue;
+        const labelEnd = node.children.at(-1)?.position?.end.offset ?? start + 1;
+        if (/^\]\(\s*<[ \t]+\/(?!\/)/.test(source.slice(labelEnd, end))) {
+          node.url = path;
+        }
+      } else if ("children" in node) pending.push(...node.children);
+    }
+  };
+};

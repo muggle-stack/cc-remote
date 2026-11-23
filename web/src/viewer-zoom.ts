@@ -1,10 +1,10 @@
-/** Runs inside the preview sandbox in both Bridge and Isolated modes. */
+/** Runs inside the sandbox for remote pages and standalone documents. */
 export function installViewerZoom() {
   if (window === parent) return;
   const root = document.documentElement;
   const baseZoom = parseFloat(getComputedStyle(root).zoom) || 1;
   let scale = 1;
-  let fit = false;
+  let fit = true;
   let parentOrigin: string | null = null;
   let touch: { distance: number; scale: number } | null = null;
   let gesture: { scale: number; start: number } | null = null;
@@ -44,6 +44,11 @@ export function installViewerZoom() {
     switch (event.data.action) {
       case "read": report(); break;
       case "fit": fit = true; fitWidth(); break;
+      case "set":
+        if (typeof event.data.scale !== "number" || !Number.isFinite(event.data.scale)) break;
+        fit = false;
+        apply(event.data.scale, { x: 0, y: 0 });
+        break;
       case "reset": fit = false; apply(1); break;
       case "in": fit = false; apply(scale * 1.2); break;
       case "out": fit = false; apply(scale / 1.2); break;
@@ -115,9 +120,14 @@ export function installViewerZoom() {
     if (gesture) event.preventDefault();
     gesture = null;
   });
-  window.addEventListener("resize", () => {
+  const refit = () => {
     cancelAnimationFrame(resizing);
     resizing = requestAnimationFrame(() => { if (fit) fitWidth(); });
-  });
+  };
+  window.addEventListener("resize", refit);
+  window.addEventListener("DOMContentLoaded", refit, { once: true });
+  window.addEventListener("load", refit, { once: true });
+  void document.fonts?.ready.then(refit);
+  if (document.body) fitWidth();
   parent.postMessage({ type: "cc-viewer-zoom-ready" }, "*");
 }

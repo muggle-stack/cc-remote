@@ -178,14 +178,14 @@ export interface PreviewAuthorizationState {
   operation: PreviewAuthorizationOperation;
   path: string;
   resolvedPath: string;
-  format: "markdown" | "text" | "html" | "image" | "pdf" | "audio" | "video" | "spreadsheet" | "presentation";
+  format: import("./protocol").FilePreviewFormat;
   previewId?: string;
   status: "required" | "submitting" | "granted";
 }
 
 export interface Artifact {
   file: string;
-  kind: "diff" | "md" | "file" | "gitdiff" | "html" | "image" | "pdf" | "audio" | "video" | "spreadsheet" | "presentation";
+  kind: "diff" | "md" | "file" | "gitdiff" | "html" | "image" | "pdf" | "audio" | "video" | "spreadsheet" | "presentation" | "document";
   sid?: string | null;
   requestId?: string;
   diff?: DiffLine[];
@@ -2801,7 +2801,7 @@ function reduceCurrent(state: AppState, action: Action): AppState {
       } };
     case "begin_preview_asset": {
       const artifact = state.artifact;
-      if (!artifact || artifact.kind !== "md"
+      if (!artifact || (artifact.kind !== "md" && artifact.kind !== "html")
           || artifact.sid !== action.sid
           || artifact.requestId !== action.previewId) return state;
       return { ...state, artifact: {
@@ -5371,7 +5371,7 @@ function reduceEvent(
         kind: "gitdiff", sections: parseGitDiff(e.diff),
       } };
     case "file_preview":
-      if (!state.artifact || !["md", "file", "html", "image", "pdf", "audio", "video", "spreadsheet", "presentation"].includes(state.artifact.kind)
+      if (!state.artifact || state.artifact.kind === "diff" || state.artifact.kind === "gitdiff"
           || state.artifact.requestId !== e.request_id
           || state.artifact.sid !== (e.sid ?? state.focusedSid)) return state;
       return { ...state, artifact: {
@@ -5401,6 +5401,7 @@ function reduceEvent(
         return { ...state, artifact: {
           ...state.artifact,
           content: state.artifact.pendingContent ?? state.artifact.content,
+          data: undefined,
           size: e.size,
           mtimeNs: e.mtime_ns,
           revision: e.revision ?? state.artifact.revision,
@@ -5419,7 +5420,7 @@ function reduceEvent(
         pendingContent: undefined,
       } };
     case "preview_asset":
-      if (!state.artifact || state.artifact.kind !== "md"
+      if (!state.artifact || (state.artifact.kind !== "md" && state.artifact.kind !== "html")
           || state.artifact.requestId !== e.preview_id
           || state.artifact.sid !== (e.sid ?? state.focusedSid)) return state;
       {
@@ -5466,7 +5467,7 @@ function reduceEvent(
           authorization,
         } };
       }
-      if (artifact.kind !== "md"
+      if ((artifact.kind !== "md" && artifact.kind !== "html")
           || artifact.requestId !== e.preview_id) return state;
       const pending = artifact.assets?.[e.path];
       if (!pending
@@ -6204,15 +6205,29 @@ function reduceEvent(
           || e.code === "steer_outcome_unknown") && e.msg_id) {
         const next = patch(state, e.sid, (rt) => {
           const kind = acceptanceKindFor(rt, e.msg_id!);
-          if (kind !== "steer" && kind !== "steer_unknown") return;
+          if (kind !== "steer" && kind !== "steer_unknown"
+              && !(kind === "query" && e.code === "steer_outcome_unknown")) return;
           if (e.code === "steer_outcome_unknown") {
             // Transport loss after submission is not a rejection. Keep both
             // the reliable acceptance latch and the optimistic row until a
             // narrative echo or an authoritative terminal boundary resolves it.
-            if (rt.acceptancePending === e.msg_id) rt.acceptanceKind = "steer_unknown";
-            else rt.additionalSteerAcceptances = {
-              ...rt.additionalSteerAcceptances, [e.msg_id!]: "steer_unknown",
-            };
+            if (rt.acceptancePending === e.msg_id) {
+              rt.acceptanceKind = "steer_unknown";
+              rt.acceptanceHistoryBaseline = null;
+              if (kind === "query") {
+                // A direct send can land inside a native callback turn. Move
+                // its unconfirmed row after the callback and require its ID.
+                const pending = rt.turns.find(turn => turn.id === e.msg_id);
+                if (pending) rt.turns = [
+                  ...rt.turns.filter(turn => turn !== pending),
+                  { ...pending, clientMsgId: pending.id },
+                ];
+              }
+            } else {
+              rt.additionalSteerAcceptances = {
+                ...rt.additionalSteerAcceptances, [e.msg_id!]: "steer_unknown",
+              };
+            }
             return;
           }
           // A definitive rejection is a control failure, not the terminal state
@@ -6432,7 +6447,7 @@ function reduceEvent(
         const stamp = eventTimestampMs(e.ts);
         const doneTs = stamp ?? Date.now();
         const acceptanceKind = acceptanceKindFor(rt, e.msg_id);
-        const localAcceptance = acceptanceKind === "steer" || acceptanceKind === "steer_unknown";
+        const localAcceptance = acceptanceKind !== null;
         const optimisticIndex = pendingOptimisticSteerIndex(rt, turns);
         let existing = turns.find((turn) =>
           turnHasIdentityAlias(turn, e.msg_id));

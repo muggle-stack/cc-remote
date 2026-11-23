@@ -3,7 +3,28 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <script src="/html-preview-runner.js" defer></script>
+  <script>
+  (() => {
+    // The opaque frame cannot reliably load a same-host script on private
+    // addresses. Keep the bootstrap inline and refuse same-origin execution.
+    try {
+      void parent.document;
+      return;
+    } catch {
+      // Required isolation boundary.
+    }
+    const receive = (event) => {
+      if (event.source !== parent
+          || event.data?.type !== "cc-remote-html-preview"
+          || typeof event.data.document !== "string") return;
+      window.removeEventListener("message", receive);
+      document.open();
+      document.write(event.data.document);
+      document.close();
+    };
+    window.addEventListener("message", receive);
+  })();
+  </script>
 </head>
 <body></body>
 </html>

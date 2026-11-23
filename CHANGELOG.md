@@ -6,9 +6,65 @@
 
 - Add collaboration rooms with Claude, Codex and DSH participants, native session
   settings, public context sharing and running-turn steering.
-- Coordinate Relay, Wrapper and Web on wire protocol v98. Include the private
-  collaboration database in transactional upgrade and rollback snapshots.
-- Sync common fixes and features through master v5.3.52.
+- Coordinate Relay, Wrapper and Web on wire protocol v99 for the new preview
+  formats. Include the private collaboration database in transactional upgrade
+  and rollback snapshots.
+- Sync common fixes and features through master v5.3.59.
+
+## v5.3.59
+
+Chat previews open local file links when an angle-bracket destination has
+extra spaces before its absolute path. This also applies to saved replies,
+and preserves spaces that belong to filenames. Wire protocol v98.
+
+See the bilingual [release notes](docs/releases/v5.3.59.md).
+
+## v5.3.58
+
+Direct Codex sends reach the original thread when a background task receipt
+wins the race. CC Remote uses the active receipt turn or starts a new turn
+once app-server confirms the thread is idle. Wire protocol v98.
+
+See the bilingual [release notes](docs/releases/v5.3.58.md).
+
+## v5.3.57
+
+Codex background task receipts retry when the server confirms a temporary
+non-admission. The worker can recover a lost acknowledgment by matching the
+receipt in the original thread and tracking its existing turn. Wire protocol v98.
+
+See the bilingual [release notes](docs/releases/v5.3.57.md).
+
+## v5.3.56
+
+Codex background task counts update when the session finishes handling their
+callbacks. Tasks that are still running stay visible. Wire protocol v98.
+
+See the bilingual [release notes](docs/releases/v5.3.56.md).
+
+## v5.3.55
+
+Bridge previews display authorized local images assigned by page scripts. Image
+completion follows the browser once the file is transferred, and failed reads
+show the resource path. Wire protocol v98.
+
+See the bilingual [release notes](docs/releases/v5.3.55.md).
+
+## v5.3.54
+
+HTML previews fit narrow panels and retain zoom across refreshes. File previews
+add PDF zoom and text search, improve mobile slide navigation, and support
+DOCX, WebM video, more image formats, and paged spreadsheets. Long CSV and TSV
+cells are shortened for display while the rest of the table remains visible.
+Original downloads preserve the file bytes. Wire protocol v98.
+
+See the bilingual [release notes](docs/releases/v5.3.54.md).
+
+## v5.3.53
+
+Expand a Codex background task to see its launch command and arguments, working directory, and timeout. Task details load from the current account and session, and the preview masks common credentials in command arguments and shell headers. Wire protocol v97.
+
+See the bilingual [release notes](docs/releases/v5.3.53.md).
 
 ## v5.3.52
 

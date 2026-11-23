@@ -12,15 +12,20 @@ import time
 from uuid import UUID, uuid4
 
 OUTPUT_BYTES = 64 * 1024
+# JSON escapes a control byte as six characters. Leave room for task metadata.
+_MAX_TASK_RECEIPT_CHARS = 6 * OUTPUT_BYTES + 4096
+MAX_TASK_ARGV_CHARS = 32_768
 MAX_ACTIVE = 8
 MAX_RECORDS = 200
 DELIVERY_TRACK_SECONDS = 86400
 TERMINAL = {"completed", "failed", "cancelled", "timed_out", "interrupted"}
-# Known legacy callback IDs (NULL deadline) get one reconciliation window;
-# 0 closes it durably. A lost acknowledgment without an ID is never guessed.
+TASK_SERVER = "cc_remote_tasks"
+TASK_RECEIPT_TOOL = "task_result"
+# Retained receipts (NULL deadline) get one read-only reconciliation window.
+# Zero closes it durably, even if acceptance never yielded a native turn ID.
 _PENDING_WORK = """(state IN ('queued','running') OR delivery IN ('pending','sending','accepted')
-    OR (delivery IN ('failed','unknown') AND delivery_turn_id IS NOT NULL
-        AND delivery_turn_id != ''
+    OR ((delivery='unknown' OR (delivery='failed' AND delivery_turn_id != ''))
+        AND cancel_requested=0
         AND (delivery_recheck_until IS NULL OR delivery_recheck_until > 0)))"""
 
 
@@ -120,7 +125,7 @@ class TaskStore:
         thread_id(sid)
         if (not isinstance(argv, list) or not 1 <= len(argv) <= 128
                 or any(not isinstance(a, str) or '\0' in a for a in argv)
-                or not argv[0] or sum(len(a) for a in argv) > 32768):
+                or not argv[0] or sum(len(a) for a in argv) > MAX_TASK_ARGV_CHARS):
             raise ValueError("argv must be a bounded, nonempty command vector")
         if not isinstance(cwd, str) or not Path(cwd).is_absolute() or not Path(cwd).is_dir():
             raise ValueError("cwd must be an existing absolute directory")
@@ -171,24 +176,21 @@ class TaskStore:
                                           (sid,))]
         return [public_task(self.get(key, sid)) for key in ids]
 
-    def activity_snapshot(self):
-        """Read public activity without creating state or starting a worker.
-
-        The Wrapper groups resident sessions by account and reads once per
-        polling pass. Output and command arguments never enter this projection.
-        Missing state is an authoritative empty level; unreadable state is not.
-        """
+    @contextmanager
+    def _read_activity_db(self):
         try:
             root = self.root.lstat()
         except FileNotFoundError:
-            return []
+            yield None
+            return
         if (not stat.S_ISDIR(root.st_mode) or root.st_uid != os.getuid()
                 or root.st_mode & 0o077):
             raise ValueError("Invalid task state directory")
         try:
             info = self.path.lstat()
         except FileNotFoundError:
-            return []
+            yield None
+            return
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                 or info.st_mode & 0o077):
             raise ValueError("Invalid task database")
@@ -196,6 +198,20 @@ class TaskStore:
         db.row_factory = sqlite3.Row
         try:
             db.execute("PRAGMA query_only=ON")
+            yield db
+        finally:
+            db.close()
+
+    def activity_snapshot(self):
+        """Read public activity without creating state or starting a worker.
+
+        The Wrapper groups resident sessions by account and reads once per
+        polling pass. Output and command arguments never enter this projection.
+        Missing state is an authoritative empty level; unreadable state is not.
+        """
+        with self._read_activity_db() as db:
+            if db is None:
+                return []
             columns = {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
             callback = ("delivery_turn_id" if "delivery_turn_id" in columns
                         else "NULL AS delivery_turn_id")
@@ -211,8 +227,18 @@ class TaskStore:
                 "created DESC LIMIT ?",
                 (MAX_RECORDS,),
             )]
-        finally:
-            db.close()
+
+    def read_parameters(self, task_id: str, sid: str) -> dict | None:
+        """Read one exact session's launch parameters through the read-only store."""
+        thread_id(task_id)
+        thread_id(sid)
+        with self._read_activity_db() as db:
+            if db is None:
+                return None
+            row = db.execute(
+                "SELECT spec FROM tasks WHERE id=? AND sid=?", (task_id, sid),
+            ).fetchone()
+        return json.loads(row["spec"]) if row is not None else None
 
     def update(self, task_id, **fields):
         if not fields or not fields.keys() <= {
@@ -250,6 +276,16 @@ class TaskStore:
             if not changed:
                 raise ValueError("Task completion is no longer pending")
 
+    def reject_delivery(self, task_id, *, retry_at=None):
+        if retry_at is None:
+            delivery, error = "rejected", "Official daemon rejected completion delivery"
+        else:
+            delivery, error = "pending", "Official daemon temporarily rejected completion. Waiting for retry"
+        with self.db() as db:
+            db.execute("UPDATE tasks SET delivery=?,delivery_error=?,next_attempt=?,updated=? "
+                       "WHERE id=? AND delivery IN ('pending','sending') AND cancel_requested=0",
+                       (delivery, error, retry_at or 0, time.time(), task_id))
+
     def recover(self):
         """Only the exclusive worker calls this after acquiring its lifetime lock.
 
@@ -283,3 +319,23 @@ def public_task(task, *, output=False):
     if output:
         result["output"] = task["output"].decode("utf-8", errors="replace")
     return result
+
+
+def parse_task_receipt(item: dict) -> dict | None:
+    """Recognize a terminal receipt by its native tool envelope and task ID."""
+    if item.get("namespace") != TASK_SERVER or item.get("name") != TASK_RECEIPT_TOOL:
+        return None
+    raw = item.get("output")
+    if not isinstance(raw, str) or len(raw) > _MAX_TASK_RECEIPT_CHARS:
+        return None
+    try:
+        receipt = json.loads(raw)
+        if not isinstance(receipt, dict):
+            return None
+        thread_id(receipt.get("task_id"))
+        state = receipt.get("state")
+        if isinstance(state, str) and state in TERMINAL:
+            return receipt
+    except (ValueError, RecursionError):
+        pass
+    return None

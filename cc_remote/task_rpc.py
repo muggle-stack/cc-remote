@@ -7,12 +7,25 @@ import json
 from pathlib import Path
 
 from websockets.asyncio.client import unix_connect
+from websockets.protocol import State
 
+from cc_remote.task_store import parse_task_receipt
 from cc_remote.wrapper.codex_daemon import socket_identity
 
 
 class Rejected(RuntimeError):
-    """An explicit native rejection; no automatic replay."""
+    """An explicit native rejection with a sanitized retry classification."""
+
+    def __init__(self, message, *, error=None):
+        super().__init__(message)
+        self.retryable = False
+        if isinstance(error, dict) and type(error.get("code")) is int:
+            code, data = error["code"], error.get("data")
+            # Overload rejects before dispatch. Draining returns NotSubmitted.
+            self.retryable = code == -32001 or (
+                code == -32600 and isinstance(data, dict)
+                and data.get("reason") == "serverShuttingDown"
+            )
 
 
 class NativeTasks:
@@ -40,7 +53,8 @@ class NativeTasks:
                 future = self.pending.get(msg.get("id"))
                 if future is not None and not future.done():
                     if "error" in msg:
-                        future.set_exception(Rejected("Official daemon rejected the operation"))
+                        future.set_exception(Rejected(
+                            "Official daemon rejected the operation", error=msg["error"]))
                     else:
                         future.set_result(msg.get("result"))
         finally:
@@ -49,7 +63,9 @@ class NativeTasks:
                     future.set_exception(ConnectionError("Official daemon connection lost"))
 
     async def rpc(self, method, params, *, timeout=20, before_send=None):
-        if self.reader.done():
+        # A known closed socket has not taken this request. Check before the
+        # caller records that a write might have reached the daemon.
+        if self.reader.done() or self.ws.state is not State.OPEN:
             raise ConnectionError("Official daemon connection closed")
         self.sequence += 1
         key = self.sequence
@@ -70,31 +86,50 @@ class NativeTasks:
             raise Rejected("Original thread identity was not confirmed")
         return thread
 
-    async def turn_status(self, sid, turn_id):
-        """Read the exact callback turn without loading items or resuming it.
-
-        A later successful turn is not evidence for this receipt. Bound both
-        pages and the caller's total read time; missing history stays unknown.
-        """
+    async def _turn_pages(self, sid, *, items_view, limit):
         await self.thread(sid)
         cursor = None
         seen = set()
         for _ in range(8):
             result = await self.rpc("thread/turns/list", {
-                "threadId": sid, "cursor": cursor, "limit": 50,
-                "sortDirection": "desc", "itemsView": "notLoaded",
+                "threadId": sid, "cursor": cursor, "limit": limit,
+                "sortDirection": "desc", "itemsView": items_view,
             })
             rows = result.get("data")
             if not isinstance(rows, list):
                 raise ValueError("Invalid native turn page")
-            for turn in rows:
-                if isinstance(turn, dict) and turn.get("id") == turn_id:
-                    status = turn.get("status")
-                    return status if isinstance(status, str) else None
+            yield rows
             cursor = result.get("nextCursor")
             if not isinstance(cursor, str) or not cursor or cursor in seen:
                 break
             seen.add(cursor)
+
+    async def turn_status(self, sid, turn_id):
+        """Read the exact callback turn without loading items or resuming it."""
+        async for turns in self._turn_pages(sid, items_view="notLoaded", limit=50):
+            for turn in turns:
+                if isinstance(turn, dict) and turn.get("id") == turn_id:
+                    status = turn.get("status")
+                    return status if isinstance(status, str) else None
+        return None
+
+    async def find_task_receipt(self, sid, task_id):
+        """Return positive evidence only; queued output can be missing from history."""
+        async for turns in self._turn_pages(sid, items_view="full", limit=5):
+            for turn in turns:
+                if not isinstance(turn, dict):
+                    continue
+                turn_id, status, items = turn.get("id"), turn.get("status"), turn.get("items")
+                if (not isinstance(turn_id, str) or not 1 <= len(turn_id) <= 512
+                        or status not in ("inProgress", "completed", "failed", "interrupted")
+                        or not isinstance(items, list)):
+                    continue
+                for item in items:
+                    if not isinstance(item, dict) or item.get("type") != "functionCallOutput":
+                        continue
+                    receipt = parse_task_receipt(item)
+                    if receipt is not None and receipt["task_id"] == task_id:
+                        return turn_id, status
         return None
 
     async def close(self):

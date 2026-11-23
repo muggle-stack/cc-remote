@@ -217,6 +217,10 @@ class SessionContext:
     # Account-local async MCP activity is a separate read-only projection. It
     # never owns native turn state or keeps the main model marked as running.
     codex_background_processes: dict[str, BackgroundProcessItem] | None = None
+    codex_background_scope: tuple[str, str] | None = None
+    # Recent successful native turns cover a callback accepted just after its
+    # completion event and stale reads taken before the event.
+    codex_completed_task_turns: dict[tuple[str, str, str], None] = field(default_factory=dict)
     # Sanitized Bash command metadata survives ResultMessage translator swaps
     # so a later task_started edge can still expose the script in the dock.
     claude_item_commands: dict[str, str] = field(default_factory=dict)

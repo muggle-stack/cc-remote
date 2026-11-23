@@ -43,7 +43,7 @@ import {
   effortNameForDisplay, modelsFor, parseSlash, type Catalog,
 } from "../data";
 import { QueuedQueryChip } from "./QueuedQueryChip";
-import BackgroundTaskControl from "./BackgroundTaskControl";
+import BackgroundTaskControl, { type RequestTaskParameters } from "./BackgroundTaskControl";
 import type { InlineImageAsset } from "../inline-image-assets";
 import {
   composePastePrompt,
@@ -126,6 +126,7 @@ interface Props {
   onSetAutoCompact: (selection: AutoCompactSelection) => boolean;
   onContext?: () => void;
   onOpenFile?: (path: string, line?: number) => void;
+  onRequestTaskParameters?: RequestTaskParameters;
   imageAssets?: Record<string, InlineImageAsset>;
   onLoadImage?: (path: string, previewId?: string) => boolean;
   onAuthorizeImage?: (
@@ -636,7 +637,7 @@ export function BtwPanel(props: Props) {
           <div className="runbar show">
             <BackgroundTaskControl key={p.draftKey}
               processes={p.rt.backgroundProcesses}
-              onOpenFile={p.onOpenFile} />
+              onOpenFile={p.onOpenFile} onRequestParameters={p.onRequestTaskParameters} />
           </div>
         )}
         {(

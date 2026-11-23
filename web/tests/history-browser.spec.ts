@@ -2356,7 +2356,7 @@ test("session workspace XLSX previews sheets and downloads the original on mobil
   await expect(sheet).toContainText("<script>bad()</script>");
   await expect(sheet.locator("script")).toHaveCount(0);
   const downloadEvent = page.waitForEvent("download");
-  await sheet.getByRole("link", { name: "下载原文件" }).click();
+  await page.getByRole("link", { name: "下载原文件" }).click();
   expect((await downloadEvent).suggestedFilename()).toBe("report.xlsx");
   await page.screenshot({ path: info.outputPath("spreadsheet-preview.png") });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
@@ -2429,7 +2429,8 @@ test("session workspace browses outside cwd and never shows an old directory aft
   relay.emit(listing);
   const panel = page.locator(".workspace-files");
   const path = panel.getByRole("textbox", { name: "文件或目录路径", exact: true });
-  await expect(panel.locator(".artifact-path")).toHaveText("/tmp/layout");
+  await expect(path).toHaveValue("/tmp/layout");
+  await expect(panel.getByRole("button", { name: "README.md", exact: true })).toBeVisible();
   await expect(panel.getByRole("button", { name: "上级目录", exact: true })).toBeEnabled();
   await panel.getByRole("button", { name: "上级目录", exact: true }).click();
   await expect.poll(() => requests().length).toBe(2);
@@ -2438,10 +2439,10 @@ test("session workspace browses outside cwd and never shows an old directory aft
   relay.emit({ ...listing, request_id: String(requests()[1].request_id),
     path: "/tmp", parent: "/", entries: [{ name: "layout", path: "/tmp/layout", kind: "directory" }] });
   await expect(path).toHaveValue("/tmp");
-  await expect(panel.locator(".artifact-path")).toHaveText("/tmp");
+  await expect(panel.getByRole("button", { name: "layout", exact: true })).toBeVisible();
 
   await path.fill("/home/example");
-  await panel.getByRole("button", { name: "打开", exact: true }).click();
+  await panel.getByRole("button", { name: "打开路径", exact: true }).click();
   await expect.poll(() => requests().length).toBe(3);
   expect(requests()[2].path).toBe("/home/example");
   relay.emit({ ...listing, request_id: String(requests()[2].request_id),
@@ -2449,7 +2450,7 @@ test("session workspace browses outside cwd and never shows an old directory aft
   await expect(panel.getByRole("alert")).toHaveText("没有权限读取该目录");
   await expect(path).toHaveValue("/home/example");
   await expect(panel.locator(".workspace-entry")).toHaveCount(0);
-  await expect(panel.locator(".artifact-path")).toHaveText("");
+  await expect(panel.locator(".workspace-count")).toHaveCount(0);
   await panel.getByRole("button", { name: "刷新目录", exact: true }).click();
   await expect.poll(() => requests().length).toBe(4);
   expect(requests()[3].path).toBe("/home/example");
@@ -2459,7 +2460,7 @@ test("session workspace browses outside cwd and never shows an old directory aft
     path: "/home/example", parent: "/home",
     entries: [{ name: "notes.md", path: "/home/example/notes.md", kind: "file" }] });
   await expect(panel.getByRole("alert")).toHaveCount(0);
-  await expect(panel.locator(".artifact-path")).toHaveText("/home/example");
+  await expect(path).toHaveValue("/home/example");
   await expect(panel.getByRole("button", { name: "notes.md", exact: true })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("workspace-external-directory.png") });
   expect(relay.commands.some((c) => ["query", "steer", "new_session"].includes(String(c.type)))).toBe(false);
@@ -5648,11 +5649,11 @@ test("remote Viewer menu and registered links use a session-scoped panel without
   await expectRightPanelSpace(page, true);
   await page.keyboard.press("Control+b");
   await page.getByText("Second parent", { exact: true }).click();
-  await expect(page.locator(".remote-viewer-panel")).toHaveCount(0);
+  await expect(page.locator(".remote-viewer-panel:visible")).toHaveCount(0);
   await expectRightPanelSpace(page, false);
   await page.getByText("Layout parent", { exact: true }).click();
   await expect(page.locator(".remote-viewer-panel")).toBeVisible();
-  await page.locator(".remote-viewer-panel .viewer-desktop-close").click();
+  await page.getByRole("button", { name: "关闭预览", exact: true }).click();
   await expectRightPanelSpace(page, false);
   registered = true;
   const refreshed = page.waitForResponse("**/api/viewers");
@@ -5729,13 +5730,15 @@ test("remote Viewer registered link waits for its deferred session controller", 
   await page.route("**/src/viewer-pages-controller.tsx*", (route) => { controller = route; });
   await page.route("**/api/viewers", (route) => route.fulfill({ json: { enabled: true, sites: [VIEWER_LINK_SITE] } }));
   let associations = 0;
+  let association: Record<string, unknown> | undefined;
   await page.route("**/api/viewers/pages", (route) => {
     const body = route.request().postDataJSON();
-    if (body.action === "associate") associations++;
-    return route.fulfill({ json: { pages: body.action === "associate" ? [{
-      id: "deferred-page", ...body.page, label: VIEWER_LINK_SITE.label,
-      references: [], turn_ids: [], available: true,
-    }] : [] } });
+    if (body.action === "associate") {
+      associations++;
+      association = { id: "deferred-page", ...body.page, label: VIEWER_LINK_SITE.label,
+        references: [], turn_ids: [], available: true };
+    }
+    return route.fulfill({ json: { pages: association ? [association] : [] } });
   });
   await page.route("**/api/viewers/open", (route) => route.fulfill({ status: 503, json: { error: "device_offline" } }));
   const catalog = page.waitForResponse("**/api/viewers");
@@ -5766,12 +5769,14 @@ test("remote Viewer registered link keeps an original-link fallback after a fail
     return route.fulfill({ json: { enabled: true, sites: [VIEWER_LINK_SITE] } });
   });
   await page.route("**/api/viewers/open", (route) => route.fulfill({ status: 503, json: { error: "device_offline" } }));
+  let associated: Record<string, unknown> | undefined;
   await page.route("**/api/viewers/pages", (route) => {
     const body = route.request().postDataJSON();
-    return route.fulfill({ json: { pages: body.action === "associate" ? [{
+    if (body.action === "associate") associated = {
       id: "registered-page", ...body.page, label: VIEWER_LINK_SITE.label,
       references: [], turn_ids: [], available: true,
-    }] : [] } });
+    };
+    return route.fulfill({ json: { pages: associated ? [associated] : [] } });
   });
   const catalog = page.waitForResponse("**/api/viewers");
   await page.goto("/");
@@ -6487,14 +6492,17 @@ for (const space of ["code", "work"] as const) {
     await page.route("**/cc-remote-build.json?*", route => route.fulfill({ json: next }));
     await page.route("**/healthz?*", route => route.fulfill({ json: next }));
     await page.goto("/");
-    const status = page.getByRole("button", { name: "状态详情：有更新", exact: true });
+    const status = page.getByRole("button", { name: /^状态详情：/ });
     await expect(status).toBeVisible();
     await expect.poll(() => commands.some(c => c.type === "get_models")).toBe(true);
     expect(commands.some(c => c.type === "list_sessions" && c.space === space)).toBe(true);
     if (space === "work") expect(commands.some(c => c.type === "get_work_dashboard")).toBe(true);
     await status.click();
+    const statusDetails = page.getByRole("dialog", { name: "状态详情", exact: true });
+    await statusDetails.getByRole("button", { name: "查看更新", exact: true }).click();
+    const updateSheet = page.getByRole("dialog", { name: "检查更新", exact: true });
     const navigation = page.waitForEvent("framenavigated", frame => frame === page.mainFrame());
-    await page.getByRole("button", { name: "更新页面", exact: true }).click();
+    await updateSheet.getByRole("button", { name: "刷新页面", exact: true }).click();
     await navigation;
     expect(commands.some(c => ["query", "new_session", "steer", "save_markdown"].includes(String(c.type)))).toBe(false);
   });
@@ -7323,6 +7331,57 @@ test("right panel layout shares the diff slot and keeps mobile as an overlay", a
   await expectRightPanelSpace(page, false);
 });
 
+for (const surface of ["main chat", "side chat"]) {
+  test(`Codex background task parameters are requested only on expansion (${surface})`, async ({ page }) => {
+    const sideChat = surface === "side chat";
+    const relay = await mockRightPanelRelay(page, { engine: "codex", visible: sideChat, retained: sideChat });
+    await page.goto("/");
+    await expect.poll(() => relay.commands.some(command => command.type === "hello")).toBe(true);
+    const chat = sideChat ? page.locator(".btw-panel:visible") : page;
+    if (sideChat) await expect(page.locator(".btw-panel:visible .btw-chat-tab")).toHaveCount(1);
+    const sid = sideChat ? "btw-layout-child" : "layout-parent";
+    const itemId = "async-task:active-test";
+    const title = "核对后台构建";
+    relay.emit({ type: "background_process_sync", sid,
+      items: [{ kind: "task", item_id: itemId, status: "running", title, summary: "后台执行中" }] });
+    const trigger = chat.getByRole("button", { name: /后台任务，\d+ 项进行中/ });
+    const requests = () => relay.commands.filter(command => command.type === "get_agent_detail");
+    await trigger.click();
+    const panel = page.getByRole("dialog", { name: "后台任务", exact: true });
+    const card = panel.locator("summary").filter({ hasText: title });
+    await expect(card).toBeVisible();
+    expect(requests()).toHaveLength(0);
+
+    await card.click();
+    await expect.poll(() => requests().length).toBe(1);
+    await expect(panel.getByText("正在读取任务参数…")).toBeVisible();
+    await card.click();
+    await card.click();
+    await expect.poll(() => requests().length).toBe(2);
+    const [closed, current] = requests();
+    expect(current).toMatchObject({ session_id: sid, run_id: itemId });
+    expect(current.request_id).not.toBe(closed.request_id);
+    const reply = (requestId: unknown, command: string, sessionId = sid) => {
+      relay.emit({ type: "agent_detail", sid: sessionId, session_id: sessionId,
+        run_id: itemId, request_id: String(requestId), revision: "layout-history",
+        detail_revision: itemId, authoritative: true, title, status: "unknown", through_seq: 0,
+        events: [{ v: PROTOCOL_VERSION, ts: Date.now() / 1000, type: "process", item_id: itemId,
+          kind: "task", phase: "snapshot", status: "unknown", title, command, cwd: "/tmp/layout",
+          input: { timeout_seconds: 1140 } }], });
+    };
+    reply(closed.request_id, "stale command");
+    reply(current.request_id, "other session command", "layout-other");
+    await expect(panel.getByText("正在读取任务参数…")).toBeVisible();
+    reply(current.request_id, "python3 verify.py --timeout 1140");
+    await expect(panel).toContainText("python3 verify.py --timeout 1140");
+    await expect(panel).toContainText("/tmp/layout");
+    await expect(panel.getByText(/超时 1140 秒/)).toBeVisible();
+    await expect(panel).not.toContainText("stale command");
+    await expect(panel).not.toContainText("other session command");
+    await expect(page.locator(".thread").getByText("python3 verify.py", { exact: false })).toHaveCount(0);
+  });
+}
+
 test("right panel layout preserves Claude agent detail priority over side chats", async ({
   page,
 }) => {
@@ -7989,6 +8048,12 @@ async function gotoWithProductionCsp(
   page: import("@playwright/test").Page,
   path: string,
 ): Promise<void> {
+  await page.route("**/html-preview-runner.html", async route => {
+    const response = await route.fetch();
+    await route.fulfill({ response, headers: { ...response.headers(),
+      "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data: blob:; media-src data: blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'",
+    } });
+  });
   await page.route("**/tests/history-browser.html*", async (route) => {
     const response = await route.fetch();
     const body = await response.text();
@@ -8132,6 +8197,39 @@ test("HTML preview opens interactive by default and stays isolated under product
     "data-script-ran",
     "yes",
   );
+});
+
+test("HTML preview fits local resources in the frame and downloads the original bytes", async ({ page }) => {
+  const path = "/tmp/layout/deck.html";
+  const relay = await mockRightPanelRelay(page, { retained: false, seedTurns: [{
+    id: "deck", prompt: "查看页面", done: true,
+    blocks: [{ kind: "text", message_id: "deck-answer", channel: "final", done: true,
+      text: `[演示稿](< ${path}>)` }],
+  }] });
+  const content = '<div id="slide" style="width:1600px"><img src="logo.png" alt="Logo">最后一列</div>'
+    + '<link rel="stylesheet" href="https://cc-remote-preview-test.invalid/page.css">';
+  const original = Buffer.from("\ufeff" + content + "\r\n");
+  await page.goto("/");
+  await page.getByRole("button", { name: `在 Remote 中打开 ${path}`, exact: true }).click();
+  await expect.poll(() => relay.commands.some(command => command.type === "get_file_preview")).toBe(true);
+  const request = relay.commands.find(command => command.type === "get_file_preview")!;
+  expect(request.path).toBe(path);
+  relay.emit({ type: "file_preview", sid: "layout-parent", request_id: String(request.request_id),
+    path, format: "html", content, data: original.toString("base64"), size: original.length });
+  await expect.poll(() => relay.commands.some(command => command.type === "get_preview_asset")).toBe(true);
+  const image = relay.commands.find(command => command.type === "get_preview_asset")!;
+  expect(image.path).toBe("/tmp/layout/logo.png");
+  relay.emit({ type: "preview_asset", sid: "layout-parent", path: String(image.path),
+    preview_id: String(image.preview_id), request_id: String(image.request_id), media_type: "image/png",
+    data: staticPng(24, 16).toString("base64") });
+  const frame = page.frameLocator('iframe[title="HTML 交互预览"]');
+  await expect.poll(() => frame.getByRole("img", { name: "Logo" }).evaluate((element: HTMLImageElement) => element.naturalWidth))
+    .toBe(24);
+  await expect.poll(() => frame.locator("html").evaluate(node => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1);
+  await expect(page.getByText("部分资源未加载。")).toBeVisible();
+  const download = page.waitForEvent("download");
+  await page.getByRole("link", { name: "下载原文件", exact: true }).click();
+  expect(readFileSync((await (await download).path())!)).toEqual(original);
 });
 
 test("Codex visualize output opens its local HTML through the preview callback", async ({
@@ -8371,6 +8469,27 @@ test("artifact-pdf renders paged PDF content under the production CSP", async ({
   })).toBe(true);
   await expect(page.locator(".artifact-pdf-stage iframe")).toHaveCount(0);
   await expect(page.locator(".artifact-pdf-stage .preview-error")).toHaveCount(0);
+  const displayWidth = await canvas.evaluate(node => node.getBoundingClientRect().width);
+  await page.getByRole("combobox", { name: "PDF 缩放" }).selectOption("300");
+  await expect.poll(() => canvas.evaluate(node => node.getBoundingClientRect().width)).toBeGreaterThan(displayWidth);
+  await page.getByRole("button", { name: "查找", exact: true }).click();
+  await page.getByRole("searchbox", { name: "搜索 PDF 文字" }).fill("pdf page");
+  await page.getByRole("button", { name: "搜索", exact: true }).click();
+  await expect(page.getByRole("search").getByRole("status")).toHaveText("1 / 2");
+  await expect(page.locator(".pdf-text-hit")).toContainText("PDF page 1");
+  await page.getByRole("button", { name: "下一个匹配" }).click();
+  const chosen = page.locator(".pdf-text-hit");
+  await expect(chosen).toContainText("PDF page 2");
+  expect(await chosen.evaluate(node => {
+    const selection = window.getSelection()!;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const style = getComputedStyle(node);
+    return { text: selection.toString(), selectable: style.userSelect === "text"
+      || style.getPropertyValue("-webkit-user-select") === "text" };
+  })).toEqual({ text: "cc-remote PDF page 2", selectable: true });
 });
 
 test("artifact-gif preserves native animation under the production CSP", async ({
