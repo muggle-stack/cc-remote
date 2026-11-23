@@ -67,12 +67,15 @@ export const remarkReplySections: Plugin<[], Root> = function () {
     // Parse together so either section can resolve the other's reference
     // definitions. A temporary block boundary keeps adjacent lists separate.
     const boundaryOffset = reply.analysis.length + 2;
-    const parsed = this.parse(`${reply.analysis}\n\n***\n\n${reply.summary}`) as Root;
+    const source = `${reply.analysis}\n\n***\n\n${reply.summary}`;
+    const parsed = this.parse(source) as Root;
     const boundary = parsed.children.findIndex((node) => node.type === "thematicBreak"
       && node.position?.start.offset === boundaryOffset);
     // An unfinished Markdown construct consumed the boundary: preserve the
     // original reply rather than guessing where its blocks should be split.
     if (boundary < 0) return;
+    // The following display transforms need the source that owns these offsets.
+    file.value = source;
     tree.children = [{
       type: "blockquote",
       data: { hName: "section", hProperties: { className: ["message-reply-analysis"], ariaLabel: "分析" } },
