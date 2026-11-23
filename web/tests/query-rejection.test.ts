@@ -117,6 +117,55 @@ try {
   assert.equal(failedTurn.done, true);
   assert.equal(failedTurn.terminalSource, "failed");
   assert.equal(failedTurn.error, "请求超时，请重新尝试。");
+  const receiptFrame = (frame: object) => ({ v: 72, ts: 40, ...frame });
+  for (const acknowledgmentLost of [false, true]) {
+    const sid = "receipt-race";
+    const nativeTurn = "native-receipt-turn";
+    const messageId = "original-direct-send";
+    const prompt = "Include this in your reply";
+    const files = [{ filename: "context.txt", data: "file-body" }];
+    let collision = reduce({
+      ...initialState,
+      focusedSid: sid,
+      runtimes: { [sid]: { ...createRuntime(), syncReady: true } },
+    }, { type: "query_sent", sid, msg_id: messageId, prompt, files, ts: 40_000 });
+    for (const frame of [
+      receiptFrame({ type: "turn_binding", sid, msg_id: nativeTurn, turn_id: nativeTurn, seq: 1 }),
+      receiptFrame({ type: "state", sid, state: "running", msg_id: nativeTurn, seq: 2 }),
+      receiptFrame({ type: "user_msg", sid, msg_id: nativeTurn, prompt: "", seq: 3 }),
+      receiptFrame({ type: "process", sid, turn_id: nativeTurn, item_id: "receipt-item",
+        kind: "task", phase: "end", status: "succeeded", title: "Background test", seq: 4 }),
+    ]) collision = reduce(collision, { type: "event", event: frame });
+    if (acknowledgmentLost) {
+      collision = reduce(collision, { type: "event", event: receiptFrame({
+        type: "error", sid, msg_id: messageId, code: "steer_outcome_unknown",
+        message: "awaiting native confirmation",
+      }) });
+      const waiting = collision.runtimes[sid];
+      assert.equal(waiting.acceptancePending, messageId);
+      assert.equal(waiting.acceptanceKind, "steer_unknown");
+      assert.deepEqual(waiting.acceptanceQuery?.files, files);
+      assert.deepEqual(waiting.turns.slice(-2).map((turn: Turn) => turn.id), [nativeTurn, messageId]);
+    }
+    collision = reduce(collision, { type: "event", event: receiptFrame({
+      type: "turn_steered", sid, msg_id: messageId, turn_id: nativeTurn, prompt,
+      files: [{ filename: "context.txt" }], seq: 5,
+    }) });
+    const runtime = collision.runtimes[sid];
+    assert.equal(runtime.acceptancePending, null);
+    assert.equal(runtime.queue.length, 0);
+    assert.deepEqual(runtime.turns.map((turn: Turn) => [turn.id, turn.prompt, turn.done]), [
+      [nativeTurn, "", true], [messageId, prompt, false],
+    ]);
+    assert.equal(runtime.turns[1].liveTaskId, nativeTurn);
+    assert.deepEqual(runtime.turns[1].files, [{ filename: "context.txt", data: "" }]);
+    collision = reduce(collision, { type: "event", event: receiptFrame({
+      type: "turn_end", sid, turn_id: nativeTurn, seq: 6,
+      result: { subtype: "success", duration_ms: 15, is_error: false },
+    }) });
+    assert.equal(collision.runtimes[sid].turns[1].done, true);
+  }
+
   console.log("query rejection tests passed");
 } finally {
   await harness.close();

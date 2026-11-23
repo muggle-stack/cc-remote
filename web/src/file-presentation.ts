@@ -1,5 +1,6 @@
 const TYPES: [RegExp, string, string, string][] = [
-  [/\.(?:wav|wave|mp3|m4a|m4b|aac|flac|ogg|oga|opus|webm)$/, "音频", "AUD", "violet"],
+  [/\.(?:wav|wave|mp3|m4a|m4b|aac|flac|ogg|oga|opus)$/, "音频", "AUD", "violet"],
+  [/\.webm$/, "WebM", "WEBM", "violet"],
   [/^(?:dockerfile(?:\.|$)|containerfile$)/, "Docker", "DK", "blue"],
   [/^(?:makefile|justfile)$|\.(?:sh|bash|zsh|fish|ps1)$/, "Shell / 构建脚本", "$_", "green"],
   [/\.(?:py|pyi|pyw)$/, "Python", "PY", "blue"],

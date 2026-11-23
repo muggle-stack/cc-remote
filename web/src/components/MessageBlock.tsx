@@ -4,7 +4,7 @@ import { createContext, isValidElement, memo, useContext, useEffect,
   type ReactNode } from "react";
 import { LocalFileLink, WebLink } from "./LinkPreview";
 import ReactMarkdown, { defaultUrlTransform, type Components, type UrlTransform } from "react-markdown";
-import { parseLocalFileTarget } from "../file-link";
+import { parseLocalFileTarget, remarkLocalFileLinks } from "../file-link";
 import { classifyPreviewTarget } from "../preview-path";
 import { RemoteViewerContext } from "../remote-viewer-context";
 import { ViewerPagesContext } from "../viewer-pages-context";
@@ -596,6 +596,7 @@ export function MessageBlock({ text, done, onOpenFile, imageAssets,
     remarkEmphasizedLinks,
     remarkLinkPunctuation,
     ...(formatReplySections && done ? [remarkReplySections] : []),
+    remarkLocalFileLinks,
     ...(extras.citation ? [extras.citation] : []),
   ], [done, formatReplySections, extras.citation, math.plugins?.remarkPlugins]);
   const rehypePlugins = useMemo(() => [

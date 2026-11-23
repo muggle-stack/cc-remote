@@ -4,12 +4,13 @@ from __future__ import annotations
 import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import cc_remote.wrapper.codex_handle as codex_handle_module
 import pytest
 from cc_remote.codex_daemon_restart import CodexDaemonRestartState
 from cc_remote.protocol import (
-    Delta, Error, GoalState, ProcessEvent, SessionListInvalidated, StateEvent,
+    Delta, Error, GoalState, ProcessEvent, Query, SessionListInvalidated, StateEvent,
     Steer, ToolDelta, ToolResult, ToolUse, TurnBinding, TurnDiff, TurnEnd,
     TurnPlan, TurnSteered, UserMsg,
 )
@@ -46,6 +47,168 @@ def _context_compaction(turn_id: str, item_id: str = "context-compaction"):
         turn_id,
         item={"id": item_id, "type": "contextCompaction"},
     )
+
+
+@pytest.mark.parametrize("outcome", [
+    "accepted", "ended", "rejected_then_ended", "successor", "unseen_successor",
+    "foreign_user", "switched_before_rpc", "unknown", "invalid_success",
+])
+def test_query_collision_with_spontaneous_task_callback(outcome, monkeypatch):
+    async def run():
+        machine, transport = _mk_machine()
+        ctx = _mk_ctx("thread-spontaneous", "thread-spontaneous")
+        ctx.engine = "codex"
+        handle = CodexHandle(machine.cfg)
+        handle.thread_id = ctx.session_id
+        handle.proc = SimpleNamespace(returncode=None)
+        handle._using_daemon_proxy = True
+        ctx.sdk = handle
+        machine.sessions[ctx.key] = ctx
+        turn_id = "receipt-turn"
+        command = Query(sid=ctx.key, prompt="include this in your reply",
+                        msg_id="browser-send", cmd_id="send-command", client_id="browser")
+        preflight_entered, preflight_done = asyncio.Event(), asyncio.Event()
+        receipt_lookup = asyncio.Event()
+        release_terminal = asyncio.Event()
+        original_wait_for_receipt = handle.wait_for_task_callback_turn
+
+        async def lifecycle(phase, native_turn):
+            await machine._on_codex_turn_lifecycle(ctx, phase, native_turn)
+
+        async def preflight(_ctx):
+            preflight_entered.set()
+            await preflight_done.wait()
+
+        async def wait_for_receipt(native_turn):
+            receipt_lookup.set()
+            return await original_wait_for_receipt(native_turn)
+
+        async def start(native_turn):
+            await handle._dispatch(_notification(
+                "turn/started", native_turn, turn={"id": native_turn}))
+
+        async def finish(native_turn):
+            await handle._dispatch(_notification(
+                "turn/completed", native_turn,
+                turn={"id": native_turn, "status": "completed"}))
+
+        async def release_after_terminal(_ctx, native_turn):
+            if native_turn == turn_id:
+                await release_terminal.wait()
+            await finish_projection(_ctx, native_turn)
+
+        async def switch_before_rpc():
+            await finish(turn_id)
+            await start("successor")
+            release_terminal.set()
+
+        async def request(method, params, *, response_boundary=None):
+            assert params["threadId"] == ctx.session_id
+            if method == "thread/read":
+                return {"thread": {"id": ctx.session_id, "status": {
+                    "type": "active" if outcome == "unseen_successor" else "idle",
+                }}}
+            assert method == "turn/steer"
+            assert params["expectedTurnId"] == turn_id
+            assert params["clientUserMessageId"] == command.msg_id
+            assert params["input"][0]["text"] == command.prompt
+            if outcome == "rejected_then_ended":
+                await finish(turn_id)
+                release_terminal.set()
+                raise codex_handle_module.CodexAppServerError({
+                    "code": -32600, "message": "no active turn to steer"})
+            if outcome == "unknown":
+                await finish(turn_id)
+                raise ConnectionError("response lost after write")
+            if outcome == "invalid_success":
+                return {"turnId": "unexpected-turn"}
+            response = {"result": {"turnId": turn_id}}
+            handle._install_steer_response_boundary(response_boundary, response)
+            return response["result"]
+
+        request_mock = AsyncMock(side_effect=request)
+        launch = AsyncMock()
+        finish_projection = machine._finish_codex_spontaneous_turn
+        monkeypatch.setattr(handle, "turn_lifecycle_callback", lifecycle)
+        monkeypatch.setattr(handle, "wait_for_task_callback_turn", wait_for_receipt)
+        monkeypatch.setattr(handle, "_request", request_mock)
+        if outcome == "switched_before_rpc":
+            monkeypatch.setattr(handle, "_wait_managed_compaction_settled", switch_before_rpc)
+        monkeypatch.setattr(machine, "_refresh_btw_availability", AsyncMock(return_value=False))
+        monkeypatch.setattr(machine, "_ensure_codex_daemon_generation", AsyncMock(return_value=True))
+        monkeypatch.setattr(machine, "_watch_session", AsyncMock())
+        monkeypatch.setattr(machine, "_prime_codex_ownership", AsyncMock(return_value=False))
+        monkeypatch.setattr(machine, "_apply_codex_context", preflight)
+        monkeypatch.setattr(machine, "_run_turn", launch)
+        monkeypatch.setattr(machine, "_record_codex_unavailable_turn", AsyncMock())
+        monkeypatch.setattr(machine, "_recover_official_codex_user", AsyncMock(return_value=None))
+        monkeypatch.setattr(machine, "_remember_codex_initial_turn_alias", AsyncMock())
+        monkeypatch.setattr(machine, "_schedule_history_refresh", lambda *_a, **_kw: None)
+        monkeypatch.setattr(machine, "_finish_codex_spontaneous_turn", release_after_terminal)
+
+        async with asyncio.timeout(3):
+            pending = asyncio.create_task(machine._handle_query(command))
+            await preflight_entered.wait()
+            await start(turn_id)
+            receipt_task = ctx.codex_spontaneous_task
+            preflight_done.set()
+            await receipt_lookup.wait()
+            if outcome == "foreign_user":
+                await handle._dispatch(_notification(
+                    "item/started", turn_id,
+                    item={"id": "cli-user", "type": "userMessage",
+                          "content": [{"type": "text", "text": "native input"}]}))
+            # The notification is admitted after the query saw turn/started,
+            # independently of when the worker records its own acknowledgment.
+            await handle._dispatch(_notification(
+                "item/started", turn_id, item={
+                    "id": "receipt-item", "type": "functionCallOutput",
+                    "namespace": "cc_remote_tasks", "name": "task_result",
+                    "output": json.dumps({
+                        "task_id": "1bf3d10e-56b4-460e-8eef-9fda6cbf0735",
+                        "state": "completed", "output": "receipt body",
+                    }),
+                }))
+            if outcome in {"ended", "unseen_successor"}:
+                await finish(turn_id)
+                release_terminal.set()
+            if outcome == "successor":
+                await finish(turn_id)
+                await start("successor")
+                release_terminal.set()
+            result = await pending
+
+            expected_requests = outcome in {"accepted", "rejected_then_ended", "unknown", "invalid_success"}
+            reads_idle = outcome in {"ended", "rejected_then_ended", "unseen_successor"}
+            assert [call.args[0] for call in request_mock.await_args_list] == (
+                ["turn/steer"] * int(expected_requests) + ["thread/read"] * int(reads_idle))
+            if outcome in {"ended", "rejected_then_ended"}:
+                assert result is None
+                await ctx.turn_task
+                launch.assert_awaited_once_with(ctx, command.prompt, None, None)
+                assert ctx.active_msg_id == command.msg_id
+            else:
+                launch.assert_not_called()
+            if outcome == "accepted":
+                assert isinstance(result, TurnSteered)
+                assert (result.msg_id, result.turn_id, result.prompt) == (
+                    command.msg_id, turn_id, command.prompt)
+                assert [event for event in transport.sent if isinstance(event, TurnSteered)] == [result]
+            elif outcome in {"unknown", "invalid_success"}:
+                assert result.code == "steer_outcome_unknown"
+                assert ctx.codex_uncertain_steer.turn_id == turn_id
+                assert ctx.codex_uncertain_steer.msg_id == command.msg_id
+                assert not any(isinstance(event, TurnSteered) for event in transport.sent)
+            elif outcome in {"successor", "unseen_successor", "foreign_user", "switched_before_rpc"}:
+                assert result.code == "busy" and result.msg_id == command.msg_id
+            release_terminal.set()
+            if handle.turn_active:
+                await finish(handle.turn_id)
+            await receipt_task
+            if ctx.codex_spontaneous_task is not None:
+                await ctx.codex_spontaneous_task
+
+    asyncio.run(run())
 
 
 def _goal_notification(

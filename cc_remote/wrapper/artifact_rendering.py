@@ -260,6 +260,10 @@ async def render_static_page(
         count = await body.evaluate("""async (_, pageNumber) => {
           await document.fonts.ready;
           await Promise.allSettled([...document.images].map(image => image.decode()));
+          const root = document.documentElement;
+          const base = parseFloat(getComputedStyle(root).zoom) || 1;
+          const width = Math.max(innerWidth, root.scrollWidth, document.body.scrollWidth * base);
+          if (width > innerWidth) root.style.zoom = String(base * innerWidth / width);
           const count = Math.max(1, Math.ceil(document.scrollingElement.scrollHeight / innerHeight));
           if (pageNumber <= count) window.scrollTo(0, (pageNumber - 1) * innerHeight);
           return count;

@@ -1134,34 +1134,22 @@ def test_caddy_site_sets_browser_security_headers():
 @pytest.mark.parametrize("template", ["Caddyfile", "Caddyfile.insecure"])
 def test_html_preview_runner_has_a_narrow_isolated_policy(template):
     source = (ROOT / "deploy" / template).read_text()
-    assert (
-        "not path /html-preview-runner.html /html-preview-runner.js"
-        in source
-    )
-    assert "not path /html-preview-runner.html /html-preview-runner.js /__cc_viewer/bridge/*" in source
-    assert (
-        "@html_preview path /html-preview-runner.html /html-preview-runner.js"
-        in source
-    )
+    assert "not path /html-preview-runner.html /__cc_viewer/bridge/*" in source
+    assert "@html_preview path /html-preview-runner.html /presentation-preview.html /word-preview.html" in source
     application, preview = source.split("header @html_preview", 1)
     assert "script-src 'self' 'unsafe-inline'" not in application
     assert "frame-src 'self'" in application
-    assert "script-src 'self' 'unsafe-inline'" in preview
+    assert "script-src 'unsafe-inline'" in preview
     assert "connect-src 'none'" in preview
     assert "form-action 'none'" in preview
     assert "frame-ancestors 'self'" in preview
     assert 'X-Frame-Options "SAMEORIGIN"' in preview
 
     runner = (ROOT / "web" / "public" / "html-preview-runner.html").read_text()
-    bootstrap = (
-        ROOT / "web" / "public" / "html-preview-runner.js"
-    ).read_text()
-    assert '<script src="/html-preview-runner.js" defer></script>' in runner
-    assert "<script>" not in runner
-    assert "void parent.document" in bootstrap
-    assert 'event.source !== parent' in bootstrap
-    assert "document.write(event.data.document)" in bootstrap
-    assert "cc-remote-html-preview-ready" not in bootstrap
+    assert "<script>" in runner and "<script src=" not in runner
+    assert "void parent.document" in runner
+    assert 'event.source !== parent' in runner
+    assert "document.write(event.data.document)" in runner
 
 
 @pytest.mark.parametrize("template", ["Caddyfile", "Caddyfile.insecure"])

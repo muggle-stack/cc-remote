@@ -13,7 +13,7 @@ import { ArtifactReadingMemory, rememberArtifactReading } from "../artifact-read
 import { LocalFileLink, WebLink } from "./LinkPreview";
 import { PanelTabs, type RightPanelView } from "./PanelTabs";
 import { GIT_DIFF_PAGE_LINES, pageGitDiff, type GitDiffSection } from "../diff";
-import { classifyPreviewTarget } from "../preview-path";
+import { artifactMediaUrl, classifyPreviewTarget } from "../preview-path";
 import { parseLocalFileTarget } from "../file-link";
 import {
   buildInteractiveSandboxDocument,
@@ -37,12 +37,18 @@ import { ArtifactHeader } from "./ArtifactHeader";
 import ArtifactDownload from "./ArtifactDownload";
 import { PanelVisible, RetainedPanelData } from "../right-panel-presentation";
 import { previewImageDimension, rehypePreviewHtml } from "../markdown-preview-html";
+import { useViewerZoom } from "../use-viewer-zoom";
+import { useViewerPages } from "../viewer-pages-context";
+import { PagePreviewZoom } from "./PagePreviewZoom";
 
 const EMPTY_GIT_DIFF_SECTIONS: GitDiffSection[] = [];
 const MAX_PREVIEW_ASSETS = 12;
+const MAX_HTML_EMBEDDED_CHARS = 12 * 1024 * 1024;
 const SOURCE_PAGE_LINES = 500;
 const URL_ATTRIBUTES = new Set(["src", "href", "xlink:href", "poster", "action", "formaction"]);
 const UNSAFE_CSS = /(?:url\s*\(|@import|expression\s*\()/i;
+const INLINE_HTML_IMAGE = /^data:image\/(?:png|jpeg|gif|webp|avif|svg\+xml);base64,/i;
+const LOCAL_HTML_IMAGE = /\.(?:png|jpe?g|gif|webp|avif|svg)$/i;
 
 function markdownNodeText(node: ReactNode): string {
   if (typeof node === "string" || typeof node === "number") return String(node);
@@ -82,68 +88,104 @@ function MarkdownPreviewCode({
 
 const SpreadsheetPreview = lazy(() => import("./SpreadsheetPreview"));
 const PresentationPreview = lazy(() => import("./PresentationPreview"));
+const WordArtifactPreview = lazy(() => import("./WordArtifactPreview"));
 
-function HtmlArtifactPreview({ content, theme }: {
+function prepareHtml(content: string, file: string) {
+  // Template contents are inert, including image and stylesheet fetches.
+  const template = document.createElement("template");
+  template.innerHTML = content;
+  const root = template.content;
+  const images = new Set<string>();
+  let blocked = !!root.querySelector('link[rel~="stylesheet"],script[src]');
+  root.querySelectorAll("iframe,object,embed,form,base,link,meta[http-equiv],script[src]")
+    .forEach(element => element.remove());
+  for (const element of root.querySelectorAll("*")) {
+    element.removeAttribute("data-cc-preview-image");
+    for (const attribute of Array.from(element.attributes)) {
+      const name = attribute.name.toLowerCase();
+      const value = attribute.value.trim();
+      if (name === "srcset") {
+        blocked ||= !element.hasAttribute("src");
+        element.removeAttribute(attribute.name);
+      } else if (URL_ATTRIBUTES.has(name)) {
+        if (name === "href" && value.startsWith("#")) continue;
+        if (name === "src" && element instanceof HTMLImageElement) {
+          if (INLINE_HTML_IMAGE.test(value)) continue;
+          const target = classifyPreviewTarget(file, value);
+          if (!/^[/~\\]/.test(value) && target.kind === "local" && LOCAL_HTML_IMAGE.test(target.value)
+              && (images.has(target.value) || images.size < MAX_PREVIEW_ASSETS)) {
+            images.add(target.value);
+            element.setAttribute("data-cc-preview-image", target.value);
+          } else if (value) blocked = true;
+        }
+        element.removeAttribute(attribute.name);
+      } else if (name === "style" && UNSAFE_CSS.test(value)) {
+        blocked = true;
+        element.removeAttribute(attribute.name);
+      }
+    }
+  }
+  for (const style of root.querySelectorAll("style")) {
+    if (UNSAFE_CSS.test(style.textContent || "")) {
+      blocked = true;
+      style.remove();
+    }
+  }
+  return { template, images: [...images], blocked };
+}
+
+function HtmlArtifactPreview({ content, artifact, machineId, theme, requestAsset, onAuthorizePreview }: {
   content: string;
+  artifact: Artifact;
+  machineId?: string | null;
   theme?: HtmlPreviewTheme;
+  requestAsset: (path: string) => boolean;
+  onAuthorizePreview?: (authorization: PreviewAuthorizationState, decision: "allow" | "deny") => boolean;
 }) {
-  const [interactiveDocument, setInteractiveDocument] =
-    useState<string | null>(null);
-  const [frameRevision, setFrameRevision] = useState(0);
+  const prepared = useMemo(() => prepareHtml(content, artifact.file), [content, artifact.file]);
+  const [rejected, setRejected] = useState<Set<string>>(() => new Set());
   const interactiveFrameRef = useRef<HTMLIFrameElement>(null);
-  const [error, setError] = useState<string | null>(null);
+  const viewer = useViewerPages();
+  const matching = viewer?.scope.sid === artifact.sid && viewer?.scope.machineId === machineId
+    ? viewer?.pages.filter(page => page.available && page.references.includes(artifact.file)) : undefined;
+  const related = matching?.length === 1 ? matching[0] : undefined;
 
   useEffect(() => {
-    let cancelled = false;
-    const prepare = async () => {
-      try {
-        const runnable = new DOMParser().parseFromString(content, "text/html");
-        for (const element of Array.from(runnable.querySelectorAll(
-          "iframe,object,embed,form,base,link,meta[http-equiv],script[src]",
-        ))) {
-          element.remove();
-        }
-        for (const element of runnable.documentElement.querySelectorAll("*")) {
-          for (const attribute of Array.from(element.attributes)) {
-            const name = attribute.name.toLowerCase();
-            const value = attribute.value.trim();
-            if (name === "srcset" || name === "action"
-                || name === "formaction") {
-              element.removeAttribute(attribute.name);
-            } else if (URL_ATTRIBUTES.has(name)) {
-              const allowedAnchor = name === "href" && value.startsWith("#");
-              const allowedImage = name === "src"
-                && /^data:image\/(?:png|jpeg|gif|webp|avif|svg\+xml);base64,/i
-                  .test(value);
-              if (!allowedAnchor && !allowedImage) {
-                element.removeAttribute(attribute.name);
-              }
-            } else if (name === "style" && UNSAFE_CSS.test(value)) {
-              element.removeAttribute(attribute.name);
-            }
-          }
-        }
-        for (const style of runnable.documentElement.querySelectorAll("style")) {
-          if (UNSAFE_CSS.test(style.textContent || "")) style.remove();
-        }
-        if (cancelled) return;
-        setInteractiveDocument(buildInteractiveSandboxDocument(
-          runnable.body.innerHTML,
-          runnable.head.innerHTML,
-          theme,
-        ));
-        setFrameRevision(value => value + 1);
-        setError(null);
-      } catch {
-        if (cancelled) return;
-        setInteractiveDocument(null);
-        setError("HTML 安全处理失败");
-      }
-    };
-    void prepare();
-    return () => { cancelled = true; };
-  }, [content, theme]);
+    const errors = prepared.images.filter(path => !artifact.assets?.[path]
+      && !rejected.has(path) && !requestAsset(path));
+    if (errors.length) setRejected(previous => new Set([...previous, ...errors]));
+  }, [prepared, artifact.assets, rejected, requestAsset]);
 
+  const ready = prepared.images.every(path => rejected.has(path) || (artifact.assets?.[path]
+    && !artifact.assets[path]?.loading));
+  const documentPreview = useMemo(() => {
+    if (!ready) return null;
+    const template = prepared.template.cloneNode(true) as HTMLTemplateElement;
+    const missing = new Set<string>();
+    let remaining = MAX_HTML_EMBEDDED_CHARS;
+    for (const img of template.content.querySelectorAll<HTMLImageElement>("[data-cc-preview-image]")) {
+      const path = img.dataset.ccPreviewImage!;
+      const asset = artifact.assets?.[path];
+      img.removeAttribute("data-cc-preview-image");
+      if (asset?.data && asset.mediaType && asset.data.length <= remaining) {
+        const url = `data:${asset.mediaType};base64,${asset.data}`;
+        if (INLINE_HTML_IMAGE.test(url)) {
+          img.src = url;
+          remaining -= url.length;
+          continue;
+        }
+      }
+      missing.add(path);
+    }
+    return { document: buildInteractiveSandboxDocument(template.innerHTML, "", theme), missing: [...missing] };
+  }, [ready, prepared, artifact.assets, theme]);
+  const interactiveDocument = documentPreview?.document ?? null;
+  const frameRevision = useRef({ doc: interactiveDocument, revision: 0 });
+  if (frameRevision.current.doc !== interactiveDocument) {
+    frameRevision.current = { doc: interactiveDocument, revision: frameRevision.current.revision + 1 };
+  }
+  const zoom = useViewerZoom(interactiveFrameRef,
+    interactiveDocument ? String(frameRevision.current.revision) : undefined, artifact.file);
   const loadInteractiveDocument = useCallback(() => {
     if (!interactiveDocument) return;
     interactiveFrameRef.current?.contentWindow?.postMessage({
@@ -152,10 +194,19 @@ function HtmlArtifactPreview({ content, theme }: {
       }, "*");
   }, [interactiveDocument]);
 
-  if (error) return <div className="preview-error"><Icon name="read" size={18} />{error}</div>;
-  if (!interactiveDocument) return <div className="diff-empty"><span className="thinking"><span/><span/><span/></span> 正在准备 HTML…</div>;
+  if (!documentPreview) return <div className="diff-empty"><span className="thinking"><span/><span/><span/></span> 正在准备 HTML…</div>;
+  const { missing } = documentPreview;
   return <div className="artifact-html-stage">
-    <iframe key={frameRevision} ref={interactiveFrameRef} className="artifact-html-preview"
+    <PagePreviewZoom zoom={zoom} label="HTML 缩放" />
+    {(prepared.blocked || missing.length > 0) && <div className="preview-truncated" role="status">
+      部分资源未加载。{related ? <button type="button" onClick={() => viewer?.open(related)}>打开远程预览</button>
+        : "依赖外部脚本或样式的页面可用远程预览打开。"}
+    </div>}
+    {missing.map(path => {
+      const auth = artifact.assets?.[path]?.authorization;
+      return auth ? <PreviewAuthorizationPrompt key={path} authorization={auth} compact onDecision={onAuthorizePreview} /> : null;
+    })}
+    <iframe key={frameRevision.current.revision} ref={interactiveFrameRef} className="artifact-html-preview"
           title="HTML 交互预览" sandbox="allow-scripts"
           referrerPolicy="no-referrer" src="/html-preview-runner.html"
           onLoad={loadInteractiveDocument} />
@@ -590,11 +641,22 @@ function ArtifactContent({ artifact, active, hasBtw, onTab, onClose,
     requestAsset,
   ]);
 
-  const title = displayName || artifact.file.split("/").pop()
-    || (["md", "file", "html", "image", "pdf", "audio", "video", "spreadsheet", "presentation"].includes(artifact.kind) ? "文件预览" : "改动");
+  const isFile = artifact.kind !== "diff" && artifact.kind !== "gitdiff";
+  const title = displayName || artifact.file.split("/").pop() || (isFile ? "文件预览" : "改动");
   const mermaidFile = artifact.kind === "file" && /\.(?:mmd|mermaid)$/i.test(artifact.file);
-  const renderedArtifact = ["image", "pdf", "audio", "video", "presentation"].includes(artifact.kind)
-    || (artifact.kind === "html" && mode === "preview");
+  const renderedArtifact = ["image", "pdf", "audio", "video", "presentation", "document"].includes(artifact.kind)
+    || (artifact.kind === "html" && mode === "preview" && !artifact.truncated);
+  const htmlContent = useMemo(() => {
+    if (artifact.kind === "html" && artifact.data && !artifact.content) {
+      try {
+        return new TextDecoder("utf-8", { fatal: true }).decode(
+          Uint8Array.from(atob(artifact.data), value => value.charCodeAt(0)));
+      } catch { return ""; }
+    }
+    return artifact.content || "";
+  }, [artifact.kind, artifact.content, artifact.data]);
+  const original = artifactMediaUrl(machineId, artifact.mediaId);
+  const downloadUnavailable = artifact.truncated || !!artifact.convertedFrom;
   const tabs = hasBtw ? <PanelTabs active={active}
     artifactKind={artifact.kind} hasArtifact hasBtw={hasBtw} onTab={switchPanelTab} /> : null;
   const controlsUnavailable = loading || !!artifact.error || !!artifact.authorization;
@@ -602,7 +664,7 @@ function ArtifactContent({ artifact, active, hasBtw, onTab, onClose,
   // Reserve HTML controls before the device confirms the preview format.
   const htmlFile = artifact.kind === "html" || (controlsUnavailable
     && artifact.kind === "file" && /\.html?$/i.test(artifact.file));
-  const modes = (artifact.kind === "md" || htmlFile || mermaidFile)
+  const modes = (artifact.kind === "md" || (htmlFile && !artifact.truncated) || mermaidFile)
     ? <div className="preview-modes" role="group"
         aria-label={`${mermaidFile ? "Mermaid" : htmlFile ? "HTML" : "Markdown"} 显示模式`}>
         <button className={mode === "preview" ? "on" : ""} aria-pressed={mode === "preview"}
@@ -621,11 +683,17 @@ function ArtifactContent({ artifact, active, hasBtw, onTab, onClose,
     </button>}
     {artifact.kind === "md" && artifact.saveStatus === "saved" && !dirty
       && <span className="markdown-save-state ok">已保存</span>}
-    {["md", "file", "html", "image", "pdf", "presentation"].includes(artifact.kind)
-      && <ArtifactDownload id={artifactKey} file={displayName || artifact.file} data={artifact.data}
-        content={artifact.content} converted={artifact.convertedFrom}
+    {isFile && artifact.kind !== "audio" && artifact.kind !== "video"
+      && <ArtifactDownload id={artifactKey} file={displayName || artifact.file}
+        href={original && `${original}?download=1`}
+        data={downloadUnavailable ? undefined : artifact.data}
+        content={downloadUnavailable || artifact.kind === "spreadsheet" ? undefined : artifact.content}
         unavailable={loading ? "正在读取文件…" : artifact.authorization ? "授权后可下载"
-          : artifact.error ? "文件读取失败" : artifact.truncated ? "截断的文件不可下载" : undefined} />}
+          : artifact.error ? "文件读取失败"
+          : !original && downloadUnavailable ? "原文件暂时无法下载，请刷新后重试" : undefined} />}
+    {artifact.kind === "pdf" && artifact.convertedFrom && !loading && !artifact.error
+      && <ArtifactDownload id={artifactKey} file={displayName || artifact.file} data={artifact.data}
+        converted={artifact.convertedFrom} />}
     <PanelExpandButton label="文件预览" />
   </>;
 
@@ -641,7 +709,7 @@ function ArtifactContent({ artifact, active, hasBtw, onTab, onClose,
       </div> : <ArtifactHeader key={artifactKey} title={title} path={artifact.file}
         onBack={onBack} backLabel={backLabel} onClose={leavePanel}
         onReload={onRefresh ? () => onRefresh(artifact.file, artifact.line) : undefined}
-        reloadDisabled={loading || artifact.saving} convertedFrom={artifact.convertedFrom}
+        reloadDisabled={loading || artifact.saving} convertedFrom={artifact.kind === "pdf" ? artifact.convertedFrom : undefined}
         tabs={tabs} modes={modes} actions={actions} />}
       <div ref={bodyRef} onScrollCapture={event => {
         if (!visible) return;
@@ -660,7 +728,7 @@ function ArtifactContent({ artifact, active, hasBtw, onTab, onClose,
             authorization={artifact.authorization}
             onDecision={onAuthorizePreview} />
         ) : loading ? (
-          <div className="diff-empty"><span className="thinking"><span/><span/><span/></span> {["md", "file", "html", "image", "pdf", "audio", "video", "spreadsheet", "presentation"].includes(artifact.kind) ? "正在读取文件…" : "正在读取 diff…"}</div>
+          <div className="diff-empty"><span className="thinking"><span/><span/><span/></span> {isFile ? "正在读取文件…" : "正在读取 diff…"}</div>
         ) : artifact.error ? (
           <div className="preview-error"><Icon name="read" size={18} />{artifact.error}</div>
         ) : artifact.kind === "gitdiff" ? (
@@ -708,11 +776,15 @@ function ArtifactContent({ artifact, active, hasBtw, onTab, onClose,
             ))}
           </pre>
         ) : artifact.kind === "html" ? (
-          mode === "source"
-            ? <SourceFile content={artifact.content || ""} artifactKey={artifactKey} />
-            : <HtmlArtifactPreview content={artifact.content || ""} theme={theme} />
+          artifact.truncated ? <>
+            <div className="preview-truncated" role="status">HTML 超过 2 MiB，显示开头源码。可下载原文件或使用远程预览。</div>
+            <SourceFile content={htmlContent} artifactKey={artifactKey} />
+          </> : mode === "source"
+            ? <SourceFile content={htmlContent} artifactKey={artifactKey} />
+            : <HtmlArtifactPreview key={artifactKey} content={htmlContent} artifact={artifact} machineId={machineId}
+                theme={theme} requestAsset={requestAsset} onAuthorizePreview={onAuthorizePreview} />
         ) : artifact.kind === "spreadsheet" ? (
-          <Suspense fallback={<div className="diff-empty">读取表格…</div>}><SpreadsheetPreview key={artifactKey} content={artifact.content || ""} data={artifact.data} title={title} /></Suspense>
+          <Suspense fallback={<div className="diff-empty">读取表格…</div>}><SpreadsheetPreview key={artifactKey} content={artifact.content || ""} /></Suspense>
         ) : artifact.kind === "presentation" ? (
           <Suspense fallback={<div className="diff-empty">正在准备幻灯片预览…</div>}>
             <PresentationPreview key={artifactKey} data={artifact.data} title={title} />
@@ -720,6 +792,10 @@ function ArtifactContent({ artifact, active, hasBtw, onTab, onClose,
         ) : artifact.kind === "image" ? (
           <ImageArtifactPreview data={artifact.data} mediaType={artifact.mediaType}
             title={title} />
+        ) : artifact.kind === "document" ? (
+          <Suspense fallback={<div className="diff-empty">正在准备文档预览…</div>}>
+            <WordArtifactPreview key={artifactKey} data={artifact.data} title={title} />
+          </Suspense>
         ) : artifact.kind === "pdf" ? (
           <PdfArtifactPreview data={artifact.data} title={title} />
         ) : artifact.kind === "audio" ? (

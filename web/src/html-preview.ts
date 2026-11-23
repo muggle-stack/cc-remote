@@ -1,4 +1,5 @@
 import { installPreviewEscape } from "./preview-keyboard";
+import { installViewerZoom } from "./viewer-zoom";
 
 const STATIC_PREVIEW_CSP =
   "default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; "
@@ -63,6 +64,6 @@ export function buildInteractiveSandboxDocument(
   head = "",
   theme?: HtmlPreviewTheme,
 ): string {
-  return documentWithCsp(`<script>(${installPreviewEscape.toString()})();</script>${head}`,
+  return documentWithCsp(`<script>(${installPreviewEscape.toString()})();(${installViewerZoom.toString()})();</script>${head}`,
     body, INTERACTIVE_PREVIEW_CSP, theme);
 }

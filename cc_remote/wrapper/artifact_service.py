@@ -149,12 +149,8 @@ class ArtifactService:
                     cap = await asyncio.to_thread(machine._preview_capability_store.inspect_path,
                         cmd.engine, cmd.space, sid, path, mode="read", source="user_approved")
                     caps[cap.path] = cap
-                if machine._preview_format(path) == "video":
-                    data = await asyncio.to_thread(machine._video_file_preview, cwd, path,
-                        cmd.engine, cmd.space, sid, cmd.owner_id, caps)
-                else:
-                    async with machine._preview_conversion_limit:
-                        data = await asyncio.to_thread(machine._read_file_preview, cwd, path, caps)
+                data = await machine._load_artifact_preview(cwd, path, cmd.engine, cmd.space,
+                    sid, cmd.owner_id, caps, frozen_caps=caps)
                 response = FilePreview(path=path, request_id=cmd.request_id, format=data["format"],
                     content=data.get("content", ""), media_type=data.get("media_type"),
                     media_id=data.get("media_id"),
@@ -179,7 +175,7 @@ class ArtifactService:
                 raise ValueError("历史缩略图不可用")
             raw = base64.b64decode(image.data, validate=True)
         else:
-            suffixes = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"})
+            suffixes = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}) | machine.RASTER_CONVERSION_FORMATS.keys()
             if Path(row["path"]).suffix.lower() not in suffixes:
                 raise ValueError("没有可用缩略图")
             # Automatic reads never grant access to files merely mentioned in prose.
@@ -193,4 +189,9 @@ class ArtifactService:
                 cwd, row["path"], allowed_suffixes=suffixes,
                 max_bytes=MAX_SINGLE_ATTACHMENT_BYTES, allow_truncate=False,
                 allowed_external_paths=caps)
+            converted = machine.RASTER_CONVERSION_FORMATS.get(Path(row["path"]).suffix.lower())
+            if converted:
+                from cc_remote.wrapper.artifact_inspection import render_raster_image
+
+                raw, _, _ = await asyncio.to_thread(render_raster_image, raw, converted)
         return await asyncio.to_thread(image_thumbnail, raw)

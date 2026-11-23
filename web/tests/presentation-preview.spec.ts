@@ -145,6 +145,8 @@ test("artifact-presentation navigation, table bounds, isolation and close releas
   } else {
     await page.getByRole("button", { name: "缩略图", exact: true }).click();
     await frame.getByRole("button", { name: "第 2 页", exact: true }).click();
+    await expect(frame.getByRole("button", { name: "第 2 页", exact: true })).toHaveAttribute("aria-current", "page");
+    await expect(page.locator(".presentation-pages")).toContainText("2 / 2");
     await page.getByRole("button", { name: "缩略图", exact: true }).click();
   }
   await expect(frame.locator("#slide").getByText("第二页", { exact: true })).toBeVisible();
@@ -177,7 +179,7 @@ test("artifact-presentation navigation, table bounds, isolation and close releas
       await expect(page.locator(".presentation-preview")).toHaveClass(/mobile/);
       await expect(page.getByRole("button", { name: "下一页", exact: true })).toHaveCount(0);
       await expect(frame.locator("#slide [data-slide-index]")).toHaveCount(2);
-      expect(await frame.locator("#slide > [data-slide-index] > div:first-child").first()
+      await expect.poll(() => frame.locator("#slide > [data-slide-index] > div:first-child").first()
         .evaluate(element => parseFloat(getComputedStyle(element).borderRadius))).toBeGreaterThanOrEqual(10);
     }
     expect(await page.locator(".presentation-controls").evaluate(element =>
@@ -210,6 +212,7 @@ test("artifact-presentation real deck renders every slide", async ({ page }) => 
   const frame = page.frameLocator(".presentation-stage iframe");
   for (let pageNumber = 1; pageNumber <= 17; pageNumber++) {
     await frame.getByRole("button", { name: `第 ${pageNumber} 页`, exact: true }).click();
+    await expect(page.locator(".presentation-pages span")).toHaveText(`${pageNumber} / 17`);
     await expect(page.locator(".presentation-loading")).toHaveCount(0);
     await expect(page.getByRole("alert")).toHaveCount(0);
     await expect(page.locator(".presentation-notice")).toHaveCount(0);

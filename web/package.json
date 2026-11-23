@@ -1,13 +1,13 @@
 {
   "name": "web",
   "private": true,
-  "version": "5.3.52",
+  "version": "5.3.59",
   "author": "muggle",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build:presentation": "vite build --config vite.presentation-preview.config.ts",
+    "build:presentation": "vite build --config vite.presentation-preview.config.ts && vite build --config vite.presentation-preview.config.ts --mode word",
     "predev": "npm run build:presentation",
     "build": "npm run build:presentation && tsc -b && vite build && npm run build:viewer-runner && npm run build:artifact-inspection && node scripts/check-bundle-budget.mjs",
     "build:artifact-inspection": "vite build --config vite.artifact-inspection.config.ts",

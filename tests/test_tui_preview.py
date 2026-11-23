@@ -47,6 +47,7 @@ def test_detect_markdown_images_spaces_and_deduplicate():
     refs = references(
         "[Plan](</work/a plan.md>) and `docs/b.markdown`\n"
         "![image](/work/image.png)\n/work/a.md:12\n"
+        "/work/photo.HEIF (scan.tiff) `image.bmp`\n"
         "[again](/work/image.png)"
     )
     assert [r.path for r in refs] == [
@@ -54,7 +55,11 @@ def test_detect_markdown_images_spaces_and_deduplicate():
         "docs/b.markdown",
         "/work/image.png",
         "/work/a.md",
+        "/work/photo.HEIF",
+        "scan.tiff",
+        "image.bmp",
     ]
+    assert all(ref.kind == "image" for ref in refs[-3:])
     assert len(references(" ".join(f"file{i}.md" for i in range(100)))) == 64
 
 

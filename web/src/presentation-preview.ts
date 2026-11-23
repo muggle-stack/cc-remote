@@ -25,6 +25,7 @@ export function installPresentationPreview(
     const inspectPage = Number.isInteger(event.data.inspectPage) ? Number(event.data.inspectPage) : null;
     const container = document.getElementById("slide")!;
     const rail = document.getElementById("pages")!;
+    const scroll = document.getElementById("scroll")!;
     if (typeof event.data.accent === "string") {
       document.documentElement.style.setProperty("--accent", event.data.accent);
     }
@@ -34,11 +35,35 @@ export function installPresentationPreview(
     let viewer: PptxViewer | null = null;
     let observer: IntersectionObserver | null = null;
     let continuous = event.data.mobile === true;
+    let navigation = 0;
+    let jumping = false;
+    let settledTop: number | null = null;
+    let scrollFrame = 0;
     const abort = new AbortController();
     const thumbnails = new Map<Element, SlideHandle>();
     const send = () => { if (alive) port.postMessage(state); };
     const finishInspection = () => {
       if (alive) port.postMessage({ ...state, type: "inspection" });
+    };
+    const selectPage = (index: number) => {
+      rail.querySelector('[aria-current="page"]')?.removeAttribute("aria-current");
+      rail.querySelector(`button[value="${index}"]`)?.setAttribute("aria-current", "page");
+      state.pageNumber = index + 1;
+      send();
+    };
+    const trackScroll = () => {
+      cancelAnimationFrame(scrollFrame);
+      scrollFrame = requestAnimationFrame(() => {
+        if (!continuous || jumping
+            || (settledTop !== null && Math.abs(scroll.scrollTop - settledTop) < 1)) return;
+        settledTop = null;
+        const top = scroll.getBoundingClientRect().top + 13;
+        const slides = container.querySelectorAll<HTMLElement>("[data-slide-index]");
+        const atEnd = scroll.scrollTop > 0 && scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 1;
+        const visible = atEnd ? slides[slides.length - 1]
+          : Array.from(slides).find(slide => slide.getBoundingClientRect().bottom > top);
+        if (visible) selectPage(Number(visible.dataset.slideIndex));
+      });
     };
     const fitTableInsets = (element: HTMLElement) => {
       // Some generators emit inch-sized margins. Use the OOXML default
@@ -55,21 +80,22 @@ export function installPresentationPreview(
     const updatePage = async (index: number) => {
       if (!viewer || !state.pageCount) return;
       const next = Math.max(0, Math.min(state.pageCount - 1, index));
-      state.pageNumber = next + 1;
+      const request = ++navigation;
+      jumping = true;
       state.error = null;
-      send();
+      selectPage(next);
       try {
-        if (continuous) await viewer.goToSlide(next, { behavior: "instant" });
+        if (continuous) await viewer.goToSlide(next, { behavior: "instant", block: "start", inline: "nearest" });
         else await viewer.renderSlide(next);
       } catch {
         state.error = "幻灯片渲染失败";
         state.busy = false;
         send();
-      }
-      if (!alive || state.pageNumber !== next + 1) return;
-      for (const button of rail.querySelectorAll<HTMLButtonElement>("button")) {
-        if (Number(button.value) === next) button.setAttribute("aria-current", "page");
-        else button.removeAttribute("aria-current");
+      } finally {
+        if (request === navigation) {
+          settledTop = scroll.scrollTop;
+          jumping = false;
+        }
       }
     };
     const keyboard = (key: KeyboardEvent) => {
@@ -88,6 +114,7 @@ export function installPresentationPreview(
     };
     document.addEventListener("keydown", keyboard);
     document.addEventListener("click", blockLinks, true);
+    scroll.addEventListener("scroll", trackScroll, { passive: true });
     cleanup = () => {
       if (!alive) return;
       alive = false;
@@ -98,6 +125,8 @@ export function installPresentationPreview(
       viewer?.destroy();
       document.removeEventListener("keydown", keyboard);
       document.removeEventListener("click", blockLinks, true);
+      scroll.removeEventListener("scroll", trackScroll);
+      cancelAnimationFrame(scrollFrame);
       container.replaceChildren();
       rail.replaceChildren();
       port.close();
@@ -111,10 +140,9 @@ export function installPresentationPreview(
         if (command?.type === "page" && Number.isInteger(command.index)) {
           await updatePage(command.index);
         } else if (command?.type === "zoom" && [100, 125, 150, 200, 300].includes(command.value)) {
-          const page = state.pageNumber - 1;
           state.zoom = command.value;
           await viewer.setZoom(state.zoom);
-          if (continuous) await viewer.goToSlide(page, { behavior: "instant" });
+          if (continuous) await updatePage(state.pageNumber - 1);
         } else if (command?.type === "thumbnails") {
           rail.hidden = command.visible !== true;
         } else if (command?.type === "mobile" && typeof command.value === "boolean"
@@ -123,8 +151,8 @@ export function installPresentationPreview(
           continuous = command.value;
           if (continuous) {
             await viewer.renderList({ windowed: true, initialSlides: 2, batchSize: 2 });
-            await viewer.goToSlide(page, { behavior: "instant" });
-          } else await viewer.renderSlide(page);
+          }
+          await updatePage(page);
         }
       } catch {
         state.error = "幻灯片渲染失败";
@@ -136,7 +164,7 @@ export function installPresentationPreview(
     try {
       viewer = new renderer.PptxViewer(container, {
         externalMedia: "block", pdfjs: false, lazyMedia: true, lazySlides: true,
-        scrollContainer: document.getElementById("scroll")!,
+        scrollContainer: scroll,
         zipLimits: { ...renderer.RECOMMENDED_ZIP_LIMITS,
           maxEntryUncompressedBytes: 16 * 1024 * 1024,
           maxTotalUncompressedBytes: 64 * 1024 * 1024,
@@ -149,7 +177,7 @@ export function installPresentationPreview(
         },
         onSlideError: () => { state.error = "该页无法完整渲染，可下载原文件查看"; send(); },
         onNodeError: () => { state.partial = true; send(); },
-        onSlideChange: (index: number) => { state.pageNumber = index + 1; send(); },
+        onSlideChange: (index: number) => { if (!continuous && !jumping) selectPage(index); },
       });
       await viewer!.open(event.data.bytes, {
         renderMode: continuous ? "list" : "slide", signal: abort.signal,

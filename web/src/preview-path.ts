@@ -73,3 +73,8 @@ export function classifyPreviewTarget(markdownPath: string, rawTarget: string): 
 export function isMarkdownPath(path: string): boolean {
   return /\.(?:md|markdown)$/i.test(path.split(/[?#]/, 1)[0]);
 }
+
+export function artifactMediaUrl(machineId?: string | null, mediaId?: string): string | undefined {
+  return machineId && mediaId && /^[a-f0-9]{32}$/.test(mediaId)
+    ? `/api/media/${encodeURIComponent(machineId)}/${mediaId}` : undefined;
+}

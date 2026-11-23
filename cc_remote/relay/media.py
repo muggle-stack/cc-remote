@@ -1,4 +1,4 @@
-"""Authenticated native video responses over the bounded Viewer binary channel."""
+"""Authenticated video and attachment responses over the Viewer binary channel."""
 from __future__ import annotations
 
 import asyncio
@@ -11,6 +11,7 @@ from cc_remote.config import valid_machine_id
 from cc_remote.relay.viewer import ViewerError
 
 MEDIA_ID_RE = re.compile(r"[a-f0-9]{32}\Z")
+MEDIA_TYPES = {"video/mp4", "video/webm", "application/octet-stream"}
 PRIVATE_HEADERS = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
                    "Cross-Origin-Resource-Policy": "same-origin"}
 
@@ -60,11 +61,13 @@ async def media_response(req, viewers, machine_id, media_id, owner_id):
         request_id, status, response_headers = await peer.read_media(
             media_id, owner_id(claims), req.method, headers)
         await authorize()
-        if status != 416 and response_headers.get("content-type") != "video/mp4":
+        mime = response_headers.get("content-type", "application/octet-stream")
+        if mime not in MEDIA_TYPES:
             raise ViewerError(502, "invalid_video_type")
-        response_headers = {**response_headers, "content-type": "video/mp4", **PRIVATE_HEADERS}
+        response_headers = {**response_headers, "content-type": mime, **PRIVATE_HEADERS}
         response_headers["content-disposition"] = (
-            'attachment; filename="video.mp4"' if req.query_params.get("download") == "1" else "inline")
+            "attachment" if mime == "application/octet-stream" or req.query_params.get("download") == "1"
+            else "inline")
         if req.method == "HEAD" or status in {304, 416}:
             await peer.cancel(request_id)
             request_id = None

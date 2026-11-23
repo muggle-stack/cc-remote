@@ -205,6 +205,8 @@ def _xlsx_table(data: bytes, sheet: str | None, region: Region | None, visual: b
             if not region.includes(row, column):
                 continue
             value, formula = workbook.value(element)
+            if visual:
+                value = workbook.display_value(element, value)
             index = element.get("s", "0")
             style = ""
             if len(index) <= 7 and index.isascii() and index.isdigit() and int(index) < len(styles):

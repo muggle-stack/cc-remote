@@ -31,12 +31,10 @@ test("HTML page zoom fits wide content and preserves controls and retained state
   const frame = page.frameLocator(".viewer-stage iframe");
   const zoom = page.getByRole("button", { name: "页面缩放", exact: true });
   await expect(zoom).toBeEnabled();
-  await expect(zoom).toHaveText("100%");
   const source = await page.locator(".viewer-stage iframe").getAttribute("src");
   const viewportScale = await page.evaluate(() => visualViewport?.scale);
-  await zoom.click();
-  await page.getByRole("button", { name: "适应宽度", exact: true }).click();
   await expect.poll(() => frame.locator("html").evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1);
+  await expect(zoom).not.toHaveText("100%");
   await frame.getByRole("button", { name: "计数 0", exact: true }).click();
   await expect(frame.locator("#counter")).toHaveText("计数 1");
   const range = frame.locator("#range");
@@ -59,8 +57,15 @@ test("HTML page zoom fits wide content and preserves controls and retained state
   await expect(zoom).toHaveText(percentage!);
   await expect(frame.locator("#counter")).toHaveText("计数 1");
   await expect(page.locator(".viewer-stage iframe")).toHaveAttribute("src", source!);
+  await page.getByRole("button", { name: "刷新预览", exact: true }).click();
+  await expect(zoom).toBeEnabled();
+  await expect(zoom).toHaveText(percentage!);
+  await expect.poll(() => frame.locator("html").evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1);
   await zoom.click();
   await page.getByRole("button", { name: "恢复 100%" }).click();
+  await expect(zoom).toHaveText("100%");
+  await page.getByRole("button", { name: "刷新预览", exact: true }).click();
+  await expect(zoom).toBeEnabled();
   await expect(zoom).toHaveText("100%");
   expect(await page.evaluate(() => visualViewport?.scale)).toBe(viewportScale);
   await expect(page.locator(".viewer-error-banner")).toHaveCount(0);
@@ -72,6 +77,9 @@ test("HTML pinch zoom stays inside the frame and respects page-owned gestures", 
   const frame = page.frameLocator(".viewer-stage iframe");
   const zoom = page.getByRole("button", { name: "页面缩放", exact: true });
   await expect(zoom).toBeEnabled();
+  await zoom.click();
+  await page.getByRole("button", { name: "恢复 100%" }).click();
+  await expect(zoom).toHaveText("100%");
   const viewportScale = await page.evaluate(() => visualViewport?.scale);
   await frame.locator("body").evaluate(el => {
     el.dispatchEvent(new WheelEvent("wheel", { ctrlKey: true, deltaY: 30, clientX: 150, clientY: 150, bubbles: true, cancelable: true }));
@@ -114,7 +122,11 @@ test("HTML browser touch input zooms locally while ordinary wheel scrolling rema
   test.skip(info.project.name !== "chromium", "CDP touch injection is Chromium-only.");
   await page.getByRole("button", { name: "打开远程预览" }).click();
   await page.getByRole("button", { name: /^宽页面缩放测试/ }).click();
-  await expect(page.getByRole("button", { name: "页面缩放", exact: true })).toBeEnabled();
+  const zoom = page.getByRole("button", { name: "页面缩放", exact: true });
+  await expect(zoom).toBeEnabled();
+  await zoom.click();
+  await page.getByRole("button", { name: "恢复 100%" }).click();
+  await expect(zoom).toHaveText("100%");
   const frame = page.frameLocator(".viewer-stage iframe");
   const viewportScale = await page.evaluate(() => visualViewport?.scale);
   const box = await page.locator(".viewer-stage iframe").boundingBox();
@@ -153,6 +165,58 @@ test("Bridge reports a stale runner immediately and reconnects with the current 
   await expect(page.frameLocator(".viewer-stage iframe").locator("#status"))
     .toContainText("模型已加载", { timeout: 30000 });
   await expect(page.locator(".viewer-error-banner")).toHaveCount(0);
+});
+
+test("Bridge loads images assigned by the page and honors src changes during a read", async ({ page }) => {
+  test.skip(process.env.VIEWER_TEST_MODE === "isolated", "Bridge image transport.");
+  await page.getByRole("button", { name: "打开远程预览" }).click();
+  await page.getByRole("button", { name: /^动态图片测试/ }).click();
+  const frame = page.frameLocator(".viewer-stage iframe");
+  const image = frame.locator("#runtime-photo");
+  await expect(image).toHaveAttribute("data-loaded-width", "16", { timeout: 5000 });
+  await expect(image).toHaveJSProperty("complete", true);
+
+  const state = await frame.locator("#gallery").evaluate(async gallery => {
+    const current = new Image();
+    current.src = "../meshes/badge.svg?stale";
+    const stale = current.decode().then(() => "decoded", error => error.name);
+    current.setAttribute("SRC", "../meshes/runtime-wide.svg");
+    gallery.append(current);
+    await current.decode();
+
+    const removed = new Image();
+    removed.src = "../meshes/badge.svg?removed";
+    const cancelled = removed.decode().then(() => "decoded", error => error.name);
+    removed.removeAttribute("src");
+    gallery.append(removed);
+    return {
+      stale: await stale, cancelled: await cancelled, width: current.naturalWidth,
+      source: current.getAttribute("src"), removed: removed.getAttribute("src"), removedComplete: removed.complete,
+    };
+  });
+  expect(state).toEqual({
+    stale: "EncodingError", cancelled: "EncodingError", width: 32,
+    source: expect.stringMatching(/^blob:/), removed: null, removedComplete: true,
+  });
+  await expect(page.locator(".viewer-error-banner")).toHaveCount(0);
+});
+
+test("Bridge reports a runtime image read failure and notifies the page", async ({ page }) => {
+  test.skip(process.env.VIEWER_TEST_MODE === "isolated", "Bridge image transport.");
+  await page.getByRole("button", { name: "打开远程预览" }).click();
+  await page.getByRole("button", { name: /^动态图片测试/ }).click();
+  const frame = page.frameLocator(".viewer-stage iframe");
+  await frame.locator("h1").evaluate(() => {
+    const image = new Image();
+    image.onload = () => { image.dataset.result = "loaded"; };
+    image.onerror = () => { image.dataset.result = "error"; };
+    image.id = "unavailable-image";
+    image.src = "../meshes/unavailable.svg";
+    document.body.append(image);
+  });
+  await expect(frame.locator("#unavailable-image")).toHaveAttribute("data-result", "error");
+  await expect(frame.locator("#unavailable-image")).toHaveJSProperty("complete", true);
+  await expect(page.locator(".viewer-error-banner")).toContainText("/meshes/unavailable.svg");
 });
 
 test("remote Viewer loads modules and binary models without exposing main cookies", async ({ page }) => {

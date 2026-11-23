@@ -2704,23 +2704,23 @@ class FilePreview(_Base):
     """wrapper -> requesting client: bounded source or locally-rendered artifact.
 
     Binary previews are transported directly through the authenticated relay;
-    the relay never writes them to disk. Video carries only an owner-bound
-    media_id; authenticated HTTP Range reads use the separate Viewer channel.
-    PPTX carries the original package for browser rendering. Other converted
-    Office files report their original extension in ``converted_from``.
+    the relay never writes them to disk. An owner-bound media_id streams video
+    or the original of a converted or partial preview through the Viewer channel.
+    When preview bytes differ from the source, ``converted_from`` records its extension.
     """
     type: Literal["file_preview"] = "file_preview"
     directory: bool = False
     path: PreviewPath
     request_id: WireId
-    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "video", "spreadsheet", "presentation"] = "text"
+    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "video", "spreadsheet", "presentation", "document"] = "text"
     content: PreviewContent = ""
     media_type: Optional[Literal[
         "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
-        "image/svg+xml", "application/pdf", "video/mp4",
+        "image/svg+xml", "application/pdf", "video/mp4", "video/webm",
         "audio/wav", "audio/mpeg", "audio/mp4", "audio/aac", "audio/flac",
         "audio/ogg", "audio/webm",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ]] = None
     media_id: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{32}$")
     data: Optional[ArtifactPreviewData] = None
@@ -2792,7 +2792,7 @@ class PreviewAuthorizationRequired(_Base):
     operation: Literal["file_preview", "preview_asset"]
     path: PreviewPath
     resolved_path: PreviewPath
-    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "video", "spreadsheet", "presentation"] = "text"
+    format: Literal["markdown", "text", "html", "image", "pdf", "audio", "video", "spreadsheet", "presentation", "document"] = "text"
     preview_id: Optional[WireId] = None
 
 
@@ -3023,7 +3023,7 @@ class TurnDetail(_Base):
 
 
 class GetAgentDetail(_Command):
-    """client -> wrapper: fetch one subagent's public process projection."""
+    """client -> wrapper: fetch one subagent or detached task detail page."""
     type: Literal["get_agent_detail"] = "get_agent_detail"
     session_id: WireId
     run_id: WireId
@@ -3036,13 +3036,14 @@ class GetAgentDetail(_Command):
 
 
 class AgentDetail(_Base):
-    """wrapper -> browser: one read-only page from a subagent run.
+    """wrapper -> requester: one read-only page from a subagent run or task.
 
     For Claude, ``run_id`` is a stable public hash of the spawning Agent tool call. Raw
     Claude agent ids, delegated prompts and output-file paths never cross this
     boundary. Live batches are unbuffered hints; a normal response is always a
     source-backed or resident authoritative snapshot. Codex cards resolve a
     native child only after verifying account-local ancestry to this session.
+    An async-task run id returns its sanitized launch parameters for this session.
     """
     type: Literal["agent_detail"] = "agent_detail"
     session_id: WireId

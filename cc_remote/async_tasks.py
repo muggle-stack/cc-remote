@@ -20,7 +20,8 @@ import time
 
 from cc_remote import task_rpc
 from cc_remote.task_store import (
-    DELIVERY_TRACK_SECONDS, OUTPUT_BYTES, TERMINAL, TaskStore, public_task, request_thread,
+    DELIVERY_TRACK_SECONDS, OUTPUT_BYTES, TASK_RECEIPT_TOOL, TASK_SERVER, TERMINAL,
+    TaskStore, public_task, request_thread,
 )
 from cc_remote.wrapper.child_env import sanitized_child_env
 
@@ -194,7 +195,7 @@ async def deliver(store, task):
                     raise task_rpc.Rejected("Original thread resume identity was not confirmed")
             result = await native.rpc("turn/start", {
                 "threadId": task["sid"], "input": [],
-                "toolOutput": {"namespace": "cc_remote_tasks", "name": "task_result",
+                "toolOutput": {"namespace": TASK_SERVER, "name": TASK_RECEIPT_TOOL,
                                "output": json.dumps(receipt, ensure_ascii=False)},
             }, before_send=lambda: store.begin_delivery(task_id))
             turn = result.get("turn") if isinstance(result, dict) else None
@@ -206,13 +207,14 @@ async def deliver(store, task):
             store.update(task_id, delivery="accepted", delivery_error=None,
                          delivery_turn_id=turn["id"], delivery_accepted_at=time.time(),
                          next_attempt=0)
-    except task_rpc.Rejected:
-        store.update(task_id, delivery="rejected", delivery_error="Official daemon rejected completion delivery")
+    except task_rpc.Rejected as exc:
+        retry_at = time.time() + RETRY_SECONDS if exc.retryable else None
+        store.reject_delivery(task_id, retry_at=retry_at)
     except Exception:
         current = store.get(task_id)
         if current["delivery"] == "sending":
             store.update(task_id, delivery="unknown",
-                         delivery_error="Completion acknowledgment lost; inspect task_result; not resent")
+                         delivery_error="Completion acknowledgment lost. Checking the original thread")
         elif current["delivery"] == "pending":
             store.update(task_id, next_attempt=time.time() + RETRY_SECONDS,
                          delivery_error="Shared daemon unavailable; completion retained for retry")
@@ -220,20 +222,45 @@ async def deliver(store, task):
 
 async def check_delivery(store, task):
     if (task["delivery"] not in {"accepted", "failed", "unknown"}
-            or not task["delivery_turn_id"]
+            or task["cancel_requested"]
             or (task["delivery"] != "accepted" and task["delivery_recheck_until"] == 0)):
         return
     task_id = task["id"]
+    turn_id = task["delivery_turn_id"]
+    if not turn_id and task["delivery"] != "unknown":
+        return
     status = None
+    receipt = None
     try:
         # Do not hold a command slot for the model's full turn. A short read is
         # retried later, independently of execution and without engine mutation.
         async with asyncio.timeout(5):
             async with task_rpc.connect(store.home) as native:
-                status = await native.turn_status(task["sid"], task["delivery_turn_id"])
+                if turn_id:
+                    status = await native.turn_status(task["sid"], turn_id)
+                else:
+                    receipt = await native.find_task_receipt(task["sid"], task_id)
     except Exception:
         pass
     now = time.time()
+    updates = {}
+    if not turn_id:
+        if receipt is None:
+            # A missing history item proves neither rejection nor non-delivery.
+            # Keep checking within one durable window, without resubmitting.
+            deadline = task["delivery_recheck_until"] or now + DELIVERY_TRACK_SECONDS
+            if now >= deadline:
+                store.update(task_id, delivery_recheck_until=0, next_attempt=0,
+                             delivery_error="Completion receipt unconfirmed. Result retained in task_result")
+            else:
+                store.update(task_id, delivery_recheck_until=deadline,
+                             next_attempt=min(now + RETRY_SECONDS, deadline))
+            return
+        recovered_turn, status = receipt
+        updates.update(delivery="accepted", delivery_turn_id=recovered_turn,
+                       delivery_accepted_at=now, delivery_error=None)
+        task = {**task, **updates, "delivery_recheck_until": None}
+
     deadline = task["delivery_recheck_until"]
     if deadline is None:
         # NULL is a legacy/untracked receipt, 0 is a finished reconciliation.
@@ -241,7 +268,7 @@ async def check_delivery(store, task):
         # this also catches a failure written by an old worker after migration.
         start = (task["delivery_accepted_at"] or 0) if task["delivery"] == "accepted" else now
         deadline = start + DELIVERY_TRACK_SECONDS
-    updates = dict(delivery_failure_status=None, delivery_failure_seen_at=None,
+    updates.update(delivery_failure_status=None, delivery_failure_seen_at=None,
                    delivery_recheck_until=deadline, next_attempt=min(now + RETRY_SECONDS, deadline))
     if status == "completed":
         updates.update(delivery="delivered", delivery_error=None, delivery_recheck_until=0,

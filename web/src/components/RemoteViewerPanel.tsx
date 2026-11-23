@@ -57,7 +57,6 @@ export function RemoteViewerPanel({ active = true, scope, selection, requestedUr
   const [loaded, setLoaded] = useState(false);
   const [retry, setRetry] = useState(0);
   const frame = useRef<HTMLIFrameElement>(null);
-  const zoom = useViewerZoom(frame, grant);
   const invalidate = useRef<(() => void) | null>(null);
   const close = useRef(onClose);
   close.current = onClose;
@@ -73,6 +72,9 @@ export function RemoteViewerPanel({ active = true, scope, selection, requestedUr
   const selectedEntry = selected?.entry;
   const selectedId = selected?.id;
   const selectionMachineId = selection?.machine_id;
+  const zoom = useViewerZoom(frame, grant?.id,
+    JSON.stringify([selectionMachineId, selection?.site_id, selectedEntry]),
+    grant?.mode === "isolated" ? grant.origin : "null");
   const selectionSiteId = selection?.site_id;
   const initialContent = useRef<string | undefined>(undefined);
   const [openedContent, setOpenedContent] = useState<string | undefined>(undefined);

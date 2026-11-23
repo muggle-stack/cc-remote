@@ -465,6 +465,7 @@ CODEX_EFFORT_RESOLVE_TIMEOUT_SECONDS = 1.0
 CODEX_EFFORT_RESOLVE_RETRY_SECONDS = 30.0
 CLAUDE_BTW_DEFAULT_EFFORT = "xhigh"
 CODEX_DAEMON_RECOVERY_TIMEOUT_SECONDS = 45.0
+CODEX_RECEIPT_DRAIN_TIMEOUT_SECONDS = 1.0
 CODEX_TURN_START_RECONCILE_INTERVAL_SECONDS = 0.25
 CODEX_TURN_START_RECONCILE_DEADLINE_SECONDS = 120.0
 CODEX_TURN_START_RECONNECT_BACKOFF_MAX_SECONDS = 5.0
@@ -2034,6 +2035,11 @@ class WrapperMachine:
     UNCERTAIN_FORK_CAP = 4096
     MARKDOWN_PREVIEW_SUFFIXES = frozenset({".md", ".markdown"})
     HTML_PREVIEW_SUFFIXES = frozenset({".htm", ".html"})
+    HTML_PREVIEW_MAX_BYTES = 2 * 1024 * 1024
+    DELIMITED_PREVIEW_SUFFIXES = frozenset({".csv", ".tsv"})
+    RASTER_CONVERSION_FORMATS = {
+        ".heic": "HEIF", ".heif": "HEIF", ".tif": "TIFF", ".tiff": "TIFF", ".bmp": "BMP",
+    }
     OFFICE_PREVIEW_SUFFIXES = frozenset({
         ".doc", ".docx", ".odt", ".rtf", ".xls", ".xlsx", ".ods",
         ".ppt", ".odp",
@@ -6194,12 +6200,15 @@ class WrapperMachine:
             for turn_id in candidates:
                 if not available():
                     return False
+                key = (str(home), native_sid, turn_id)
+                if key in ctx.codex_completed_task_turns:
+                    continue
                 if await sdk.probe_owned_turn(turn_id) is None or not available():
                     continue
                 # Re-read the same private receipt after asynchronous native
                 # reads; account replacement/cancellation cannot transfer it.
                 current = await asyncio.to_thread(read_task_callbacks, home, native_sid)
-                if turn_id not in current or not available():
+                if turn_id not in current or not available() or key in ctx.codex_completed_task_turns:
                     continue
                 if await sdk.recover_owned_turn(turn_id):
                     log.info("recovered shared Codex task callback",
@@ -7055,11 +7064,39 @@ class WrapperMachine:
             ],
         )
 
+    def _observe_completed_codex_task_turn(self, ctx: SessionContext, turn_id: str) -> bool:
+        """Retire this account/thread's callback cards under the emission lock."""
+        from cc_remote.task_store import MAX_RECORDS
+        from cc_remote.wrapper.codex_tasks import TASK_ITEM_PREFIX
+
+        if ctx.space != "code" or not ctx.session_id or not self._is_resident_context(ctx):
+            return False
+        scope = (str(self._codex_profile_for_ctx(ctx).home), ctx.session_id)
+        key = (*scope, turn_id)
+        completed = ctx.codex_completed_task_turns
+        completed.pop(key, None)
+        completed[key] = None
+        if len(completed) > MAX_RECORDS:
+            completed.pop(next(iter(completed)))
+
+        previous = ctx.codex_background_processes
+        # Let the next full read fill any slots hidden by a capped snapshot.
+        if ctx.codex_background_scope != scope or not previous or len(previous) >= MAX_BACKGROUND_PROCESS_ITEMS:
+            return False
+        remaining = {
+            item_id: item for item_id, item in previous.items()
+            if not (item_id.startswith(TASK_ITEM_PREFIX) and item.turn_id == turn_id)
+        }
+        if len(remaining) == len(previous):
+            return False
+        ctx.codex_background_processes = remaining
+        return True
+
     async def _refresh_codex_background_processes(
         self, contexts: list[SessionContext] | None = None,
     ) -> None:
         """Project detached task state without querying or waking an engine."""
-        from cc_remote.wrapper.codex_tasks import read_task_activity
+        from cc_remote.wrapper.codex_tasks import TASK_ITEM_PREFIX, read_task_activity
         from cc_remote.wrapper.codex_agent_activity import CodexAgentActivity
 
         async with self._codex_task_sync_lock:
@@ -7104,33 +7141,39 @@ class WrapperMachine:
                 if activity is None and agents is None:
                     continue
                 for ctx, native_sid in residents:
-                    if (not self._is_resident_context(ctx) or ctx.session_id != native_sid
-                            or self._codex_profile_for_ctx(ctx).home != home):
-                        continue
-                    previous = ctx.codex_background_processes
-                    retained = (previous or {}).values()
-                    tasks = (activity.get(native_sid, []) if activity is not None else
-                             [item for item in retained if item.item_id.startswith("async-task:")])
-                    native_agents = (agents.get(native_sid, []) if agents is not None else
-                                     [item for item in retained if item.item_id.startswith("codex-agent:")])
-                    combined = tasks + native_agents
-                    # Active native agents must not be hidden behind retained
-                    # MCP delivery warnings when the public snapshot is full.
-                    combined.sort(key=lambda item: item.status not in {"running", "pending"})
-                    replacement = {item.item_id: item for item in
-                                   combined[:MAX_BACKGROUND_PROCESS_ITEMS]}
+                    # Serialize with live terminal publication so a read taken
+                    # before completion cannot reintroduce a retired callback.
+                    async with ctx.emit_lock:
+                        if (not self._is_resident_context(ctx) or ctx.session_id != native_sid
+                                or self._codex_profile_for_ctx(ctx).home != home):
+                            continue
+                        scope = (str(home), native_sid)
+                        previous = ctx.codex_background_processes
+                        retained = (previous or {}).values() if ctx.codex_background_scope == scope else ()
+                        tasks = (activity.get(native_sid, []) if activity is not None else
+                                 [item for item in retained if item.item_id.startswith(TASK_ITEM_PREFIX)])
+                        tasks = [item for item in tasks
+                                 if (*scope, item.turn_id) not in ctx.codex_completed_task_turns]
+                        native_agents = (agents.get(native_sid, []) if agents is not None else
+                                         [item for item in retained if item.item_id.startswith("codex-agent:")])
+                        combined = tasks + native_agents
+                        # Active native agents must not be hidden behind retained
+                        # MCP delivery warnings when the public snapshot is full.
+                        combined.sort(key=lambda item: item.status not in {"running", "pending"})
+                        replacement = {item.item_id: item for item in
+                                       combined[:MAX_BACKGROUND_PROCESS_ITEMS]}
+                        ctx.codex_background_scope = scope
+                        if replacement != previous:
+                            ctx.codex_background_processes = replacement
+                            # A first empty read needs no live transition. Hello
+                            # and focus still seed the authoritative level.
+                            if previous is not None or replacement:
+                                await self._emit_locked(ctx, self._background_process_sync(ctx))
                     if tasks:
                         # A callback can start while the Wrapper is offline or
                         # before the fresh proxy subscribes. Activity alone does
                         # not reopen a turn: recovery proves its exact native ID.
                         await self._recover_unleased_codex_callback(ctx, ctx.key)
-                    if replacement == previous:
-                        continue
-                    ctx.codex_background_processes = replacement
-                    # A first empty read has no live transition to broadcast.
-                    # Hello/focus still seed it after their ordered envelope.
-                    if previous is not None or replacement:
-                        await self._emit(ctx, self._background_process_sync(ctx))
 
     async def _publish_claude_background_processes(
         self, ctx: SessionContext,
@@ -10804,17 +10847,17 @@ class WrapperMachine:
         self,
         ctx: SessionContext,
         msg: TurnEnd,
-    ) -> None:
+    ) -> CodexTerminalFence | None:
         """Normalize and retain an authoritative live app-server terminal."""
         if (
             ctx.engine != "codex"
             or ctx.btw
             or not msg._codex_authoritative_terminal
         ):
-            return
+            return None
         fence = self._codex_terminal_fence_from_event(msg)
         if fence is None:
-            return
+            return None
         if (
             fence.status == "interrupted"
             and fence.turn_id in _codex_compaction_continuation_ids(ctx)
@@ -10822,12 +10865,13 @@ class WrapperMachine:
             # The app-server uses an interrupted native boundary while compact
             # immediately continues the same visible logical turn.  Its final
             # replacement terminal will be recorded normally.
-            return
+            return None
         sid = self._ctx_wire_sid(ctx) or ctx.key
         watch = self._watch.get(sid)
         source_identity = self._codex_watch_source_identity(watch)
         self._remember_codex_terminal_fence(
             sid, fence, source_identity=source_identity)
+        return fence
 
     async def _codex_terminal_snapshot(
         self,
@@ -11023,7 +11067,9 @@ class WrapperMachine:
             # copy sent on this live call receives presentation metadata.
             msg.notification_context = None
             try:
-                self._remember_codex_terminal_event(ctx, msg)
+                fence = self._remember_codex_terminal_event(ctx, msg)
+                if fence is not None and fence.status == "completed":
+                    background_membership_changed = self._observe_completed_codex_task_turn(ctx, fence.turn_id)
             except Exception as exc:
                 # Lifecycle recovery is optional. No cache/ledger failure may
                 # suppress the engine's authoritative live terminal.
@@ -12332,6 +12378,13 @@ class WrapperMachine:
                 replay.cc_session_id = self._ctx_wire_sid(ctx)
                 replay.cwd = ctx.cwd
                 replay.generation = self.instance_id
+        if isinstance(replay, BackgroundProcessSync) and replay.sid:
+            ctx = self._ctx_for(replay.sid)
+            if ctx is not None and ctx.engine == "codex":
+                current = self._background_process_sync(ctx)
+                replay.items = current.items
+                replay.generation = current.generation
+                replay.ts = current.ts
         return replay
 
     async def _fork_entry_for_cached_command(
@@ -18338,7 +18391,9 @@ class WrapperMachine:
         )
 
     async def _handle_get_agent_detail(self, cmd) -> AgentDetail:
-        """Return one read-only Agent process page without resuming it."""
+        """Return one private process detail page without resuming an engine."""
+        from cc_remote.wrapper.codex_tasks import TASK_ITEM_PREFIX, read_task_parameters
+
         started_at = time.perf_counter()
         sid = self._resolve_session_alias(cmd.session_id) or cmd.session_id
         revision = self._history_revision(sid)
@@ -18378,6 +18433,7 @@ class WrapperMachine:
                 before=getattr(cmd, "before", None),
                 sid=sid,
                 to=client_id,
+                owner_id=getattr(cmd, "owner_id", None),
             )
             await self.transport.send(detail)
             log.info(
@@ -18390,6 +18446,25 @@ class WrapperMachine:
                 elapsed_ms=round((time.perf_counter() - started_at) * 1000),
             )
             return detail
+
+        if cmd.run_id.startswith(TASK_ITEM_PREFIX):
+            error = "后台任务参数暂不可用"
+            ctx = self._ctx_by_sid(sid)
+            if (not client_id or ctx is None or ctx.engine != "codex"
+                    or ctx.space != "code" or not ctx.session_id):
+                return await send(title="后台任务", error=error)
+            try:
+                home = self._codex_profile_for_ctx(ctx).home
+                native_sid = ctx.session_id
+                task = await asyncio.to_thread(read_task_parameters, home, native_sid, cmd.run_id)
+                if (task is None or not self._is_resident_context(ctx)
+                        or ctx.session_id != native_sid or self._codex_profile_for_ctx(ctx).home != home):
+                    return await send(title="后台任务", error=error)
+            except Exception as exc:
+                log.warning("Codex background task parameters unavailable", error_type=type(exc).__name__)
+                return await send(title="后台任务", error=error)
+            return await send([task.model_dump(mode="json", exclude_none=True)],
+                              title=task.title, detail_revision=cmd.run_id)
 
         requested_revision = getattr(cmd, "revision", None)
         if requested_revision and requested_revision != revision:
@@ -19392,9 +19467,12 @@ class WrapperMachine:
         if ctx.engine == "codex":
             await self._apply_codex_context(ctx)
             if ctx.state != "idle" or getattr(ctx.sdk, "turn_active", False):
-                error = Error(code=ERR_BUSY, message="会话已开始新回合，请稍后重试或排队发送",
-                              msg_id=getattr(cmd, "msg_id", None))
-                return await self._reject_query(ctx, cmd, error)
+                if launch_receipt is not None:
+                    return await self._reject_query(ctx, cmd, Error(
+                        code=ERR_BUSY, message="会话已开始新回合，请稍后重试或排队发送"))
+                collision = await self._handle_codex_query_collision(ctx, cmd)
+                if collision is not None:
+                    return collision
         # All synchronous rejection paths have passed. A new conversation may
         # now finish before the next sidebar catalog read, so remember its first
         # accepted prompt under the temporary key; capture migrates it to the
@@ -19438,7 +19516,75 @@ class WrapperMachine:
 
             turn_task.add_done_callback(settle_unstarted_launch)
 
-    async def _handle_steer(self, cmd):
+    async def _handle_codex_query_collision(
+        self, ctx: SessionContext, cmd: Query,
+    ) -> Error | TurnSteered | None:
+        """Resolve a direct send that passed the idle preflight before a receipt."""
+        sdk = ctx.sdk
+        turn_id = ctx.codex_spontaneous_turn_id
+        task = ctx.codex_spontaneous_task
+        generation = getattr(sdk, "_generation", None)
+        native_sid = ctx.session_id
+        wait_for_receipt = getattr(sdk, "wait_for_task_callback_turn", None)
+
+        def same_session() -> bool:
+            return (
+                self._is_resident_context(ctx) and ctx.sdk is sdk
+                and ctx.session_id == native_sid == getattr(sdk, "thread_id", None)
+                and getattr(sdk, "_generation", None) == generation
+                and self._codex_shared_live(ctx) and ctx.write_state == "writable"
+                and ctx.turn_task is None and not ctx.codex_account_handoff
+                and not ctx.codex_turn_start_reconciling
+            )
+
+        def ready_to_launch() -> bool:
+            return (
+                same_session() and ctx.state == "idle"
+                and ctx.codex_spontaneous_turn_id is None
+                and sdk.turn_id is None
+                and not getattr(sdk, "turn_active", False)
+            )
+
+        if (
+            turn_id and native_sid and cmd.sid == self._ctx_wire_sid(ctx)
+            and cmd.delivery == "immediate" and callable(wait_for_receipt)
+            and (self._session_messages is None or not self._session_messages.owns(cmd.msg_id))
+            and same_session() and ctx.state == "running"
+        ):
+            receipt = await wait_for_receipt(turn_id)
+            if (
+                receipt and same_session() and ctx.codex_spontaneous_turn_id == turn_id
+                and sdk.turn_active and sdk.turn_id == turn_id
+            ):
+                result = await self._handle_steer(cmd, task_callback_turn_id=turn_id)
+                if isinstance(result, TurnSteered) or result.code == ERR_STEER_UNKNOWN:
+                    return result
+            if (
+                task is not None and not task.done() and same_session()
+                and ctx.codex_spontaneous_turn_id == turn_id
+                and ctx.codex_spontaneous_next_id is None
+                and (receipt or ctx.codex_spontaneous_completed_id == turn_id)
+            ):
+                # A rejection can precede the native terminal or the bridge's
+                # final idle state. Keep the query lock and let that exact
+                # reader drain before deciding whether a normal launch is safe.
+                await asyncio.wait({task}, timeout=CODEX_RECEIPT_DRAIN_TIMEOUT_SECONDS)
+            if ready_to_launch():
+                # Local idle can lag a successor on another native client.
+                # Check the exact thread on the same transport before starting.
+                try:
+                    confirmation = await asyncio.wait_for(
+                        sdk.confirm_no_active_turn(native_sid, turn_id),
+                        timeout=CODEX_RECEIPT_DRAIN_TIMEOUT_SECONDS,
+                    )
+                except (OSError, RuntimeError, asyncio.TimeoutError):
+                    confirmation = None
+                if confirmation and confirmation.authoritative_terminal and ready_to_launch():
+                    return None
+        return await self._reject_query(ctx, cmd, Error(
+            code=ERR_BUSY, message="会话已开始新回合，请稍后重试或排队发送"))
+
+    async def _handle_steer(self, cmd, *, task_callback_turn_id: str | None = None):
         """Append one user instruction to the exact active engine turn.
 
         Steering is neither a new engine turn nor an interrupt.  The successful
@@ -19447,6 +19593,8 @@ class WrapperMachine:
         """
         sid = getattr(cmd, "sid", None)
         ctx = self._ctx_for(sid)
+        steer_sdk = ctx.sdk if ctx is not None else None
+        steer_generation = getattr(steer_sdk, "_generation", None)
 
         async def reject(code: str, message: str) -> Error:
             error = Error(
@@ -19468,7 +19616,8 @@ class WrapperMachine:
             # This is a correlated control rejection, not shared session
             # narrative. Buffering it would let a later client replay A's
             # targeted failure as its own after hello rewrites the recipient.
-            await self.transport.send(error)
+            if task_callback_turn_id is None:
+                await self.transport.send(error)
             return error
 
         if ctx is None:
@@ -19497,7 +19646,7 @@ class WrapperMachine:
             )
         if ctx.codex_uncertain_steer is not None:
             return await reject(
-                ERR_STEER_UNKNOWN,
+                ERR_STEER_UNKNOWN if task_callback_turn_id is None else ERR_NOT_STEERABLE,
                 "上一条 Codex 引导结果仍未确认，请等待当前任务结束或刷新历史。",
             )
         if not cmd.prompt and not cmd.images and not cmd.files:
@@ -19588,12 +19737,28 @@ class WrapperMachine:
                         ERR_NOT_STEERABLE,
                         "Codex 当前回合不支持引导，请等待后重试。",
                     )
+                callback_target = {}
+                if task_callback_turn_id is not None:
+                    if (
+                        not self._is_resident_context(ctx) or ctx.sdk is not steer_sdk
+                        or getattr(steer_sdk, "_generation", None) != steer_generation
+                        or ctx.write_state != "writable" or ctx.turn_task is not None
+                        or ctx.codex_account_handoff or ctx.interrupt_event.is_set()
+                        or ctx.codex_uncertain_steer is not None
+                        or ctx.codex_spontaneous_turn_id != task_callback_turn_id
+                        or ctx.active_msg_id not in {None, task_callback_turn_id}
+                        or ctx.codex_spontaneous_anchor_id not in {None, task_callback_turn_id}
+                        or sdk_turn_id != task_callback_turn_id
+                    ):
+                        return await reject(ERR_NOT_STEERABLE, "后台回执回合已切换，本次未发送。")
+                    callback_target["task_callback_turn_id"] = task_callback_turn_id
                 ctx.codex_steer_gate.clear()
                 steer_gate_held = True
                 steer_acceptance = await ctx.sdk.steer(
                     prompt,
                     images=image_paths,
                     client_user_message_id=cmd.msg_id,
+                    **callback_target,
                 )
                 turn_id = str(steer_acceptance)
                 candidate_fence = getattr(
@@ -19640,7 +19805,7 @@ class WrapperMachine:
             retain_attachments()
             ctx.codex_uncertain_steer = TurnSteered(
                 msg_id=cmd.msg_id,
-                turn_id=getattr(ctx.sdk, "turn_id", None) or sdk_turn_id,
+                turn_id=task_callback_turn_id or getattr(ctx.sdk, "turn_id", None) or sdk_turn_id,
                 prompt=original_prompt,
                 images=images,
                 files=file_meta,
@@ -19652,6 +19817,9 @@ class WrapperMachine:
             error = Error(
                 code=ERR_STEER_UNKNOWN,
                 message=(
+                    "Codex 尚未确认本次消息是否送达；请先观察后续输出或"
+                    "刷新历史，确认前不要重复发送。"
+                    if task_callback_turn_id is not None else
                     "Codex 尚未确认本次引导是否生效；请先观察后续输出或"
                     "刷新历史，确认前不要重复发送。"
                 ),
@@ -19669,7 +19837,7 @@ class WrapperMachine:
                     error_type=type(exc).__name__,
                 )
             log.warning(
-                "Codex steer outcome unknown after transport wait failure",
+                "Codex steer outcome unknown",
                 session_id=ctx.session_id,
             )
             return error
@@ -26191,27 +26359,63 @@ class WrapperMachine:
     async def _handle_get_session_artifact_preview(self, cmd):
         return await self._artifacts.preview(cmd)
 
-    def _video_file_preview(self, cwd, path, engine, space, sid, owner_id, caps=None):
+    def _streamed_file_preview(
+        self, cwd, path, engine, space, sid, owner_id, caps=None, *, download_identity=None,
+    ):
         from cc_remote.viewer import MAX_FILE_BYTES
-        from cc_remote.wrapper.media_preview import VIDEO_SUFFIXES
+        from cc_remote.wrapper.media_preview import STREAMED_MEDIA_SUFFIXES
 
         # Freeze the resolved file, while rechecking current external capabilities
         # and its exact identity on every range request. A new engine is never started.
-        resolved = os.path.realpath(os.path.join(cwd, path))
+        root = os.path.realpath(cwd)
+        resolved = os.path.realpath(os.path.join(root, path))
+        root_stat = os.stat(root)
+        inside = self._path_is_below(root, resolved)
+
         def opener():
             allowed = (caps if caps is not None else
                        self._preview_capability_store.snapshot(engine, space, sid))
             return self._open_session_file(
-                cwd, resolved, allowed_suffixes=VIDEO_SUFFIXES,
-                max_bytes=MAX_FILE_BYTES, allow_truncate=False, allowed_external_paths=allowed)
+                root, resolved,
+                allowed_suffixes=None if download_identity is not None else STREAMED_MEDIA_SUFFIXES,
+                max_bytes=MAX_FILE_BYTES, allow_truncate=False, allowed_external_paths=allowed,
+                workspace_identity=(root_stat.st_dev, root_stat.st_ino) if inside else None)
+
         def authorize(info):
-            if not self._path_is_below(os.path.realpath(cwd), resolved):
+            if not inside:
                 allowed = (caps if caps is not None else
                            self._preview_capability_store.snapshot(engine, space, sid))
                 capability = allowed.get(resolved)
                 if capability is None or not capability.matches(info):
-                    raise PermissionError("video permission revoked")
-        return self.media_previews.create(owner_id, engine, sid, opener, authorize)
+                    raise PermissionError("file permission revoked")
+
+        return self.media_previews.create(
+            owner_id, engine, sid, opener, authorize, download_identity=download_identity)
+
+    async def _load_artifact_preview(self, cwd, path, engine, space, sid, owner_id, caps, *, frozen_caps=None):
+        from cc_remote.wrapper.media_preview import STREAMED_MEDIA_SUFFIXES, fingerprint
+
+        suffix = os.path.splitext(path)[1].lower()
+        if suffix in STREAMED_MEDIA_SUFFIXES:
+            return await asyncio.to_thread(
+                self._streamed_file_preview, cwd, path, engine, space, sid, owner_id, frozen_caps)
+        if suffix in self.OFFICE_PREVIEW_SUFFIXES or suffix in self.RASTER_CONVERSION_FORMATS:
+            async with self._preview_conversion_limit:
+                preview = await asyncio.to_thread(self._read_file_preview, cwd, path, caps)
+        else:
+            preview = await asyncio.to_thread(self._read_file_preview, cwd, path, caps)
+        original_stat = preview.pop("original_stat", None)
+        if original_stat is not None and owner_id:
+            try:
+                descriptor = await asyncio.to_thread(
+                    self._streamed_file_preview, cwd, path, engine, space, sid, owner_id,
+                    frozen_caps, download_identity=fingerprint(original_stat))
+                preview.update(descriptor)
+            except (ValueError, OSError):
+                # The preview remains useful if the original changed or is too
+                # large for the download channel. Never link to a different file.
+                pass
+        return preview
 
     async def _handle_get_file_preview(self, cmd):
         sid = getattr(cmd, "sid", None)
@@ -26257,21 +26461,10 @@ class WrapperMachine:
                     ctx.engine, ctx.space, self._ctx_wire_sid(ctx),
                     resolved_path, mode="read", source="user_approved",
                     persist=not ctx.btw)
-            suffix = os.path.splitext(requested_path)[1].lower()
             external_paths = self._preview_capabilities(ctx)
-            if self._preview_format(requested_path) == "video":
-                preview = await asyncio.to_thread(
-                    self._video_file_preview, ctx.cwd, requested_path, ctx.engine, ctx.space,
-                    self._ctx_wire_sid(ctx), cmd.owner_id)
-            elif suffix in self.OFFICE_PREVIEW_SUFFIXES:
-                async with self._preview_conversion_limit:
-                    preview = await asyncio.to_thread(
-                        self._read_file_preview, ctx.cwd, requested_path,
-                        external_paths)
-            else:
-                preview = await asyncio.to_thread(
-                    self._read_file_preview, ctx.cwd, requested_path,
-                    external_paths)
+            preview = await self._load_artifact_preview(
+                ctx.cwd, requested_path, ctx.engine, ctx.space,
+                self._ctx_wire_sid(ctx), cmd.owner_id, external_paths)
             external_capability = external_paths.get(resolved_path)
             response = FilePreview(
                 path=preview["path"],
@@ -27240,14 +27433,17 @@ class WrapperMachine:
             dict[str, PreviewCapability]
         ] = None,
     ) -> tuple[str, str, int, bool, int, str, Optional[str]]:
-        relative, data, file_stat, truncated = cls._read_session_file(
-            cwd,
-            path,
-            allowed_suffixes=None,
-            max_bytes=FILE_PREVIEW_MAX_BYTES,
-            allow_truncate=True,
-            allowed_external_paths=allowed_external_paths,
+        preview = cls._read_file_preview_text(cwd, path, allowed_external_paths, FILE_PREVIEW_MAX_BYTES)
+        return (
+            preview["path"], preview["content"], preview["size"], preview["truncated"],
+            preview["mtime_ns"], preview["format"], preview["revision"],
         )
+
+    @classmethod
+    def _read_file_preview_text(cls, cwd, path, caps, max_bytes, *, allowed_suffixes=None):
+        relative, data, file_stat, truncated = cls._read_session_file(
+            cwd, path, allowed_suffixes=allowed_suffixes, max_bytes=max_bytes, allow_truncate=True,
+            allowed_external_paths=caps)
         if b"\0" in data:
             raise ValueError("文件不是可预览的 UTF-8 文本")
         decoder = codecs.getincrementaldecoder("utf-8-sig")("strict")
@@ -27255,15 +27451,15 @@ class WrapperMachine:
             content = decoder.decode(data, final=not truncated)
         except UnicodeDecodeError as exc:
             raise ValueError("文件不是有效的 UTF-8 文本") from exc
-        return (
-            relative,
-            content,
-            file_stat.st_size,
-            truncated,
-            file_stat.st_mtime_ns,
-            cls._preview_format(relative),
-            None if truncated else hashlib.sha256(data).hexdigest(),
-        )
+        result = {
+            "path": relative, "content": content, "format": cls._preview_format(relative),
+            "size": file_stat.st_size, "mtime_ns": file_stat.st_mtime_ns, "truncated": truncated,
+            "revision": None if truncated else hashlib.sha256(data).hexdigest(),
+            "data": None if truncated else data,
+        }
+        if truncated:
+            result["original_stat"] = file_stat
+        return result
 
     @classmethod
     def _read_file_preview(
@@ -27301,34 +27497,48 @@ class WrapperMachine:
                 allowed_external_paths=allowed_external_paths)
             return {"path": relative, "format": "spreadsheet", "content": spreadsheet_preview(data),
                     "data": data, "size": file_stat.st_size, "mtime_ns": file_stat.st_mtime_ns}
+        if suffix in cls.DELIMITED_PREVIEW_SUFFIXES:
+            from cc_remote.wrapper.spreadsheet_preview import delimited_preview
+
+            preview = cls._read_file_preview_text(
+                cwd, path, allowed_external_paths, ARTIFACT_PREVIEW_MAX_BYTES,
+                allowed_suffixes=frozenset({suffix}))
+            preview["content"] = delimited_preview(preview["content"], suffix, preview["truncated"])
+            return preview
         if suffix in cls.OFFICE_PREVIEW_SUFFIXES:
-            return cls._convert_office_preview(
-                cwd, path, allowed_external_paths)
+            if suffix != ".docx":
+                return cls._convert_office_preview(cwd, path, allowed_external_paths)
+            if not shutil.which("bwrap"):
+                return cls._read_word_preview(cwd, path, allowed_external_paths)
+            try:
+                return cls._convert_office_preview(cwd, path, allowed_external_paths)
+            except (ValueError, OSError) as exc:
+                if isinstance(exc, _PreviewAuthorizationNeeded):
+                    raise
+                return cls._read_word_preview(cwd, path, allowed_external_paths)
 
         if suffix in cls.HTML_PREVIEW_SUFFIXES:
-            relative, data, file_stat, truncated = cls._read_session_file(
-                cwd,
-                path,
-                allowed_suffixes=cls.HTML_PREVIEW_SUFFIXES,
-                max_bytes=FILE_PREVIEW_MAX_BYTES,
-                allow_truncate=True,
-                allowed_external_paths=allowed_external_paths,
-            )
-            if b"\0" in data:
-                raise ValueError("HTML 文件不是有效的 UTF-8 文本")
-            decoder = codecs.getincrementaldecoder("utf-8-sig")("strict")
-            try:
-                content = decoder.decode(data, final=not truncated)
-            except UnicodeDecodeError as exc:
-                raise ValueError("HTML 文件不是有效的 UTF-8 文本") from exc
+            preview = cls._read_file_preview_text(
+                cwd, path, allowed_external_paths, cls.HTML_PREVIEW_MAX_BYTES,
+                allowed_suffixes=cls.HTML_PREVIEW_SUFFIXES)
+            if len(preview["content"].encode("utf-8")) > FILE_PREVIEW_MAX_BYTES:
+                # Complete HTML is carried in data; the text field remains bounded.
+                preview["content"] = (preview["content"].encode("utf-8")[:FILE_PREVIEW_MAX_BYTES]
+                                      .decode("utf-8", errors="ignore") if preview["truncated"] else "")
+            return preview
+
+        if suffix in cls.RASTER_CONVERSION_FORMATS:
+            from cc_remote.wrapper.artifact_inspection import render_raster_image
+
+            relative, data, file_stat, _ = cls._read_session_file(
+                cwd, path, allowed_suffixes=frozenset(cls.RASTER_CONVERSION_FORMATS),
+                max_bytes=ARTIFACT_PREVIEW_MAX_BYTES, allow_truncate=False,
+                allowed_external_paths=allowed_external_paths)
+            image, mime, _ = render_raster_image(data, cls.RASTER_CONVERSION_FORMATS[suffix])
             return {
-                "path": relative,
-                "format": "html",
-                "content": content,
-                "size": file_stat.st_size,
-                "truncated": truncated,
-                "mtime_ns": file_stat.st_mtime_ns,
-                "revision": None if truncated else hashlib.sha256(data).hexdigest(),
+                "path": relative, "format": "image", "media_type": mime, "data": image,
+                "size": file_stat.st_size, "mtime_ns": file_stat.st_mtime_ns, "original_stat": file_stat,
+                "converted_from": suffix[1:],
             }
 
         media_type = cls.ARTIFACT_PREVIEW_MEDIA_TYPES.get(suffix)
@@ -27352,16 +27562,23 @@ class WrapperMachine:
                 "mtime_ns": file_stat.st_mtime_ns,
             }
 
-        relative, content, size, truncated, mtime_ns, file_format, revision = (
-            cls._read_text_preview(cwd, path, allowed_external_paths))
+        return cls._read_file_preview_text(cwd, path, allowed_external_paths, FILE_PREVIEW_MAX_BYTES)
+
+    @classmethod
+    def _read_word_preview(cls, cwd, path, caps):
+        from cc_remote.wrapper.presentation_preview import prepare_word_preview
+
+        relative, data, file_stat, _ = cls._read_session_file(
+            cwd, path, allowed_suffixes=frozenset({".docx"}), max_bytes=ARTIFACT_PREVIEW_MAX_BYTES,
+            allow_truncate=False, allowed_external_paths=caps)
+        prepared = prepare_word_preview(data)
+        if len(prepared) > ARTIFACT_PREVIEW_MAX_BYTES:
+            raise ValueError("DOCX 渲染包超过 8 MiB 预览上限")
         return {
-            "path": relative,
-            "format": file_format,
-            "content": content,
-            "size": size,
-            "truncated": truncated,
-            "mtime_ns": mtime_ns,
-            "revision": revision,
+            "path": relative, "format": "document", "data": prepared,
+            "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "size": file_stat.st_size, "mtime_ns": file_stat.st_mtime_ns, "original_stat": file_stat,
+            "converted_from": "docx",
         }
 
     @staticmethod
@@ -27521,6 +27738,7 @@ class WrapperMachine:
                 "media_type": "application/pdf",
                 "data": preview,
                 "converted_from": suffix.removeprefix("."),
+                "original_stat": file_stat,
                 "size": file_stat.st_size,
                 "mtime_ns": file_stat.st_mtime_ns,
             }
@@ -27777,13 +27995,15 @@ class WrapperMachine:
             return "markdown"
         if suffix in cls.HTML_PREVIEW_SUFFIXES:
             return "html"
-        if suffix == ".xlsx":
+        if suffix == ".xlsx" or suffix in cls.DELIMITED_PREVIEW_SUFFIXES:
             return "spreadsheet"
         if suffix == ".pptx":
             return "presentation"
+        if suffix == ".docx":
+            return "document"
         if suffix in cls.OFFICE_PREVIEW_SUFFIXES or suffix == ".pdf":
             return "pdf"
-        if suffix in cls.PREVIEW_ASSET_MEDIA_TYPES:
+        if suffix in cls.PREVIEW_ASSET_MEDIA_TYPES or suffix in cls.RASTER_CONVERSION_FORMATS:
             return "image"
         if suffix in AUDIO_PREVIEW_MEDIA_TYPES:
             return "audio"
@@ -29604,14 +29824,13 @@ class WrapperMachine:
         await self._emit(ctx, focus)
         cached_responses = [snap, focus] if snap is not None else [focus]
         await self._refresh_codex_background_processes([ctx])
-        if ctx.engine == "claude" or ctx.codex_background_processes is not None:
-            # This wrapper instance may have respawned the native Claude child
-            # without changing its generation.  Re-seed the exact current level
-            # on every focus so an empty replacement clears cards retained from
-            # the previous child/runtime.
-            background_event = self._background_process_sync(ctx)
-            await self._emit(ctx, background_event)
-            cached_responses.append(background_event)
+        async with ctx.emit_lock:
+            if ctx.engine == "claude" or ctx.codex_background_processes is not None:
+                # Seed the current level on focus. An empty snapshot clears
+                # retained cards, including after a Claude child respawn.
+                background_event = self._background_process_sync(ctx)
+                await self._emit_locked(ctx, background_event)
+                cached_responses.append(background_event)
         control_event = self._session_control(ctx)
         await self._emit(ctx, control_event)
         cached_responses.append(control_event)

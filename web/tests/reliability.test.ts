@@ -18818,7 +18818,7 @@ assert.match(serviceWorkerSource, /existing\.postMessage\(\{[\s\S]*cc-remote-not
 assert.match(serviceWorkerSource, /self\.clients\.openWindow\(target\)/,
   "cold notification clicks must retain the fragment route");
 assert.match(serviceWorkerSource,
-  /url\.pathname === "\/html-preview-runner\.html"[\s\S]*url\.pathname === "\/html-preview-runner\.js"[\s\S]*return/,
+  /url\.pathname === "\/html-preview-runner\.html"[\s\S]*url\.pathname === "\/word-preview\.html"[\s\S]*return/,
   "the isolated HTML runner must bypass shell and asset caching");
 assert.match(layoutCss, /\.sheet\{[^}]*bottom:var\(--keyboard-inset,0px\)/,
   "mobile bottom sheets must remain above the virtual keyboard");
