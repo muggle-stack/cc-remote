@@ -4,6 +4,14 @@
 
 ## Unreleased
 
+## v5.3.59
+
+Chat previews open local file links when an angle-bracket destination has
+extra spaces before its absolute path. This also applies to saved replies,
+and preserves spaces that belong to filenames. Wire protocol v98.
+
+See the bilingual [release notes](docs/releases/v5.3.59.md).
+
 ## v5.3.58
 
 Direct Codex sends reach the original thread when a background task receipt
