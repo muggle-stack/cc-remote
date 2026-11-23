@@ -4,6 +4,7 @@ import {
   CommandOutbox,
   QueryAcceptanceLatch,
   planRecoveryReplay,
+  queryAcceptanceDescriptor,
 } from "../src/outbox.ts";
 import { shouldAcceptSessionList } from "../src/session-list.ts";
 
@@ -253,11 +254,29 @@ assert.equal(shouldAcceptSessionList("codex", "code", {
   assert.equal(replies.accept({ type: "error", sid: "native-session", msg_id: "reply-1", ...error }), false);
   assert.equal(replies.accept({ type: "turn_steered", sid: "native-session", msg_id: "reply-2" }), true);
   assert.deepEqual(await retry, { accepted: true });
-  replies.begin("native-session", "reply-3");
+  replies.begin("native-session", "reply-3",
+    queryAcceptanceDescriptor("reply-3", "same prompt"), {
+      revision: "revision", generation: "generation", buildSeq: 1, liveSeq: 10,
+      newestId: "previous-native-message",
+    });
   const unknown = replies.receiptFor("native-session", "reply-3")!;
   replies.accept({ type: "error", sid: "native-session", msg_id: "reply-3",
     code: "steer_outcome_unknown", message: "still reconciling" });
   assert.equal((await unknown).accepted, false, "an unknown native outcome is never success");
+  assert.equal(replies.pendingMessageId("native-session"), "reply-3",
+    "a direct query with an uncertain steer outcome still awaits confirmation");
+  assert.equal(replies.acceptHistory({
+    v: 72, ts: 10, type: "history", session_id: "native-session", revision: "revision",
+    generation: "generation", build_seq: 2, live_seq: 11, newest_id: "other-message", has_more: false,
+    events: [{ v: 72, ts: 10, type: "user_msg", msg_id: "other-message", prompt: "same prompt" }],
+  }), false, "matching text from another native message cannot resolve uncertainty");
+  assert.equal(replies.accept({
+    type: "turn_steered", sid: "native-session", msg_id: "other-message",
+  }), false);
+  assert.equal(replies.accept({
+    type: "turn_steered", sid: "native-session", msg_id: "reply-3",
+  }), true);
+  assert.equal(replies.pendingMessageId("native-session"), null);
 }
 
 console.log("command outbox tests passed");

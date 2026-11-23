@@ -247,9 +247,9 @@ export class QueryAcceptanceLatch {
     if (event.type === "error" && event.code === "wrapper_offline") return false;
     const pending = this.bySession.get(event.sid)?.get(messageId);
     if (!pending) return false;
-    if (event.type === "error" && event.code === "steer_outcome_unknown"
-        && pending.exactOnly) {
+    if (event.type === "error" && event.code === "steer_outcome_unknown") {
       pending.kind = "steer_unknown";
+      pending.exactOnly = true;
       pending.finish?.({ accepted: false,
         error: { code: event.code, message: event.message ?? "" } });
       return true;

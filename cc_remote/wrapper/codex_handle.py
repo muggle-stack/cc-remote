@@ -46,6 +46,7 @@ from cc_remote.wrapper.artifact_inspection import (
 )
 from cc_remote.wrapper.rollout_io import rollout_open, rollout_size
 from cc_remote.log import logger
+from cc_remote.task_store import parse_task_receipt
 from cc_remote.wrapper.token_usage import CodexUsageTracker
 from cc_remote.wrapper.btw_history import CodexBtwCompletions
 from cc_remote.protocol import (
@@ -101,6 +102,7 @@ from cc_remote.wrapper.codex_context_usage import read_codex_context_estimate
 log = logger("cc_remote.wrapper.codex_handle")
 
 _REQ_TIMEOUT = 60.0
+_TASK_CALLBACK_ORIGIN_TIMEOUT_SECONDS = 0.5
 _APPROVAL_TIMEOUT = 5 * 60.0
 _MAX_SERVER_REQUEST_TASKS = 32
 _THREAD_SETTINGS_NOTIFY_TIMEOUT = 1.0
@@ -845,6 +847,8 @@ class _SpontaneousNotificationQueue:
         self._lossy = False
         self._post_gap_items: set[str] = set()
         self._end_delivered = False
+        self.origin_ready: asyncio.Event | None = None
+        self.task_callback = False
 
     @property
     def byte_size(self) -> int:
@@ -2846,6 +2850,7 @@ class CodexHandle:
         images=None,
         *,
         client_user_message_id: Optional[str] = None,
+        task_callback_turn_id: str | None = None,
     ) -> str:
         """Append input to the exact active turn without changing lifecycle."""
         await self._wait_managed_compaction_settled()
@@ -2862,6 +2867,14 @@ class CodexHandle:
             })
         thread_id = self.thread_id
         turn_id = self.turn_id
+        if task_callback_turn_id is not None and (
+            turn_id != task_callback_turn_id
+            or not self._is_task_callback_turn(task_callback_turn_id)
+        ):
+            raise CodexAppServerError({
+                "code": -32600,
+                "message": "expected turn mismatch before turn/steer",
+            })
         params: dict[str, Any] = {
             "threadId": thread_id,
             "expectedTurnId": turn_id,
@@ -2896,6 +2909,10 @@ class CodexHandle:
         )
         if returned_turn_id != turn_id:
             boundary.release()
+            if task_callback_turn_id is not None:
+                # A malformed success response cannot prove input was rejected.
+                raise CodexSteerOutcomeUnknown(
+                    "Codex app-server did not confirm the expected receipt turn")
             self._discard_steer_user_identity(client_user_message_id)
             raise CodexAppServerError({
                 "code": -32600,
@@ -3787,14 +3804,69 @@ class CodexHandle:
         self._turn_q = _SpontaneousNotificationQueue(item_cap, byte_cap)
         self._managed_overflow = False
 
-    def _open_spontaneous_stream(self, turn_id: str) -> None:
+    def _open_spontaneous_stream(
+        self, turn_id: str, *, observe_origin: bool = False,
+    ) -> None:
         """Create the bounded raw-notification bridge before announcing a turn."""
         if self._spontaneous_q is not None:
             self._close_spontaneous_stream(self._spontaneous_queue_turn_id)
         item_cap, byte_cap = self._notification_queue_limits(managed=False)
         self._spontaneous_q = _SpontaneousNotificationQueue(item_cap, byte_cap)
+        if observe_origin:
+            self._spontaneous_q.origin_ready = asyncio.Event()
         self._spontaneous_queue_turn_id = turn_id
         self._spontaneous_overflow = False
+
+    def _observe_spontaneous_origin(self, message: dict) -> None:
+        q = self._spontaneous_q
+        if (
+            q is None or q.origin_ready is None
+            or _notification_thread_id(message) != self.thread_id
+            or _notification_turn_id(message) != self._spontaneous_queue_turn_id
+        ):
+            return
+        method = message.get("method")
+        if method == "turn/completed":
+            q.origin_ready.set()
+            return
+        if method not in {"item/started", "item/completed"}:
+            return
+        params = message.get("params")
+        item = params.get("item") if isinstance(params, dict) else None
+        if not isinstance(item, dict):
+            return
+        kind = item.get("type")
+        if not q.origin_ready.is_set():
+            # Only the opening item can establish a receipt turn. A later
+            # tool output can have been appended to somebody else's turn.
+            q.task_callback = (
+                kind == "functionCallOutput" and parse_task_receipt(item) is not None
+            )
+            q.origin_ready.set()
+        elif kind in ("userMessage", "enteredReviewMode", "contextCompaction"):
+            q.task_callback = False
+
+    def _is_task_callback_turn(self, turn_id: str) -> bool:
+        return bool(
+            self._spontaneous_queue_turn_id == turn_id
+            and self._spontaneous_q is not None
+            and self._spontaneous_q.task_callback
+            and not self._review_active
+            and (self.last_goal or {}).get("status") != "active"
+        )
+
+    async def wait_for_task_callback_turn(self, turn_id: str) -> bool:
+        """Allow the native receipt item to follow turn/started on stdout."""
+        q = self._spontaneous_q
+        if self._spontaneous_queue_turn_id != turn_id or q is None or q.origin_ready is None:
+            return False
+        if not q.origin_ready.is_set():
+            try:
+                await asyncio.wait_for(
+                    q.origin_ready.wait(), timeout=_TASK_CALLBACK_ORIGIN_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                return False
+        return self._spontaneous_q is q and self._is_task_callback_turn(turn_id)
 
     @staticmethod
     def _notification_wire_size(message: dict) -> int:
@@ -3958,6 +4030,9 @@ class CodexHandle:
         current = self._spontaneous_queue_turn_id
         if q is None or current is None or (turn_id and turn_id != current):
             return
+        if q.origin_ready is not None:
+            q.task_callback = False
+            q.origin_ready.set()
         if q.has_turn_completed():
             return
         closed = CodexSpontaneousClosed(current)
@@ -7206,6 +7281,9 @@ class CodexHandle:
                 task = self._server_request_tasks_by_id.pop(request_id, None)
                 if task is not None and not task.done():
                     task.cancel()
+        # A registered user item can be consumed by identity capture below.
+        # Revoke receipt-only ownership before that happens.
+        self._observe_spontaneous_origin(m)
         # Preserve the strict ownership filter below. The only pre-filter
         # exception is a content-free identity proof for a client id registered
         # by this exact handle generation.
@@ -7401,7 +7479,14 @@ class CodexHandle:
                 # bounded queue and deadlock the sole stdout reader.
                 self._turn_q = None
                 self._spontaneous_turn_id = turn_id
-                self._open_spontaneous_stream(turn_id)
+                self._open_spontaneous_stream(
+                    turn_id,
+                    observe_origin=(
+                        not turn.get("items")
+                        and self._manual_compact_candidate != turn_id
+                        and turn_id not in self._goal_prompt_pending
+                    ),
+                )
                 # The machine callback only claims state and schedules its raw
                 # consumer; it deliberately performs no relay I/O on this reader.
                 await self._publish_turn_lifecycle("started", turn_id)
