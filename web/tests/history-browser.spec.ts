@@ -8194,7 +8194,7 @@ test("HTML preview fits local resources in the frame and downloads the original 
   const relay = await mockRightPanelRelay(page, { retained: false, seedTurns: [{
     id: "deck", prompt: "查看页面", done: true,
     blocks: [{ kind: "text", message_id: "deck-answer", channel: "final", done: true,
-      text: `[演示稿](${path})` }],
+      text: `[演示稿](< ${path}>)` }],
   }] });
   const content = '<div id="slide" style="width:1600px"><img src="logo.png" alt="Logo">最后一列</div>'
     + '<link rel="stylesheet" href="https://cc-remote-preview-test.invalid/page.css">';
@@ -8203,6 +8203,7 @@ test("HTML preview fits local resources in the frame and downloads the original 
   await page.getByRole("button", { name: `在 Remote 中打开 ${path}`, exact: true }).click();
   await expect.poll(() => relay.commands.some(command => command.type === "get_file_preview")).toBe(true);
   const request = relay.commands.find(command => command.type === "get_file_preview")!;
+  expect(request.path).toBe(path);
   relay.emit({ type: "file_preview", sid: "layout-parent", request_id: String(request.request_id),
     path, format: "html", content, data: original.toString("base64"), size: original.length });
   await expect.poll(() => relay.commands.some(command => command.type === "get_preview_asset")).toBe(true);

@@ -746,7 +746,7 @@ try {
   const replyAnalysis = "先核对 **职责边界**，再查看 [说明][guide]。\n\n"
     + "```xml\n<summary>这是代码示例</summary>\n```";
   const replySummary = "## 主要请求和意图\n\n1. 限定动作范围。\n2. 保留慢脑任务。\n\n"
-    + "[guide]: /tmp/guide.md";
+    + "[看板](< /tmp/report.html>)\n\n[guide]: /tmp/guide.md";
   const taggedReply = `<analysis>\n${replyAnalysis}\n</analysis>\n\n<summary>\n${replySummary}`;
   for (const closing of ["", "\n</summary>"]) {
     const markup = renderToStaticMarkup(createElement(MessageBlock, {
@@ -756,7 +756,10 @@ try {
     assert.match(markup, /<section class="message-reply-analysis" aria-label="分析">/);
     assert.match(markup, /message-reply-analysis-label">分析<\/div>/);
     assert.match(markup, /<strong>职责边界<\/strong>/);
-    assert.match(markup, /message-file-link/, "references keep their definitions across reply sections");
+    assert.match(markup, /aria-label="在 Remote 中打开 \/tmp\/guide.md"/,
+      "references keep their definitions across reply sections");
+    assert.match(markup, /aria-label="在 Remote 中打开 \/tmp\/report.html"/,
+      "padded file links are normalized in the formatted summary");
     assert.match(markup, /&lt;summary&gt;这是代码示例&lt;\/summary&gt;/);
     assert.match(markup, /<h2>主要请求和意图<\/h2>/);
     assert.match(markup, /<li>保留慢脑任务。<\/li>/);
@@ -1643,6 +1646,23 @@ $$`,
   assert.match(messageMarkup, /message-file-link/);
   assert.match(messageMarkup, /在 Remote 中打开/);
   assert.doesNotMatch(messageMarkup, /href="\/home\/nancy/);
+
+  const mixedFileLinks = [
+    ["换这份 [看板](< /tmp/EP-nightly-preview.html>)。", "/tmp/EP-nightly-preview.html"],
+    ["[**看板**](< \t/tmp/EP nightly preview.html >)", "/tmp/EP nightly preview.html "],
+    ["[相对路径](<%20/tmp/encoded-report.html>)", " /tmp/encoded-report.html"],
+    ["[实体空格](<&#32;/tmp/entity-report.html>)", " /tmp/entity-report.html"],
+    ["[双斜线](< //server/report.html>)", " //server/report.html"],
+  ];
+  for (const done of [false, true]) {
+    const markup = renderToStaticMarkup(createElement(MessageBlock, {
+      text: mixedFileLinks.map(([text]) => text).join("\n\n"), done, onOpenFile: () => {},
+    }));
+    for (const [text, path] of mixedFileLinks) {
+      assert.ok(markup.includes(`aria-label="在 Remote 中打开 ${path}"`), text);
+    }
+    assert.doesNotMatch(markup, /href=/);
+  }
 
   for (const [href, path] of [
     ["/tmp/listen/short.wav", "/tmp/listen/short.wav"],
