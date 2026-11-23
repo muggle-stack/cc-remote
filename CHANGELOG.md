@@ -6,8 +6,9 @@
 
 - Add collaboration rooms with Claude, Codex and DSH participants, native session
   settings, public context sharing and running-turn steering.
-- Coordinate Relay, Wrapper and Web on wire protocol v98. Include the private
-  collaboration database in transactional upgrade and rollback snapshots.
+- Coordinate Relay, Wrapper and Web on wire protocol v99 for the new preview
+  formats. Include the private collaboration database in transactional upgrade
+  and rollback snapshots.
 - Sync common fixes and features through master v5.3.59.
 
 ## v5.3.59

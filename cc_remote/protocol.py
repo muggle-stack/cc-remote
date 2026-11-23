@@ -29,7 +29,7 @@ from cc_remote.attachments import (
 )
 from cc_remote.collaboration import CollaborationMemberSpec, MAX_ROOM_MESSAGE
 
-PROTOCOL_VERSION = 98
+PROTOCOL_VERSION = 99
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a

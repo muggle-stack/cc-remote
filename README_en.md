@@ -4,7 +4,7 @@
 
 Self-hosted · Multiple sessions and devices · Live tool activity · Code / Work / Collaboration · Web / PWA / TUI
 
-**Product version: v5.3.59** · Wire protocol v98
+**Product version: v5.3.59** · Wire protocol v99
 
 [中文](README.md) · [Collaboration rooms](#collaboration) · [Release install (recommended)](#install-and-upgrade) · [Engine comparison](#engines-and-features) · [Try from source](#quick-start) ·
 [Interface tour](#interface-tour) · [Terminal workspace](#terminal-workspace) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)
@@ -148,7 +148,7 @@ After a member is bound, continue adjusting its model, permissions and other
 runtime settings in the native session.
 
 To try this branch, select `feat/multi-agent-collaboration` during the
-[source installation steps](#quick-start). This source uses **wire protocol v98**.
+[source installation steps](#quick-start). This source uses **wire protocol v99**.
 Relay, Web and every connected Wrapper must use the same source snapshot.
 For an existing installation, follow the repository deployment procedure to
 upgrade the tiers together and preserve private state in deployment snapshots.

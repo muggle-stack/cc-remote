@@ -4,7 +4,7 @@
 
 自托管 · 多会话 · 多设备 · 实时工具过程 · Code / Work / 协作 · Web / PWA / TUI
 
-**产品版本：v5.3.59** · Wire protocol v98
+**产品版本：v5.3.59** · Wire protocol v99
 
 [English](README_en.md) · [协作聊天室](#collaboration) · [Release 安装（推荐）](#安装与升级) · [功能对照](#引擎与功能) · [源码体验](#快速开始) ·
 [界面导览](#界面导览) · [终端工作台](#terminal-workspace) · [文档](#文档) · [更新记录](CHANGELOG_zh.md)
@@ -109,7 +109,7 @@ cc-remote 把本机 agent 的会话、工具过程、文件和运行控制带到
 运行配置可在对应原生会话中继续调整。
 
 体验此分支时，在[源码安装步骤](#快速开始)中切换到 `feat/multi-agent-collaboration`。
-此源码使用 **wire protocol v98**，Relay、Web 和所有连接的 Wrapper 需要来自同一源码
+此源码使用 **wire protocol v99**，Relay、Web 和所有连接的 Wrapper 需要来自同一源码
 快照。已有部署请按仓库部署流程同步升级各层，私有状态通过部署快照保留。
 使用稳定 Release 的安装与更新方式时，功能范围以所安装 tag 为准。
 [部署流程](deploy/README.md)
