@@ -325,6 +325,7 @@ from cc_remote.wrapper.codex_process_clocks import (
 )
 from cc_remote.wrapper.codex_permissions import codex_permission_profiles
 from cc_remote.wrapper.codex_delegation import is_codex_delegation_output
+from cc_remote.wrapper.codex_tasks import TASK_ITEM_PREFIX
 from cc_remote.wrapper.codex_stream import (
     CodexHistoryImageView, CodexHistoryNativeWitness,
     CodexHistoryProcessPageWitness, CodexLiveUserMessage,
@@ -6180,13 +6181,16 @@ class WrapperMachine:
         from cc_remote.wrapper.codex_tasks import read_task_callbacks
 
         sdk = ctx.sdk
+        native_sid = self._codex_task_thread_id(ctx)
+        if not native_sid:
+            return False
         home = self._codex_profile_for_ctx(ctx).home
-        native_sid = ctx.session_id
 
         def available() -> bool:
             return bool(
                 self._is_resident_context(ctx) and ctx.sdk is sdk
-                and ctx.session_id == native_sid
+                and not ctx.btw_destroyed
+                and self._codex_task_thread_id(ctx) == native_sid
                 and self._codex_profile_for_ctx(ctx).home == home
                 and self._codex_shared_live(ctx) and ctx.state == "idle"
                 and ctx.turn_task is None and ctx.codex_spontaneous_task is None
@@ -7064,14 +7068,21 @@ class WrapperMachine:
             ],
         )
 
+    @staticmethod
+    def _codex_task_thread_id(ctx: SessionContext) -> str | None:
+        """Resolve the native thread for account-local Code task records."""
+        if ctx.engine != "codex" or ctx.space != "code":
+            return None
+        return ctx.btw_real_id if ctx.btw else ctx.session_id
+
     def _observe_completed_codex_task_turn(self, ctx: SessionContext, turn_id: str) -> bool:
         """Retire this account/thread's callback cards under the emission lock."""
         from cc_remote.task_store import MAX_RECORDS
-        from cc_remote.wrapper.codex_tasks import TASK_ITEM_PREFIX
 
-        if ctx.space != "code" or not ctx.session_id or not self._is_resident_context(ctx):
+        native_sid = self._codex_task_thread_id(ctx)
+        if not native_sid or not self._is_resident_context(ctx):
             return False
-        scope = (str(self._codex_profile_for_ctx(ctx).home), ctx.session_id)
+        scope = (str(self._codex_profile_for_ctx(ctx).home), native_sid)
         key = (*scope, turn_id)
         completed = ctx.codex_completed_task_turns
         completed.pop(key, None)
@@ -7096,18 +7107,18 @@ class WrapperMachine:
         self, contexts: list[SessionContext] | None = None,
     ) -> None:
         """Project detached task state without querying or waking an engine."""
-        from cc_remote.wrapper.codex_tasks import TASK_ITEM_PREFIX, read_task_activity
+        from cc_remote.wrapper.codex_tasks import read_task_activity
         from cc_remote.wrapper.codex_agent_activity import CodexAgentActivity
 
         async with self._codex_task_sync_lock:
             selected = None if contexts is None else {id(ctx) for ctx in contexts}
             accounts: dict[Path, list[tuple[SessionContext, str]]] = {}
             for ctx in list(self.sessions.values()):
-                if (ctx.engine != "codex" or ctx.space != "code"
-                        or not ctx.session_id or not self._is_resident_context(ctx)):
+                native_sid = self._codex_task_thread_id(ctx)
+                if not native_sid or not self._is_resident_context(ctx):
                     continue
                 profile = self._codex_profile_for_ctx(ctx)
-                accounts.setdefault(profile.home, []).append((ctx, ctx.session_id))
+                accounts.setdefault(profile.home, []).append((ctx, native_sid))
             for home, account_residents in accounts.items():
                 residents = [entry for entry in account_residents
                              if selected is None or id(entry[0]) in selected]
@@ -7144,7 +7155,8 @@ class WrapperMachine:
                     # Serialize with live terminal publication so a read taken
                     # before completion cannot reintroduce a retired callback.
                     async with ctx.emit_lock:
-                        if (not self._is_resident_context(ctx) or ctx.session_id != native_sid
+                        if (not self._is_resident_context(ctx)
+                                or self._codex_task_thread_id(ctx) != native_sid
                                 or self._codex_profile_for_ctx(ctx).home != home):
                             continue
                         scope = (str(home), native_sid)
@@ -9029,9 +9041,14 @@ class WrapperMachine:
         # Only the stable btw-* key is a valid live target. The persisted Claude
         # session id is internal, and session-store operations (switch/history/
         # rename/archive) would turn an ephemeral fork into a normal cold session.
+        task_parameters = (
+            cmd.type == "get_agent_detail" and ctx is not None
+            and ctx.engine == "codex" and target == ctx.key
+            and cmd.run_id.startswith(TASK_ITEM_PREFIX)
+        )
         invalid_private_target = bool(
             tombstoned
-            or cmd.type in self.BTW_SESSION_COMMANDS
+            or (cmd.type in self.BTW_SESSION_COMMANDS and not task_parameters)
             or (ctx is not None and target == ctx.btw_real_id)
         )
         if (not invalid_private_target and client_id and owner_id
@@ -10848,12 +10865,8 @@ class WrapperMachine:
         ctx: SessionContext,
         msg: TurnEnd,
     ) -> CodexTerminalFence | None:
-        """Normalize and retain an authoritative live app-server terminal."""
-        if (
-            ctx.engine != "codex"
-            or ctx.btw
-            or not msg._codex_authoritative_terminal
-        ):
+        """Normalize a live Codex terminal and retain it for durable sessions."""
+        if ctx.engine != "codex" or not msg._codex_authoritative_terminal:
             return None
         fence = self._codex_terminal_fence_from_event(msg)
         if fence is None:
@@ -10866,6 +10879,10 @@ class WrapperMachine:
             # immediately continues the same visible logical turn.  Its final
             # replacement terminal will be recorded normally.
             return None
+        if ctx.btw:
+            # The live boundary retires private task cards without storing
+            # ephemeral fork state in the terminal ledger.
+            return fence
         sid = self._ctx_wire_sid(ctx) or ctx.key
         watch = self._watch.get(sid)
         source_identity = self._codex_watch_source_identity(watch)
@@ -18392,7 +18409,7 @@ class WrapperMachine:
 
     async def _handle_get_agent_detail(self, cmd) -> AgentDetail:
         """Return one private process detail page without resuming an engine."""
-        from cc_remote.wrapper.codex_tasks import TASK_ITEM_PREFIX, read_task_parameters
+        from cc_remote.wrapper.codex_tasks import read_task_parameters
 
         started_at = time.perf_counter()
         sid = self._resolve_session_alias(cmd.session_id) or cmd.session_id
@@ -18450,15 +18467,15 @@ class WrapperMachine:
         if cmd.run_id.startswith(TASK_ITEM_PREFIX):
             error = "后台任务参数暂不可用"
             ctx = self._ctx_by_sid(sid)
-            if (not client_id or ctx is None or ctx.engine != "codex"
-                    or ctx.space != "code" or not ctx.session_id):
+            native_sid = self._codex_task_thread_id(ctx) if ctx is not None else None
+            if not client_id or ctx is None or not native_sid:
                 return await send(title="后台任务", error=error)
             try:
                 home = self._codex_profile_for_ctx(ctx).home
-                native_sid = ctx.session_id
                 task = await asyncio.to_thread(read_task_parameters, home, native_sid, cmd.run_id)
                 if (task is None or not self._is_resident_context(ctx)
-                        or ctx.session_id != native_sid or self._codex_profile_for_ctx(ctx).home != home):
+                        or self._codex_task_thread_id(ctx) != native_sid
+                        or self._codex_profile_for_ctx(ctx).home != home):
                     return await send(title="后台任务", error=error)
             except Exception as exc:
                 log.warning("Codex background task parameters unavailable", error_type=type(exc).__name__)

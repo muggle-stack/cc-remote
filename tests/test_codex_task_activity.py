@@ -3,11 +3,12 @@ import asyncio
 import json
 import shlex
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
 
-from cc_remote.protocol import GetAgentDetail, TurnEnd, TurnResult
+from cc_remote.protocol import ERR_AUTH, GetAgentDetail, SyncBtw, TurnEnd, TurnResult
 from cc_remote.task_store import TaskStore, public_task
 from cc_remote.wrapper.codex_tasks import read_task_activity, read_task_callbacks, read_task_parameters
 from cc_remote.wrapper.history_store import materialize_history_turns
@@ -20,6 +21,18 @@ def task(home, sid, title="Background verification"):
     key = store.create(sid, argv=["echo", "PRIVATE_ARGUMENT"], cwd=str(home),
                        title=title, request_id=str(uuid4()))
     return store, key
+
+
+async def codex_task_context(machine, sid, *, side_chat=False):
+    key = f"btw-{uuid4().hex}" if side_chat else sid
+    ctx = _mk_ctx(key, None if side_chat else sid)
+    ctx.engine = "codex"
+    if side_chat:
+        ctx.btw = ctx.btw_announced = True
+        ctx.owner_client_id = "requesting-owner"
+        await machine._capture_session_id(ctx, sid)
+    machine.sessions[key] = ctx
+    return ctx
 
 
 def test_absent_task_state_is_empty_without_writes(tmp_path):
@@ -87,30 +100,40 @@ def test_task_parameters_redact_headers_inside_shell_scripts(tmp_path, script, r
 
 
 @pytest.mark.asyncio
-async def test_wrapper_sends_task_parameters_only_to_requester_without_waking_session(tmp_path, monkeypatch):
+@pytest.mark.parametrize("side_chat", [False, True], ids=["main", "side-chat"])
+async def test_wrapper_sends_task_parameters_only_to_requester_without_waking_session(
+    tmp_path, monkeypatch, side_chat,
+):
     sid, other_sid = str(uuid4()), str(uuid4())
     _, key = task(tmp_path, sid)
     machine, transport = _mk_machine()
-    for target in (sid, other_sid):
-        ctx = _mk_ctx(target, target)
-        ctx.engine = "codex"
-        machine.sessions[ctx.key] = ctx
+    ctx = await codex_task_context(machine, sid, side_chat=side_chat)
+    other = await codex_task_context(machine, other_sid, side_chat=side_chat)
     monkeypatch.setattr(machine, "_codex_profile_for_ctx", lambda _: SimpleNamespace(home=tmp_path))
 
     async def unexpected_watch(_sid):
         pytest.fail("Reading task parameters must not watch or resume a session")
 
     monkeypatch.setattr(machine, "_watch_session", unexpected_watch)
-    cmd = GetAgentDetail(session_id=sid, run_id=f"async-task:{key}", owner_id="requesting-owner",
+    cmd = GetAgentDetail(session_id=ctx.key, run_id=f"async-task:{key}", owner_id="requesting-owner",
                          client_id="requesting-client", request_id="parameters-request")
-    detail = await machine._handle_get_agent_detail(cmd)
+    detail = await machine._handle(cmd)
     assert transport.sent == [detail] and detail.to == cmd.client_id
     assert detail.owner_id == cmd.owner_id
-    assert detail.sid == sid and detail.request_id == cmd.request_id
+    assert detail.sid == ctx.key and detail.request_id == cmd.request_id
     assert detail.events[0]["command"] == "echo PRIVATE_ARGUMENT"
     assert detail.events[0]["input"] == {"timeout_seconds": 3600}
-    for fields in ({"session_id": other_sid}, {"client_id": None}):
-        denied = await machine._handle_get_agent_detail(cmd.model_copy(update=fields))
+    denied = await machine._handle(cmd.model_copy(update={"session_id": other.key}))
+    assert not denied.authoritative and denied.error and denied.events == []
+    if side_chat:
+        for fields in (
+            {"owner_id": "other-owner"}, {"session_id": sid}, {"client_id": None},
+            {"run_id": "other-agent"},
+        ):
+            denied = await machine._handle(cmd.model_copy(update=fields))
+            assert denied.type == "error" and denied.code == ERR_AUTH
+    else:
+        denied = await machine._handle(cmd.model_copy(update={"client_id": None}))
         assert not denied.authoritative and denied.error and denied.events == []
 
 
@@ -238,7 +261,46 @@ async def test_wrapper_sync_routes_activity_and_never_reopens_idle(tmp_path, mon
 
 
 @pytest.mark.asyncio
-async def test_native_completion_retires_only_its_callbacks_before_the_worker_poll(tmp_path, monkeypatch):
+async def test_side_chat_seeds_background_tasks_and_recovers_its_accepted_callback(tmp_path, monkeypatch):
+    sid, parent_sid, turn_id = (str(uuid4()) for _ in range(3))
+    store, key = task(tmp_path, sid)
+    store.update(key, state="running")
+    machine, transport = _mk_machine()
+    await codex_task_context(machine, parent_sid)
+    side = await codex_task_context(machine, sid, side_chat=True)
+    side.parent_sid = parent_sid
+    monkeypatch.setattr(machine, "_codex_profile_for_ctx", lambda _: SimpleNamespace(home=tmp_path))
+    item_id = f"async-task:{key}"
+
+    await machine._refresh_codex_background_processes()
+    snapshot, = (frame for frame in transport.sent if frame.type == "background_process_sync")
+    assert snapshot.sid == side.key and snapshot.owner_id == side.owner_client_id
+    assert [(item.item_id, item.status) for item in snapshot.items] == [(item_id, "running")]
+
+    transport.sent.clear()
+    await machine._handle(SyncBtw(sid=side.key, client_id="reconnected-client", owner_id=side.owner_client_id))
+    seeded, = (frame for frame in transport.sent if frame.type == "background_process_sync")
+    assert seeded.items == snapshot.items and seeded.seq is None
+    assert seeded.sid == side.key and seeded.to == "reconnected-client"
+    assert seeded.owner_id == side.owner_client_id and side.state == "idle"
+
+    store.update(key, state="failed", delivery="accepted", delivery_turn_id=turn_id)
+    side.sdk = SimpleNamespace(
+        using_daemon_proxy=True,
+        probe_owned_turn=AsyncMock(return_value=SimpleNamespace(turn_id=turn_id)),
+        recover_owned_turn=AsyncMock(return_value=True),
+    )
+    await machine._refresh_codex_background_processes([side])
+    side.sdk.probe_owned_turn.assert_awaited_once_with(turn_id)
+    side.sdk.recover_owned_turn.assert_awaited_once_with(turn_id)
+    assert side.session_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("side_chat", [False, True], ids=["main", "side-chat"])
+async def test_native_completion_retires_only_its_callbacks_before_the_worker_poll(
+    tmp_path, monkeypatch, side_chat,
+):
     sid, other_sid, turn_id = (str(uuid4()) for _ in range(3))
     local_home, other_home = tmp_path / "local", tmp_path / "other"
     store, first = task(local_home, sid, "First callback")
@@ -252,17 +314,19 @@ async def test_native_completion_retires_only_its_callbacks_before_the_worker_po
     store.update(running, state="running")
 
     machine, transport = _mk_machine()
-    current = _mk_ctx(sid, sid)
+    current = await codex_task_context(machine, sid, side_chat=side_chat)
     different_thread = _mk_ctx(other_sid, other_sid)
     different_account = _mk_ctx(f"other:{sid}", sid)
-    for ctx in (current, different_thread, different_account):
+    for ctx in (different_thread, different_account):
         ctx.engine = "codex"
         machine.sessions[ctx.key] = ctx
     monkeypatch.setattr(machine, "_codex_profile_for_ctx", lambda ctx: SimpleNamespace(
         home=other_home if ctx is different_account else local_home))
     await machine._refresh_codex_background_processes()
     assert set(current.codex_background_processes) == {f"async-task:{key}" for key in (first, second, running)}
-    cached = next(frame for frame in transport.sent if frame.type == "background_process_sync" and frame.sid == sid)
+    cached = next(
+        frame for frame in transport.sent if frame.type == "background_process_sync" and frame.sid == current.key
+    )
 
     for target, trusted, is_error in (
         (turn_id, False, False), (turn_id, True, True), (str(uuid4()), True, False),
@@ -291,7 +355,8 @@ async def test_native_completion_retires_only_its_callbacks_before_the_worker_po
     }}):
         await machine._emit(current, event)
     frames = [frame for frame in transport.sent if frame.type == "background_process_sync"]
-    assert len(frames) == 1 and frames[0].sid == sid
+    assert len(frames) == 1 and frames[0].sid == current.key
+    assert frames[0].owner_id == current.owner_client_id
     assert [(item.item_id, item.status) for item in frames[0].items] == [(f"async-task:{running}", "running")]
     assert store.get(first)["delivery"] == store.get(second)["delivery"] == "accepted"
     assert list(different_thread.codex_background_processes) == [f"async-task:{other_thread}"]
