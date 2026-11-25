@@ -4,6 +4,15 @@
 
 ## Unreleased
 
+## v5.3.60
+
+Codex Shared opens the updated macOS Codex App on the selected account's
+shared daemon. Codex browser completions appear as finished activities in
+live and restored chat. Codex side chats show their own background tasks,
+including launch parameters and completion status. Wire protocol v98.
+
+See the bilingual [release notes](docs/releases/v5.3.60.md).
+
 ## v5.3.59
 
 Chat previews open local file links when an angle-bracket destination has
