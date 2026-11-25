@@ -25,9 +25,9 @@ The [official app-server protocol](https://learn.chatgpt.com/docs/app-server)
 documents WebSockets over the Unix control socket. WebSocket transport is
 experimental. The Desktop `CODEX_APP_SERVER_WS_URL` launch override is an
 internal, version-dependent App behavior, **not a documented compatibility
-guarantee**; it has been locally checked with Desktop 26.901.41600 and Codex
-0.153.4, and rechecked after a Desktop update to 26.903.61454. Revalidate it after
-updating the official App; these observations do not guarantee other builds.
+guarantee**. It has been locally checked with Desktop 26.901.41600 and Codex
+0.153.4, after a Desktop update to 26.903.61454, and with Desktop 26.1120.50957
+sharing a Codex 0.169.1 daemon. Revalidate it after updating the official App.
 
 ## Post-deploy choice and preflight
 
@@ -155,10 +155,10 @@ checks. An in-progress turn may keep its previous catalog until the next turn
 boundary; do not restart the daemon to force refresh. A UI tool returning
 `queued` is not proof that its panel has opened.
 
-Tests cover real socket byte forwarding,
-browser/foreign-process rejection, exact profile/PID identity, repeat clicks,
-simulated quit/reopen, lock release, non-overwriting installation and idempotent
-Dock changes. They make no model calls. Never quit a real active App merely to
+Tests cover real socket byte forwarding, browser/foreign-process rejection,
+exact profile/PID identity, utility process admission, repeat clicks, simulated
+quit/reopen, lock release, non-overwriting installation and idempotent Dock
+changes. They make no model calls. Never quit a real active App merely to
 test this launcher; perform full desktop quit/reopen acceptance when the user is
 ready. An App auto-update that relaunches itself without preserving the launch
 environment may require quitting and reopening through **Codex Shared**.
@@ -167,9 +167,11 @@ report the exact failed or pending check, and do not fall back to a private
 App backend while reporting successful sharing.
 
 The listener binds only `127.0.0.1` on an ephemeral port, rejects any browser
-Origin, validates Host/path/upgrade framing, and checks the peer's OS process
-identity, owner, exact executable and account-specific launch environment.
-Only its own bounded startup preflight can connect without being the App.
+Origin, and validates Host/path/upgrade framing. It admits the launched App or
+its signed app-server utility from the installed bundle. It checks the peer's
+owner and kernel-reported executable, the utility's direct parent, and the
+App's process identity and account-specific launch environment. The listener
+also permits its own bounded startup preflight.
 Connections are bounded and streaming/backpressured; RPC bodies, headers,
 environment contents and user messages are not logged.
 
