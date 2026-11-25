@@ -30,7 +30,6 @@ from cc_remote import codex_app_tools as desktop
 from cc_remote.wrapper.codex_daemon import socket_identity
 from cc_remote.wrapper.process_scan import (
     ProcessIdentity,
-    process_command,
     process_environment_value,
     process_identity,
     process_owner_uid,
@@ -93,7 +92,7 @@ async def reuse_app(app: Path, executable: Path, profile: Path) -> ProcessIdenti
     identity = await asyncio.to_thread(app_identity, executable)
     if identity is None:
         return None
-    shared = await asyncio.to_thread(desktop._shared_app, identity, profile)
+    shared = await asyncio.to_thread(desktop._shared_app, identity, profile, executable)
     _, endpoint = process_environment_value(identity, "CODEX_APP_SERVER_WS_URL")
     try:
         parsed = urlsplit(endpoint or "")
@@ -110,7 +109,7 @@ async def reuse_app(app: Path, executable: Path, profile: Path) -> ProcessIdenti
     if not shared and connecting:
         for _ in range(24):
             await asyncio.sleep(0.25)
-            shared = await asyncio.to_thread(desktop._shared_app, identity, profile)
+            shared = await asyncio.to_thread(desktop._shared_app, identity, profile, executable)
             if shared or process_identity(identity.pid) != identity:
                 break
     if process_identity(identity.pid) != identity:
@@ -180,8 +179,10 @@ class Bridge:
     def __init__(self, profile: Path, executable: Path):
         self.profile = profile
         self.executable = executable
+        self.utility = desktop._app_server_utility(executable)
         self.port = 0
         self.active: set[asyncio.Task] = set()
+        self.launched_app: asyncio.Future[ProcessIdentity] = asyncio.get_running_loop().create_future()
         self.app_connected = asyncio.Event()
         self.preflighting = False
 
@@ -194,25 +195,25 @@ class Bridge:
             "/usr/sbin/lsof", "-nP", "-a", f"-iTCP:{peer_port}",
             "-sTCP:ESTABLISHED", "-Fpun",
         )
-        pid, uid = None, None
-        expected = f"n127.0.0.1:{peer_port}->127.0.0.1:{self.port}"
-        for line in output.splitlines():
-            if line.startswith("p"):
-                pid, uid = int(line[1:]), None
-            elif line.startswith("u"):
-                uid = int(line[1:])
-            elif line == expected and uid == os.getuid() and pid is not None:
-                identity = process_identity(pid)
-                if identity is None:
-                    return None
-                if pid == os.getpid() and self.preflighting:
-                    return identity
-                argv = process_command(identity)
-                if (
-                    argv and os.fsdecode(argv[0]) == str(self.executable)
-                    and matches_launch(identity, self.profile, self.endpoint)
-                ):
-                    return identity
+        expected = f"127.0.0.1:{peer_port}->127.0.0.1:{self.port}"
+        for pid, address in desktop._owned_tcp_connections(output):
+            if address != expected:
+                continue
+            identity = process_identity(pid)
+            if identity is None:
+                return None
+            if pid == os.getpid():
+                return identity if self.preflighting else None
+            # The utility can dial before LaunchServices returns to start_app.
+            try:
+                app = await asyncio.wait_for(asyncio.shield(self.launched_app), 5)
+            except TimeoutError:
+                return None
+            if (
+                desktop._is_app_server_peer(identity, app, self.executable, self.utility)
+                and matches_launch(app, self.profile, self.endpoint)
+            ):
+                return identity
         return None
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -238,6 +239,10 @@ class Bridge:
             )
             if process_identity(identity.pid) != identity:
                 return
+            if identity.pid != os.getpid():
+                app = self.launched_app.result()
+                if process_identity(app.pid) != app:
+                    return
             upstream.write(header)
             await upstream.drain()
             if identity.pid != os.getpid():
@@ -325,6 +330,8 @@ async def start_app(profile: Path, app: Path, executable: Path, ready) -> None:
         ready({"ok": True, "state": "reused"})
         return
     bridge = Bridge(profile, executable)
+    if bridge.utility is not None:
+        await asyncio.to_thread(desktop._signed, bridge.utility)
     try:
         async with await asyncio.start_server(bridge.handle, "127.0.0.1", 0, limit=16384) as server:
             bridge.port = server.sockets[0].getsockname()[1]
@@ -343,6 +350,7 @@ async def start_app(profile: Path, app: Path, executable: Path, ready) -> None:
                     await asyncio.sleep(0.25)
             if not matches_launch(identity, profile, bridge.endpoint):
                 raise LaunchError("另一启动方式抢先打开了 App。请完全退出 App 后，从共享入口重开。")
+            bridge.launched_app.set_result(identity)
             try:
                 await asyncio.wait_for(bridge.app_connected.wait(), _START_TIMEOUT)
                 ready({"ok": True, "state": "connected"})

@@ -17,6 +17,7 @@ _CTL_KERN = 1
 _KERN_PROCARGS2 = 49
 _PROC_ALL_PIDS = 1
 _PROC_PIDTBSDINFO = 3
+_PROC_PIDPATHINFO_MAXSIZE = 4096
 _MAXCOMLEN = 16
 
 
@@ -120,6 +121,8 @@ def _darwin_libraries() -> tuple[ctypes.CDLL, ctypes.CDLL] | None:
             ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_int,
         ]
         libproc.proc_listpids.restype = ctypes.c_int
+        libproc.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        libproc.proc_pidpath.restype = ctypes.c_int
     except (AttributeError, OSError):
         return None
     _darwin_libc = libc
@@ -353,6 +356,28 @@ def process_command(
             return None
         return info[3]
     return None
+
+
+def darwin_process_executable(
+    identity: ProcessIdentity, *, parent_pid: int | None = None,
+) -> Path | None:
+    """Return the kernel's executable path for the exact process and parent."""
+    libraries = _darwin_libraries()
+    if libraries is None:
+        return None
+    before = _darwin_bsd_snapshot(identity.pid)
+    if before is None or before[0] != identity:
+        return None
+    _libc, libproc = libraries
+    buffer = ctypes.create_string_buffer(_PROC_PIDPATHINFO_MAXSIZE)
+    if libproc.proc_pidpath(identity.pid, buffer, len(buffer)) <= 0:
+        return None
+    after = _darwin_bsd_snapshot(identity.pid)
+    if after is None or after[0] != identity:
+        return None
+    if parent_pid is not None and (before[1] != parent_pid or after[1] != parent_pid):
+        return None
+    return Path(os.fsdecode(buffer.value))
 
 
 def _environment_value(

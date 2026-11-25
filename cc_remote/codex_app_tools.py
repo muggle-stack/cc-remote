@@ -8,6 +8,7 @@ the App's native peer authorization remains in force.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterator
 import hashlib
 import json
 import os
@@ -22,6 +23,7 @@ from urllib.parse import urlsplit
 from cc_remote.wrapper.codex_daemon import socket_identity
 from cc_remote.wrapper.process_scan import (
     ProcessIdentity,
+    darwin_process_executable,
     process_command,
     process_environment_value,
     process_identity,
@@ -95,21 +97,55 @@ def _matching_app_pids(executable: Path) -> list[int]:
     return found
 
 
+def _app_server_utility(executable: Path) -> Path | None:
+    frameworks = executable.parent.parent / "Frameworks"
+    helper = frameworks / (
+        "Codex Framework.framework/Versions/Current/Helpers/"
+        "Codex (Aperitif).app/Contents/MacOS/Codex (Aperitif)"
+    )
+    try:
+        resolved = helper.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    return resolved if resolved.is_relative_to(frameworks) and resolved.is_file() else None
+
+
+def _is_app_server_peer(
+    peer: ProcessIdentity, app: ProcessIdentity, executable: Path, utility: Path | None,
+) -> bool:
+    if (
+        process_owner_uid(peer.pid) != os.getuid()
+        or darwin_process_executable(app) != executable
+    ):
+        return False
+    if peer == app:
+        return True
+    return (
+        utility is not None and peer.start_ticks >= app.start_ticks
+        and darwin_process_executable(peer, parent_pid=app.pid) == utility
+        and process_identity(app.pid) == app
+    )
+
+
+def _owned_tcp_connections(output: str) -> Iterator[tuple[int, str]]:
+    pid, uid = None, None
+    for line in output.splitlines():
+        if line.startswith("p"):
+            pid, uid = int(line[1:]), None
+        elif line.startswith("u"):
+            uid = int(line[1:])
+        elif line.startswith("n") and pid is not None and uid == os.getuid():
+            yield pid, line[1:]
+
+
 def _shared_bridge(profile: Path, port: int) -> ProcessIdentity | None:
     """Identify our profile-bound supervisor at the kernel's TCP listener."""
     listeners = _command(
         "/usr/sbin/lsof", "-nP", "-a", f"-iTCP:{port}",
         "-sTCP:LISTEN", "-Fpun",
     )
-    pids = set()
-    pid, uid = None, None
-    for line in listeners.splitlines():
-        if line.startswith("p"):
-            pid, uid = int(line[1:]), None
-        elif line.startswith("u"):
-            uid = int(line[1:])
-        elif line == f"n127.0.0.1:{port}" and uid == os.getuid() and pid is not None:
-            pids.add(pid)
+    pids = {pid for pid, address in _owned_tcp_connections(listeners)
+            if address == f"127.0.0.1:{port}"}
     if len(pids) != 1:
         return None
     identity = process_identity(pids.pop())
@@ -141,7 +177,7 @@ def _shared_bridge(profile: Path, port: int) -> ProcessIdentity | None:
     return identity if process_identity(identity.pid) == identity else None
 
 
-def _shared_app(identity, profile: Path) -> bool:
+def _shared_app(identity: ProcessIdentity, profile: Path, executable: Path) -> bool:
     complete, home = process_environment_value(identity, "CODEX_HOME")
     if not complete or not home or Path(home).resolve() != profile:
         return False
@@ -156,34 +192,34 @@ def _shared_app(identity, profile: Path) -> bool:
             or parsed.path != "/rpc" or parsed.query or parsed.fragment
         ):
             return False
-        expected = f"->127.0.0.1:{parsed.port}"
-        connections = _command(
-            "/usr/sbin/lsof", "-nP", "-a", "-p", str(identity.pid),
-            "-iTCP", "-sTCP:ESTABLISHED", "-Fn",
-        )
-        peers = {
-            line.removeprefix("n127.0.0.1:").removesuffix(expected)
-            for line in connections.splitlines()
-            if line.startswith("n127.0.0.1:") and line.endswith(expected)
-        }
-        if not peers or any(not peer.isdigit() for peer in peers):
-            return False
         bridge = _shared_bridge(profile, parsed.port)
         if bridge is None:
             return False
-        bridge_connections = _command(
-            "/usr/sbin/lsof", "-nP", "-a", "-p", str(bridge.pid),
-            "-iTCP", "-sTCP:ESTABLISHED", "-Fn",
-        ).splitlines()
-        return (
-            any(f"n127.0.0.1:{parsed.port}->127.0.0.1:{peer}" in bridge_connections
-                for peer in peers)
-            and process_identity(bridge.pid) == bridge
-            and process_identity(identity.pid) == identity
-            and process_owner_uid(identity.pid) == os.getuid()
-        )
+        connections = list(_owned_tcp_connections(_command(
+            "/usr/sbin/lsof", "-nP", "-a", f"-iTCP:{parsed.port}",
+            "-sTCP:ESTABLISHED", "-Fpun",
+        )))
+        listener = f"127.0.0.1:{parsed.port}"
+        peers = {
+            address.removeprefix(f"{listener}->")
+            for pid, address in connections
+            if pid == bridge.pid and address.startswith(f"{listener}->127.0.0.1:")
+        }
+        utility = _app_server_utility(executable)
+        for pid, address in connections:
+            local, _, remote = address.partition("->")
+            if local not in peers or remote != listener:
+                continue
+            peer = process_identity(pid)
+            if peer is not None and _is_app_server_peer(peer, identity, executable, utility):
+                return (
+                    process_identity(bridge.pid) == bridge
+                    and process_identity(identity.pid) == identity
+                    and process_owner_uid(identity.pid) == os.getuid()
+                )
     except (OSError, ValueError, subprocess.SubprocessError):
         return False
+    return False
 
 
 def _pipe_from_open_logs(pid: int, bundle_id: str) -> Path | None:
@@ -257,7 +293,7 @@ def discover(profile: Path, app: Path, expected_manifest: str | None = None) -> 
         matches = []
         for pid in _matching_app_pids(executable):
             identity = process_identity(pid)
-            if identity is None or not _shared_app(identity, profile):
+            if identity is None or not _shared_app(identity, profile, executable):
                 continue
             pipe = _pipe_from_open_logs(pid, bundle_id)
             if pipe is None:

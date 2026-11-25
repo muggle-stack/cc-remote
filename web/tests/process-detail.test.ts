@@ -11,7 +11,7 @@ import {
   restoreCachedTurnDetails,
 } from "../src/history-merge.ts";
 import { PROTOCOL_VERSION, type ServerEvent } from "../src/protocol.ts";
-import type { ProcessBlock, Turn } from "../src/reducer.ts";
+import type { Block, ProcessBlock, Turn } from "../src/reducer.ts";
 import {
   acceptAgentDetail,
   emptyAgentRun,
@@ -389,6 +389,47 @@ try {
   const seamUse = event({ type: "tool_use", message_id: "message", tool_use_id: "call",
     tool: "shell", category: "command", input: { command: "ls" }, title: "List files" });
   const seamUser = event({ type: "user_msg", msg_id: "human", prompt: "inspect" });
+  const browserComplete = '::browser-complete{title="Merged the CI changes"}';
+  const browserMessage = { message_id: "browser-completion", channel: "commentary" };
+  const browserStart = event({ type: "assistant_msg_start", ...browserMessage });
+  const browserEnd = event({ type: "assistant_msg_end", ...browserMessage });
+  const browserDelta = (text: string) => event({ type: "delta", ...browserMessage, text });
+  const renderBrowserTimeline = (blocks: Block[], done: boolean, engine: "codex" | "claude" = "codex") =>
+    renderToStaticMarkup(createElement(ProcessTimeline, { blocks, done, engine, openOverride: true }));
+
+  const liveBrowserEvents = [seamUser, browserStart];
+  for (const chunk of ["::browser-com", "plete{title=", '"Merged the ', 'CI changes"}']) {
+    liveBrowserEvents.push(browserDelta(chunk));
+    const live = decodeSeam(liveBrowserEvents)!;
+    assert.doesNotMatch(renderBrowserTimeline(live.blocks, false), /::browser|Merged the CI/,
+      "an unfinished browser completion directive must not flash in live commentary");
+  }
+  const liveBrowser = decodeSeam([...liveBrowserEvents, browserEnd])!;
+  assert.equal(liveBrowser.done, false, "browser completion does not finish the Codex turn");
+  const liveBrowserMarkup = renderBrowserTimeline(liveBrowser.blocks, false);
+  assert.match(liveBrowserMarkup, /process-succeeded[\s\S]*浏览器 · Merged the CI changes/);
+  assert.doesNotMatch(liveBrowserMarkup, /::browser-complete/);
+
+  const historicalBrowser = installTurnDetailProjectionPage(undefined, {
+    events: [seamUser, browserStart, browserDelta(browserComplete), browserEnd],
+    hasMore: false, oldestCursor: null,
+  }, decodeSeam).projection.blocks;
+  const historicalBrowserMarkup = renderBrowserTimeline(historicalBrowser, true);
+  assert.match(historicalBrowserMarkup, /process-succeeded[\s\S]*浏览器 · Merged the CI changes/);
+  assert.doesNotMatch(historicalBrowserMarkup, /::browser-complete/);
+  assert.match(renderBrowserTimeline(historicalBrowser, true, "claude"), /::browser-complete/,
+    "the directive is specific to Codex");
+  const quotedTitle = decodeSeam([seamUser, browserStart,
+    browserDelta('::browser-complete{title="Closed \\"Search\\" tab"}'), browserEnd])!;
+  assert.match(renderBrowserTimeline(quotedTitle.blocks, true), /浏览器 · Closed &quot;Search&quot; tab/);
+
+  for (const text of [`\`${browserComplete}\``, `${browserComplete}\nBrowser detail.`,
+    '::browser-complete{title="Bad \\q"}', "::browser-com"]) {
+    const literal = decodeSeam([seamUser, browserStart, browserDelta(text), browserEnd])!;
+    assert.match(renderBrowserTimeline(literal.blocks, true), /::browser-com/,
+      "ordinary commentary, malformed directives and completed prefixes stay visible");
+  }
+
   const newestSeam = installTurnDetailProjectionPage(undefined, {
     events: [seamUser, event({ ...seamUse, tool: "tool", category: "tool", input: {}, title: null }),
       event({ type: "tool_result", tool_use_id: "call", content: "files", is_error: false })],

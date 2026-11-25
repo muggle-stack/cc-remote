@@ -48,30 +48,37 @@ def test_private_socket_rejects_world_access_and_symlinks():
 ])
 def test_discovery_requires_exact_shared_profile(monkeypatch, tmp_path, home, endpoint, connected, expected):
     profile = tmp_path.resolve()
+    executable = tmp_path / "App"
     env = {
         "CODEX_HOME": str(profile) if home == "same" else (str(profile / "other") if home else None),
         "CODEX_APP_SERVER_WS_URL": endpoint,
     }
     monkeypatch.setattr(tools, "process_environment_value", lambda _pid, key: (True, env[key]))
-    monkeypatch.setattr(tools, "_command", lambda *args: (
-        "n127.0.0.1:1234->127.0.0.1:999\n" if "43" in args
-        else "n127.0.0.1:999->127.0.0.1:1234\n"
+    owner = os.getuid()
+    monkeypatch.setattr(tools, "_command", lambda *_args: (
+        f"p43\nu{owner}\nn127.0.0.1:1234->127.0.0.1:999\n"
+        f"p42\nu{owner}\nn127.0.0.1:999->127.0.0.1:1234\n"
     ) if connected else "")
     monkeypatch.setattr(tools, "_shared_bridge", lambda *_args: ProcessIdentity(43, 100))
     monkeypatch.setattr(tools, "process_identity", lambda pid: ProcessIdentity(pid, 100))
-    monkeypatch.setattr(tools, "process_owner_uid", lambda _pid: tools.os.getuid())
-    assert tools._shared_app(ProcessIdentity(42, 100), profile) is expected
+    monkeypatch.setattr(tools, "process_owner_uid", lambda _pid: owner)
+    monkeypatch.setattr(tools, "darwin_process_executable", lambda _id: executable)
+    assert tools._shared_app(ProcessIdentity(42, 100), profile, executable) is expected
 
 
 @pytest.mark.parametrize("failure", [
     None, "private_listener", "wrong_profile", "duplicate_profile", "wrong_path",
     "missing_listener", "ambiguous_listener", "foreign_owner", "wrong_peer",
     "bridge_reused", "app_reused", "missing_daemon", "linked_daemon",
+    "utility", "wrong_utility_parent", "wrong_utility_executable",
 ])
 @pytest.mark.parametrize("protected_alias", [False, True])
 def test_shared_app_requires_profile_bound_bridge_and_both_connection_ends(monkeypatch, failure, protected_alias):
     with tempfile.TemporaryDirectory(prefix="cc-bridge-", dir="/tmp") as root:
         profile = Path(root).resolve()
+        executable = profile / "App"
+        utility = profile / "Utility"
+        client = 45 if failure is not None and "utility" in failure else 42
         directory = profile / "app-server-control"
         directory.mkdir()
         upstream = directory / "app-server-control.sock"
@@ -122,22 +129,32 @@ def test_shared_app_requires_profile_bound_bridge_and_both_connection_ends(monke
                     if failure == "ambiguous_listener":
                         result += f"p44\nu{owner}\nn127.0.0.1:1234\n"
                     return result
-                if "43" in args:
-                    peer = 888 if failure == "wrong_peer" else 999
-                    return f"n127.0.0.1:1234->127.0.0.1:{peer}\n"
-                return "n127.0.0.1:999->127.0.0.1:1234\n"
+                peer = 888 if failure == "wrong_peer" else 999
+                return (f"p43\nu{owner}\nn127.0.0.1:1234->127.0.0.1:{peer}\n"
+                        f"p{client}\nu{owner}\nn127.0.0.1:999->127.0.0.1:1234\n")
+
+            def kernel_path(process, *, parent_pid=None):
+                if process.pid == 42:
+                    return executable
+                if process.pid != 45 or parent_pid != 42 or failure == "wrong_utility_parent":
+                    return None
+                return profile / "Unrelated" if failure == "wrong_utility_executable" else utility
 
             monkeypatch.setattr(tools, "process_environment_value", lambda _id, key: (True, env[key]))
             monkeypatch.setattr(tools, "process_command", lambda _id: tuple(arg.encode() for arg in argv))
             monkeypatch.setattr(tools, "process_owner_uid", lambda _pid: owner)
             monkeypatch.setattr(tools, "process_identity", identity)
+            monkeypatch.setattr(tools, "_app_server_utility", lambda _exe: utility)
+            monkeypatch.setattr(tools, "darwin_process_executable", kernel_path)
             monkeypatch.setattr(tools, "_command", command)
-            assert tools._shared_app(ProcessIdentity(42, 100), profile) is (failure is None)
+            assert tools._shared_app(ProcessIdentity(42, 100), profile, executable) is (
+                failure in {None, "utility"}
+            )
 
 
 def test_incomplete_profile_read_fails_closed(monkeypatch, tmp_path):
     monkeypatch.setattr(tools, "process_environment_value", lambda *args: (False, str(tmp_path)))
-    assert not tools._shared_app(ProcessIdentity(42, 100), tmp_path)
+    assert not tools._shared_app(ProcessIdentity(42, 100), tmp_path, tmp_path / "App")
 
 
 def test_discovery_without_macos_is_optional(monkeypatch, tmp_path):
