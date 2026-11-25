@@ -96,14 +96,50 @@ export function isCodexPresentationNoise(block: Block): boolean {
   );
 }
 
+const BROWSER_COMPLETE_PREFIX = "::browser-complete{title=";
+const BROWSER_COMPLETE_TITLE = /^("(?:[^"\\\r\n]|\\[^\r\n])*")\}$/u;
+const BROWSER_COMPLETE_TITLE_FRAGMENT = /^"(?:[^"\\\r\n]|\\[^\r\n])*(?:\\|"\}?)?$/u;
+
+function presentBrowserCompletion(block: TextBlock): TextBlock | ProcessBlock | null {
+  const { text, done } = block;
+  if (!done && BROWSER_COMPLETE_PREFIX.startsWith(text)) return null;
+  if (!text.startsWith(BROWSER_COMPLETE_PREFIX)) return block;
+
+  const payload = text.slice(BROWSER_COMPLETE_PREFIX.length).trimEnd();
+  // A matching prefix can still turn into prose if more text follows it.
+  if (!done) return BROWSER_COMPLETE_TITLE_FRAGMENT.test(payload) ? null : block;
+  const literal = BROWSER_COMPLETE_TITLE.exec(payload)?.[1];
+  if (!literal) return block;
+
+  let title: string;
+  try {
+    title = JSON.parse(literal).trim();
+  } catch {
+    return block;
+  }
+  return {
+    kind: "process", item_id: `browser-complete:${block.message_id}`,
+    processKind: "server_tool", phase: "end", status: "succeeded", done: true,
+    title: title ? `浏览器 · ${title}` : "浏览器操作已完成",
+    background: block.background, liveOrder: block.liveOrder,
+    startedTs: block.startedTs, terminalTs: block.doneTs,
+  };
+}
+
 export function presentableProcessBlocks(
   blocks: Block[],
   engine: "claude" | "codex" | "dsh",
 ): Block[] {
   const items = processBlocks(blocks);
-  return engine === "codex"
-    ? items.filter((block) => !isCodexPresentationNoise(block))
-    : items;
+  if (engine !== "codex") return items;
+  const visible: Block[] = [];
+  for (const block of items) {
+    if (isCodexPresentationNoise(block)) continue;
+    const row = block.kind === "text" && block.channel === "commentary"
+      ? presentBrowserCompletion(block) : block;
+    if (row) visible.push(row);
+  }
+  return visible;
 }
 
 export function finalTextBlocks(blocks: Block[]): TextBlock[] {
