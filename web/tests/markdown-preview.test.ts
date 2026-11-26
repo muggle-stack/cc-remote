@@ -697,6 +697,15 @@ try {
       assert.ok(markup.includes(`</strong>${punctuation}用浏览器打开。`));
       assert.doesNotMatch(markup, /\*\*/);
     }
+    const pageUrl = "http://192.168.1.20:18790/notes/conv1d/";
+    const loopbackUrl = "http://127.0.0.1:18790/notes/conv1d/";
+    const parenthetical = renderToStaticMarkup(createElement(MessageBlock, {
+      text: `页面做好了：**${pageUrl}**（本机也可以开 \`${loopbackUrl}\`）`, done,
+    }));
+    assert.ok(parenthetical.includes(`<strong><a href="${pageUrl}"`),
+      "a full-width opening parenthesis stays outside the bold link destination");
+    assert.ok(parenthetical.includes(`>${pageUrl}</a></strong>（本机也可以开 <code>${loopbackUrl}</code>）`));
+    assert.doesNotMatch(parenthetical, /\*\*/);
   }
   const linkedInstructions = renderToStaticMarkup(createElement(MessageBlock, {
     text: `**${boardUrl}**，用 **浏览器** 打开。\n\n备用 **https://example.test/docs/?a=1&b=2**。`,
