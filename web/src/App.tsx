@@ -6651,6 +6651,8 @@ export default function App() {
               } : null}
               activeTurnId={activeTurnId}
               ambiguousActiveTurnIds={ambiguousActiveTurnIds}
+              sessionRunning={focusedEngine === "codex" && activeDeviceOnline
+                && !archivedBrowse && rt.state === "running"}
               onOpenAgent={space === "code"
                 ? openAgentDetail : undefined}
               onFork={!historyView.recovering && !archivedBrowse
