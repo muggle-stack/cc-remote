@@ -4,6 +4,14 @@
 
 ## Unreleased
 
+## v5.3.61
+
+Codex shows its working indicator while reconnecting to a running session
+and restoring its current turn. Bold URLs followed by a full-width opening
+parenthesis render with the parenthetical text outside the link. Wire protocol v98.
+
+See the bilingual [release notes](docs/releases/v5.3.61.md).
+
 ## v5.3.60
 
 Codex Shared opens the updated macOS Codex App on the selected account's
