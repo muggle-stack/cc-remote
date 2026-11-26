@@ -349,6 +349,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   sessionLink, onOpenSession, dshApi, onDshPlugin,
   activeTurnId = null,
   ambiguousActiveTurnIds = [],
+  sessionRunning = false,
   initialReadingState, onReadingStateSave,
   surface = "code", voiceSpeech }: {
   ref?: Ref<ChatViewHandle>;
@@ -421,6 +422,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   /** More than one displayed row exactly aliases the active native owner.
    * Empty for idle/browse/missing-owner states, which must stay fail-closed. */
   ambiguousActiveTurnIds?: readonly string[];
+  sessionRunning?: boolean;
 }) {
   const visible = useContext(PanelVisible);
   const voicePlayback = useVoicePlayback(voiceSpeech === true && visible && typeof AudioContext !== "undefined");
@@ -2874,13 +2876,16 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
           || foreground.some((block) => !block.done);
       })?.id ?? null
     : null;
+  // Keep session progress at the live tail while replay restores its exact row.
+  const showSessionWorking = sessionRunning && !browseMode
+    && activeTurnIndex < 0 && fallbackWorkingTurnId == null;
   const activityRequest = historyRequestRef.current;
   const visibleHistoryPageActivity = historyPageActivity && (
     activityRequest?.activityKey === historyPageActivity.key
       && activityRequest.sid === sid)
     ? historyPageActivity : null;
 
-  if (turns.length === 0) {
+  if (turns.length === 0 && !showSessionWorking) {
     if (loading) {
       return (
         <div className={surface === "work"
@@ -3445,6 +3450,13 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
             height: `${virtualTrailingPad}px`,
             overflowAnchor: "none",
           }} />
+          {showSessionWorking && (
+            <div className="turn-working" role="status" aria-live="polite">
+              <EngineWorking engine={engine} size={24} />
+              <span className="turn-working-tx"><WorkingWord
+                scope={`${engine}:${sid ?? ""}:session`} label="处理中" /></span>
+            </div>
+          )}
         </div>
         </div>
         {(browseMode || (!scrollState.atBottom
