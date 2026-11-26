@@ -1,7 +1,7 @@
 import type { Nodes, Root } from "mdast";
 import type { Plugin } from "unified";
 
-/** GFM's bare-URL tokenizer consumes `**，后文` as part of an address before
+/** GFM's bare-URL tokenizer consumes suffixes such as `**（说明）` before
  * emphasis can close. Only repair an exact, unescaped **URL** boundary in an
  * already parsed bare link; code and explicitly authored destinations stay
  * untouched. Let the normal parser own emphasis, escaping and the suffix. */
@@ -22,7 +22,7 @@ export const remarkEmphasizedLinks: Plugin<[], Root> = function () {
         for (let index = start - 3; index >= 0 && source[index] === "\\"; index -= 1) slashes += 1;
         if (slashes % 2) continue;
         const raw = source.slice(start, end);
-        const match = /^(https?:\/\/[^\s<>\\*`]+)\*\*(?=[，。！？；：、）】》」』〕〉])/u.exec(raw);
+        const match = /^(https?:\/\/[^\s<>\\*`]+)\*\*(?=[，。！？；：、（）】》」』〕〉])/u.exec(raw);
         if (!match) continue;
         // Angle autolinks treat character references literally. Do not change
         // their meaning while repairing an unrelated emphasis boundary.
