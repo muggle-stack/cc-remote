@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 import json
 import os
 import re
@@ -17,6 +18,9 @@ from cc_remote.protocol import Error
 from cc_remote.update import host_platform, read_installation, release_repository
 from cc_remote.installation_updates import InstallationUpdates, release_catalog
 from cc_remote.update_jobs import TERMINAL, failure_reason, job_id
+from cc_remote.wrapper.codex_tasks import TASK_ITEM_PREFIX
+
+MAX_UPDATE_BLOCKERS = 8
 
 
 class UIUpdates(InstallationUpdates):
@@ -34,7 +38,11 @@ class UIUpdates(InstallationUpdates):
         self.reserved = None
 
     def busy_count(self, *, replacing_claude_service: bool = False) -> int:
-        """Count work that would lose ownership/state when this Wrapper exits.
+        return sum(1 for _ in self._busy_operations(
+            replacing_claude_service=replacing_claude_service))
+
+    def _busy_operations(self, *, replacing_claude_service: bool = False) -> Iterator[dict]:
+        """Describe work that would lose ownership/state when this Wrapper exits.
 
         A live model turn is not itself an activation blocker. Only proven
         independent owners may keep running; launch/control windows, local
@@ -42,45 +50,79 @@ class UIUpdates(InstallationUpdates):
         synchronous with reserve() so new commands cannot enter between the
         final check and the maintenance barrier.
         """
-        count = 0
         for ctx in self.machine.sessions.values():
+            task_id = None
             if self._local_session_work(ctx):
-                count += 1
-                continue
-            replacing_owner = replacing_claude_service and ctx.engine == "claude"
-            if replacing_owner and (
+                kind = ("queued_message" if ctx.queued_queries or ctx.queued_query_starting_msg_id
+                        else "session_operation")
+            elif replacing_claude_service and ctx.engine == "claude" and (
                 getattr(ctx.sdk, "autonomous_steer_pending", False)
                 or getattr(getattr(ctx.sdk, "client", None), "callback_tasks", None)
             ):
-                count += 1
-                continue
-            tasks = [getattr(ctx, name, None) for name in ("turn_task", "codex_spontaneous_task")]
-            backgrounds = (getattr(ctx, "codex_background_processes", None) or {}).values()
-            if (ctx.state != "idle" or ctx.pending_asks
-                    or getattr(ctx.sdk, "turn_active", False) is True
-                    or (ctx.engine == "dsh" and any(child.get("activity") == "running"
-                                                   for child in getattr(ctx.sdk, "children", [])))
-                    or any(t is not None and not t.done() for t in tasks)
-                    or self.machine._claude_has_background_work(ctx)
-                    or any(getattr(item, "status", None) in {"running", "pending", "unknown"}
-                           for item in backgrounds)):
-                count += replacing_owner or not self._independent_session(ctx)
-        count += sum(not task.done() for task in getattr(self.machine, "_work_schedule_runs", ()))
-        count += bool(getattr(self.machine, "_ui_schedule_scanning", False))
-        for name in ("_interactive_control_tasks", "_codex_fork_tasks", "_claude_fork_tasks", "_codex_archive_tasks"):
-            count += sum(not task.done() for task in getattr(self.machine, name, {}).values())
-        count += sum(not task.done() for task in getattr(self.machine, "_codex_terminal_persist_tasks", ()))
+                kind = "session_operation"
+            else:
+                tasks = (getattr(ctx, name, None) for name in ("turn_task", "codex_spontaneous_task"))
+                backgrounds = (getattr(ctx, "codex_background_processes", None) or {}).values()
+                background = next((item for item in backgrounds
+                                   if getattr(item, "status", None) in {"running", "pending", "unknown"}), None)
+                running = (ctx.state != "idle" or getattr(ctx.sdk, "turn_active", False) is True
+                           or (ctx.engine == "dsh" and any(child.get("activity") == "running"
+                                   for child in getattr(ctx.sdk, "children", [])))
+                           or any(task is not None and not task.done() for task in tasks))
+                if not (running or ctx.pending_asks or background is not None
+                        or self.machine._claude_has_background_work(ctx)):
+                    continue
+                replacing_owner = replacing_claude_service and ctx.engine == "claude"
+                if not replacing_owner and self._independent_session(ctx):
+                    continue
+                if ctx.pending_asks:
+                    kind = "question"
+                elif running:
+                    kind = "turn"
+                else:
+                    item_id = getattr(background, "item_id", "")
+                    task_id = item_id[len(TASK_ITEM_PREFIX):] if item_id.startswith(TASK_ITEM_PREFIX) else None
+                    kind = ("background_receipt" if task_id and background.status == "pending"
+                            and getattr(background, "turn_id", None) else "background_task")
+            # This endpoint is device-scoped. Keep private chat and task
+            # identities on the owner-scoped chat channel.
+            detail = {"kind": kind, "engine": ctx.engine, "side_chat": ctx.btw}
+            sid = ctx.parent_sid if ctx.btw else ctx.key
+            if sid and not sid.startswith("btw-"):
+                detail["session_id"] = sid
+            if not ctx.btw and task_id and re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", task_id):
+                detail["task_id"] = task_id
+            yield detail
+
+        for task in getattr(self.machine, "_work_schedule_runs", ()):
+            if not task.done():
+                yield {"kind": "schedule"}
+        if getattr(self.machine, "_ui_schedule_scanning", False):
+            yield {"kind": "schedule"}
+        for name in ("_interactive_control_tasks", "_codex_fork_tasks",
+                     "_claude_fork_tasks", "_codex_archive_tasks"):
+            for task in getattr(self.machine, name, {}).values():
+                if not task.done():
+                    yield {"kind": "device_operation"}
+        for task in getattr(self.machine, "_codex_terminal_persist_tasks", ()):
+            if not task.done():
+                yield {"kind": "device_operation"}
         scheduler = getattr(self.machine, "_command_scheduler", None)
         if scheduler is not None:
-            count += sum(not p.task.done() for p in scheduler._pending.values())
+            for pending in scheduler._pending.values():
+                if not pending.task.done():
+                    yield {"kind": "device_operation"}
         runtime = getattr(self.machine, "_dsh", None)
         # Native DSH jobs are owned by its separately running server. An
         # unavailable connection cannot establish that boundary for this check.
         if not self._independent_dsh():
-            count += sum(job.status in {"running", "stopping"}
-                         for rows in getattr(runtime, "jobs", {}).values() for job in rows)
-        count += sum(not task.done() for task in getattr(runtime, "questions", {}).values())
-        return count
+            for rows in getattr(runtime, "jobs", {}).values():
+                for job in rows:
+                    if job.status in {"running", "stopping"}:
+                        yield {"kind": "background_task", "engine": "dsh"}
+        for task in getattr(runtime, "questions", {}).values():
+            if not task.done():
+                yield {"kind": "question", "engine": "dsh"}
 
     @staticmethod
     def _local_session_work(ctx) -> bool:
@@ -292,8 +334,10 @@ class UIUpdates(InstallationUpdates):
                 return {"ok": False, "reason": "permission_required"}
 
     async def status(self, *, check: bool = False) -> dict:
+        blockers = list(self._busy_operations())
         result = {"schema": 1, "managed": False, "enabled": False, "reason": "unsupported",
-                  "busy_count": self.busy_count(), "latest": self.catalog, "job": None,
+                  "busy_count": len(blockers), "blockers": blockers[:MAX_UPDATE_BLOCKERS],
+                  "latest": self.catalog, "job": None,
                   "maintenance": self.guarded()}
         if self.root is None:
             return result

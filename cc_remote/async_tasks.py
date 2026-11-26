@@ -231,13 +231,29 @@ async def check_delivery(store, task):
         return
     status = None
     receipt = None
+    inactive_ephemeral = False
     try:
         # Do not hold a command slot for the model's full turn. A short read is
         # retried later, independently of execution and without engine mutation.
         async with asyncio.timeout(5):
             async with task_rpc.connect(store.home) as native:
                 if turn_id:
-                    status = await native.turn_status(task["sid"], turn_id)
+                    try:
+                        status = await native.turn_status(task["sid"], turn_id)
+                    except task_rpc.Rejected as exc:
+                        if exc.retryable:
+                            raise
+                    if status is None and task["delivery"] == "accepted":
+                        # Ephemeral side chats may not support turn history.
+                        # The exact thread must still be reachable and inactive.
+                        thread = await native.thread(task["sid"])
+                        thread_status = thread.get("status")
+                        inactive_ephemeral = (
+                            thread.get("ephemeral") is True
+                            and isinstance(thread_status, dict)
+                            and thread_status.get("type") in {"idle", "systemError"}
+                            and not thread_status.get("activeFlags")
+                        )
                 else:
                     receipt = await native.find_task_receipt(task["sid"], task_id)
     except Exception:
@@ -270,15 +286,21 @@ async def check_delivery(store, task):
         deadline = start + DELIVERY_TRACK_SECONDS
     updates.update(delivery_failure_status=None, delivery_failure_seen_at=None,
                    delivery_recheck_until=deadline, next_attempt=min(now + RETRY_SECONDS, deadline))
+    observation = status if status in {"failed", "interrupted"} else None
+    if inactive_ephemeral:
+        observation = "inactive_ephemeral"
+    since = (task["delivery_failure_seen_at"]
+             if observation and task["delivery_failure_status"] == observation else None)
+    confirmed = since is not None and now - since >= RETRY_SECONDS
     if status == "completed":
         updates.update(delivery="delivered", delivery_error=None, delivery_recheck_until=0,
                        next_attempt=0)
+    elif inactive_ephemeral and confirmed:
+        updates.update(delivery="unknown", delivery_recheck_until=0, next_attempt=0,
+                       delivery_error=("Codex callback outcome is unavailable in the inactive ephemeral thread. "
+                                       "The task result is retained in task_result."))
     elif status in {"failed", "interrupted"} and (
-        task["delivery"] == "failed" or (
-            task["delivery_failure_status"] == status
-            and task["delivery_failure_seen_at"] is not None
-            and now - task["delivery_failure_seen_at"] >= RETRY_SECONDS
-        )
+        task["delivery"] == "failed" or confirmed
     ):
         # A paginated history read can report an interrupted turn just after
         # turn/start accepts it. Require separated observations, then continue
@@ -293,10 +315,8 @@ async def check_delivery(store, task):
                        delivery_error=task["delivery_error"] if retain_failure else
                        "Callback outcome could not be confirmed within 24 hours; result retained; not resent",
                        delivery_recheck_until=0, next_attempt=0)
-    elif status in {"failed", "interrupted"}:
-        since = (task["delivery_failure_seen_at"]
-                 if task["delivery_failure_status"] == status else None)
-        updates.update(delivery="accepted", delivery_failure_status=status,
+    elif observation:
+        updates.update(delivery="accepted", delivery_failure_status=observation,
                        delivery_failure_seen_at=now if since is None else since,
                        delivery_error="Callback accepted; waiting to confirm its outcome; not resent")
     elif status == "inProgress":

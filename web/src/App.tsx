@@ -6405,6 +6405,7 @@ export default function App() {
         </header>
         {appUpdateOpen && <Suspense fallback={null}><AppUpdateSheet updates={appUpdates} serverUpdates={serverUpdates}
           deviceName={activeDevice?.label ?? machineId} webUpdate={webUpdate}
+          sessions={ownsDeviceState ? state.sessions : undefined}
           onClose={() => setAppUpdateOpen(false)} /></Suspense>}
 
         {restoringSurfaceScope === activeScopeKey ? (
