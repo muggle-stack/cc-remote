@@ -4,6 +4,14 @@
 
 ## Unreleased
 
+## v5.3.62
+
+Device updates can proceed when an accepted Codex side-chat callback has
+an unconfirmed outcome and its temporary thread is inactive. The update
+window shows what is holding up installation. Wire protocol v98.
+
+See the bilingual [release notes](docs/releases/v5.3.62.md).
+
 ## v5.3.61
 
 Codex shows its working indicator while reconnecting to a running session
