@@ -19,6 +19,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from cc_remote import update as updater
 from cc_remote import update_relay
+from cc_remote.protocol import BackgroundProcessItem
 from cc_remote.update_jobs import JOBS, POLICY, UpdateJobs, public_job
 from cc_remote.wrapper.updates import UIUpdates
 from cc_remote.wrapper import updates as device_updates
@@ -248,6 +249,36 @@ def test_cancel_before_install_is_cooperative_and_never_kills_services(managed, 
     store.save({**store.state(IDENTITY), "phase": "installing", "cancel_requested": False})
     launcher.cancel(root, IDENTITY)
     assert store.state(IDENTITY)["cancel_requested"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("side_chat", [True, False])
+async def test_status_reports_receipt_blocker_without_private_chat_metadata(side_chat):
+    machine, _ = _mk_machine()
+    updates = UIUpdates(machine, None)
+    sid = "primary@aa011111-1111-4111-8111-111111111111"
+    task_id = "bb022222-2222-4222-8222-222222222222"
+    ctx = _mk_ctx("btw-private" if side_chat else sid, sid)
+    ctx.engine = "codex"
+    ctx.btw = side_chat
+    ctx.parent_sid = sid if side_chat else None
+    machine.sessions[ctx.key] = ctx
+    item = BackgroundProcessItem(item_id="async-task:" + task_id, kind="task",
+                                 title="private command", status="pending", turn_id="native-turn")
+    ctx.codex_background_processes = {item.item_id: item}
+
+    status = await updates.status()
+    expected = {"kind": "background_receipt", "engine": "codex",
+                "side_chat": side_chat, "session_id": sid}
+    if not side_chat:
+        expected["task_id"] = task_id
+    assert status["busy_count"] == updates.busy_count() == 1
+    assert status["blockers"] == [expected]
+
+    ctx.codex_background_processes[item.item_id] = item.model_copy(update={"status": "failed"})
+    status = await updates.status()
+    assert status["busy_count"] == updates.busy_count() == 0
+    assert status["blockers"] == []
 
 
 @pytest.mark.asyncio
