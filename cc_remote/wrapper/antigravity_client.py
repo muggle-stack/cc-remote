@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from cc_remote import __version__
@@ -94,7 +95,6 @@ class AcpClient:
     def __init__(
         self,
         launch: AntigravityLaunch,
-        cwd: str,
         on_update: Callable[[dict], Awaitable[None]],
         on_request: Callable[[str, int | str, dict], Awaitable[dict | None]],
         *,
@@ -103,7 +103,8 @@ class AcpClient:
         on_lifecycle: Callable[[AcpClient, str, str, str], Awaitable[None]] | None = None,
     ):
         self.launch = launch
-        self.cwd = cwd
+        self.control_directory: TemporaryDirectory[str] | None = None
+        self.cwd: str | None = None
         self.on_update = on_update
         self.on_request = on_request
         self.on_disconnect = on_disconnect
@@ -127,13 +128,18 @@ class AcpClient:
                 and self.reader is not None and not self.reader.done())
 
     async def start(self) -> None:
-        args = self.args
-        if self.hooks:
-            with suppress(OSError):
-                args += await self.hooks.start()
         try:
+            # Initialize, authenticate and discover catalogs without giving agy
+            # a project from which to load executable customizations.
+            self.control_directory = TemporaryDirectory(prefix="ccr-agy-control-", dir="/tmp")
+            self.cwd = str(Path(self.control_directory.name).resolve())
+            args = self.args
+            if self.hooks:
+                with suppress(OSError):
+                    args += await self.hooks.start()
             self.process = await asyncio.create_subprocess_exec(
-                self.launch.binary, "acp", *args, cwd=self.cwd, env=self.launch.environment,
+                self.launch.binary, "acp", *args, cwd=self.cwd,
+                env={**self.launch.environment, "PWD": self.cwd},
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL, limit=_MAX_FRAME,
             )
@@ -326,3 +332,7 @@ class AcpClient:
                 await process.wait()
         if self.hooks:
             await self.hooks.close()
+        if self.control_directory is not None:
+            self.control_directory.cleanup()
+            self.control_directory = None
+            self.cwd = None

@@ -26,6 +26,7 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
   const seen: Record<string, unknown>[] = [];
   let emit = (_event: Record<string, unknown>) => {};
   let created = withSessionMessage || emptyGeminiHistory;
+  let workspaceTrusted = true;
   let hidden = false;
   let title = "Gemini session";
   let state = "idle";
@@ -86,6 +87,11 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
               effort_names: { low: "Low", extra: "Extra" } }] });
       }
       if (cmd.type === "new_session" && cmd.engine === "antigravity") {
+        if (!workspaceTrusted) {
+          emit({ type: "error", code: "gemini_workspace_untrusted", message: "Gemini workspace needs trust",
+            request_id: cmd.request_id, msg_id: cmd.msg_id });
+          return;
+        }
         created = true;
         model = String(cmd.model ?? "neon");
         mode = String(cmd.antigravity_mode ?? "default");
@@ -171,6 +177,7 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
       }
       return () => finish("background_followup");
     },
+    requireWorkspaceTrust: () => { workspaceTrusted = false; },
     draining: () => {
       state = "draining";
       emit({ type: "state", state, sid, seq: ++seq });
@@ -192,6 +199,19 @@ test("Gemini is hidden on a device without Antigravity enabled", async ({ page }
   await page.getByRole("button", { name: "切换新会话引擎" }).click();
   await expect(page.getByRole("menuitemradio", { name: "Codex" })).toBeVisible();
   await expect(page.getByRole("menuitemradio", { name: "Gemini" })).toHaveCount(0);
+});
+
+test("Gemini explains device-side workspace trust on new session denial", async ({ page, hasTouch }) => {
+  const relay = await mockRelay(page, true);
+  relay.requireWorkspaceTrust();
+  await page.goto("/");
+  await page.getByRole("button", { name: "切换新会话引擎" }).click();
+  await page.getByRole("menuitemradio", { name: "Gemini" }).click();
+  await page.locator(".newchat-input").fill("Check this project");
+  const send = page.getByRole("button", { name: "开始", exact: true });
+  if (hasTouch) await send.tap();
+  else await send.click();
+  await expect(page.getByText(/CC_REMOTE_ANTIGRAVITY_TRUSTED_WORKSPACES/)).toBeVisible();
 });
 
 test("a session message opens its original Gemini Code session", async ({ page }) => {

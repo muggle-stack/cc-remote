@@ -189,6 +189,7 @@ class ScriptedAcp:
 async def wire(tmp_path):
     machine, transport = _mk_machine()
     machine.cfg.cc_cwd = str(tmp_path)
+    trust_workspaces(machine, tmp_path)
     runtime = machine._antigravity = AntigravityRuntime(machine, launch_factory=lambda: True)
     client = ScriptedAcp(runtime, tmp_path)
     runtime.client = client
@@ -201,6 +202,10 @@ async def wire(tmp_path):
     await runtime.close()
 
 
+def trust_workspaces(machine, *paths):
+    machine.cfg.antigravity_trusted_workspaces = json.dumps([str(path.resolve()) for path in paths])
+
+
 async def new_session(machine, **fields):
     focus, _ = await machine._handle(NewSession(engine="antigravity", **fields))
     return machine.sessions[focus.session_id]
@@ -210,6 +215,69 @@ async def prompted(client, count):
     async with asyncio.timeout(1):
         while len(client.prompts) < count:
             await asyncio.sleep(0.001)
+
+
+@pytest.mark.asyncio
+async def test_acp_launch_uses_a_private_control_directory_and_managed_hooks(monkeypatch, tmp_path):
+    captured = {}
+
+    async def launch(*args, cwd, env, **_streams):
+        captured["cwd"] = Path(cwd)
+        captured["hooks"] = Path(args[args.index("--add-dir") + 1])
+        assert env["PWD"] == cwd and not captured["cwd"].samefile(tmp_path)
+        assert captured["cwd"].stat().st_mode & 0o777 == 0o700
+        assert not list(captured["cwd"].iterdir())
+        assert (captured["hooks"] / ".agents" / "hooks.json").is_file()
+        raise OSError("fixture launch failure")
+
+    async def noop(*_args):
+        pass
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    acp = AcpClient(AntigravityLaunch("/fake/agy", {"PWD": str(tmp_path)}), noop, noop, on_lifecycle=noop)
+    with pytest.raises(AcpError, match="无法启动"):
+        await acp.start()
+    assert all(not path.exists() for path in captured.values())
+
+
+@pytest.mark.asyncio
+async def test_workspace_must_be_trusted_before_agy_can_open_or_restore_it(wire, tmp_path):
+    machine, _, _, client = wire
+    project = tmp_path / "project"
+    project.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(project, target_is_directory=True)
+    workspace = str(project.resolve())
+    command = NewSession(engine="antigravity", cwd=str(alias), client_id="owner", cmd_id="trust-create")
+    client.rows["previous"] = {"sessionId": "previous", "cwd": workspace}
+    client.capabilities = {**client.capabilities, "sessionCapabilities": {"list": {}, "resume": {}}}
+    assert (await machine._handle(command)).code == "gemini_workspace_untrusted"
+    assert (await machine._handle(SwitchSession(engine="antigravity", session_id="agy@previous"))).code == "gemini_workspace_untrusted"
+    assert "信任" in (await machine._handle(GetHistory(session_id="agy@previous"))).error
+    assert all(method == "session/list" for method, _ in client.calls)
+
+    machine.cfg.antigravity_trusted_workspaces = json.dumps([str(alias)])
+    assert (await machine._handle(command)).code == "gemini_workspace_untrusted"
+    machine.cfg.antigravity_trusted_workspaces = '{"invalid":true}'
+    assert (await machine._handle(command)).code == "gemini_workspace_config"
+    trust_workspaces(machine, project)
+    focus, _ = await machine._handle(command)
+    assert focus.cwd == workspace
+    assert [params["cwd"] for method, params in client.calls if method == "session/new"] == [workspace]
+
+
+@pytest.mark.asyncio
+async def test_resident_gemini_queries_cannot_change_or_skip_workspace_trust(wire):
+    machine, _, runtime, client = wire
+    ctx = await new_session(machine)
+    result = await machine._handle(Query(sid=ctx.key, prompt="/add-dir", msg_id="change-workspace"))
+    assert result.code == "gemini_workspace_command"
+    trust_workspaces(machine)
+    result = await machine._handle(Query(sid=ctx.key, prompt="Continue", msg_id="untrusted-workspace"))
+    assert result.code == "gemini_workspace_untrusted"
+    deferred = Query(sid=ctx.key, prompt="From the queue", msg_id="untrusted-deferred")
+    assert (await runtime.query(ctx, deferred)).code == "gemini_workspace_untrusted"
+    assert not client.prompts
 
 
 @pytest.mark.asyncio
@@ -337,10 +405,23 @@ async def test_independent_gemini_service_keeps_running_question_across_wrapper_
         listener = await asyncio.start_unix_server(service.connection, str(path))
         path.chmod(0o600)
         first, _ = _mk_machine()
+        first.cfg.antigravity_trusted_workspaces = worker.cfg.antigravity_trusted_workspaces
+        trust_workspaces(worker)
         first._gemini_controller = GeminiController(path, first)
         second, second_transport = _mk_machine()
+        second.cfg.antigravity_trusted_workspaces = first.cfg.antigravity_trusted_workspaces
         second._gemini_controller = GeminiController(path, second)
         try:
+            reader, writer = await asyncio.open_unix_connection(str(path))
+            try:
+                await write_frame(writer, {
+                    "op": "attach", "protocol": 2, "machine": worker.cfg.machine_id,
+                    "runtime": {"session_messages": False, "environment": {}, "trusted_workspaces": "[]"},
+                })
+                assert (await read_frame(reader))["error"] == "scope"
+            finally:
+                writer.close()
+                await writer.wait_closed()
             focus = await first._handle(NewSession(engine="antigravity", cwd=client.cwd))
             sid = focus.session_id
             query = Query(sid=sid, msg_id="service-query", prompt="Keep one running turn",
@@ -471,7 +552,7 @@ async def test_installed_service_waits_for_original_wrapper_message_receiver(wir
             try:
                 await write_frame(writer, {"op": "attach", "protocol": GEMINI_SERVICE_VERSION,
                                           "machine": worker.cfg.machine_id,
-                                          "runtime": {"session_messages": True, "environment": {}}})
+                                          "runtime": {"session_messages": True, "environment": {}, "trusted_workspaces": "[]"}})
                 assert (await read_frame(reader))["error"] == "occupied"
             finally:
                 writer.close()
@@ -560,8 +641,14 @@ async def test_gemini_controller_waits_for_previous_wrapper_to_release_service(w
 @pytest.mark.asyncio
 async def test_catalog_reopens_one_blank_probe_across_scopes_and_wrapper_restart(wire, tmp_path):
     machine, _, runtime, client = wire
+    control = tmp_path / "private-control"
+    control.mkdir()
+    client.cwd = str(control.resolve())
     other = tmp_path / "other"
     other.mkdir()
+    trust_workspaces(machine)
+    # The old probe may have been opened in a project. Never reload its ID.
+    (runtime.catalog_path.parent / "antigravity-catalog.json").write_text('{"session_id":"old-project-probe"}')
     await machine._handle(GetModels(engine="antigravity", cwd=client.cwd))
     await machine._handle(GetModels(engine="antigravity", cwd=client.cwd, antigravity_model="flash"))
     await machine._handle(GetModels(engine="antigravity", cwd=str(other)))
@@ -572,8 +659,9 @@ async def test_catalog_reopens_one_blank_probe_across_scopes_and_wrapper_restart
     assert catalog.default_model == "neon"
     assert sum(method == "session/new" for method, _ in client.calls) == 1
     loaded = [args for method, args in client.calls if method == "session/load"]
-    assert len(loaded) == 3 and len({args["sessionId"] for args in loaded}) == 1
-    assert loaded[-1]["cwd"] == str(other.resolve())
+    assert len(loaded) == 2 and len({args["sessionId"] for args in loaded}) == 1
+    assert loaded[-1]["sessionId"] != "old-project-probe"
+    assert {args["cwd"] for method, args in client.calls if method in {"session/new", "session/load"}} == {client.cwd}
     assert all(not args["mcpServers"] for method, args in client.calls
                if method in {"session/new", "session/load"})
     assert not machine.sessions and not client.prompts and not client.rows
@@ -667,6 +755,7 @@ async def test_missing_worktree_history_remains_readable_and_hidden_row_is_rever
     machine, _, _, client = wire
     worktree = tmp_path / "removed"
     worktree.mkdir()
+    trust_workspaces(machine, worktree)
     ctx = await new_session(machine, cwd=str(worktree))
     await machine._handle(Query(sid=ctx.key, msg_id="old", prompt="old"))
     client.prompts[0][1].set_result({"stopReason": "end_turn"})
@@ -1015,7 +1104,7 @@ async def test_acp_eof_retires_background_on_its_original_turn(wire, next_prompt
     assert ctx.sdk.transcript.background
 
     stream = asyncio.StreamReader()
-    acp = AcpClient(AntigravityLaunch("/fake/agy", {}), ctx.cwd, runtime.on_update,
+    acp = AcpClient(AntigravityLaunch("/fake/agy", {}), runtime.on_update,
                     runtime.on_request, on_disconnect=runtime.on_disconnect)
     acp.process = SimpleNamespace(stdout=stream, returncode=None)
     turn_task = None
@@ -1118,7 +1207,7 @@ async def test_rpc_diagnostics_keep_error_code_without_native_secret():
     async def noop(*_args):
         return None
 
-    client = AcpClient(AntigravityLaunch("/fake/agy", {}), "/tmp", noop, noop)
+    client = AcpClient(AntigravityLaunch("/fake/agy", {}), noop, noop)
     receipt = asyncio.get_running_loop().create_future()
     client.pending[1] = receipt
     await client._receive({"id": 1, "error": {"code": -32602, "message": "private gateway key"}})

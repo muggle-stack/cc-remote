@@ -48,6 +48,8 @@ log = logger("antigravity_runtime")
 _ENGINE = "antigravity"
 _MISSING_DIRECTORY = "Gemini 工作目录已不存在。仍可查看历史，恢复原目录后可继续。"
 _DISCONNECTED = "本机 agy 连接已断开，请重新打开会话。"
+_WORKSPACE_ENV = "CC_REMOTE_ANTIGRAVITY_TRUSTED_WORKSPACES"
+_WORKSPACE_COMMANDS = frozenset({"/add-dir", "/projects", "/resume"})
 _CONTROL_LABELS = {"model": "模型", "thought_level": "思考强度", "mode": "权限模式"}
 _CODE_PROMPT_APPEND = (
     "When you need the user's decision, use the CC Remote ask_user tool. "
@@ -210,8 +212,9 @@ class AntigravityRuntime:
         self.mutations = DshMutationJournal(owner_state, engine=_ENGINE, label="Gemini", error_type=AcpError)
         self.control_store = AntigravityControlStore(owner_state)
         self.metadata = AntigravityMetadataStore(owner_state)
-        self.catalog_path = owner_state / "antigravity-catalog.json"
-        self.catalog: OrderedDict[tuple[str, str | None], tuple[float, AntigravityHandle, str | None]] = OrderedDict()
+        # Earlier catalogs may point at sessions created in a project.
+        self.catalog_path = owner_state / "antigravity-control-catalog.json"
+        self.catalog: OrderedDict[str | None, tuple[float, AntigravityHandle, str | None]] = OrderedDict()
         self.cached_history: OrderedDict[str, tuple[float, AntigravityHandle]] = OrderedDict()
 
     def availability(self, cmd):
@@ -292,6 +295,25 @@ class AntigravityRuntime:
         await self.machine.transport.send(frame)
         return frame
 
+    def trusted_workspace(self, cwd: str) -> str:
+        try:
+            workspace = str(Path(cwd).resolve())
+        except (OSError, ValueError, RuntimeError):
+            raise AcpError("directory", "Gemini 工作目录无效或不可读取。") from None
+        try:
+            allowed = json.loads(self.machine.cfg.antigravity_trusted_workspaces)
+        except (ValueError, RecursionError):
+            allowed = None
+        if not isinstance(allowed, list) or any(
+            not isinstance(path, str) or not os.path.isabs(path) or "\0" in path for path in allowed
+        ):
+            raise AcpError("workspace_config", f"请检查 Wrapper 上的 {_WORKSPACE_ENV}，它需要一个绝对路径的 JSON 数组。")
+        # Compare with the configured physical path verbatim. A symlink named
+        # in the trust list must not silently transfer trust to a new target.
+        if workspace not in allowed:
+            raise AcpError("workspace_untrusted", f"此 Gemini 目录尚未受信任。请在 Wrapper 的 {_WORKSPACE_ENV} 中加入该目录的物理路径。")
+        return workspace
+
     async def connection(self):
         async with self.connect_lock:
             if self.client is not None:
@@ -302,7 +324,7 @@ class AntigravityRuntime:
             launch = self.launch_factory()
             if launch is None:
                 raise AcpError("unavailable", "此设备未启用 Gemini 或没有安装 agy。")
-            client = AcpClient(launch, self.machine.cfg.cc_cwd, self.on_update,
+            client = AcpClient(launch, self.on_update,
                                self.on_request, args=self.args, on_disconnect=self.on_disconnect,
                                on_lifecycle=self.on_native_lifecycle)
             await client.start()
@@ -393,9 +415,15 @@ class AntigravityRuntime:
         # was removed. Only commands capable of working in it need existence.
         return cwd
 
-    async def open_native(self, cwd, sid=None, *, interactive=False):
+    async def open_native(self, cwd: str | None, sid=None, *, interactive=False):
         """Call under setup_lock so early native replay has one exact owner."""
+        if cwd is not None:
+            cwd = self.trusted_workspace(cwd)
         client = await self.connection()
+        # Only the internal, prompt-free catalog passes no user directory.
+        cwd = cwd or client.cwd
+        if cwd is None:
+            raise AcpError("startup", "无法创建 Gemini 私有控制目录。")
         handle = AntigravityHandle(client, sid[4:] if sid else "")
         handle.transcript.native_id = handle.native_id
         self.opening = handle
@@ -459,6 +487,7 @@ class AntigravityRuntime:
         params = handle.history_params
         if params is None:
             return
+        params = {**params, "cwd": self.trusted_workspace(params["cwd"])}
         staged = self.opening = AntigravityHandle(handle.client, handle.native_id)
         staged.transcript.native_id = handle.native_id
         try:
@@ -480,12 +509,14 @@ class AntigravityRuntime:
             sid = focused.key
         ctx = self.machine.sessions.get(sid)
         if self.reusable(ctx):
+            self.trusted_workspace(ctx.cwd)
             if ctx.state == "idle":
                 await self.sync_directory_control(ctx)
             return ctx
         async with self.setup_lock:
             ctx = self.machine.sessions.get(sid)
             if self.reusable(ctx):
+                self.trusted_workspace(ctx.cwd)
                 if ctx.state == "idle":
                     await self.sync_directory_control(ctx)
                 return ctx
@@ -650,7 +681,7 @@ class AntigravityRuntime:
     async def handle_new_session(self, cmd):
         if cmd.prompt is not None or cmd.images or cmd.files:
             self.validate_input(cmd)
-        cwd = _cwd(cmd.cwd or self.machine.cfg.cc_cwd)
+        cwd = self.trusted_workspace(_cwd(cmd.cwd or self.machine.cfg.cc_cwd))
         fields = cmd.model_dump(exclude={"v", "ts", "cmd_id", "client_id", "owner_id", "to", "route_id"})
         identity, fresh, previous = await self.mutation_intent(cmd, "create", fields)
         if not fresh:
@@ -663,7 +694,12 @@ class AntigravityRuntime:
                 session_id=sid, cwd=ctx.cwd, request_id=cmd.request_id, to=cmd.client_id))
         async with self.setup_lock:
             await self.ensure_capacity()
-            handle = await self.open_native(cwd, interactive=True)
+            try:
+                handle = await self.open_native(cwd, interactive=True)
+            except AcpError as exc:
+                if exc.code in {"workspace_untrusted", "workspace_config", "directory"}:
+                    await asyncio.to_thread(self.mutations.discard_unsent, identity)
+                raise
             sid = wire_session_id(handle.native_id)
             try:
                 await asyncio.to_thread(self.mutations.created, identity, sid)
@@ -786,7 +822,7 @@ class AntigravityRuntime:
                 raise AcpError("directory", _MISSING_DIRECTORY)
             await self.apply_option(ctx, category, value)
 
-    async def open_catalog_probe(self, cwd):
+    async def open_catalog_probe(self):
         # A prompt-free session remains on disk after session/close. Persist
         # its identity so every catalogue scope reuses it across restarts.
         try:
@@ -799,7 +835,7 @@ class AntigravityRuntime:
         sid = wire_session_id(native_id)
         if sid:
             try:
-                handle = await self.open_native(cwd, sid)
+                handle = await self.open_native(None, sid)
             except AcpError as exc:
                 if exc.code != "session_missing":
                     raise
@@ -810,7 +846,7 @@ class AntigravityRuntime:
         elif saved:
             raise AcpError("catalog_state", "本机 Gemini 模型目录会话标识无效。")
 
-        handle = await self.open_native(cwd)
+        handle = await self.open_native(None)
         try:
             await asyncio.to_thread(write_json, self.catalog_path, {
                 "session_id": handle.native_id, "default_model": handle.model,
@@ -827,14 +863,13 @@ class AntigravityRuntime:
             ctx = await self.context(cmd.sid)
             handle = ctx.sdk
         else:
-            normalized = _cwd(cwd or self.machine.cfg.cc_cwd)
-            scope = (normalized, cmd.antigravity_model)
+            scope = cmd.antigravity_model
             async with self.setup_lock:
                 cached = self.catalog.get(scope)
                 if cached and time.monotonic() - cached[0] < 60 and cached[1].client.running:
                     _, handle, native_default = cached
                 else:
-                    handle, native_default = await self.open_catalog_probe(normalized)
+                    handle, native_default = await self.open_catalog_probe()
                     try:
                         choices = self.choices(handle, "model")
                         configured = handle.client.launch.default_model
@@ -1040,6 +1075,9 @@ class AntigravityRuntime:
             raise AcpError(ERR_BAD_PROMPT, "请输入内容或添加附件。")
         if validate_attachments(cmd.images, cmd.files):
             raise AcpError(ERR_BAD_PROMPT, "附件不符合大小或格式要求。")
+        prompt = (cmd.prompt or "").lstrip()
+        if prompt.startswith("/") and prompt.split(maxsplit=1)[0].casefold() in _WORKSPACE_COMMANDS:
+            raise AcpError("workspace_command", "请从 CC Remote 的会话入口切换 Gemini 工作目录或恢复会话。")
 
     @staticmethod
     def prompt_blocks(client, cmd):
@@ -1093,6 +1131,7 @@ class AntigravityRuntime:
             handle = ctx.sdk
             if not handle.connected:
                 raise AcpError("offline", "本机 agy 已断开，请重新打开 Gemini 会话。")
+            self.trusted_workspace(ctx.cwd)
             if handle.history_params is not None:
                 async with self.setup_lock:
                     await self.load_resumed_history(handle)

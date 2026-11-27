@@ -23,7 +23,7 @@ log = logger("antigravity_service")
 _REPLAY = ContextVar("gemini_replay", default=False)
 _DISCONNECT = (OSError, ValueError, asyncio.IncompleteReadError, TimeoutError)
 _SOCKET = "service.sock"
-GEMINI_SERVICE_VERSION = 2
+GEMINI_SERVICE_VERSION = 3
 GEMINI_CONTROL_VERSION = 1
 GEMINI_SWITCH_FENCE = "service-switching"
 
@@ -127,9 +127,11 @@ class GeminiService:
             await write_frame(writer, {"error": "scope"})
             return False
         environment = settings.get("environment")
+        trusted_workspaces = settings.get("trusted_workspaces")
         if (not isinstance(environment, dict) or environment.keys() - WRAPPER_ENV_KEYS
                 or any(not isinstance(value, str) or "\0" in value for value in environment.values())
-                or sum(len(value) for value in environment.values()) > 131072):
+                or sum(len(value) for value in environment.values()) > 131072
+                or not isinstance(trusted_workspaces, str) or len(trusted_workspaces) > 131072):
             await write_frame(writer, {"error": "scope"})
             return False
         async with self.attach_lock:
@@ -151,6 +153,7 @@ class GeminiService:
             if messages is not None:
                 messages.set_enabled(settings["session_messages"])
             self.environment = environment
+            self.machine.cfg.antigravity_trusted_workspaces = trusted_workspaces
             # No events can precede the attach reply.
             self.transport.writer = writer
             await self.transport.write(writer, {"attached": True})
@@ -288,6 +291,7 @@ class GeminiController:
             settings = {
                 "environment": {key: os.environ[key] for key in WRAPPER_ENV_KEYS if key in os.environ},
                 "session_messages": self.machine.cfg.session_messages_enabled,
+                "trusted_workspaces": self.machine.cfg.antigravity_trusted_workspaces,
             }
             async with asyncio.timeout(3):
                 while True:

@@ -340,6 +340,8 @@ class WrapperConfig:
     antigravity_service_socket: str = field(
         default_factory=lambda: _env("CC_REMOTE_ANTIGRAVITY_SERVICE_SOCKET", ""))
     antigravity_owner_state_dir: Path | None = None
+    antigravity_trusted_workspaces: str = field(default_factory=lambda: _env(
+        "CC_REMOTE_ANTIGRAVITY_TRUSTED_WORKSPACES", "[]"))
     # During an SDK-service upgrade, existing native work may finish on the
     # previous service while newly opened sessions use the primary socket.
     claude_service_drain_socket: str = field(
