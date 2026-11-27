@@ -689,15 +689,16 @@ class AntigravityRuntime:
                 for ctx in self.machine.sessions.values()):
             raise AcpError(ERR_BUSY, "请等本机 Gemini 会话和队列空闲后再登录。")
         async with self.auth_lock:
-            identity, fresh, row = await self.mutation_intent(cmd, "auth", [cmd.method])
-            if not fresh:
-                if row.get("result") and json.loads(row["result"]).get("status") == "signed_in":
-                    return await self.send(AntigravityAuthResult(signed_in=True, **fields))
-                raise self.uncertain()
-            await client.call("authenticate", {"methodId": cmd.method}, timeout=300)
-            self.catalog.clear()
-            await asyncio.to_thread(self.mutations.finish, identity, {"status": "signed_in"})
-            await self.send(SessionListInvalidated(engine=_ENGINE))
+            with self.quota.account_change():
+                identity, fresh, row = await self.mutation_intent(cmd, "auth", [cmd.method])
+                if fresh:
+                    await client.call("authenticate", {"methodId": cmd.method}, timeout=300)
+                    self.catalog.clear()
+                    await asyncio.to_thread(self.mutations.finish, identity, {"status": "signed_in"})
+                elif not (row.get("result") and json.loads(row["result"]).get("status") == "signed_in"):
+                    raise self.uncertain()
+            if fresh:
+                await self.send(SessionListInvalidated(engine=_ENGINE))
             return await self.send(AntigravityAuthResult(signed_in=True, **fields))
 
     async def handle_get_antigravity_quota(self, cmd):

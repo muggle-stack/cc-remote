@@ -12603,10 +12603,6 @@ class WrapperMachine:
             return error
         if cmd.type == "get_antigravity_quota":
             return await self._antigravity.dispatch(cmd)
-        if cmd.type == "antigravity_auth" and cmd.method:
-            gemini = self._gemini_controller or self._antigravity
-            with self._antigravity.quota.account_change():
-                return await gemini.dispatch(cmd)
         if self._gemini_controller and self._antigravity.targets(cmd):
             return await self._gemini_controller.dispatch(cmd)
         result = await self._antigravity.dispatch(cmd)

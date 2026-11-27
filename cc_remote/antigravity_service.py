@@ -8,7 +8,7 @@ import json
 import os
 import signal
 import stat
-from contextlib import asynccontextmanager, suppress
+from contextlib import ExitStack, asynccontextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
 from uuid import uuid4
@@ -16,7 +16,7 @@ from uuid import uuid4
 from cc_remote.claude_service.wire import private_directory, read_frame, same_user, write_frame
 from cc_remote.log import logger
 from cc_remote import protocol
-from cc_remote.protocol import AntigravityAvailability, FilePreview, SessionInfo
+from cc_remote.protocol import AntigravityAuthResult, AntigravityAvailability, FilePreview, SessionInfo
 from cc_remote.update import UpdateError
 from cc_remote.update_jobs import read_json, write_json
 from cc_remote.wrapper.antigravity_client import AcpError, AntigravityLaunch, WRAPPER_ENV_KEYS, antigravity_opted_out
@@ -327,6 +327,7 @@ class GeminiController:
         self.reader_task = None
         self.lock = asyncio.Lock()
         self.pending = {}
+        self._login_guards: dict[tuple[str | None, str | None], ExitStack] = {}
 
     async def _connect(self):
         if self.reader_task is not None and not self.reader_task.done() and self.writer is not None:
@@ -373,6 +374,13 @@ class GeminiController:
                     event = local_message(frame["event"])
                     if isinstance(event, FilePreview) and event.media_id:
                         event = self._register_media(event, frame.get("media_registration"))
+                    elif isinstance(event, AntigravityAuthResult):
+                        # The browser refreshes quota as soon as it sees the
+                        # result, which can precede the worker's command reply.
+                        if guard := self._login_guards.get((event.to, event.request_id)):
+                            guard.close()
+                        elif event.signed_in:
+                            self.machine._antigravity.quota.invalidate()
                     await self.machine.transport.send(event)
                 elif (future := self.pending.get(frame.get("id"))) and not future.done():
                     if "error" in frame:
@@ -434,9 +442,26 @@ class GeminiController:
             if not future.done():
                 future.cancel()
 
+    async def _request_command(self, cmd, *, reliable=False):
+        payload = {"command": service_message(cmd)}
+        if reliable:
+            payload["reliable"] = True
+        is_auth = cmd.type == "antigravity_auth"
+        timeout = 310 if is_auth else 90
+        key = (cmd.client_id, cmd.cmd_id) if is_auth and cmd.method else None
+        with ExitStack() as guard:
+            if key is not None and key not in self._login_guards:
+                guard.enter_context(self.machine._antigravity.quota.account_change())
+                if cmd.client_id and cmd.cmd_id:
+                    self._login_guards[key] = guard
+            try:
+                return await self.request(payload, timeout=timeout)
+            finally:
+                if key is not None and self._login_guards.get(key) is guard:
+                    del self._login_guards[key]
+
     async def call(self, cmd):
-        reply = await self.request(
-            {"command": service_message(cmd)}, timeout=310 if cmd.type == "antigravity_auth" else 90)
+        reply = await self._request_command(cmd)
         events = [local_message(raw) for raw in reply]
         return [unavailable_media(event) if isinstance(event, FilePreview) and event.media_id
                 and self.machine.media_previews.gemini_registration(event.media_id) is None else event
@@ -458,8 +483,7 @@ class GeminiController:
 
     async def process(self, cmd):
         try:
-            await self.request({"command": service_message(cmd), "reliable": True},
-                               timeout=310 if cmd.type == "antigravity_auth" else 90)
+            await self._request_command(cmd, reliable=True)
         except AcpError as exc:
             await self.machine._antigravity.error(cmd, exc)
             if not exc.unknown:
