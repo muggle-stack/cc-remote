@@ -8,13 +8,16 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
+import httpx
 import pytest
 import pytest_asyncio
 
 from cc_remote import protocol
 from cc_remote.protocol import (
-    AnswerQuestion, AntigravityAuth, ArchiveSession, GetContext, GetEngineCapabilities, GetHistory, GetModels, GetTurnDetail, Hello,
-    Interrupt, ListSessions, NewSession, Query, RenameSession, SetAntigravityOption, Steer, SwitchSession,
+    FILE_PREVIEW_MAX_BYTES, AcknowledgeCompletion, AnswerQuestion, AntigravityAuth, ArchiveSession,
+    GetContext, GetEngineCapabilities, GetFilePreview,
+    GetHistory, GetModels, GetTurnDetail, Hello, Interrupt, ListSessions, NewSession, Query, RenameSession,
+    SetAntigravityOption, Steer, SwitchSession,
     deserialize, serialize,
 )
 from cc_remote.antigravity_service import (
@@ -23,6 +26,7 @@ from cc_remote.antigravity_service import (
 from cc_remote.claude_service.wire import read_frame, write_frame
 from cc_remote.session_messages import parse_message, reference
 from cc_remote.wrapper import antigravity_runtime
+from cc_remote.wrapper import session_presentation
 from cc_remote.wrapper.antigravity_client import AcpClient, AcpError, AntigravityLaunch
 from cc_remote.wrapper.antigravity_hooks import AntigravityHooks
 from cc_remote.wrapper.antigravity_runtime import AntigravityRuntime
@@ -30,6 +34,11 @@ from cc_remote.wrapper.session_messages import SessionMessages
 from cc_remote.wrapper.session_pins import SessionPinStore
 from cc_remote.wrapper.session_presentation import SessionPresentationStore
 from tests.test_multisession import _mk_machine
+from tests import test_viewer
+from tests.test_video_preview import owner_for, video_file
+
+publication = test_viewer.publication
+isolated_login_limiter = test_viewer.isolated_login_limiter
 
 
 def test_local_launch_is_opt_in_and_keeps_gateway_credentials_local(monkeypatch, tmp_path):
@@ -209,6 +218,28 @@ def trust_workspaces(machine, *paths):
     machine.cfg.antigravity_trusted_workspaces = json.dumps([str(path.resolve()) for path in paths])
 
 
+@pytest_asyncio.fixture
+async def managed_gemini(wire):
+    worker, _, _, native = wire
+    wrapper, transport = _mk_machine()
+    worker.cfg.antigravity_owner_state_dir = wrapper.cfg.state_dir
+    worker.transport = ServiceTransport()
+    service = GeminiService(worker, worker.transport)
+    with TemporaryDirectory(prefix="ccr-managed-gemini-", dir="/tmp") as directory:
+        path = Path(directory) / "service.sock"
+        listener = await asyncio.start_unix_server(service.connection, str(path))
+        path.chmod(0o600)
+        wrapper._gemini_controller = GeminiController(path, wrapper)
+        try:
+            yield wrapper, transport, worker, service, native
+        finally:
+            await wrapper._gemini_controller.close()
+            await wrapper._command_scheduler.close()
+            listener.close()
+            await listener.wait_closed()
+            await service.close()
+
+
 async def new_session(machine, **fields):
     focus, _ = await machine._handle(NewSession(engine="antigravity", **fields))
     return machine.sessions[focus.session_id]
@@ -218,6 +249,79 @@ async def prompted(client, count):
     async with asyncio.timeout(1):
         while len(client.prompts) < count:
             await asyncio.sleep(0.001)
+
+
+@pytest.mark.asyncio
+async def test_managed_gemini_media_is_registered_and_streamed_by_wrapper(tmp_path, publication, managed_gemini):
+    wrapper, transport, worker, _, _ = managed_gemini
+    cwd = tmp_path / "gemini-workspace"
+    cwd.mkdir()
+    trust_workspaces(wrapper, cwd)
+    focus = await wrapper._handle(NewSession(engine="antigravity", cwd=str(cwd)))
+    clip = video_file(tmp_path, size=4096)
+
+    async with test_viewer.live_viewer(tmp_path, publication, mode="bridge", media_previews=wrapper.media_previews) as (
+            client, _app, config, _site):
+        owner = owner_for(client, config)
+        preview = await wrapper._handle(GetFilePreview(sid=focus.session_id, path=str(clip),
+                                                        request_id="gemini-video", client_id="browser", owner_id=owner))
+        assert preview.format == "video" and preview.media_id and not preview.error
+        assert any(frame == preview for frame in transport.sent)
+        assert wrapper.media_previews.get(preview.media_id, owner).sid == focus.session_id
+        url = f"/api/media/device/{preview.media_id}"
+        async with httpx.AsyncClient(base_url=config.public_origin, cookies=client.cookies) as http:
+            response = await http.get(url, headers={"Range": "bytes=0-15"})
+            assert response.status_code == 206
+            assert response.content == clip.read_bytes()[:16]
+            worker._preview_capability_store.revoke("antigravity", "code", focus.session_id, str(clip.resolve()))
+            assert (await http.get(url, headers={"Range": "bytes=0-15"})).status_code == 404
+
+            source = cwd / "original.txt"
+            source.write_bytes(b"x" * (FILE_PREVIEW_MAX_BYTES + 16))
+            original = await wrapper._handle(GetFilePreview(sid=focus.session_id, path=source.name,
+                                                              request_id="gemini-original", client_id="browser", owner_id=owner))
+            assert original.truncated and original.media_id and not original.error
+            raw = await http.get(f"/api/media/device/{original.media_id}", headers={"Range": "bytes=-16"})
+            assert raw.status_code == 206 and raw.content == b"x" * 16
+            assert raw.headers["content-type"] == "application/octet-stream"
+
+
+@pytest.mark.asyncio
+async def test_managed_gemini_imports_cold_receipts_and_keeps_newer_service_completions(managed_gemini, monkeypatch):
+    wrapper, _, worker, service, native = managed_gemini
+    old, newer = "agy@old", "agy@newer"
+    for sid in (old, newer):
+        native.rows[sid[4:]] = {"sessionId": sid[4:], "cwd": native.cwd, "title": sid}
+    now = [100.0]
+    monkeypatch.setattr(session_presentation, "time", SimpleNamespace(time=lambda: now[0]))
+    previous = wrapper._session_presentation
+    for sid in (old, newer):
+        previous.mark_completion("antigravity", sid, "wrapper-first")
+        previous.acknowledge_completion("antigravity", sid, "wrapper-first")
+        previous.mark_completion("antigravity", sid, "wrapper-unread")
+    previous.mark_completion("codex", "codex-receipt", "unrelated")
+    now[0] = 200.0
+    active = worker._session_presentation
+    active.mark_completion("antigravity", newer, "service-receipt")
+
+    listing = await wrapper._handle(ListSessions(engine="antigravity"))
+    receipts = {row.session_id: (row.completion_id, row.completion_unread, row.completion_revision)
+                for row in listing.sessions}
+    assert receipts == {old: ("wrapper-unread", True, 3), newer: ("service-receipt", True, 4)}
+    assert not active.entries_for_engine("codex")
+    await wrapper._handle(AcknowledgeCompletion(sid=old, completion_id="wrapper-unread"))
+    assert not active.get("antigravity", old).completion_unread
+    assert active.get("antigravity", old).completion_revision == 4
+
+    await wrapper._gemini_controller.close()
+    async with asyncio.timeout(2):
+        while service.transport.writer is not None:
+            await asyncio.sleep(.001)
+    now[0] = 300.0
+    previous.mark_completion("antigravity", old, "stale-owner")
+    await wrapper._gemini_controller.list_sessions()
+    restored = SessionPresentationStore(worker.cfg.state_dir).get("antigravity", old)
+    assert (restored.completion_id, restored.completion_unread, restored.completion_revision) == ("wrapper-unread", False, 4)
 
 
 @pytest.mark.asyncio

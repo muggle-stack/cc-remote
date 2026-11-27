@@ -179,6 +179,33 @@ class SessionPresentationStore:
         with self._lock:
             return {key[len(prefix):]: value for key, value in self._sessions.items() if key.startswith(prefix)}
 
+    def import_completions(self, engine: str, source: dict[str, SessionPresentationSnapshot]) -> None:
+        """Carry receipts across an ownership transfer without rewinding browser revisions."""
+        with self._lock:
+            updated = OrderedDict(self._sessions)
+            for sid, incoming in source.items():
+                if not incoming.completion_revision:
+                    continue
+                key = _scope_key(engine, sid)
+                current = updated.get(key, SessionPresentationSnapshot())
+                latest = incoming if (not current.completion_revision
+                                      or incoming.updated_at > current.updated_at) else current
+                other = current if latest is incoming else incoming
+                revision = max(latest.completion_revision, other.completion_revision)
+                if (latest.completion_revision <= other.completion_revision
+                        and (latest.completion_id, latest.completion_unread)
+                        != (other.completion_id, other.completion_unread)):
+                    # A changed projection must supersede the other store's
+                    # last known revision, including an equal-revision conflict.
+                    revision += 1
+                updated[key] = replace(current, completion_id=latest.completion_id,
+                                       completion_unread=latest.completion_unread,
+                                       completion_revision=revision, updated_at=latest.updated_at)
+            if updated != self._sessions:
+                updated = OrderedDict(sorted(updated.items(), key=lambda item: item[1].updated_at)[-_MAX_ENTRIES:])
+                self._persist_bounded(updated)
+                self._sessions = updated
+
     def set_hidden(self, engine: str, session_id: str, hidden: bool) -> None:
         key = _scope_key(engine, session_id)
         with self._lock:

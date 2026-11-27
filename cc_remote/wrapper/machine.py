@@ -26394,7 +26394,7 @@ class WrapperMachine:
                     raise PermissionError("file permission revoked")
 
         return self.media_previews.create(
-            owner_id, engine, sid, opener, authorize, download_identity=download_identity)
+            owner_id, engine, sid, opener, authorize, download_identity=download_identity, resolved_path=resolved)
 
     async def _load_artifact_preview(self, cwd, path, engine, space, sid, owner_id, caps, *, frozen_caps=None):
         from cc_remote.wrapper.media_preview import STREAMED_MEDIA_SUFFIXES, fingerprint

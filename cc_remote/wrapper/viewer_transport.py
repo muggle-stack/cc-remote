@@ -151,6 +151,8 @@ class ViewerTransport:
                                or not isinstance(v, str) or len(v) > 256
                                for k, v in headers.items())):
                     raise ValueError("invalid headers")
+                if media:
+                    await self.media_previews.check_remote(message.get("media_id"), message.get("owner_id"))
                 opening = asyncio.create_task(asyncio.to_thread(*open_args))
                 try:
                     stream, info, mime = await asyncio.shield(opening)
@@ -174,6 +176,7 @@ class ViewerTransport:
                     await asyncio.wait_for(ready.get(), timeout=45)
                     # Removal / configuration change revokes even an ongoing download.
                     if media:
+                        await self.media_previews.check_remote(message.get("media_id"), message.get("owner_id"))
                         await asyncio.to_thread(self.media_previews.validate,
                             message.get("media_id"), message.get("owner_id"), stream)
                     else:

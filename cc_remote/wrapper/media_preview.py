@@ -6,9 +6,12 @@ from dataclasses import dataclass
 import os
 import re
 import secrets
+import stat
 import threading
 import time
-from typing import Callable
+from typing import Awaitable, Callable, Literal
+
+from pydantic import BaseModel, Field
 
 from cc_remote.audio_preview import webm_media_type
 from cc_remote.protocol import ARTIFACT_PREVIEW_MAX_BYTES
@@ -35,8 +38,22 @@ class MediaPreview:
     expires: float
     identity: tuple
     mime: str
+    path: str
     opener: Callable
     authorize: Callable | None
+    remote_check: Callable[[], Awaitable[None]] | None = None
+
+
+class MediaRegistration(BaseModel):
+    """A reopening descriptor sent only on the private Gemini service socket."""
+
+    media_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    owner: str = Field(min_length=1, max_length=128)
+    sid: str = Field(min_length=1, max_length=512)
+    expires: float = Field(allow_inf_nan=False)
+    identity: tuple[int, int, int, int, int, int, int]
+    mime: Literal["video/mp4", "video/webm", "application/octet-stream"]
+    path: str = Field(min_length=1, max_length=4096)
 
 
 class MediaPreviews:
@@ -48,7 +65,7 @@ class MediaPreviews:
         self.lock = threading.RLock()
         self.generation = 0
 
-    def create(self, owner, engine, sid, opener, authorize=None, *, download_identity=None):
+    def create(self, owner, engine, sid, opener, authorize=None, *, download_identity=None, resolved_path=None):
         if not isinstance(owner, str) or not owner or len(owner) > 128:
             raise ValueError("请重新连接后再打开文件")
         with self.lock:
@@ -85,21 +102,64 @@ class MediaPreviews:
                 raise ValueError("会话已改变，请重新打开文件")
             if data is not None:
                 return {**preview, "format": "audio", "media_type": mime, "data": data}
-            now = self.clock()
-            for key, item in tuple(self.entries.items()):
-                if item.expires <= now:
-                    self.entries.pop(key)
-            owned = [key for key, item in self.entries.items() if item.owner == owner]
-            while len(owned) >= MAX_OWNER_PREVIEWS:
-                self.entries.pop(owned.pop(0))
-            while len(self.entries) >= MAX_MEDIA_PREVIEWS:
-                self.entries.popitem(last=False)
             media_id = secrets.token_hex(16)
-            self.entries[media_id] = MediaPreview(owner, engine, sid, now + MEDIA_TTL,
-                                                 identity, mime, opener, authorize)
+            self._register_locked(media_id, MediaPreview(
+                owner, engine, sid, self.clock() + MEDIA_TTL, identity, mime, resolved_path or path, opener, authorize))
         if download_identity is not None:
             return {"media_id": media_id}
         return {**preview, "format": "video", "media_type": mime, "media_id": media_id}
+
+    def _register_locked(self, media_id: str, record: MediaPreview) -> None:
+        now = self.clock()
+        if record.expires <= now:
+            raise ValueError("video expired")
+        for key, item in tuple(self.entries.items()):
+            if item.expires <= now:
+                self.entries.pop(key)
+        if media_id in self.entries:
+            raise ValueError("video identifier already registered")
+        owned = [key for key, item in self.entries.items() if item.owner == record.owner]
+        while len(owned) >= MAX_OWNER_PREVIEWS:
+            self.entries.pop(owned.pop(0))
+        while len(self.entries) >= MAX_MEDIA_PREVIEWS:
+            self.entries.popitem(last=False)
+        self.entries[media_id] = record
+
+    def gemini_registration(self, media_id: str) -> MediaRegistration | None:
+        with self.lock:
+            item = self.entries.get(media_id)
+            if item is None or item.engine != "antigravity" or item.expires <= self.clock():
+                return None
+            return MediaRegistration(media_id=media_id, owner=item.owner, sid=item.sid,
+                                     expires=item.expires, identity=item.identity, mime=item.mime, path=item.path)
+
+    def register_gemini(self, source: MediaRegistration, check: Callable[[], Awaitable[None]]) -> None:
+        if not os.path.isabs(source.path) or "\0" in source.path:
+            raise ValueError("invalid video path")
+
+        def opener():
+            fd = os.open(source.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    raise PermissionError("video changed")
+                return source.path, os.fdopen(fd, "rb"), info
+            except BaseException:
+                os.close(fd)
+                raise
+
+        record = MediaPreview(source.owner, "antigravity", source.sid, source.expires, source.identity,
+                              source.mime, source.path, opener, None, remote_check=check)
+        with self.lock:
+            existing = self.entries.get(source.media_id)
+            if existing and existing.remote_check is not None and self.gemini_registration(source.media_id) == source:
+                return
+            self._register_locked(source.media_id, record)
+
+    async def check_remote(self, media_id, owner) -> None:
+        item = self.get(media_id, owner)
+        if item.remote_check is not None:
+            await item.remote_check()
 
     def get(self, media_id, owner):
         with self.lock:

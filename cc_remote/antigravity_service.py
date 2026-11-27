@@ -16,8 +16,12 @@ from uuid import uuid4
 from cc_remote.claude_service.wire import private_directory, read_frame, same_user, write_frame
 from cc_remote.log import logger
 from cc_remote import protocol
-from cc_remote.protocol import AntigravityAvailability, SessionInfo
+from cc_remote.protocol import AntigravityAvailability, FilePreview, SessionInfo
+from cc_remote.update import UpdateError
+from cc_remote.update_jobs import read_json, write_json
 from cc_remote.wrapper.antigravity_client import AcpError, AntigravityLaunch, WRAPPER_ENV_KEYS, antigravity_opted_out
+from cc_remote.wrapper.media_preview import MediaRegistration
+from cc_remote.wrapper.session_presentation import SessionPresentationStore, SessionPresentationStoreError
 
 log = logger("antigravity_service")
 _REPLAY = ContextVar("gemini_replay", default=False)
@@ -33,6 +37,11 @@ def service_message(event):
     fields = json.loads(protocol.serialize(event))
     fields.pop("v", None)
     return fields
+
+
+def unavailable_media(event: FilePreview) -> FilePreview:
+    return event.model_copy(update={"media_id": None, "error": (
+        "视频暂时无法读取，请重新打开文件。" if event.format == "video" else event.error)})
 
 
 def local_message(fields):
@@ -82,6 +91,7 @@ class ServiceTransport:
         self.writer: asyncio.StreamWriter | None = None
         self.lock = asyncio.Lock()
         self.on_connected = None
+        self.media_previews = None
 
     async def write(self, writer, frame):
         async with self.lock:
@@ -98,13 +108,19 @@ class ServiceTransport:
         if _REPLAY.get() and event.type != "antigravity_availability" and not (event.sid or "").startswith("agy@"):
             return
         if (writer := self.writer) is not None:
-            await self.write(writer, {"event": service_message(event)})
+            frame = {"event": service_message(event)}
+            if isinstance(event, FilePreview) and event.media_id and self.media_previews is not None:
+                with suppress(ValueError):
+                    if source := self.media_previews.gemini_registration(event.media_id):
+                        frame["media_registration"] = source.model_dump(mode="json")
+            await self.write(writer, frame)
 
 
 class GeminiService:
     def __init__(self, machine, transport, *, message_state=None):
         self.machine = machine
         self.transport = transport
+        self.transport.media_previews = machine.media_previews
         self.message_state = message_state or machine._antigravity.metadata.root
         self.environment: dict[str, str] | None = None
         self.machine._antigravity.opted_out = lambda: antigravity_opted_out(self.environment)
@@ -122,6 +138,22 @@ class GeminiService:
             "state_dir": str(self.machine._antigravity.metadata.root.resolve()),
             "release": str(Path(__file__).resolve().parents[1]),
         }
+
+    def _import_completion_receipts(self):
+        owner = self.machine.cfg.antigravity_owner_state_dir
+        store = self.machine._session_presentation
+        if owner is None or store is None:
+            return
+        marker = Path(self.machine.cfg.state_dir) / "gemini-completion-import.json"
+        try:
+            try:
+                read_json(marker, os.getuid())
+            except FileNotFoundError:
+                source = SessionPresentationStore(owner).entries_for_engine("antigravity")
+                store.import_completions("antigravity", source)
+                write_json(marker, {"version": 1}, mode=0o600)
+        except (OSError, ValueError, UpdateError, SessionPresentationStoreError) as exc:
+            log.warning("Gemini completion receipt migration unavailable", error_type=type(exc).__name__)
 
     async def attach(self, writer, settings):
         if not isinstance(settings, dict) or not isinstance(settings.get("session_messages"), bool):
@@ -153,6 +185,9 @@ class GeminiService:
                 self.machine._session_messages = messages
             if messages is not None:
                 messages.set_enabled(settings["session_messages"])
+            # Read the old owner only after its replacement can attach, so
+            # completions produced between installation and takeover survive.
+            await asyncio.to_thread(self._import_completion_receipts)
             self.environment = environment
             self.machine.cfg.antigravity_trusted_workspaces = trusted_workspaces
             # No events can precede the attach reply.
@@ -219,6 +254,9 @@ class GeminiService:
         try:
             if request.get("op") == "list_sessions":
                 result = [session.model_dump(mode="json") for session in await self.machine._antigravity.list_sessions()]
+            elif request.get("op") == "check_media":
+                await asyncio.to_thread(self._check_media, request.get("media_id"), request.get("owner_id"))
+                result = True
             elif request.get("op") == "session_cwd":
                 sid = request.get("sid")
                 if not isinstance(sid, str) or not sid.startswith("agy@"):
@@ -232,6 +270,13 @@ class GeminiService:
             log.warning("Gemini service request failed", error_type=type(exc).__name__)
             frame = {"id": identity, "error": "command"}
         await self.transport.write(writer, frame)
+
+    def _check_media(self, media_id, owner_id):
+        store = self.machine.media_previews
+        if store.get(media_id, owner_id).engine != "antigravity":
+            raise FileNotFoundError("video unavailable")
+        with store.open(media_id, owner_id)[0]:
+            pass
 
     async def handle_command(self, cmd, *, reliable=False):
         if cmd.type == "hello" and cmd.role == "client":
@@ -325,7 +370,10 @@ class GeminiController:
             while True:
                 frame = await read_frame(reader)
                 if "event" in frame:
-                    await self.machine.transport.send(local_message(frame["event"]))
+                    event = local_message(frame["event"])
+                    if isinstance(event, FilePreview) and event.media_id:
+                        event = self._register_media(event, frame.get("media_registration"))
+                    await self.machine.transport.send(event)
                 elif (future := self.pending.get(frame.get("id"))) and not future.done():
                     if "error" in frame:
                         message = ("Gemini 服务正在切换，请稍后重试。" if frame["error"] == "draining"
@@ -344,6 +392,26 @@ class GeminiController:
                     if not future.done():
                         future.set_exception(AcpError("service", disconnect, unknown=True))
             writer.transport.abort()
+
+    def _register_media(self, event: FilePreview, registration) -> FilePreview:
+        try:
+            source = MediaRegistration.model_validate(registration)
+            if source.media_id != event.media_id or source.sid != event.sid or not source.sid.startswith("agy@"):
+                raise ValueError("video registration scope mismatch")
+            self.machine.media_previews.register_gemini(source, lambda: self._check_media(source))
+            return event
+        except ValueError:
+            return unavailable_media(event)
+
+    async def _check_media(self, source: MediaRegistration) -> None:
+        try:
+            async with asyncio.timeout(5):
+                if await self.request({"op": "check_media", "media_id": source.media_id,
+                                       "owner_id": source.owner}) is True:
+                    return
+        except (AcpError, TimeoutError):
+            pass
+        raise FileNotFoundError("video unavailable")
 
     async def request(self, fields, *, timeout=90):
         key = uuid4().hex
@@ -369,7 +437,10 @@ class GeminiController:
     async def call(self, cmd):
         reply = await self.request(
             {"command": service_message(cmd)}, timeout=310 if cmd.type == "antigravity_auth" else 90)
-        return [local_message(raw) for raw in reply]
+        events = [local_message(raw) for raw in reply]
+        return [unavailable_media(event) if isinstance(event, FilePreview) and event.media_id
+                and self.machine.media_previews.gemini_registration(event.media_id) is None else event
+                for event in events]
 
     async def list_sessions(self):
         return [SessionInfo.model_validate(row, extra="ignore")
