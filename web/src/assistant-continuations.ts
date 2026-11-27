@@ -1,3 +1,4 @@
+import type { Engine } from "./protocol";
 import type { ResponseProcessSummary } from "./protocol";
 import type { Block, ProcessBlock, TextBlock, Turn } from "./domain/conversation";
 import { finalTextBlocks } from "./process-blocks";
@@ -94,7 +95,7 @@ export function continuationTerminalOwner(
 
 /** Native receipt order for Codex, background main-agent output for Claude.
  * Source order and native message IDs keep live, replay and detail identical. */
-export function assistantContinuations(blocks: Block[], answers: TextBlock[], engine: "claude" | "codex" | "dsh" = "claude",
+export function assistantContinuations(blocks: Block[], answers: TextBlock[], engine: Engine = "claude",
   responseProcesses?: ResponseProcessSummary[] | null) {
   const original: Block[] = [];
   const continuations: AssistantContinuation[] = [];

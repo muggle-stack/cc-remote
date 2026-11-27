@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { QuestionNotificationGate, questionNotificationPresentation } from "../src/question-notification.ts";
+import { turnNotificationPresentation } from "../src/turn-notification.ts";
 import { PROTOCOL_VERSION, type AskUser, type AssistantMsgEnd } from "../src/protocol.ts";
 
 const ask: AskUser = {
@@ -28,6 +29,14 @@ assert.doesNotMatch(JSON.stringify(named), /private question|private option/);
 assert.equal(questionNotificationPresentation({ ...ask, notification_context: {
   ...ask.notification_context!, parent_session_id: "parent",
 } }, "session").sessionId, "parent");
+assert.deepEqual(turnNotificationPresentation({
+  type: "turn_end", v: PROTOCOL_VERSION, ts: 2, sid: "agy@session",
+  result: { subtype: "success", duration_ms: 100, is_error: false },
+  notification_context: { engine: "antigravity", space: "code" },
+}, "session"), {
+  title: "Gemini 会话", body: "Gemini 会话已经完成", sessionId: "agy@session",
+  engine: "antigravity", space: "code",
+});
 console.log("question notification checks passed");
 
 const asyncQuestion: AssistantMsgEnd = {

@@ -94,8 +94,12 @@ class ArtifactService:
                 private_dsh = cmd.engine == "dsh" and sid in machine._dsh.sidechats.check()
                 if not private_dsh and (ctx is None or not ctx.btw):
                     request = GetHistory(session_id=sid, before=cmd.history_before, limit=12, detail="summary", cwd=cwd)
-                    history = (await machine._dsh.handle_get_history(request, publish=False) if cmd.engine == "dsh"
-                               else await machine._history_page_singleflight(request, sid))
+                    if cmd.engine == "dsh":
+                        history = await machine._dsh.handle_get_history(request, publish=False)
+                    elif cmd.engine == "antigravity":
+                        history = await machine._antigravity.handle_get_history(request, publish=False)
+                    else:
+                        history = await machine._history_page_singleflight(request, sid)
                     if history.error:
                         raise ValueError("历史附件整理暂时失败，请重试")
                     await asyncio.to_thread(self.store.history, scope, history, cwd,
@@ -113,6 +117,13 @@ class ArtifactService:
         await machine.transport.send(response)
         return response
 
+    def history_image_reader(self, engine):
+        if engine == "dsh":
+            return self.machine._dsh.handle_get_history_image
+        if engine == "antigravity":
+            return self.machine._antigravity.handle_get_history_image
+        return self.machine._handle_get_history_image
+
     async def preview(self, cmd):
         machine = self.machine
         path = f"artifacts/{cmd.artifact_id}"
@@ -129,7 +140,7 @@ class ArtifactService:
                     data=base64.b64encode(data).decode(), media_type="image/webp",
                     size=len(data), writable=False, sid=sid, to=cmd.client_id)
             elif row["image_id"]:
-                image = await (machine._dsh.handle_get_history_image if cmd.engine == "dsh" else machine._handle_get_history_image)(GetHistoryImage(
+                image = await self.history_image_reader(cmd.engine)(GetHistoryImage(
                     session_id=sid, turn_id=row["turn_id"], image_id=row["image_id"],
                     variant="full", request_id=cmd.request_id, client_id=cmd.client_id), publish=False)
                 response = FilePreview(path=path, request_id=cmd.request_id, format="image",
@@ -168,7 +179,7 @@ class ArtifactService:
     async def thumbnail(self, cmd, sid, cwd, row):
         machine = self.machine
         if row["image_id"]:
-            image = await (machine._dsh.handle_get_history_image if cmd.engine == "dsh" else machine._handle_get_history_image)(GetHistoryImage(
+            image = await self.history_image_reader(cmd.engine)(GetHistoryImage(
                 session_id=sid, turn_id=row["turn_id"], image_id=row["image_id"],
                 variant="thumbnail", request_id=cmd.request_id, client_id=cmd.client_id), publish=False)
             if image.error or not image.data:

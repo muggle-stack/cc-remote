@@ -211,6 +211,28 @@ const harness = await createServer({ root: process.cwd(), appType: "custom",
 try {
   const { initialState, createRuntime, reduce } =
     await harness.ssrLoadModule("/src/reducer.ts");
+  {
+    const sid = "agy@steer-tool";
+    let state = { ...initialState, focusedSid: sid,
+      runtimes: { [sid]: { ...createRuntime(), legacyLiveFallbackBlocked: true } } };
+    const emit = (body: Record<string, unknown>) => {
+      state = reduce(state, { type: "event", event: { v: 99, ts: 10, sid, ...body } });
+    };
+    emit({ type: "state", state: "running", seq: 1 });
+    emit({ type: "user_msg", msg_id: "original", prompt: "edit files", seq: 2 });
+    emit({ type: "turn_binding", turn_id: "original", msg_id: "original", seq: 3 });
+    emit({ type: "tool_use", turn_id: "original", message_id: "tool", tool_use_id: "tool",
+      tool: "edit", input: {}, seq: 4 });
+    emit({ type: "turn_steered", turn_id: "supplement", msg_id: "supplement",
+      prompt: "then explain", preserve_open_tools: true, seq: 5 });
+    assert.equal(state.runtimes[sid].turns[0].blocks[0].done, false);
+    emit({ type: "tool_result", turn_id: "original", tool_use_id: "tool", is_error: false,
+      status: "succeeded", content: "", seq: 6 });
+    const turns = state.runtimes[sid].turns;
+    assert.equal(turns[0].blocks[0].done, true);
+    assert.equal(turns[1].blocks.length, 0);
+    assert.equal(state.runtimes[sid].liveOwner?.turnId, "supplement");
+  }
   const { ChatView } = await harness.ssrLoadModule("/src/components/ChatView.tsx");
   {
     let state = { ...initialState, focusedSid: "s",

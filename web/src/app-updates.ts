@@ -1,3 +1,4 @@
+import type { Engine } from "./protocol";
 /** Device-scoped maintenance HTTP; deliberately independent of chat protocol. */
 export type UpdatePhase = "submitting" | "preparing" | "downloading" | "waiting_network" | "waiting_device" | "validating" | "waiting"
   | "updating_relay" | "installing" | "verifying" | "unknown" | "succeeded" | "failed" | "blocked" | "cancelled";
@@ -21,7 +22,7 @@ export const UPDATE_BLOCKER_LABELS = {
 } as const;
 export interface UpdateBlocker {
   kind: keyof typeof UPDATE_BLOCKER_LABELS;
-  engine?: "codex" | "claude" | "dsh";
+  engine?: Engine;
   session_id?: string;
   side_chat: boolean;
   task_id?: string;
@@ -154,7 +155,7 @@ function parseUpdateBlockers(raw: unknown): UpdateBlocker[] {
     const sideChat = item.side_chat === true;
     return [{
       kind: item.kind as UpdateBlocker["kind"],
-      engine: item.engine === "codex" || item.engine === "claude" || item.engine === "dsh"
+      engine: item.engine === "codex" || item.engine === "claude" || item.engine === "dsh" || item.engine === "antigravity"
         ? item.engine : undefined,
       session_id: typeof item.session_id === "string" && !item.session_id.startsWith("btw-")
         && /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/.test(item.session_id) ? item.session_id : undefined,

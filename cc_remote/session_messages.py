@@ -17,21 +17,26 @@ import stat
 MAX_PROMPT = 32_000
 MAX_FRAME = 256 * 1024
 _REF = re.compile(r"^ccr:(claude|codex):([A-Za-z0-9][A-Za-z0-9._@-]{0,110})$")
+_AGY_REF = re.compile(r"^ccr:antigravity:([A-Za-z0-9][A-Za-z0-9._-]{0,110})$")
 _REQUEST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _OPEN, _CLOSE = "<cc_remote_message>", "</cc_remote_message>"
 
 
 def reference(engine: str, sid: str) -> str:
-    value = f"ccr:{engine}:{sid}"
-    split_reference(value)
+    component = sid.removeprefix("agy@") if engine == "antigravity" else sid
+    value = f"ccr:{engine}:{component}"
+    if split_reference(value) != (engine, sid):
+        raise ValueError("Invalid Code session routing ID")
     return value
 
 
 def split_reference(value: object) -> tuple[str, str]:
-    match = _REF.fullmatch(value) if isinstance(value, str) else None
-    if not match or len(value) > 128:
-        raise ValueError("Use an exact session_ref returned by list_sessions")
-    return match[1], match[2]
+    if isinstance(value, str):
+        if match := _AGY_REF.fullmatch(value):
+            return "antigravity", "agy@" + match[1]
+        if len(value) <= 128 and (match := _REF.fullmatch(value)):
+            return match[1], match[2]
+    raise ValueError("Use an exact session_ref returned by list_sessions")
 
 
 def request_id(value: object) -> str:
@@ -104,13 +109,13 @@ def receipt_status(content: object) -> str:
 
 
 def make_server(call):
-    """One schema for Codex stdio and a caller-bound Claude SDK server."""
+    """One schema for the caller-bound Code session tools."""
     from mcp.server import Server
     from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
 
     server = Server("cc_remote_messages")
     schemas = {
-        "list_sessions": ("Find recent Code sessions on this device, across configured Claude/Codex accounts. "
+        "list_sessions": ("Find recent Code sessions on this device, across Claude, Codex and Gemini. "
                           "Read-only; does not start or focus a session.",
                           {"search": {"type": "string", "maxLength": 200}}, []),
         "send_message": ("Send a user-authorized message to another session_ref from list_sessions. "

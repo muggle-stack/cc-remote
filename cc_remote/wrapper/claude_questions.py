@@ -22,6 +22,10 @@ class AskTimeout(AskUnavailable):
     """No controlling client answered before the bounded deadline."""
 
 
+class AskDeclined(AskUnavailable):
+    """The user rejected a native elicitation form."""
+
+
 class AskCancelled(AskUnavailable):
     """The surrounding turn or control task cancelled the prompt."""
 

@@ -1,3 +1,4 @@
+import type { Engine } from "./protocol";
 import type { Block, ProcessBlock, Turn } from "./domain/conversation.ts";
 import type { ClaudePlan, ThreadGoal } from "./protocol.ts";
 import { mergeDetailWithLiveTail } from "./history-merge.ts";
@@ -17,7 +18,7 @@ export type TurnPlanProgressSource = "runtime" | "history";
 
 export interface SessionPlanProgressScope {
   machineId: string;
-  engine: "claude" | "codex" | "dsh";
+  engine: Engine;
   space: "code" | "work";
   sid: string;
 }
@@ -108,7 +109,7 @@ export class SessionPlanProgressCache {
     permissionMode,
   }: {
     machineId?: string;
-    engine?: "claude" | "codex" | "dsh";
+    engine?: Engine;
     space?: "code" | "work";
     sid: string;
     runtime: TurnPlanProgress | null;

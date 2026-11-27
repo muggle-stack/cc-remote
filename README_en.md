@@ -4,7 +4,7 @@
 
 Self-hosted · Multiple sessions and devices · Live tool activity · Code / Work · Web / PWA / TUI
 
-**Product version: v5.3.62** · Wire protocol v98
+**Product version: v5.3.62** · Wire protocol v99
 
 [中文](README.md) · [Release install (recommended)](#install-and-upgrade) · [Engine comparison](#engines-and-features) · [Try from source](#quick-start) ·
 [Interface tour](#interface-tour) · [Terminal workspace](#terminal-workspace) · [Documentation](#documentation) · [Changelog](CHANGELOG.md)
@@ -61,7 +61,8 @@ fictional. See the [interface tour](#interface-tour) for more features.
 ### Code and Work
 
 **Code** operates in your chosen project directory for development, debugging and
-other agent tasks. It supports Claude, Codex and the optional DSH integration.
+other agent tasks. It supports Claude, Codex, optional DSH and Gemini through Antigravity CLI.
+See the [Gemini setup and supported features](docs/antigravity-integration.md).
 
 **Work** is a separate Claude/Codex workspace for documents, spreadsheets,
 presentations and research. It includes private projects, file/link/note sources,

@@ -23,8 +23,10 @@ def digest(value) -> str:
 
 
 class DshMutationJournal:
-    def __init__(self, state_dir: Path):
-        self.path = Path(state_dir) / "dsh-mutations.sqlite3"
+    def __init__(self, state_dir: Path, *, engine="dsh", label="DSH", error_type=DshError):
+        self.path = Path(state_dir) / f"{engine}-mutations.sqlite3"
+        self.label = label
+        self.error_type = error_type
 
     @contextmanager
     def connection(self):
@@ -46,7 +48,7 @@ class DshMutationJournal:
             finally:
                 os.close(fd)
         except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
-            raise DshError("mutation_journal", "无法确认 DSH 操作记录，已停止自动执行。请检查设备状态。") from exc
+            raise self.error_type("mutation_journal", f"无法确认 {self.label} 操作记录，已停止自动执行。请检查设备状态。") from exc
 
     def begin(self, identity: str, fingerprint: str) -> tuple[bool, dict]:
         with self.connection() as db:
@@ -56,9 +58,16 @@ class DshMutationJournal:
                 (identity, fingerprint)).rowcount == 1
             row = dict(db.execute("SELECT * FROM receipts WHERE identity = ?", (identity,)).fetchone())
             if row["fingerprint"] != fingerprint:
-                raise DshError("mutation_identity", "这个请求编号已用于另一项 DSH 操作，请刷新后重新操作。")
+                raise self.error_type("mutation_identity", f"这个请求编号已用于另一项 {self.label} 操作，请刷新后重新操作。")
             db.commit()
             return inserted, row
+
+    def discard_unsent(self, identity: str):
+        """Only the claiming caller may release an intent proven never written."""
+        with self.connection() as db:
+            db.execute("DELETE FROM receipts WHERE identity = ? AND sid IS NULL AND result IS NULL",
+                       (identity,))
+            db.commit()
 
     def created(self, identity: str, sid: str):
         with self.connection() as db:
@@ -70,7 +79,7 @@ class DshMutationJournal:
     def finish(self, identity: str, result: dict):
         raw = json.dumps(result, ensure_ascii=True)
         if len(raw) > 256 * 1024:
-            raise DshError("mutation_journal", "DSH 操作结果过大，请查看原生状态；不会自动重试。")
+            raise self.error_type("mutation_journal", f"{self.label} 操作结果过大，请查看原生状态；不会自动重试。")
         with self.connection() as db:
             if db.execute("UPDATE receipts SET result = ? WHERE identity = ?", (raw, identity)).rowcount != 1:
                 raise ValueError("missing mutation intent")

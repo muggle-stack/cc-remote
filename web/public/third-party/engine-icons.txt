@@ -1,9 +1,10 @@
-Claude and Codex engine icons
+Claude, Codex and Gemini engine icons
 
 Source: https://github.com/lobehub/lobe-icons
 Revision: 8a1b2821bb768c484fe8da20c5e1838b6bf551a9
-Files: packages/static-svg/icons/claude.svg and codex.svg
-Adaptation: original path geometry packaged as SVG symbols.
+Files: packages/static-svg/icons/claude.svg, codex.svg and gemini-color.svg
+Adaptation: Claude and Codex paths are packaged as SVG symbols. The Gemini
+color SVG is bundled as an image.
 
 claude-working.svg uses the same MIT-licensed Claude path in nine cells with
 an added center hub. This is an independently reconstructed bloom/contraction
@@ -19,6 +20,7 @@ click replay. This combined working sequence is cc-remote's presentation,
 not an extracted Claude Desktop animation.
 
 Claude and its marks belong to Anthropic. Codex and its marks belong to OpenAI.
+Gemini and its marks belong to Google.
 These icons identify the selected third-party engine, not cc-remote itself.
 No affiliation or endorsement is implied. The MIT license below covers the
 icon-library code; it does not grant trademark rights.

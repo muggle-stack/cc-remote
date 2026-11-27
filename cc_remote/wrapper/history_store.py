@@ -572,6 +572,7 @@ def materialize_history_turns(
     events: list[dict[str, Any]] | tuple[dict[str, Any], ...],
     *,
     include_live_detail: bool = False,
+    preserve_steered_tools: bool = False,
 ) -> tuple[dict[str, Any], ...]:
     """Build the lightweight UI projection persisted beside full detail.
 
@@ -601,6 +602,8 @@ def materialize_history_turns(
         started_ms = None
         done_ms = None
         duration_ms = None
+        token_usage = None
+        background_tool_ids = set()
         fork_point = None
         checkpoint_id = None
         done = False
@@ -844,6 +847,8 @@ def materialize_history_turns(
                     fork_point = event["turn_id"]
                 if started_ms is None:
                     started_ms = _event_ms(event.get("ts"))
+            elif event_type == "turn_usage" and event.get("turn_id") == turn_id:
+                token_usage = event.get("usage")
             elif event_type == "turn_end":
                 done = True
                 done_ms = _event_ms(event.get("ts"))
@@ -855,6 +860,9 @@ def materialize_history_turns(
                 if isinstance(result, dict):
                     subtype = str(result.get("subtype") or "")
                     steered = subtype == "steered"
+                    ids = result.get("background_tool_ids")
+                    if isinstance(ids, list):
+                        background_tool_ids.update(item for item in ids[:64] if isinstance(item, str))
                     if (
                         subtype != "steered"
                         and isinstance(result.get("duration_ms"), int)
@@ -1164,12 +1172,12 @@ def materialize_history_turns(
                     else "succeeded"
                 )
                 for block in candidates:
-                    if block.get("done"):
+                    if block.get("done") or block.get("tool_use_id") in background_tool_ids:
                         continue
                     if (
                         steered
-                        and block.get("kind") == "process"
-                        and block.get("processKind") == "plan"
+                        and ((block.get("kind") == "process" and block.get("processKind") == "plan")
+                             or (preserve_steered_tools and block.get("kind") == "tool"))
                     ):
                         continue
                     block["done"] = True
@@ -1323,6 +1331,7 @@ def materialize_history_turns(
             "ts": started_ms,
             "doneTs": done_ms,
             "durationMs": duration_ms,
+            "tokenUsage": token_usage,
             "processStartedTs": process_started_ms,
             "processDoneTs": process_done_ms,
             "error": error,

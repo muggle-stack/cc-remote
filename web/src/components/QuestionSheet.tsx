@@ -1,7 +1,8 @@
+import { ENGINE_LABELS } from "../protocol";
 import ReactMarkdown from "react-markdown";
 import { useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { AskOption, AskQuestion, Engine, ModelFallbackPrompt } from "../protocol";
+import type { AskDismissAction, AskOption, AskQuestion, Engine, ModelFallbackPrompt } from "../protocol";
 import { EngineIcon } from "../icons";
 import { useImeSubmit } from "../use-ime-submit";
 import { QuestionBatchSheet } from "./QuestionBatchSheet";
@@ -23,6 +24,7 @@ interface Props {
   engine: Engine;
   question: string;
   planDocument?: string | null;
+  approvalDiff?: string | null;
   header?: string | null;
   options: AskOption[];
   allowText?: boolean;
@@ -36,6 +38,8 @@ interface Props {
   errorRevision?: string | number;
   onAnswer: (answer: string | string[]) => boolean | void;
   onAnswers?: (answers: (string | string[])[]) => boolean | void;
+  dismissActions?: AskDismissAction[] | null;
+  onDismiss?: (action: AskDismissAction) => boolean | void;
 }
 
 export function QuestionSheet(props: Props) {
@@ -44,13 +48,14 @@ export function QuestionSheet(props: Props) {
     errorRevision={props.errorRevision} onAnswer={props.onAnswer} />;
   return props.questions?.length ? <QuestionBatchSheet key={JSON.stringify(props.questions)}
     engine={props.engine} questions={props.questions} draft={props.draft}
+    approvalDiff={props.approvalDiff} dismissActions={props.dismissActions} onDismiss={props.onDismiss}
     onSubmit={props.onAnswers ?? (() => false)} /> : <SingleQuestionSheet {...props} />;
 }
 
 function SingleQuestionSheet({
   engine, question, header, options, allowText, secret, multiSelect, onAnswer, draft, planDocument,
 }: Props) {
-  const engineName = { claude: "Claude", codex: "Codex", dsh: "DSH" }[engine];
+  const engineName = ENGINE_LABELS[engine];
   const dialogRef = useRef<HTMLDialogElement>(null);
   const headingRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);

@@ -1,12 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import type { Engine } from "../protocol";
+import { ENGINE_LABELS, type Engine } from "../protocol";
 import { EngineIcon, Icon } from "../icons";
 
-const engines: Engine[] = ["claude", "codex", "dsh"];
+const engines: Engine[] = ["claude", "codex", "dsh", "antigravity"];
 
-export default function EngineMenu({ engine, anchor, keyboard, altShortcuts, onClose, onSelect }: {
+export default function EngineMenu({ engine, antigravityAvailable, anchor, keyboard, altShortcuts, onClose, onSelect }: {
   engine: Engine;
+  antigravityAvailable?: boolean;
   anchor: RefObject<HTMLButtonElement | null>;
   keyboard: boolean;
   altShortcuts: boolean;
@@ -56,13 +57,13 @@ export default function EngineMenu({ engine, anchor, keyboard, altShortcuts, onC
       event.preventDefault();
       items[next]?.focus();
     }}>
-    {engines.map(value => <button key={value} type="button" role="menuitemradio"
+    {engines.filter(value => value !== "antigravity" || antigravityAvailable || engine === value).map(value => <button key={value} type="button" role="menuitemradio"
       aria-checked={value === engine} tabIndex={-1} className="engine-menu-item"
       aria-keyshortcuts={altShortcuts ? `Alt+${engines.indexOf(value) + 1}`
         : `Meta+${engines.indexOf(value) + 1} Control+${engines.indexOf(value) + 1}`}
       onClick={event => onSelect(value, event.detail === 0)}>
       <EngineIcon engine={value} size={18} />
-      <span>{value === "dsh" ? "DSH" : value === "codex" ? "Codex" : "Claude"}</span>
+      <span>{ENGINE_LABELS[value]}</span>
       {value === engine && <Icon name="check" size={16} />}
     </button>)}
   </div>, document.body);

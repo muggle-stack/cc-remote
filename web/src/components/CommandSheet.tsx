@@ -1,6 +1,8 @@
+import type { AntigravityOption } from "../protocol";
+import type { Engine } from "../protocol";
 import {
   isCmd, commandsFor, modelsFor, effortsFor, effortIsSelectable, permsFor,
-  permissionProfilesFor, dshPermissionLabel,
+  permissionProfilesFor, dshPermissionLabel, antigravityPermissions, antigravityEfforts,
   type Cmd, type CmdGroup, type Catalog,
 } from "../data";
 import { Icon } from "../icons";
@@ -10,9 +12,10 @@ import { CenteredSheet } from "./CenteredSheet";
 interface Props {
   dsh?: DshState;
   dshPermissions?: DshPermissionOption[];
+  antigravityOptions?: AntigravityOption[];
   open: boolean;
   kind: "commands" | "models" | "efforts" | "perms";
-  engine?: "claude" | "codex" | "dsh";
+  engine?: Engine;
   catalog?: Catalog;
   onRequestModels?: () => void;
   // command mode: the token typed after "/" in the composer (prefix filter).
@@ -36,7 +39,7 @@ interface Props {
 }
 
 export function CommandSheet({
-  open, kind, engine, catalog, onRequestModels, dsh, dshPermissions, filter = "", onClose, onPickCommand,
+  open, kind, engine, catalog, onRequestModels, dsh, dshPermissions, antigravityOptions, filter = "", onClose, onPickCommand,
   currentModel, onPickModel, currentEffort, onPickEffort, currentPerm,
   onPickPerm, onUseDefaultPerm, currentPermissionProfile, permissionProfiles,
   onPickPermissionProfile, currentWebSearch, onPickWebSearch,
@@ -47,7 +50,9 @@ export function CommandSheet({
   const f = filter.toLowerCase();
   // Effort levels are per-model, so the effort sheet must be built from the model
   // currently selected, not just the engine.
-  const MODELS = modelsFor(engine, catalog), EFFORTS = effortsFor(engine, currentModel, catalog), PERMS = engine === "dsh" ? (dshPermissions ?? dsh?.permissions ?? []).map(p => ({ id: p.value, name: dshPermissionLabel(p.value, p.name), ds: p.description, ic: "shield", danger: p.value === "danger-full-access" })) : permsFor(engine);
+  const MODELS = modelsFor(engine, catalog);
+  const EFFORTS = engine === "antigravity" ? antigravityEfforts(antigravityOptions) : effortsFor(engine, currentModel, catalog);
+  const PERMS = engine === "dsh" ? (dshPermissions ?? dsh?.permissions ?? []).map(p => ({ id: p.value, name: dshPermissionLabel(p.value, p.name), ds: p.description, ic: "shield", danger: p.value === "danger-full-access" })) : engine === "antigravity" ? antigravityPermissions(antigravityOptions) : permsFor(engine);
   const PROFILES = permissionProfilesFor(permissionProfiles);
 
   // Prefix-match on the slash (same rule the composer uses to decide visibility),

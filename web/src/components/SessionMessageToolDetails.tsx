@@ -25,7 +25,8 @@ export function SessionMessageToolDetails({ block, message, sessionLink, onOpenS
   const target = sessionLink?.(message.threadId);
   const title = target?.title ?? relatedSessionTitle(undefined, message.threadId);
   const local = localSessionReference(message.threadId);
-  const account = target?.account ?? (local?.sid.includes("@") ? local.sid.split("@")[0] : undefined);
+  const account = target?.account
+    ?? (local?.engine !== "antigravity" && local?.sid.includes("@") ? local.sid.split("@")[0] : undefined);
   const enabled = !!onOpenSession && !!target?.available;
   const output = block.result?.content || block.output;
   const copy = async () => {

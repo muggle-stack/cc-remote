@@ -18,6 +18,7 @@ export function newChatCatalogRequest(
   claudeProfileId?: string | null,
 ): NewChatCatalogRequest | null {
   if (engine === "dsh") return { engine };
+  if (engine === "antigravity") return space === "code" ? { engine, cwd } : null;
   if (engine === "codex") {
     return {
       engine,
@@ -48,7 +49,7 @@ export function resolveNewChatLocalDefaults(
   defaultCwds: Record<string, string>,
   catalogScopeKey: string = engine,
 ): NewChatLocalDefaults {
-  if (engine === "claude"
+  if ((engine === "claude" || engine === "antigravity")
       && (space !== "code" || defaultCwds[catalogScopeKey] !== cwd)) {
     return { model: null, effort: null };
   }

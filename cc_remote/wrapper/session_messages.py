@@ -56,7 +56,7 @@ class MessageStore:
             db.close()
 
     def claim(self, source, key, target, prompt, *, queue=False):
-        spec = hashlib.sha256(json.dumps([target, prompt], ensure_ascii=False).encode()).hexdigest()
+        spec = self.spec(target, prompt)
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM messages WHERE source=? AND request=?", (source, key)).fetchone()
@@ -80,16 +80,22 @@ class MessageStore:
                 "session_ref": row["target"], "status": "unknown" if row["status"] == "dispatching" else row["status"],
                 "reason": row["reason"]}
 
+    @staticmethod
+    def spec(target, prompt):
+        return hashlib.sha256(json.dumps([target, prompt], ensure_ascii=False).encode()).hexdigest()
+
     def get(self, source, key):
         result = self.find(source, key)
         if result is None:
             raise ValueError("No receipt for this caller and request_id")
         return result
 
-    def find(self, source, key):
+    def find(self, source, key, *, spec=None):
         with self.db() as db:
             row = db.execute("SELECT * FROM messages WHERE source=? AND request=?", (source, key)).fetchone()
-            return self.public(row) if row is not None else None
+            if row is None or (spec is not None and row["spec"] != spec):
+                return None
+            return self.public(row)
 
     def settle(self, message_id, status, reason=None):
         with self.db() as db:
@@ -114,20 +120,25 @@ class MessageStore:
             db.execute("UPDATE messages SET status='queued', prompt=? WHERE id=? AND status='dispatching'",
                        (prompt, message_id))
 
-    def recover(self):
+    def recover(self, owns_target=None):
         # Called only after taking the exclusive Wrapper message-server lease.
         # A dead controller's in-flight native input is uncertain, never pending.
         with self.db() as db:
-            db.execute("UPDATE messages SET status='unknown', prompt=NULL WHERE status='dispatching'")
+            ids = [(row["id"],) for row in db.execute(
+                "SELECT id, target FROM messages WHERE status='dispatching'")
+                if owns_target is None or owns_target(row["target"])]
+            db.executemany("UPDATE messages SET status='unknown', prompt=NULL WHERE id=? AND status='dispatching'", ids)
 
 
 class SessionMessages:
-    def __init__(self, machine):
+    def __init__(self, machine, *, gemini_worker_state=None):
         self.machine = machine
-        self.store = MessageStore(Path(machine.cfg.state_dir) / "messages")
+        self.gemini_worker = gemini_worker_state is not None
+        self.gemini_remote = bool(machine.cfg.antigravity_service_socket and not self.gemini_worker)
+        self.store = MessageStore(Path(gemini_worker_state or machine.cfg.state_dir) / "messages")
         self.socket = self.store.root / "control.sock"
         self.server = None
-        self.lock_fd = None
+        self.locks = []
         self.commands = {}
         self.waiters = {}
         self.clients = set()
@@ -136,32 +147,46 @@ class SessionMessages:
         self.pump = None
         self.wakeup = asyncio.Event()
         self.closing = False
+        self.enabled = True
         self.retry_after = {}
+
+    def set_enabled(self, enabled):
+        self.enabled = enabled
+        self.wakeup.set()
+
+    def owns_target(self, target):
+        gemini = target.startswith("ccr:antigravity:")
+        return gemini if self.gemini_worker else not (gemini and self.gemini_remote)
 
     async def start(self):
         # Validate the directory before creating the socket or lifetime lock.
         with self.store.db():
             pass
-        if len(os.fsencode(self.socket)) > 103:
+        if not self.gemini_worker and len(os.fsencode(self.socket)) > 103:
             raise ValueError("Message socket path exceeds the platform limit")
-        self.lock_fd = os.open(self.store.root / "server.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
-            lock_info = os.fstat(self.lock_fd)
-            if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.getuid():
-                raise ValueError("Invalid message server lock")
-            fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            self.store.recover()
-            if self.socket.exists() or self.socket.is_symlink():
-                info = self.socket.lstat()
-                if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
-                    raise ValueError("Refusing to replace an unrelated message socket")
-                self.socket.unlink()
-            self.server = await asyncio.start_unix_server(self._client, str(self.socket), limit=MAX_FRAME)
-            os.chmod(self.socket, 0o600)
+            names = [] if self.gemini_worker else ["server.lock"]
+            if not self.gemini_remote:
+                names.append("receiver-gemini.lock")
+            for name in names:
+                fd = os.open(self.store.root / name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+                self.locks.append(fd)
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                    raise ValueError("Invalid message server lock")
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.store.recover(self.owns_target)
+            if not self.gemini_worker:
+                if self.socket.exists() or self.socket.is_symlink():
+                    info = self.socket.lstat()
+                    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+                        raise ValueError("Refusing to replace an unrelated message socket")
+                    self.socket.unlink()
+                self.server = await asyncio.start_unix_server(self._client, str(self.socket), limit=MAX_FRAME)
+                os.chmod(self.socket, 0o600)
             self.pump = asyncio.create_task(self._drain(), name="session-message-inbox")
         except BaseException:
-            os.close(self.lock_fd)
-            self.lock_fd = None
+            await self.close()
             raise
 
     async def close(self):
@@ -176,9 +201,9 @@ class SessionMessages:
         for client in list(self.clients):
             client.cancel()
         await asyncio.gather(*self.clients, return_exceptions=True)
-        if self.lock_fd is not None:
-            os.close(self.lock_fd)
-            self.lock_fd = None
+        for fd in self.locks:
+            os.close(fd)
+        self.locks.clear()
 
     def owns(self, message_id):
         return message_id in self.active
@@ -192,7 +217,7 @@ class SessionMessages:
                     and self.machine._claude_has_background_work(ctx)))
 
     async def _schedule(self, message_id, target, prompt):
-        if self.closing or target in self.scheduled:
+        if not self.enabled or self.closing or not self.owns_target(target) or target in self.scheduled:
             return False
         engine, sid = split_reference(target)
         cmd = Query(sid=sid, prompt=prompt, msg_id=message_id,
@@ -213,9 +238,9 @@ class SessionMessages:
             self.wakeup.clear()
             try:
                 seen = set()
-                for row in self.store.pending():
+                for row in self.store.pending() if self.enabled else ():
                     target = row["target"]
-                    if target in seen:
+                    if target in seen or not self.owns_target(target):
                         continue
                     seen.add(target)  # FIFO per target, independent across targets.
                     if self.retry_after.get(target, 0) > asyncio.get_running_loop().time():
@@ -310,9 +335,30 @@ class SessionMessages:
                 rows[ref] = {"session_ref": ref, "engine": engine, "account": profile_id,
                              "title": str(row.get("summary") or row.get("first_prompt") or native)[:200],
                              "cwd": row.get("cwd"), "state": ctx.state if ctx else "not_loaded"}
+        runtime = machine._antigravity
+        controller = machine._gemini_controller
+        if controller or runtime.launch_factory():
+            try:
+                async with asyncio.timeout(3):
+                    candidates = await controller.list_sessions() if controller else await runtime.list_sessions()
+            except Exception as exc:
+                log.warning("Gemini message catalog unavailable", error_type=type(exc).__name__)
+            else:
+                for session in candidates:
+                    if session.tag == "archived":
+                        continue
+                    sid = session.session_id
+                    ref = reference("antigravity", sid)
+                    rows[ref] = {
+                        "session_ref": ref, "engine": "antigravity", "account": None,
+                        "title": (session.summary or session.native_session_id)[:200],
+                        "cwd": session.cwd, "state": session.state if controller or sid in machine.sessions else "not_loaded",
+                    }
         return rows
 
     async def call(self, source, name, args):
+        if not self.enabled:
+            raise ValueError("Session messaging is disabled.")
         split_reference(source)
         if not isinstance(args, dict):
             raise ValueError("Invalid tool arguments")
@@ -362,8 +408,8 @@ class SessionMessages:
             future = asyncio.get_running_loop().create_future()
             self.waiters[receipt["message_id"]] = future
             # Only the oldest queued message can claim this target's next turn.
-            first = next(row for row in self.store.pending() if row["target"] == target)
-            if first["id"] == receipt["message_id"]:
+            first = next((row for row in self.store.pending() if row["target"] == target), None)
+            if first and first["id"] == receipt["message_id"]:
                 if not await self._schedule(receipt["message_id"], target, prompt):
                     self._resolve_waiter(receipt["message_id"])
             else:
@@ -374,6 +420,16 @@ class SessionMessages:
             except TimeoutError:
                 pass  # The original handler owns delivery; never resend it.
         return self.store.get(source, key)
+
+    def send_receipt(self, source, args):
+        """Read the exact original send, including its message and target."""
+        try:
+            key = request_id(args.get("request_id"))
+            prompt = envelope(source, args.get("message"))
+            return self.store.find(source, key, spec=self.store.spec(args.get("session_ref"), prompt))
+        except (OSError, ValueError, sqlite3.Error):
+            log.warning("Message tool receipt unavailable")
+        return None
 
     def accepted(self, message_id):
         if message_id not in self.active:
@@ -401,10 +457,11 @@ class SessionMessages:
         machine = self.machine
         claimed = False
         try:
-            if self.closing:
-                return  # Durable queued item belongs to the next Wrapper.
+            if not self.enabled or self.closing:
+                return  # Keep the durable item for an enabled receiver.
             updates = getattr(machine, "_ui_updates", None)
-            if updates is not None and updates.guarded():
+            if ((updates is not None and updates.guarded())
+                    or (engine == "antigravity" and machine._antigravity.admission_paused())):
                 self._resolve_waiter(cmd.msg_id)
                 self.retry_after[target] = asyncio.get_running_loop().time() + 5
                 return
@@ -419,18 +476,21 @@ class SessionMessages:
                 return
             row = current[target]
             ctx = machine.sessions.get(cmd.sid)
-            if ctx is None:
-                profile, native = (machine._codex_target(cmd.sid) if engine == "codex"
-                                   else machine._claude_target(cmd.sid))
+            if ctx is None or engine == "antigravity":
                 if not row.get("cwd") or not os.path.isdir(row["cwd"]):
                     self._settle(cmd.msg_id, "rejected", "Target working directory is unavailable")
                     return
                 # Ordinary resume only: no bootstrap fresh-session fallback,
                 # takeover, focus change or replacement of native settings.
-                kwargs = (machine._codex_spawn_profile_kwargs(profile) if engine == "codex"
-                          else machine._claude_spawn_profile_kwargs(profile))
-                ctx = await machine._spawn(resume_id=native, cwd=row["cwd"], engine=engine,
-                                           raise_on_failure=True, **kwargs)
+                if engine == "antigravity":
+                    ctx = await machine._antigravity.context(cmd.sid)
+                else:
+                    profile, native = (machine._codex_target(cmd.sid) if engine == "codex"
+                                       else machine._claude_target(cmd.sid))
+                    kwargs = (machine._codex_spawn_profile_kwargs(profile) if engine == "codex"
+                              else machine._claude_spawn_profile_kwargs(profile))
+                    ctx = await machine._spawn(resume_id=native, cwd=row["cwd"], engine=engine,
+                                               raise_on_failure=True, **kwargs)
             if (ctx is None or ctx.engine != engine or ctx.btw or ctx.space != "code"
                     or ctx.write_state != "writable"
                     or getattr(ctx.sdk, "is_claude_broker", False)):
@@ -443,7 +503,7 @@ class SessionMessages:
                 if self._busy(ctx):
                     self._resolve_waiter(cmd.msg_id)
                     return
-                if self.closing:
+                if not self.enabled or self.closing:
                     return
                 if not self.store.begin_delivery(cmd.msg_id):
                     return
@@ -458,6 +518,8 @@ class SessionMessages:
                     self.store.unsubmitted(cmd.msg_id, cmd.prompt)
                     self._resolve_waiter(cmd.msg_id)
                     self.retry_after[target] = asyncio.get_running_loop().time() + 5
+                elif engine == "antigravity" and launched.done() and launched.result():
+                    self._settle(cmd.msg_id, "unknown")
                 else:
                     self._settle(cmd.msg_id, "rejected", result.message)
             elif ctx.turn_task:
@@ -479,3 +541,6 @@ class SessionMessages:
             log.warning("Message delivery unconfirmed", message_id=cmd.msg_id)
         finally:
             self.scheduled.discard(target)
+            if not claimed:
+                self.active.discard(cmd.msg_id)
+                self._resolve_waiter(cmd.msg_id)

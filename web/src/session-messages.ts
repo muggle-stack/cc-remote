@@ -17,8 +17,11 @@ export interface SessionMessageToolContext extends SessionMessageNavigation {
 
 const NATIVE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const LOCAL_REF = /^ccr:(claude|codex):([A-Za-z0-9][A-Za-z0-9._@-]{0,110})$/;
+const GEMINI_REF = /^ccr:antigravity:([A-Za-z0-9][A-Za-z0-9._-]{0,110})$/;
 
 export function localSessionReference(value: string): { engine: string; sid: string } | null {
+  const gemini = GEMINI_REF.exec(value);
+  if (gemini) return { engine: "antigravity", sid: `agy@${gemini[1]}` };
   const match = LOCAL_REF.exec(value);
   return match && value.length <= 128 ? { engine: match[1], sid: match[2] } : null;
 }
@@ -41,7 +44,10 @@ export function resolveRelatedSession(
 }
 
 export function relatedSessionTitle(session: SessionInfo | undefined, nativeId: string): string {
+  const title = session?.summary || session?.first_prompt;
+  if (title) return title;
   const local = localSessionReference(nativeId);
-  return session?.summary || session?.first_prompt
-    || (local ? `${local.engine === "claude" ? "Claude" : "Codex"} · ${local.sid.split("@").at(-1)!.slice(0, 8)}` : nativeId.slice(0, 8));
+  if (!local) return nativeId.slice(0, 8);
+  const engine = local.engine === "antigravity" ? "Gemini" : local.engine === "claude" ? "Claude" : "Codex";
+  return `${engine} · ${local.sid.split("@").at(-1)!.slice(0, 8)}`;
 }

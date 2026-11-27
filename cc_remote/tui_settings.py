@@ -12,7 +12,10 @@ from textual.widgets.option_list import Option
 from cc_remote import protocol as p
 from cc_remote.tui_actions import build_action
 from cc_remote.tui_modal import ModalEditor, Overlay, PickerList, hints
+from cc_remote.tui_navigation import engine_label
 from cc_remote.tui_panels import ActionPicker
+
+_GEMINI_OPTIONS = {"model": "model", "effort": "thought_level", "permission_mode": "mode"}
 
 
 class ValuePicker(ActionPicker):
@@ -114,6 +117,9 @@ class SettingsForm(Overlay):
 
     def fields(self):
         fields = ["cwd"] if self.new and self.space == "code" else []
+        if self.engine == "antigravity":
+            return fields + [field for field in _GEMINI_OPTIONS
+                             if field == "model" or self.gemini_option(field)]
         fields += ["model", "effort"]
         if self.engine == "codex":
             if self.space == "code":
@@ -131,6 +137,8 @@ class SettingsForm(Overlay):
         values = {"cwd": self.values["cwd"], **self.profiles}
         if kind == "models":
             values["engine"] = self.engine
+            if self.engine == "antigravity" and self.new:
+                values["antigravity_model"] = self.values.get("model")
             if self.space == "work":
                 values.pop("cwd", None)
         else:
@@ -142,11 +150,21 @@ class SettingsForm(Overlay):
         key = (kind, *self.client.capability_key(args, session=kind == "models"))
         return self.client.settings_catalogs.get(key, {})
 
+    def gemini_option(self, field):
+        if self.new:
+            options = self.catalog("models").get("antigravity_options", [])
+        else:
+            sid = self.client.workspace.rekeys.get(self.sid, self.sid)
+            options = self.client.workspace.view(sid).presentation.settings.get(
+                "antigravity_state", {},
+            ).get("options", [])
+        return next((option for option in options if option["category"] == _GEMINI_OPTIONS[field]), None)
+
     def compose(self):
         with Vertical(classes="tui-panel"):
             yield Label(
                 f"{'New session' if self.new else 'Settings'} · "
-                f"{self.engine.title()} / {self.space.title()} · {self.sid or 'new'}",
+                f"{engine_label(self.engine)} / {self.space.title()} · {self.sid or 'new'}",
                 markup=False,
             )
             yield Label(
@@ -216,6 +234,7 @@ class SettingsForm(Overlay):
             repr(self.values),
             repr(self.catalog("models")),
             repr(self.catalog("permission_profiles")),
+            repr([self.gemini_option(field) for field in _GEMINI_OPTIONS]) if self.engine == "antigravity" else None,
         )
         if signature == self.signature:
             return
@@ -238,6 +257,9 @@ class SettingsForm(Overlay):
 
     def choices(self, field):
         choices = [("Engine default (no override)", None)] if self.new else []
+        if self.engine == "antigravity":
+            option = self.gemini_option(field)
+            return choices + [(item["name"], item["value"]) for item in (option or {}).get("choices", [])]
         if field == "model":
             models = self.catalog("models").get("models", [])
             if self.engine == "claude" and not models:
@@ -366,18 +388,22 @@ class SettingsForm(Overlay):
                     await self.fetch()
                 elif field == "model":
                     self.values["effort"] = None
+                    if self.engine == "antigravity":
+                        await self.fetch()
                 self.paint()
             else:
                 import json
 
                 _, attr, command = SETTING_FIELDS[field]
                 try:
-                    message = build_action(
-                        command,
-                        json.dumps({attr: value}),
-                        self.sid,
-                        self.client.client_id,
-                    )
+                    if self.engine == "antigravity":
+                        message = p.SetAntigravityOption(
+                            sid=self.sid, category=_GEMINI_OPTIONS[field], value=value,
+                            cmd_id=uuid.uuid4().hex, client_id=self.client.client_id,
+                        )
+                    else:
+                        message = build_action(command, json.dumps({attr: value}),
+                                               self.sid, self.client.client_id)
                 except ValueError as exc:
                     self.query_one("#form-result", Static).update(str(exc))
                     return
@@ -425,6 +451,9 @@ class SettingsForm(Overlay):
                     raise ValueError(
                         f"Selected {field} is no longer available."
                     )
+            if self.engine == "antigravity":
+                args["antigravity_effort"] = args.pop("effort", None)
+                args["antigravity_mode"] = args.pop("permission_mode", None)
             message = p.NewSession(
                 **args,
                 **self.profiles,

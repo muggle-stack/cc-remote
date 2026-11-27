@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 from collections.abc import AsyncIterator
+from itertools import islice
 from urllib.parse import urlsplit
 
 from cc_remote.claude_paths import claude_config_dir
@@ -485,6 +486,87 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("Hook 配置顶层必须是对象")
     return raw
+
+
+def antigravity_capabilities(cwd: str, gemini_dir: Path, *, skills_only: bool) -> list[dict]:
+    """List configured entries without loading plugins or returning their commands and secrets."""
+    items = {}
+
+    def directories(root):
+        if root.is_symlink():
+            return []
+        try:
+            return [path for path in islice(root.iterdir(), _MAX_ITEMS)
+                    if not path.is_symlink() and path.is_dir()]
+        except OSError:
+            return []
+
+    def configuration(path):
+        try:
+            return _read_json_object(path)
+        except (OSError, ValueError):
+            return {}
+
+    def add(kind, name, scope, path, **fields):
+        if len(items) < _MAX_ITEMS and (name := _text(name, 512)):
+            identity = _opaque_id(kind, path, name)
+            items.setdefault(identity, dict(kind=kind, name=name, scope=scope,
+                                             id=identity, **fields))
+
+    def skills(root, scope):
+        for directory in directories(root):
+            manifest = directory / "SKILL.md"
+            if not manifest.is_symlink():
+                name, description = _manifest_metadata(manifest)
+                if name and _SKILL_NAME.fullmatch(name):
+                    add("skill", name, scope, manifest, description=description)
+
+    def tools(root, scope):
+        servers = configuration(root / "mcp_config.json").get("mcpServers")
+        if isinstance(servers, dict):
+            for name, server in islice(servers.items(), _MAX_ITEMS):
+                if isinstance(server, dict):
+                    add("mcp", name, scope, root, enabled=server.get("disabled") is not True)
+        for name, body in islice(configuration(root / "hooks.json").items(), _MAX_ITEMS):
+            if not isinstance(body, dict):
+                continue
+            for event in ("SessionStart", "PreToolUse", "PostToolUse", "PreInvocation", "PostInvocation", "Stop"):
+                if isinstance(body.get(event), list) and body[event]:
+                    add("hook", name, scope, root / event, event=event,
+                        enabled=body.get("enabled") is not False)
+
+    project = Path(cwd)
+    ancestors = (project, *project.parents)
+    repo = next((index for index, ancestor in enumerate(ancestors)
+                 if (ancestor / ".git").exists()), 0)
+    for ancestor in ancestors[:repo + 1]:
+        for directory in (".agents", ".agent"):
+            root = ancestor / directory
+            if not root.is_symlink():
+                skills(root / "skills", "project")
+                if not skills_only and directory == ".agents":
+                    tools(root, "project")
+
+    config = gemini_dir / "config"
+    if not config.is_symlink():
+        skills(config / "skills", "user")
+        if not skills_only:
+            tools(config, "user")
+        for plugin in directories(config / "plugins"):
+            manifest = plugin / ".antigravity-plugin"
+            metadata = configuration(manifest / "plugin.json") if not manifest.is_symlink() else {}
+            metadata = metadata or configuration(plugin / "plugin.json")
+            if not metadata:
+                continue
+            skills(plugin / "skills", "plugin")
+            if not skills_only:
+                add("plugin", metadata.get("displayName") or metadata.get("name"), "user", plugin,
+                    installed=True, description=_text(metadata.get("description"), 4096))
+                tools(plugin, "plugin")
+    for root in (gemini_dir, gemini_dir / "antigravity-cli"):
+        if not root.is_symlink():
+            skills(root / "skills", "user")
+    return list(items.values())
 
 
 def _claude_hook_rows(

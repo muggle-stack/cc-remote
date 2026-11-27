@@ -78,7 +78,7 @@ export function sessionCommandTarget(
   session: SessionInfo, fallbackEngine: Engine, fallbackSpace: Space,
 ): { engine: Engine; space: Space } {
   return {
-    engine: session.engine === "codex" || session.engine === "claude"
+    engine: session.engine === "codex" || session.engine === "claude" || session.engine === "dsh" || session.engine === "antigravity"
       ? session.engine : fallbackEngine,
     space: session.space === "work" || session.space === "code"
       ? session.space : fallbackSpace,

@@ -164,6 +164,7 @@ from cc_remote.protocol import (
     ERR_QUEUE_FULL,
 )
 from cc_remote.wrapper.ringbuffer import RingBuffer
+from cc_remote.wrapper.antigravity_runtime import AntigravityRuntime
 from cc_remote.wrapper.dsh_runtime import DshRuntime
 from cc_remote.wrapper.session_pins import SessionPinStore, SessionPinStoreError
 from cc_remote.wrapper.session_plans import (
@@ -232,6 +233,7 @@ from cc_remote.wrapper.claude_broker_history import (
 from cc_remote.wrapper.ask import make_ask_server
 from cc_remote.wrapper.claude_questions import (
     AskCancelled,
+    AskDeclined,
     AskSuperseded,
     AskTimeout,
     AskUnavailable,
@@ -2135,6 +2137,12 @@ class WrapperMachine:
         self._command_scheduler = CommandScheduler(
             self._process_command_safely, self._command_target_identity)
         self._dsh = DshRuntime(self)
+        self._antigravity = AntigravityRuntime(self)
+        self._gemini_controller = None
+        if cfg.antigravity_service_socket:
+            from cc_remote.antigravity_service import GeminiController
+
+            self._gemini_controller = GeminiController(cfg.antigravity_service_socket, self)
         self.instance_id = uuid4().hex
         # Each configured CLAUDE_CONFIG_DIR is an independent account/session
         # boundary. Keep implicit single-account mode source-compatible and
@@ -7048,9 +7056,14 @@ class WrapperMachine:
     def _background_process_sync(
         self, ctx: SessionContext,
     ) -> BackgroundProcessSync:
+        if ctx.engine == "antigravity":
+            live = ctx.sdk.transcript.background if ctx.sdk.connected else {}
+        elif ctx.engine == "codex":
+            live = ctx.codex_background_processes or {}
+        else:
+            live = ctx.claude_background_processes
         items = sorted(
-            ((ctx.codex_background_processes or {}) if ctx.engine == "codex"
-             else ctx.claude_background_processes).values(),
+            live.values(),
             key=lambda item: (
                 item.started_at if item.started_at is not None else item.updated_at
                 if item.updated_at is not None else 0,
@@ -9848,6 +9861,9 @@ class WrapperMachine:
             for c in self.sessions.values():
                 c.claude_followup_recovery_task = None
             await self._dsh.close()
+            if self._gemini_controller:
+                await self._gemini_controller.close()
+            await self._antigravity.close()
             await self.transport.stop()
             for c in list(self.sessions.values()):
                 disconnected = False
@@ -11195,7 +11211,7 @@ class WrapperMachine:
                 and not msg.result.is_error
                 and msg.result.subtype != "steered"
                 and not ctx.btw
-                and not (ctx.engine == "dsh" and msg.result.subtype == "interrupted")
+                and not (ctx.engine in {"dsh", "antigravity"} and msg.result.subtype == "interrupted")
                 and self._session_presentation is not None
             ):
                 sid = self._ctx_wire_sid(ctx) or ctx.key
@@ -11934,7 +11950,7 @@ class WrapperMachine:
                                 ctx.queued_query_errors[
                                     command.msg_id] = launch_error
                                 if (isinstance(result, Error) and result.code in {
-                                    "dsh_upload_unknown", "dsh_upload_failed",
+                                    "dsh_upload_unknown", "dsh_upload_failed", "gemini_outcome_unknown",
                                 }):
                                     ctx.queued_query_blocked.add(command.msg_id)
                             if (
@@ -12204,10 +12220,10 @@ class WrapperMachine:
                 or (cmd.type == "get_diff" and getattr(cmd, "turn_id", None))):
             self._start_history_command(cmd)
             return
-        if cmd.type in {"get_models", "get_permission_profiles"}:
+        if cmd.type in {"get_models", "get_permission_profiles", "antigravity_auth"}:
             self._start_models_command(cmd)
             return
-        if (cmd.type == "steer" and not self._dsh.targets(cmd)
+        if (cmd.type == "steer" and not (self._dsh.targets(cmd) or self._antigravity.targets(cmd))
                 or cmd.type == "set_dsh_control"
                 and cmd.kind in {"terminal", "job_stop"}):
             # Session settings must precede later prompt admission. Only
@@ -12473,6 +12489,9 @@ class WrapperMachine:
         client_id = getattr(cmd, "client_id", None)
         cmd_id = getattr(cmd, "cmd_id", None)
         reliable = is_reliable_command(cmd) and client_id and cmd_id
+        if reliable and self._gemini_controller and self._antigravity.targets(cmd):
+            await self._gemini_controller.process(cmd)
+            return
         seen, cached_responses = (
             self._command_seen(client_id, cmd_id) if reliable else (False, ()))
         if seen:
@@ -12580,7 +12599,11 @@ class WrapperMachine:
             )
             await self._emit(ctx, error)
             return error
-        result = await self._dsh.dispatch(cmd)
+        if self._gemini_controller and self._antigravity.targets(cmd):
+            return await self._gemini_controller.dispatch(cmd)
+        result = await self._antigravity.dispatch(cmd)
+        if result is UNHANDLED_COMMAND:
+            result = await self._dsh.dispatch(cmd)
         if result is UNHANDLED_COMMAND:
             result = await self._command_router.dispatch(cmd)
         if result is UNHANDLED_COMMAND:
@@ -12943,7 +12966,7 @@ class WrapperMachine:
                             "route_id": getattr(cmd, "route_id", None),
                         },
                     ))
-                if ctx.engine == "claude" or ctx.codex_background_processes is not None:
+                if ctx.engine in {"claude", "antigravity"} or ctx.codex_background_processes is not None:
                     # Background work is current state just like a pending
                     # question. An explicit empty replacement is required to
                     # clear stale browser state after a missed terminal edge.
@@ -13007,6 +13030,8 @@ class WrapperMachine:
                     await self.transport.send(ctx.sdk.state.model_copy(deep=True, update={
                         "sid": sid, "to": cmd.client_id, "seq": None,
                         "route_id": getattr(cmd, "route_id", None)}))
+                if ctx.engine == "antigravity":
+                    await self._antigravity.replay_controls(ctx, cmd)
                 permission_mode = _session_permission_mode(ctx)
                 # This targeted baseline is not a broadcast acknowledgement.
                 # A queued native status must still reach existing clients and
@@ -13107,6 +13132,10 @@ class WrapperMachine:
                         to=cmd.client_id,
                         route_id=getattr(cmd, "route_id", None),
                     ))
+        if self._gemini_controller:
+            await self._gemini_controller.replay(cmd)
+        elif getattr(cmd, "discover_engines", False):
+            await self.transport.send(self._antigravity.availability(cmd))
         log.info("client hello handled", client_id=cmd.client_id,
                  sessions=len(self.sessions), replayed=replayed)
 
@@ -19259,6 +19288,8 @@ class WrapperMachine:
     ):
         if ctx.engine == "dsh":
             return await self._dsh.query(ctx, cmd, launch_receipt=launch_receipt)
+        if ctx.engine == "antigravity":
+            return await self._antigravity.query(ctx, cmd, launch_receipt=launch_receipt)
         if await self._refresh_btw_availability(ctx):
             error = Error(code=ERR_NOT_RUNNING, message=self.BTW_DESTROYED_MESSAGE,
                           msg_id=getattr(cmd, "msg_id", None))
@@ -26069,11 +26100,16 @@ class WrapperMachine:
             if ctx.engine != scope.engine or ctx.space != scope.space:
                 raise ValueError("session scope mismatch")
             return scope.model_copy(update={"sid": self._ctx_wire_sid(ctx)}), ctx.cwd
-        if scope.engine == "dsh":
+        if scope.engine in {"dsh", "antigravity"}:
             if scope.space != "code":
-                raise ValueError("DSH has no Work session")
-            await self._dsh.connection()
-            cwd = await self._dsh.session_cwd(sid)
+                raise ValueError("engine has no Work session")
+            if scope.engine == "dsh":
+                await self._dsh.connection()
+                cwd = await self._dsh.session_cwd(sid)
+            elif self._gemini_controller:
+                cwd = await self._gemini_controller.session_cwd(sid)
+            else:
+                cwd = await self._antigravity.session_cwd(sid)
             return scope.model_copy(update={"sid": sid}), cwd
         # History-only/cold sessions remain browsable without creating an engine.
         # A transcript proves identity, not Code/Work ownership. In particular,
@@ -26768,11 +26804,12 @@ class WrapperMachine:
         ctx: SessionContext,
         question: str,
         options: list[dict[str, str]],
+        **ask_options,
     ) -> str:
         """Keep the MCP tool's textual result and allow a custom answer."""
         try:
             answers = await self._on_ask_batch(ctx, [AskQuestion(
-                question=question, options=options, allow_text=True)])
+                question=question, options=options, allow_text=True)], **ask_options)
             answer = answers[0]
         except AskTimeout:
             return "(用户未回答，已超时)"
@@ -26781,10 +26818,10 @@ class WrapperMachine:
         return answer if isinstance(answer, str) else ", ".join(answer)
 
     async def _on_mcp_ask_batch(
-        self, ctx: SessionContext, questions: list[AskQuestion],
+        self, ctx: SessionContext, questions: list[AskQuestion], **ask_options,
     ) -> str:
         try:
-            answers = await self._on_ask_batch(ctx, questions)
+            answers = await self._on_ask_batch(ctx, questions, **ask_options)
         except AskTimeout:
             return "(用户未回答，已超时)"
         except (AskCancelled, AskSuperseded):
@@ -26857,6 +26894,9 @@ class WrapperMachine:
         to: str | None = None,
         questions: list[AskQuestion] | None = None,
         model_fallback=None,
+        dismiss_actions=None,
+        approval_diff: str | None = None,
+        guard=None,
     ) -> str | list[str] | list[str | list[str]]:
         """Run one question while the caller owns ``ctx.ask_lock``."""
         service_client = getattr(ctx.sdk, "client", None)
@@ -26900,6 +26940,8 @@ class WrapperMachine:
             plan_document=plan_document,
             questions=questions,
             model_fallback=model_fallback,
+            dismiss_actions=dismiss_actions,
+            approval_diff=approval_diff,
             to=to,
         )
         loop = asyncio.get_running_loop()
@@ -26918,6 +26960,8 @@ class WrapperMachine:
         registered = False
         try:
             async with ctx.emit_lock:
+                if guard is not None:
+                    guard()
                 if (
                     ctx.interrupt_event.is_set()
                     or ctx.state in {"interrupting", "draining"}
@@ -26958,16 +27002,20 @@ class WrapperMachine:
             if resolution.reason == "timeout":
                 log.warning("ask_user timed out", ask_id=ask_id)
                 raise AskTimeout
+            if resolution.reason == "declined":
+                raise AskDeclined
             if resolution.reason == "superseded":
                 raise AskSuperseded
             raise AskCancelled
         except asyncio.CancelledError:
             if registered:
-                await self._close_pending_ask(
+                # A tool transport can cancel its entire task group on EOF.
+                # Close the browser question independently of that group.
+                await asyncio.shield(self._close_pending_ask(
                     ctx,
                     ask_id,
                     reason="cancelled",
-                )
+                ))
             raise
         except Exception:
             # Validation happened before registration. If the initial transport
@@ -27324,6 +27372,14 @@ class WrapperMachine:
                 )
                 return await reject_locked(
                     ERR_NOT_RUNNING, "该交互问题已经超时")
+
+            action = getattr(cmd, "action", None)
+            if action is not None:
+                if action not in (state.event.dismiss_actions or ()):
+                    return await reject_locked(ERR_BAD_PROMPT, "此交互不支持该操作")
+                await self._close_pending_ask_locked(
+                    ctx, cmd.ask_id, reason="declined" if action == "decline" else "cancelled")
+                return None
 
             try:
                 batch = state.event.questions
@@ -37901,6 +37957,9 @@ class WrapperMachine:
                     ctx.claude_followup_recovery_task))):
             return False
         if ctx.engine == "claude" and self._claude_has_background_work(ctx):
+            return False
+        if (ctx.engine == "antigravity" and ctx.sdk.connected
+                and (ctx.sdk.turn_active or ctx.sdk.transcript.background)):
             return False
         if ctx.engine == "dsh":
             return not (

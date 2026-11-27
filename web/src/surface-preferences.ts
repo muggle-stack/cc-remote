@@ -1,4 +1,4 @@
-import type { Engine, Space } from "./protocol";
+import { isCodeOnlyEngine, type Engine, type Space } from "./protocol.ts";
 
 export const LEGACY_SPACE_KEY = "cc_remote_space";
 export const ENGINE_SPACES_KEY = "cc_remote_spaces_by_engine_v1";
@@ -23,13 +23,13 @@ export function readEngineSpaces(
     if (saved) return {
       claude: normalizeSpace(saved.claude),
       codex: normalizeSpace(saved.codex),
-      dsh: "code",
+      dsh: "code", antigravity: "code",
     };
   } catch { /* migrate malformed/legacy storage below */ }
   return {
     claude: currentEngine === "claude" ? legacySpace : "code",
     codex: currentEngine === "codex" ? legacySpace : "code",
-    dsh: "code",
+    dsh: "code", antigravity: "code",
   };
 }
 
@@ -38,5 +38,5 @@ export function rememberEngineSpace(
   engine: Engine,
   space: Space,
 ): EngineSpaces {
-  return { ...spaces, [engine]: engine === "dsh" ? "code" : space };
+  return { ...spaces, [engine]: isCodeOnlyEngine(engine) ? "code" : space };
 }

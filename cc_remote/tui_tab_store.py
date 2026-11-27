@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import tempfile
 
+from cc_remote.tui_navigation import SCOPES
+
 
 def clean(value):
     if not isinstance(value, dict):
@@ -20,8 +22,8 @@ def clean(value):
     )) if isinstance(tabs, list) else []
     scope = value.get("scope")
     if (not isinstance(scope, list) or len(scope) != 2
-            or scope[0] not in ("codex", "claude")
-            or scope[1] not in ("code", "work")):
+            or not all(isinstance(value, str) for value in scope)
+            or tuple(scope) not in SCOPES):
         scope = ["codex", "code"]
     return {"tabs": tabs, "active": value.get("active")
             if value.get("active") in tabs else None, "scope": scope}

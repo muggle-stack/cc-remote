@@ -15,7 +15,7 @@ Env:
   LOGIN_USERNAME  required only when relay multi-user login is enabled
   LOGIN_PASSWORD  optional locally; remote connections prompt without echo
   PUBLIC_ORIGIN   optional WebSocket Origin override (normally derived from URL)
-  ENGINE          claude | codex   (which store to list / which backend for /new)
+  ENGINE          claude | codex | antigravity
   ALLOW_INSECURE_HTTP  1/true to allow a non-loopback RELAY_URL to stay ws://
                         instead of requiring wss:// (default off; traffic
                         including the login password travels in cleartext)
@@ -32,7 +32,7 @@ Commands (each on its own line):
   /model [id]       set model (no arg = list options)
   /effort <id>      set reasoning effort (low|medium|high|xhigh|max)
   /context          show context-window usage
-  /engine <e>       switch engine (claude|codex) for listing/new
+  /engine <e>       switch engine for listing/new
   /help             show commands
   /quit
 """
@@ -57,10 +57,11 @@ from cc_remote.config import valid_machine_id
 from cc_remote.log import logger, setup
 from cc_remote.protocol import (
     Hello, Query, Interrupt, SetModel, SetEffort, GetContext,
-    GetHistory, ListSessions, SwitchSession, NewSession, AnswerQuestion,
+    GetHistory, ListSessions, SwitchSession, NewSession, AnswerQuestion, SetAntigravityOption,
     Ping, is_reliable_command, serialize,
 )
 from cc_remote.relay.auth import SESSION_COOKIE_NAME
+from cc_remote.tui_navigation import ENGINES
 from cc_remote.tui_local import (
     discover_local_relay, is_loopback_url, same_local_endpoint,
 )
@@ -514,6 +515,7 @@ class Tui:
         if not await self._send(Hello(
             role="client", client_id=self.client_id,
             machine_id=self.machine_id,
+            discover_engines=True,
             cursors=cursors or None, generations=generations or None)):
             return
         queued: list[tuple[str, str, Optional[str]]] = []
@@ -705,7 +707,11 @@ class Tui:
                 self._line(DIM("usage: /model <id>   (e.g. claude-opus-4-8 / gpt-5.5)"))
         elif cmd == "effort":
             if arg:
-                if await self._send(SetEffort(effort=arg, sid=self.attached_sid)):
+                if self.attached_engine == "antigravity" and self.attached_sid:
+                    message = SetAntigravityOption(sid=self.attached_sid, category="thought_level", value=arg)
+                else:
+                    message = SetEffort(effort=arg, sid=self.attached_sid)
+                if await self._send(message):
                     self._line(CYAN(f"[effort → {arg}]"))
             else:
                 self._line(DIM("usage: /effort <low|medium|high|xhigh|max>"))
@@ -714,12 +720,12 @@ class Tui:
                 await self._send(GetContext(
                     sid=self.attached_sid, refresh=True))
         elif cmd == "engine":
-            if arg in ("claude", "codex"):
+            if arg in ENGINES:
                 self.engine = arg
                 await self._send(ListSessions(engine=self.engine))
                 self._line(CYAN(f"[engine → {arg}] (applies to /sessions and /new)"))
             else:
-                self._line(DIM("usage: /engine <claude|codex>"))
+                self._line(DIM("usage: /engine <claude|codex|antigravity>"))
         else:
             self._line(YELLOW(f"[unknown command: /{cmd}] — /help"))
 
@@ -734,7 +740,7 @@ class Tui:
             if 0 <= i < len(self.sessions):
                 sid = self.sessions[i]["session_id"]
                 candidate = self.sessions[i].get("engine")
-                if candidate in ("claude", "codex"):
+                if candidate in ENGINES:
                     target_engine = candidate
             else:
                 self._line(YELLOW(f"[no session #{arg}] — /sessions"))
@@ -1055,7 +1061,7 @@ class Tui:
         self.sessions = [s for s in sessions if s.get("tag") != "archived"]
         for session in self.sessions:
             sid, engine = session.get("session_id"), session.get("engine")
-            if isinstance(sid, str) and engine in ("claude", "codex"):
+            if isinstance(sid, str) and engine in ENGINES:
                 self.session_engines[sid] = engine
         if not self.sessions:
             self._line(DIM("[no sessions] — /new to start one"))
@@ -1170,7 +1176,7 @@ def main() -> None:
     parser.add_argument("--demo", action="store_true",
                         help="offline full-screen interaction preview")
     parser.add_argument("--url", default=os.environ.get("RELAY_URL"))
-    parser.add_argument("--engine", choices=("claude", "codex"))
+    parser.add_argument("--engine", choices=ENGINES)
     parser.add_argument("--machine", default="default")
     parser.add_argument("--space", choices=("code", "work"))
     parser.add_argument("--config", help="full-screen TUI shortcut TOML file")
@@ -1196,9 +1202,12 @@ def main() -> None:
             return
         if args.json:
             parser.error("--json requires --list-keys")
-        engine = args.engine or os.environ.get("ENGINE") or ENGINE
-        if engine not in {"codex", "claude"}:
-            parser.error("ENGINE must be 'codex' or 'claude'; or pass --engine")
+        engine = args.engine or os.environ.get("ENGINE") or (
+            "antigravity" if (args.session_id or "").startswith("agy@") else ENGINE)
+        if engine not in ENGINES:
+            parser.error("ENGINE must be 'codex', 'claude' or 'antigravity'; or pass --engine")
+        if engine == "antigravity" and args.space == "work":
+            parser.error("Gemini sessions require --space code")
         url = args.url
         password, origin, username = LOGIN_PASSWORD, PUBLIC_ORIGIN, LOGIN_USERNAME
         local_login = False
@@ -1241,7 +1250,7 @@ def main() -> None:
             tui.keys = load_keys(args.config)
             tui.space = args.space or "code"
             tui.explicit_engine = (
-                args.engine is not None or bool(os.environ.get("ENGINE"))
+                args.engine is not None or bool(os.environ.get("ENGINE")) or engine == "antigravity"
             )
             tui.explicit_space = args.space is not None
             run_workspace(tui, demo=args.demo)

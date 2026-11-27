@@ -23,11 +23,11 @@ from uuid import uuid4
 _WIRE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$")
 _MAX_ENTRIES = 4096
 _MAX_FILE_BYTES = 16 * 1024 * 1024
-_ENGINES = frozenset({"claude", "codex", "dsh"})
+_ENGINES = frozenset({"claude", "codex", "dsh", "antigravity"})
 _LEGACY_ENGINE = "legacy"
 
 
-def _engine(value: object) -> Literal["claude", "codex", "dsh"]:
+def _engine(value: object) -> Literal["claude", "codex", "dsh", "antigravity"]:
     if value not in _ENGINES:
         raise SessionPresentationStoreError(
             "session presentation engine is invalid")
@@ -71,6 +71,8 @@ class SessionPresentationSnapshot:
     completion_revision: int = 0
     dismissed_goal_id: str | None = None
     updated_at: float = 0.0
+    hidden: bool = False
+    custom_title: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -79,6 +81,8 @@ class SessionPresentationSnapshot:
             "completion_revision": self.completion_revision,
             "dismissed_goal_id": self.dismissed_goal_id,
             "updated_at": self.updated_at,
+            **({"hidden": True} if self.hidden else {}),
+            **({"custom_title": self.custom_title} if self.custom_title else {}),
         }
 
 
@@ -91,7 +95,7 @@ def _wire_id(value: object, *, optional: bool = False) -> str | None:
 
 
 def _snapshot(value: object) -> SessionPresentationSnapshot:
-    if not isinstance(value, dict) or set(value) != {
+    if not isinstance(value, dict) or set(value) - {"hidden", "custom_title"} != {
         "completion_id",
         "completion_unread",
         "completion_revision",
@@ -120,7 +124,9 @@ def _snapshot(value: object) -> SessionPresentationSnapshot:
             "session presentation timestamp is invalid"
         )
     unread = value.get("completion_unread")
-    if not isinstance(unread, bool):
+    hidden = value.get("hidden", False)
+    custom_title = value.get("custom_title")
+    if not isinstance(unread, bool) or not isinstance(hidden, bool):
         raise SessionPresentationStoreError(
             "session completion receipt is invalid"
         )
@@ -132,12 +138,19 @@ def _snapshot(value: object) -> SessionPresentationSnapshot:
         raise SessionPresentationStoreError(
             "an unread completion requires an identity"
         )
+    if custom_title is not None and (
+        not isinstance(custom_title, str) or not 1 <= len(custom_title) <= 200
+        or not custom_title.strip()
+    ):
+        raise SessionPresentationStoreError("session custom title is invalid")
     return SessionPresentationSnapshot(
         completion_id=completion_id,
         completion_unread=unread,
         completion_revision=revision,
         dismissed_goal_id=dismissed_goal_id,
         updated_at=float(updated_at),
+        hidden=hidden,
+        custom_title=custom_title,
     )
 
 
@@ -161,9 +174,33 @@ class SessionPresentationStore:
             self._sessions.move_to_end(key)
             return snapshot
 
+    def entries_for_engine(self, engine: str) -> dict[str, SessionPresentationSnapshot]:
+        prefix = f"{_engine(engine)}\0"
+        with self._lock:
+            return {key[len(prefix):]: value for key, value in self._sessions.items() if key.startswith(prefix)}
+
+    def set_hidden(self, engine: str, session_id: str, hidden: bool) -> None:
+        key = _scope_key(engine, session_id)
+        with self._lock:
+            current = self._sessions.get(key, SessionPresentationSnapshot())
+            if current.hidden != hidden:
+                self._replace_locked(key, replace(current, hidden=hidden, updated_at=time.time()))
+
+    def set_title(self, engine: str, session_id: str, title: str) -> None:
+        key = _scope_key(engine, session_id)
+        title = title.strip()
+        if not 1 <= len(title) <= 200:
+            raise SessionPresentationStoreError("session custom title is invalid")
+        with self._lock:
+            current = self._sessions.get(key, SessionPresentationSnapshot())
+            if current.custom_title != title:
+                self._replace_locked(
+                    key, replace(current, custom_title=title, updated_at=time.time()),
+                )
+
     def completion_engine(
         self, session_id: str, completion_id: str,
-    ) -> Literal["claude", "codex", "dsh"] | None:
+    ) -> Literal["claude", "codex", "dsh", "antigravity"] | None:
         """Resolve an engine-less legacy acknowledgement without guessing.
 
         Protocol v34 predates engine-scoped completion commands. A cold
@@ -174,9 +211,9 @@ class SessionPresentationStore:
         """
         completion_id = _wire_id(completion_id)  # type: ignore[assignment]
         assert completion_id is not None
-        matches: list[Literal["claude", "codex", "dsh"]] = []
+        matches: list[Literal["claude", "codex", "dsh", "antigravity"]] = []
         with self._lock:
-            for engine in ("claude", "codex", "dsh"):
+            for engine in ("claude", "codex", "dsh", "antigravity"):
                 snapshot = self._sessions.get(_scope_key(engine, session_id))
                 if (
                     snapshot is not None

@@ -74,7 +74,7 @@ from cc_remote.tui_chrome import (
 from cc_remote.attachments import validate_attachments
 from cc_remote.tui_presentation import bounded
 from cc_remote.tui_keys import KeyConfig, LAYERS
-from cc_remote.tui_navigation import SCOPES, scoped_catalog, select_session
+from cc_remote.tui_navigation import ENGINES, SCOPES, engine_label, scoped_catalog, select_session
 from cc_remote.tui_deletion import SessionDeletion
 
 
@@ -100,6 +100,7 @@ class WorkspaceClient(Tui):
         self.catalog_dirty: set[tuple[str, str]] = set()
         self.protocol_error = False
         self.demo = False
+        self.gemini_available = False
         self.panel_reads: set[str] = set()
         self.read_tickets: dict[tuple[str, str], tuple[str, int]] = {}
         self.goal_versions: dict[str, int] = {}
@@ -280,7 +281,7 @@ class WorkspaceClient(Tui):
                     # and request a fresh catalog after handler completion.
                     self.catalog_dirty.update(
                         {(engine, command.get("space", "code"))}
-                        if engine else SCOPES
+                        if engine else self.catalog_scopes
                     )
         generation = event.get("generation")
         if (
@@ -351,6 +352,10 @@ class WorkspaceClient(Tui):
         if route_preview(self, event):
             return
         kind = event.get("type")
+        if kind == "antigravity_availability":
+            self.gemini_available = event["enabled"]
+            if self.gemini_available and ("antigravity", "code") not in self.catalog_ready:
+                self.catalog_dirty.add(("antigravity", "code"))
         sid = event.get("sid")
         request = event.get("request_id")
         update = self.queue_updates.get(request)
@@ -403,13 +408,15 @@ class WorkspaceClient(Tui):
                     ).get("default_" + profile)
                 if expected_profile != event.get(profile):
                     continue
-                if event["engine"] == "codex" and event.get("sid") != (
+                if event["engine"] in {"codex", "antigravity"} and event.get("sid") != (
                     self.workspace.rekeys.get(source.get("sid"), source.get("sid"))
                 ):
                     continue
-                if event["engine"] == "claude" and source.get(
+                if event["engine"] in {"claude", "antigravity"} and source.get(
                     "cwd"
                 ) != event.get("cwd"):
+                    continue
+                if event["engine"] == "antigravity" and source.get("antigravity_model") != event.get("antigravity_model"):
                     continue
                 if source.get("sid"):
                     self.workspace.view(source["sid"]).presentation.reports[
@@ -558,7 +565,7 @@ class WorkspaceClient(Tui):
                     (event["engine"], event.get("space", "code"))
                 )
             else:
-                self.catalog_dirty.update(SCOPES)
+                self.catalog_dirty.update(self.catalog_scopes)
         if kind in {"snapshot", "session_focus", "session_rekey"}:
             sid = event.get("session_id") or event.get("sid")
             if sid:
@@ -580,6 +587,12 @@ class WorkspaceClient(Tui):
     def scope(self) -> tuple[str, str]:
         return self.engine, self.space
 
+    @property
+    def catalog_scopes(self) -> set[tuple[str, str]]:
+        if self.gemini_available or self.engine == "antigravity":
+            return SCOPES
+        return SCOPES - {("antigravity", "code")}
+
     def visible_catalog(self) -> dict:
         return scoped_catalog(self.workspace.catalog, *self.scope)
 
@@ -591,8 +604,13 @@ class WorkspaceClient(Tui):
             ] = self.attached_sid
 
     async def switch_surface(self, engine: str, space: str) -> None:
+        if engine == "antigravity":
+            if not self.gemini_available and self.engine != engine:
+                raise ValueError("Gemini is disabled on this device")
+            if space == "work":
+                raise ValueError("Gemini is available in Code")
         if (engine, space) not in SCOPES:
-            raise ValueError("Choose claude/codex and code/work")
+            raise ValueError("Choose claude, codex or antigravity in a supported workspace")
         if (engine, space) == self.scope:
             return
         self.direct_session_pending = None
@@ -603,7 +621,7 @@ class WorkspaceClient(Tui):
         self.attached_engine = engine
         self._pending_new_request = None
         self.restore_pending = True
-        self.notice = f"Loading {engine.title()} / {space.title()} sessions…"
+        self.notice = f"Loading {engine_label(engine)} / {space.title()} sessions…"
         if self.demo:
             self.catalog_ready.add(self.scope)
             await self.restore_surface()
@@ -619,7 +637,7 @@ class WorkspaceClient(Tui):
             row = self.workspace.catalog.get(sid)
             if row:
                 await self._attach(sid, row["engine"])
-            elif SCOPES <= self.catalog_ready:
+            elif self.catalog_scopes <= self.catalog_ready:
                 self.notice = "Requested session is not in the device catalog"
             return
         if not self.restore_pending or self.scope not in self.catalog_ready:
@@ -648,7 +666,7 @@ class WorkspaceClient(Tui):
                 ":new" if self.space == "work" else ":new /absolute/directory"
             )
             self.notice = (
-                f"No {self.engine.title()} / {self.space.title()} sessions · "
+                f"No {engine_label(self.engine)} / {self.space.title()} sessions · "
                 f"{command} creates one"
             )
 
@@ -699,9 +717,9 @@ class WorkspaceClient(Tui):
         await super()._recovery_preamble()
         if self.attached_sid and not self._history_backed(self.attached_sid):
             await self.sync_side_chat(self.attached_sid)
-        # Warm all four catalogs, but only the selected scope can pick focus.
+        # Warm the active device's catalogs. Only the selected scope can pick focus.
         # These are read-only catalog queries, never engine/model turns.
-        for engine, space in sorted(SCOPES):
+        for engine, space in sorted(self.catalog_scopes):
             if (engine, space) != (self.engine, "code"):
                 await self._send(ListSessions(engine=engine, space=space))
 
@@ -808,7 +826,11 @@ class WorkspaceClient(Tui):
                 "codex_profile_id",
             )
         )
-        return key + (row.get("sid"),) if session and row.get("engine") == "codex" else key
+        if session and row.get("engine") in {"codex", "antigravity"}:
+            key += (row.get("sid"),)
+            if row["engine"] == "antigravity":
+                key += (row.get("antigravity_model"),)
+        return key
 
     async def prefetch_capabilities(self, sid: str) -> None:
         row = self.workspace.catalog.get(sid, {})
@@ -847,6 +869,9 @@ class WorkspaceClient(Tui):
     ) -> None:
         sid = self.workspace.rekeys.get(sid, sid)
         row = self.workspace.catalog.get(sid, {})
+        engine = self.session_engines.get(sid, row.get("engine") or self.engine)
+        if engine == "antigravity" and name in {"Goal / Plan", "Status"}:
+            return
         messages = {
             "Goal / Plan": lambda: [GetGoal(sid=sid)],
             "Usage / Context": lambda: [GetContext(sid=sid, refresh=explicit)],
@@ -886,11 +911,13 @@ class WorkspaceClient(Tui):
             and self.session_engines.get(sid, row.get("engine") or self.engine) == "claude"
         ):
             messages.append(GetClaudePlan(sid=sid))
-        if name == "Usage / Context" and (
+        if engine != "antigravity" and name == "Usage / Context" and (
             explicit or self.session_engines.get(sid, self.engine) == "codex"
         ):
             messages.append(GetStatus(sid=sid))
         for message in messages:
+            if engine == "antigravity" and isinstance(message, GetPermissionProfiles):
+                continue
             await self._send(message)
 
     async def execute_action(self, message) -> bool:
@@ -1020,7 +1047,7 @@ class WorkspaceClient(Tui):
         args.update(images=images or None, files=files or None)
         if (
             not queue
-            and self.session_engines.get(sid, self.engine) == "codex"
+            and self.session_engines.get(sid, self.engine) in {"codex", "antigravity"}
             and view.state == "running"
         ):
             msg = Steer(**args)
@@ -1884,7 +1911,7 @@ class WorkspaceApp(App, inherit_bindings=False):
         )
         self.update_chrome(
             "#session-title",
-            f"{self.client.engine.title()} / {self.client.space.title()} · {heading}",
+            f"{engine_label(self.client.engine)} / {self.client.space.title()} · {heading}",
         )
         if view:
             p = view.presentation
@@ -2177,12 +2204,13 @@ class WorkspaceApp(App, inherit_bindings=False):
                 self.query_one(Transcript).focus()
 
     async def action_toggle_engine(self) -> None:
-        await self.change_surface(
-            "claude" if self.client.engine == "codex" else "codex",
-            self.client.space,
-        )
+        engines = ENGINES if self.client.gemini_available or self.client.engine == "antigravity" else ENGINES[:2]
+        engine = engines[(engines.index(self.client.engine) + 1) % len(engines)]
+        await self.change_surface(engine, "code" if engine == "antigravity" else self.client.space)
 
     async def action_toggle_space(self) -> None:
+        if self.client.engine == "antigravity":
+            return
         await self.change_surface(
             self.client.engine,
             "work" if self.client.space == "code" else "code",
@@ -3167,7 +3195,7 @@ def seed_demo(client: WorkspaceClient) -> None:
             ],
         }
     )
-    for engine, space in sorted(SCOPES - {("codex", "code")}):
+    for engine, space in sorted(client.catalog_scopes - {("codex", "code")}):
         sid = f"demo-{engine}-{space}"
         client.workspace.event(
             {
@@ -3194,7 +3222,7 @@ def seed_demo(client: WorkspaceClient) -> None:
             }
         )
         view.write_state = "writable"
-    client.catalog_ready.update(SCOPES)
+    client.catalog_ready.update(client.catalog_scopes)
     client.attached_sid = select_session(client.visible_catalog(), None)
     client.attached_engine = client.engine
     client.restore_pending = False

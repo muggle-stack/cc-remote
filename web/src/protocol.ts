@@ -1,7 +1,11 @@
 // Mirror of cc_remote/protocol.py. Kept in sync manually (generate later).
 
 export type State = "idle" | "running" | "interrupting" | "draining";
-export type Engine = "claude" | "codex" | "dsh";
+export type Engine = "claude" | "codex" | "dsh" | "antigravity";
+export const ENGINE_LABELS: Record<Engine, string> = {
+  claude: "Claude", codex: "Codex", dsh: "DSH", antigravity: "Gemini",
+};
+export const isCodeOnlyEngine = (engine: Engine): boolean => engine === "dsh" || engine === "antigravity";
 export type Space = "code" | "work";
 export type RestoreMode = "conversation" | "files" | "both";
 export type RestoreOutcome = "succeeded" | "failed" | "skipped";
@@ -45,6 +49,7 @@ interface Base {
 
 export interface Hello extends Base {
   type: "hello";
+  discover_engines?: boolean;
   role: "client" | "wrapper";
   client_id?: string | null;
   machine_id?: string | null;
@@ -125,7 +130,7 @@ export interface Pong extends Base { type: "pong"; n: number }
 export interface CommandAck extends Base { type: "command_ack"; cmd_id: string; client_id: string }
 export interface ReplayStart extends Base { type: "replay_start"; from_seq: number; to_seq: number; truncated: boolean; rebuild?: boolean; generation?: string | null }
 export interface ReplayEnd extends Base { type: "replay_end"; to_seq: number; truncated: boolean; turn_usage?: TurnUsage[] }
-export interface TokenUsage { input_tokens?: number | null; output_tokens?: number | null; cache_read_tokens?: number | null; cache_write_tokens?: number | null }
+export interface TokenUsage { input_tokens?: number | null; output_tokens?: number | null; cache_read_tokens?: number | null; cache_write_tokens?: number | null; thought_tokens?: number | null }
 export interface TurnUsage extends Base { type: "turn_usage"; turn_id: string; usage: TokenUsage }
 export interface Snapshot extends Base { type: "snapshot"; cc_session_id?: string | null; state: State; tail_text: string; cwd?: string | null; generation?: string | null; control?: SessionControl | null; turn_usage?: TurnUsage[] }
 export interface StateEvent extends Base {
@@ -200,7 +205,7 @@ export interface TimedTaskInfo {
   sent_count: number; total_count: number; valid_until: number;
 }
 export interface UserMsg extends Base { type: "user_msg"; source_thread_id?: string | null; msg_id: string; client_msg_id?: string | null; timed_task?: TimedMessage | null; prompt: string; images?: QueryImg[] | null; files?: { filename: string }[] | null }
-export interface TurnSteered extends Base { type: "turn_steered"; source_thread_id?: string | null; msg_id: string; turn_id: string; prompt: string; images?: QueryImg[] | null; files?: { filename: string }[] | null }
+export interface TurnSteered extends Base { type: "turn_steered"; source_thread_id?: string | null; preserve_open_tools?: boolean; msg_id: string; turn_id: string; prompt: string; images?: QueryImg[] | null; files?: { filename: string }[] | null }
 export interface AssistantMsgStart extends Base { type: "assistant_msg_start"; message_id: string; turn_id?: string | null; background?: boolean | null; channel?: AssistantChannel }
 export interface Delta extends Base { replace?: boolean; type: "delta"; message_id: string; turn_id?: string | null; background?: boolean | null; text: string; channel?: AssistantChannel }
 export interface ToolUse extends Base {
@@ -299,7 +304,7 @@ export interface TurnFileChangesPage extends Base { type: "turn_file_changes_pag
 export interface GetTurnFileChanges extends Base { type: "get_turn_file_changes"; sid: string; engine: Engine; turn_id: string; revision: string; offset?: number; limit?: number }
 export type TurnContinuation = "subagent";
 export interface TurnBinding extends Base { type: "turn_binding"; msg_id: string; turn_id: string; autonomous?: boolean; continuation?: TurnContinuation | null }
-export interface TurnResult { subtype: string; duration_ms: number; is_error: boolean; total_cost_usd?: number | null; num_turns?: number | null }
+export interface TurnResult { subtype: string; duration_ms: number; is_error: boolean; total_cost_usd?: number | null; num_turns?: number | null; background_tool_ids?: string[] | null }
 export interface TurnNotificationContext { engine: Engine; space: Space; display_name?: string | null; parent_session_id?: string | null }
 export interface TurnEnd extends Base { type: "turn_end"; result: TurnResult; turn_id?: string | null; checkpoint_id?: string | null; notification_context?: TurnNotificationContext | null }
 export interface ErrorMsg extends Base {
@@ -357,9 +362,11 @@ export interface NewSession extends Base {
   dsh_permission?: string | null;
   dsh_agent_preset?: string | null;
   dsh_effort?: string | null;
+  antigravity_mode?: string | null;
+  antigravity_effort?: string | null;
   request_id?: string | null;
   cwd?: string | null;
-  engine?: "claude" | "codex" | "dsh";
+  engine?: Engine;
   claude_profile_id?: string | null;
   codex_profile_id?: string | null;
   space?: Space;
@@ -446,7 +453,7 @@ export interface RollbackResult extends Base {
   prefill_text?: string | null;
   detail?: string | null;
 }
-export interface CompactSession extends Base { type: "compact_session"; session_id: string; engine?: "claude" | "codex" | "dsh"; space?: "code" }
+export interface CompactSession extends Base { type: "compact_session"; session_id: string; engine?: Engine; space?: "code" }
 export interface StartReview extends Base { type: "start_review"; session_id: string; engine?: "codex"; space?: "code"; target: "uncommittedChanges" | "baseBranch" | "commit" | "custom"; value?: string | null }
 export interface GetWorkDashboard extends Base { type: "get_work_dashboard"; engine?: Engine }
 export interface CreateWorkProject extends Base { type: "create_work_project"; engine?: Engine; name: string; description?: string }
@@ -549,7 +556,7 @@ export type ProcessDetailState = "none" | "present" | "unknown";
 export type TurnDetailReason = "process" | "prompt_truncated" | "answer_truncated" | "image_deferred";
 export interface SessionMessageReceipt { itemId: string; threadId: string; status: "sending" | "queued" | "sent" | "failed" }
 export interface ResponseProcessSummary { id: string; background: boolean; answerId?: string | null; itemCount: number; startedTs?: number | null; doneTs?: number | null }
-export interface ConversationTurn { responseProcesses?: ResponseProcessSummary[] | null; continuation?: TurnContinuation | null; sessionMessages?: SessionMessageReceipt[] | null; id: string; sourceThreadId?: string | null; timedTask?: TimedMessage | null; clientMsgId?: string | null; prompt: string; blocks: unknown[]; done: boolean; forkPointId?: string | null; checkpointId?: string | null; interrupted?: boolean | null; error?: string | null; images?: QueryImg[] | null; imageRefs?: ConversationImageRef[] | null; files?: QueryFile[] | null; ts?: number | null; doneTs?: number | null; durationMs?: number | null; processDetailState?: ProcessDetailState; detailReasons?: TurnDetailReason[]; processStartedTs?: number | null; processDoneTs?: number | null; detailEventCount: number; detailLoaded: boolean; fileChanges?: TurnChangeSummary | null }
+export interface ConversationTurn { tokenUsage?: TokenUsage | null; responseProcesses?: ResponseProcessSummary[] | null; continuation?: TurnContinuation | null; sessionMessages?: SessionMessageReceipt[] | null; id: string; sourceThreadId?: string | null; timedTask?: TimedMessage | null; clientMsgId?: string | null; prompt: string; blocks: unknown[]; done: boolean; forkPointId?: string | null; checkpointId?: string | null; interrupted?: boolean | null; error?: string | null; images?: QueryImg[] | null; imageRefs?: ConversationImageRef[] | null; files?: QueryFile[] | null; ts?: number | null; doneTs?: number | null; durationMs?: number | null; processDetailState?: ProcessDetailState; detailReasons?: TurnDetailReason[]; processStartedTs?: number | null; processDoneTs?: number | null; detailEventCount: number; detailLoaded: boolean; fileChanges?: TurnChangeSummary | null }
 export interface CodexTerminalFence { turn_id: string; status: "completed" | "interrupted" | "failed"; duration_ms?: number | null; completed_at?: number | null }
 export interface History extends Base { type: "history"; session_id: string; revision: string; generation?: string | null; continuity_revision?: string | null; build_seq?: number; live_seq?: number | null; authoritative?: boolean; error?: string | null; events: ServerEvent[]; turns?: ConversationTurn[]; detail?: "summary" | "full"; has_more: boolean; oldest_id?: string | null; newest_id?: string | null; before?: string | null; control?: SessionControl | null; external?: boolean; takeover_pending?: boolean; in_progress?: boolean; compaction_continuation_turn_ids?: string[]; terminal_fences?: CodexTerminalFence[]; reset?: boolean }
 export interface GetTurnDetail extends Base { type: "get_turn_detail"; session_id: string; turn_id: string; client_id?: string | null; revision?: string | null; before?: string | null; limit?: number | null }
@@ -569,12 +576,13 @@ export interface ArtifactInvalidated extends Base { type: "artifact_invalidated"
 // which reasoning levels it accepts — and `turn/start` does NOT validate the level
 // (it accepts `bogus-zzz`), so one we invent client-side only fails later inside the
 // model API. Codex choices and descriptions come from this native catalog.
-export interface GetModels extends Base { type: "get_models"; engine?: string | null; client_id?: string | null; cwd?: string | null; claude_profile_id?: string | null; codex_profile_id?: string | null }
+export interface GetModels extends Base { type: "get_models"; antigravity_model?: string; engine?: string | null; client_id?: string | null; cwd?: string | null; claude_profile_id?: string | null; codex_profile_id?: string | null }
 export interface CatalogModel {
   id: string;
   display_name: string;
   description: string;
   efforts: string[];
+  effort_names?: Record<string, string>;
   effort_descriptions?: Record<string, string>;
   default_effort?: string | null;
   is_default?: boolean;
@@ -585,7 +593,8 @@ export interface ModelServiceTier { id: string; name: string; description: strin
 // Effective controls for a NEW no-override session. These are display metadata,
 // not the focused session's controls and not implicit overrides on NewSession.
 export interface DshPreset { id: string; name: string; description: string; is_default: boolean; available: boolean }
-export interface DshCommandInfo { name: string; description: string; input_hint?: string | null; attachments: boolean }
+export interface NativeCommandInfo { name: string; description: string; input_hint?: string | null; attachments: boolean }
+export type DshCommandInfo = NativeCommandInfo;
 export interface DshPermissionOption { value: string; name: string; description: string }
 export interface DshGoal { id: string; revision: number; objective: string; phase: "active" | "paused" | "blocked" | "complete"; rounds: number; max_rounds: number; blocked_reason?: string | null; activation?: "armed" | "disarmed" | null }
 export interface DshCommandResult extends Base { type: "dsh_command_result"; request_id: string; status: "success" | "error" | "unknown"; text: string }
@@ -602,7 +611,43 @@ export interface DshDownloadChunk extends Base { type: "dsh_download_chunk"; req
 export interface DshState extends Base { type: "dsh_state"; plan_active?: boolean | null; plan_pending?: boolean; jobs?: DshJob[]; connected: boolean; error?: string | null; agent_preset?: string | null; commands: DshCommandInfo[]; permissions: DshPermissionOption[]; permission?: string | null; goal?: DshGoal | null }
 export type DshControlKind = "permission" | "effort" | "command" | "job_stop" | "plugin_enable" | "plugin_disable" | "manage" | "terminal";
 export interface SetDshControl extends Base { type: "set_dsh_control"; sid: string; kind: DshControlKind; value: string; images?: QueryImg[]; files?: QueryFile[] }
-export interface Models extends Base { dsh_permissions?: DshPermissionOption[]; dsh_presets?: DshPreset[]; error?: string | null; type: "models"; engine: string; models: CatalogModel[]; default_model?: string | null; default_effort?: string | null; cwd?: string | null; claude_profile_id?: string | null; codex_profile_id?: string | null }
+export type AntigravityConfigCategory = "model" | "thought_level" | "mode";
+export interface AntigravityChoice { value: string; name: string; description: string }
+export interface AntigravityOption {
+  category: AntigravityConfigCategory;
+  current: string;
+  choices: AntigravityChoice[];
+}
+export interface AntigravityState extends Base {
+  type: "antigravity_state";
+  connected: boolean;
+  options: AntigravityOption[];
+  commands: NativeCommandInfo[];
+}
+export interface AntigravityAvailability extends Base {
+  type: "antigravity_availability";
+  enabled: boolean;
+}
+export type AntigravityAuthMethod = "oauth-personal" | "oauth-business";
+export interface AntigravityAuth extends Base {
+  type: "antigravity_auth";
+  engine?: "antigravity";
+  method?: AntigravityAuthMethod | null;
+}
+export interface AntigravityAuthResult extends Base {
+  type: "antigravity_auth_result";
+  request_id?: string | null;
+  methods: AntigravityAuthMethod[];
+  signed_in: boolean;
+  error?: string | null;
+}
+export interface SetAntigravityOption extends Base {
+  type: "set_antigravity_option";
+  sid: string;
+  category: AntigravityConfigCategory;
+  value: string;
+}
+export interface Models extends Base { antigravity_model?: string | null; antigravity_options?: AntigravityOption[]; antigravity_commands?: NativeCommandInfo[]; dsh_permissions?: DshPermissionOption[]; dsh_presets?: DshPreset[]; error?: string | null; type: "models"; engine: string; models: CatalogModel[]; default_model?: string | null; default_effort?: string | null; cwd?: string | null; claude_profile_id?: string | null; codex_profile_id?: string | null }
 export interface GetEngineCapabilities extends Base { dsh_agent_preset?: string | null; type: "get_engine_capabilities"; engine: Engine; space?: Space; client_id?: string | null; cwd?: string | null; skills_only?: boolean; claude_profile_id?: string | null; codex_profile_id?: string | null }
 export interface ManageEnginePlugin extends Base { type: "manage_engine_plugin"; engine: Engine; action: "install" | "uninstall"; plugin_id: string; space?: Space; client_id?: string | null; cwd?: string | null; claude_profile_id?: string | null; codex_profile_id?: string | null }
 export interface ManageEngineSkill extends Base { type: "manage_engine_skill"; engine: Engine; action: "create" | "remove" | "enable" | "disable"; skill_id?: string | null; name?: string | null; description?: string | null; instructions?: string | null; scope?: "user" | "project"; space?: Space; client_id?: string | null; cwd?: string | null; claude_profile_id?: string | null; codex_profile_id?: string | null }
@@ -614,12 +659,13 @@ export interface EngineCapabilities extends Base { dsh_commands?: DshCommandInfo
 export interface AskOption { label: string; ds?: string }
 export interface AskQuestion { plan_document?: string | null; header?: string | null; question: string; options: AskOption[]; allow_text?: boolean; secret?: boolean; multi_select?: boolean }
 export interface ModelFallbackPrompt { original_model: string; fallback_model: string; turn_id?: string | null; original_prompt?: string | null }
-export interface AskUser extends Base, AskQuestion { type: "ask_user"; notification_context?: TurnNotificationContext | null; ask_id: string; questions?: AskQuestion[] | null; model_fallback?: ModelFallbackPrompt | null }
+export type AskDismissAction = "decline" | "cancel";
+export interface AskUser extends Base, AskQuestion { type: "ask_user"; notification_context?: TurnNotificationContext | null; ask_id: string; approval_diff?: string | null; dismiss_actions?: AskDismissAction[] | null; questions?: AskQuestion[] | null; model_fallback?: ModelFallbackPrompt | null }
 /** Authoritative Hello baseline: following AskUser frames are the complete
  * still-open set visible to this client for the same session. */
 export interface AskUserSync extends Base { type: "ask_user_sync" }
-export interface AskUserClosed extends Base { type: "ask_user_closed"; ask_id: string; reason: "answered" | "cancelled" | "timeout" | "superseded" }
-export interface AnswerQuestion extends Base { type: "answer_question"; ask_id: string; answer?: string | string[] | null; answers?: (string | string[])[] | null }
+export interface AskUserClosed extends Base { type: "ask_user_closed"; ask_id: string; reason: "answered" | "cancelled" | "declined" | "timeout" | "superseded" }
+export interface AnswerQuestion extends Base { type: "answer_question"; ask_id: string; action?: AskDismissAction; answer?: string | string[] | null; answers?: (string | string[])[] | null }
 export type GoalStatus = "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited" | "complete";
 export interface ClaudePlan {
   id: string; revision: number; turn_id?: string | null; document: string;
@@ -806,7 +852,7 @@ export interface CodexContext extends Base {
 export type ServerEvent = SessionArtifacts | FilesListed | CodexContext
   | DirectoryActionPlan | DirectoryActionProgress
   | TurnFileChangesPage
-  | Pong | CommandAck | ReplayStart | ReplayEnd | Snapshot | StateEvent | QueryQueueState | QueuedQueryDetail | QueuedQueryUpdated | Model | Effort | AutoCompact | Fast | CollaborationMode | BtwOpened | BtwSync | BtwClosed | Perm | PermissionProfiles | PermissionProfile | WebSearch | ContextReport | DiffReport | FilePreview | FileSaveResult | PreviewAsset | PreviewAuthorizationRequired | PreviewAuthorizationResult | History | TurnDetail | AgentDetail | HistoryImage | HistoryInvalidated | ArtifactInvalidated | Models | DshState | DshCommandResult | DshReadResult | DshDownloadChunk | EngineCapabilities | TakeoverState | SessionControl
+  | Pong | CommandAck | ReplayStart | ReplayEnd | Snapshot | StateEvent | QueryQueueState | QueuedQueryDetail | QueuedQueryUpdated | Model | Effort | AutoCompact | Fast | CollaborationMode | BtwOpened | BtwSync | BtwClosed | Perm | PermissionProfiles | PermissionProfile | WebSearch | ContextReport | DiffReport | FilePreview | FileSaveResult | PreviewAsset | PreviewAuthorizationRequired | PreviewAuthorizationResult | History | TurnDetail | AgentDetail | HistoryImage | HistoryInvalidated | ArtifactInvalidated | Models | AntigravityState | AntigravityAvailability | AntigravityAuthResult | DshState | DshCommandResult | DshReadResult | DshDownloadChunk | EngineCapabilities | TakeoverState | SessionControl
   | AskUser | AskUserSync | AskUserClosed | ClaudePlanState | GoalState | CompletionState | StatusReport | RateLimitResetResult | Notice | RateLimitUpdate | RollbackResult | RewindPreview
   | SessionList | SessionListInvalidated | SessionActivity | SessionFocus | SessionRekey | SessionForked | SessionMigrated | WorkDashboard | WorkArtifacts
   | DirList
@@ -814,7 +860,7 @@ export type ServerEvent = SessionArtifacts | FilesListed | CodexContext
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnUsage | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 98;
+export const PROTOCOL_VERSION = 99;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 
@@ -882,7 +928,7 @@ export function sessionControlLocksInput(control: SessionControl): boolean {
 /** Local storage is user-controlled and may contain stale values from older
  * builds. Normalize before a value reaches a strict Pydantic command frame. */
 export function normalizeEngine(value: string | null): Engine {
-  return value === "dsh" ? "dsh" : value === "codex" ? "codex" : "claude";
+  return value === "dsh" || value === "codex" || value === "antigravity" ? value : "claude";
 }
 
 export function normalizeDiffTheme(value: string | null): DiffTheme {

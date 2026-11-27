@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import closing
 from io import BytesIO
 import os
@@ -34,6 +34,16 @@ from cc_remote.wrapper.session_files import PreviewAuthorizationNeeded, read_ses
 
 SERVER_NAME = "cc_remote_artifact_preview"
 TOOL_NAME = "inspect_file"
+FILE_LINK_GUIDANCE = (
+    "The user is reading your replies in cc-remote's browser. When sharing "
+    "files or directories available on this machine, use clickable Markdown "
+    "links with absolute paths, for example [Listen](</absolute/path/audio.wav>) "
+    "or [Open folder](</absolute/path/output/>), rather than bare paths or "
+    "file:// URLs. These links open cc-remote's file browser or preview, "
+    "including audio playback. Link directly to existing audio files when "
+    "the user asks to listen; no separate HTML page or web server is needed. "
+    "Only link to real files and directories; preserve their actual paths."
+)
 _IMAGE_FORMATS = {
     ".png": "PNG", ".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP", ".gif": "GIF",
     ".avif": "AVIF", ".heic": "HEIF", ".heif": "HEIF", ".tif": "TIFF", ".tiff": "TIFF",
@@ -266,7 +276,9 @@ async def inspect_artifact(
     ]
 
 
-def _make_artifact_server(workspace: Callable[[], _Workspace]) -> Server:
+def _make_artifact_server(
+    workspace: Callable[[], _Workspace], *, before_inspect: Callable[[], Awaitable[object]] | None = None,
+) -> Server:
     server = Server(SERVER_NAME)
     limit = asyncio.Lock()
 
@@ -278,7 +290,10 @@ def _make_artifact_server(workspace: Callable[[], _Workspace]) -> Server:
                 "Inspect files inside this session's workspace without opening a desktop app. "
                 "Returns an image for common raster files, SVG, PPTX, PDF, DOCX, static HTML, Markdown, "
                 "Mermaid, XLSX, CSV, and TSV. Choose a page, frame, or table region as appropriate. "
+                "If an image is returned as a file URI, read that resource with the native file reader. "
                 "Use data view for exact table cell values and saved formula text."
+                " When sharing a file, link to its original absolute path in Markdown, "
+                "using angle brackets around paths with spaces."
             ),
             inputSchema={
                 "type": "object",
@@ -318,6 +333,8 @@ def _make_artifact_server(workspace: Callable[[], _Workspace]) -> Server:
         if name != TOOL_NAME:
             raise ValueError("Unknown artifact inspection tool.")
         async with limit:
+            if before_inspect is not None:
+                await before_inspect()
             cwd, identity = await asyncio.to_thread(workspace)
             return await inspect_artifact(
                 cwd, arguments["path"], arguments.get("page", 1),
@@ -329,7 +346,9 @@ def _make_artifact_server(workspace: Callable[[], _Workspace]) -> Server:
     return server
 
 
-def make_artifact_server(cwd: str) -> Server:
+def make_artifact_server(
+    cwd: str, *, before_inspect: Callable[[], Awaitable[object]] | None = None,
+) -> Server:
     try:
         scope = _workspace(cwd)
     except (OSError, ValueError):
@@ -340,7 +359,7 @@ def make_artifact_server(cwd: str) -> Server:
             raise ValueError("The session workspace is unavailable.")
         return scope
 
-    return _make_artifact_server(workspace)
+    return _make_artifact_server(workspace, before_inspect=before_inspect)
 
 
 async def _serve(scope: CodexArtifactScope) -> None:

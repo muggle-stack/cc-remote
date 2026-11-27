@@ -1,3 +1,4 @@
+import type { Engine } from "./protocol";
 import type { State } from "./protocol";
 
 export type SendMode = "steer" | "queue";
@@ -37,7 +38,7 @@ export type BusySubmitAction =
 export function classifyBusySubmit(
   state: State,
   mode: SendMode,
-  _engine: "claude" | "codex" | "dsh",
+  _engine: Engine,
   hasPayload: boolean,
 ): BusySubmitAction {
   if (state === "idle") return "noop";

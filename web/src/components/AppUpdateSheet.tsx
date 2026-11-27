@@ -1,3 +1,4 @@
+import { ENGINE_LABELS } from "../protocol";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { Icon } from "../icons";
@@ -9,7 +10,6 @@ import type { AppUpdatesController } from "../use-app-updates";
 import { CenteredSheet } from "./CenteredSheet";
 import "./AppUpdateSheet.css";
 
-const ENGINE_LABELS = { codex: "Codex", claude: "Claude", dsh: "DSH" } as const;
 
 function blockerDescription(blocker: UpdateBlocker, sessions: readonly SessionInfo[]): string {
   const sid = blocker.session_id;

@@ -20,7 +20,7 @@ export type AppearanceChange = { mode: AppearanceMode }
   | { target: ThemeMode; patch: AppearanceLook }
   | { target: ThemeMode; replace: AppearanceLook };
 export const APPEARANCE_STORAGE_KEY = "cc_remote_appearance_v2";
-const ENGINES = ["claude", "codex", "dsh"] as const;
+const ENGINES = ["claude", "codex", "dsh", "antigravity"] as const;
 export const APPEARANCE_FONTS: Record<AppearanceFont, { label: string; stack?: string }> = {
   system: { label: "系统默认" },
   sans: { label: "无衬线", stack: 'Arial,"Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif' },
@@ -34,6 +34,10 @@ const CLASSIC: Record<ThemeEngine, Record<ThemeMode, AppearanceColors>> = {
   dsh: {
     light: { accent: "#2E6FF0", background: "#FBFCFE", foreground: "#111726" },
     dark: { accent: "#6BA5FF", background: "#0D0E15", foreground: "#ECEDF3" },
+  },
+  antigravity: {
+    light: { accent: "#395FA8", background: "#F8FAFF", foreground: "#202535" },
+    dark: { accent: "#A8C7FA", background: "#111216", foreground: "#ECEDF3" },
   },
   codex: {
     light: { accent: "#6F69D2", background: "#FAFAFC", foreground: "#252334" },

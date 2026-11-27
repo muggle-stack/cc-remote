@@ -110,6 +110,7 @@ def _normalize_ask_arguments(
 
 def make_ask_server(
     ask: AskCallback, set_mode: SetModeCallback, *, ask_batch: AskBatchCallback | None = None,
+    modes: tuple[str, ...] | None = None,
 ) -> Server:
     """Build an in-process MCP server exposing the ask_user + set_mode tools."""
     server: Server = Server("cc-remote-ask")
@@ -174,10 +175,14 @@ def make_ask_server(
                     "'acceptEdits'. Takes effect immediately for the rest of the turn. "
                     "Modes: 'default' (ask each time), 'acceptEdits' (auto-accept edits), "
                     "'plan' (read-only, plan first), 'auto', 'bypassPermissions' (skip all)."
+                ) if modes is None else (
+                    "Switch this session's native permission mode when the user requests it. "
+                    "Available modes: default (ask per permission settings), accept-edits "
+                    "(approve workspace edits), and plan (plan before executing)."
                 ),
                 inputSchema={
                     "type": "object",
-                    "properties": {"mode": {"type": "string", "enum": MODES}},
+                    "properties": {"mode": {"type": "string", "enum": MODES if modes is None else list(modes)}},
                     "required": ["mode"],
                 },
             ),
@@ -240,8 +245,9 @@ def make_ask_server(
             return [types.TextContent(type="text", text=answer or "(no answer)")]
         if name == SET_MODE_TOOL:
             mode = str(arguments.get("mode", ""))
-            if mode not in MODES:
-                return [types.TextContent(type="text", text=f"unknown mode: {mode}; valid: {MODES}")]
+            allowed = MODES if modes is None else list(modes)
+            if mode not in allowed:
+                return [types.TextContent(type="text", text=f"unknown mode: {mode}; valid: {allowed}")]
             await set_mode(mode)
             return [types.TextContent(type="text", text=f"permission mode set to {mode}")]
         return [types.TextContent(type="text", text=f"unknown tool: {name}")]

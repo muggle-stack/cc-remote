@@ -51,6 +51,11 @@ drain first; daemon readiness alone does not prove an old child was adopted.
 If the local service protocol or pinned SDK changes, stage first and defer the
 service's own restart until native work and pending callbacks have finished.
 
+For Gemini Code, use the [optional service installer](../docs/antigravity-integration.md#独立-gemini-服务)
+from the immutable Wrapper release. A regular Wrapper update keeps the worker's
+registered release. Upgrade the Gemini worker explicitly once its work has
+finished. The installed service definition is a runtime dependency for retention.
+
 Relay + Web activate as one transaction. Newer product versions can cross chat
 protocol versions through the independent schema-1 maintenance channel. Devices
 can catch up individually, including after their chat link becomes incompatible.
@@ -598,7 +603,7 @@ Quarantine is temporary transaction state, not another retained backup or Trash.
 Publish Relay/Web and Wrapper artifacts from the same tagged commit. The strict
 chat gate requires matching protocol versions. The maintenance channel remains
 available while devices catch up to the server. `setup-vps.sh` verifies that its
-Web build matches the Relay. Protocol v98 uses this same flow. Activate Relay/Web
+Web build matches the Relay. Protocol v99 uses this same flow. Activate Relay/Web
 together, upgrade each Wrapper through maintenance, then reload Web/PWA clients.
 
 The wrapper installer treats local Work data and versioned private control state

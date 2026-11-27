@@ -1,3 +1,4 @@
+import type { Engine } from "../protocol";
 import { useEffect, useState, type FormEvent } from "react";
 import { Icon } from "../icons";
 import type {
@@ -21,7 +22,7 @@ export interface HookDraft {
 
 interface Props {
   open: boolean;
-  engine: "claude" | "codex" | "dsh";
+  engine: Engine;
   activeKind: EngineCapabilityKind | "all";
   report: EngineCapabilities | null;
   loading: boolean;
@@ -109,12 +110,14 @@ export function CapabilitiesSheet({
       </header>
       <nav className="capabilities-tabs" aria-label="扩展类型">
         <button className={activeKind === "all" ? "active" : ""} onClick={() => onKindChange("all")}>全部</button>
-        {KINDS.map((kind) => <button key={kind}
+        {KINDS.filter(kind => engine !== "antigravity" || kind !== "app").map((kind) => <button key={kind}
           className={activeKind === kind ? "active" : ""}
           onClick={() => onKindChange(kind)}>{LABELS[kind]}</button>)}
       </nav>
       <div className="capabilities-body">
-        {readOnly && <div className="capabilities-note">Work 仅展示有效目录，不允许修改 Code 扩展。</div>}
+        {readOnly && <div className="capabilities-note">{engine === "antigravity"
+          ? "Gemini 扩展目录为只读。"
+          : "Work 仅展示有效目录，不允许修改 Code 扩展。"}</div>}
         {loading && !report && <div className="capabilities-empty">正在读取扩展目录…</div>}
         {report?.notes?.map((note) => <div className="capabilities-note" key={note}>{note}</div>)}
         {report?.errors?.length ? <div className="capabilities-errors">

@@ -4,6 +4,9 @@
 
 ## Unreleased
 
+- Add Gemini Code sessions through Antigravity CLI and ACP, with native model,
+  permission and command discovery. Wire protocol v99.
+
 ## v5.3.62
 
 Device updates can proceed when an accepted Codex side-chat callback has

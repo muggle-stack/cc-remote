@@ -1,10 +1,11 @@
+import type { Engine } from "./protocol";
 import type { StatusAccount } from "./protocol";
 
 /** Status is a Codex-only, session-bound sheet; two empty ids never mean open. */
 export function shouldOpenCodexStatus(
   requestedSid: string | null,
   focusedSid: string | null,
-  engine: "claude" | "codex" | "dsh",
+  engine: Engine,
 ): boolean {
   return engine === "codex" && requestedSid !== null && requestedSid === focusedSid;
 }

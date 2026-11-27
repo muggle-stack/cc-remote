@@ -13,6 +13,7 @@ import type {
   ToolCategory,
   TurnChangeSummary,
   TimedMessage,
+  TokenUsage,
   SessionMessageReceipt,
 } from "../protocol";
 
@@ -175,6 +176,7 @@ export interface Turn {
   ts?: number;
   doneTs?: number;
   durationMs?: number;
+  tokenUsage?: TokenUsage | null;
   responseProcesses?: ResponseProcessSummary[] | null;
   /** Exact visible-process evidence, or `unknown` when a bounded native
    * summary proves only that more detail exists. */

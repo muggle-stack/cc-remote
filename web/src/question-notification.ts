@@ -1,3 +1,4 @@
+import { ENGINE_LABELS } from "./protocol.ts";
 import type { AskUser, AssistantMsgEnd } from "./protocol.ts";
 import type { NotificationMode } from "./notification-mode.ts";
 import type { TurnNotificationPresentation } from "./turn-notification.ts";
@@ -39,7 +40,7 @@ export function questionNotificationPresentation(
     body: asyncQuestion ? "远程会话有一个问题待回答" : "远程会话正在等待你的回答",
     sessionId: null, engine: null, space: null,
   };
-  const label = context.engine === "codex" ? "Codex" : context.engine === "dsh" ? "DSH" : "Claude";
+  const label = ENGINE_LABELS[context.engine];
   const title = context.display_name?.slice(0, 320).replace(/\s/gu, " ")
     .replace(/\p{C}/gu, "").replace(/ +/g, " ").trim().slice(0, 120);
   return {

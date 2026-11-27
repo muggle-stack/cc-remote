@@ -1,3 +1,4 @@
+import type { Engine } from "./protocol";
 import type { ThreadGoal } from "./protocol";
 
 export const GOAL_UI_PREFERENCES_KEY = "cc-remote-goal-ui-v1";
@@ -15,7 +16,7 @@ export type GoalUiPreferences = Record<string, GoalUiPreference>;
 
 export interface GoalEventOwnership {
   machineId: string;
-  engine: "claude" | "codex" | "dsh";
+  engine: Engine;
   space: "code" | "work";
 }
 
@@ -33,7 +34,7 @@ export function resetGoalDismissMigrationTracking(
 export function goalUiScopeKey(
   machineId: string,
   space: "code" | "work",
-  engine: "claude" | "codex" | "dsh",
+  engine: Engine,
   sid: string,
 ): string {
   return JSON.stringify([machineId, space, engine, sid]);

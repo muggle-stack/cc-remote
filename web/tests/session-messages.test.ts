@@ -11,6 +11,7 @@ const sessions: SessionInfo[] = [
   { session_id: "iris@sender", engine: "codex", space: "code", summary: "Other account" },
   { session_id: "nyx@claude", engine: "claude", space: "code" },
   { session_id: "nyx@work", engine: "codex", space: "work" },
+  { session_id: "agy@gemini-session", engine: "antigravity", space: "code", summary: "Gemini 接力" },
 ];
 assert.equal(resolveRelatedSession("sender", "nyx@receiver", sessions)?.summary, "开发");
 for (const target of ["iris@sender", "../sender", "https://example.com", "missing", "claude", "work", "receiver"]) {
@@ -20,6 +21,8 @@ assert.equal(resolveRelatedSession("sender", "other@receiver", sessions), undefi
 assert.equal(resolveRelatedSession("sender", "receiver", sessions), undefined);
 assert.equal(resolveRelatedSession("ccr:codex:iris@sender", "nyx@receiver", sessions)?.summary, "Other account");
 assert.equal(resolveRelatedSession("ccr:claude:nyx@claude", "nyx@receiver", sessions)?.engine, "claude");
+assert.equal(resolveRelatedSession("ccr:antigravity:gemini-session", "nyx@receiver", sessions)?.session_id, "agy@gemini-session");
+assert.equal(resolveRelatedSession("ccr:antigravity:gemini-session", "agy@gemini-session", sessions), undefined);
 for (const ref of ["ccr:codex:nyx@claude", "ccr:codex:nyx@work", "ccr:claude:../nyx@claude"]) {
   assert.equal(resolveRelatedSession(ref, "nyx@receiver", sessions), undefined);
 }
@@ -50,6 +53,9 @@ const sendTool: ToolBlock = { kind: "tool", message_id: "m", tool_use_id: "send-
   tool: "mcp__cc_remote_messages__send_message", done: false,
   input: { session_ref: "ccr:claude:nyx@claude", message: "Line one\nLine two", request_id: "r" } };
 assert.equal(sessionMessageForTool(sendTool)?.message, "Line one\nLine two");
+assert.equal(sessionMessageForTool({ ...sendTool,
+  input: { ...sendTool.input, session_ref: "ccr:antigravity:gemini-session" },
+})?.threadId, "ccr:antigravity:gemini-session");
 assert.equal(sessionMessageForTool({ ...sendTool, tool: "mcp__other__send_message" }), null);
 assert.equal(sessionMessageForTool({ ...sendTool, input: { ...sendTool.input, session_ref: "https://example.com" } }), null);
 assert.equal(sessionMessageForTool(sendTool, [

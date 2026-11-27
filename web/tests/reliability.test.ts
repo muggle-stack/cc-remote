@@ -241,21 +241,21 @@ const preferenceStorage = {
   getItem: (key: string) => preferenceValues.get(key) ?? null,
 };
 assert.deepEqual(readEngineSpaces(preferenceStorage, "codex"), {
-  claude: "code", codex: "work", dsh: "code",
+  claude: "code", codex: "work", dsh: "code", antigravity: "code",
 }, "legacy space migrates only to the previously active engine");
 preferenceValues.set(ENGINE_SPACES_KEY, JSON.stringify({
-  claude: "work", codex: "code", dsh: "code",
+  claude: "work", codex: "code", dsh: "code", antigravity: "work",
 }));
 assert.deepEqual(readEngineSpaces(preferenceStorage, "codex"), {
-  claude: "work", codex: "code", dsh: "code",
+  claude: "work", codex: "code", dsh: "code", antigravity: "code",
 }, "persisted engine spaces survive reload independently");
 assert.deepEqual(
-  rememberEngineSpace({ claude: "work", codex: "code", dsh: "code" }, "codex", "work"),
-  { claude: "work", codex: "work", dsh: "code" },
+  rememberEngineSpace({ claude: "work", codex: "code", dsh: "code", antigravity: "code" }, "codex", "work"),
+  { claude: "work", codex: "work", dsh: "code", antigravity: "code" },
   "changing one engine's space must preserve the other engine's memory",
 );
-let switchingSpaces: { claude: "code" | "work"; codex: "code" | "work"; dsh: "code" | "work" } = {
-  claude: "code", codex: "code", dsh: "code",
+let switchingSpaces: { claude: "code" | "work"; codex: "code" | "work"; dsh: "code" | "work"; antigravity: "code" | "work" } = {
+  claude: "code", codex: "code", dsh: "code", antigravity: "code",
 };
 switchingSpaces = rememberEngineSpace(switchingSpaces, "claude", "work");
 assert.equal(switchingSpaces.codex, "code",
@@ -18632,9 +18632,10 @@ assert.doesNotMatch(contextPopoverSource, /正在读取真实上下文/,
   "background context refreshes must not flash a loading notice");
 assert.match(composerSource, /ref=\{workSettingsRef\}/);
 assert.match(composerSource, /document\.addEventListener\("pointerdown", onPointerDown\)/);
-assert.match(composerSource, /disabled=\{locked\} title="选择模型"/,
+assert.match(composerSource, /const settingsLocked = locked \|\|/);
+assert.match(composerSource, /disabled=\{settingsLocked\} title="选择模型"/,
   "read-only sessions must disable model changes");
-assert.match(composerSource, /disabled=\{locked\} title="思考强度"/,
+assert.match(composerSource, /disabled=\{settingsLocked\} title="思考强度"/,
   "read-only sessions must disable effort changes");
 assert.match(composerSource, /const deferredClaudeControls = externalClaudeOwner !== null/,
   "unmanaged native Claude controls must not expose saved values as current");

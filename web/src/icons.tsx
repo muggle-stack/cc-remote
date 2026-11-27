@@ -2,12 +2,14 @@
 // One <Icon name="..."/> component renders the SVG; sizes via prop.
 import { useEffect, useState } from "react";
 import type { Engine } from "./protocol";
+import geminiMark from "./assets/gemini-mark.svg?no-inline";
 import dshMark from "./assets/dsh-mark.svg?no-inline";
 import engineMarks from "./assets/engine-marks.svg?no-inline";
 import claudeWorkingFrames from "./assets/claude-working.svg?no-inline";
 import claudeAlternatingFrames from "./assets/claude-working-alternating.svg?no-inline";
 
 export function EngineIcon({ engine, size = 16 }: { engine: Engine; size?: number }) {
+  if (engine === "antigravity") return <img className="engine-brand-icon antigravity" src={geminiMark} width={size} height={size} alt="" aria-hidden="true" draggable={false} />;
   if (engine === "dsh") return <span className="engine-brand-icon dsh" aria-hidden="true" style={{ width: size, height: size, maskImage: `url(${dshMark})`, WebkitMaskImage: `url(${dshMark})` }} />;
   return <svg viewBox="0 0 24 24" width={size} height={size}
     className={`engine-brand-icon ${engine}`} aria-hidden="true" focusable="false">
@@ -22,8 +24,8 @@ function ClaudeDoneReplay({ size }: { size: number }) {
   </span>;
 }
 
-// Only Claude's live mark changes; Codex and DSH retain their existing sparks.
 export function EngineWorking({ engine, size = 22 }: { engine: Engine; size?: number }) {
+  if (engine === "antigravity") return <span className="gemini-working"><EngineIcon engine={engine} size={size} /></span>;
   return engine === "claude"
     ? <span className="claude-working-mark is-alternating" style={{ width: size, height: size }} aria-hidden="true">
         <img src={claudeAlternatingFrames} width={size * 326} height={size} alt="" draggable={false} />
@@ -47,7 +49,7 @@ export function EngineDone({ engine, size = 22, label }: {
         }}>
         {playing ? <ClaudeDoneReplay size={size} /> : <EngineIcon engine={engine} size={size} />}
       </button>
-    : engine === "dsh" ? <EngineIcon engine={engine} size={size} /> : <ClaudeSpark size={size} label={label ?? "Codex"} />;
+    : engine === "dsh" || engine === "antigravity" ? <EngineIcon engine={engine} size={size} /> : <ClaudeSpark size={size} label={label ?? "Codex"} />;
 }
 
 const PATHS: Record<string, string> = {

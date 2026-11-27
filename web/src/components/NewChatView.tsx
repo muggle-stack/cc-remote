@@ -1,3 +1,4 @@
+import { isCodeOnlyEngine, type Engine, type AntigravityOption, type NativeCommandInfo } from "../protocol";
 import { dshCommandMatches } from "../dsh-commands";
 import type { DshCommandInfo, DshPreset, DshPermissionOption } from "../protocol";
 // Empty-state "new chat" page: a centered composer (a la Claude app / Codex)
@@ -12,7 +13,7 @@ import { SpeedPicker } from "./SpeedPicker";
 import { newChatSpeed, normalizeSpeed, speedsFor } from "../codex-speed";
 import {
   clientSlashesFor, matchCommands, matchSkills, modelsFor, permsFor, routeComposerInput, skillToken, slashToken, dshPermissionLabel,
-  CODEX_PERMISSION_PROFILES, type Catalog, type Effort, type Model,
+  CODEX_PERMISSION_PROFILES, antigravityPermissions, type Catalog, type Effort, type Model,
 } from "../data";
 import { attachmentBytes, snapshotAttachmentFiles } from "../img";
 import {
@@ -50,7 +51,6 @@ import {
 const AutoCompactControl = lazy(() => import("./AutoCompactControl"));
 const DshPresetPicker = lazy(() => import("./DshPresetPicker"));
 
-type Engine = "claude" | "codex" | "dsh";
 import { newChatEfforts } from "../new-chat-selection";
 export { compatibleNewChatEffort, newChatCatalogRequest, resolveNewChatLocalDefaults,
   reconcileNewChatSelection, newChatEfforts } from "../new-chat-selection";
@@ -62,6 +62,7 @@ interface Props {
   editPrompt?: string | null;
   onEditConsumed?: () => void;
   dshCommands?: DshCommandInfo[];
+  antigravity?: { options: AntigravityOption[]; commands: NativeCommandInfo[]; error?: string | null };
   dshPresets?: DshPreset[];
   dshPermissions?: DshPermissionOption[];
   dshPreset?: string | null;
@@ -109,7 +110,7 @@ interface Props {
            permissionMode?: PermissionMode,
            permissionProfile?: string,
            webSearch?: CodexWebSearchMode,
-           serviceTier?: CodexServiceTier, dshPermission?: string) => boolean;
+           serviceTier?: CodexServiceTier, nativeMode?: string) => boolean;
 }
 
 interface SelectorOption {
@@ -209,7 +210,7 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
   onPickModel, onPickEffort, onPickAutoCompact, onPickClaudeProfile, onRequestModels,
   onPickCodexProfile, skills, skillsOnline = true, skillsError = false, onRequestSkills,
   permissionProfiles, onGetPermissionProfiles, onOpenExtensions,
-  dshCommands, dshPresets = [], dshPermissions = [], dshPreset, dshError, onPickDshPreset,
+  antigravity, dshCommands, dshPresets = [], dshPermissions = [], dshPreset, dshError, onPickDshPreset,
   onSend, draftKey, draftStore, voiceEnabled }: Props) {
   const localDrafts = useRef(new ComposerDraftStore());
   const drafts = draftStore ?? localDrafts.current;
@@ -256,8 +257,9 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
   const [executionControls, setExecutionControls] =
     useState<NewChatExecutionControls>(
       () => defaultExecutionControls(controlScopeKey));
-  const [dshPermissionChoice, setDshPermissionChoice] = useState<{scope: string; value: string} | null>(null);
-  const dshPermission = dshPermissionChoice?.scope === controlScopeKey ? dshPermissionChoice.value : "";
+  const [nativeModeChoice, setNativeModeChoice] = useState<{scope: string; value: string} | null>(null);
+  const nativeModeScope = engine === "antigravity" ? `${controlScopeKey}\u0000${cwd}` : controlScopeKey;
+  const nativeMode = nativeModeChoice?.scope === nativeModeScope ? nativeModeChoice.value : "";
   const [permissionsOpen, setPermissionsOpen] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const pasteGuard = useClipboardPasteGuard(taRef, `${controlScopeKey}:${cwd}:${engine}`);
@@ -267,7 +269,7 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
     if (engine === "dsh" && skillsOnline && !skillsError && dshCommands === undefined) onRequestSkills?.();
   }, [engine, skillsOnline, skillsError, dshCommands, onRequestSkills]);
   const commandToken = slashToken(text);
-  const commandMatches = commandToken === null ? [] : [...matchCommands(commandToken, engine, space),
+  const commandMatches = commandToken === null ? [] : [...matchCommands(commandToken, engine, space, antigravity?.commands),
     ...(engine === "dsh" ? dshCommandMatches(commandToken, {commands: dshCommands ?? [], agent_preset: dshPreset}) : [])];
   // Work gets a private cwd only when created; the Code cwd cannot describe it.
   const currentSkillToken = (engine === "codex" || engine === "dsh") && space === "code" ? skillToken(text) : null;
@@ -482,7 +484,7 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
       engine === "codex" ? permission ?? "never" : permission ?? undefined,
       engine === "codex" ? permissionProfile ?? undefined : undefined,
       engine === "codex" ? webSearch ?? undefined : undefined,
-      engine === "codex" ? serviceTier : undefined, engine === "dsh" ? dshPermission || undefined : undefined);
+      engine === "codex" ? serviceTier : undefined, isCodeOnlyEngine(engine) ? nativeMode || undefined : undefined);
     if (!queued) setCreating(false);
   };
 
@@ -610,7 +612,7 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
 
   const send = (value = taRef.current?.value ?? text) => {
     if (creating || importingRef.current || selectedProfileMissing) return;
-    const route = routeComposerInput(value, engine, space);
+    const route = routeComposerInput(value, engine, space, antigravity?.commands);
     if (route.kind === "empty") return;
     if (route.kind === "blocked") { setAutoCompactNotice(route.message); return; }
     if (route.kind === "client") { runClientSlash(route.slash, route.args); return; }
@@ -620,7 +622,7 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
   const pickCommand = (slash: string) => {
     if (commandMatches.find(command => command.slash === slash)?.unavailable) return;
     if (creating || importingRef.current || selectedProfileMissing) return;
-    if (slash !== "autocompact" && clientSlashesFor(engine).has(slash)) {
+    if (slash !== "autocompact" && !antigravity?.commands.some(command => command.name === slash) && clientSlashesFor(engine).has(slash)) {
       runClientSlash(slash, "");
     } else {
       setText(`/${slash} `);
@@ -710,6 +712,13 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
           e.preventDefault();
           if (engine === "codex") {
             updateExecutionControls({ collaborationMode: collaborationMode === "plan" ? "default" : "plan" });
+          } else if (isCodeOnlyEngine(engine)) {
+            const modes = engine === "antigravity" ? geminiModes.map(mode => mode.id)
+              : dshPermissions.filter(mode => mode.value !== "custom").map(mode => mode.value);
+            const current = modes.indexOf((engine === "antigravity" ? geminiMode : nativeMode) ?? "");
+            if (modes.length) setNativeModeChoice({
+              scope: nativeModeScope, value: modes[(current + 1) % modes.length],
+            });
           } else {
             const modes = permsFor(engine);
             const current = modes.findIndex(mode => mode.id === permissionMode);
@@ -754,11 +763,18 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
       <Icon name="send" size={20} />{space === "work" && "开始"}
     </button>
   );
-  const accessControl = engine === "dsh" ? (
+  const geminiModes = antigravityPermissions(antigravity?.options);
+  const geminiMode = nativeMode || antigravity?.options.find(option => option.category === "mode")?.current;
+  const accessControl = engine === "antigravity" ? (geminiModes.length > 0 && (
     <button type="button" className="newchat-access" title="选择权限模式"
       onClick={() => setPermissionsOpen(true)} disabled={creating || importing}>
-      <Icon name="shield" size={14} /><span>{dshPermission ? dshPermissionLabel(dshPermission,
-        dshPermissions.find(p => p.value === dshPermission)?.name) : "默认权限"}</span>
+      <Icon name="shield" size={14} /><span>{geminiModes.find(mode => mode.id === geminiMode)?.name ?? "默认权限"}</span>
+    </button>
+  )) : engine === "dsh" ? (
+    <button type="button" className="newchat-access" title="选择权限模式"
+      onClick={() => setPermissionsOpen(true)} disabled={creating || importing}>
+      <Icon name="shield" size={14} /><span>{nativeMode ? dshPermissionLabel(nativeMode,
+        dshPermissions.find(p => p.value === nativeMode)?.name) : "默认权限"}</span>
     </button>
   ) : engine === "codex" ? (
     <button type="button" className="newchat-access"
@@ -819,6 +835,7 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
             {cwdButton}
             {profileWarning}
             {engine === "dsh" && dshError && <p role="alert" className="newchat-profile-error">{dshError}</p>}
+            {antigravity?.error && <p role="alert" className="newchat-profile-error">{antigravity.error}</p>}
           </div>
         )}
 
@@ -919,13 +936,15 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
               <span title={modelLabel}>{space === "code"
                 ? displayModel(effectiveModel, modelList) ?? "本机默认" : modelLabel}</span>
             </button>
-            <button type="button" className="hint-ctl"
-              onClick={() => setSheetKind("efforts")}
-              title="选择思考强度"
-              disabled={creating || importing || !onPickEffort}>
-              <span title={effortLabel}>{space === "code"
-                ? displayEffort(effort, effortList) ?? localEffortName ?? "默认" : effortLabel}</span>
-            </button>
+            {(engine !== "antigravity" || (antigravity && effortList.length > 0)) && (
+              <button type="button" className="hint-ctl"
+                onClick={() => setSheetKind("efforts")}
+                title="选择思考强度"
+                disabled={creating || importing || !onPickEffort}>
+                <span title={effortLabel}>{space === "code"
+                  ? displayEffort(effort, effortList) ?? localEffortName ?? "默认" : effortLabel}</span>
+              </button>
+            )}
             {engine === "codex" && (
               <SpeedPicker newSession model={effectiveModel} catalog={catalog}
                 value={serviceTier} scopeKey={`${controlScopeKey}:${accountProfileId}`}
@@ -953,7 +972,7 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
         kind={sheetKind ?? "models"}
         showIcons={sheetKind === "efforts" || engine === "dsh"}
         options={sheetKind === "efforts" ? effortOptions : modelOptions}
-        catalogUnavailable={engine === "codex" && modelList.length === 0}
+        catalogUnavailable={(engine === "codex" || engine === "antigravity") && modelList.length === 0}
         onRequestModels={onRequestModels}
         current={sheetKind === "efforts" ? effort : model}
         onClose={() => setSheetKind(null)}
@@ -985,19 +1004,20 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
         kind="perms"
         engine={engine}
         dshPermissions={engine === "dsh" ? dshPermissions : undefined}
+        antigravityOptions={antigravity?.options}
         onClose={() => setPermissionsOpen(false)}
-        currentPerm={engine === "dsh" ? dshPermission : permissionMode ?? (engine === "codex" ? "never" : undefined)}
+        currentPerm={engine === "antigravity" ? geminiMode : engine === "dsh" ? nativeMode : permissionMode ?? (engine === "codex" ? "never" : undefined)}
         onPickPerm={(mode) => {
-          if (engine === "dsh") {
-            setDshPermissionChoice({ scope: controlScopeKey, value: mode });
+          if (isCodeOnlyEngine(engine)) {
+            setNativeModeChoice({ scope: nativeModeScope, value: mode });
             setPermissionsOpen(false);
             return;
           }
           updateExecutionControls({ permissionMode: mode as PermissionMode });
           if (engine === "claude") setPermissionsOpen(false);
         }}
-        onUseDefaultPerm={engine === "claude" || engine === "dsh" ? () => {
-          if (engine === "dsh") setDshPermissionChoice({ scope: controlScopeKey, value: "" });
+        onUseDefaultPerm={engine === "claude" || isCodeOnlyEngine(engine) ? () => {
+          if (isCodeOnlyEngine(engine)) setNativeModeChoice({ scope: nativeModeScope, value: "" });
           else updateExecutionControls({ permissionMode: null });
           setPermissionsOpen(false);
         } : undefined}

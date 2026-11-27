@@ -1,3 +1,4 @@
+import type { Engine } from "../protocol";
 import { lazy, Suspense, useEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "../icons";
@@ -12,7 +13,7 @@ import type { AppearanceController } from "../use-theme";
 const ThemePicker = lazy(() => import("./ThemePicker"));
 
 interface Props {
-  engine: "claude" | "codex" | "dsh";
+  engine: Engine;
   appearance: AppearanceController;
   boldText: boolean;
   onBoldText: (enabled: boolean) => void;
@@ -29,6 +30,7 @@ interface Props {
   onOpenBtw?: () => void;
   onOpenViewer?: () => void;
   onOpenDshTools?: () => void;
+  onOpenGeminiAuth?: () => void;
   onOpenArtifacts?: () => void;
   onOpenFiles?: () => void;
   onLogout: () => void;
@@ -65,6 +67,7 @@ export function HeaderMenu({
   onOpenFiles,
   onOpenArtifacts,
   onOpenDshTools,
+  onOpenGeminiAuth,
   onLogout,
 }: Props) {
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -196,6 +199,11 @@ export function HeaderMenu({
                   <Icon name="chevron-right" size={16} />
                 </button>}
                 {onOpenDshTools && <button type="button" className="header-menu-item" onClick={() => { close(); onOpenDshTools(); }}><Icon name="plan" size={18} /><span><b>DSH 会话工具</b><small>子代理、任务、插件与导出</small></span><Icon name="chevron-right" size={16} /></button>}
+                {onOpenGeminiAuth && <button type="button" className="header-menu-item"
+                  onClick={() => { close(); onOpenGeminiAuth(); }}>
+                  <Icon name="shield" size={18} /><span><b>Gemini 登录</b><small>在 Gemini 运行设备上完成验证</small></span>
+                  <Icon name="chevron-right" size={16} />
+                </button>}
                 {onOpenArtifacts && <button type="button" className="header-menu-item" aria-label="打开 Artifacts" onClick={() => {
                   close(); onOpenArtifacts();
                 }}><Icon name="archive" size={18} />

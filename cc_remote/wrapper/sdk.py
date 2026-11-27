@@ -37,7 +37,7 @@ from mcp.server import Server
 from cc_remote.config import WrapperConfig
 from cc_remote.claude_paths import claude_config_dir
 from cc_remote.wrapper.artifact_inspection import SERVER_NAME as ARTIFACT_PREVIEW_SERVER
-from cc_remote.wrapper.artifact_inspection import make_artifact_server
+from cc_remote.wrapper.artifact_inspection import FILE_LINK_GUIDANCE, make_artifact_server
 from cc_remote.wrapper.claude_settings import save_user_defaults
 from cc_remote.claude_permissions import CLAUDE_PERMISSION_MODES, native_permission_mode
 from cc_remote.claude_steering import (
@@ -446,14 +446,7 @@ class SdkHandle:
             "or 'acceptEdits'. The user has no Shift+Tab here, so calling this is how you "
             "enter plan mode for them.\n"
             "Modes: default, acceptEdits, plan, auto, bypassPermissions.\n\n"
-            "The user is reading your replies in cc-remote's browser. When sharing "
-            "files or directories available on this machine, use clickable Markdown "
-            "links with absolute paths, for example [Listen](</absolute/path/audio.wav>) "
-            "or [Open folder](</absolute/path/output/>), rather than bare paths or "
-            "file:// URLs. These links open cc-remote's file browser or preview, "
-            "including audio playback. Link directly to existing audio files when "
-            "the user asks to listen; no separate HTML page or web server is needed. "
-            "Only link to real files and directories; preserve their actual paths."
+            + FILE_LINK_GUIDANCE
         )
         # showThinkingSummaries is an interactive CLI preference. SDK sessions
         # must request the readable summary explicitly. Pass only display here:

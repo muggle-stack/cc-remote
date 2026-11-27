@@ -146,14 +146,14 @@ import {
   withoutForkFocusPlaceholder,
 } from "./session-worktree";
 import { matchesBtwRequest,
-  normalizeEngine, type Snapshot, type QueryImg,
+  normalizeEngine, isCodeOnlyEngine, type Snapshot, type QueryImg,
   type QueryFile, type SessionInfo, type PermissionMode,
   type CodexWebSearchMode, type PermissionProfileInfo,
   type CodexServiceTier, type CollaborationModeName,
   type Engine, type Space,
   type SessionControl, type History,
   sessionControlLocksInput } from "./protocol";
-import type { EngineCapabilities, EngineCapabilityItem, EngineCapabilityKind, WorkArtifactInfo, WorkDashboard } from "./protocol";
+import type { AntigravityAuthMethod, EngineCapabilities, EngineCapabilityItem, EngineCapabilityKind, WorkArtifactInfo, WorkDashboard } from "./protocol";
 import { isMarkdownPath } from "./preview-path";
 import { parseGitDiff } from "./diff";
 import {
@@ -339,6 +339,9 @@ const WorkArtifactsSheet = lazy(() => import("./components/WorkArtifactsSheet").
 const CapabilitiesSheet = lazy(() => import("./components/CapabilitiesSheet").then(
   ({ CapabilitiesSheet: Sheet }) => ({ default: Sheet }),
 ));
+const CenteredSheet = lazy(() => import("./components/CenteredSheet").then(
+  ({ CenteredSheet: Sheet }) => ({ default: Sheet }),
+));
 const AgentDetailController = lazy(() => import("./components/AgentDetailController").then(
   ({ AgentDetailController: Controller }) => ({ default: Controller }),
 ));
@@ -498,6 +501,10 @@ export default function App() {
   const [workManagerOpen, setWorkManagerOpen] = useState(false);
   const [workArtifactsOpen, setWorkArtifactsOpen] = useState(false);
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false);
+  const [geminiLogin, setGeminiLogin] = useState<{
+    device: string; request: string | null; starting: boolean;
+    methods: AntigravityAuthMethod[]; signedIn?: boolean; error?: string | null;
+  } | null>(null);
   const [capabilitiesKind, setCapabilitiesKind] = useState<EngineCapabilityKind | "all">("all");
   const [capabilitiesLoading, setCapabilitiesLoading] = useState(false);
   const [deviceSheetOpen, setDeviceSheetOpen] = useState(false);
@@ -984,7 +991,7 @@ export default function App() {
       session => session.session_id === departing.focusedSid);
     if (authed && remoteDevices.some(device => device.machine_id === previous)) {
       deviceViewsRef.current.remember(previous,
-        departingSession?.engine === "codex" || departingSession?.engine === "dsh"
+        departingSession?.engine === "codex" || departingSession?.engine === "dsh" || departingSession?.engine === "antigravity"
           ? departingSession.engine : "claude",
         departingSession?.space === "work" ? "work" : "code", departing);
     }
@@ -1075,7 +1082,7 @@ export default function App() {
     ? null : focusedSid;
   // DSH forks persist natively and cannot yet be deleted. Keep the side-chat
   // implementation dormant, including any retained panel visibility.
-  const btwPanelKey = visibleParentSid && engine !== "dsh"
+  const btwPanelKey = visibleParentSid && !isCodeOnlyEngine(engine)
     ? btwPanelScopeKey(machineId, space, engine, visibleParentSid) : null;
   const btwPanelVisible = !!btwPanelKey && btwPanelScopes.includes(btwPanelKey);
   const btwPanelVisibleRef = useRef(btwPanelVisible);
@@ -1249,6 +1256,10 @@ export default function App() {
     && !knownClaudeProfileIds.has(newChatClaudeProfileId);
   const newChatProfileId = engine === "codex"
     ? newChatCodexProfileId : newChatClaudeProfileId;
+  const newChatAntigravityModel = engine === "antigravity" ? state.newChat?.model : undefined;
+  const antigravityCatalog = engine === "antigravity" && state.antigravityCatalog?.cwd === newChatCwd
+    && (state.antigravityCatalog?.model ?? null) === (newChatAntigravityModel ?? null)
+    ? state.antigravityCatalog : undefined;
   const newChatCatalogScopeKey = modelCatalogScopeKey(
     engine, newChatProfileId);
   const newChatCatalog = catalogForEngineProfile(
@@ -1278,19 +1289,21 @@ export default function App() {
   const focusedSession = state.sessions.find(
     (session) => session.session_id === focusedSid);
   const archivedBrowse = focusedSession?.tag === "archived";
-  const focusedEngine = (focusedSession?.engine ?? engine) as "claude" | "codex" | "dsh";
+  const focusedEngine = (focusedSession?.engine ?? engine) as Engine;
   useEffect(() => {
     if (space !== "code" || state.connState !== "connected" || !state.wrapperOnline) return;
     if (!historyView.turns.some((turn) => turn.sourceThreadId?.startsWith("ccr:")
       || turn.sessionMessages?.some((receipt) => receipt.threadId.startsWith("ccr:"))
       || turn.blocks.some((block) => block.kind === "tool" && (block.tool.includes("cc_remote_messages")
         || block.tool === "mcp__cc-remote-ask__send_message")))) return;
-    const other = focusedEngine === "codex" ? "claude" : "codex";
-    const key = `code:${other}`;
-    if (!prefetchedSurfacesRef.current.has(key) && wsRef.current?.sendListSessions(other, "code")) {
-      prefetchedSurfacesRef.current.add(key);
+    for (const other of ["claude", "codex", "antigravity"] as const) {
+      if (other === focusedEngine || (other === "antigravity" && !state.antigravityAvailable)) continue;
+      const key = `code:${other}`;
+      if (!prefetchedSurfacesRef.current.has(key) && wsRef.current?.sendListSessions(other, "code")) {
+        prefetchedSurfacesRef.current.add(key);
+      }
     }
-  }, [space, focusedEngine, historyView.turns, state.connState, state.wrapperOnline]);
+  }, [space, focusedEngine, historyView.turns, state.connState, state.wrapperOnline, state.antigravityAvailable]);
   useEffect(() => {
     if (!focusedSid || state.newChat) {
       archivedBrowseRef.current = null;
@@ -1337,7 +1350,7 @@ export default function App() {
   const focusedCatalog = catalogForEngineProfile(
     state.catalog, focusedEngine, focusedAccountProfileId,
     space === "code" ? focusedSession?.cwd || currentCwd : undefined,
-    focusedEngine === "codex" ? focusedSid : undefined);
+    focusedEngine === "codex" || focusedEngine === "antigravity" ? focusedSid : undefined);
   const completedGoalRetired = completedGoalHasNewerUserTurn(
     rt.goal, rt.turns,
   ) || completedGoalHasNewerUserTurn(rt.goal, historyView.turns);
@@ -1378,7 +1391,7 @@ export default function App() {
   const requestFocusedModels = () => wsRef.current?.sendGetModels(
     focusedEngine, focusedEngine === "claude" && space === "code" ? capabilityCwd : undefined,
     focusedCodexProfileId, focusedClaudeProfileId,
-    focusedEngine === "codex" ? focusedSid : undefined);
+    focusedEngine === "codex" || focusedEngine === "antigravity" ? focusedSid : undefined);
   const focusedComposerDraftKey = composerDraftKey(
     machineId, space, focusedEngine, focusedSid ?? "",
   );
@@ -1497,7 +1510,7 @@ export default function App() {
   }, [authed, focusedEngine, focusedSid, machineId, state.connState, state.wrapperOnline, state.newChat]);
 
   useEffect(() => {
-    if (focusedEngine === "dsh" || !authed || !focusedSid || !focusedGoalScopeKey || state.newChat
+    if (isCodeOnlyEngine(focusedEngine) || !authed || !focusedSid || !focusedGoalScopeKey || state.newChat
         || archivedBrowse
         || state.connState !== "connected" || !state.wrapperOnline) {
       return;
@@ -1999,7 +2012,7 @@ export default function App() {
         .find((session) => session.session_id === sid);
     const scope: HistoryPageCacheScope = {
       machineId,
-      engine: listed?.engine === "codex" || listed?.engine === "claude" || listed?.engine === "dsh"
+      engine: listed?.engine === "codex" || listed?.engine === "claude" || listed?.engine === "dsh" || listed?.engine === "antigravity"
         ? listed.engine : fallbackEngine,
       space: listed?.space === "work" || listed?.space === "code"
         ? listed.space : fallbackSpace,
@@ -2155,9 +2168,10 @@ export default function App() {
     if (!request) return;
     wsRef.current?.sendGetModels(
       request.engine, request.cwd,
-      request.codexProfileId, request.claudeProfileId);
+      request.codexProfileId, request.claudeProfileId, undefined, newChatAntigravityModel);
   }, [
     engine,
+    newChatAntigravityModel,
     newChatCwd,
     newChatClaudeProfileId,
     newChatClaudeProfileMissing,
@@ -2187,13 +2201,14 @@ export default function App() {
     state.newChat,
   ]);
   useEffect(() => {
-    if (state.newChat || state.connState !== "connected" || !state.wrapperOnline) return;
+    if (state.newChat || state.connState !== "connected" || !state.wrapperOnline
+        || (focusedEngine === "antigravity" && !focusedSid)) return;
     wsRef.current?.sendGetModels(
       focusedEngine,
       focusedEngine === "claude" && space === "code" ? capabilityCwd : undefined,
       focusedCodexProfileId,
       focusedClaudeProfileId,
-      focusedEngine === "codex" ? focusedSid : undefined);
+      focusedEngine === "codex" || focusedEngine === "antigravity" ? focusedSid : undefined);
   }, [
     capabilityCwd,
     focusedSid,
@@ -2302,7 +2317,7 @@ export default function App() {
 
   const focusListedSession = useCallback((selected: SessionInfo) => {
     const selectedEngine: Engine = selected.engine === "codex"
-      || selected.engine === "claude" || selected.engine === "dsh"
+      || selected.engine === "claude" || selected.engine === "dsh" || selected.engine === "antigravity"
       ? selected.engine : engineRef.current;
     const selectedSpace: Space = selected.space === "work"
       || selected.space === "code"
@@ -2448,8 +2463,9 @@ export default function App() {
 
   // Engine and Work/Code switches are navigation. Each surface restores the
   // session that was last open there instead of silently starting a new one.
-  const toggleEngine = (nextEngine: Engine) => {
-    if (nextEngine === engine || !confirmArtifactDiscard()) return;
+  const toggleEngine = useCallback((nextEngine: Engine) => {
+    if (nextEngine === engine || (nextEngine === "antigravity" && !state.antigravityAvailable)
+        || !confirmArtifactDiscard()) return;
     cancelPendingNotificationTarget();
     const nextSpace = spacesByEngineRef.current[nextEngine];
     pendingCreateRef.current = null;
@@ -2464,10 +2480,17 @@ export default function App() {
     setEngine(nextEngine);
     setSpace(nextSpace);
     if (isMobile()) setSidebarOpen(false);
-  };
+  }, [engine, state.antigravityAvailable, confirmArtifactDiscard, cancelPendingNotificationTarget,
+    prepareSurfaceSwitch, setSidebarOpen]);
+
+  // A saved Gemini view can be restored after reconnect. A different device
+  // must confirm its own opt-in before showing the engine as selectable.
+  useEffect(() => {
+    if (engine === "antigravity" && state.antigravityAvailable === false) toggleEngine("claude");
+  }, [engine, state.antigravityAvailable, toggleEngine]);
 
   const switchSpace = (next: Space) => {
-    if ((engine === "dsh" && next !== "code") || next === space || !confirmArtifactDiscard()) return;
+    if ((isCodeOnlyEngine(engine) && next !== "code") || next === space || !confirmArtifactDiscard()) return;
     cancelPendingNotificationTarget();
     pendingCreateRef.current = null;
     setCreateError(null);
@@ -2570,6 +2593,12 @@ export default function App() {
         },
         onEvent: (msg, ownership) => {
           if (!acceptsLifecycle()) return;
+          if (msg.type === "antigravity_auth_result") {
+            setGeminiLogin(current => current?.device === machineId && current.request === msg.request_id
+              ? { ...current, request: null, methods: msg.methods, signedIn: msg.signed_in, error: msg.error }
+              : current);
+            return;
+          }
           if (directoryListenerRef.current?.(msg)) return;
           rewind.onEventRef.current(msg);
           if (turnFileRequestsRef.current.accept(msg)) return;
@@ -3851,7 +3880,7 @@ export default function App() {
             // not start a second app-server and the user's first toggle is fast.
             const siblingSpace: Space = listedSpace === "work" ? "code" : "work";
             const siblingKey = `${siblingSpace}:${msg.engine}`;
-            if (msg.engine !== "dsh" && !prefetchedSurfacesRef.current.has(siblingKey)) {
+            if (!isCodeOnlyEngine(msg.engine) && !prefetchedSurfacesRef.current.has(siblingKey)) {
               prefetchedSurfacesRef.current.add(siblingKey);
               ws.sendListSessions(msg.engine, siblingSpace);
             }
@@ -4385,7 +4414,7 @@ export default function App() {
     if (latest && (latest.session_id !== state.focusedSid || resumeRequired)) {
       dispatch({ type: "exit_new_chat" });
       dispatch({ type: "focus_session", sid: latest.session_id });
-      const latestEngine = (latest.engine as "claude" | "codex" | "dsh") || engineRef.current;
+      const latestEngine = (latest.engine as Engine) || engineRef.current;
       wsRef.current.setFocusedSid(latest.session_id, latestEngine, spaceRef.current);
       requestHistory(
         latest.session_id, undefined, HISTORY_INITIAL_PAGE);
@@ -4621,7 +4650,8 @@ export default function App() {
   }, [authed, setSidebarOpen]);
 
   const setPerm = useCallback((perm: string) => {
-    if (focusedEngine === "dsh" && focusedSid) wsRef.current?.sendDshControl(focusedSid, "permission", perm);
+    if (focusedEngine === "antigravity" && focusedSid) wsRef.current?.sendAntigravityOption(focusedSid, "mode", perm);
+    else if (focusedEngine === "dsh" && focusedSid) wsRef.current?.sendDshControl(focusedSid, "permission", perm);
     else wsRef.current?.sendSetPerm(perm);
   }, [focusedEngine, focusedSid]);
 
@@ -4642,6 +4672,8 @@ export default function App() {
         }
         const modes = focusedEngine === "dsh"
           ? (rt.dsh?.permissions ?? []).filter(p => p.value !== "custom").map(p => p.value)
+          : focusedEngine === "antigravity"
+          ? (rt.antigravity?.options.find(option => option.category === "mode")?.choices ?? []).map(choice => choice.value)
           : permsFor(focusedEngine).map((p) => p.id);
         if (!modes.length) return;
         const current = modes.indexOf(rt.perm);
@@ -4651,7 +4683,7 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [authed, focusedSid, rt.perm, rt.collaborationMode, rt.control,
-    rt.external, rt.dsh?.permissions, focusedEngine, setPerm]);
+    rt.external, rt.dsh?.permissions, rt.antigravity?.options, focusedEngine, setPerm]);
 
   const requestHistoryTurnDetail = useCallback((
     displayTurnId: string, before?: string | null,
@@ -5396,7 +5428,7 @@ export default function App() {
                             permissionMode?: PermissionMode,
                             permissionProfile?: string,
                             webSearch?: CodexWebSearchMode,
-                            serviceTier?: CodexServiceTier, dshPermission?: string): boolean => {
+                            serviceTier?: CodexServiceTier, nativeMode?: string): boolean => {
     if (!wsRef.current || !state.newChat || newChatCodexProfileMissing
         || newChatClaudeProfileMissing
         || restoringSurfaceScope === activeScopeKey) {
@@ -5426,7 +5458,7 @@ export default function App() {
       } : undefined,
       engine === "claude" ? newChatClaudeProfileId : undefined,
       engine === "dsh" ? newChatDshPreset ?? undefined : undefined,
-      engine === "dsh" ? dshPermission : undefined);
+      isCodeOnlyEngine(engine) ? nativeMode : undefined);
     if (queued) {
       pendingCreateRef.current = msg_id;
       createRequestsRef.current.set(msg_id, {
@@ -5494,10 +5526,12 @@ export default function App() {
   };
   const interrupt = () => wsRef.current?.sendInterrupt();
   const setModel = (model: string) => {
-    wsRef.current?.sendSetModel(model);
+    if (focusedEngine === "antigravity" && focusedSid) wsRef.current?.sendAntigravityOption(focusedSid, "model", model);
+    else wsRef.current?.sendSetModel(model);
   };
   const setEffort = (effort: string) => {
-    if (focusedEngine === "dsh" && focusedSid) wsRef.current?.sendDshControl(focusedSid, "effort", effort);
+    if (focusedEngine === "antigravity" && focusedSid) wsRef.current?.sendAntigravityOption(focusedSid, "thought_level", effort);
+    else if (focusedEngine === "dsh" && focusedSid) wsRef.current?.sendDshControl(focusedSid, "effort", effort);
     else wsRef.current?.sendSetEffort(effort);
   };
   const setAutoCompact = (selection: AutoCompactSelection): boolean => (
@@ -6242,7 +6276,7 @@ export default function App() {
         onNew={(profileId) => { if (!confirmArtifactDiscard()) return; clearForkFocusLease(false); cancelPendingNotificationTarget(); pendingCreateRef.current = null; setCreateError(null); setStatusOpenSid(null); setNewChatAutoFocus(true); setRestoringSurfaceScope(null); wsRef.current?.setFocusedSid(null); dispatch({ type: "enter_new_chat", cwd: "~", cwdSource: "default", claudeProfileId: engine === "claude" ? profileId ?? newChatClaudeProfileId : null, codexProfileId: engine === "codex" ? profileId ?? newChatCodexProfileId : null }); if (isMobile()) setSidebarOpen(false); }}
         onNewInDir={(cwd, profileId) => { if (!confirmArtifactDiscard()) return; clearForkFocusLease(false); cancelPendingNotificationTarget(); pendingCreateRef.current = null; setCreateError(null); setStatusOpenSid(null); setNewChatAutoFocus(true); setRestoringSurfaceScope(null); wsRef.current?.setFocusedSid(null); dispatch({ type: "enter_new_chat", cwd, cwdSource: "explicit", claudeProfileId: engine === "claude" ? profileId ?? newChatClaudeProfileId : null, codexProfileId: engine === "codex" ? profileId ?? newChatCodexProfileId : null }); if (isMobile()) setSidebarOpen(false); }}
         onDirectoryAction={(cwd, action, profileId) => {
-          if (engine === "dsh") return;
+          if (engine !== "claude" && engine !== "codex") return;
           setDirectoryScope({ cwd, action, profile_id: profileId, engine, machineId });
         }}
         onClose={() => setSidebarOpen(false)}
@@ -6362,7 +6396,7 @@ export default function App() {
             }} />
           <SessionStatus state={dshConnectionError ? "reconnecting" : effectiveState}
             awaitingConfirmation={!!rt.pendingQuestion?.model_fallback} />
-          {space === "code" && focusedEngine !== "dsh" && (
+          {space === "code" && !isCodeOnlyEngine(focusedEngine) && (
             focusedSid && !state.newChat && !archivedBrowse ? (
               <TerminalControl control={rt.control} engine={focusedEngine}
                 availability={state.connState !== "connected" || !state.wrapperOnline
@@ -6380,7 +6414,7 @@ export default function App() {
             <Icon name="devices" size={18} />
             <span>{activeDevice?.label ?? machineId}</span><i />
           </button>
-          <EngineSelector engine={engine} onChange={toggleEngine} />
+          <EngineSelector engine={engine} antigravityAvailable={state.antigravityAvailable} onChange={toggleEngine} />
           <Suspense fallback={<span className="iconbtn" aria-hidden="true"><Icon name="dots" /></span>}><HeaderMenu
             engine={engine}
             appearance={appearance}
@@ -6395,6 +6429,11 @@ export default function App() {
             notificationError={harmonyPush.error}
             onNotificationMode={updateNotificationMode}
             onOpenDshTools={engine === "dsh" && focusedSid ? () => setDshPanel({ sid: focusedSid, scope: activeScopeKey, selection: { kind: "subagents" } }) : undefined}
+            onOpenGeminiAuth={engine === "antigravity" && activeDeviceOnline ? () => {
+              const request = wsRef.current?.sendAntigravityAuth() ?? null;
+              setGeminiLogin({ device: machineId, request, starting: false, methods: [],
+                error: request ? null : "暂时无法连接 Gemini 运行设备。" });
+            } : undefined}
             onOpenUsageActivity={openUsageActivity}
             onOpenBtw={btwPanelKey && !archivedBrowse ? () => openBtw() : undefined}
             onOpenViewer={visibleParentSid ? () => openViewer() : undefined}
@@ -6403,6 +6442,29 @@ export default function App() {
             onLogout={() => void logout()}
           /></Suspense>
         </header>
+        {engine === "antigravity" && geminiLogin?.device === machineId && <Suspense fallback={null}>
+          <CenteredSheet open label="Gemini 登录" minimumHeight={160} onClose={() => setGeminiLogin(null)}>
+            <div className="sheet-scroll">
+              <p className="capabilities-note" role="status">
+                {!activeDeviceOnline ? "Gemini 运行设备已断开。"
+                  : geminiLogin.request ? (geminiLogin.starting
+                    ? "请在运行 Gemini 的设备上完成浏览器验证。" : "正在查询本机登录方式…")
+                  : geminiLogin.error ?? (geminiLogin.signedIn ? "Gemini 登录成功。"
+                    : geminiLogin.methods.length ? "选择账号类型，登录页将在运行设备上打开。"
+                      : "本机 agy 未提供浏览器登录。可在运行设备上执行 agy acp --login。")}
+              </p>
+              {geminiLogin.methods.map(method => <button key={method} type="button" className="cmd"
+                disabled={!!geminiLogin.request || !activeDeviceOnline}
+                onClick={() => {
+                  const request = wsRef.current?.sendAntigravityAuth(method) ?? null;
+                  setGeminiLogin({ ...geminiLogin, request, starting: true, signedIn: false,
+                    error: request ? null : "暂时无法连接 Gemini 运行设备。" });
+                }}>
+                <span>{method === "oauth-personal" ? "Google 个人账号" : "Gemini Enterprise 账号"}</span>
+              </button>)}
+            </div>
+          </CenteredSheet>
+        </Suspense>}
         {appUpdateOpen && <Suspense fallback={null}><AppUpdateSheet updates={appUpdates} serverUpdates={serverUpdates}
           deviceName={activeDevice?.label ?? machineId} webUpdate={webUpdate}
           sessions={ownsDeviceState ? state.sessions : undefined}
@@ -6421,6 +6483,7 @@ export default function App() {
             editPrompt={editPrompt} onEditConsumed={() => setEditPrompt(null)}
             dshPresets={state.dshPresets} dshPermissions={state.dshPermissions}
             dshError={state.dshError}
+            antigravity={antigravityCatalog}
             dshPreset={newChatDshPreset}
             onPickDshPreset={value => setDshPresetSelection({ scope: activeScopeKey, value })}
             controlScopeKey={`${activeScopeKey}\u0000${newChatProfileId ?? "__default__"}`}
@@ -6451,8 +6514,8 @@ export default function App() {
               }
             }}
             onRequestModels={() => wsRef.current?.sendGetModels(
-              engine, engine === "claude" && space === "code" ? state.newChat?.cwd : undefined,
-              newChatCodexProfileId, newChatClaudeProfileId)}
+              engine, (engine === "claude" || engine === "antigravity") && space === "code" ? state.newChat?.cwd : undefined,
+              newChatCodexProfileId, newChatClaudeProfileId, undefined, newChatAntigravityModel)}
             model={state.newChat.model}
             effort={state.newChat.effort}
             autoCompact={{
@@ -6502,13 +6565,15 @@ export default function App() {
                 const session = findMessageSession(nativeId);
                 return { title: relatedSessionTitle(session, nativeId), available: !!session,
                   account: session?.claude_profile_id ?? session?.codex_profile_id
-                    ?? (session?.session_id.includes("@") ? session.session_id.split("@")[0] : undefined) };
+                    ?? (session?.engine !== "antigravity" && session?.session_id.includes("@")
+                      ? session.session_id.split("@")[0] : undefined) };
               }}
               onOpenSession={space === "code" ? (nativeId) => {
                 const session = findMessageSession(nativeId);
                 if (!session || !confirmArtifactDiscard()) return;
                 cancelPendingNotificationTarget();
-                const targetEngine = session.engine === "codex" ? "codex" : "claude";
+                const targetEngine = session.engine === "antigravity" || session.engine === "codex"
+                  ? session.engine : "claude";
                 if (targetEngine !== engine) {
                   // Select the exact linked session, not the other engine's
                   // remembered/latest chat. Use the normal navigation path.
@@ -6523,6 +6588,7 @@ export default function App() {
               loading={!!rt.loading || historyView.recovering}
               surface={space}
               engine={focusedEngine} forkingPointId={forkingPointId}
+              turnUsage={rt.turnUsage}
               hasMore={historyView.hasMore}
               historyPagingReady={historyView.pagingReady}
               historyRevision={rt.historyRevision}
@@ -6581,7 +6647,7 @@ export default function App() {
               onOpenAgent={space === "code"
                 ? openAgentDetail : undefined}
               onFork={!historyView.recovering && !archivedBrowse
-                  && space === "code"
+                  && space === "code" && focusedEngine !== "antigravity"
                 ? forkFromTurn : undefined} /></Suspense>
 
             <Suspense fallback={((!archivedBrowse
@@ -6595,7 +6661,7 @@ export default function App() {
                 disabled={!state.wrapperOnline || !rt.dsh?.connected || !rt.dsh.commands.some(c => c.name === "goal")}
                 onOpen={() => setGoalUi({ open: true })} onClose={() => setGoalUi({ open: false })}
                 onAction={action => dshApi.goal(focusedSid!, action)} />}
-              {focusedEngine !== "dsh" && <GoalPanel engine={focusedEngine} goal={rt.goal}
+              {(focusedEngine === "claude" || focusedEngine === "codex") && <GoalPanel engine={focusedEngine} goal={rt.goal}
                 revealed={!archivedBrowse && !!goalUi?.revealed}
                 open={!archivedBrowse && !!goalUi?.open}
                 key={focusedGoalScopeKey}
@@ -6665,12 +6731,17 @@ export default function App() {
                 errorRevision={`${state.connState}:${state.wrapperOnline}:${state.bannerRevision}`}
                 header={rt.pendingQuestion.header}
                 question={rt.pendingQuestion.question}
+                approvalDiff={rt.pendingQuestion.approval_diff}
                 planDocument={rt.pendingQuestion.plan_document}
                 options={rt.pendingQuestion.options}
                 allowText={rt.pendingQuestion.allow_text}
                 secret={rt.pendingQuestion.secret}
                 multiSelect={rt.pendingQuestion.multi_select}
                 questions={rt.pendingQuestion.questions}
+                dismissActions={rt.pendingQuestion.dismiss_actions}
+                onDismiss={(action) => !!focusedSid && !!rt.pendingQuestion
+                  && (wsRef.current?.sendAnswerQuestion(
+                    focusedSid, rt.pendingQuestion.ask_id, undefined, undefined, action) ?? false)}
                 onAnswers={(answers) => {
                   const question = rt.pendingQuestion;
                   if (!focusedSid || !question) return false;
@@ -6722,6 +6793,7 @@ export default function App() {
 
             <Composer maintenance={appUpdates.maintenance} voiceEnabled={voiceConfig?.transcription}
           dsh={rt.dsh}
+          antigravity={rt.antigravity}
           dshSid={focusedSid ?? undefined}
           readDsh={dshApi.read}
           dshCommandResult={rt.dshCommandResult}
@@ -7184,7 +7256,7 @@ export default function App() {
         open={capabilitiesOpen && capabilitiesScope !== null}
         engine={capabilitiesScope?.engine ?? engine}
         activeKind={capabilitiesKind}
-        readOnly={space === "work"}
+        readOnly={space === "work" || capabilitiesScope?.engine === "antigravity"}
         report={capabilitiesScope ? capabilitiesByScope[capabilitiesScope.key] ?? null : null}
         loading={capabilitiesLoading}
         onKindChange={setCapabilitiesKind}

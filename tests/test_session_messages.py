@@ -805,6 +805,18 @@ def test_restart_only_replays_queued_never_inflight_even_with_remaining_body(tmp
     assert [r['id'] for r in store.pending()] == [queued['message_id']]
 
 
+def test_wrapper_recovery_preserves_inflight_receipt_owned_by_gemini_service(tmp_path):
+    store = MessageStore(tmp_path / "messages")
+    direct, _ = store.claim(SOURCE, "direct", TARGET, "direct sender", queue=True)
+    gemini, _ = store.claim(SOURCE, "gemini", "ccr:antigravity:fixture", "persistent sender", queue=True)
+    assert store.begin_delivery(direct["message_id"])
+    assert store.begin_delivery(gemini["message_id"])
+    store.recover(lambda target: not target.startswith("ccr:antigravity:"))
+    store.settle(gemini["message_id"], "accepted")
+    assert store.get(SOURCE, "gemini")["status"] == "accepted"
+    assert store.get(SOURCE, "direct")["status"] == "unknown"
+
+
 @pytest.mark.asyncio
 async def test_refresh_intent_survives_controller_loss_between_off_and_on():
     handle, control, _ = legacy_handle()

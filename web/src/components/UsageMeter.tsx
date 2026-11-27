@@ -1,3 +1,4 @@
+import type { Engine } from "../protocol";
 import { useEffect, useRef, useState } from "react";
 import type {
   StatusRateLimit,
@@ -15,7 +16,7 @@ import {
 } from "../rate-limit-usage";
 
 interface Props {
-  engine?: "claude" | "codex" | "dsh";
+  engine?: Engine;
   open: boolean;
   report: StatusReport | null;
   rateLimits?: StatusRateLimit[] | null;

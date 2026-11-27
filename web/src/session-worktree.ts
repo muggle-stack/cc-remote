@@ -17,7 +17,7 @@ export interface PendingWorktreeFork {
 
 export interface PendingSessionFork extends PendingWorktreeFork {
   forkPointId: string;
-  engine: "claude" | "codex" | "dsh";
+  engine: Engine;
 }
 
 export interface PendingSessionMigration {
@@ -29,7 +29,7 @@ export interface ForkFocusLease {
   requestId: string;
   parentSessionId: string;
   childSessionId: string;
-  engine: "claude" | "codex" | "dsh";
+  engine: Engine;
   space: "code";
   machineId: string;
   cwd: string;
@@ -45,7 +45,7 @@ export function forkFocusLeaseSession(
   lease: ForkFocusLease | null,
   sessions: readonly SessionInfo[],
   machineId: string,
-  engine: "claude" | "codex" | "dsh",
+  engine: Engine,
   space: "code" | "work",
 ): SessionInfo | null {
   if (!lease || lease.machineId !== machineId || lease.engine !== engine
@@ -92,7 +92,7 @@ export function sessionMenuCapabilities(session: SessionInfo): SessionMenuCapabi
     forkWorktree: session.engine === "codex" && session.tag !== "archived",
     migrate: session.engine === "codex" && session.space !== "work"
       && session.tag !== "archived",
-    delete: session.engine !== "dsh",
+    delete: session.engine !== "dsh" && session.engine !== "antigravity",
   };
 }
 
@@ -101,7 +101,7 @@ export function canDeleteSidebarSession(
   _space: Space,
   _archived: boolean,
 ): boolean {
-  return engine !== "dsh";
+  return engine !== "dsh" && engine !== "antigravity";
 }
 
 export function isWorktreeForkBlockedByState(state?: State | null): boolean {
@@ -181,10 +181,10 @@ export function isTerminalSessionMigrationError(code: string): boolean {
 }
 
 export function canForkTurn<T extends { done: boolean; forkPointId?: string; forkAvailable?: boolean }>(
-  engine: "claude" | "codex" | "dsh",
+  engine: Engine,
   turn: T,
 ): turn is T & { done: true; forkPointId: string } {
-  return (engine === "claude" || engine === "codex" || engine === "dsh")
+  return (engine === "claude" || engine === "codex" || engine === "dsh" || engine === "antigravity")
     && turn.done && !!turn.forkPointId && turn.forkAvailable !== false;
 }
 

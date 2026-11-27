@@ -5,7 +5,12 @@ import math
 
 SCOPES = {
     (engine, space) for engine in ("claude", "codex") for space in ("code", "work")
-}
+} | {("antigravity", "code")}
+ENGINES = ("claude", "codex", "antigravity")
+
+
+def engine_label(engine: str) -> str:
+    return "Gemini" if engine == "antigravity" else engine.title()
 
 
 def activity(row: dict) -> float:

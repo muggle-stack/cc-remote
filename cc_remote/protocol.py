@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 98
+PROTOCOL_VERSION = 99
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -43,7 +43,7 @@ MAX_BACKGROUND_PROCESS_COMMAND_CHARS = 16 * 1024
 MAX_BACKGROUND_PROCESS_CWD_CHARS = 4 * 1024
 
 State = Literal["idle", "running", "interrupting", "draining"]
-Engine = Literal["claude", "codex", "dsh"]
+Engine = Literal["claude", "codex", "dsh", "antigravity"]
 Space = Literal["code", "work"]
 RestoreMode = Literal["conversation", "files", "both"]
 RestoreOutcome = Literal["succeeded", "failed", "skipped"]
@@ -323,6 +323,7 @@ class Hello(_Base):
     client_id: Optional[WireId] = None  # client
     machine_id: Optional[WireId] = None  # relay route; wrapper identity
     last_seq: Optional[int] = None  # client (legacy: focused session only)
+    discover_engines: Optional[bool] = Field(default=None, exclude_if=lambda value: value is None)  # client
     cursors: Optional[dict[WireId, int]] = None  # client: per-session last_seq for multi-session catch-up
     generations: Optional[dict[WireId, WireId]] = None  # client: wrapper generation paired with each cursor
     cc_session_id: Optional[WireId] = None  # wrapper
@@ -684,6 +685,7 @@ class TokenUsage(BaseModel):
     output_tokens: Optional[int] = Field(default=None, ge=0, le=MAX_SAFE_WIRE_INTEGER, strict=True)
     cache_read_tokens: Optional[int] = Field(default=None, ge=0, le=MAX_SAFE_WIRE_INTEGER, strict=True)
     cache_write_tokens: Optional[int] = Field(default=None, ge=0, le=MAX_SAFE_WIRE_INTEGER, strict=True)
+    thought_tokens: Optional[int] = Field(default=None, ge=0, le=MAX_SAFE_WIRE_INTEGER, strict=True)
 
 
 class TurnUsage(_Base):
@@ -831,7 +833,7 @@ class BtwSessionInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
     btw_sid: WireId
     parent_sid: WireId
-    engine: Literal["claude", "codex", "dsh"]
+    engine: Engine
     created_at: float = Field(ge=0)
     state: State = "idle"
 
@@ -904,6 +906,7 @@ class TurnSteered(_Base):
     msg_id: WireId
     turn_id: WireId
     source_thread_id: Optional[WireId] = None
+    preserve_open_tools: bool = Field(default=False, exclude_if=lambda value: not value)
     prompt: str
     images: Optional[list[QueryImage]] = Field(
         default=None, max_length=MAX_ATTACHMENT_COUNT)
@@ -1185,6 +1188,7 @@ class TurnResult(BaseModel):
     is_error: bool
     total_cost_usd: Optional[float] = None
     num_turns: Optional[int] = None
+    background_tool_ids: Optional[list[WireId]] = Field(default=None, max_length=MAX_BACKGROUND_PROCESS_ITEMS)
 
 
 class TurnNotificationContext(BaseModel):
@@ -1303,14 +1307,14 @@ class ListSessions(_Command):
     session store (Claude ~/.claude/projects vs Codex ~/.codex/sessions);
     optional, default claude."""
     type: Literal["list_sessions"] = "list_sessions"
-    engine: Literal["claude", "codex", "dsh"] = "claude"
+    engine: Engine = "claude"
     space: Space = "code"
 
 
 class SessionList(_Base):
     """wrapper -> client: the sessions (downstream so a reconnect restores it)."""
     type: Literal["session_list"] = "session_list"
-    engine: Literal["claude", "codex", "dsh"]
+    engine: Engine
     space: Space = "code"
     # Exact ListSessions.cmd_id. A single Codex read may paint a cached list and
     # then a refreshed list, so both responses intentionally carry the same id.
@@ -1331,7 +1335,7 @@ class SessionListInvalidated(_Base):
     ListSessions; the wrapper never broadcasts an uncorrelated SessionList.
     """
     type: Literal["session_list_invalidated"] = "session_list_invalidated"
-    engine: Literal["claude", "codex", "dsh"]
+    engine: Engine
     space: Space = "code"
 
 
@@ -1345,7 +1349,7 @@ class SessionActivity(_Base):
     presentation.
     """
     type: Literal["session_activity"] = "session_activity"
-    engine: Literal["claude", "codex", "dsh"]
+    engine: Engine
     session_id: WireId
     state: State
 
@@ -1379,6 +1383,8 @@ class NewSession(_Command):
     dsh_permission: Optional[str] = Field(default=None, min_length=1, max_length=256)
     dsh_agent_preset: Optional[str] = Field(default=None, min_length=1, max_length=256)
     dsh_effort: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    antigravity_mode: Optional[str] = Field(default=None, min_length=1, max_length=256)
+    antigravity_effort: Optional[str] = Field(default=None, min_length=1, max_length=256)
     space: Space = "code"
     project_id: Optional[WireId] = None
     model: Optional[ModelName] = None    # None -> engine default (settings.json / codex config)
@@ -1410,6 +1416,10 @@ class NewSession(_Command):
             raise ValueError("DSH supports Code sessions")
         if self.engine != "dsh" and (self.dsh_agent_preset or self.dsh_effort or self.dsh_permission):
             raise ValueError("DSH controls require the DSH engine")
+        if self.engine == "antigravity" and self.space != "code":
+            raise ValueError("Gemini supports Code sessions")
+        if self.engine != "antigravity" and (self.antigravity_mode or self.antigravity_effort):
+            raise ValueError("ACP controls require the Antigravity engine")
         if _attachment_count(self.images, self.files) > MAX_ATTACHMENT_COUNT:
             raise ValueError(
                 f"new_session attachments exceed {MAX_ATTACHMENT_COUNT} items")
@@ -1576,7 +1586,7 @@ class RollbackResult(_Base):
 class CompactSession(_Command):
     type: Literal["compact_session"] = "compact_session"
     session_id: WireId
-    engine: Literal["claude", "codex", "dsh"] = "codex"
+    engine: Engine = "codex"
     space: Literal["code"] = "code"
 
 
@@ -1804,7 +1814,7 @@ class SessionRekey(_Base):
 
 
 class RenameSession(_Command):
-    """client -> wrapper: set a session's custom title (appended to its jsonl)."""
+    """client -> wrapper: set a session's custom title."""
     type: Literal["rename_session"] = "rename_session"
     session_id: WireId
     title: str = Field(min_length=1, max_length=200)
@@ -1921,7 +1931,8 @@ class GetModels(_Command):
     from a prompt-free initialization and resolves no-override settings for cwd.
     """
     type: Literal["get_models"] = "get_models"
-    engine: Optional[Literal["cc", "claude", "codex", "dsh"]] = None
+    engine: Optional[Literal["cc", "claude", "codex", "dsh", "antigravity"]] = None
+    antigravity_model: Optional[ModelName] = None
     client_id: Optional[WireId] = None  # requester, so the wrapper routes Models back to=<client_id>
     # Legacy Claude defaults can depend on project/local settings, so resolve
     # them in the prospective cwd. Explicit account profiles remain user-scoped.
@@ -1939,12 +1950,15 @@ class DshPreset(BaseModel):
     available: bool = True
 
 
-class DshCommandInfo(BaseModel):
+class NativeCommandInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=128)
     description: str = Field(default="", max_length=4096)
     input_hint: Optional[str] = Field(default=None, max_length=1024)
     attachments: bool = False
+
+
+DshCommandInfo = NativeCommandInfo
 
 
 class DshPermissionOption(BaseModel):
@@ -2117,6 +2131,64 @@ class SetDshControl(_Command):
         return self
 
 
+AntigravityConfigCategory = Literal["model", "thought_level", "mode"]
+
+
+class AntigravityChoice(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    value: str = Field(min_length=1, max_length=256)
+    name: str = Field(min_length=1, max_length=512)
+    description: str = Field(default="", max_length=4096)
+
+
+class AntigravityOption(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    category: AntigravityConfigCategory
+    current: str = Field(max_length=256)
+    choices: list[AntigravityChoice] = Field(max_length=256)
+
+
+class AntigravityState(_Base):
+    """Complete ACP control projection for one resident session."""
+
+    type: Literal["antigravity_state"] = "antigravity_state"
+    connected: bool
+    options: list[AntigravityOption] = Field(default_factory=list, max_length=3)
+    commands: list[NativeCommandInfo] = Field(default_factory=list, max_length=256)
+
+
+class AntigravityAvailability(_Base):
+    """Device-local opt-in and binary discovery, without starting the agent."""
+
+    type: Literal["antigravity_availability"] = "antigravity_availability"
+    enabled: bool
+
+
+class SetAntigravityOption(_Command):
+    type: Literal["set_antigravity_option"] = "set_antigravity_option"
+    sid: WireId
+    category: AntigravityConfigCategory
+    value: str = Field(min_length=1, max_length=256)
+
+
+AntigravityAuthMethod = Literal["oauth-personal", "oauth-business"]
+
+
+class AntigravityAuth(_Command):
+    """Read native OAuth choices or start sign-in on the Wrapper host."""
+    type: Literal["antigravity_auth"] = "antigravity_auth"
+    engine: Literal["antigravity"] = "antigravity"
+    method: Optional[AntigravityAuthMethod] = None
+
+
+class AntigravityAuthResult(_Base):
+    type: Literal["antigravity_auth_result"] = "antigravity_auth_result"
+    request_id: Optional[WireId] = None
+    methods: list[AntigravityAuthMethod] = Field(default_factory=list, max_length=2)
+    signed_in: bool = False
+    error: Optional[str] = Field(default=None, max_length=4096)
+
+
 class Models(_Base):
     """wrapper -> client: the engine's model catalog (one-shot, like DirList — not
     seq'd/buffered). Each entry: {id, display_name, description, efforts,
@@ -2131,6 +2203,9 @@ class Models(_Base):
     no-override session. Neither replaces the focused thread's controls.
     """
     type: Literal["models"] = "models"
+    antigravity_model: Optional[ModelName] = None
+    antigravity_options: list[AntigravityOption] = Field(default_factory=list, max_length=3)
+    antigravity_commands: list[NativeCommandInfo] = Field(default_factory=list, max_length=256)
     dsh_permissions: list[DshPermissionOption] = Field(default_factory=list, max_length=256)
     dsh_presets: list[DshPreset] = Field(default_factory=list, max_length=256)
     error: Optional[str] = Field(default=None, max_length=4096)
@@ -2575,7 +2650,7 @@ class GetDiff(_Command):
     theme: Literal["light", "dark"] = "light"
     turn_id: Optional[WireId] = None
     revision: Optional[str] = Field(default=None, min_length=1, max_length=64)
-    engine: Optional[Literal["claude", "codex", "dsh"]] = None
+    engine: Optional[Engine] = None
 
     @model_validator(mode="after")
     def require_complete_archive_identity(self):
@@ -2589,7 +2664,7 @@ class GetTurnFileChanges(_Command):
     """Read an immutable file-index page without resuming the engine."""
     type: Literal["get_turn_file_changes"] = "get_turn_file_changes"
     sid: WireId
-    engine: Literal["claude", "codex", "dsh"]
+    engine: Engine
     turn_id: WireId
     revision: str = Field(min_length=1, max_length=64)
     offset: int = Field(default=0, ge=0, le=4096, strict=True)
@@ -2599,7 +2674,7 @@ class GetTurnFileChanges(_Command):
 class TurnFileChangesPage(_Base):
     """Private one-shot response; never retained in the live replay ring."""
     type: Literal["turn_file_changes_page"] = "turn_file_changes_page"
-    engine: Literal["claude", "codex", "dsh"]
+    engine: Engine
     turn_id: WireId
     revision: str = Field(min_length=1, max_length=64)
     offset: int = Field(ge=0, le=4096)
@@ -2878,6 +2953,7 @@ class ConversationTurn(BaseModel):
     ts: Optional[int] = Field(default=None, ge=0)
     doneTs: Optional[int] = Field(default=None, ge=0)
     durationMs: Optional[int] = Field(default=None, ge=0)
+    tokenUsage: Optional[TokenUsage] = None
     # Detail size and process visibility are deliberately separate. A deferred
     # payload may contain only a truncated prompt/final answer (or an image),
     # while an official Codex summary may not reveal whether process items
@@ -3158,7 +3234,9 @@ class AskUser(_Base, AskQuestion):
     # Live-only, stripped before journal/ring storage and pending-question sync.
     notification_context: Optional[TurnNotificationContext] = None
     ask_id: WireId
+    approval_diff: Optional[str] = Field(default=None, max_length=64 * 1024, exclude_if=lambda value: value is None)
     model_fallback: Optional[ModelFallbackPrompt] = None
+    dismiss_actions: Optional[list[Literal["decline", "cancel"]]] = Field(default=None, max_length=2)
     questions: Optional[list[AskQuestion]] = Field(
         default=None, min_length=1, max_length=ASK_QUESTION_MAX_COUNT)
 
@@ -3186,7 +3264,7 @@ class AskUserClosed(_Base):
     """wrapper -> client: replayable terminal boundary for an AskUser card."""
     type: Literal["ask_user_closed"] = "ask_user_closed"
     ask_id: WireId
-    reason: Literal["answered", "cancelled", "timeout", "superseded"]
+    reason: Literal["answered", "cancelled", "declined", "timeout", "superseded"]
 
 
 class AnswerQuestion(_Command):
@@ -3194,14 +3272,15 @@ class AnswerQuestion(_Command):
     selected option's label (or free text if the agent allowed it)."""
     type: Literal["answer_question"] = "answer_question"
     ask_id: WireId
+    action: Optional[Literal["decline", "cancel"]] = None
     answer: Optional[AskAnswer] = None
     answers: Optional[list[AskAnswer]] = Field(
         default=None, min_length=1, max_length=ASK_QUESTION_MAX_COUNT)
 
     @model_validator(mode="after")
     def exactly_one_answer_shape(self):
-        if (self.answer is None) == (self.answers is None):
-            raise ValueError("provide either answer or answers")
+        if sum(value is not None for value in (self.answer, self.answers, self.action)) != 1:
+            raise ValueError("provide one of answer, answers, or action")
         return self
 
 
@@ -3249,7 +3328,7 @@ class ThreadGoal(BaseModel):
     threadId: WireId
     objective: str = Field(min_length=1, max_length=16 * 1024)
     status: GoalStatus
-    engine: Literal["claude", "codex", "dsh"]
+    engine: Engine
     tokenBudget: Optional[int] = Field(default=None, ge=1)
     tokensUsed: int = Field(ge=0)
     timeUsedSeconds: int = Field(ge=0)
@@ -3306,6 +3385,7 @@ AnyMessage = Union[
     GetSessionArtifacts, GetSessionArtifactPreview, SessionArtifacts,
     ReadDsh, DshReadResult, ActDshSubagent, ActDshGoal, DownloadDsh, DshDownloadChunk,
     DshState, DshCommandResult, SetDshControl,
+    AntigravityAvailability, AntigravityState, SetAntigravityOption, AntigravityAuth, AntigravityAuthResult,
     BrowseFiles, FilesListed, SetCodexContext, CodexContext,
     GetTurnFileChanges, TurnFileChangesPage,
     Hello, Query, CancelQueuedQuery, GetQueuedQuery, QueuedQueryDetail, UpdateQueuedQuery, QueuedQueryUpdated, QueryQueueState, Steer, Interrupt, Takeover, TakeoverState, SessionControl, SetModel, SetEffort, SetAutoCompact, SetServiceTier, SetCollaborationMode, SetPerm, GetPermissionProfiles, SetPermissionProfile, SetWebSearch, Fast, CollaborationMode, OpenBtw, CloseBtw, SyncBtw, BtwOpened, BtwSync, BtwClosed, GetContext, GetStatus, ConsumeRateLimitResetCredit, GetDiff, GetFilePreview, SaveMarkdown, GetPreviewAsset, AuthorizePreview, GetHistory, GetTurnDetail, GetAgentDetail, GetHistoryImage, GetModels, GetEngineCapabilities, ManageEnginePlugin, ManageEngineSkill, ManageEngineHook, ListSessions, SwitchSession, NewSession, DeleteWorkSession, DeleteSession, RollbackSession, RollbackResult, CompactSession, StartReview, GetWorkDashboard, CreateWorkProject, DeleteWorkProject, AddWorkSource, DeleteWorkSource, CreateWorkPlugin, DeleteWorkPlugin, CreateWorkSchedule, DeleteWorkSchedule, GetWorkArtifacts, ListDir, Ping, Pong, CommandAck,
@@ -3326,7 +3406,7 @@ AnyMessage = Union[
 # wrapper_disconnected, wrapper_reconnected) are synthesized per-reconnect and
 # are NOT seq'd/buffered.
 DOWNSTREAM_TYPES = frozenset({
-    "user_msg", "turn_steered", "state", "model", "effort", "auto_compact", "perm", "dsh_state",
+    "user_msg", "turn_steered", "state", "model", "effort", "auto_compact", "perm", "dsh_state", "antigravity_state",
     "permission_profile", "web_search", "fast", "codex_context",
     "collaboration_mode", "session_control", "query_queue", "btw_opened",
     "assistant_msg_start", "delta", "tool_use", "tool_delta", "tool_result",
@@ -3402,6 +3482,11 @@ _TYPE_MAP: dict[str, type[BaseModel]] = {
     "download_dsh": DownloadDsh,
     "dsh_download_chunk": DshDownloadChunk,
     "dsh_state": DshState,
+    "antigravity_state": AntigravityState,
+    "antigravity_availability": AntigravityAvailability,
+    "set_antigravity_option": SetAntigravityOption,
+    "antigravity_auth": AntigravityAuth,
+    "antigravity_auth_result": AntigravityAuthResult,
     "dsh_command_result": DshCommandResult,
     "set_dsh_control": SetDshControl,
     "get_engine_capabilities": GetEngineCapabilities,
@@ -3517,7 +3602,7 @@ class ProtocolError(Exception):
     pass
 
 
-def deserialize(raw: str | bytes) -> AnyMessage:
+def deserialize(raw: str | bytes, *, allow_additive_fields: bool = False) -> AnyMessage:
     try:
         data = json.loads(raw)
     except (ValueError, UnicodeDecodeError, TypeError) as exc:
@@ -3531,7 +3616,7 @@ def deserialize(raw: str | bytes) -> AnyMessage:
     if cls is None:
         raise ProtocolError("unknown message type")
     try:
-        return cls.model_validate(data)  # type: ignore[return-value]
+        return cls.model_validate(data, extra="ignore" if allow_additive_fields else None)  # type: ignore[return-value]
     except ValidationError as exc:
         # Pydantic's default string includes attacker-controlled input_value.
         # Keep only bounded field locations and stable error kinds so malformed

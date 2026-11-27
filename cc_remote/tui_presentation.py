@@ -18,6 +18,7 @@ LIMIT = 64 * 1024
 TERMINAL = {"completed", "failed", "declined", "cancelled", "interrupted"}
 SETTING_TYPES = {
     "model",
+    "antigravity_state",
     "effort",
     "auto_compact",
     "codex_context",

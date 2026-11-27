@@ -1,3 +1,4 @@
+import { ENGINE_LABELS, isCodeOnlyEngine } from "../protocol";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type TouchEvent } from "react";
 import type { ClaudeProfileInfo, CodexProfileInfo, Engine, SessionInfo, Space, State } from "../protocol";
 import type { CompletionBadgeKind } from "../completion-badges";
@@ -117,7 +118,7 @@ export function SessionsSidebar({ maintenance = false, open, engine, space, sess
     pressStart.current = null;
   }, []);
 
-  const accountProfiles = engine === "dsh" ? NO_ACCOUNT_PROFILES : engine === "codex" ? codexProfiles : claudeProfiles;
+  const accountProfiles = isCodeOnlyEngine(engine) ? NO_ACCOUNT_PROFILES : engine === "codex" ? codexProfiles : claudeProfiles;
   const defaultAccountProfileId = engine === "codex"
     ? defaultCodexProfileId : defaultClaudeProfileId;
   const showProfileManagement = accountProfiles.length > 1;
@@ -351,7 +352,8 @@ export function SessionsSidebar({ maintenance = false, open, engine, space, sess
       : visibleCompletion ? "已完成" : null;
     const forkBlocked = isWorktreeForkBlockedByState(st);
     const migrationBlocked = isSessionMigrationBlockedByState(st);
-    const archiveBlocked = maintenance || (!isArchived && (engine === "codex" || engine === "dsh")
+    const hidesLocally = engine === "antigravity";
+    const archiveBlocked = maintenance || (!isArchived && (engine === "codex" || engine === "dsh" || hidesLocally)
       && isSessionArchiveBlockedByState(st));
     const deleteBlocked = maintenance || isSessionDeleteBlockedByState(st);
     const profilePresentation = profilePresentationFor(s);
@@ -433,11 +435,13 @@ export function SessionsSidebar({ maintenance = false, open, engine, space, sess
             )}
             <button onClick={() => doCopyId(s)}><Icon name={copiedId === s.session_id ? "check" : "copy"} size={15} />{copiedId === s.session_id ? "已复制" : "复制 session ID"}</button>
             {capabilities.archive && (isArchived ? (
-              <button disabled={maintenance} onClick={() => doArchive(s, false)}><Icon name="archive" size={15} />取消归档</button>
+              <button disabled={maintenance} onClick={() => doArchive(s, false)}><Icon name="archive" size={15} />{hidesLocally ? "恢复显示" : "取消归档"}</button>
             ) : (
               <button onClick={() => doArchive(s, true)} disabled={archiveBlocked}
-                title={maintenance ? "设备正在更新" : archiveBlocked ? "请停止当前任务并清空排队后再归档" : "归档会话"}>
-                <Icon name="archive" size={15} />归档
+                title={maintenance ? "设备正在更新" : archiveBlocked
+                  ? (hidesLocally ? "请停止当前任务并清空排队后再隐藏" : "请停止当前任务并清空排队后再归档")
+                  : hidesLocally ? "从 CC Remote 侧栏隐藏" : "归档会话"}>
+                <Icon name="archive" size={15} />{hidesLocally ? "隐藏会话" : "归档"}
               </button>
             ))}
             {capabilities.delete
@@ -496,7 +500,7 @@ export function SessionsSidebar({ maintenance = false, open, engine, space, sess
             <button disabled={maintenance} onClick={() => { closeMenu(); onNewInDir(key, profileFilter === "all" ? undefined : profileFilter); }}>
               <Icon name="plus" size={15} />新建会话
             </button>
-            {engine !== "dsh" && onDirectoryAction && <>
+            {!isCodeOnlyEngine(engine) && onDirectoryAction && <>
               <div className="directory-menu-divider" />
               <button disabled={maintenance} onClick={() => { closeMenu(); onDirectoryAction(key, "archive", profileFilter === "all" ? undefined : profileFilter); }}>
                 <Icon name="archive" size={15} />归档目录会话…
@@ -543,10 +547,10 @@ export function SessionsSidebar({ maintenance = false, open, engine, space, sess
           <div className="space-switch" role="tablist" aria-label="切换工作空间">
             <button role="tab" aria-selected={space === "work"}
               className={space === "work" ? "active" : ""}
-              onClick={() => onSpaceChange("work")} disabled={engine === "dsh"}
-              title={engine === "dsh" ? "DSH 暂不支持 Work" : undefined}>
+              onClick={() => onSpaceChange("work")} disabled={isCodeOnlyEngine(engine)}
+              title={isCodeOnlyEngine(engine) ? `${ENGINE_LABELS[engine]} 支持 Code` : undefined}>
               <Icon name="work" size={17} />Work
-              {engine === "dsh" && <span className="space-lock" aria-hidden="true"><Icon name="lock" size={13} /></span>}
+              {isCodeOnlyEngine(engine) && <span className="space-lock" aria-hidden="true"><Icon name="lock" size={13} /></span>}
             </button>
             <button role="tab" aria-selected={space === "code"}
               className={space === "code" ? "active" : ""}
@@ -589,7 +593,7 @@ export function SessionsSidebar({ maintenance = false, open, engine, space, sess
             {filtered.length === 0 && <div className="s-group">{sessions.length === 0 ? "暂无会话" : "无匹配"}</div>}
             {pinned.length > 0 && renderGroup("__pinned__", pinned, "置顶")}
             {groupKeys.map((k) => renderGroup(k, groups[k]))}
-            {archived.length > 0 && renderGroup("archived", archived, "已归档")}
+            {archived.length > 0 && renderGroup("archived", archived, engine === "antigravity" ? "已隐藏" : "已归档")}
             <div className={"s-lift-scrim" + (lifting ? " show" : "")} onClick={closeMenu} />
           </div>
           <div className="s-foot">

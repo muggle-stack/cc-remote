@@ -304,6 +304,24 @@ async def test_catalog_responses_bound_to_requested_directory_and_profile():
 
 
 @pytest.mark.asyncio
+async def test_gemini_terminal_settings_use_native_options_and_code_scope():
+    sid = "agy@fixture"
+    client = WorkspaceClient("ws://localhost:8766/ws", "", "", "antigravity", sid)
+    client.workspace.catalog[sid] = {
+        "session_id": sid, "engine": "antigravity", "space": "code", "cwd": "/repo",
+    }
+    mode = p.AntigravityOption(category="mode", current="accept-edits", choices=[
+        p.AntigravityChoice(value="accept-edits", name="Accept edits", description="Native permission"),
+    ])
+    client._handle(json.loads(p.serialize(p.AntigravityState(sid=sid, connected=True, options=[mode]))))
+    form = SettingsForm(client, sid)
+    assert form.choices("permission_mode") == [("Accept edits", "accept-edits")]
+    assert form.fields() == ["model", "permission_mode"]
+    assert ("antigravity", "code") in client.catalog_scopes
+    assert ("antigravity", "work") not in client.catalog_scopes
+
+
+@pytest.mark.asyncio
 async def test_model_responses_keep_session_provider_and_new_session_scopes_separate():
     _, client = setup()
     for sid in ("one", "two", None):

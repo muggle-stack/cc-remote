@@ -1,6 +1,7 @@
+import { ENGINE_LABELS } from "../protocol";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { AskQuestion, Engine } from "../protocol";
+import type { AskDismissAction, AskQuestion, Engine } from "../protocol";
 import { EngineIcon } from "../icons";
 import { useImeSubmit } from "../use-ime-submit";
 import type { QuestionDraft } from "./QuestionSheet";
@@ -19,13 +20,16 @@ function complete(question: AskQuestion, page: PageDraft): boolean {
   return answer.length > 0 && (!Array.isArray(answer) || answer.length <= 5);
 }
 
-export function QuestionBatchSheet({ engine, questions, draft, onSubmit }: {
+export function QuestionBatchSheet({ engine, questions, draft, onSubmit, approvalDiff, dismissActions, onDismiss }: {
   engine: Engine;
   questions: AskQuestion[];
   draft?: { key: string; store: Map<string, QuestionDraft> };
   onSubmit: (answers: (string | string[])[]) => boolean | void;
+  approvalDiff?: string | null;
+  dismissActions?: AskDismissAction[] | null;
+  onDismiss?: (action: AskDismissAction) => boolean | void;
 }) {
-  const engineName = { claude: "Claude", codex: "Codex", dsh: "DSH" }[engine];
+  const engineName = ENGINE_LABELS[engine];
   const [initial] = useState(() => {
     const saved = draft?.store.get(draft.key);
     return saved?.signature === JSON.stringify(questions) ? saved : undefined;
@@ -84,13 +88,16 @@ export function QuestionBatchSheet({ engine, questions, draft, onSubmit }: {
     const missing = questions.findIndex((q, index) => !complete(q, next[index]));
     if (missing !== -1) { save(next, missing); setPage(missing); return; }
     const answers = questions.map((q, index) => answerFor(q, next[index]));
-    if (onSubmit(answers) === false) {
+    send(() => onSubmit(answers));
+  };
+  const send = (callback: () => boolean | void) => {
+    if (pendingRef.current) return;
+    if (callback() === false) {
       setError("回答暂未发送，请重试。");
       return;
     }
     pendingRef.current = true; setPending(true); setError("");
-    // Only the authoritative ask_user_closed retires this form. Retain all
-    // drafts on transport/service failure; retry uses the same pending ask_id.
+    // Keep drafts until the native callback authoritatively closes the form.
     timer.current = setTimeout(() => {
       pendingRef.current = false; setPending(false);
       setError("尚未收到确认，可重试提交。");
@@ -170,6 +177,10 @@ export function QuestionBatchSheet({ engine, questions, draft, onSubmit }: {
         <span>{question.header}</span>{question.multi_select && <span>可多选</span>}
       </div>}
       <div className="qa-question">{question.question}</div>
+      {page === 0 && approvalDiff && <details className="qa-approval-diff" open>
+        <summary>待审批的改动</summary>
+        <pre className="tool-pre tool-diff">{approvalDiff}</pre>
+      </details>}
       <div className="qa-options">
         {question.options.map(option => <button key={option.label}
           className={`qa-opt${current.selected.includes(option.label) ? " selected" : ""}`}
@@ -202,6 +213,12 @@ export function QuestionBatchSheet({ engine, questions, draft, onSubmit }: {
       </div>}
       {error && <div className="qa-submit-error" role="status">{error}</div>}
     </div>
+    {onDismiss && !!dismissActions?.length && <div className="qa-footer qa-dismiss-actions">
+      {dismissActions.map(action => <button type="button" className="qa-previous"
+        key={action} disabled={pending} onClick={() => send(() => onDismiss(action))}>
+        {action === "decline" ? "拒绝回答" : "取消请求"}
+      </button>)}
+    </div>}
     <div className="qa-footer">
       {questions.length > 1 && <button className="qa-previous" disabled={page === 0 || pending}
         onPointerDown={ime.commitCompositionBeforePointerSubmit}

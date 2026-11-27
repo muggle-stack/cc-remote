@@ -153,10 +153,21 @@ def _claude_service_socket(key: str = "socket") -> str:
     explicit = os.environ.get(env_key)
     if explicit is not None:
         return explicit.strip()
+    return _registered_service_value("claude-service.json", "Claude", key)
+
+
+def _antigravity_service_socket() -> str:
+    explicit = os.environ.get("CC_REMOTE_ANTIGRAVITY_SERVICE_SOCKET")
+    if explicit is not None:
+        return explicit.strip()
+    return _registered_service_value("gemini-service.json", "Gemini", "socket")
+
+
+def _registered_service_value(filename: str, label: str, key: str) -> str:
     # A system-managed Wrapper can use its user's private registration without
     # granting that user permission to rewrite root-owned service credentials.
     directory = Path(_env("CC_REMOTE_STATE_DIR", str(Path.home() / ".cc-remote"))).expanduser()
-    path = directory / "claude-service.json"
+    path = directory / filename
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except FileNotFoundError:
@@ -165,13 +176,13 @@ def _claude_service_socket(key: str = "socket") -> str:
         info = os.fstat(source.fileno())
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                 or info.st_mode & 0o077 or info.st_size > 4096):
-            raise ValueError("Claude service registration must be a private user-owned file")
+            raise ValueError(f"{label} service registration must be a private user-owned file")
         payload = json.loads(source.read(4097))
     if not isinstance(payload, dict) or not isinstance(payload.get("socket"), str):
-        raise ValueError("invalid Claude service registration")
+        raise ValueError(f"invalid {label} service registration")
     value = payload.get(key, "")
     if not isinstance(value, str):
-        raise ValueError("invalid Claude service registration")
+        raise ValueError(f"invalid {label} service registration")
     return value
 
 
@@ -326,6 +337,9 @@ class WrapperConfig:
     # retains the in-process SDK for unmanaged development installations.
     claude_service_socket: str = field(
         default_factory=lambda: _env("CC_REMOTE_CLAUDE_SERVICE_SOCKET", ""))
+    antigravity_service_socket: str = field(
+        default_factory=lambda: _env("CC_REMOTE_ANTIGRAVITY_SERVICE_SOCKET", ""))
+    antigravity_owner_state_dir: Path | None = None
     # During an SDK-service upgrade, existing native work may finish on the
     # previous service while newly opened sessions use the primary socket.
     claude_service_drain_socket: str = field(
@@ -614,7 +628,8 @@ def wrapper_config() -> WrapperConfig:
     # Read the opt-in installation registration only at actual Wrapper startup;
     # constructing test/development config objects must not attach live workers.
     return WrapperConfig(claude_service_socket=_claude_service_socket(),
-                         claude_service_drain_socket=_claude_service_socket("drain_socket"))
+                         claude_service_drain_socket=_claude_service_socket("drain_socket"),
+                         antigravity_service_socket=_antigravity_service_socket())
 
 
 def validate_wrapper_config(cfg: WrapperConfig) -> None:
@@ -708,6 +723,11 @@ def validate_wrapper_config(cfg: WrapperConfig) -> None:
             errors.append("CC_REMOTE_CLAUDE_SERVICE_SOCKET must be an absolute Unix socket path of at most 103 bytes")
         if cfg.experimental_claude_broker:
             errors.append("Claude SDK service and experimental PTY broker cannot be enabled together")
+    if cfg.antigravity_service_socket:
+        service_socket = os.path.expanduser(cfg.antigravity_service_socket)
+        if (not os.path.isabs(service_socket) or "\x00" in service_socket
+                or len(os.fsencode(service_socket)) > 103):
+            errors.append("CC_REMOTE_ANTIGRAVITY_SERVICE_SOCKET must be an absolute Unix socket path of at most 103 bytes")
     if cfg.claude_service_drain_socket:
         drain_socket = os.path.expanduser(cfg.claude_service_drain_socket)
         if (not cfg.claude_service_socket or not os.path.isabs(drain_socket)

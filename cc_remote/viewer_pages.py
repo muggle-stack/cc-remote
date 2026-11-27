@@ -28,7 +28,7 @@ _PROFILE_REVISIONS = "_profile_revisions"
 class PageScope(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     sid: str = Field(min_length=1, max_length=256)
-    engine: Literal["claude", "codex", "dsh"]
+    engine: Literal["claude", "codex", "dsh", "antigravity"]
     space: Literal["code", "work"]
 
     @field_validator("sid")
@@ -228,7 +228,7 @@ class ViewerPageStore:
         return result
 
     def migrate_profile_sessions(
-        self, engine: Literal["claude", "codex", "dsh"], transform: Callable[[str], str],
+        self, engine: Literal["claude", "codex", "dsh", "antigravity"], transform: Callable[[str], str],
         *, profile_revision: int,
     ) -> None:
         """Rewrite one engine's scopes atomically, once per topology revision.

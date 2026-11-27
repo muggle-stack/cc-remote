@@ -6,7 +6,7 @@
 // chips drive set_model / set_permission_mode on the wrapper.
 
 import type {
-  CatalogModel, EngineCapabilityItem, PermissionProfileInfo,
+  AntigravityOption, CatalogModel, EngineCapabilityItem, NativeCommandInfo, PermissionProfileInfo,
 } from "./protocol";
 
 export interface CmdGroup { g: string }
@@ -210,13 +210,13 @@ const fromCatalog = (entries: CatalogModel[], engine?: string): Model[] =>
     ds: e.description ?? "",
     ic: "cpu",
     // Empty native capabilities stay empty, including before discovery.
-    efforts: e.efforts.map((id) => engine === "codex"
-      ? { id, name: id, ds: e.effort_descriptions?.[id] ?? "", ic: "gauge3" }
+    efforts: e.efforts.map((id) => engine === "codex" || engine === "antigravity"
+      ? { id, name: e.effort_names?.[id] ?? id, ds: e.effort_descriptions?.[id] ?? "", ic: "gauge3" }
       : effort(id)),
   }));
 
 export const modelsFor = (engine?: string, catalog?: Catalog): Model[] => {
-  if (engine === "codex" || engine === "dsh") return fromCatalog(catalog?.[engine] ?? [], engine);
+  if (engine === "codex" || engine === "dsh" || engine === "antigravity") return fromCatalog(catalog?.[engine] ?? [], engine);
   const live = catalog?.claude;
   return live?.length ? fromCatalog(live) : MODELS;
 };
@@ -241,7 +241,7 @@ export const effortsFor = (engine?: string, model?: string | null, catalog?: Cat
   const m = model ? modelsFor(engine, catalog).find((x) => x.id === model
     || (engine !== "codex" && x.id.replace(/\[1m\]$/i, "") === model.replace(/\[1m\]$/i, ""))) : undefined;
   if (m?.efforts) return m.efforts;
-  return engine === "dsh" || engine === "codex" ? [] : EFFORTS;
+  return engine === "dsh" || engine === "codex" || engine === "antigravity" ? [] : EFFORTS;
 };
 
 /** A null app-server thread effort is a real model-default state, not loading.
@@ -262,7 +262,21 @@ export function effortIsSelectable(
   return !!normalized && normalized !== "model-default";
 }
 
-export const permsFor = (engine?: string): Perm[] => (engine === "dsh" ? [] : engine === "codex" ? CODEX_PERMS : PERMS);
+export const permsFor = (engine?: string): Perm[] => (engine === "dsh" || engine === "antigravity" ? [] : engine === "codex" ? CODEX_PERMS : PERMS);
+
+/** Project the advertised ACP modes into the shared permission picker. */
+export function antigravityPermissions(options?: AntigravityOption[]): Perm[] {
+  return (options?.find(option => option.category === "mode")?.choices ?? []).map(choice => ({
+    id: choice.value, name: choice.name, short: choice.name, ds: choice.description,
+    ic: choice.value === "plan" ? "plan" : "shield", danger: false,
+  }));
+}
+
+export function antigravityEfforts(options?: AntigravityOption[]): Effort[] {
+  return (options?.find(option => option.category === "thought_level")?.choices ?? []).map(choice => ({
+    id: choice.value, name: choice.name, ds: choice.description, ic: "gauge3",
+  }));
+}
 
 /** Localized display only; selections retain the exact native permission ID. */
 export function dshPermissionLabel(value: string, fallback = value): string {
@@ -348,12 +362,19 @@ const CODEX_CMD_LIST: Cmd[] = CODEX_COMMANDS.filter(isCmd) as Cmd[];
 export const CODEX_CLIENT_SLASHES = new Set(["model", "plan", "normal", "clear", "context", "autocompact", "status", "permissions", "fast", "goal", "btw", "diff", "preview", "open", "review", "compact", "rollback", ...EXTENSION_SLASHES]);
 const HIDDEN_CODE_ONLY_SLASHES = new Set(["rollback"]);
 export type CommandSurface = "code" | "work";
+const GEMINI_SLASHES = new Set(["model", "permissions", "context", "diff", "preview", "open", "clear", "extensions"]);
 export const commandsFor = (engine?: string, surface: CommandSurface = "code"): Command[] => (
-  engine === "dsh" ? CODEX_COMMANDS.filter(c => !isCmd(c) || ["model", "context", "diff", "preview", "open", "skills"].includes(c.slash)) : surface === "work"
+  engine === "antigravity" ? CODEX_CMD_LIST.filter(c => GEMINI_SLASHES.has(c.slash)).map(c => {
+    if (c.slash === "permissions") return { ...c, ds: "选择 Gemini 原生权限模式" };
+    if (c.slash === "clear") return { ...c, ds: "开始新的 Gemini 会话" };
+    if (c.slash === "extensions") return { ...c, name: "扩展目录", ds: "查看 Gemini Skills、Plugins、MCP 与 Hooks" };
+    return c;
+  })
+    : engine === "dsh" ? CODEX_COMMANDS.filter(c => !isCmd(c) || ["model", "context", "diff", "preview", "open", "skills"].includes(c.slash)) : surface === "work"
     ? engine === "codex" ? CODEX_WORK_COMMANDS : WORK_COMMANDS
     : engine === "codex" ? CODEX_COMMANDS : COMMANDS
 );
-export const clientSlashesFor = (engine?: string): Set<string> => (engine === "dsh" ? new Set(["model", "context", "diff", "preview", "open", "skills"]) : engine === "codex" ? CODEX_CLIENT_SLASHES : CLIENT_SLASHES);
+export const clientSlashesFor = (engine?: string): Set<string> => (engine === "antigravity" ? GEMINI_SLASHES : engine === "dsh" ? new Set(["model", "context", "diff", "preview", "open", "skills"]) : engine === "codex" ? CODEX_CLIENT_SLASHES : CLIENT_SLASHES);
 
 export const DSH_SIDECHAT_UNAVAILABLE = "DSH 侧聊暂未开放，等待官方提供会话删除能力后再接入。";
 
@@ -413,10 +434,15 @@ export function matchSkills(
 
 // Commands whose slash starts with `token` (case-insensitive, prefix match).
 export function matchCommands(token: string, engine?: string,
-                              surface: CommandSurface = "code"): Cmd[] {
+                              surface: CommandSurface = "code", native: NativeCommandInfo[] = []): Cmd[] {
   const t = token.toLowerCase();
   const list = commandsFor(engine, surface).filter(isCmd) as Cmd[];
-  return list.filter((c) => c.slash.toLowerCase().startsWith(t));
+  const matches = native.filter(c => c.name.toLowerCase().startsWith(t));
+  return [
+    ...matches.map(c => ({ slash: c.name, name: c.name,
+      ds: [c.description, c.input_hint].filter(Boolean).join(" · "), ic: "term" })),
+    ...list.filter(c => c.slash.toLowerCase().startsWith(t) && !matches.some(n => n.name === c.slash)),
+  ];
 }
 
 // Split "/slash rest of args" -> { slash, args }. null if not a slash line.
@@ -432,7 +458,7 @@ export function parseSlash(input: string): { slash: string; args: string } | nul
 /** Shared by the welcome composer and the live conversation. Client commands
  * must never accidentally become model prompts just because a session is new. */
 export function routeComposerInput(
-  input: string, engine?: string, surface: CommandSurface = "code",
+  input: string, engine?: string, surface: CommandSurface = "code", native?: NativeCommandInfo[],
 ): { kind: "empty" } | { kind: "blocked"; message: string }
   | { kind: "client"; slash: string; args: string }
   | { kind: "prompt"; prompt: string } {
@@ -441,6 +467,9 @@ export function routeComposerInput(
   const parsed = parseSlash(raw);
   if (engine === "dsh" && parsed?.slash === "btw") {
     return { kind: "blocked", message: DSH_SIDECHAT_UNAVAILABLE };
+  }
+  if (engine === "antigravity" && parsed && native?.some(c => c.name === parsed.slash)) {
+    return { kind: "prompt", prompt: raw };
   }
   if (surface === "work" && parsed && isKnownCodeOnlySlash(parsed.slash, engine)) {
     return { kind: "blocked", message: `/${parsed.slash} 是 Code 指令，请切换到 Code 使用` };

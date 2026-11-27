@@ -10,6 +10,7 @@ from textual.widgets import Input, Static, Tree
 from cc_remote.tui import _safe_remote_text
 from cc_remote.protocol import CloseBtw, DeleteSession, RenameSession
 from cc_remote.tui_modal import Overlay, PickerList, hints
+from cc_remote.tui_navigation import engine_label
 from cc_remote.tui_settings import TextValue
 from textual.widgets import Label, OptionList, TextArea
 
@@ -411,7 +412,7 @@ class SessionExplorer(Vertical):
         tree.get_node_at_line(0)
         tree.move_cursor(target or next(iter(tree.root.children), tree.root))
         self.query_one("#tree-heading", Static).update(
-            f"{client.engine.title()} / {client.space.title()} · {len(matches)} sessions"
+            f"{engine_label(client.engine)} / {client.space.title()} · {len(matches)} sessions"
         )
 
     def on_input_changed(self, event: Input.Changed) -> None:

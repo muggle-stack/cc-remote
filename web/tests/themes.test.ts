@@ -11,13 +11,13 @@ const storage = { getItem: (key: string) => values.get(key) ?? null,
   setItem: (key: string, value: string) => { values.set(key, value); } };
 assert.equal(readThemePreferences(storage).codex, "system");
 values.set(LEGACY_THEME_KEY, "dark");
-assert.deepEqual(readThemePreferences(storage), { claude: "dark", codex: "dark", dsh: "dark" });
+assert.deepEqual(readThemePreferences(storage), { claude: "dark", codex: "dark", dsh: "dark", antigravity: "dark" });
 values.set(THEME_STORAGE_KEY, '{"codex":"moss","claude":"invalid","dsh":"lagoon"}');
-assert.deepEqual(readThemePreferences(storage), { claude: "dark", codex: "moss", dsh: "lagoon" });
+assert.deepEqual(readThemePreferences(storage), { claude: "dark", codex: "moss", dsh: "lagoon", antigravity: "dark" });
 const olderTab = readThemePreferences(storage);
 saveThemeChoice(storage, olderTab, "dsh", "rose");
 saveThemeChoice(storage, olderTab, "codex", "amber");
-assert.deepEqual(readThemePreferences(storage), { claude: "dark", codex: "amber", dsh: "rose" },
+assert.deepEqual(readThemePreferences(storage), { claude: "dark", codex: "amber", dsh: "rose", antigravity: "dark" },
   "a stale tab must not overwrite another engine's latest preference");
 assert.equal(values.get(LEGACY_THEME_KEY), "dark");
 values.set(THEME_STORAGE_KEY, "{invalid");

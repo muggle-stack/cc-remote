@@ -1,6 +1,7 @@
 /** Appearance is local to each engine. Only the resolved light/dark mode is
  * passed to diff/preview renderers; palette names never enter the protocol. */
-export type ThemeEngine = "claude" | "codex" | "dsh";
+import type { Engine } from "./protocol";
+export type ThemeEngine = Engine;
 export type ThemeMode = "light" | "dark";
 export type PaletteId = "amber" | "moss" | "rose" | "lagoon" | "bordeaux" | "heritage";
 export type ThemeChoice = "system" | ThemeMode | PaletteId;
@@ -61,7 +62,7 @@ export function readThemePreferences(storage?: Pick<Storage, "getItem">): ThemeP
     try { saved = JSON.parse(storage?.getItem(THEME_STORAGE_KEY) ?? "null"); }
     catch { /* Fall back to the previous light/dark preference. */ }
     const preferences: ThemePreferences = {};
-    for (const engine of ["claude", "codex", "dsh"] as const) {
+    for (const engine of ["claude", "codex", "dsh", "antigravity"] as const) {
       const value = saved && typeof saved === "object" ? (saved as Record<string, unknown>)[engine] : undefined;
       preferences[engine] = isThemeChoice(value) ? value : fallback;
     }
@@ -80,7 +81,7 @@ export function saveThemeChoice(storage: Pick<Storage, "getItem" | "setItem"> | 
       let saved: Partial<Record<ThemeEngine, unknown>> | null = null;
       try { saved = JSON.parse(storage.getItem(THEME_STORAGE_KEY) ?? "null"); }
       catch { /* Replace malformed preferences with this valid selection. */ }
-      for (const other of ["claude", "codex", "dsh"] as const) {
+      for (const other of ["claude", "codex", "dsh", "antigravity"] as const) {
         const value = saved?.[other];
         if (other !== engine && isThemeChoice(value)) next[other] = value;
       }

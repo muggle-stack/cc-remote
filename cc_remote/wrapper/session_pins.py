@@ -16,7 +16,7 @@ from typing import Callable, Literal
 from uuid import uuid4
 
 
-Engine = Literal["claude", "codex", "dsh"]
+Engine = Literal["claude", "codex", "dsh", "antigravity"]
 
 _SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,255}$")
 _MAX_ENTRIES = 4096
@@ -188,13 +188,13 @@ class SessionPinStore:
 
     @staticmethod
     def _validate_identity(engine: object, session_id: object) -> None:
-        if engine not in {"claude", "codex", "dsh"}:
+        if engine not in {"claude", "codex", "dsh", "antigravity"}:
             raise SessionPinStoreError("invalid session pin engine")
         if not isinstance(session_id, str) or not _SAFE_SESSION_ID.fullmatch(session_id):
             raise SessionPinStoreError("invalid pinned session id")
 
     def _load(self) -> dict[Engine, set[str]]:
-        empty: dict[Engine, set[str]] = {"claude": set(), "codex": set(), "dsh": set()}
+        empty: dict[Engine, set[str]] = {"claude": set(), "codex": set(), "dsh": set(), "antigravity": set()}
         try:
             info = self.path.lstat()
             if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_FILE_BYTES:
@@ -206,7 +206,7 @@ class SessionPinStore:
             if (
                 not isinstance(raw, dict)
                 or set(raw) - {
-                    "claude", "codex", "dsh", "profile_revision", "profile_revisions"
+                    "claude", "codex", "dsh", "antigravity", "profile_revision", "profile_revisions"
                 }
                 or not {"claude", "codex"}.issubset(raw)
             ):
@@ -218,8 +218,8 @@ class SessionPinStore:
                 or profile_revision < 0
             ):
                 raise ValueError("session pin profile revision is invalid")
-            loaded: dict[Engine, set[str]] = {"claude": set(), "codex": set(), "dsh": set()}
-            for engine in ("claude", "codex", "dsh"):
+            loaded: dict[Engine, set[str]] = {"claude": set(), "codex": set(), "dsh": set(), "antigravity": set()}
+            for engine in ("claude", "codex", "dsh", "antigravity"):
                 values = raw.get(engine, [])
                 if not isinstance(values, list):
                     raise ValueError("session pin list is invalid")
@@ -272,6 +272,7 @@ class SessionPinStore:
                 "claude": sorted(pins["claude"]),
                 "codex": sorted(pins["codex"]),
                 **({"dsh": sorted(pins["dsh"])} if pins.get("dsh") else {}),
+                **({"antigravity": sorted(pins["antigravity"])} if pins.get("antigravity") else {}),
                 "profile_revision": (
                     self._profile_revision
                     if profile_revision is None else profile_revision

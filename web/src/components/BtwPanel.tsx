@@ -1,3 +1,4 @@
+import type { Engine } from "../protocol";
 import AsyncQuestionHost from "./AsyncQuestionDialog";
 import { AsyncQuestionStore } from "../async-question-state";
 import { PanelFrame, PanelExpandButton } from "./RightPanelPresentation";
@@ -82,10 +83,10 @@ interface Props {
   onOpenArtifacts?: () => void;
   sid?: string;
   rt: SessionRuntime | undefined;
-  engine: "claude" | "codex" | "dsh";
+  engine: Engine;
   chats: Array<{
     sid: string;
-    engine: "claude" | "codex" | "dsh";
+    engine: Engine;
     title: string;
     state: "idle" | "running" | "interrupting" | "draining";
     needsAnswer: boolean;

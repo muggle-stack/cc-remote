@@ -1,8 +1,9 @@
+import type { Engine } from "./protocol";
 import {
   acceptanceKindFor, canSubmitSteer, pendingAcceptanceIds,
   type SteerAcceptanceKind,
 } from "./pending-steers";
-import type { DshState, DshPreset, DshPermissionOption, DshCommandResult } from "./protocol";
+import type { AskDismissAction, AntigravityState, AntigravityOption, NativeCommandInfo, DshState, DshPreset, DshPermissionOption, DshCommandResult } from "./protocol";
 import type { DeviceView } from "./device-view-cache";
 import { isSyntheticReturnReceipt } from "./agent-returns";
 import { reduceWithRetainedArtifacts } from "./artifact-retention";
@@ -138,8 +139,8 @@ export function modelCatalogScopeKey(
   const account = (engine === "codex" || engine === "claude") && profileId
     ? `${engine}\u0000${profileId}`
     : engine;
-  if (engine === "codex" && sessionId) return `${account}\u0000session:${sessionId}`;
-  return engine === "claude" && cwd ? `${account}\u0000${cwd}` : account;
+  if ((engine === "codex" || engine === "antigravity") && sessionId) return `${account}\u0000session:${sessionId}`;
+  return (engine === "claude" || engine === "antigravity") && cwd ? `${account}\u0000${cwd}` : account;
 }
 
 export function nativeProfileSessionId(sessionId: string): string {
@@ -215,6 +216,7 @@ export interface Artifact {
 export interface SessionRuntime {
   turnUsage?: TurnUsageReadings;
   dsh?: DshState;
+  antigravity?: AntigravityState;
   dshCommandResult?: DshCommandResult;
   turns: Turn[];
   state: State;
@@ -355,7 +357,7 @@ export interface SessionRuntime {
   takeoverPending: boolean;
   takeoverMessage: string | null;
   ccSessionId?: string;
-  pendingQuestion: (AskQuestion & { ask_id: string; questions?: AskQuestion[] | null;
+  pendingQuestion: (AskQuestion & { ask_id: string; approval_diff?: string | null; dismiss_actions?: AskDismissAction[] | null; questions?: AskQuestion[] | null;
     model_fallback?: ModelFallbackPrompt | null }) | null;
   contextReport: ContextReport | null;
   // Last usable native reading, or the latest billing reading until native
@@ -402,6 +404,14 @@ export interface SessionRuntime {
 }
 
 export interface AppState {
+  antigravityAvailable?: boolean;
+  antigravityCatalog?: {
+    cwd?: string | null;
+    model?: string | null;
+    options: AntigravityOption[];
+    commands: NativeCommandInfo[];
+    error?: string | null;
+  };
   dshPresets?: DshPreset[];
   dshPermissions?: DshPermissionOption[];
   dshError?: string | null;
@@ -483,7 +493,7 @@ export interface AppState {
 
 export interface BtwChat {
   sid: string;
-  engine: "claude" | "codex" | "dsh";
+  engine: Engine;
   createdAt: number;
   state: "idle" | "running" | "interrupting" | "draining";
 }
@@ -1791,14 +1801,15 @@ function finishOpenBlocks(
   preserveOpenPlans = false,
   preserveBackground = false,
   preserveOpenText = false,
+  preserveOpenTools = false,
 ): void {
   finishOpenBlockList(
     mutableTurnBlocks(turn), status, isError,
-    preserveOpenPlans, preserveBackground, preserveOpenText);
+    preserveOpenPlans, preserveBackground, preserveOpenText, preserveOpenTools);
   if (turn.detailProjection) {
     finishOpenBlockList(
       turn.detailProjection.blocks, status, isError,
-      preserveOpenPlans, preserveBackground, preserveOpenText);
+      preserveOpenPlans, preserveBackground, preserveOpenText, preserveOpenTools);
   }
 }
 
@@ -1807,6 +1818,7 @@ function finishCompletedTurnChildren(
   turn: Turn,
   preserveOpenPlans = false,
   preserveBackground = false,
+  preserveOpenTools = false,
 ): void {
   if (!turn.done) return;
   const status = turn.interrupted
@@ -1814,7 +1826,7 @@ function finishCompletedTurnChildren(
   finishOpenBlocks(
     turn, status, status !== "succeeded",
     preserveOpenPlans, preserveBackground,
-    preserveOpenPlans && status === "succeeded");
+    preserveOpenPlans && status === "succeeded", preserveOpenTools);
 }
 
 /** Close only one newly-installed detail projection. A completed turn may have
@@ -1825,13 +1837,15 @@ function finishOpenDetailBlocks(
   status: "succeeded" | "failed" | "interrupted",
   isError: boolean,
   preserveContinuation = false,
+  preserveOpenTools = false,
 ): void {
   if (turn.detailProjection) {
     // Exact terminal translations already close their Plan. Preserve an open
     // one because it identifies a neutral Codex steer segment.
     finishOpenBlockList(
       turn.detailProjection.blocks.filter(block =>
-        !preserveContinuation || block.background !== true), status, isError, true);
+        !preserveContinuation || block.background !== true),
+      status, isError, true, false, false, preserveOpenTools);
   }
 }
 
@@ -1842,6 +1856,7 @@ function finishOpenBlockList(
   preserveOpenPlans = false,
   preserveBackground = false,
   preserveOpenText = false,
+  preserveOpenTools = false,
 ): void {
   for (const block of blocks) {
     if (block.kind === "text") {
@@ -1851,7 +1866,7 @@ function finishOpenBlockList(
           || (preserveBackground && block.background === true)) continue;
       block.done = true;
       if (!terminalProcessStatus(block.status)) block.status = status;
-    } else if (block.kind === "tool" && !block.done) {
+    } else if (block.kind === "tool" && !block.done && !preserveOpenTools) {
       block.done = true;
       block.result ??= {
         content: block.output ?? "",
@@ -1919,6 +1934,7 @@ function finishTurnFromIdleHistory(turn: Turn, doneTs: number): void {
 
 function finishTurnAtSteerFence(
   turn: Turn, nativeTurnId: string, doneTs: number,
+  preserveOpenTools = false,
 ): void {
   if (turn.done) return;
   turn.done = true;
@@ -1938,11 +1954,12 @@ function finishTurnAtSteerFence(
   // stream the predecessor's current message. Only its native item end (or an
   // authoritative terminal) closes that text; otherwise Delta treats the
   // locally closed prefix as immutable and silently drops the remaining reply.
-  finishOpenBlocks(turn, "succeeded", false, false, false, true);
+  finishOpenBlocks(turn, "succeeded", false, false, false, true, preserveOpenTools);
 }
 
 function reconcileAcceptedSteerHistory(
   turns: Turn[], pendingId: string, doneTs: number,
+  preserveOpenTools = false,
 ): void {
   const acceptedIndex = turns.findIndex((turn) =>
     turnHasIdentityAlias(turn, pendingId));
@@ -1956,7 +1973,7 @@ function reconcileAcceptedSteerHistory(
   // the same narrative fence so later process/TurnEnd events target the new
   // segment rather than resurrecting its predecessor.
   const nativeTurnId = previous.liveTaskId ?? previous.forkPointId;
-  finishTurnAtSteerFence(previous, nativeTurnId ?? "", doneTs);
+  finishTurnAtSteerFence(previous, nativeTurnId ?? "", doneTs, preserveOpenTools);
   if (nativeTurnId && !accepted.done) {
     accepted.liveTaskId ??= nativeTurnId;
   }
@@ -1964,6 +1981,7 @@ function reconcileAcceptedSteerHistory(
 
 function reconcileAcceptedSteerEcho(
   runtime: SessionRuntime, turns: Turn[], id: string, doneTs: number,
+  preserveOpenTools = false,
 ): void {
   const index = turns.findIndex(turn => turnHasIdentityAlias(turn, id));
   if (index < 0) return;
@@ -1972,7 +1990,7 @@ function reconcileAcceptedSteerEcho(
   turns.splice(pendingIndex < 0 ? turns.length : pendingIndex, 0, accepted);
   // An exact user echo or binding can recover a lost TurnSteered frame.
   // Retire its predecessor, leaving every unconsumed input untouched.
-  reconcileAcceptedSteerHistory(turns, id, doneTs);
+  reconcileAcceptedSteerHistory(turns, id, doneTs, preserveOpenTools);
 }
 
 function resolveUnknownPendingSteer(
@@ -4540,6 +4558,7 @@ function reduceEvent(
       const isClaudeHistory = ownership?.engine === "claude"
         || state.sessions.some((session) =>
           session.session_id === sid && session.engine === "claude");
+      const preserveGeminiTools = sid.startsWith("agy@") && preserveProjectionOpenPlans;
       const settledCodexHistory = settledHistory && isCodexHistory;
       // Never infer Claude merely because Codex ownership has not arrived yet.
       // Session lists and first History can race on reconnect; an unknown
@@ -4647,7 +4666,7 @@ function reduceEvent(
           const accepted = acceptedInputs.find(input => input.id === turn.id);
           if (accepted?.nativeId && (accepted.kind === "steer" || accepted.kind === "steer_unknown")) {
             reconcileAcceptedSteerHistory(turns, accepted.id,
-              e.ts ? Math.round(e.ts * 1000) : Date.now());
+              e.ts ? Math.round(e.ts * 1000) : Date.now(), preserveGeminiTools);
           }
         }
         // A current first page which explicitly reports idle is the recovery
@@ -4694,7 +4713,7 @@ function reduceEvent(
             // Detail may still be shared with the previous reducer state.
             const settled = cloneTurns([merged])[0];
             finishCompletedTurnChildren(
-              settled, preserveProjectionOpenPlans, isClaudeHistory);
+              settled, preserveProjectionOpenPlans, isClaudeHistory, preserveGeminiTools);
             return settled;
           }
           return merged;
@@ -5233,7 +5252,8 @@ function reduceEvent(
             const status = next.interrupted
               ? "interrupted" : next.error ? "failed" : "succeeded";
             finishOpenDetailBlocks(
-              next, status, status !== "succeeded", activeContinuation);
+              next, status, status !== "succeeded", activeContinuation,
+              rt.state !== "idle" && e.sid?.startsWith("agy@"));
           }
           if (continuedLiveSpillRefreshDue(next)
               && next.detailLoading !== true) {
@@ -5274,6 +5294,12 @@ function reduceEvent(
       return patch(state, e.sid, (rt) => { rt.dshCommandResult = e; });
     case "dsh_state":
       return patch(state, e.sid, (rt) => { rt.dsh = e; });
+    case "antigravity_auth_result":
+      return state;
+    case "antigravity_availability":
+      return { ...state, antigravityAvailable: e.enabled, wrapperOnline: true };
+    case "antigravity_state":
+      return patch(state, e.sid, rt => { rt.antigravity = e; });
     case "models": {
       // DSH catalogs are authoritative, including empty responses. Other engines
       // retain their existing catalog on a failed/empty read.
@@ -5285,13 +5311,16 @@ function reduceEvent(
             ? (e.claude_profile_id ?? state.defaultClaudeProfileId)
             : null,
         null,
-        e.engine === "codex" ? e.sid : null,
+        e.engine === "codex" || e.engine === "antigravity" ? e.sid : null,
       );
-      const catalogKey = e.engine === "claude" && e.cwd ? `${cacheKey}\u0000${e.cwd}` : cacheKey;
+      if (e.engine === "antigravity" && !e.sid && (
+        e.cwd !== state.newChat?.cwd || (e.antigravity_model ?? null) !== (state.newChat?.model ?? null)
+      )) return state;
+      const catalogKey = (e.engine === "claude" || e.engine === "antigravity") && e.cwd ? `${cacheKey}\u0000${e.cwd}` : cacheKey;
       const catalog = e.models.length || e.engine === "dsh"
         ? { ...state.catalog, [catalogKey]: e.models }
         : state.catalog;
-      if (e.engine === "codex" && e.sid) return { ...state, catalog };
+      if ((e.engine === "codex" || e.engine === "antigravity") && e.sid) return { ...state, catalog };
       if (e.cwd && e.cwd !== state.newChat?.cwd) {
         // Cwd-aware reads run concurrently. Never let a late response for a
         // directory the user has left replace the still-current result.
@@ -5333,6 +5362,10 @@ function reduceEvent(
       }
       return {
         ...state, catalog, catalogDefault, catalogDefaultEffort,
+        ...(e.engine === "antigravity" ? { antigravityCatalog: {
+          cwd: e.cwd, model: e.antigravity_model,
+          options: e.antigravity_options ?? [], commands: e.antigravity_commands ?? [], error: e.error,
+        } } : {}),
         ...(e.engine === "dsh" ? { dshPresets: e.dsh_presets ?? [], dshPermissions: e.dsh_permissions ?? [], dshError: e.error ?? null } : {}),
         catalogDefaultCwd,
       };
@@ -5895,7 +5928,7 @@ function reduceEvent(
       // user's answer) can retire a restored question during normal operation.
       return patch(state, e.sid, (rt) => { rt.pendingQuestion = null; });
     case "ask_user":
-      return patch(state, e.sid, (rt) => { rt.pendingQuestion = { ask_id: e.ask_id, header: e.header, question: e.question, options: e.options, allow_text: e.allow_text, secret: e.secret, multi_select: e.multi_select, questions: e.questions, plan_document: e.plan_document, model_fallback: e.model_fallback }; });
+      return patch(state, e.sid, (rt) => { rt.pendingQuestion = { ask_id: e.ask_id, approval_diff: e.approval_diff, dismiss_actions: e.dismiss_actions, header: e.header, question: e.question, options: e.options, allow_text: e.allow_text, secret: e.secret, multi_select: e.multi_select, questions: e.questions, plan_document: e.plan_document, model_fallback: e.model_fallback }; });
     case "ask_user_closed":
       return patch(state, e.sid, (rt) => {
         if (rt.pendingQuestion?.ask_id === e.ask_id) {
@@ -6412,7 +6445,7 @@ function reduceEvent(
           });
         }
         for (const id of acceptedSteers) {
-          reconcileAcceptedSteerEcho(rt, turns, id, stamp ?? Date.now());
+          reconcileAcceptedSteerEcho(rt, turns, id, stamp ?? Date.now(), e.sid?.startsWith("agy@"));
         }
         const binding = rt.pendingLiveBinding;
         const boundNativeTurnId = binding
@@ -6460,7 +6493,7 @@ function reduceEvent(
             const previous = [...turns.slice(0, insertAt)].reverse()
               .find((turn) => !turn.done);
             if (previous) {
-              finishTurnAtSteerFence(previous, e.turn_id, doneTs);
+              finishTurnAtSteerFence(previous, e.turn_id, doneTs, e.preserve_open_tools);
             }
             existing.done = false;
             existing.doneTs = undefined;
@@ -6507,7 +6540,7 @@ function reduceEvent(
         const previous = [...predecessorPool].reverse()
           .find((turn) => !turn.done);
         if (previous) {
-          finishTurnAtSteerFence(previous, e.turn_id, doneTs);
+          finishTurnAtSteerFence(previous, e.turn_id, doneTs, e.preserve_open_tools);
         }
         existing = {
           id: e.msg_id,
@@ -6702,7 +6735,7 @@ function reduceEvent(
             && b.tool_use_id === e.tool_use_id) as ToolBlock | undefined;
           if (!block) continue;
           if (e.background === true) block.background = true;
-          const detachedBackground = e.background === true && t.done;
+          const detachedBackground = t.done && (e.background === true || e.sid?.startsWith("agy@"));
           if (!detachedBackground) {
             markTurnAsLive(rt, t.id, boundCompletedTurns, e.seq);
           }
@@ -6733,7 +6766,7 @@ function reduceEvent(
           const b = mutableTurnBlocks(t).find((b) => b.kind === "tool"
             && b.tool_use_id === e.tool_use_id) as ToolBlock | undefined;
           if (b) {
-            const detachedBackground = e.background === true && t.done;
+            const detachedBackground = t.done && (e.background === true || e.sid?.startsWith("agy@"));
             if (!detachedBackground) {
               markTurnAsLive(rt, t.id, boundCompletedTurns, e.seq);
             }
@@ -7000,7 +7033,7 @@ function reduceEvent(
         clearAcceptance(rt, e.msg_id);
         let turns = cloneTurns(rt.turns);
         if (acceptanceKind === "steer" || acceptanceKind === "steer_unknown") {
-          reconcileAcceptedSteerEcho(rt, turns, e.msg_id, eventTimestampMs(e.ts) ?? Date.now());
+          reconcileAcceptedSteerEcho(rt, turns, e.msg_id, eventTimestampMs(e.ts) ?? Date.now(), e.sid?.startsWith("agy@"));
         }
         const seq = typeof e.seq === "number" ? e.seq : 0;
         if (e.autonomous) {
@@ -7196,6 +7229,9 @@ function reduceEvent(
                 : "succeeded",
             e.result.is_error || nativeDshInterrupt,
             e.result.subtype === "steered",
+            false,
+            false,
+            !!e.sid?.startsWith("agy@") && !!e.result.background_tool_ids?.length,
           );
           settleVisibleProcessIfComplete(
             t, eventTimestampMs(e.ts) ?? t.doneTs);

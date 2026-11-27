@@ -1,3 +1,4 @@
+import { ENGINE_LABELS } from "../protocol";
 import { type RefObject } from "react";
 import { EngineIcon } from "../icons";
 import type { ThemeEngine } from "../themes";
@@ -26,7 +27,7 @@ export default function ThemePicker({ engine, appearance, onClose, returnFocusRe
   return <CenteredSheet open label="外观" onClose={onClose} maxWidth={engine === "dsh" ? 520 : 620} maxHeight={940} minimumHeight={engine === "dsh" ? 700 : 600}
     className={`theme-picker${engine === "dsh" ? " theme-picker-dsh" : ""}`} returnFocusRef={returnFocusRef}>
     <div className="theme-picker-intro">
-      <span><EngineIcon engine={engine} size={17} />{({ claude: "Claude", codex: "Codex", dsh: "DSH" })[engine]}</span>
+      <span><EngineIcon engine={engine} size={17} />{ENGINE_LABELS[engine]}</span>
       <p>配色与字体按当前引擎保存</p>
     </div>
     <div className="sheet-scroll theme-picker-scroll">

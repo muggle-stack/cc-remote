@@ -1,11 +1,12 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import type { Engine } from "../protocol";
+import { ENGINE_LABELS, type Engine } from "../protocol";
 import { EngineIcon } from "../icons";
 
 const EngineMenu = lazy(() => import("./EngineMenu"));
 
-export function EngineSelector({ engine, onChange }: {
+export function EngineSelector({ engine, antigravityAvailable, onChange }: {
   engine: Engine;
+  antigravityAvailable?: boolean;
   onChange: (engine: Engine) => void;
 }) {
   const button = useRef<HTMLButtonElement>(null);
@@ -17,7 +18,7 @@ export function EngineSelector({ engine, onChange }: {
     const onKey = (event: KeyboardEvent) => {
       if (event.isComposing || event.keyCode === 229 || event.repeat
           || event.shiftKey
-          || (event.key !== "1" && event.key !== "2" && event.key !== "3")) return;
+          || (event.key !== "1" && event.key !== "2" && event.key !== "3" && !(event.key === "4" && antigravityAvailable))) return;
       if (altShortcuts
           ? !event.altKey || event.ctrlKey || event.metaKey
           : !(event.metaKey || event.ctrlKey) || event.altKey) return;
@@ -26,12 +27,12 @@ export function EngineSelector({ engine, onChange }: {
       event.preventDefault();
       event.stopPropagation();
       setMenu(null);
-      const next = event.key === "1" ? "claude" : event.key === "2" ? "codex" : "dsh";
+      const next = event.key === "1" ? "claude" : event.key === "2" ? "codex" : event.key === "3" ? "dsh" : "antigravity";
       if (next !== engine) onChange(next);
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [engine, onChange, altShortcuts]);
+  }, [engine, onChange, altShortcuts, antigravityAvailable]);
   const close = (restoreFocus: boolean) => {
     setMenu(null);
     if (restoreFocus) button.current?.focus();
@@ -50,9 +51,9 @@ export function EngineSelector({ engine, onChange }: {
         }
       }}>
       <span className="engine-label"><EngineIcon engine={engine} />
-        <span className="engine-name">{engine === "dsh" ? "DSH" : engine === "codex" ? "Codex" : "Claude"}</span></span>
+        <span className="engine-name">{ENGINE_LABELS[engine]}</span></span>
     </button>
-    {menu !== null && <Suspense fallback={null}><EngineMenu engine={engine} anchor={button}
+    {menu !== null && <Suspense fallback={null}><EngineMenu engine={engine} antigravityAvailable={antigravityAvailable} anchor={button}
       keyboard={menu} altShortcuts={altShortcuts} onClose={close} onSelect={(next, keyboard) => {
         close(keyboard);
         if (next !== engine) onChange(next);

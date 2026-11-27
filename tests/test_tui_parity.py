@@ -803,7 +803,8 @@ def test_all_existing_command_surfaces_are_exposed_or_owned_by_core_ui():
         "get_turn_detail",
         "answer_question",
     }
-    assert commands == set(ACTIONS) | core
+    web = {"antigravity_auth", "set_antigravity_option"}
+    assert commands == set(ACTIONS) | core | web
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@
   overflow:hidden; overflow-wrap:anywhere;
 }
 .question-dialog[open] { display:flex; flex-direction:column; }
-.question-dialog::backdrop { background:rgba(30,22,12,.34); }
+.question-dialog::backdrop { background:rgb(var(--overlay-rgb,30 22 12) / .34); }
 :root[data-theme="dark"] .question-dialog::backdrop { background:rgba(0,0,0,.55); }
 .question-dialog-title {
   display:flex; align-items:center; gap:10px; flex:none; padding:20px 22px 14px;
@@ -63,3 +63,6 @@
 .qa-footer button:disabled { opacity:.45; cursor:default; }
 .qa-footer button span { font-size:22px; line-height:16px; font-weight:400; }
 .qa-submit-error { margin-top:12px; font-size:13px; color:var(--dim); }
+.qa-approval-diff { margin: 8px 16px; }
+.qa-approval-diff summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.qa-approval-diff pre { max-height: 30vh; overflow: auto; }

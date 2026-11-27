@@ -63,6 +63,8 @@ class UIUpdates(InstallationUpdates):
             else:
                 tasks = (getattr(ctx, name, None) for name in ("turn_task", "codex_spontaneous_task"))
                 backgrounds = (getattr(ctx, "codex_background_processes", None) or {}).values()
+                if ctx.engine == "antigravity" and ctx.sdk.connected:
+                    backgrounds = ctx.sdk.transcript.background.values()
                 background = next((item for item in backgrounds
                                    if getattr(item, "status", None) in {"running", "pending", "unknown"}), None)
                 running = (ctx.state != "idle" or getattr(ctx.sdk, "turn_active", False) is True

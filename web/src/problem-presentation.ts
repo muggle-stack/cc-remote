@@ -1,6 +1,22 @@
 import type { ErrorMsg } from "./protocol";
 import { isUpdateMaintenance, UPDATE_MAINTENANCE_MESSAGE } from "./update-maintenance.ts";
 
+const GEMINI_PROBLEMS: Readonly<Record<string, string>> = {
+  gemini_authentication: "Gemini 需要认证。请在 Wrapper 主机登录 agy 或配置本机网关。",
+  gemini_unavailable: "此设备未启用 Gemini 或没有安装 agy。",
+  gemini_startup: "无法启动本机 agy，请检查安装和工作目录。",
+  gemini_directory: "Gemini 工作目录不存在或不可读取。",
+  gemini_offline: "本机 agy 连接中断。请重新打开会话并查看已有结果。",
+  gemini_outcome_unknown: "上次 Gemini 请求结果待核实，请查看原生会话后再发送。",
+  gemini_timeout: "本机 agy 返回超时，操作结果未知。",
+  gemini_version: "本机 agy 缺少所需 ACP 能力，请更新 Antigravity CLI。",
+  gemini_capacity: "会话驻留已满，请先结束一个运行中的会话。",
+  gemini_option: "所选 Gemini 设置未生效，请刷新会话查看当前值。",
+  gemini_cancel_pending: "已请求停止，正在等待 Gemini 确认当前回合结束。",
+  gemini_session: "找不到此 Gemini 会话，请刷新会话列表。",
+  gemini_unsupported: "当前 Gemini ACP 不支持此操作。",
+};
+
 const OWNERSHIP_GUIDANCE = /(本机终端|原生 .*CLI|Codex App|Claude TUI)/;
 const INCOMPLETE_CLAUDE_SESSION =
   "Claude 会话历史不完整，无法恢复；可从会话菜单删除该条目。";
@@ -121,6 +137,7 @@ function ownershipMessage(message: string): string | null {
 
 export function presentTurnProblem(error: Pick<ErrorMsg, "code" | "message">): string {
   if (isUpdateMaintenance(error)) return UPDATE_MAINTENANCE_MESSAGE;
+  if (Object.hasOwn(GEMINI_PROBLEMS, error.code)) return GEMINI_PROBLEMS[error.code];
   if (error.code === "busy") {
     return ownershipMessage(error.message)
       ?? "本次消息未发送，会话当前不可写，请稍后重试。";
@@ -145,6 +162,7 @@ export function presentCommandProblem(
   error: Pick<ErrorMsg, "code" | "message">,
 ): string {
   if (isUpdateMaintenance(error)) return UPDATE_MAINTENANCE_MESSAGE;
+  if (Object.hasOwn(GEMINI_PROBLEMS, error.code)) return GEMINI_PROBLEMS[error.code];
   if ((error.code === "cc_crash" || error.code === "not_steerable")
       && error.message === CODEX_PROVIDER_MISMATCH) return CODEX_PROVIDER_MISMATCH;
   if (error.code === "busy" && CODEX_METADATA_PROBLEMS.has(error.message)) return error.message;

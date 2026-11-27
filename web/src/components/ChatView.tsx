@@ -1,3 +1,4 @@
+import type { Engine } from "../protocol";
 import {
   lazy,
   Suspense,
@@ -27,14 +28,14 @@ import {
 import type {
   ProcessBlock, TextBlock, Turn,
 } from "../domain/conversation";
-import type { Space } from "../protocol";
+import { ENGINE_LABELS, type Space } from "../protocol";
 import type { SessionMessageNavigation } from "../session-messages";
 import type { LoadTurnFilePage } from "../turn-file-pages";
 import { MessageBlock } from "./MessageBlock";
 import { assistantContinuations, ContinuationRenderKeys, continuationTerminalOwner, type AssistantContinuation } from "../assistant-continuations";
 import { isReturnReceipt, returnRunId, returnedAgents } from "../agent-returns";
 import { TimedMessageTag } from "./TimedMessageTag";
-import { Icon, ClaudeMark, EngineWorking, EngineDone } from "../icons";
+import { Icon, ClaudeMark, EngineIcon, EngineWorking, EngineDone } from "../icons";
 import { useVoicePlayback } from "../use-voice-playback";
 import { PanelVisible } from "../right-panel-presentation";
 import { WorkingWord } from "./WorkingWord";
@@ -104,6 +105,7 @@ import type { ChatReadingState } from "../chat-reading-memory";
 import type { DshApiClient } from "../dsh-api";
 import { DshRecommendation } from "./DshRecommendations";
 import { recommendationTurn, useDshRecommendations } from "../dsh-recommendations";
+import { compactTokens, usageForTurn, type TurnUsageReadings } from "../turn-usage";
 
 const SessionMessageLinks = lazy(() => import("./SessionMessageLinks"));
 const DshProducedFiles = lazy(() => import("./DshProducedFiles"));
@@ -351,7 +353,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   ambiguousActiveTurnIds = [],
   sessionRunning = false,
   initialReadingState, onReadingStateSave,
-  surface = "code", voiceSpeech }: {
+  surface = "code", voiceSpeech, turnUsage }: {
   ref?: Ref<ChatViewHandle>;
   sessionLink?: SessionMessageNavigation["sessionLink"];
   onOpenSession?: (nativeId: string) => void;
@@ -359,11 +361,12 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   onDshPlugin?: (name: string) => void;
   sid: string | null;
   turns: Turn[];
+  turnUsage?: TurnUsageReadings;
   voiceSpeech?: boolean;
   initialReadingState?: ChatReadingState;
   onReadingStateSave?: (position: ChatReadingState | null) => void;
   surface?: Space;
-  engine?: "claude" | "codex" | "dsh";
+  engine?: Engine;
   loading?: boolean;
   hasMore?: boolean;
   historyPagingReady?: boolean;
@@ -2901,11 +2904,13 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
       <div className={surface === "work"
         ? "thread-shell work-thread-shell" : "thread-shell"}>
         <div className="empty">
-          <div className="glyph"><ClaudeMark size={30} /></div>
+          <div className="glyph">{engine === "antigravity"
+            ? <EngineIcon engine={engine} size={30} /> : <ClaudeMark size={30} />}</div>
           <h2>{surface === "work" ? "工作区已就绪" : "已连接"}</h2>
           <p>{surface === "work"
             ? "添加资料并描述成果，我会把生成的文档和文件留在这项工作的私有目录。"
-            : <>发一条消息开始，或用 <code>/</code> 唤起命令面板（Plan mode、review、技能…）。</>}</p>
+            : engine === "antigravity" ? <>发一条消息开始，或用 <code>/</code> 查看 Gemini 命令。</>
+              : <>发一条消息开始，或用 <code>/</code> 唤起命令面板（Plan mode、review、技能…）。</>}</p>
         </div>
       </div>
     );
@@ -3014,7 +3019,8 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
             const renderContinuationBoundary = (receipts: ProcessBlock[], startedTs?: number, standalone = false) => (
               <div className={`background-followup-boundary${standalone ? " turn-continuation" : ""}`}>
                 {receipts.map(renderAgentReturn)}
-                <span>{engine === "codex" ? "Codex 收到后台消息，继续处理" : engine === "dsh" ? "DeepSeek 继续处理" : "Claude 继续处理"}</span>
+                <span>{engine === "codex" ? "Codex 收到后台消息，继续处理"
+                  : `${engine === "dsh" ? "DeepSeek" : ENGINE_LABELS[engine]} 继续处理`}</span>
                 {startedTs != null && <time>{formatTime(startedTs)}</time>}
               </div>
             );
@@ -3103,6 +3109,8 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
             // task reaches its terminal boundary. Completion time, copy and
             // fork belong to that real boundary, never to the segment bit.
             const showCompletionFooter = t.done && !working;
+            const tokens = engine === "antigravity" && showCompletionFooter
+              ? usageForTurn(t, turnUsage) ?? t.tokenUsage : undefined;
             const workingLabel = t.progress
               ?? (activePhase === "answering"
                 ? "回答中"
@@ -3374,6 +3382,10 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
                     instead of reserving an empty 22px metadata row. */}
                 {showCompletionFooter && <div className="ubub-meta ai-meta">
                   {showCompletionFooter && t.doneTs && <span className="ubub-time">{formatTime(t.doneTs)}</span>}
+                  {tokens && <span className="ubub-time"
+                    title={`输入 ${tokens.input_tokens ?? "—"} · 输出 ${tokens.output_tokens ?? "—"} · 缓存读取 ${tokens.cache_read_tokens ?? "—"} · 缓存写入 ${tokens.cache_write_tokens ?? "—"} · 思考 ${tokens.thought_tokens ?? "—"}`}>
+                    {compactTokens(tokens.input_tokens)} 输入 · {compactTokens(tokens.output_tokens)} 输出
+                  </span>}
                   {showCompletionFooter && finalBlocks.length > 0 && <button
                     className={"ubub-act" + (copiedId === t.id + "-ai" ? " copied" : "")}
                     onClick={() => copyText(t.id + "-ai", aiText(t))}

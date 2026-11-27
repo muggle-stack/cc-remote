@@ -1,3 +1,4 @@
+import { ENGINE_LABELS, type Engine } from "./protocol.ts";
 import type { TurnEnd, TurnResult } from "./protocol";
 import type { NotificationMode } from "./notification-mode";
 
@@ -30,7 +31,7 @@ export interface TurnNotificationPresentation {
   title: string;
   body: string;
   sessionId: string | null;
-  engine: "claude" | "codex" | "dsh" | null;
+  engine: Engine | null;
   space: "code" | "work" | null;
 }
 
@@ -67,7 +68,7 @@ export function turnNotificationPresentation(
       space: null,
     };
   }
-  const label = context.engine === "dsh" ? "DSH" : context.engine === "codex" ? "Codex" : "Claude";
+  const label = ENGINE_LABELS[context.engine];
   return {
     title: safeDisplayName(context.display_name) ?? `${label} 会话`,
     body: turnNotificationBody(label, message.result),

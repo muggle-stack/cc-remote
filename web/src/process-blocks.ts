@@ -1,3 +1,4 @@
+import type { Engine } from "./protocol";
 import type { Block, ProcessBlock, TextBlock, Turn } from "./domain/conversation";
 import { isSyntheticReturnReceipt } from "./agent-returns.ts";
 
@@ -128,7 +129,7 @@ function presentBrowserCompletion(block: TextBlock): TextBlock | ProcessBlock | 
 
 export function presentableProcessBlocks(
   blocks: Block[],
-  engine: "claude" | "codex" | "dsh",
+  engine: Engine,
 ): Block[] {
   const items = processBlocks(blocks);
   if (engine !== "codex") return items;

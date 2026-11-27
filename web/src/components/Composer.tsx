@@ -1,7 +1,8 @@
+import type { Engine } from "../protocol";
 import type { DshRead } from "../dsh-api";
 import type { DshItem } from "../protocol";
 import { useDshReferences } from "./DshReferences";
-import type { DshState, DshCommandResult } from "../protocol";
+import type { AntigravityState, DshState, DshCommandResult } from "../protocol";
 import { dshCommandMatches } from "../dsh-commands";
 import {
   useCallback,
@@ -30,7 +31,7 @@ const CodexContextControl = lazy(() => import("./CodexContextControl"));
 import {
   clientSlashesFor, parseSlash, routeComposerInput, slashToken,
   matchCommands, matchSkills, skillToken,
-  modelsFor, effortNameForDisplay, permsFor, dshPermissionLabel,
+  modelsFor, effortNameForDisplay, permsFor, dshPermissionLabel, antigravityPermissions, antigravityEfforts,
   permissionProfileLabel, type Catalog,
 } from "../data";
 const CommandSheet = lazy(() => import("./CommandSheet").then(m => ({ default: m.CommandSheet })));
@@ -82,6 +83,7 @@ interface Props {
   maintenance?: boolean;
   voiceEnabled?: boolean;
   dsh?: DshState;
+  antigravity?: AntigravityState;
   dshSid?: string;
   readDsh?: DshRead;
   dshCommandResult?: DshCommandResult;
@@ -117,7 +119,7 @@ interface Props {
   external?: boolean;
   takeoverPending?: boolean;
   takeoverMessage?: string | null;
-  engine?: "claude" | "codex" | "dsh";
+  engine?: Engine;
   archived?: boolean;
   catalog?: Catalog;   // engine-reported models and reasoning capabilities
   onRequestModels?: () => void;
@@ -380,7 +382,7 @@ export function Composer(p: Props) {
   // enabled Skill catalog. Both stop suggesting once arguments begin.
   const cmdToken = slashToken(input);
   const cmdMatches = cmdToken !== null
-    ? [...matchCommands(cmdToken, p.engine, p.surface ?? "code"), ...(p.engine === "dsh"
+    ? [...matchCommands(cmdToken, p.engine, p.surface ?? "code", p.antigravity?.commands), ...(p.engine === "dsh"
       ? dshCommandMatches(cmdToken, p.dsh) : [])] : [];
   const currentSkillToken = p.engine === "codex" || p.engine === "dsh" ? skillToken(input) : null;
   const skillMatches = currentSkillToken !== null && p.skills
@@ -701,7 +703,8 @@ export function Composer(p: Props) {
       growTa();
       return;
     }
-    if (clientSlashesFor(p.engine).has(slash) || p.engine === "dsh" && slash === "goal") {
+    if (!p.antigravity?.commands.some(command => command.name === slash)
+        && (clientSlashesFor(p.engine).has(slash) || p.engine === "dsh" && slash === "goal")) {
       runClientSlash(slash, "");
       if (slash !== "btw" && slash !== "goal") focusTa();
       return;
@@ -717,7 +720,7 @@ export function Composer(p: Props) {
 
   const send = (value = taRef.current?.value ?? input, mode: SendMode = "steer") => {
     if (locked || importing) return;
-    const route = routeComposerInput(value, p.engine, p.surface);
+    const route = routeComposerInput(value, p.engine, p.surface, p.antigravity?.commands);
     if (route.kind === "blocked") { flash(route.message); return; }
     const raw = value.trim();
     const parsed = parseSlash(raw);
@@ -751,13 +754,14 @@ export function Composer(p: Props) {
     submitPrompt(route.prompt, mode);
   };
 
+  const forceGeminiStop = p.engine === "antigravity" && p.state === "draining";
   const requestButtonSend = () => {
     if (buttonSendTimerRef.current !== null) return;
     buttonSendTimerRef.current = window.setTimeout(() => {
       buttonSendTimerRef.current = null;
       const buttonPrompt = taRef.current?.value ?? input;
       if (busy && !buttonPrompt.trim() && !hasAttachments && pastes.length === 0) {
-        if (p.state === "running") p.onInterrupt();
+        if (p.state === "running" || forceGeminiStop) p.onInterrupt();
         return;
       }
       send(buttonPrompt);
@@ -769,12 +773,12 @@ export function Composer(p: Props) {
   const sendIcon = stopping ? "stop" : "send";
   const sendClass = "sendbtn" + (stopping ? " interrupt" : "");
   const disabled = locked || importing || (!busy && !hasText && !hasAttachments)
-    || isSettlingStopDisabled(p.state, hasText || hasAttachments);
+    || (!forceGeminiStop && isSettlingStopDisabled(p.state, hasText || hasAttachments));
   // Fall back to the raw id (not MODELS[0]) so a hidden model set via
   // "/model <id>" shows its actual id on the chip instead of "Mythos 5".
   const MODELS_E = modelsFor(p.engine, p.catalog), PERMS_E = p.engine === "dsh"
     ? (p.dsh?.permissions ?? []).map(option => ({ id: option.value, name: dshPermissionLabel(option.value, option.name), short: dshPermissionLabel(option.value, option.name), ds: option.description, ic: "shield", danger: option.value === "danger-full-access" }))
-    : permsFor(p.engine);
+    : p.engine === "antigravity" ? antigravityPermissions(p.antigravity?.options) : permsFor(p.engine);
   const workSurface = p.surface === "work";
   const currentContextReport = p.contextReport?.available !== false ? p.contextReport : null;
   const retainedContextReport = p.contextExactReport?.available !== false ? p.contextExactReport : null;
@@ -819,7 +823,9 @@ export function Composer(p: Props) {
     ? (MODELS_E.find((m) => m.id === p.model)
       || { id: p.model, name: p.model, ds: "", ic: "cpu" })
     : null;
-  const effortName = effortNameForDisplay(p.effort);
+  const nativeEfforts = antigravityEfforts(p.antigravity?.options);
+  const effortName = nativeEfforts.find(choice => choice.id === p.effort)?.name ?? effortNameForDisplay(p.effort);
+  const settingsLocked = locked || (p.engine === "antigravity" && (busy || !p.antigravity?.connected));
   const perm = p.perm
     ? (PERMS_E.find((x) => x.id === p.perm)
       || { id: p.perm, name: p.perm, short: p.perm, ds: "", ic: "shield" })
@@ -843,7 +849,8 @@ export function Composer(p: Props) {
       placeholder={importing ? "正在安全导入附件…"
         : p.maintenance ? "设备正在更新，草稿已保留…"
         : offline ? "机器离线 — 等待重连…"
-        : p.archived ? "会话已归档 — 取消归档后可继续对话"
+        : p.archived ? p.engine === "antigravity"
+          ? "会话已隐藏，恢复显示后可继续对话" : "会话已归档 — 取消归档后可继续对话"
         : (controlUi?.placeholder
           ?? (busy
             ? "补充当前任务…"
@@ -927,7 +934,8 @@ export function Composer(p: Props) {
       }}
       onClick={requestButtonSend}
       disabled={disabled}
-      aria-label={interruptSettling && stopping ? "正在停止" : stopping ? "停止" : "发送"}>
+      aria-label={stopping ? forceGeminiStop ? "强制停止 Gemini" : interruptSettling ? "正在停止" : "停止" : "发送"}
+      title={stopping && forceGeminiStop ? "再次请求停止并恢复 Gemini 会话" : undefined}>
       <Icon name={sendIcon} size={19} />
     </button>
   );
@@ -1105,12 +1113,12 @@ export function Composer(p: Props) {
             {sendControl}
           </div>
           <div className="hint">
-          {(p.engine !== "dsh" || !!p.dsh?.permissions.length) && <button
+          {((p.engine !== "dsh" && p.engine !== "antigravity") || !!PERMS_E.length) && <button
             type="button"
             className={"hint-mode" + modeCls}
             aria-busy={p.permissionProfilePending || undefined}
             onClick={openPermissions}
-            disabled={locked}
+            disabled={settingsLocked}
             title={deferredClaudeControls
               ? `${externalClaudeOwner} 当前权限模式未公开`
               : (p.engine === "codex"
@@ -1135,9 +1143,11 @@ export function Composer(p: Props) {
               </span>
             ) : <>
               <button className="hint-ctl" onClick={() => { p.onRequestModels?.(); setSheetKind("models"); }}
-                disabled={locked} title="选择模型">{model?.name ?? "模型读取中"}</button>
-              <button className="hint-ctl" onClick={() => setSheetKind("efforts")}
-                disabled={locked} title="思考强度">{effortName ?? "强度读取中"}</button>
+                disabled={settingsLocked} title="选择模型">{model?.name ?? "模型读取中"}</button>
+              {(p.engine !== "antigravity" || nativeEfforts.length > 0) && (
+                <button className="hint-ctl" onClick={() => setSheetKind("efforts")}
+                  disabled={settingsLocked} title="思考强度">{effortName ?? "强度读取中"}</button>
+              )}
             </>}
             {p.engine === "codex" && p.collaborationMode === "plan" && (
               <button
@@ -1240,6 +1250,7 @@ export function Composer(p: Props) {
         catalog={p.catalog}
         onRequestModels={p.onRequestModels}
         dsh={p.dsh}
+        antigravityOptions={p.antigravity?.options}
         onClose={() => setSheetKind(null)}
         currentModel={p.model}
         onPickModel={(m) => { p.onSetModel(m); setSheetKind(null); }}
