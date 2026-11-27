@@ -1,4 +1,6 @@
 import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -72,14 +74,27 @@ async def test_automatic_quota_reads_share_cache_until_native_login_changes(monk
 
 
 @pytest.mark.asyncio
-async def test_account_quota_routes_to_requester_without_creating_a_session(monkeypatch):
+@pytest.mark.parametrize("managed", [False, True])
+async def test_reliable_account_quota_is_served_by_wrapper(monkeypatch, managed):
     machine, transport = _mk_machine()
+    if managed:
+        machine._gemini_controller = SimpleNamespace(process=AsyncMock(
+            side_effect=AssertionError("The Gemini worker does not handle Wrapper quota reads"),
+        ))
     monkeypatch.setattr(machine._antigravity, "opted_out", lambda: False)
-    monkeypatch.setattr(machine._antigravity, "launch_factory", lambda: AntigravityLaunch("/local/agy", {}))
-    monkeypatch.setattr(antigravity_quota, "read_native_quota",
-                        lambda _launch: antigravity_quota.parse_quota(usage_payload()))
-    result = await machine._handle(GetAntigravityQuota(cmd_id="quota-1", client_id="browser"))
-    assert result.type == "antigravity_quota"
-    assert result.request_id == "quota-1" and result.to == "browser"
-    assert result.plan == "Antigravity Starter Quota"
+    launch = AntigravityLaunch("/local/agy", {})
+    monkeypatch.setattr(machine._antigravity, "launch_factory", lambda: launch)
+    native_read = Mock(return_value=antigravity_quota.parse_quota(usage_payload()))
+    monkeypatch.setattr(antigravity_quota, "read_native_quota", native_read)
+
+    command = GetAntigravityQuota(cmd_id="quota-1", client_id="browser")
+    await machine._process_command(command)
+    await machine._process_command(command)
+
+    assert [frame.type for frame in transport.sent] == ["antigravity_quota", "command_ack"] * 2
+    for result, ack in zip(transport.sent[::2], transport.sent[1::2], strict=True):
+        assert result.request_id == ack.cmd_id == "quota-1"
+        assert result.to == ack.to == "browser"
+        assert result.plan == "Antigravity Starter Quota"
+    native_read.assert_called_once_with(launch)
     assert not machine.sessions

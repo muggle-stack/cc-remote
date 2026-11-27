@@ -12489,7 +12489,9 @@ class WrapperMachine:
         client_id = getattr(cmd, "client_id", None)
         cmd_id = getattr(cmd, "cmd_id", None)
         reliable = is_reliable_command(cmd) and client_id and cmd_id
-        if reliable and self._gemini_controller and self._antigravity.targets(cmd):
+        # The Wrapper owns quota reads even when a retained worker handles sessions.
+        if (reliable and cmd.type != "get_antigravity_quota"
+                and self._gemini_controller and self._antigravity.targets(cmd)):
             await self._gemini_controller.process(cmd)
             return
         seen, cached_responses = (
