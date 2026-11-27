@@ -641,6 +641,31 @@ export interface AntigravityAuthResult extends Base {
   signed_in: boolean;
   error?: string | null;
 }
+export interface GetAntigravityQuota extends Base {
+  type: "get_antigravity_quota";
+  engine?: "antigravity";
+  sid?: null;
+}
+export interface AntigravityQuotaBucket {
+  id: string;
+  window: string;
+  name: string;
+  remaining_fraction: number;
+  resets_at?: number | null;
+}
+export interface AntigravityQuotaGroup {
+  name: string;
+  models: string[];
+  buckets: AntigravityQuotaBucket[];
+}
+export interface AntigravityQuota extends Base {
+  type: "antigravity_quota";
+  request_id?: string | null;
+  observed_at?: number | null;
+  plan?: string | null;
+  groups: AntigravityQuotaGroup[];
+  error?: "unavailable" | "refresh_failed" | null;
+}
 export interface SetAntigravityOption extends Base {
   type: "set_antigravity_option";
   sid: string;
@@ -849,7 +874,7 @@ export interface CodexContext extends Base {
   error: string | null;
 }
 
-export type ServerEvent = SessionArtifacts | FilesListed | CodexContext
+export type ServerEvent = SessionArtifacts | FilesListed | CodexContext | AntigravityQuota
   | DirectoryActionPlan | DirectoryActionProgress
   | TurnFileChangesPage
   | Pong | CommandAck | ReplayStart | ReplayEnd | Snapshot | StateEvent | QueryQueueState | QueuedQueryDetail | QueuedQueryUpdated | Model | Effort | AutoCompact | Fast | CollaborationMode | BtwOpened | BtwSync | BtwClosed | Perm | PermissionProfiles | PermissionProfile | WebSearch | ContextReport | DiffReport | FilePreview | FileSaveResult | PreviewAsset | PreviewAuthorizationRequired | PreviewAuthorizationResult | History | TurnDetail | AgentDetail | HistoryImage | HistoryInvalidated | ArtifactInvalidated | Models | AntigravityState | AntigravityAvailability | AntigravityAuthResult | DshState | DshCommandResult | DshReadResult | DshDownloadChunk | EngineCapabilities | TakeoverState | SessionControl
@@ -860,7 +885,7 @@ export type ServerEvent = SessionArtifacts | FilesListed | CodexContext
   | ProcessEvent | BackgroundProcessSync | TurnPlan | TurnDiff | TurnFileChanges | TurnBinding
   | TurnUsage | TurnEnd | ErrorMsg | WrapperDisconnected | WrapperReconnected | Hello;
 
-export const PROTOCOL_VERSION = 99;
+export const PROTOCOL_VERSION = 100;
 export const MIN_AUTO_COMPACT_TOKENS = 100_000;
 export const MAX_AUTO_COMPACT_TOKENS = 1_000_000;
 

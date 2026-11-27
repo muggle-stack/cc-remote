@@ -441,6 +441,37 @@ async def test_catalog_controls_cwd_context_and_native_history(wire):
 
 
 @pytest.mark.asyncio
+async def test_gemini_history_replay_keeps_original_message_times(wire, tmp_path):
+    machine, _, _, client = wire
+    ctx = await new_session(machine)
+    native_id = ctx.sdk.native_id
+    client.rows[native_id] = {"sessionId": native_id, "cwd": client.cwd}
+    agent_home = tmp_path / "agy-home"
+    client.launch = SimpleNamespace(default_model="neon", environment={"HOME": str(agent_home)})
+    log = agent_home / ".gemini/antigravity-cli/brain" / native_id / ".system_generated/logs/transcript.jsonl"
+    log.parent.mkdir(parents=True)
+    records = [
+        {"type": "USER_INPUT", "created_at": "2026-01-01T00:00:00Z",
+         "content": "<USER_REQUEST>\nsaved question\n</USER_REQUEST>\n<ADDITIONAL_METADATA>fixture</ADDITIONAL_METADATA>"},
+        {"type": "PLANNER_RESPONSE", "created_at": "2026-01-01T00:00:04Z", "content": "saved answer"},
+    ]
+    log.write_text("".join(json.dumps(row) + "\n" for row in records))
+    await machine._detach_idle_session(ctx.key)
+
+    history = await machine._handle(GetHistory(session_id=ctx.key, detail="summary"))
+    turn, = history.turns
+    assert (turn.ts, turn.doneTs) == (1767225600000, 1767225604000)
+    detail = await machine._handle(GetHistory(session_id=ctx.key))
+    assert next(row["ts"] for row in detail.events if row["type"] == "turn_end") == 1767225604
+
+    session_caps = {**client.capabilities["sessionCapabilities"], "resume": {}}
+    client.capabilities = {**client.capabilities, "sessionCapabilities": session_caps}
+    await machine._handle(SwitchSession(session_id=ctx.key, engine="antigravity"))
+    resumed = await machine._handle(GetHistory(session_id=ctx.key, detail="summary"))
+    assert [(item.ts, item.doneTs) for item in resumed.turns] == [(turn.ts, turn.doneTs)]
+
+
+@pytest.mark.asyncio
 async def test_gemini_presentation_and_read_only_extensions(wire, monkeypatch, tmp_path):
     machine, _, _, client = wire
     ctx = await new_session(machine)

@@ -10,7 +10,7 @@ import { allowedDuringUpdate, isUpdateMaintenance } from "./update-maintenance.t
 // commands that target a session stamp `sid: focusedSid`.
 import type {
   AntigravityAuth, AntigravityAuthMethod, AntigravityConfigCategory, AskDismissAction, AutoCompactMode, DiffTheme, DshGoalAction, DshReadKind,
-  Engine, GoalStatus, PermissionMode, QueryFile, QueryImg, ServerEvent, SessionControl, SetAntigravityOption, Space,
+  Engine, GetAntigravityQuota, GoalStatus, PermissionMode, QueryFile, QueryImg, ServerEvent, SessionControl, SetAntigravityOption, Space,
 } from "./protocol.ts";
 import {
   compareSessionControl,
@@ -97,7 +97,7 @@ const UPDATE_DISPOSABLE_READS = new Set([
   "list_sessions", "get_models", "get_work_dashboard", "get_work_artifacts",
   "get_history", "get_turn_detail", "get_agent_detail", "get_history_image",
   "get_engine_capabilities", "get_permission_profiles", "get_context",
-  "get_goal", "get_claude_plan", "get_status", "get_queued_query",
+  "get_goal", "get_claude_plan", "get_status", "get_antigravity_quota", "get_queued_query",
   "get_session_artifacts", "get_session_artifact_preview", "get_file_preview",
   "get_preview_asset", "get_turn_file_changes", "get_diff", "list_dir",
   "browse_files", "read_dsh", "prepare_directory_action",
@@ -1222,6 +1222,12 @@ export class RelayWs {
     return this.sendTracked({
       v: PROTOCOL_VERSION, ts: nowTs(), type: "antigravity_auth", engine: "antigravity", method,
     } satisfies AntigravityAuth);
+  }
+
+  sendGetAntigravityQuota(): string | null {
+    return this.sendTracked({
+      v: PROTOCOL_VERSION, ts: nowTs(), type: "get_antigravity_quota", engine: "antigravity",
+    } satisfies GetAntigravityQuota);
   }
 
   sendGetEngineCapabilities(engine: Engine, space: Space,

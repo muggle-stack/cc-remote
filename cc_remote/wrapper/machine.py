@@ -2075,7 +2075,7 @@ class WrapperMachine:
         "get_rewind_preview",
         "list_sessions", "get_history", "get_turn_detail", "get_agent_detail",
         "get_history_image", "read_dsh",
-        "get_models", "get_permission_profiles", "get_engine_capabilities",
+        "get_models", "get_permission_profiles", "get_engine_capabilities", "get_antigravity_quota",
         "get_session_artifacts", "get_session_artifact_preview",
         "get_context", "get_status", "get_diff", "get_turn_file_changes", "get_file_preview",
         "get_preview_asset", "get_goal", "dismiss_goal", "get_claude_plan", "dismiss_claude_plan",
@@ -12230,7 +12230,7 @@ class WrapperMachine:
             # interactive input/cancellation bypasses the ordered mutation lane.
             self._start_interactive_control_command(cmd)
             return
-        if cmd.type in {"get_status", "consume_rate_limit_reset_credit"}:
+        if cmd.type in {"get_status", "consume_rate_limit_reset_credit", "get_antigravity_quota"}:
             self._start_status_command(cmd)
             return
         if cmd.type in {
@@ -12301,7 +12301,7 @@ class WrapperMachine:
         task.add_done_callback(forget)
 
     def _start_status_command(self, cmd) -> None:
-        """Read Codex status without blocking Query/Interrupt intake."""
+        """Read account status without blocking Query/Interrupt intake."""
         client_id = getattr(cmd, "client_id", None) or ""
         cmd_id = getattr(cmd, "cmd_id", None) or f"untracked-{id(cmd)}"
         key = (client_id, cmd_id)
@@ -12599,6 +12599,12 @@ class WrapperMachine:
             )
             await self._emit(ctx, error)
             return error
+        if cmd.type == "get_antigravity_quota":
+            return await self._antigravity.dispatch(cmd)
+        if cmd.type == "antigravity_auth" and cmd.method:
+            gemini = self._gemini_controller or self._antigravity
+            with self._antigravity.quota.account_change():
+                return await gemini.dispatch(cmd)
         if self._gemini_controller and self._antigravity.targets(cmd):
             return await self._gemini_controller.dispatch(cmd)
         result = await self._antigravity.dispatch(cmd)

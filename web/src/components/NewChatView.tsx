@@ -28,6 +28,8 @@ import { PendingImageAttachments } from "./PendingImageAttachments";
 import { CommandSheet } from "./CommandSheet";
 import { CenteredSheet } from "./CenteredSheet";
 import { ChoicePicker } from "./ChoicePicker";
+import { UsageMeter } from "./UsageMeter";
+import type { AntigravityQuotaView } from "../antigravity-quota";
 import { AttachmentPicker } from "./AttachmentPicker";
 import { VoiceInputButton, VoiceInputStatus } from "./VoiceInputButton";
 import { useVoiceInput, voiceInputAvailable } from "../use-voice-input";
@@ -75,6 +77,8 @@ interface Props {
   engine?: Engine;  // which backend this new chat will use
   catalog?: Catalog;
   onRequestModels?: () => void;
+  antigravityQuota?: AntigravityQuotaView;
+  onAntigravityQuotaOpen?: () => void;
   skills?: EngineCapabilityItem[];
   skillsOnline?: boolean;
   skillsError?: boolean;
@@ -211,7 +215,21 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
   onPickCodexProfile, skills, skillsOnline = true, skillsError = false, onRequestSkills,
   permissionProfiles, onGetPermissionProfiles, onOpenExtensions,
   antigravity, dshCommands, dshPresets = [], dshPermissions = [], dshPreset, dshError, onPickDshPreset,
-  onSend, draftKey, draftStore, voiceEnabled }: Props) {
+  onSend, draftKey, draftStore, voiceEnabled, antigravityQuota, onAntigravityQuotaOpen }: Props) {
+  const [quotaOpen, setQuotaOpen] = useState(false);
+  useEffect(() => {
+    setQuotaOpen(false);
+  }, [controlScopeKey, engine]);
+  useEffect(() => {
+    if (!quotaOpen) return;
+    const close = (event: PointerEvent) => {
+      if (event.target instanceof Element && !event.target.closest(".usage-meter-wrap")) {
+        setQuotaOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", close, true);
+    return () => document.removeEventListener("pointerdown", close, true);
+  }, [quotaOpen]);
   const localDrafts = useRef(new ComposerDraftStore());
   const drafts = draftStore ?? localDrafts.current;
   const key = draftKey ?? "new";
@@ -952,6 +970,15 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
                 onChange={(tier) => updateExecutionControls({
                   serviceTier: tier, serviceTierScope: speedScope,
                 })} />
+            )}
+            {space === "code" && engine === "antigravity" && (
+              <UsageMeter engine="antigravity" report={null} open={quotaOpen}
+                antigravityQuota={antigravityQuota} model={displayModel(effectiveModel, modelList)}
+                onRefresh={onAntigravityQuotaOpen}
+                disabled={creating || importing} onToggle={() => {
+                  if (!quotaOpen) onAntigravityQuotaOpen?.();
+                  setQuotaOpen(!quotaOpen);
+                }} />
             )}
           </div>
           {(space === "work" || createError || importing || creating || autoCompactNotice || voiceError) && (

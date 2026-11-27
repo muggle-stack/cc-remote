@@ -5295,6 +5295,7 @@ function reduceEvent(
     case "dsh_state":
       return patch(state, e.sid, (rt) => { rt.dsh = e; });
     case "antigravity_auth_result":
+    case "antigravity_quota":
       return state;
     case "antigravity_availability":
       return { ...state, antigravityAvailable: e.enabled, wrapperOnline: true };

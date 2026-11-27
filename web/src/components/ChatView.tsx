@@ -105,7 +105,6 @@ import type { ChatReadingState } from "../chat-reading-memory";
 import type { DshApiClient } from "../dsh-api";
 import { DshRecommendation } from "./DshRecommendations";
 import { recommendationTurn, useDshRecommendations } from "../dsh-recommendations";
-import { compactTokens, usageForTurn, type TurnUsageReadings } from "../turn-usage";
 
 const SessionMessageLinks = lazy(() => import("./SessionMessageLinks"));
 const DshProducedFiles = lazy(() => import("./DshProducedFiles"));
@@ -353,7 +352,7 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   ambiguousActiveTurnIds = [],
   sessionRunning = false,
   initialReadingState, onReadingStateSave,
-  surface = "code", voiceSpeech, turnUsage }: {
+  surface = "code", voiceSpeech }: {
   ref?: Ref<ChatViewHandle>;
   sessionLink?: SessionMessageNavigation["sessionLink"];
   onOpenSession?: (nativeId: string) => void;
@@ -361,7 +360,6 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
   onDshPlugin?: (name: string) => void;
   sid: string | null;
   turns: Turn[];
-  turnUsage?: TurnUsageReadings;
   voiceSpeech?: boolean;
   initialReadingState?: ChatReadingState;
   onReadingStateSave?: (position: ChatReadingState | null) => void;
@@ -3109,8 +3107,6 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
             // task reaches its terminal boundary. Completion time, copy and
             // fork belong to that real boundary, never to the segment bit.
             const showCompletionFooter = t.done && !working;
-            const tokens = engine === "antigravity" && showCompletionFooter
-              ? usageForTurn(t, turnUsage) ?? t.tokenUsage : undefined;
             const workingLabel = t.progress
               ?? (activePhase === "answering"
                 ? "回答中"
@@ -3382,10 +3378,6 @@ export function ChatView({ ref, sid, turns: incomingTurns, engine = "claude", lo
                     instead of reserving an empty 22px metadata row. */}
                 {showCompletionFooter && <div className="ubub-meta ai-meta">
                   {showCompletionFooter && t.doneTs && <span className="ubub-time">{formatTime(t.doneTs)}</span>}
-                  {tokens && <span className="ubub-time"
-                    title={`输入 ${tokens.input_tokens ?? "—"} · 输出 ${tokens.output_tokens ?? "—"} · 缓存读取 ${tokens.cache_read_tokens ?? "—"} · 缓存写入 ${tokens.cache_write_tokens ?? "—"} · 思考 ${tokens.thought_tokens ?? "—"}`}>
-                    {compactTokens(tokens.input_tokens)} 输入 · {compactTokens(tokens.output_tokens)} 输出
-                  </span>}
                   {showCompletionFooter && finalBlocks.length > 0 && <button
                     className={"ubub-act" + (copiedId === t.id + "-ai" ? " copied" : "")}
                     onClick={() => copyText(t.id + "-ai", aiText(t))}

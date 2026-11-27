@@ -34,6 +34,7 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
   let model = "neon";
   let mode = "default";
   let seq = 0;
+  let quotaPlan: "Starter" | "Pro" = "Starter";
   await page.addInitScript(() => {
     localStorage.setItem("cc_remote_engine", "codex");
     localStorage.setItem("cc_remote_machine", "gemini-machine");
@@ -86,6 +87,22 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
             { id: "pro", display_name: "Gemini Pro", efforts: selected === "pro" ? ["low", "extra"] : [],
               effort_names: { low: "Low", extra: "Extra" } }] });
       }
+      if (cmd.type === "get_antigravity_quota") {
+        const weekly = { id: "gemini-weekly", window: "weekly", name: "Weekly Limit Remaining",
+          remaining_fraction: .9419, resets_at: Math.floor(Date.now() / 1000) + 3600 };
+        const fiveHour = { id: "gemini-5h", window: "5h", name: "Five Hour Limit Remaining",
+          remaining_fraction: .8 };
+        emit({ type: "antigravity_quota", request_id: cmd.cmd_id,
+          plan: quotaPlan === "Starter" ? "Antigravity Starter Quota" : "Pro",
+          observed_at: Math.floor(Date.now() / 1000), groups: [
+            { name: "Gemini Models", models: ["Gemini 4 Neon"], buckets: quotaPlan === "Starter"
+              ? [weekly] : [weekly, fiveHour] },
+            { name: "Claude and GPT models", models: ["Claude Sonnet 4.6"], buckets: [
+              { ...weekly, id: "3p-weekly", remaining_fraction: 1, resets_at: null },
+              { ...fiveHour, id: "3p-5h", remaining_fraction: 1 },
+            ] },
+          ] });
+      }
       if (cmd.type === "new_session" && cmd.engine === "antigravity") {
         if (!workspaceTrusted) {
           emit({ type: "error", code: "gemini_workspace_untrusted", message: "Gemini workspace needs trust",
@@ -114,7 +131,8 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
       if (cmd.type === "get_history" && cmd.session_id === sid) {
         emit({ type: "history", sid, session_id: sid, detail: "summary", generation: "current-wrapper",
           revision: "native-history", build_seq: 1, live_seq: seq, in_progress: state !== "idle", events: [], turns: emptyGeminiHistory ? [] : [{ id: "test-turn", prompt: "验证 Gemini 接入",
-            done: true, tokenUsage: { input_tokens: 17, output_tokens: 9, cache_read_tokens: 5, thought_tokens: 3 },
+            done: true, doneTs: Date.now(),
+            tokenUsage: { input_tokens: 17, output_tokens: 9, cache_read_tokens: 5, thought_tokens: 3 },
             blocks: [{ kind: "text", channel: "final", text: "Gemini 已就绪。", message_id: "test-response", done: true }] }] });
       }
       if (cmd.type === "antigravity_auth") {
@@ -178,6 +196,7 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
       return () => finish("background_followup");
     },
     requireWorkspaceTrust: () => { workspaceTrusted = false; },
+    setQuotaPlan: (value: "Starter" | "Pro") => { quotaPlan = value; },
     draining: () => {
       state = "draining";
       emit({ type: "state", state, sid, seq: ++seq });
@@ -223,7 +242,10 @@ test("a session message opens its original Gemini Code session", async ({ page }
   await expect(page.locator("html")).toHaveAttribute("data-engine", "antigravity");
   await expect.poll(() => relay.seen.some(cmd => cmd.type === "switch_session" && cmd.session_id === sid)).toBe(true);
   await expect(page.getByText("Gemini 已就绪。")).toBeVisible();
-  await expect(page.getByText("17 输入 · 9 输出")).toBeVisible();
+  const replyFooter = page.locator(".ai-meta").last();
+  await expect(replyFooter.locator(".ubub-time")).toHaveCount(1);
+  await expect(replyFooter.getByRole("button", { name: "复制" })).toBeVisible();
+  await expect(replyFooter.getByText(/输入|输出/)).toHaveCount(0);
 });
 
 test("Gemini keeps a background follow-up active until Stop is acknowledged", async ({ page, hasTouch }) => {
@@ -314,6 +336,29 @@ test("Gemini colors carry through empty sessions, appearance and question dialog
   expect(await question.evaluate(node => getComputedStyle(node, "::backdrop").backgroundColor))
     .toBe("rgba(30, 43, 70, 0.34)");
 });
+
+for (const plan of ["Starter", "Pro"] as const) {
+  test(`Gemini quota displays ${plan} native windows with a subscription badge`, async ({ page, hasTouch }) => {
+    const relay = await mockRelay(page, true);
+    relay.setQuotaPlan(plan);
+    const press = (control: Locator) => hasTouch ? control.tap() : control.click();
+    await page.goto("/");
+    await press(page.getByRole("button", { name: "切换新会话引擎" }));
+    await press(page.getByRole("menuitemradio", { name: "Gemini" }));
+    const meter = page.getByRole("button", { name: /账户额度：.*每周额度剩余94%/ });
+    await expect(meter).toBeVisible();
+    await expect(meter.locator(".usage-meter-line")).toHaveCount(plan === "Starter" ? 1 : 2);
+    await press(meter);
+    const panel = page.getByRole("region", { name: "Gemini 账户额度" });
+    await expect(panel.getByText(plan, { exact: true })).toBeVisible();
+    await expect(panel.getByRole("button", { name: "刷新", exact: true })).toHaveCount(0);
+    const groups = panel.locator(".usage-pop-group");
+    await expect(groups.first().getByText("剩余 94%")).toBeVisible();
+    await expect(groups.first().getByText("5 小时额度", { exact: true })).toHaveCount(plan === "Starter" ? 0 : 1);
+    await expect(groups.last().getByText("剩余 100%")).toHaveCount(2);
+    await expect(groups.last().locator(".usage-pop-window small")).toHaveCount(0);
+  });
+}
 
 test("Gemini uses native model, effort, permission and slash options on desktop and mobile", async ({ page, hasTouch }, info) => {
   const relay = await mockRelay(page, true);
