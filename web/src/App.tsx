@@ -31,6 +31,7 @@ import {
   useState,
 } from "react";
 import { RelayWs, sessionScopeKey, type EventOwnership } from "./ws";
+import { useAntigravityQuota } from "./antigravity-quota";
 import { DeviceViewCache } from "./device-view-cache";
 import type { QueryAcceptanceResult } from "./outbox";
 import { RemoteViewerContext, useRemoteViewerLinks } from "./remote-viewer-context";
@@ -602,6 +603,8 @@ export default function App() {
   const stateRef = useRef(state);
   stateRef.current = state;
   const wsRef = useRef<RelayWs | null>(null);
+  const { view: geminiQuota, request: requestGeminiQuota, reset: resetGeminiQuota,
+    accept: acceptGeminiQuota } = useAntigravityQuota(machineId, wsRef);
   const webUpdate = useWebUpdate(authed, state.connState, () => {
     if (artifactDirtyRef.current) return "Markdown 有未保存的修改，请先保存或放弃修改，再更新页面。";
     if (asyncQuestions.hasDrafts || composerDraftsRef.current.hasDrafts || btwDraftsRef.current.hasDrafts
@@ -1290,6 +1293,10 @@ export default function App() {
     (session) => session.session_id === focusedSid);
   const archivedBrowse = focusedSession?.tag === "archived";
   const focusedEngine = (focusedSession?.engine ?? engine) as Engine;
+  useEffect(() => {
+    if (authed && ownsDeviceState && engine === "antigravity"
+        && state.connState === "connected" && state.wrapperOnline) requestGeminiQuota();
+  }, [authed, ownsDeviceState, engine, state.connState, state.wrapperOnline, requestGeminiQuota]);
   useEffect(() => {
     if (space !== "code" || state.connState !== "connected" || !state.wrapperOnline) return;
     if (!historyView.turns.some((turn) => turn.sourceThreadId?.startsWith("ccr:")
@@ -2593,10 +2600,15 @@ export default function App() {
         },
         onEvent: (msg, ownership) => {
           if (!acceptsLifecycle()) return;
+          if (acceptGeminiQuota(ws, msg)) return;
           if (msg.type === "antigravity_auth_result") {
             setGeminiLogin(current => current?.device === machineId && current.request === msg.request_id
               ? { ...current, request: null, methods: msg.methods, signedIn: msg.signed_in, error: msg.error }
               : current);
+            if (msg.signed_in) {
+              resetGeminiQuota();
+              if (engineRef.current === "antigravity") requestGeminiQuota(ws);
+            }
             return;
           }
           if (directoryListenerRef.current?.(msg)) return;
@@ -4100,6 +4112,7 @@ export default function App() {
             }
           }
           if (msg.type === "wrapper_reconnected") {
+            if (engineRef.current === "antigravity") requestGeminiQuota(ws);
             skillCatalogsRef.current = {};
             setSkillCatalogs({});
             setSkillCatalogErrors({});
@@ -4122,6 +4135,7 @@ export default function App() {
           // Refresh from wrapper-owned live/transcript usage. Automatic reads
           // never issue Claude's optional native control request or use model tokens.
           if (msg.type === "turn_end" && msg.sid) {
+            if (engineRef.current === "antigravity" && msg.sid.startsWith("agy@")) requestGeminiQuota(ws);
             const runtime = stateRef.current.runtimes[msg.sid];
             if (!runtime?.contextRequestId
                 && !runtime?.contextRefreshDeferred) {
@@ -4148,6 +4162,7 @@ export default function App() {
           if (!acceptsLifecycle()) return;
           dispatch({ type: "conn", connState: s, detail });
           if (s !== "connected") {
+            resetGeminiQuota();
             turnFileRequestsRef.current.clear();
             goalApiRef.current?.reset();
             dshApi.reset();
@@ -4267,6 +4282,7 @@ export default function App() {
         },
         onWrapperGenerationChanged: () => {
           if (!acceptsLifecycle()) return;
+          resetGeminiQuota();
           turnFileRequestsRef.current.clear();
           setAgentPanel(null);
           agentDetailListenerRef.current.clear();
@@ -4330,6 +4346,7 @@ export default function App() {
     };
   }, [
     acceptSkillCatalog,
+    acceptGeminiQuota,
     asyncQuestions,
     dshApi,
     authed,
@@ -4342,7 +4359,9 @@ export default function App() {
     machineId,
     persistGoalUiPreferences,
     requestHistory,
+    requestGeminiQuota,
     requestSkillCatalog,
+    resetGeminiQuota,
     sendContextRequestTo,
     setBtwOpeningFor,
     setSidebarOpen,
@@ -6457,6 +6476,7 @@ export default function App() {
                 disabled={!!geminiLogin.request || !activeDeviceOnline}
                 onClick={() => {
                   const request = wsRef.current?.sendAntigravityAuth(method) ?? null;
+                  if (request) resetGeminiQuota();
                   setGeminiLogin({ ...geminiLogin, request, starting: true, signedIn: false,
                     error: request ? null : "暂时无法连接 Gemini 运行设备。" });
                 }}>
@@ -6484,6 +6504,7 @@ export default function App() {
             dshPresets={state.dshPresets} dshPermissions={state.dshPermissions}
             dshError={state.dshError}
             antigravity={antigravityCatalog}
+            antigravityQuota={geminiQuota} onAntigravityQuotaOpen={requestGeminiQuota}
             dshPreset={newChatDshPreset}
             onPickDshPreset={value => setDshPresetSelection({ scope: activeScopeKey, value })}
             controlScopeKey={`${activeScopeKey}\u0000${newChatProfileId ?? "__default__"}`}
@@ -6588,7 +6609,6 @@ export default function App() {
               loading={!!rt.loading || historyView.recovering}
               surface={space}
               engine={focusedEngine} forkingPointId={forkingPointId}
-              turnUsage={rt.turnUsage}
               hasMore={historyView.hasMore}
               historyPagingReady={historyView.pagingReady}
               historyRevision={rt.historyRevision}
@@ -6884,7 +6904,8 @@ export default function App() {
             ? (maxTokens) => wsRef.current?.sendCodexContext(focusedSid, maxTokens) ?? false : undefined}
           onGoal={runGoal}
           onStatus={openStatus}
-          onRefreshUsage={refreshStatus}
+          onRefreshUsage={focusedEngine === "antigravity" ? requestGeminiQuota : refreshStatus}
+          antigravityQuota={geminiQuota}
           onReview={(target, value) => {
             if (focusedSid) wsRef.current?.sendStartReview(focusedSid, target, value);
           }}

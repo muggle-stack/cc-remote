@@ -28,7 +28,7 @@ from cc_remote.attachments import (
     MAX_SINGLE_ATTACHMENT_BYTES,
 )
 
-PROTOCOL_VERSION = 99
+PROTOCOL_VERSION = 100
 
 # Codex Desktop renders a 53-week daily token-activity calendar. Keep the wire
 # payload to that same bounded window so an account response can never turn a
@@ -2189,6 +2189,42 @@ class AntigravityAuthResult(_Base):
     error: Optional[str] = Field(default=None, max_length=4096)
 
 
+class GetAntigravityQuota(_Command):
+    """Read the device's native Antigravity account quota."""
+
+    type: Literal["get_antigravity_quota"] = "get_antigravity_quota"
+    engine: Literal["antigravity"] = "antigravity"
+    sid: None = None
+
+
+class AntigravityQuotaBucket(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: WireId
+    window: str = Field(min_length=1, max_length=32)
+    name: str = Field(min_length=1, max_length=128)
+    remaining_fraction: float = Field(ge=0, le=1)
+    resets_at: Optional[int] = Field(default=None, gt=0, le=MAX_SAFE_WIRE_TIMESTAMP_SECONDS)
+
+
+class AntigravityQuotaGroup(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=128)
+    models: list[Annotated[str, StringConstraints(min_length=1, max_length=128)]] = Field(
+        default_factory=list, max_length=64)
+    buckets: list[AntigravityQuotaBucket] = Field(min_length=1, max_length=8)
+
+
+class AntigravityQuota(_Base):
+    """A request-scoped account reading containing only public display fields."""
+
+    type: Literal["antigravity_quota"] = "antigravity_quota"
+    request_id: Optional[WireId] = None
+    observed_at: Optional[int] = Field(default=None, gt=0, le=MAX_SAFE_WIRE_TIMESTAMP_SECONDS)
+    plan: Optional[str] = Field(default=None, min_length=1, max_length=96)
+    groups: list[AntigravityQuotaGroup] = Field(default_factory=list, max_length=16)
+    error: Optional[Literal["unavailable", "refresh_failed"]] = None
+
+
 class Models(_Base):
     """wrapper -> client: the engine's model catalog (one-shot, like DirList — not
     seq'd/buffered). Each entry: {id, display_name, description, efforts,
@@ -3386,6 +3422,7 @@ AnyMessage = Union[
     ReadDsh, DshReadResult, ActDshSubagent, ActDshGoal, DownloadDsh, DshDownloadChunk,
     DshState, DshCommandResult, SetDshControl,
     AntigravityAvailability, AntigravityState, SetAntigravityOption, AntigravityAuth, AntigravityAuthResult,
+    GetAntigravityQuota, AntigravityQuota,
     BrowseFiles, FilesListed, SetCodexContext, CodexContext,
     GetTurnFileChanges, TurnFileChangesPage,
     Hello, Query, CancelQueuedQuery, GetQueuedQuery, QueuedQueryDetail, UpdateQueuedQuery, QueuedQueryUpdated, QueryQueueState, Steer, Interrupt, Takeover, TakeoverState, SessionControl, SetModel, SetEffort, SetAutoCompact, SetServiceTier, SetCollaborationMode, SetPerm, GetPermissionProfiles, SetPermissionProfile, SetWebSearch, Fast, CollaborationMode, OpenBtw, CloseBtw, SyncBtw, BtwOpened, BtwSync, BtwClosed, GetContext, GetStatus, ConsumeRateLimitResetCredit, GetDiff, GetFilePreview, SaveMarkdown, GetPreviewAsset, AuthorizePreview, GetHistory, GetTurnDetail, GetAgentDetail, GetHistoryImage, GetModels, GetEngineCapabilities, ManageEnginePlugin, ManageEngineSkill, ManageEngineHook, ListSessions, SwitchSession, NewSession, DeleteWorkSession, DeleteSession, RollbackSession, RollbackResult, CompactSession, StartReview, GetWorkDashboard, CreateWorkProject, DeleteWorkProject, AddWorkSource, DeleteWorkSource, CreateWorkPlugin, DeleteWorkPlugin, CreateWorkSchedule, DeleteWorkSchedule, GetWorkArtifacts, ListDir, Ping, Pong, CommandAck,
@@ -3487,6 +3524,8 @@ _TYPE_MAP: dict[str, type[BaseModel]] = {
     "set_antigravity_option": SetAntigravityOption,
     "antigravity_auth": AntigravityAuth,
     "antigravity_auth_result": AntigravityAuthResult,
+    "get_antigravity_quota": GetAntigravityQuota,
+    "antigravity_quota": AntigravityQuota,
     "dsh_command_result": DshCommandResult,
     "set_dsh_control": SetDshControl,
     "get_engine_capabilities": GetEngineCapabilities,

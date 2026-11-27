@@ -29,7 +29,9 @@ from cc_remote.protocol import (
 from cc_remote.session_messages import reference
 from cc_remote.wrapper.antigravity_client import AcpClient, AcpError, AntigravityLaunch, antigravity_opted_out
 from cc_remote.wrapper.antigravity_controls import CONTROL_CATEGORIES, AntigravityControlStore
+from cc_remote.wrapper.antigravity_history import apply_native_turn_times, read_native_turn_times
 from cc_remote.wrapper.antigravity_metadata import AntigravityMetadata, AntigravityMetadataStore
+from cc_remote.wrapper.antigravity_quota import AntigravityQuotaReader
 from cc_remote.wrapper.antigravity_stream import (
     MCP_SEND_MESSAGE, AntigravityTranscript, config_options, context_usage, event_id, native_diff, prompt_usage, records, slash_commands,
     text, wire_session_id,
@@ -206,6 +208,7 @@ class AntigravityRuntime:
         self.setup_lock = asyncio.Lock()
         self.controls_lock = asyncio.Lock()
         self.auth_lock = asyncio.Lock()
+        self.quota = AntigravityQuotaReader()
         self.draining = False
         self.install_fence: Path | None = None
         self.opening: AntigravityHandle | None = None
@@ -341,6 +344,7 @@ class AntigravityRuntime:
             return client
 
     async def close(self):
+        self.quota.invalidate()
         if self.client:
             client = self.client
             await self.client.close()
@@ -472,7 +476,7 @@ class AntigravityRuntime:
             if method == "session/resume":
                 handle.history_params = params
             identified = True
-            handle.transcript.complete(replay=True)
+            await self.finish_history_replay(handle)
             handle.set_options(result)
             # agy sends its first command update just after the new/load
             # response. Keep accepting notifications for this unbound session.
@@ -491,6 +495,15 @@ class AntigravityRuntime:
             self.opening = None
             self.early_controls.clear()
 
+    @staticmethod
+    async def finish_history_replay(handle):
+        transcript = handle.transcript
+        transcript.complete(replay=True)
+        home = getattr(handle.client.launch, "environment", {}).get("HOME")
+        if transcript.replay_turns and home and os.path.isabs(home):
+            times = await asyncio.to_thread(read_native_turn_times, Path(home), handle.native_id)
+            apply_native_turn_times(transcript, times)
+
     async def load_resumed_history(self, handle):
         """Populate the transcript lazily under setup_lock before any new input."""
         params = handle.history_params
@@ -503,7 +516,7 @@ class AntigravityRuntime:
             result = await handle.client.call("session/load", params)
             if result.get("sessionId", handle.native_id) != handle.native_id:
                 raise AcpError("identity", "本机 agy 返回了不匹配的会话标识。")
-            staged.transcript.complete(replay=True)
+            await self.finish_history_replay(staged)
             handle.transcript = staged.transcript
             handle.usage = staged.usage or handle.usage
             handle.history_params = None
@@ -676,16 +689,24 @@ class AntigravityRuntime:
                 for ctx in self.machine.sessions.values()):
             raise AcpError(ERR_BUSY, "请等本机 Gemini 会话和队列空闲后再登录。")
         async with self.auth_lock:
-            identity, fresh, row = await self.mutation_intent(cmd, "auth", [cmd.method])
-            if not fresh:
-                if row.get("result") and json.loads(row["result"]).get("status") == "signed_in":
-                    return await self.send(AntigravityAuthResult(signed_in=True, **fields))
-                raise self.uncertain()
-            await client.call("authenticate", {"methodId": cmd.method}, timeout=300)
-            self.catalog.clear()
-            await asyncio.to_thread(self.mutations.finish, identity, {"status": "signed_in"})
-            await self.send(SessionListInvalidated(engine=_ENGINE))
+            with self.quota.account_change():
+                identity, fresh, row = await self.mutation_intent(cmd, "auth", [cmd.method])
+                if fresh:
+                    await client.call("authenticate", {"methodId": cmd.method}, timeout=300)
+                    self.catalog.clear()
+                    await asyncio.to_thread(self.mutations.finish, identity, {"status": "signed_in"})
+                elif not (row.get("result") and json.loads(row["result"]).get("status") == "signed_in"):
+                    raise self.uncertain()
+            if fresh:
+                await self.send(SessionListInvalidated(engine=_ENGINE))
             return await self.send(AntigravityAuthResult(signed_in=True, **fields))
+
+    async def handle_get_antigravity_quota(self, cmd):
+        launch = None if self.opted_out() else self.launch_factory()
+        report = await self.quota.refresh(launch)
+        return await self.send(report.model_copy(update={
+            "request_id": cmd.cmd_id, "to": cmd.client_id,
+        }))
 
     async def handle_new_session(self, cmd):
         if cmd.prompt is not None or cmd.images or cmd.files:

@@ -15,7 +15,7 @@ import pytest_asyncio
 from cc_remote import protocol
 from cc_remote.protocol import (
     FILE_PREVIEW_MAX_BYTES, AcknowledgeCompletion, AnswerQuestion, AntigravityAuth, ArchiveSession,
-    GetContext, GetEngineCapabilities, GetFilePreview,
+    GetAntigravityQuota, GetContext, GetEngineCapabilities, GetFilePreview,
     GetHistory, GetModels, GetTurnDetail, Hello, Interrupt, ListSessions, NewSession, Query, RenameSession,
     SetAntigravityOption, Steer, SwitchSession,
     deserialize, serialize,
@@ -25,7 +25,7 @@ from cc_remote.antigravity_service import (
 )
 from cc_remote.claude_service.wire import read_frame, write_frame
 from cc_remote.session_messages import parse_message, reference
-from cc_remote.wrapper import antigravity_runtime
+from cc_remote.wrapper import antigravity_quota, antigravity_runtime
 from cc_remote.wrapper import session_presentation
 from cc_remote.wrapper.antigravity_client import AcpClient, AcpError, AntigravityLaunch
 from cc_remote.wrapper.antigravity_hooks import AntigravityHooks
@@ -441,6 +441,37 @@ async def test_catalog_controls_cwd_context_and_native_history(wire):
 
 
 @pytest.mark.asyncio
+async def test_gemini_history_replay_keeps_original_message_times(wire, tmp_path):
+    machine, _, _, client = wire
+    ctx = await new_session(machine)
+    native_id = ctx.sdk.native_id
+    client.rows[native_id] = {"sessionId": native_id, "cwd": client.cwd}
+    agent_home = tmp_path / "agy-home"
+    client.launch = SimpleNamespace(default_model="neon", environment={"HOME": str(agent_home)})
+    log = agent_home / ".gemini/antigravity-cli/brain" / native_id / ".system_generated/logs/transcript.jsonl"
+    log.parent.mkdir(parents=True)
+    records = [
+        {"type": "USER_INPUT", "created_at": "2026-01-01T00:00:00Z",
+         "content": "<USER_REQUEST>\nsaved question\n</USER_REQUEST>\n<ADDITIONAL_METADATA>fixture</ADDITIONAL_METADATA>"},
+        {"type": "PLANNER_RESPONSE", "created_at": "2026-01-01T00:00:04Z", "content": "saved answer"},
+    ]
+    log.write_text("".join(json.dumps(row) + "\n" for row in records))
+    await machine._detach_idle_session(ctx.key)
+
+    history = await machine._handle(GetHistory(session_id=ctx.key, detail="summary"))
+    turn, = history.turns
+    assert (turn.ts, turn.doneTs) == (1767225600000, 1767225604000)
+    detail = await machine._handle(GetHistory(session_id=ctx.key))
+    assert next(row["ts"] for row in detail.events if row["type"] == "turn_end") == 1767225604
+
+    session_caps = {**client.capabilities["sessionCapabilities"], "resume": {}}
+    client.capabilities = {**client.capabilities, "sessionCapabilities": session_caps}
+    await machine._handle(SwitchSession(session_id=ctx.key, engine="antigravity"))
+    resumed = await machine._handle(GetHistory(session_id=ctx.key, detail="summary"))
+    assert [(item.ts, item.doneTs) for item in resumed.turns] == [(turn.ts, turn.doneTs)]
+
+
+@pytest.mark.asyncio
 async def test_gemini_presentation_and_read_only_extensions(wire, monkeypatch, tmp_path):
     machine, _, _, client = wire
     ctx = await new_session(machine)
@@ -494,6 +525,73 @@ async def test_gemini_sign_in_is_scoped_deduplicated_and_blocks_active_turns(wir
     assert (await machine._handle(cmd)).signed_in
     assert [args for method, args in client.calls if method == "authenticate"] == [{"methodId": "oauth-personal"}]
     assert deserialize(serialize(signin)) == signin
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reliable", [False, True], ids=["dispatch", "reliable"])
+async def test_managed_gemini_sign_in_refreshes_quota_before_the_worker_reply(managed_gemini, monkeypatch, reliable):
+    wrapper, transport, _, service, native = managed_gemini
+    login_started, finish_login, auth_result_sent, finish_reply = (asyncio.Event() for _ in range(4))
+    current_plan = "Starter"
+    plans_read = []
+    login = AntigravityAuth(method="oauth-personal", client_id="browser", cmd_id="login")
+    quota = GetAntigravityQuota(client_id="browser", cmd_id="quota")
+
+    def read_quota(_launch):
+        plans_read.append(current_plan)
+        return protocol.AntigravityQuota(plan=current_plan)
+
+    native_call = native.call
+
+    async def sign_in(method, args, *, timeout=30):
+        nonlocal current_plan
+        if method == "authenticate":
+            login_started.set()
+            await finish_login.wait()
+            current_plan = "Pro"
+        return await native_call(method, args, timeout=timeout)
+
+    send = transport.send
+
+    async def observe_result(event):
+        await send(event)
+        if event.type == "antigravity_auth_result" and event.request_id == login.cmd_id and event.signed_in:
+            auth_result_sent.set()
+
+    write = service.transport.write
+
+    async def hold_reply(writer, frame):
+        if "reply" in frame:
+            await finish_reply.wait()
+        await write(writer, frame)
+
+    monkeypatch.setattr(wrapper._antigravity, "launch_factory", lambda: AntigravityLaunch("/local/agy", {}))
+    monkeypatch.setattr(antigravity_quota, "read_native_quota", read_quota)
+    monkeypatch.setattr(native, "call", sign_in)
+    monkeypatch.setattr(transport, "send", observe_result)
+    monkeypatch.setattr(service.transport, "write", hold_reply)
+
+    assert (await wrapper._handle(quota)).plan == "Starter"
+    handle_login = wrapper._process_command if reliable else wrapper._handle
+    task = asyncio.create_task(handle_login(login))
+    try:
+        async with asyncio.timeout(3):
+            await login_started.wait()
+            during_login = await wrapper._handle(quota)
+            assert during_login.error == "unavailable" and during_login.plan is None
+            finish_login.set()
+            await auth_result_sent.wait()
+            assert not task.done()
+            assert (await wrapper._handle(quota)).plan == "Pro"
+    finally:
+        finish_login.set()
+        finish_reply.set()
+        await asyncio.wait_for(task, timeout=3)
+
+    assert (await wrapper._handle(quota)).plan == "Pro"
+    assert plans_read == ["Starter", "Pro"]
+    assert any(event.type == "command_ack" and event.cmd_id == login.cmd_id and event.to == login.client_id
+               for event in transport.sent) == reliable
 
 
 @pytest.mark.asyncio

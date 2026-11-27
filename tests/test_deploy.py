@@ -958,7 +958,7 @@ def test_release_docs_and_examples_describe_one_atomic_layout():
     assert "claude-agent-sdk==0.2.174" in claude
     assert f"protocol v{PROTOCOL_VERSION}" in claude
     assert "0.2.110" not in claude
-    assert "protocol v10" not in claude
+    assert not re.search(r"\bprotocol v10\b", claude)
 
 
 def test_example_wrapper_buffer_can_hold_one_maximum_websocket_frame():

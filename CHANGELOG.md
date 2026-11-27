@@ -5,7 +5,9 @@
 ## Unreleased
 
 - Add Gemini Code sessions through Antigravity CLI and ACP, with native model,
-  permission and command discovery. Wire protocol v99.
+  permission and command discovery.
+- Show Gemini account quota and the subscription tier, restore original history
+  timestamps, and refine the reply footer and new session button. Wire protocol v100.
 
 ## v5.3.62
 

@@ -1,4 +1,5 @@
 import type { Engine } from "../protocol";
+import type { AntigravityQuotaView } from "../antigravity-quota";
 import type { DshRead } from "../dsh-api";
 import type { DshItem } from "../protocol";
 import { useDshReferences } from "./DshReferences";
@@ -153,6 +154,7 @@ interface Props {
   onGoal?: (args: string) => void;
   onStatus?: () => void;
   onRefreshUsage?: () => void;
+  antigravityQuota?: AntigravityQuotaView;
   onReview?: (
     target: "uncommittedChanges" | "baseBranch" | "commit" | "custom",
     value?: string,
@@ -1165,12 +1167,14 @@ export function Composer(p: Props) {
                 onRefresh={p.onRequestModels}
                 onChange={(tier) => p.onSetServiceTier?.(tier)} /></Suspense>
             )}
-            {(p.engine === "codex" || p.engine === "claude") && (
+            {(p.engine === "codex" || p.engine === "claude" || p.engine === "antigravity") && (
               <UsageMeter
                 engine={p.engine}
                 open={usageOpen}
                 report={p.statusReport ?? null}
                 rateLimits={p.rateLimits}
+                antigravityQuota={p.antigravityQuota}
+                model={model?.name}
                 error={p.statusError}
                 loading={p.statusLoading}
                 disabled={locked}
@@ -1182,7 +1186,7 @@ export function Composer(p: Props) {
                   setUsageOpen(opening);
                   if (opening) p.onRefreshUsage?.();
                 }}
-                onRefresh={() => p.onRefreshUsage?.()}
+                onRefresh={p.onRefreshUsage}
                 onOpenStatus={p.engine === "codex" && p.onStatus ? () => {
                   setUsageOpen(false);
                   p.onStatus?.();
