@@ -337,7 +337,8 @@ class SessionMessages:
                              "cwd": row.get("cwd"), "state": ctx.state if ctx else "not_loaded"}
         runtime = machine._antigravity
         controller = machine._gemini_controller
-        if controller or runtime.launch_factory():
+        # A disabled Gemini entry still owns the work it already accepted.
+        if controller or (runtime.client and runtime.client.running) or runtime.launch_factory():
             try:
                 async with asyncio.timeout(3):
                     candidates = await controller.list_sessions() if controller else await runtime.list_sessions()
@@ -371,7 +372,7 @@ class SessionMessages:
         if name == "send_message":
             key = request_id(args.get("request_id"))
             target = args.get("session_ref")
-            split_reference(target)
+            target_engine, _ = split_reference(target)
             prompt = envelope(source, args.get("message"))
             # A retry must recover its receipt even if a participant was later
             # archived or deleted. It never revalidates into a second send.
@@ -389,10 +390,12 @@ class SessionMessages:
             matches = []
             size = 256
             truncated = False
+            gemini_disabled = self.machine._antigravity.opted_out()
             for ref, row in rows.items():
-                encoded = json.dumps(row)
-                if ref == source or search.casefold() not in json.dumps(row, ensure_ascii=False).casefold():
+                if (ref == source or (gemini_disabled and row["engine"] == "antigravity")
+                        or search.casefold() not in json.dumps(row, ensure_ascii=False).casefold()):
                     continue
+                encoded = json.dumps(row)
                 if len(matches) >= 200 or size + len(encoded) > MAX_FRAME - 1024:
                     truncated = True
                     break
@@ -401,6 +404,8 @@ class SessionMessages:
             return {"sessions": matches, "truncated": truncated}
         if target == source or target not in rows:
             raise ValueError("Choose another eligible Code session from list_sessions")
+        if target_engine == "antigravity" and self.machine._antigravity.opted_out():
+            raise ValueError("Gemini is disabled for new messages on this device")
         if len(self.waiters) >= MAX_PENDING:
             raise ValueError("Too many unresolved sends; no message was submitted")
         receipt, fresh = self.store.claim(source, key, target, prompt, queue=True)

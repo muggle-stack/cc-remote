@@ -20,7 +20,8 @@ Gemini 是 CC Remote 的可选 Code 引擎。Wrapper 在会话所在设备运行
 `~/.antigravity/settings.json` 中已启用的 `gateway.url`、
 `gateway.apiKey`、`gateway.wireProtocol`，以及
 `models.defaultModelId`。凭据只传给本机 agy 子进程。
-`CC_REMOTE_ANTIGRAVITY=0` 可关闭该设备的 Gemini 入口。
+在 Wrapper 上设置 `CC_REMOTE_ANTIGRAVITY=0` 会关闭该设备的 Gemini 新会话和新消息入口。
+独立 Gemini 服务在 Wrapper 重新连接时接收该设置，已接收的回合和排队消息继续处理。
 
 ### 授权工作目录
 

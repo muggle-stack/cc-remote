@@ -27,7 +27,7 @@ from cc_remote.protocol import (
     TurnBinding, TurnDetail, TurnSteered, TurnUsage, UserMsg,
 )
 from cc_remote.session_messages import reference
-from cc_remote.wrapper.antigravity_client import AcpClient, AcpError, AntigravityLaunch
+from cc_remote.wrapper.antigravity_client import AcpClient, AcpError, AntigravityLaunch, antigravity_opted_out
 from cc_remote.wrapper.antigravity_controls import CONTROL_CATEGORIES, AntigravityControlStore
 from cc_remote.wrapper.antigravity_metadata import AntigravityMetadata, AntigravityMetadataStore
 from cc_remote.wrapper.antigravity_stream import (
@@ -60,6 +60,7 @@ _CANCEL_TIMEOUT = 15
 _CLOSE_TIMEOUT = 4
 _FOLLOWUP_NOTICE_AFTER = 15.0
 _FOLLOWUP_STOP_SETTLE = .2
+_NEW_WORK = frozenset({"new_session", "query", "steer", "get_models", "antigravity_auth"})
 _COMMON = frozenset({
     "hello", "ping", "list_dir", "answer_question",
     "acknowledge_completion", "cancel_queued_query", "get_queued_query", "update_queued_query",
@@ -198,6 +199,7 @@ class AntigravityRuntime:
     def __init__(self, machine, *, launch_factory=AntigravityLaunch.local, args=()):
         self.machine = machine
         self.launch_factory = launch_factory
+        self.opted_out = antigravity_opted_out
         self.args = args
         self.client: AcpClient | None = None
         self.connect_lock = asyncio.Lock()
@@ -217,9 +219,12 @@ class AntigravityRuntime:
         self.catalog: OrderedDict[str | None, tuple[float, AntigravityHandle, str | None]] = OrderedDict()
         self.cached_history: OrderedDict[str, tuple[float, AntigravityHandle]] = OrderedDict()
 
+    def available(self):
+        return not self.opted_out() and bool(self.launch_factory())
+
     def availability(self, cmd):
         return AntigravityAvailability(
-            enabled=bool(self.launch_factory()), to=cmd.client_id,
+            enabled=self.available(), to=cmd.client_id,
             route_id=getattr(cmd, "route_id", None),
         )
 
@@ -246,6 +251,10 @@ class AntigravityRuntime:
             if (getattr(cmd, "engine", None) not in (None, _ENGINE)
                     or getattr(cmd, "space", "code") != "code"):
                 raise AcpError("scope", "此操作与 Gemini Code 会话不匹配。")
+            # Reject new admissions while letting accepted turns, approvals
+            # and wrapper-owned queues continue on the resident ACP process.
+            if cmd.type in _NEW_WORK and self.opted_out():
+                raise AcpError("unavailable", "此设备已关闭 Gemini 新会话和消息。")
             if cmd.type == "query":
                 await self.context(cmd.sid)
                 return UNHANDLED_COMMAND

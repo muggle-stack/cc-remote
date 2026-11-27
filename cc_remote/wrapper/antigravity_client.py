@@ -22,13 +22,18 @@ _GATEWAY_URL = "AGY_LLM_GATEWAY_URL"
 _GATEWAY_KEY = "AGY_LLM_GATEWAY_API_KEY"
 _GATEWAY_PROTOCOL = "AGY_LLM_GATEWAY_WIRE_PROTOCOL"
 _ACP_LOGS = "~/.gemini/antigravity-cli/log/acp-*.log"
+_ENABLE_ENV = "CC_REMOTE_ANTIGRAVITY"
 WRAPPER_ENV_KEYS = frozenset({
     "PATH", "SHELL", "LANG", "LC_ALL", "LC_CTYPE",
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
     "http_proxy", "https_proxy", "all_proxy", "no_proxy",
     "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
-    "GEMINI_API_KEY", _GATEWAY_URL, _GATEWAY_KEY, _GATEWAY_PROTOCOL,
+    "GEMINI_API_KEY", _GATEWAY_URL, _GATEWAY_KEY, _GATEWAY_PROTOCOL, _ENABLE_ENV,
 })
+
+
+def antigravity_opted_out(wrapper_environment: Mapping[str, str] | None = None) -> bool:
+    return (wrapper_environment or {}).get(_ENABLE_ENV, os.environ.get(_ENABLE_ENV)) == "0"
 
 
 class AcpError(Exception):
@@ -46,15 +51,15 @@ class AntigravityLaunch:
 
     @classmethod
     def local(cls, *, wrapper_environment: Mapping[str, str] | None = None) -> AntigravityLaunch | None:
+        if antigravity_opted_out(wrapper_environment):
+            return None
         env = sanitized_child_env()
         if wrapper_environment is not None:
-            # An absent value in the Wrapper also clears an inherited worker value.
-            for key in WRAPPER_ENV_KEYS:
+            # Credentials and shell settings come from the Wrapper. Keep the
+            # installed service's enable setting unless explicitly overridden.
+            for key in WRAPPER_ENV_KEYS - {_ENABLE_ENV}:
                 env.pop(key, None)
             env.update((key, wrapper_environment[key]) for key in wrapper_environment.keys() & WRAPPER_ENV_KEYS)
-        enabled = env.get("CC_REMOTE_ANTIGRAVITY")
-        if enabled == "0":
-            return None
         home = Path.home()
         try:
             with (home / ".antigravity" / "settings.json").open("rb") as stream:
@@ -74,7 +79,7 @@ class AntigravityLaunch:
             if gateway.get("enabled") is True and all(isinstance(v, str) and v for v in values):
                 env.update(zip((_GATEWAY_URL, _GATEWAY_KEY, _GATEWAY_PROTOCOL), values))
         gateway_configured = bool(env.get(_GATEWAY_URL) and env.get(_GATEWAY_KEY))
-        if not (enabled == "1" or env.get("CC_REMOTE_ANTIGRAVITY_BIN")
+        if not (env.get(_ENABLE_ENV) == "1" or env.get("CC_REMOTE_ANTIGRAVITY_BIN")
                 or gateway_configured or env.get("GEMINI_API_KEY")):
             return None
         configured = env.get("CC_REMOTE_ANTIGRAVITY_BIN")

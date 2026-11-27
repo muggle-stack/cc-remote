@@ -17,7 +17,7 @@ from cc_remote.claude_service.wire import private_directory, read_frame, same_us
 from cc_remote.log import logger
 from cc_remote import protocol
 from cc_remote.protocol import AntigravityAvailability, SessionInfo
-from cc_remote.wrapper.antigravity_client import AcpError, AntigravityLaunch, WRAPPER_ENV_KEYS
+from cc_remote.wrapper.antigravity_client import AcpError, AntigravityLaunch, WRAPPER_ENV_KEYS, antigravity_opted_out
 
 log = logger("antigravity_service")
 _REPLAY = ContextVar("gemini_replay", default=False)
@@ -107,6 +107,7 @@ class GeminiService:
         self.transport = transport
         self.message_state = message_state or machine._antigravity.metadata.root
         self.environment: dict[str, str] | None = None
+        self.machine._antigravity.opted_out = lambda: antigravity_opted_out(self.environment)
         self.attach_lock = asyncio.Lock()
         self.commands = set()
         self.processing = {}
@@ -115,7 +116,7 @@ class GeminiService:
     def status(self):
         messages = self.machine._session_messages
         return {
-            "ready": bool(self.machine._antigravity.launch_factory()),
+            "ready": self.machine._antigravity.available(),
             "busy": bool(self.commands or self.machine._ui_updates.busy_count()
                          or (messages and messages.active)),
             "state_dir": str(self.machine._antigravity.metadata.root.resolve()),

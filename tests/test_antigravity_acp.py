@@ -82,8 +82,10 @@ def test_managed_agy_uses_the_wrappers_environment_and_clears_worker_values(monk
     assert launch.environment["http_proxy"] == "http://wrapper.test"
     assert launch.environment["NO_PROXY"] == "localhost"
     assert launch.environment["GEMINI_API_KEY"] == "fixture-provider-key"
+    assert launch.environment["CC_REMOTE_ANTIGRAVITY"] == "1"
     assert "HTTPS_PROXY" not in launch.environment and "WRAPPER_TOKEN" not in launch.environment
     assert "fixture-provider-key" not in repr(launch)
+    assert AntigravityLaunch.local(wrapper_environment={"CC_REMOTE_ANTIGRAVITY": "0"}) is None
 
 
 class ScriptedAcp:
@@ -186,7 +188,8 @@ class ScriptedAcp:
 
 
 @pytest_asyncio.fixture
-async def wire(tmp_path):
+async def wire(tmp_path, monkeypatch):
+    monkeypatch.setenv("CC_REMOTE_ANTIGRAVITY", "1")
     machine, transport = _mk_machine()
     machine.cfg.cc_cwd = str(tmp_path)
     trust_workspaces(machine, tmp_path)
@@ -428,6 +431,10 @@ async def test_independent_gemini_service_keeps_running_question_across_wrapper_
                           cmd_id="service-command", client_id="browser-client")
             await first._process_command(query)
             ctx = worker.sessions[sid]
+            queued = Query(sid=sid, msg_id="accepted-queue", prompt="Finish accepted queue", delivery="queue",
+                           cmd_id="service-queue", client_id="browser-client")
+            await first._process_command(queued)
+            assert [item.msg_id for item in ctx.queued_queries] == [queued.msg_id]
             async with service_control(path, worker.cfg.machine_id, "drain") as reply:
                 assert reply["error"] == "busy"
             await first._gemini_controller.close()
@@ -444,9 +451,17 @@ async def test_independent_gemini_service_keeps_running_question_across_wrapper_
                 while not ctx.pending_asks:
                     await asyncio.sleep(.001)
             monkeypatch.setattr(protocol, "PROTOCOL_VERSION", protocol.PROTOCOL_VERSION + 1)
+            monkeypatch.setenv("CC_REMOTE_ANTIGRAVITY", "0")
             hello = NewerHello(role="client", client_id="replacement", discover_engines=True)
             assert service_message(hello)["optional_display_hint"] is None
             await second._handle(hello)
+            assert service.environment["CC_REMOTE_ANTIGRAVITY"] == "0"
+            assert any(frame.type == "antigravity_availability" and not frame.enabled and frame.to == "replacement"
+                       for frame in second_transport.sent)
+            create = await second._handle(NewSession(engine="antigravity", cwd=client.cwd))
+            assert create.code == "gemini_unavailable"
+            extra = await second._handle(Query(sid=sid, msg_id="new-after-opt-out", prompt="New work"))
+            assert extra.code == "gemini_unavailable"
             await transport.send(NewerAvailability(enabled=True, to="extended-event"))
             await second._process_command(query)
             assert len(client.prompts) == 1
@@ -465,9 +480,14 @@ async def test_independent_gemini_service_keeps_running_question_across_wrapper_
                                 content={"type": "text", "text": "Original work finished"})
             client.prompts[0][1].set_result({"stopReason": "end_turn"})
             await ctx.turn_task
-            assert len(client.prompts) == 1
+            await prompted(client, 2)
+            request, outcome = client.prompts[1]
+            assert request["prompt"] == [{"type": "text", "text": queued.prompt}]
+            outcome.set_result({"stopReason": "end_turn"})
+            await ctx.turn_task
             snapshot = await second._handle(GetHistory(session_id=sid, detail="summary"))
-            assert snapshot.turns[-1].blocks[-1]["text"] == "Original work finished"
+            assert [turn.prompt for turn in snapshot.turns] == [query.prompt, queued.prompt]
+            assert snapshot.turns[0].blocks[-1]["text"] == "Original work finished"
             async with service_control(path, worker.cfg.machine_id, "drain") as reply:
                 assert reply["draining"] and runtime.admission_paused()
                 with pytest.raises(AcpError, match="正在切换"):
@@ -1431,7 +1451,12 @@ async def test_messages_to_gemini_confirm_native_delivery_without_retrying_ambig
         else:
             await client.close()
             assert (await sending)["status"] == "unknown"
+        monkeypatch.setenv("CC_REMOTE_ANTIGRAVITY", "0")
         assert await bus.call(source_ref, "send_message", args) == await sending
+        if connected:
+            assert (await bus.call(source_ref, "list_sessions", {}))["sessions"] == []
+            with pytest.raises(ValueError, match="Gemini is disabled"):
+                await bus.call(source_ref, "send_message", {**args, "request_id": "new-after-opt-out"})
         assert len(client.prompts) == 1
         update = {"name": "mcp_cc_remote_messages_send_message", "status": "completed", "rawInput": args}
         assert json.loads(runtime.with_message_receipt(source.key, update)["rawOutput"]) == await sending
