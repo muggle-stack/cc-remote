@@ -4890,8 +4890,25 @@ function reduceEvent(
         // raced it, its completed rows are the terminal fence for browser-only
         // process projections. Preserve every payload/disclosure, but never let
         // an old item/started replay animate the session again.
+        // Answer truncation describes the current summary. After restoring
+        // cached process details, use the completed source summary to clear a
+        // stale answer flag for the same turn.
+        const completeAnswerIds = e.detail === "summary" && !e.error
+          ? new Set(built.turns.filter((turn) =>
+              turn.done && turn.detailReasons
+              && !turn.detailReasons.includes("answer_truncated")
+              && turn.blocks.some((block) => block.kind === "text"
+                && block.channel === "final" && block.done && block.text.length > 0),
+            ).map((turn) => turn.id))
+          : undefined;
         turns = cloneTurns(turns);
-        turns.forEach((turn) => finishCompletedTurnChildren(turn));
+        for (const turn of turns) {
+          finishCompletedTurnChildren(turn);
+          if (turn.done && completeAnswerIds?.has(turn.historyTurnId ?? turn.id)
+              && turn.detailReasons?.includes("answer_truncated")) {
+            turn.detailReasons = turn.detailReasons.filter((reason) => reason !== "answer_truncated");
+          }
+        }
       } else if (settledClaudeHistory) {
         // ResultMessage closes Claude's foreground turn, but a following
         // same-revision summary can restore live-observed detail after that

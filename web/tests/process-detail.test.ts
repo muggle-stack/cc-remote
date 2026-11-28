@@ -1057,6 +1057,41 @@ try {
   assert.match(processWithTruncatedAnswerMarkup, /查看完整内容/,
     "real deferred answer content retains its own entry even beside a process disclosure");
 
+  const receiptOverflowSid = "codex-receipt-overflow";
+  const completeReceiptAnswer: Turn = {
+    id: "receipt-overflow-turn", prompt: "check background tasks", done: true,
+    blocks: [{
+      kind: "text", message_id: "receipt-overflow-answer", channel: "final",
+      text: "All checks finished.", done: true,
+    }],
+    processDetailState: "present", detailReasons: ["process"],
+    detailEventCount: 18, detailLoaded: false,
+  };
+  const receiptHistory = (turn: Turn, buildSeq: number) => event({
+    type: "history", session_id: receiptOverflowSid, generation: "receipt-generation",
+    revision: "receipt-revision", build_seq: buildSeq, detail: "summary",
+    has_more: true, in_progress: false, events: [], turns: [turn],
+  });
+  const oldReceiptState = reduce({
+    ...initialState, focusedSid: receiptOverflowSid,
+    sessions: [{ session_id: receiptOverflowSid, engine: "codex" }],
+  }, {
+    type: "event", event: receiptHistory({
+      ...completeReceiptAnswer, detailReasons: ["process", "answer_truncated"],
+    }, 1),
+  });
+  const repairedReceiptState = reduce(oldReceiptState, {
+    type: "event", event: receiptHistory(completeReceiptAnswer, 2),
+  });
+  const repairedReceiptMarkup = renderToStaticMarkup(createElement(ChatView, {
+    sid: receiptOverflowSid, turns: repairedReceiptState.runtimes[receiptOverflowSid].turns,
+    engine: "codex", onEdit: () => {}, onGetDiff: () => {}, onLoadDetail: () => {},
+  }));
+  assert.match(repairedReceiptMarkup, /All checks finished\./);
+  assert.match(repairedReceiptMarkup, /已处理/);
+  assert.doesNotMatch(repairedReceiptMarkup, /查看完整内容/,
+    "settled Codex history removes the old false answer truncation from the open view");
+
   const restoredProcessMarkup = renderToStaticMarkup(createElement(ChatView, {
     sid: "restored-process-session", turns: [restoredUnknownProcess],
     engine: "codex", onEdit: () => {}, onGetDiff: () => {},

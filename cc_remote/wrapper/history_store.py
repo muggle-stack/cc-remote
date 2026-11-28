@@ -96,7 +96,8 @@ from cc_remote.wrapper.history_responses import response_process_summaries
 # v58 restores native tool-result clocks instead of history-read timestamps.
 # v59 supplies per-response process headers before lazy detail is opened.
 # v60 removes human aliases from synthetic Codex callback anchors.
-_SCHEMA_VERSION = 60
+# v61 rebuilds Codex summary pages that mislabeled omitted task results.
+_SCHEMA_VERSION = 61
 _FINGERPRINT_SAMPLE_BYTES = 64 * 1024
 _DEFAULT_MAX_ENTRIES = 128
 _DEFAULT_MAX_BYTES = 64 * 1024 * 1024
@@ -629,7 +630,7 @@ def materialize_history_turns(
         model_notices: dict[str, dict[str, Any]] = {}
         task_receipts: dict[str, dict[str, Any]] = {}
         source_order: dict[str, int] = {}
-        receipts_truncated = False
+        return_links_truncated = False
 
         def short(value: Any) -> str | None:
             if not isinstance(value, str) or not value:
@@ -712,8 +713,11 @@ def materialize_history_turns(
                     "startedTs": _event_ms(event.get("ts")),
                 }
                 if len(task_receipts) > 16:
-                    task_receipts.pop(next(iter(task_receipts)))
-                    receipts_truncated = True
+                    omitted = task_receipts.pop(next(iter(task_receipts)))
+                    # Native task results remain available in process detail.
+                    # Omitted return links still need the content disclosure.
+                    if omitted["server"] == "cc_remote":
+                        return_links_truncated = True
                 if (event.get("server") == "cc_remote"
                         and event["item_id"].startswith(("return-", "dsh-return-"))):
                     # Link metadata is already in the summary. It must not add
@@ -1133,7 +1137,7 @@ def materialize_history_turns(
         final_ids = [message_id for message_id in final_ids
                      if any(texts.get(message_id, ()))]
         answer_limit = _SUMMARY_BLOCK_MAX - len(task_receipts)
-        summary_truncated = receipts_truncated or len(final_ids) > answer_limit
+        summary_truncated = return_links_truncated or len(final_ids) > answer_limit
         final_ids = final_ids[-answer_limit:]
         final_block_count = len(final_ids)
         notice_limit = max(0, _SUMMARY_BLOCK_MAX - final_block_count - len(task_receipts))
@@ -1424,6 +1428,8 @@ class HistoryIndexStore:
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
             current = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if current == 60:
+                connection.execute("DELETE FROM history_pages WHERE engine='codex'")
             if current in range(10, 60):
                 for table in ("history_pages", "history_turn_details"):
                     connection.execute(f"DELETE FROM {table} WHERE engine='codex'")
@@ -1614,7 +1620,7 @@ class HistoryIndexStore:
                 for table in ("history_pages", "history_turn_details"):
                     connection.execute(
                         f"DELETE FROM {table} WHERE engine='codex'")
-            elif current in range(21, 60):
+            elif current in range(21, 61):
                 # The independent projection invalidations above suffice.
                 pass
             elif current not in (0, _SCHEMA_VERSION):
