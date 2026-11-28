@@ -19,7 +19,9 @@ from cc_remote import protocol
 from cc_remote.protocol import AntigravityAuthResult, AntigravityAvailability, FilePreview, SessionInfo
 from cc_remote.update import UpdateError
 from cc_remote.update_jobs import read_json, write_json
-from cc_remote.wrapper.antigravity_client import AcpError, AntigravityLaunch, WRAPPER_ENV_KEYS, antigravity_opted_out
+from cc_remote.wrapper.antigravity_client import (
+    AcpError, AntigravityLaunch, WRAPPER_ENV_KEYS, antigravity_opted_out, parse_trusted_workspaces,
+)
 from cc_remote.wrapper.media_preview import MediaRegistration
 from cc_remote.wrapper.session_presentation import SessionPresentationStore, SessionPresentationStoreError
 
@@ -28,8 +30,17 @@ _REPLAY = ContextVar("gemini_replay", default=False)
 _DISCONNECT = (OSError, ValueError, asyncio.IncompleteReadError, TimeoutError)
 _SOCKET = "service.sock"
 GEMINI_SERVICE_VERSION = 3
+_GEMINI_TRUST_ALL_VERSION = 4
 GEMINI_CONTROL_VERSION = 1
 GEMINI_SWITCH_FENCE = "service-switching"
+
+
+def _attach_protocol(trusted_workspaces: str) -> int:
+    # Older workers understand path lists. Require the new attach contract
+    # before sending a trust setting whose meaning they cannot enforce.
+    if parse_trusted_workspaces(trusted_workspaces) == ["*"]:
+        return _GEMINI_TRUST_ALL_VERSION
+    return GEMINI_SERVICE_VERSION
 
 
 def service_message(event):
@@ -155,7 +166,7 @@ class GeminiService:
         except (OSError, ValueError, UpdateError, SessionPresentationStoreError) as exc:
             log.warning("Gemini completion receipt migration unavailable", error_type=type(exc).__name__)
 
-    async def attach(self, writer, settings):
+    async def attach(self, writer, settings, version):
         if not isinstance(settings, dict) or not isinstance(settings.get("session_messages"), bool):
             await write_frame(writer, {"error": "scope"})
             return False
@@ -164,7 +175,8 @@ class GeminiService:
         if (not isinstance(environment, dict) or environment.keys() - WRAPPER_ENV_KEYS
                 or any(not isinstance(value, str) or "\0" in value for value in environment.values())
                 or sum(len(value) for value in environment.values()) > 131072
-                or not isinstance(trusted_workspaces, str) or len(trusted_workspaces) > 131072):
+                or not isinstance(trusted_workspaces, str) or len(trusted_workspaces) > 131072
+                or version != _attach_protocol(trusted_workspaces)):
             await write_frame(writer, {"error": "scope"})
             return False
         async with self.attach_lock:
@@ -202,9 +214,9 @@ class GeminiService:
             async with asyncio.timeout(3):
                 attach = await read_frame(reader)
                 op = attach.get("op")
-                version = GEMINI_CONTROL_VERSION if op in {"status", "drain"} else GEMINI_SERVICE_VERSION
-                expected = {"protocol": version, "machine": self.machine.cfg.machine_id}
-                if any(attach.get(key) != value for key, value in expected.items()):
+                version = attach.get("protocol")
+                if (attach.get("machine") != self.machine.cfg.machine_id
+                        or (op in {"status", "drain"} and version != GEMINI_CONTROL_VERSION)):
                     await write_frame(writer, {"error": "scope"})
                     return
                 if op == "status":
@@ -221,7 +233,7 @@ class GeminiService:
                 elif op != "attach":
                     await write_frame(writer, {"error": "scope"})
                     return
-                elif not await self.attach(writer, attach.get("runtime")):
+                elif not await self.attach(writer, attach.get("runtime"), version):
                     return
             if self.drain_owner is writer:
                 await reader.read(1)
@@ -340,16 +352,20 @@ class GeminiController:
                 "session_messages": self.machine.cfg.session_messages_enabled,
                 "trusted_workspaces": self.machine.cfg.antigravity_trusted_workspaces,
             }
+            version = _attach_protocol(settings["trusted_workspaces"])
             async with asyncio.timeout(3):
                 while True:
                     reader, writer = await asyncio.open_unix_connection(str(self.path))
                     if not same_user(writer):
                         raise ValueError("untrusted Gemini service process")
-                    await write_frame(writer, {"op": "attach", "protocol": GEMINI_SERVICE_VERSION,
+                    await write_frame(writer, {"op": "attach", "protocol": version,
                                               "machine": self.machine.cfg.machine_id, "runtime": settings})
                     reply = await read_frame(reader)
                     if reply.get("attached") is True:
                         break
+                    if version == _GEMINI_TRUST_ALL_VERSION and reply.get("error") == "scope":
+                        raise AcpError("service_workspace_trust",
+                                       "本机 Gemini 服务拒绝了所有目录授权。请核对设备配置，旧版服务需用 --upgrade 更新。")
                     if reply.get("error") != "occupied":
                         raise ValueError("Gemini service configuration mismatch")
                     # During Wrapper replacement the service may not have
@@ -361,9 +377,10 @@ class GeminiController:
             self.writer = writer
             self.reader_task = asyncio.create_task(self._read(reader, writer))
         except _DISCONNECT:
-            if writer:
-                writer.transport.abort()
             raise AcpError("service", "无法连接本机 Gemini 服务。请检查服务状态和版本。") from None
+        finally:
+            if writer is not None and writer is not self.writer:
+                writer.transport.abort()
 
     async def _read(self, reader, writer):
         disconnect = "本机 Gemini 服务连接中断。"

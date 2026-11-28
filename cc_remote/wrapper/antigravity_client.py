@@ -36,6 +36,21 @@ def antigravity_opted_out(wrapper_environment: Mapping[str, str] | None = None) 
     return (wrapper_environment or {}).get(_ENABLE_ENV, os.environ.get(_ENABLE_ENV)) == "0"
 
 
+def parse_trusted_workspaces(value: str) -> list[str] | None:
+    """Decode the device's workspace allowlist or explicit all-workspaces opt-in."""
+    try:
+        allowed = json.loads(value)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(allowed, list):
+        return None
+    if allowed == ["*"]:
+        return allowed
+    if any(not isinstance(path, str) or not os.path.isabs(path) or "\0" in path for path in allowed):
+        return None
+    return allowed
+
+
 class AcpError(Exception):
     def __init__(self, code: str, message: str, *, unknown: bool = False):
         super().__init__(message)
