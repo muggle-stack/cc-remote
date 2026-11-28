@@ -18,6 +18,18 @@ assert.equal(parseUpdateJob({ ...job, id: "../../a" }), null);
 assert(!("secret" in parseUpdateJob(job)!));
 const state = parseAppUpdate({ managed: true, enabled: true, current: "5.3.14", busy_count: 2,
   latest: { version: "5.3.15", notes: "更新内容" }, job });
+assert.deepEqual(state.blockers, []);
+const receiptUpdate = parseAppUpdate({ ...state, blockers: [
+  { kind: "background_receipt", engine: "codex", session_id: "primary@73b2d199", side_chat: true,
+    task_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", title: "private task" },
+  { kind: "question", session_id: "btw-private", side_chat: true },
+  { kind: "toString" },
+] });
+assert.equal(receiptUpdate.blockers.length, 2);
+assert.equal(receiptUpdate.blockers[0].session_id, "primary@73b2d199");
+assert.equal(receiptUpdate.blockers[0].task_id, undefined);
+assert(!("title" in receiptUpdate.blockers[0]));
+assert.equal(receiptUpdate.blockers[1].session_id, undefined);
 assert.equal(appUpdateFeedback(state)?.label, "等待更新");
 for (const [phase, label] of [["waiting_network", "等待网络"], ["waiting_device", "等待上线"]] as const) {
   const paused = parseAppUpdate({ ...state, online: false, job: { ...job, phase } });

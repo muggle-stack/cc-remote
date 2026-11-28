@@ -72,41 +72,57 @@ async def test_lock_rejects_symlink_and_writable_file(tmp_path):
             pass
 
 
-@pytest.mark.parametrize("uid,exe,home,url,reused,expected", [
-    ("self", "app", "same", "same", False, True),
-    ("other", "app", "same", "same", False, False),
-    ("self", "other", "same", "same", False, False),
-    ("self", "app", "other", "same", False, False),
-    ("self", "app", "same", "other", False, False),
-    ("self", "app", "same", "same", True, False),
+@pytest.mark.parametrize("client,failure", [
+    ("app", None), ("app", "owner"), ("app", "executable"),
+    ("app", "profile"), ("app", "endpoint"), ("app", "reused"),
+    ("utility", None), ("utility", "owner"), ("utility", "executable"),
+    ("utility", "parent"), ("utility", "profile"), ("utility", "reused"),
 ])
 @pytest.mark.asyncio
 async def test_bridge_peer_requires_exact_app_profile_and_process(
-    monkeypatch, tmp_path, uid, exe, home, url, reused, expected,
+    monkeypatch, tmp_path, client, failure,
 ):
     executable = tmp_path / "App"
+    utility = tmp_path / "Utility"
+    monkeypatch.setattr(launcher.desktop, "_app_server_utility", lambda _exe: utility)
     bridge = launcher.Bridge(tmp_path, executable)
     bridge.port = 1234
-    identity = ProcessIdentity(42, 100)
-    owner = os.getuid() if uid == "self" else os.getuid() + 1
+    app = ProcessIdentity(42, 100)
+    peer = app if client == "app" else ProcessIdentity(43, 101)
+    owner = os.getuid() + (failure == "owner")
 
     async def command(*_args):
-        return f"p42\nu{owner}\nn127.0.0.1:4567->127.0.0.1:1234\n"
+        return f"p{peer.pid}\nu{owner}\nn127.0.0.1:4567->127.0.0.1:1234\n"
+
+    def app_identity(pid):
+        if pid == app.pid:
+            return ProcessIdentity(app.pid, 200) if failure == "reused" else app
+        return peer
+
+    def kernel_path(identity, *, parent_pid=None):
+        if client == "utility" and identity == peer:
+            if parent_pid != app.pid or failure == "parent":
+                return None
+            return tmp_path / "Unrelated" if failure == "executable" else utility
+        if identity == app:
+            return tmp_path / "Unrelated" if client == "app" and failure == "executable" else executable
+        return None
 
     monkeypatch.setattr(launcher, "command", command)
     monkeypatch.setattr(launcher, "process_owner_uid", lambda _pid: owner)
-    calls = []
-
-    def process_identity(_pid):
-        calls.append(True)
-        return ProcessIdentity(42, 200) if reused and len(calls) > 1 else identity
-
-    monkeypatch.setattr(launcher, "process_identity", process_identity)
-    monkeypatch.setattr(launcher, "process_command", lambda _id: (os.fsencode(executable if exe == "app" else "/other"),))
-    env = {"CODEX_HOME": str(tmp_path if home == "same" else tmp_path / "other"),
-           "CODEX_APP_SERVER_WS_URL": bridge.endpoint if url == "same" else "ws://127.0.0.1:5555/rpc"}
+    monkeypatch.setattr(launcher.desktop, "process_owner_uid", lambda _pid: owner)
+    monkeypatch.setattr(launcher, "process_identity", app_identity)
+    monkeypatch.setattr(launcher.desktop, "process_identity", app_identity)
+    monkeypatch.setattr(launcher.desktop, "darwin_process_executable", kernel_path)
+    env = {
+        "CODEX_HOME": str(tmp_path / "other" if failure == "profile" else tmp_path),
+        "CODEX_APP_SERVER_WS_URL": "ws://127.0.0.1:5555/rpc" if failure == "endpoint" else bridge.endpoint,
+    }
     monkeypatch.setattr(launcher, "process_environment_value", lambda _id, key: (True, env[key]))
-    assert (await bridge.peer_identity(4567) is not None) is expected
+    result = asyncio.create_task(bridge.peer_identity(4567))
+    await asyncio.sleep(0)
+    bridge.launched_app.set_result(app)
+    assert await result == (peer if failure is None else None)
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,24 @@ export interface UpdateJob {
   coordinated?: boolean; server_phase?: UpdatePhase | null;
 }
 
+export const UPDATE_BLOCKER_LABELS = {
+  queued_message: "等待排队消息处理",
+  session_operation: "等待会话操作完成",
+  turn: "会话回合仍在运行",
+  question: "等待回答会话提问",
+  background_task: "后台任务仍在处理",
+  background_receipt: "等待后台任务回执确认",
+  schedule: "等待定时任务处理",
+  device_operation: "等待设备操作完成",
+} as const;
+export interface UpdateBlocker {
+  kind: keyof typeof UPDATE_BLOCKER_LABELS;
+  engine?: "codex" | "claude" | "dsh";
+  session_id?: string;
+  side_chat: boolean;
+  task_id?: string;
+}
+
 export function cleanupNotice(reason: string | null | undefined): string {
   switch (reason) {
     case "dependencies": return "旧版运行时仍在使用，释放引用后会自动清理。";
@@ -24,6 +42,7 @@ export interface AppUpdateState {
   maintenance?: boolean;
   managed: boolean; enabled: boolean; current?: string; relay_version?: string;
   reason?: string | null; busy_count: number; allow_relay_update?: boolean;
+  blockers: UpdateBlocker[];
   latest?: { version: string; notes: string } | null; job: UpdateJob | null;
   online?: boolean;
 }
@@ -126,6 +145,25 @@ export function parseUpdateJob(raw: unknown): UpdateJob | null {
     coordinated: value.coordinated === true,
     server_phase: PHASES.has(value.server_phase as UpdatePhase) ? value.server_phase as UpdatePhase : null };
 }
+function parseUpdateBlockers(raw: unknown): UpdateBlocker[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, 8).flatMap((rawItem): UpdateBlocker[] => {
+    if (!rawItem || typeof rawItem !== "object") return [];
+    const item = rawItem as Record<string, unknown>;
+    if (typeof item.kind !== "string" || !Object.hasOwn(UPDATE_BLOCKER_LABELS, item.kind)) return [];
+    const sideChat = item.side_chat === true;
+    return [{
+      kind: item.kind as UpdateBlocker["kind"],
+      engine: item.engine === "codex" || item.engine === "claude" || item.engine === "dsh"
+        ? item.engine : undefined,
+      session_id: typeof item.session_id === "string" && !item.session_id.startsWith("btw-")
+        && /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/.test(item.session_id) ? item.session_id : undefined,
+      side_chat: sideChat,
+      task_id: !sideChat && typeof item.task_id === "string"
+        && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(item.task_id) ? item.task_id : undefined,
+    }];
+  });
+}
 export function parseAppUpdate(raw: unknown): AppUpdateState {
   if (!raw || typeof raw !== "object") throw new Error("invalid_request");
   const value = raw as Record<string, unknown>;
@@ -140,6 +178,7 @@ export function parseAppUpdate(raw: unknown): AppUpdateState {
     reason: typeof value.reason === "string" ? value.reason : null,
     busy_count: typeof value.busy_count === "number" && Number.isSafeInteger(value.busy_count)
       ? Math.max(0, value.busy_count) : 0,
+    blockers: parseUpdateBlockers(value.blockers),
     allow_relay_update: value.allow_relay_update === true,
     latest: latest && validVersion(latest.version) ? { version: latest.version,
       notes: typeof latest.notes === "string" ? latest.notes.slice(0, 4000) : "" } : null,

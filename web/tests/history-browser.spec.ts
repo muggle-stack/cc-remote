@@ -888,6 +888,43 @@ async function mockRightPanelRelay(
   return { commands, connections, emit: (message: PanelRelayEvent) => emit(message) };
 }
 
+test("running Codex shows progress before its current turn binding is restored", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const sid = "layout-parent";
+  const turnId = "active-native-turn";
+  const relay = await mockRightPanelRelay(page, {
+    engine: "codex", parentState: "running", retained: false,
+    historyReply: () => ({
+      type: "history", sid, session_id: sid, revision: "layout-history",
+      generation: "layout-generation", live_seq: 0, newest_id: turnId,
+      detail: "summary", in_progress: true, events: [], has_more: false,
+      turns: [
+        { id: "finished-turn", prompt: "上一轮已结束", done: true, ts: 100_000, blocks: [] },
+        { id: turnId, forkPointId: turnId, prompt: "核对构建结果",
+          done: false, ts: 101_000, blocks: [] },
+      ],
+    }),
+  });
+  await page.goto("/");
+  await page.reload();
+  const thread = page.getByRole("region", { name: "对话记录" });
+  await expect(thread.getByText("核对构建结果", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "停止", exact: true })).toBeVisible();
+  const working = thread.locator(".turn-working");
+  await expect(working).toHaveCount(1);
+  await expect(working).toBeInViewport();
+  await expect(thread.locator(".turn .turn-working")).toHaveCount(0);
+
+  relay.emit({ type: "turn_binding", sid, seq: 1,
+    msg_id: "browser-query", turn_id: turnId });
+  await expect(thread.locator(`[data-turn-id="${turnId}"] .turn-working`)).toBeVisible();
+  await expect(working).toHaveCount(1);
+  await expect(thread.locator('[data-turn-id="finished-turn"] .turn-working')).toHaveCount(0);
+
+  relay.emit({ type: "state", sid, seq: 2, state: "idle" });
+  await expect(working).toHaveCount(0);
+});
+
 for (const width of [390, 1280]) {
   test(`Claude assistant-only detail pages retain identity after compaction at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });

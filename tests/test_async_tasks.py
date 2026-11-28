@@ -50,7 +50,7 @@ def start(store, *, sid=None, code="print('done')", request_id=None, **kwargs):
 
 @asynccontextmanager
 async def daemon(store, *, delivery="ok", reject_exec=False, thread_state="idle", thread_path=None,
-                 turn_status="completed"):
+                 turn_status="completed", ephemeral=False):
     root = store.home / "app-server-control"
     root.mkdir(exist_ok=True)
     socket = root / "app-server-control.sock"
@@ -60,7 +60,8 @@ async def daemon(store, *, delivery="ok", reject_exec=False, thread_state="idle"
         if actual != socket:
             socket.symlink_to(actual)
         calls, receipts, commands = [], [], []
-        outcomes = SimpleNamespace(status=turn_status, pages=None, reject=False, reads=[], delivery=delivery)
+        outcomes = SimpleNamespace(status=turn_status, pages=None, reject=False, reads=[],
+                                   delivery=delivery, thread_state=thread_state)
 
         async def handle(ws):
             jobs = set()
@@ -98,14 +99,18 @@ async def daemon(store, *, delivery="ok", reject_exec=False, thread_state="idle"
                     p = msg.get("params", {})
                     result = {}
                     if method == "thread/read":
-                        result = {"thread": {"id": p["threadId"], "status": {"type": thread_state},
-                                             "path": thread_path}}
+                        if outcomes.thread_state is None:
+                            await ws.send(json.dumps({"id": msg["id"], "error": {"code": -32600}}))
+                            continue
+                        result = {"thread": {"id": p["threadId"], "status": {"type": outcomes.thread_state},
+                                             "path": thread_path, "ephemeral": ephemeral}}
                     elif method == "thread/resume":
                         result = {"thread": {"id": p["threadId"]}}
                     elif method == "thread/turns/list":
                         outcomes.reads.append(p)
                         if outcomes.reject:
-                            await ws.send(json.dumps({"id": msg["id"], "error": {"code": -32601}}))
+                            code = outcomes.reject if type(outcomes.reject) is int else -32601
+                            await ws.send(json.dumps({"id": msg["id"], "error": {"code": code}}))
                             continue
                         result = (outcomes.pages[p.get("cursor")] if outcomes.pages is not None else
                                   {"data": [{"id": "native-turn", "status": outcomes.status}],
@@ -619,6 +624,66 @@ def test_callback_startup_failure_snapshot_is_rechecked_without_resubmission(sto
             assert store.get(key)["output"] == b"already executed"
             assert len(native.receipts) == 1 and not native.commands
             assert "thread/resume" not in native.calls
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("thread_state", ["systemError", "idle"])
+def test_inactive_ephemeral_callback_releases_update_wait(
+        store, delivery_clock, thread_state):
+    from cc_remote.wrapper.codex_tasks import read_task_activity
+    sid, key = start(store)
+    store.update(key, state="completed", exit_code=0, output=b"original result",
+                 delivery="accepted", delivery_turn_id="native-turn",
+                 delivery_accepted_at=delivery_clock.now - 60)
+
+    async def run():
+        async with daemon(store, ephemeral=True, thread_state=thread_state) as native:
+            native.outcomes.reject = -32600
+            await tasks.process_task(store, key)
+            assert store.get(key)["delivery"] == "accepted"
+            assert read_task_activity(store.home)[sid][0].status == "pending"
+
+            reopened = TaskStore(store.home)
+            delivery_clock.now += tasks.RETRY_SECONDS
+            await tasks.process_task(reopened, key)
+            task = reopened.get(key, sid)
+            assert task["state"] == "completed" and task["exit_code"] == 0
+            assert task["output"] == b"original result"
+            assert task["delivery"] == "unknown" and task["delivery_turn_id"] == "native-turn"
+            assert read_task_activity(reopened.home)[sid][0].status == "failed"
+            assert not reopened.has_pending()
+            assert not native.receipts and not native.commands
+            assert "thread/resume" not in native.calls
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(("ephemeral", "next_state", "view"), [
+    (False, "idle", "unavailable"),
+    (True, "active", "unavailable"),
+    (True, "notLoaded", "unavailable"),
+    (True, None, "unavailable"),
+    (True, "idle", "inProgress"),
+    (True, "idle", "completed"),
+])
+def test_ephemeral_settlement_requires_inactive_thread_and_unavailable_turn(
+        store, delivery_clock, ephemeral, next_state, view):
+    _, key = start(store)
+    store.update(key, state="completed", delivery="accepted",
+                 delivery_turn_id="native-turn", delivery_accepted_at=delivery_clock.now)
+
+    async def run():
+        async with daemon(store, ephemeral=ephemeral) as native:
+            native.outcomes.reject = -32600
+            await tasks.process_task(store, key)
+            native.outcomes.thread_state = next_state
+            native.outcomes.reject = -32600 if view == "unavailable" else False
+            native.outcomes.status = view
+            delivery_clock.now += tasks.RETRY_SECONDS
+            await tasks.process_task(store, key)
+            task = store.get(key)
+            assert task["delivery"] == ("delivered" if view == "completed" else "accepted")
+            assert task["delivery_failure_seen_at"] is None
+            assert not native.receipts and not native.commands
     asyncio.run(run())
 
 

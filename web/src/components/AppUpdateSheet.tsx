@@ -2,14 +2,32 @@ import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { Icon } from "../icons";
 import { WEB_BUILD } from "../web-build";
-import { cleanupNotice, currentUpdateJob, newerVersion, preferServerUpdate, UPDATE_LABELS, UPDATE_TERMINAL, updateReason, releaseHighlights } from "../app-updates";
+import { cleanupNotice, currentUpdateJob, newerVersion, preferServerUpdate, UPDATE_BLOCKER_LABELS, UPDATE_LABELS, UPDATE_TERMINAL, updateReason, releaseHighlights, type UpdateBlocker } from "../app-updates";
+import type { SessionInfo } from "../protocol";
+import { relatedSessionTitle } from "../session-messages";
 import type { AppUpdatesController } from "../use-app-updates";
 import { CenteredSheet } from "./CenteredSheet";
 import "./AppUpdateSheet.css";
 
-export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, deviceName, webUpdate, onClose }: {
+const ENGINE_LABELS = { codex: "Codex", claude: "Claude", dsh: "DSH" } as const;
+
+function blockerDescription(blocker: UpdateBlocker, sessions: readonly SessionInfo[]): string {
+  const sid = blocker.session_id;
+  const engine = blocker.engine ? ENGINE_LABELS[blocker.engine] : "";
+  const title = sid ? relatedSessionTitle(
+    sessions.find(session => session.session_id === sid), sid.split("@").at(-1)!,
+  ).slice(0, 64) : "";
+  const chat = blocker.side_chat
+    ? (title ? title + " 的 " : "") + (engine ? engine + " " : "") + "侧边聊天"
+    : title || engine;
+  return [chat, UPDATE_BLOCKER_LABELS[blocker.kind], blocker.task_id && "任务 " + blocker.task_id.slice(0, 8)]
+    .filter(Boolean).join(" · ");
+}
+
+export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, deviceName, webUpdate, sessions = [], onClose }: {
   updates: AppUpdatesController; deviceName: string; onClose: () => void;
   serverUpdates?: AppUpdatesController;
+  sessions?: readonly SessionInfo[];
   webUpdate: { version: string | null; updating: boolean; message: string | null; reload: () => Promise<void> };
 }) {
   const [selected, setSelected] = useState<"device" | "server" | null>(null);
@@ -51,6 +69,10 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
     && (!blocked || catalogUnavailable || requiresDeviceAuthorization) && !active && !recovering && !checking && !changing && !authorizing;
   const canCancel = waitingForRelay || (active
     && ["submitting", "preparing", "downloading", "waiting_network", "waiting_device", "validating", "waiting"].includes(job.phase));
+  const busyCount = data?.busy_count ?? 0;
+  const waitingForOperations = !serverMode && active && job.phase === "waiting"
+    && data?.online !== false && busyCount > 0;
+  const blockers = data?.blockers.slice(0, busyCount) ?? [];
   const readyPage = !!webUpdate.version && !available && !active && !recovering && !pending;
   const succeeded = job?.phase === "succeeded";
   const retryPending = !!pending && pendingStatus !== "unconfirmed";
@@ -144,8 +166,13 @@ export default function AppUpdateSheet({ updates: deviceUpdates, serverUpdates, 
         </ol>
         <p className="app-update-progress-copy">{job.phase === "waiting_network" ? "下载进度已保存，网络恢复后会自动续传。关闭窗口也会继续等待。"
           : job.phase === "waiting_device" ? "更新请求已保存，设备上线后会继续。服务器可以先完成更新。"
-          : job.phase === "waiting" ? "仅等待会受更新影响的操作结束，例如排队消息或尚未完成的提交。可独立运行的任务会继续。"
+          : job.phase === "waiting" ? waitingForOperations ? "正在等待 " + busyCount + " 项操作结束。"
+            : "仅等待会受更新影响的操作结束，例如排队消息或尚未完成的提交。可独立运行的任务会继续。"
           : uncertain ? "正在核实原更新任务，请勿重复安装。" : "短暂断线时更新仍会继续，完成后自动重连。"}</p>
+        {waitingForOperations && blockers.length > 0 && <ul className="app-update-blockers">
+          {blockers.map((blocker, index) => <li key={index}>{blockerDescription(blocker, sessions)}</li>)}
+          {busyCount > blockers.length && <li>还有 {busyCount - blockers.length} 项操作</li>}
+        </ul>}
         {job.cancel_requested && <p className="app-update-help">正在等待安全取消。</p>}
       </section> : <section aria-label="更新范围" className="app-update-versions">
         {rows.map(({ label, current, icon }) => <div key={label}>

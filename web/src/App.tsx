@@ -6481,6 +6481,7 @@ export default function App() {
         </header>
         {appUpdateOpen && <Suspense fallback={null}><AppUpdateSheet updates={appUpdates} serverUpdates={serverUpdates}
           deviceName={activeDevice?.label ?? machineId} webUpdate={webUpdate}
+          sessions={ownsDeviceState ? state.sessions : undefined}
           onClose={() => setAppUpdateOpen(false)} /></Suspense>}
 
         {restoringSurfaceScope === activeScopeKey ? (
@@ -6651,6 +6652,8 @@ export default function App() {
               } : null}
               activeTurnId={activeTurnId}
               ambiguousActiveTurnIds={ambiguousActiveTurnIds}
+              sessionRunning={focusedEngine === "codex" && activeDeviceOnline
+                && !archivedBrowse && rt.state === "running"}
               onOpenAgent={space === "code"
                 ? openAgentDetail : undefined}
               onFork={!historyView.recovering && !archivedBrowse

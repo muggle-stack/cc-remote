@@ -371,6 +371,26 @@ async function open(page: Page) {
   await expect(page.getByRole("dialog", { name: "检查更新", exact: true })).toBeVisible();
 }
 
+test("application update shows and clears the side chat receipt blocker", async ({ page }) => {
+  let waiting = true;
+  await page.route("**/api/updates/*", route => route.fulfill({ json: {
+    ...base, busy_count: waiting ? 1 : 0,
+    blockers: waiting ? [{ kind: "background_receipt", engine: "codex",
+      session_id: "primary@73b2d199-0000-4000-8000-000000000000", side_chat: true }] : [],
+    job: { id: "a".repeat(32), version: base.latest.version, previous: base.current,
+      phase: waiting ? "waiting" : "installing" },
+  } }));
+  await page.goto(url);
+  await open(page);
+  const sheet = page.getByRole("dialog", { name: "检查更新", exact: true });
+  await expect(sheet.getByText("正在等待 1 项操作结束。")).toBeVisible();
+  const blocker = sheet.getByText("73b2d199 的 Codex 侧边聊天 · 等待后台任务回执确认");
+  await expect(blocker).toBeVisible();
+  waiting = false;
+  await expect(sheet.getByRole("heading", { name: "正在安装 device-a 更新" })).toBeVisible();
+  await expect(blocker).toHaveCount(0);
+});
+
 for (const phase of ["waiting_network", "waiting_device"] as const) {
   test(`application update ${phase} preserves its task and supports cancellation`, async ({ page }) => {
     let job: Record<string, unknown> | null = null;

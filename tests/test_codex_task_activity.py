@@ -484,6 +484,40 @@ def test_native_receipt_survives_summary_in_source_order(tmp_path, live_detail):
     assert "PRIVATE_OUTPUT" not in json.dumps(projected)
 
 
+@pytest.mark.parametrize("live_detail", [False, True])
+def test_native_receipt_overflow_is_process_detail(live_detail):
+    from cc_remote.wrapper.codex_history import _translate_turn
+    from cc_remote.wrapper.machine import _turn_detail_page
+
+    receipt_ids = [f"receipt-{index}" for index in range(20)]
+    items = [
+        {
+            "id": receipt_id, "type": "functionCallOutput", "namespace": "cc_remote_tasks",
+            "name": "task_result",
+            "output": json.dumps({"task_id": str(uuid4()), "state": "completed"}),
+        }
+        for receipt_id in receipt_ids
+    ]
+    items.append({"type": "agentMessage", "id": "answer", "phase": "final", "text": "All checks finished."})
+    native_turn = {"id": "native-turn", "items": items, "status": "completed"}
+    events, = _translate_turn("thread", native_turn, tool_result_max=8000)
+
+    turn, = materialize_history_turns(events, include_live_detail=live_detail)
+
+    assert turn["done"]
+    assert turn["processDetailState"] == "present"
+    assert turn["detailReasons"] == ["process"]
+    assert turn["detailEventCount"] == len(receipt_ids)
+    assert [block["item_id"] for block in turn["blocks"] if block.get("tool") == "task_result"] == receipt_ids[-16:]
+    assert [block["text"] for block in turn["blocks"] if block.get("channel") == "final"] == ["All checks finished."]
+
+    _, has_more, cursor, _, _ = _turn_detail_page(events, before=None, limit=17)
+    assert has_more and cursor is not None
+    older, has_more, _, _, _ = _turn_detail_page(events, before=cursor, limit=17)
+    assert not has_more
+    assert [row["item_id"] for row in older if row.get("tool") == "task_result"] == receipt_ids[:4]
+
+
 def test_actual_rollout_tool_output_keeps_native_receipt_identity(tmp_path):
     from cc_remote.wrapper.codex_stream import codex_translate_history
     sid = str(uuid4())
