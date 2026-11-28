@@ -271,6 +271,34 @@ test("a session message opens its original Gemini Code session", async ({ page }
   await expect(replyFooter.getByText(/输入|输出/)).toHaveCount(0);
 });
 
+test("Gemini replays the completion spark once on click or tap", async ({ page, hasTouch }) => {
+  const relay = await mockRelay(page, true, true);
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.goto("/");
+  await page.getByRole("button", { name: /来自会话.*Gemini session/ }).click();
+  await expect(page.getByText("Gemini 已就绪。")).toBeVisible();
+
+  const completion = page.locator('[data-turn-id="test-turn"] .turn-done-mark');
+  const spark = completion.getByRole("button", { name: "Gemini 已完成" });
+  const resting = completion.locator(".engine-brand-icon.antigravity");
+  const replay = completion.locator(".gemini-working-spark");
+  await expect(resting).toBeVisible();
+  await expect(spark).toBeVisible();
+  await (hasTouch ? spark.tap() : spark.click());
+  await expect(replay.locator("linearGradient")).toHaveCount(3);
+  await expect.poll(() => replay.locator(":scope > use").count()).toBe(2);
+  await expect(resting).toBeVisible();
+
+  await (hasTouch ? spark.tap() : spark.press("Enter"));
+  await expect(replay).toBeVisible();
+  await expect(resting).toBeVisible();
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await (hasTouch ? spark.tap() : spark.click());
+  await expect(resting).toBeVisible();
+  await expect(replay).toHaveCount(0);
+  expect(relay.seen.filter(cmd => ["query", "steer", "interrupt"].includes(String(cmd.type)))).toEqual([]);
+});
+
 test("Gemini keeps a background follow-up active until Stop is acknowledged", async ({ page, hasTouch }) => {
   const relay = await mockRelay(page, true, true);
   await page.goto("/");

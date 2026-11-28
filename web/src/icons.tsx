@@ -41,14 +41,16 @@ export function EngineDone({ engine, size = 22, label }: {
     const timer = window.setTimeout(() => setPlaying(false), 810);
     return () => window.clearTimeout(timer);
   }, [playing]);
-  return engine === "claude"
-    ? <button type="button" className="engine-done-mark spark-btn" aria-label={label ?? "Claude 已完成"}
-        title="重播完成动画" onClick={() => {
-          if (!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) setPlaying(true);
-        }}>
-        {playing ? <ClaudeDoneReplay size={size} /> : <EngineIcon engine={engine} size={size} />}
-      </button>
-    : engine === "dsh" || engine === "antigravity" ? <EngineIcon engine={engine} size={size} /> : <ClaudeSpark size={size} label={label ?? "Codex"} />;
+  if (engine === "dsh") return <EngineIcon engine={engine} size={size} />;
+  if (engine !== "claude") {
+    return <SparkReplay key={engine} engine={engine} size={size} label={label} />;
+  }
+  return <button type="button" className="engine-done-mark spark-btn" aria-label={label ?? "Claude 已完成"}
+    title="重播完成动画" onClick={() => {
+      if (!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) setPlaying(true);
+    }}>
+    {playing ? <ClaudeDoneReplay size={size} /> : <EngineIcon engine={engine} size={size} />}
+  </button>;
 }
 
 const PATHS: Record<string, string> = {
@@ -162,26 +164,26 @@ export function ClaudeMark({ size = 16, className }: { size?: number; className?
   );
 }
 
-// A clickable Claude spark that sits under a finished reply: static at rest,
-// and on click it plays ONE loop of the working morph, then settles back.
-export function ClaudeSpark({ size = 22, className, label = "Claude" }: {
-  size?: number; className?: string; label?: string;
+function SparkReplay({ engine, size, label }: {
+  engine: "codex" | "antigravity"; size: number; label?: string;
 }) {
-  const [frame, setFrame] = useState(-1); // -1 = static
+  const gemini = engine === "antigravity";
+  const frameMs = gemini ? WORK_FRAME_MS : 110;
+  const [frame, setFrame] = useState<number | null>(null);
   useEffect(() => {
-    if (frame < 0) return;
-    const id = window.setTimeout(() => setFrame(frame + 1 < WORK_FRAMES.length ? frame + 1 : -1), 110);
+    if (frame === null) return;
+    const id = window.setTimeout(() => setFrame(frame + 1 < WORK_FRAMES.length ? frame + 1 : null), frameMs);
     return () => window.clearTimeout(id);
-  }, [frame]);
-  const play = () => { if (frame < 0) setFrame(0); };
-  const [a, b] = frame >= 0 ? WORK_FRAMES[frame] : [0.9, 0.42];
+  }, [frame, frameMs]);
+  const play = () => {
+    if (frame !== null || (gemini && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches)) return;
+    setFrame(0);
+  };
   return (
-    <button type="button" className={"spark-btn" + (className ? " " + className : "")} onClick={play} aria-label={label}
-      title="重播完成动画">
-      <svg viewBox="0 0 24 24" width={size} height={size} fill="currentColor" aria-hidden="true">
-        {b > 0 && <path d={SPARK} transform={sparkTransform(b, 45)} opacity={frame >= 0 ? 0.8 : 0.55} />}
-        {a > 0 && <path d={SPARK} transform={sparkTransform(a)} />}
-      </svg>
+    <button type="button" className="spark-btn" onClick={play}
+      aria-label={label ?? (gemini ? "Gemini 已完成" : "Codex")} title="重播完成动画">
+      {gemini && frame === null ? <EngineIcon engine={engine} size={size} />
+        : <SparkFrame size={size} gemini={gemini} frame={frame} />}
     </button>
   );
 }
@@ -190,15 +192,20 @@ export function ClaudeSpark({ size = 22, className, label = "Claude" }: {
 const WORK_FRAMES: Array<[number, number]> = [
   [0.55, 0.0], [0.85, 0.35], [1.0, 0.6], [0.8, 0.85], [0.5, 1.0], [0.32, 0.72],
 ];
+const WORK_FRAME_MS = 125;
 function WorkingSpark({ size, gemini }: { size: number; gemini: boolean }) {
-  const id = useId();
   const [i, setI] = useState(0);
   useEffect(() => {
     if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
-    const id = window.setInterval(() => setI((x) => (x + 1) % WORK_FRAMES.length), 125);
+    const id = window.setInterval(() => setI((x) => (x + 1) % WORK_FRAMES.length), WORK_FRAME_MS);
     return () => clearInterval(id);
   }, []);
-  const [a, b] = WORK_FRAMES[i];
+  return <SparkFrame size={size} gemini={gemini} frame={i} />;
+}
+
+function SparkFrame({ size, gemini, frame }: { size: number; gemini: boolean; frame: number | null }) {
+  const id = useId();
+  const [a, b] = frame === null ? [0.9, 0.42] : WORK_FRAMES[frame];
   const spark = (scale: number, rotation = 0, opacity?: number) => {
     const transform = sparkTransform(scale, rotation);
     return gemini ? <use href={`#${id}-spark`} transform={transform} opacity={opacity} />
@@ -225,7 +232,7 @@ function WorkingSpark({ size, gemini }: { size: number; gemini: boolean }) {
           <path d={SPARK} fill={`url(#${id}-yellow)`} />
         </g>
       </defs>}
-      {b > 0 && spark(b, 45, 0.8)}
+      {b > 0 && spark(b, 45, frame === null ? 0.55 : 0.8)}
       {spark(a)}
     </svg>
   );
