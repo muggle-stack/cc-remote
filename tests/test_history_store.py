@@ -11,6 +11,7 @@ from cc_remote.wrapper.history_store import (
     HistorySourceFingerprint,
     MaterializedHistoryPage,
     MaterializedTurnDetail,
+    _SCHEMA_VERSION,
     history_source_extends,
     history_turn_snapshot_hash,
     materialize_history_turns,
@@ -33,7 +34,8 @@ def _compact_visible(row):
 
 
 @pytest.mark.parametrize("kind,run_id", [("agent", "child"), ("task", None)])
-def test_compact_return_receipts_keep_source_order_and_exact_child_without_output(kind, run_id):
+@pytest.mark.parametrize("receipt_count", [1, 17])
+def test_compact_return_receipts_keep_source_order_and_exact_child_without_output(kind, run_id, receipt_count):
     from cc_remote.protocol import ProcessEvent
     from cc_remote.wrapper.agent_returns import return_receipt
 
@@ -46,17 +48,23 @@ def test_compact_return_receipts_keep_source_order_and_exact_child_without_outpu
         return [{"type": "assistant_msg_start", "message_id": identifier, "channel": "final"},
                 {"type": "delta", "message_id": identifier, "channel": "final", "text": identifier},
                 {"type": "assistant_msg_end", "message_id": identifier, "channel": "final"}]
+    receipts = [event, *(
+        return_receipt(original, f"native-notice-{index}", run_id).model_dump(exclude_none=True)
+        for index in range(1, receipt_count)
+    )]
     turn = materialize_history_turns([
         {"type": "user_msg", "msg_id": "human", "prompt": "review"},
-        *text("before"), event, *text("after"),
+        *text("before"), *receipts, *text("after"),
     ])[0]
     blocks = turn["blocks"]
-    assert [block["kind"] for block in blocks] == ["text", "process", "text"]
+    assert [block["text"] for block in blocks if block["kind"] == "text"] == ["before", "after"]
+    assert [block["item_id"] for block in blocks[1:-1]] == [row["item_id"] for row in receipts[-16:]]
     assert blocks[1]["input"] == {"agent_run_id": run_id}
     assert blocks[1]["tool"] == f"{kind}_return"
     assert "private child output" not in json.dumps(blocks)
     assert turn["processDetailState"] == "none"
-    assert turn["detailEventCount"] == 0
+    assert turn["detailEventCount"] == int(receipt_count > 16)
+    assert turn["detailReasons"] == (["answer_truncated"] if receipt_count > 16 else [])
 
 
 def _compact_row(uid):
@@ -164,7 +172,7 @@ def test_return_receipt_migration_rebuilds_chat_projections_preserving_images(tm
         connection.execute(f"PRAGMA user_version={old_version}")
     migrated = HistoryIndexStore(tmp_path / "state")
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 60
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
         for table in ("history_pages", "history_turn_details"):
             assert sorted(connection.execute(f"SELECT engine FROM {table}").fetchall()) == []
         assert connection.execute("SELECT COUNT(*) FROM history_image_assets").fetchone()[0] == 3
@@ -191,7 +199,7 @@ def test_narrative_migration_preserves_dsh_and_assets(tmp_path, old_version):
         connection.execute(f"PRAGMA user_version={old_version}")
     migrated = HistoryIndexStore(tmp_path / "state")
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 60
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
         for table in ("history_pages", "history_turn_details"):
             assert sorted(connection.execute(f"SELECT engine FROM {table}").fetchall()) == [
                 ("dsh",)]
@@ -637,7 +645,7 @@ def test_paged_file_migration_rebuilds_summaries_once_without_removing_assets(tm
         connection.execute(f"PRAGMA user_version={old_version}")
     migrated = HistoryIndexStore(tmp_path / "state")
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 60
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
         for table in ("history_pages", "history_turn_details"):
             assert connection.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE engine='codex'"
@@ -666,7 +674,7 @@ def test_compact_migration_rebuilds_claude_details_and_preserves_assets(tmp_path
         connection.execute(f"PRAGMA user_version={old_version}")
     migrated = HistoryIndexStore(tmp_path / "state")
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 60
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
         assert connection.execute(
             "SELECT engine FROM history_pages").fetchall() == []
         assert connection.execute(
@@ -741,7 +749,7 @@ def test_v19_migration_rebuilds_history_and_adds_agent_details(tmp_path):
     assert migrated.get_page(
         "session-1", "claude", source, before=None, limit=4) is None
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 60
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
         assert connection.execute(
             "SELECT COUNT(*) FROM history_agent_details").fetchone()[0] == 0
 
@@ -769,7 +777,7 @@ def test_v20_migration_rebuilds_codex_and_claude_identity_projections(tmp_path):
 
     migrated = HistoryIndexStore(state_dir)
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 60
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
         for table in ("history_pages", "history_turn_details"):
             assert connection.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE engine='claude'"
@@ -830,7 +838,7 @@ def test_v21_migration_rebuilds_claude_alias_and_codex_process_projections(
 
     migrated = HistoryIndexStore(state_dir)
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 60
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
         for table in ("history_pages", "history_turn_details"):
             assert connection.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE engine='claude'"
@@ -887,7 +895,7 @@ def test_v22_migration_applies_codex_and_claude_projection_repairs(
 
     migrated = HistoryIndexStore(state_dir)
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 60
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
         for table in ("history_pages", "history_turn_details"):
             assert connection.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE engine='claude'"
@@ -949,7 +957,7 @@ def test_recent_migration_applies_codex_and_claude_projection_repairs(
 
     migrated = HistoryIndexStore(state_dir)
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 60
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
         for table in ("history_pages", "history_turn_details"):
             assert connection.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE engine='claude'"
@@ -1020,7 +1028,7 @@ def test_async_question_migration_preserves_assets(
 
     migrated = HistoryIndexStore(state_dir)
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 60
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
         for table in ("history_pages", "history_turn_details"):
             assert connection.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE engine='claude'"
@@ -1129,7 +1137,7 @@ def test_legacy_migration_rebuilds_all_derived_history_rows(
 
     migrated = HistoryIndexStore(state_dir)
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 60
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
         for table in (
             "history_pages",
             "history_turn_details",
@@ -1176,7 +1184,7 @@ def test_v10_migration_invalidates_changed_projection_rows(tmp_path):
 
     migrated = HistoryIndexStore(state_dir)
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 60
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
         for table in (
             "history_pages", "history_turn_details", "history_image_assets",
         ):
@@ -1227,7 +1235,7 @@ def test_v11_migration_invalidates_claude_pages_and_adds_compact_index(
         "claude-session", "claude", source, before=None, limit=4,
     ) is None
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 60
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
         tables = {
             row[0] for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
@@ -1273,7 +1281,7 @@ def test_recent_migration_invalidates_changed_projection_rows(
 
     migrated = HistoryIndexStore(state_dir)
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 60
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
         for table in (
             "history_pages", "history_turn_details", "history_image_assets",
         ):
@@ -1315,7 +1323,7 @@ def test_owner_and_interrupt_alias_migration_invalidates_both_projections(
 
     migrated = HistoryIndexStore(state_dir)
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 60
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
         for table in ("history_pages", "history_turn_details"):
             assert connection.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE engine='claude'"
@@ -1379,7 +1387,7 @@ def test_recent_summary_migration_rebuilds_pages_but_preserves_source_assets(
 
     migrated = HistoryIndexStore(state_dir)
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 60
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
         assert connection.execute(
             "SELECT COUNT(*) FROM history_pages"
         ).fetchone()[0] == 0
@@ -1840,6 +1848,29 @@ def test_callback_alias_migration_only_rebuilds_codex_projections(tmp_path):
         "codex", "codex", source, before=None, limit=4) == _page("new")
 
 
+def test_receipt_overflow_migration_rebuilds_codex_pages_only(tmp_path):
+    source_path = tmp_path / "native.jsonl"
+    source_path.write_text("{}\n")
+    source = HistorySourceFingerprint.capture(source_path)
+    store = HistoryIndexStore(tmp_path / "state")
+    for engine in ("claude", "codex", "dsh"):
+        assert store.put_page(engine, engine, source, before=None, limit=4, page=_page(engine))
+        store.put_image_asset(
+            engine, engine, source, engine, "image", "thumbnail", "image/png", 1, 1, b"image")
+    with sqlite3.connect(store.path) as connection:
+        connection.execute("PRAGMA user_version=60")
+
+    migrated = HistoryIndexStore(tmp_path / "state")
+
+    assert migrated.get_page("codex", "codex", source, before=None, limit=4) is None
+    for engine in ("claude", "dsh"):
+        assert migrated.get_page(engine, engine, source, before=None, limit=4) == _page(engine)
+    for engine in ("claude", "codex", "dsh"):
+        assert migrated.get_turn_detail(engine, engine, source, engine) is not None
+        assert migrated.get_image_asset(
+            engine, engine, source, engine, "image", "thumbnail") == ("image/png", 1, 1, b"image")
+
+
 def test_response_header_migration_retains_claude_source_details(tmp_path):
     source_path = tmp_path / "native.jsonl"
     source_path.write_text("{}\n")
@@ -1853,7 +1884,7 @@ def test_response_header_migration_retains_claude_source_details(tmp_path):
         connection.execute("PRAGMA user_version=58")
     migrated = HistoryIndexStore(tmp_path / "state")
     with sqlite3.connect(migrated.path) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 60
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
         assert connection.execute("SELECT COUNT(*) FROM history_pages WHERE engine='claude'").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM history_pages WHERE engine='codex'").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM history_turn_details WHERE engine='claude'").fetchone()[0] == before // 2
