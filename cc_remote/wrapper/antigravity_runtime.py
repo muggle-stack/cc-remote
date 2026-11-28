@@ -1099,7 +1099,7 @@ class AntigravityRuntime:
         await self.machine._emit(ctx, frame)
 
     @staticmethod
-    def validate_input(cmd) -> str | None:
+    def validate_input(cmd):
         if not cmd.prompt and not cmd.images and not cmd.files:
             raise AcpError(ERR_BAD_PROMPT, "请输入内容或添加附件。")
         if validate_attachments(cmd.images, cmd.files):
@@ -1110,7 +1110,6 @@ class AntigravityRuntime:
             raise AcpError("workspace_command", "请从 CC Remote 的会话入口切换 Gemini 工作目录或恢复会话。")
         if slash == "/goal" and len(parts) == 1:
             raise AcpError(ERR_BAD_PROMPT, "请在 /goal 后填写目标。")
-        return slash
 
     @staticmethod
     def prompt_blocks(client, cmd):
@@ -1156,9 +1155,7 @@ class AntigravityRuntime:
 
         claim = None
         try:
-            plan = self.validate_input(cmd) == "/plan"
-            if plan and steer:
-                raise AcpError(ERR_NOT_STEERABLE, "请将 /plan 排队到下一轮，空闲后再切换模式。")
+            self.validate_input(cmd)
             if self.admission_paused():
                 raise AcpError(ERR_BUSY, "Gemini 服务正在切换，请稍后重试。")
             if self.auth_lock.locked():
@@ -1195,10 +1192,6 @@ class AntigravityRuntime:
             if not fresh:
                 raise self.uncertain()
             claim = identity
-            if plan:
-                # Sending the native slash prompt alone can leave the session in Auto.
-                check_idle()
-                await self.apply_option(ctx, "mode", "plan")
             response = await handle.client.submit("session/prompt", {
                 "sessionId": handle.native_id, "prompt": blocks,
             }, guard=check_steer if steer else check_idle)

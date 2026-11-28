@@ -6,7 +6,7 @@
 // chips drive set_model / set_permission_mode on the wrapper.
 
 import type {
-  AntigravityOption, CatalogModel, EngineCapabilityItem, NativeCommandInfo, PermissionProfileInfo,
+  AntigravityConfigCategory, AntigravityOption, CatalogModel, EngineCapabilityItem, NativeCommandInfo, PermissionProfileInfo,
 } from "./protocol";
 
 export interface CmdGroup { g: string }
@@ -278,6 +278,23 @@ export function antigravityEfforts(options?: AntigravityOption[]): Effort[] {
   }));
 }
 
+export function antigravityChoice(
+  options: AntigravityOption[] | undefined, category: AntigravityConfigCategory, argument: string,
+) {
+  const choices = options?.find(option => option.category === category)?.choices ?? [];
+  const exact = choices.find(choice => choice.value === argument);
+  if (exact) return exact;
+  const names = choices.filter(choice => choice.name.toLowerCase() === argument.toLowerCase());
+  return names.length === 1 ? names[0] : undefined;
+}
+
+export function antigravityModelArgument(options: AntigravityOption[] | undefined, argument: string) {
+  const model = antigravityChoice(options, "model", argument);
+  if (model) return { category: "model" as const, value: model.value };
+  const effort = antigravityChoice(options, "thought_level", argument);
+  return effort && { category: "thought_level" as const, value: effort.value };
+}
+
 /** Localized display only; selections retain the exact native permission ID. */
 export function dshPermissionLabel(value: string, fallback = value): string {
   return ({ "read-only": "只读", "workspace-write": "工作区写入",
@@ -365,7 +382,8 @@ export type CommandSurface = "code" | "work";
 const GEMINI_SLASHES = new Set(["model", "permissions", "context", "diff", "preview", "open", "clear", "extensions"]);
 export const commandsFor = (engine?: string, surface: CommandSurface = "code"): Command[] => (
   engine === "antigravity" ? CODEX_CMD_LIST.filter(c => GEMINI_SLASHES.has(c.slash)).map(c => {
-    if (c.slash === "permissions") return { ...c, ds: "选择 Gemini 原生权限模式" };
+    if (c.slash === "model") return { ...c, ds: "打开模型面板，可指定模型 ID 或当前模型的思考档位" };
+    if (c.slash === "permissions") return { ...c, ds: "打开权限面板，可指定 Gemini 原生权限模式" };
     if (c.slash === "clear") return { ...c, ds: "开始新的 Gemini 会话" };
     if (c.slash === "extensions") return { ...c, name: "扩展目录", ds: "查看 Gemini Skills、Plugins、MCP 与 Hooks" };
     return c;
@@ -437,7 +455,8 @@ export function matchCommands(token: string, engine?: string,
                               surface: CommandSurface = "code", native: NativeCommandInfo[] = []): Cmd[] {
   const t = token.toLowerCase();
   const list = commandsFor(engine, surface).filter(isCmd) as Cmd[];
-  const matches = native.filter(c => c.name.toLowerCase().startsWith(t));
+  const local = clientSlashesFor(engine);
+  const matches = native.filter(c => c.name.toLowerCase().startsWith(t) && !local.has(c.name.toLowerCase()));
   return [
     ...matches.map(c => ({ slash: c.name, name: c.name,
       ds: [c.description, c.input_hint].filter(Boolean).join(" · "), ic: "term" })),
@@ -458,7 +477,7 @@ export function parseSlash(input: string): { slash: string; args: string } | nul
 /** Shared by the welcome composer and the live conversation. Client commands
  * must never accidentally become model prompts just because a session is new. */
 export function routeComposerInput(
-  input: string, engine?: string, surface: CommandSurface = "code", native?: NativeCommandInfo[],
+  input: string, engine?: string, surface: CommandSurface = "code",
 ): { kind: "empty" } | { kind: "blocked"; message: string }
   | { kind: "client"; slash: string; args: string }
   | { kind: "prompt"; prompt: string } {
@@ -470,9 +489,6 @@ export function routeComposerInput(
   }
   if (engine === "antigravity" && parsed?.slash === "goal" && !parsed.args) {
     return { kind: "blocked", message: "请在 /goal 后填写目标。" };
-  }
-  if (engine === "antigravity" && parsed && native?.some(c => c.name === parsed.slash)) {
-    return { kind: "prompt", prompt: raw };
   }
   if (surface === "work" && parsed && isKnownCodeOnlySlash(parsed.slash, engine)) {
     return { kind: "blocked", message: `/${parsed.slash} 是 Code 指令，请切换到 Code 使用` };

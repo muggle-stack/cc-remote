@@ -33,6 +33,7 @@ import {
   clientSlashesFor, parseSlash, routeComposerInput, slashToken,
   matchCommands, matchSkills, skillToken,
   modelsFor, effortNameForDisplay, permsFor, dshPermissionLabel, antigravityPermissions, antigravityEfforts,
+  antigravityChoice, antigravityModelArgument,
   permissionProfileLabel, type Catalog,
 } from "../data";
 const CommandSheet = lazy(() => import("./CommandSheet").then(m => ({ default: m.CommandSheet })));
@@ -550,18 +551,37 @@ export function Composer(p: Props) {
     }
   };
 
-  // Client-side slash commands — never forwarded to cc. "/model <id>" passes the
-  // id straight to set_model (hidden models included), aligning with Claude Code.
+  // Client controls use the same callbacks as the pickers.
   const runClientSlash = (slash: string, args: string) => {
     switch (slash) {
       case "model":
-        if (args) { p.onSetModel(args); flash(`正在切换模型：${args}`); }
-        else { p.onRequestModels?.(); setSheetKind("models"); }
+        if (args && p.engine === "antigravity") {
+          if (settingsLocked) { flash("Gemini 会话空闲且已连接时才能切换设置。"); return; }
+          const choice = antigravityModelArgument(p.antigravity?.options, args);
+          if (!choice) { flash("当前 Gemini 模型目录没有这个模型或思考档位。"); return; }
+          if (choice.category === "model") p.onSetModel(choice.value);
+          else p.onSetEffort(choice.value);
+        } else if (args) {
+          p.onSetModel(args); flash(`正在切换模型：${args}`);
+        } else {
+          p.onRequestModels?.(); setSheetKind("models");
+        }
         break;
-      case "permissions": openPermissions(); break;
+      case "permissions":
+        if (args && p.engine === "antigravity") {
+          if (settingsLocked) { flash("Gemini 会话空闲且已连接时才能切换设置。"); return; }
+          const choice = antigravityChoice(p.antigravity?.options, "mode", args);
+          if (!choice) { flash("当前 Gemini 会话没有这个权限模式。"); return; }
+          p.onSetPerm(choice.value);
+        } else openPermissions();
+        break;
       case "clear": p.onClear(); break;
       // open the popup too (not just fetch) — same as clicking the context ring.
       case "context":
+        if (p.engine === "antigravity" && args) {
+          flash("请输入 /context 查看当前上下文用量。");
+          return;
+        }
         p.onContext();
         setUsageOpen(false);
         setAutoCompactOpen(false);
@@ -705,8 +725,7 @@ export function Composer(p: Props) {
       growTa();
       return;
     }
-    if (!p.antigravity?.commands.some(command => command.name === slash)
-        && (clientSlashesFor(p.engine).has(slash) || p.engine === "dsh" && slash === "goal")) {
+    if (clientSlashesFor(p.engine).has(slash) || p.engine === "dsh" && slash === "goal") {
       runClientSlash(slash, "");
       if (slash !== "btw" && slash !== "goal") focusTa();
       return;
@@ -722,7 +741,7 @@ export function Composer(p: Props) {
 
   const send = (value = taRef.current?.value ?? input, mode: SendMode = "steer") => {
     if (locked || importing) return;
-    const route = routeComposerInput(value, p.engine, p.surface, p.antigravity?.commands);
+    const route = routeComposerInput(value, p.engine, p.surface);
     if (route.kind === "blocked") { flash(route.message); return; }
     const raw = value.trim();
     const parsed = parseSlash(raw);

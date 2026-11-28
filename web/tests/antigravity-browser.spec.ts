@@ -8,7 +8,7 @@ const commands: NativeCommandInfo[] = [
   { name: "plan", description: "Enter native planning", attachments: false },
   { name: "goal", description: "Run until the goal is complete", attachments: false },
 ];
-const options = (model: string, mode: string): AntigravityOption[] => [
+const options = (model: string, mode: string, effort = "low"): AntigravityOption[] => [
   { category: "model", current: model, choices: [
     { value: "neon", name: "Gemini 4 Neon (High)", description: "" },
     { value: "pro", name: "Gemini Pro", description: "" },
@@ -17,7 +17,7 @@ const options = (model: string, mode: string): AntigravityOption[] => [
     { value: "default", name: "Default", description: "" },
     { value: "plan", name: "Plan", description: "" },
   ] },
-  ...(model === "pro" ? [{ category: "thought_level", current: "low", choices: [
+  ...(model === "pro" ? [{ category: "thought_level", current: effort, choices: [
     { value: "low", name: "Low", description: "" },
     { value: "extra", name: "Extra", description: "" },
   ] } satisfies AntigravityOption] : []),
@@ -34,6 +34,7 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
   let finishFollowup: (() => void) | undefined;
   let model = "neon";
   let mode = "default";
+  let effort = "low";
   let seq = 0;
   let quotaPlan: "Starter" | "Pro" = "Starter";
   let quotaHeld = false;
@@ -53,12 +54,12 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
     let connected = false;
     emit = event => socket.send(JSON.stringify({ v: PROTOCOL_VERSION, ts: Date.now() / 1000, ...event }));
     const controls = () => {
-      emit({ type: "antigravity_state", sid, connected: true, options: options(model, mode), commands, seq: ++seq });
+      emit({ type: "antigravity_state", sid, connected: true, options: options(model, mode, effort), commands, seq: ++seq });
       emit({ type: "model", sid, model, seq: ++seq });
       emit({ type: "perm", sid, mode, seq: ++seq });
-      emit({ type: "effort", sid, effort: model === "pro" ? "extra" : "", seq: ++seq });
+      emit({ type: "effort", sid, effort: model === "pro" ? effort : "", seq: ++seq });
       emit({ type: "context_report", sid, available: true, source: "native_estimate",
-        total_tokens: 1024, max_tokens: 1048576, percentage: .1 });
+        total_tokens: 1024, max_tokens: 1048576, percentage: .1, categories: [] });
     };
     const snapshot = () => emit({ type: "snapshot", sid, state, cc_session_id: sid,
       tail_text: "", cwd: "/tmp", generation: "current-wrapper", seq });
@@ -85,7 +86,7 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
       if (cmd.type === "get_models" && cmd.engine === "antigravity") {
         const selected = String(cmd.antigravity_model ?? (cmd.sid ? model : "neon"));
         emit({ type: "models", engine: cmd.engine, sid: cmd.sid, cwd: cmd.cwd, antigravity_model: cmd.antigravity_model,
-          default_model: "neon", antigravity_options: options(selected, mode), antigravity_commands: commands,
+          default_model: "neon", antigravity_options: options(selected, mode, cmd.sid ? effort : "low"), antigravity_commands: commands,
           models: [{ id: "neon", display_name: "Gemini 4 Neon (High)", efforts: [] },
             { id: "pro", display_name: "Gemini Pro", efforts: selected === "pro" ? ["low", "extra"] : [],
               effort_names: { low: "Low", extra: "Extra" } }] });
@@ -117,6 +118,7 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
         created = true;
         model = String(cmd.model ?? "neon");
         mode = String(cmd.antigravity_mode ?? "default");
+        effort = String(cmd.antigravity_effort ?? "low");
         emit({ type: "session_focus", session_id: sid, cwd: "/tmp", request_id: cmd.request_id });
         snapshot();
         controls();
@@ -153,8 +155,10 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
         title = String(cmd.title);
         emit({ type: "session_list_invalidated", engine: "antigravity", space: "code" });
       }
-      if (cmd.type === "set_antigravity_option" && cmd.category === "mode") {
-        mode = String(cmd.value);
+      if (cmd.type === "set_antigravity_option") {
+        if (cmd.category === "mode") mode = String(cmd.value);
+        if (cmd.category === "model") { model = String(cmd.value); effort = "low"; }
+        if (cmd.category === "thought_level") effort = String(cmd.value);
         controls();
       }
       if (cmd.type === "answer_question") {
@@ -321,6 +325,48 @@ test("Gemini exposes its sign-in, read-only catalog and local clear command", as
   expect(relay.seen.filter(cmd => cmd.type === "new_session" || cmd.type === "query")).toHaveLength(0);
 });
 
+test("Gemini slash controls open existing panels and use only advertised choices", async ({ page }) => {
+  const relay = await mockRelay(page, true, true);
+  await page.goto("/");
+  await page.getByRole("button", { name: /来自会话.*Gemini session/ }).click();
+  await expect(page.getByText("Gemini 已就绪。")).toBeVisible();
+  const input = page.locator(".composer textarea");
+  const command = async (value: string) => {
+    await input.fill(value);
+    await input.press("Enter");
+  };
+  await command("/model");
+  const models = page.getByRole("dialog", { name: "选择模型" });
+  await expect(models.getByText("Gemini Pro", { exact: true })).toBeVisible();
+  await models.getByRole("button", { name: "关闭选择模型" }).click();
+  await command("/permissions");
+  const permissions = page.getByRole("dialog", { name: "选择权限模式" });
+  await expect(permissions.getByText("Plan", { exact: true })).toBeVisible();
+  await permissions.getByRole("button", { name: "关闭选择权限模式" }).click();
+  await command("/context");
+  await expect(page.getByRole("dialog", { name: "上下文占用" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "上下文占用" })).toHaveAttribute("aria-expanded", "true");
+
+  await command("/model unavailable-model");
+  await expect(page.getByText("当前 Gemini 模型目录没有这个模型或思考档位。")).toBeVisible();
+  await expect(input).toHaveValue("/model unavailable-model");
+  expect(relay.seen.filter(cmd => cmd.type === "set_antigravity_option" || cmd.type === "query")).toHaveLength(0);
+
+  await command("/model pro");
+  await expect(page.getByTitle("选择模型", { exact: true })).toHaveText("Gemini Pro");
+  await command("/model Extra");
+  await expect(page.getByTitle("思考强度", { exact: true })).toHaveText("Extra");
+  await command("/permissions acceptEdits");
+  await expect(page.getByText("当前 Gemini 会话没有这个权限模式。")).toBeVisible();
+  await command("/permissions plan");
+  await expect(page.getByTitle("点击切换权限模式")).toContainText("Plan");
+  expect(relay.seen.filter(cmd => cmd.type === "set_antigravity_option")
+    .map(cmd => [cmd.sid, cmd.category, cmd.value])).toEqual([
+    [sid, "model", "pro"], [sid, "thought_level", "extra"], [sid, "mode", "plan"],
+  ]);
+  expect(relay.seen.filter(cmd => cmd.type === "query")).toHaveLength(0);
+});
+
 test("Gemini colors carry through empty sessions, appearance and question dialogs", async ({ page, hasTouch }) => {
   const relay = await mockRelay(page, true, false, true);
   const press = (control: Locator) => hasTouch ? control.tap() : control.click();
@@ -409,12 +455,15 @@ test("Gemini uses native model, effort, permission and slash options on desktop 
   }
   await expect(page.getByTitle("选择模型", { exact: true })).toContainText("Gemini 4 Neon (High)");
   await expect(page.getByTitle("选择思考强度", { exact: true })).toHaveCount(0);
-  await page.getByTitle("选择模型", { exact: true }).click();
-  await page.getByRole("button", { name: "Gemini Pro", exact: true }).click();
-  await page.getByTitle("选择思考强度", { exact: true }).click();
-  await page.getByRole("button", { name: "Extra", exact: true }).click();
-  await page.getByTitle("选择权限模式", { exact: true }).click();
-  await page.getByRole("button", { name: "Plan", exact: true }).click();
+  await newComposer.fill("/model Gemini Pro");
+  await newComposer.press("Enter");
+  await expect(page.getByTitle("选择思考强度", { exact: true })).toHaveText("默认");
+  await newComposer.fill("/model extra");
+  await newComposer.press("Enter");
+  await expect(page.getByTitle("选择思考强度", { exact: true })).toHaveText("Extra");
+  await newComposer.fill("/permissions Plan");
+  await newComposer.press("Enter");
+  await expect(page.getByTitle("选择权限模式", { exact: true })).toContainText("Plan");
   await newComposer.fill("/comp");
   await expect(page.getByRole("listbox", { name: "命令" }).getByText("/compact", { exact: true })).toBeVisible();
   const send = page.getByRole("button", { name: "开始", exact: true });

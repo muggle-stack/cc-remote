@@ -424,42 +424,27 @@ async def test_resident_gemini_queries_cannot_change_or_skip_workspace_trust(wir
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("prompt", ["/plan", "/plan Review this project"])
-async def test_plan_slash_waits_for_native_mode_and_preserves_the_command(wire, monkeypatch, prompt):
-    machine, transport, runtime, client = wire
+async def test_plan_slash_preserves_native_command_and_permission_mode(wire, prompt):
+    machine, _, _, client = wire
     ctx = await new_session(machine)
-    submit = client.submit
-
-    async def submit_in_plan(method, args, *, guard=None):
-        assert client.controls[ctx.sdk.native_id]["mode"] == "plan"
-        assert any(frame.type == "perm" and frame.mode == "plan" for frame in transport.sent)
-        return await submit(method, args, guard=guard)
-
-    monkeypatch.setattr(client, "submit", submit_in_plan)
+    client.calls.clear()
     await machine._handle(Query(sid=ctx.key, msg_id="plan", prompt=prompt))
     request, outcome = client.prompts[0]
     assert request["prompt"] == [{"type": "text", "text": prompt}]
-    assert runtime.control_store.get(ctx.key)["mode"] == "plan"
+    assert not any(method in {"session/set_config_option", "session/set_mode"} for method, _ in client.calls)
+    assert ctx.sdk.permission_mode == "default"
     outcome.set_result({"stopReason": "end_turn"})
     await ctx.turn_task
 
 
 @pytest.mark.asyncio
-async def test_unconfirmed_plan_and_goal_without_objective_do_not_start_a_prompt(wire, monkeypatch):
+async def test_goal_requires_an_objective_before_starting_a_prompt(wire):
     machine, _, _, client = wire
     failed = await machine._handle(NewSession(engine="antigravity", cwd=client.cwd, prompt="/goal", msg_id="empty-goal"))
     assert failed.code == "bad_prompt" and not client.calls
     ctx = await new_session(machine)
-    call = client.call
-
-    async def refuse_mode(method, args, *, timeout=30):
-        if method == "session/set_config_option" and args["value"] == "plan":
-            return client.options(args["sessionId"])
-        return await call(method, args, timeout=timeout)
-
-    monkeypatch.setattr(client, "call", refuse_mode)
-    failed = await machine._handle(Query(sid=ctx.key, msg_id="plan", prompt="/plan"))
-    assert failed.code == "gemini_option"
-    assert ctx.sdk.permission_mode == "default" and not client.prompts
+    failed = await machine._handle(Query(sid=ctx.key, msg_id="empty-goal", prompt="/goal"))
+    assert failed.code == "bad_prompt" and not client.prompts
     await machine._handle(Query(sid=ctx.key, msg_id="goal", prompt="/goal Check the fixture"))
     request, outcome = client.prompts[0]
     assert request["prompt"] == [{"type": "text", "text": "/goal Check the fixture"}]
@@ -1125,10 +1110,6 @@ async def test_steer_retains_tool_owner_in_live_events_and_history(wire):
     machine, transport, _, client = wire
     ctx = await new_session(machine)
     await machine._handle(Query(sid=ctx.key, msg_id="original", prompt="edit fixture"))
-    plan_steer = await machine._handle(Steer(sid=ctx.key, msg_id="plan-during-edit", prompt="/plan",
-                                           cmd_id="steer-plan", client_id="web"))
-    assert plan_steer.code == "not_steerable"
-    assert ctx.sdk.permission_mode == "default" and len(client.prompts) == 1
     await client.update(ctx.sdk.native_id, "tool_call", kind="edit", toolCallId="native-edit", status="in_progress")
     await machine._handle(Steer(sid=ctx.key, msg_id="supplement", prompt="explain",
                                 cmd_id="steer", client_id="web"))

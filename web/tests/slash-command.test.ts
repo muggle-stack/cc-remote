@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { CODEX_PROMPTS, parseSlash, routeComposerInput, slashToken } from "../src/data.ts";
+import { CODEX_PROMPTS, matchCommands, parseSlash, routeComposerInput, slashToken } from "../src/data.ts";
 
 for (const prompt of [
   "/Users/tester/workspace/unitree-go2这里有双目的，看看我们的大脑是否能接入？",
@@ -45,5 +45,15 @@ for (const command of ["/unknown-command", "/constructor", "/__proto__", "/toStr
 }
 assert.deepEqual(routeComposerInput("/init follow project conventions", "codex"),
   { kind: "prompt", prompt: `${CODEX_PROMPTS.init}\n\nfollow project conventions` });
+
+for (const slash of ["model", "permissions", "context", "extensions"]) {
+  assert.deepEqual(routeComposerInput(`/${slash} `, "antigravity"), { kind: "client", slash, args: "" });
+  const commands = matchCommands(slash, "antigravity", "code",
+    [{ name: slash, description: "Native command with the same name", attachments: false }]);
+  assert.equal(commands.length, 1);
+  assert.notEqual(commands[0].ic, "term");
+}
+assert.deepEqual(routeComposerInput("/plan check code", "antigravity"),
+  { kind: "prompt", prompt: "/plan check code" });
 
 console.log("slash command path regressions passed");

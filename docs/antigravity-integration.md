@@ -49,6 +49,9 @@ JSON 数组，例如 `["/Users/me/projects/app","/Users/me/worktrees/app-fix"]`�
 它不会出现在侧栏，选择目录或模型时也无需新建会话库。
 
 侧栏菜单可重命名 CC Remote 中的会话；`/clear` 打开新的 Gemini 会话页。
+`/model` 和 `/permissions` 打开相应选择器。带参数时可用 agy 返回的
+模型 ID、当前模型的思考档位，或对应的权限模式。已有会话中，
+`/context` 打开只读的上下文用量面板，`/plan` 交给 agy 执行原生规划命令。
 `/extensions` 查看本机和当前项目配置的 Skills、Plugins、MCP 与 Hooks。
 仍在执行的原生命令和定时任务会显示在后台任务列表。收到原生终态后，
 结果记到发起它的轮次。agy 意外断开时，尚无终态的任务标记为结果未知。

@@ -13,7 +13,8 @@ import { SpeedPicker } from "./SpeedPicker";
 import { newChatSpeed, normalizeSpeed, speedsFor } from "../codex-speed";
 import {
   clientSlashesFor, matchCommands, matchSkills, modelsFor, permsFor, routeComposerInput, skillToken, slashToken, dshPermissionLabel,
-  CODEX_PERMISSION_PROFILES, antigravityPermissions, type Catalog, type Effort, type Model,
+  CODEX_PERMISSION_PROFILES, antigravityPermissions, antigravityChoice, antigravityModelArgument,
+  type Catalog, type Effort, type Model,
 } from "../data";
 import { attachmentBytes, snapshotAttachmentFiles } from "../img";
 import {
@@ -523,7 +524,24 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
       return;
     }
     if (slash === "model") {
-      if (args) {
+      if (args && engine === "antigravity") {
+        if (!antigravity?.options.length) {
+          setAutoCompactNotice(antigravity?.error || "Gemini 模型目录尚未就绪。");
+          return;
+        }
+        const choice = antigravityModelArgument(antigravity.options, args);
+        if (!choice) {
+          setAutoCompactNotice("当前 Gemini 模型目录没有这个模型或思考档位。");
+          return;
+        }
+        const pick = choice.category === "model" ? onPickModel : onPickEffort;
+        if (!pick) {
+          setAutoCompactNotice("模型设置当前不可用。");
+          return;
+        }
+        pick(choice.value);
+        setAutoCompactNotice(null);
+      } else if (args) {
         const selected = modelList.find(candidate =>
           candidate.id === args || candidate.name.toLowerCase() === args.toLowerCase());
         if (!onPickModel) {
@@ -552,8 +570,20 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
       return;
     }
     if (slash === "permissions") {
-      setPermissionsOpen(true);
-      if (engine === "codex") onGetPermissionProfiles?.(cwd);
+      if (args && engine === "antigravity") {
+        const choice = antigravityChoice(antigravity?.options, "mode", args);
+        if (!choice) {
+          setAutoCompactNotice(antigravity?.options.length
+            ? "当前 Gemini 会话没有这个权限模式。"
+            : "Gemini 权限模式尚未就绪。");
+          return;
+        }
+        setNativeModeChoice({ scope: nativeModeScope, value: choice.value });
+        setAutoCompactNotice(null);
+      } else {
+        setPermissionsOpen(true);
+        if (engine === "codex") onGetPermissionProfiles?.(cwd);
+      }
       setText("");
       return;
     }
@@ -630,7 +660,7 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
 
   const send = (value = taRef.current?.value ?? text) => {
     if (creating || importingRef.current || selectedProfileMissing) return;
-    const route = routeComposerInput(value, engine, space, antigravity?.commands);
+    const route = routeComposerInput(value, engine, space);
     if (route.kind === "empty") return;
     if (route.kind === "blocked") { setAutoCompactNotice(route.message); return; }
     if (route.kind === "client") { runClientSlash(route.slash, route.args); return; }
@@ -640,7 +670,7 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
   const pickCommand = (slash: string) => {
     if (commandMatches.find(command => command.slash === slash)?.unavailable) return;
     if (creating || importingRef.current || selectedProfileMissing) return;
-    if (slash !== "autocompact" && !antigravity?.commands.some(command => command.name === slash) && clientSlashesFor(engine).has(slash)) {
+    if (slash !== "autocompact" && clientSlashesFor(engine).has(slash)) {
       runClientSlash(slash, "");
     } else {
       setText(`/${slash} `);
