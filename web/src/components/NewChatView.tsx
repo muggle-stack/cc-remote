@@ -12,7 +12,7 @@ import { EngineIcon, Icon } from "../icons";
 import { SpeedPicker } from "./SpeedPicker";
 import { newChatSpeed, normalizeSpeed, speedsFor } from "../codex-speed";
 import {
-  clientSlashesFor, matchCommands, matchSkills, modelsFor, permsFor, routeComposerInput, skillToken, slashToken, dshPermissionLabel,
+  isClientSlash, isGeminiGoalCommand, matchCommands, matchSkills, modelsFor, permsFor, routeComposerInput, skillToken, slashToken, dshPermissionLabel,
   CODEX_PERMISSION_PROFILES, antigravityPermissions, antigravityChoice, antigravityModelArgument,
   type Catalog, type Effort, type Model,
 } from "../data";
@@ -53,6 +53,7 @@ import {
 
 const AutoCompactControl = lazy(() => import("./AutoCompactControl"));
 const DshPresetPicker = lazy(() => import("./DshPresetPicker"));
+const GeminiGoalDialog = lazy(() => import("./GeminiGoalDialog"));
 
 import { newChatEfforts } from "../new-chat-selection";
 export { compatibleNewChatEffort, newChatCatalogRequest, resolveNewChatLocalDefaults,
@@ -271,6 +272,8 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
   const [creating, setCreating] = useState(false);
   const [sheetKind, setSheetKind] =
     useState<"models" | "efforts" | null>(null);
+  const [geminiGoalOpen, setGeminiGoalOpen] = useState(false);
+  useLayoutEffect(() => { setGeminiGoalOpen(false); }, [key, cwd]);
   const [autoCompactOpen, setAutoCompactOpen] = useState(false);
   const [autoCompactNotice, setAutoCompactNotice] = useState<string | null>(null);
   const [executionControls, setExecutionControls] =
@@ -475,27 +478,29 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
     const pastedText = clipboard.text;
     const attachments = clipboard.files.length || clipboard.images.length
       || clipboard.errors.length;
+    const inlineGoal = isGeminiGoalCommand(engine, e.currentTarget.value.trim() || pastedText);
     if (!paste.acceptText) {
       e.preventDefault();
       if (!attachments) return;
     }
-    if (!attachments && pastedText.length <= LONG_PASTE_THRESHOLD) return;
+    if (!attachments && (pastedText.length <= LONG_PASTE_THRESHOLD || inlineGoal)) return;
     e.preventDefault();
-    if (paste.acceptText && pastedText.length > LONG_PASTE_THRESHOLD) {
+    if (paste.acceptText && pastedText.length > LONG_PASTE_THRESHOLD && !inlineGoal) {
       setPastes((current) => [...current, makeComposerPaste(pastedText, uuid())]);
     } else if (paste.acceptText && pastedText) insertClipboardText(e.currentTarget, pastedText, setText);
     if (attachments) void onPick(null, clipboard, paste);
   };
 
-  const submitPrompt = (value: string, mode = collaborationMode, permission = permissionMode) => {
-    const composed = composePastePrompt(pastes, value.trim());
+  const submitPrompt = (value: string, mode = collaborationMode, permission = permissionMode): boolean => {
+    const raw = value.trim();
+    const composed = composePastePrompt(pastes, raw, isGeminiGoalCommand(engine, raw));
     if (!composed.ok) {
       window.alert(`消息内容超过上限（最多 ${composed.maxChars.toLocaleString()} 个字符）`);
-      return;
+      return false;
     }
     const prompt = composed.prompt;
     if ((!prompt && !hasAttachments) || creating || importingRef.current
-        || selectedProfileMissing) return;
+        || selectedProfileMissing) return false;
     setCreating(true);
     const queued = onSend(
       prompt, images.length ? images : undefined, files.length ? files : undefined,
@@ -505,9 +510,20 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
       engine === "codex" ? webSearch ?? undefined : undefined,
       engine === "codex" ? serviceTier : undefined, isCodeOnlyEngine(engine) ? nativeMode || undefined : undefined);
     if (!queued) setCreating(false);
+    return queued;
   };
 
   const runClientSlash = (slash: string, args: string) => {
+    if (engine === "antigravity" && slash === "goal") {
+      if (!antigravity?.commands.some(command => command.name === "goal")) {
+        setAutoCompactNotice("当前 Gemini 尚未提供 /goal 命令。");
+        return;
+      }
+      setGeminiGoalOpen(true);
+      setText("");
+      setAutoCompactNotice(null);
+      return;
+    }
     const extensionKinds: Partial<Record<string, EngineCapabilityKind | "all">> = {
       extensions: "all", skills: "skill", plugins: "plugin",
       apps: "app", mcp: "mcp", hooks: "hook",
@@ -670,7 +686,7 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
   const pickCommand = (slash: string) => {
     if (commandMatches.find(command => command.slash === slash)?.unavailable) return;
     if (creating || importingRef.current || selectedProfileMissing) return;
-    if (slash !== "autocompact" && clientSlashesFor(engine).has(slash)) {
+    if (slash !== "autocompact" && isClientSlash(engine, slash)) {
       runClientSlash(slash, "");
     } else {
       setText(`/${slash} `);
@@ -1023,6 +1039,15 @@ export function NewChatView({ cwd, controlScopeKey, editPrompt, onEditConsumed,
           )}
         </div>
       </div>
+
+      {engine === "antigravity" && geminiGoalOpen && <Suspense fallback={null}>
+        <GeminiGoalDialog disabled={creating || importing || selectedProfileMissing}
+          onClose={() => setGeminiGoalOpen(false)} onSend={prompt => {
+            // Creation failure recovery uses the main composer's saved draft.
+            setText(prompt);
+            return submitPrompt(prompt);
+          }} />
+      </Suspense>}
 
       <NewChatSelectorSheet
         open={sheetKind !== null}

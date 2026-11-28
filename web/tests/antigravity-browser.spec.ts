@@ -235,19 +235,25 @@ test("Gemini is hidden on a device without Antigravity enabled", async ({ page }
   await expect(page.getByRole("menuitemradio", { name: "Gemini" })).toHaveCount(0);
 });
 
-test("Gemini explains device-side workspace trust on new session denial", async ({ page, hasTouch }) => {
+test("Gemini preserves a goal draft when the selected workspace refuses a new session", async ({ page, hasTouch }) => {
   const relay = await mockRelay(page, true);
   relay.requireWorkspaceTrust();
   await page.goto("/");
   await page.getByRole("button", { name: "切换新会话引擎" }).click();
   await page.getByRole("menuitemradio", { name: "Gemini" }).click();
-  await page.locator(".newchat-input").fill("Check this project");
-  const send = page.getByRole("button", { name: "开始", exact: true });
-  if (hasTouch) await send.tap();
-  else await send.click();
+  const input = page.locator(".newchat-input");
+  await input.fill("/go");
+  const command = page.getByRole("listbox", { name: "命令" }).getByRole("button", { name: /\/goal/ });
+  await (hasTouch ? command.tap() : command.click());
+  const goal = page.getByRole("dialog", { name: "Gemini Goal" });
+  await goal.getByRole("textbox", { name: "目标内容" }).fill("Run the project checks");
+  const start = goal.getByRole("button", { name: "开始目标" });
+  await (hasTouch ? start.tap() : start.click());
   const error = page.getByText(/CC_REMOTE_ANTIGRAVITY_TRUSTED_WORKSPACES/);
   await expect(error).toBeVisible();
   await expect(error).toContainText('["*"]');
+  await expect(input).toHaveValue("/goal Run the project checks");
+  expect(relay.seen.filter(cmd => cmd.type === "new_session")).toMatchObject([{ prompt: "/goal Run the project checks" }]);
 });
 
 test("a session message opens its original Gemini Code session", async ({ page }) => {
@@ -274,10 +280,15 @@ test("Gemini keeps a background follow-up active until Stop is acknowledged", as
   await expect(page.getByText("后台检查完成，结果已保存。")).toBeVisible();
   await expect(page.locator(".composer textarea")).toHaveAttribute("placeholder", /补充/);
   await expect(page.getByText(/Gemini 尚未确认续写结束/)).toBeVisible();
+  const spark = page.locator(".turn-working .gemini-working-spark");
+  await expect(spark).toHaveAttribute("width", "24");
+  await expect(spark.locator("linearGradient")).toHaveCount(3);
+  await expect.poll(() => spark.locator(":scope > use").count()).toBe(2);
   const stop = page.getByRole("button", { name: "停止", exact: true });
   await (hasTouch ? stop.tap() : stop.click());
   await expect.poll(() => relay.seen.some(cmd => cmd.type === "interrupt" && cmd.sid === sid)).toBe(true);
   await expect(page.locator(".composer textarea")).toHaveAttribute("placeholder", /输入/);
+  await expect(spark).toHaveCount(0);
   await expect(page.getByText(/Gemini 尚未确认续写结束/)).toHaveCount(0);
   await expect(page.getByText("后台检查完成，结果已保存。")).toHaveCount(1);
   expect(relay.seen.some(cmd => cmd.type === "query")).toBe(false);
@@ -365,6 +376,30 @@ test("Gemini slash controls open existing panels and use only advertised choices
     [sid, "model", "pro"], [sid, "thought_level", "extra"], [sid, "mode", "plan"],
   ]);
   expect(relay.seen.filter(cmd => cmd.type === "query")).toHaveLength(0);
+});
+
+test("Gemini opens its goal panel from the suggestion and submits the native command once", async ({ page, hasTouch }) => {
+  const relay = await mockRelay(page, true, true);
+  await page.goto("/");
+  await page.getByRole("button", { name: /来自会话.*Gemini session/ }).click();
+  await expect(page.getByText("Gemini 已就绪。")).toBeVisible();
+  const input = page.locator(".composer textarea");
+  await input.fill("/go");
+  const command = page.getByRole("listbox", { name: "命令" }).getByRole("button", { name: /\/goal/ });
+  await (hasTouch ? command.tap() : command.click());
+  const goal = page.getByRole("dialog", { name: "Gemini Goal" });
+  await expect(goal.getByText("新目标", { exact: true })).toBeVisible();
+  await expect(goal.locator("img.antigravity")).toBeVisible();
+  const start = goal.getByRole("button", { name: "开始目标" });
+  await expect(start).toBeDisabled();
+  expect(relay.seen.filter(cmd => cmd.type === "query" || cmd.type === "set_goal")).toHaveLength(0);
+  await goal.getByRole("textbox", { name: "目标内容" }).fill("修复预览\n桌面和手机端都通过");
+  await (hasTouch ? start.tap() : start.click());
+  await expect(goal).toHaveCount(0);
+  await expect.poll(() => relay.seen.filter(cmd => cmd.type === "query")).toMatchObject([
+    { sid, prompt: "/goal 修复预览\n桌面和手机端都通过" },
+  ]);
+  expect(relay.seen.some(cmd => cmd.type === "set_goal")).toBe(false);
 });
 
 test("Gemini colors carry through empty sessions, appearance and question dialogs", async ({ page, hasTouch }) => {
@@ -470,16 +505,17 @@ test("Gemini uses native model, effort, permission and slash options on desktop 
   await newComposer.fill("/goal");
   if (hasTouch) await send.tap();
   else await send.click();
-  await expect(page.getByText("请在 /goal 后填写目标。")).toBeVisible();
-  await expect(newComposer).toHaveValue("/goal");
+  const goal = page.getByRole("dialog", { name: "Gemini Goal" });
+  await expect(goal.getByRole("button", { name: "开始目标" })).toBeDisabled();
+  await goal.getByRole("button", { name: "取消", exact: true }).click();
   expect(relay.seen.filter(cmd => cmd.type === "new_session")).toHaveLength(0);
-  await newComposer.fill("/compact with summary");
+  await newComposer.fill("/goal Verify the build");
   if (hasTouch) await send.tap();
   else await send.click();
-  await expect.poll(() => relay.seen.find(cmd => cmd.type === "new_session")).toMatchObject({
+  await expect.poll(() => relay.seen.filter(cmd => cmd.type === "new_session")).toMatchObject([{
     engine: "antigravity", model: "pro", antigravity_effort: "extra", antigravity_mode: "plan",
-    prompt: "/compact with summary",
-  });
+    prompt: "/goal Verify the build",
+  }]);
   await expect(page.getByText("Gemini 已就绪。")).toBeVisible();
   await expect(page.locator(".composer .inrow")).toHaveCSS("background-image", /radial-gradient/);
   expect(relay.seen.some(cmd => cmd.engine === "antigravity" && cmd.space === "work")).toBe(false);

@@ -393,6 +393,12 @@ export const commandsFor = (engine?: string, surface: CommandSurface = "code"): 
     : engine === "codex" ? CODEX_COMMANDS : COMMANDS
 );
 export const clientSlashesFor = (engine?: string): Set<string> => (engine === "antigravity" ? GEMINI_SLASHES : engine === "dsh" ? new Set(["model", "context", "diff", "preview", "open", "skills"]) : engine === "codex" ? CODEX_CLIENT_SLASHES : CLIENT_SLASHES);
+export function isClientSlash(engine: string | undefined, slash: string, args = ""): boolean {
+  return clientSlashesFor(engine).has(slash) || (engine === "antigravity" && slash === "goal" && !args);
+}
+export function isGeminiGoalCommand(engine: string | undefined, input: string): boolean {
+  return engine === "antigravity" && /^\s*\/goal(?:\s|$)/i.test(input);
+}
 
 export const DSH_SIDECHAT_UNAVAILABLE = "DSH 侧聊暂未开放，等待官方提供会话删除能力后再接入。";
 
@@ -458,8 +464,10 @@ export function matchCommands(token: string, engine?: string,
   const local = clientSlashesFor(engine);
   const matches = native.filter(c => c.name.toLowerCase().startsWith(t) && !local.has(c.name.toLowerCase()));
   return [
-    ...matches.map(c => ({ slash: c.name, name: c.name,
-      ds: [c.description, c.input_hint].filter(Boolean).join(" · "), ic: "term" })),
+    ...matches.map(c => engine === "antigravity" && c.name === "goal"
+      ? { slash: c.name, name: "目标", ds: "打开目标面板，或输入 /goal <目标描述> 直接发送", ic: "verify" }
+      : { slash: c.name, name: c.name,
+          ds: [c.description, c.input_hint].filter(Boolean).join(" · "), ic: "term" }),
     ...list.filter(c => c.slash.toLowerCase().startsWith(t) && !matches.some(n => n.name === c.slash)),
   ];
 }
@@ -487,13 +495,10 @@ export function routeComposerInput(
   if (engine === "dsh" && parsed?.slash === "btw") {
     return { kind: "blocked", message: DSH_SIDECHAT_UNAVAILABLE };
   }
-  if (engine === "antigravity" && parsed?.slash === "goal" && !parsed.args) {
-    return { kind: "blocked", message: "请在 /goal 后填写目标。" };
-  }
   if (surface === "work" && parsed && isKnownCodeOnlySlash(parsed.slash, engine)) {
     return { kind: "blocked", message: `/${parsed.slash} 是 Code 指令，请切换到 Code 使用` };
   }
-  if (parsed && clientSlashesFor(engine).has(parsed.slash)) {
+  if (parsed && isClientSlash(engine, parsed.slash, parsed.args)) {
     return { kind: "client", ...parsed };
   }
   if (engine === "codex" && parsed) {

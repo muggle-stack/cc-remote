@@ -1,13 +1,13 @@
 import { useEffect, useId, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { useChatDialogGeometry } from "../chat-dialog-geometry";
-import { Icon } from "../icons";
-import type { Engine } from "../protocol";
+import { EngineIcon, Icon } from "../icons";
+import { ENGINE_LABELS, type Engine } from "../protocol";
 import "./GoalDialog.css";
 import { goalTokens } from "../goal-presentation";
 
 export function GoalSheet({ engine, title, status, scopeRef, onClose, children, footer }: {
-  engine: Engine; title: string; status?: string; scopeRef: RefObject<HTMLElement | null>;
+  engine: Engine; title: string; status?: string; scopeRef?: RefObject<HTMLElement | null>;
   onClose: () => void; children: ReactNode; footer: ReactNode;
 }) {
   const dialogRef = useRef<HTMLElement>(null);
@@ -45,7 +45,7 @@ export function GoalSheet({ engine, title, status, scopeRef, onClose, children, 
   // Geometry updates during keyboard/layout changes must not steal input focus.
   }, [hasGeometry]);
   if (!geometry) return null;
-  const name = engine === "dsh" ? "DSH" : engine === "codex" ? "Codex" : "Claude";
+  const name = ENGINE_LABELS[engine];
   // Geometry uses viewport coordinates. The mobile chat pane is transformed
   // for the sidebar, so keep the dialog outside its fixed-position container.
   return createPortal(<>
@@ -54,10 +54,10 @@ export function GoalSheet({ engine, title, status, scopeRef, onClose, children, 
       role="dialog" aria-modal="true" aria-label={`${name} Goal`} style={geometry} data-lock-horizontal-swipe>
       <header className="goal-sheet-head">
         <span className="goal-sheet-icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor"
+          {engine === "antigravity" ? <EngineIcon engine={engine} size={18} /> : <svg viewBox="0 0 24 24" width={18} height={18} fill="none" stroke="currentColor"
             strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
             <path d="M13 5.4a8.5 8.5 0 1 0 5.6 5.6M11.9 9.2a4.5 4.5 0 1 0 2.9 2.9M10.5 13.5 18 6m-7.5 4.5v3h3M18 2v4h4l-4 4h-4V6Z" />
-          </svg>
+          </svg>}
         </span>
         <div className="goal-sheet-title"><b>{title}</b><span>{name}</span></div>
         {status && <span className="goal-card-status"><i />{status}</span>}

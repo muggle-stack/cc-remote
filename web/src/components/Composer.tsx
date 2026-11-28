@@ -30,13 +30,14 @@ import { AttachmentPicker } from "./AttachmentPicker";
 import { parseContextCapacity } from "../codex-context";
 const CodexContextControl = lazy(() => import("./CodexContextControl"));
 import {
-  clientSlashesFor, parseSlash, routeComposerInput, slashToken,
+  clientSlashesFor, isClientSlash, isGeminiGoalCommand, parseSlash, routeComposerInput, slashToken,
   matchCommands, matchSkills, skillToken,
   modelsFor, effortNameForDisplay, permsFor, dshPermissionLabel, antigravityPermissions, antigravityEfforts,
   antigravityChoice, antigravityModelArgument,
   permissionProfileLabel, type Catalog,
 } from "../data";
 const CommandSheet = lazy(() => import("./CommandSheet").then(m => ({ default: m.CommandSheet })));
+const GeminiGoalDialog = lazy(() => import("./GeminiGoalDialog"));
 import { attachmentBytes, snapshotAttachmentFiles } from "../img";
 import { useAttachmentDrop } from "../use-attachment-drop";
 import { useClipboardPasteGuard } from "../use-clipboard-paste-guard";
@@ -212,6 +213,7 @@ export function Composer(p: Props) {
   // Only the modal pickers live in state now; the "/" command palette is a live
   // popover DERIVED from the composer text (no second input box).
   const [sheetKind, setSheetKind] = useState<"models" | "efforts" | "perms" | null>(null);
+  const [geminiGoalOpen, setGeminiGoalOpen] = useState(false);
   const openPermissions = () => {
     setSheetKind("perms");
     if (p.engine === "codex") p.onGetPermissionProfiles();
@@ -246,6 +248,7 @@ export function Composer(p: Props) {
     draftKeyRef.current = p.draftKey;
     setDraft(p.draftStore.get(p.draftKey));
     setSheetKind(null);
+    setGeminiGoalOpen(false);
     setCtxOpen(false);
     setUsageOpen(false);
     setAutoCompactOpen(false);
@@ -469,14 +472,15 @@ export function Composer(p: Props) {
     const { text } = clipboard;
     const attachments = clipboard.files.length || clipboard.images.length
       || clipboard.errors.length;
+    const inlineGoal = isGeminiGoalCommand(p.engine, e.currentTarget.value.trim() || text);
     if (!paste.acceptText) {
       e.preventDefault();
       if (!attachments) return;
     }
-    if (!attachments && text.length <= LONG_PASTE_THRESHOLD) return;
+    if (!attachments && (text.length <= LONG_PASTE_THRESHOLD || inlineGoal)) return;
     e.preventDefault();
     const textarea = e.currentTarget;
-    if (paste.acceptText && text.length > LONG_PASTE_THRESHOLD) {
+    if (paste.acceptText && text.length > LONG_PASTE_THRESHOLD && !inlineGoal) {
       const id = uuid();
       updateDraft((current) => ({
         ...current, pastes: [...current.pastes, makeComposerPaste(text, id)],
@@ -498,12 +502,12 @@ export function Composer(p: Props) {
   }, [dshResult, p.draftKey, updateDraft]);
 
   // Send prompt text to cc, honoring busy/queue/interrupt rules.
-  const submitPrompt = (prompt: string, mode: SendMode = "steer") => {
-    if (importing) { flash("请等待附件导入完成"); return; }
-    const composed = composePastePrompt(pastes, prompt);
+  const submitPrompt = (prompt: string, mode: SendMode = "steer"): boolean => {
+    if (locked || importing) return false;
+    const composed = composePastePrompt(pastes, prompt, isGeminiGoalCommand(p.engine, prompt));
     if (!composed.ok) {
       flash(`消息内容超过上限（最多 ${composed.maxChars.toLocaleString()} 个字符）`);
-      return;
+      return false;
     }
     const expandedPrompt = composed.prompt;
     const query: PendingQuery = {
@@ -511,44 +515,34 @@ export function Composer(p: Props) {
       images: images.length ? images : undefined,
       files: files.length ? files : undefined,
     };
-    if (busy) {
+    let accepted: boolean;
+    if (!busy) {
+      if (!expandedPrompt && !hasAttachments) return false;
+      accepted = p.onSendQuery(expandedPrompt, query.images, query.files);
+    } else {
       const action = classifyBusySubmit(
         p.state, mode, p.engine ?? "claude",
         !!expandedPrompt || hasAttachments);
-      if (action === "noop") return;
+      if (action === "noop") return false;
       if (action === "steer") {
-        if (p.onSteerQuery(
-            expandedPrompt,
-            images.length ? images : undefined,
-            files.length ? files : undefined)) {
-          clearDraft(); resetTaHeight();
+        accepted = p.onSteerQuery(expandedPrompt, query.images, query.files);
+      } else {
+        const unconfirmed = mode === "queue"
+          ? p.unconfirmedQueued : p.unconfirmedReplaceable;
+        const capacity = mode === "queue"
+          ? p.queueCapacity : p.replaceQueueCapacity;
+        if (!canEnqueueQuery(unconfirmed, query, capacity)) {
+          flash("排队已满（最多 32 条 / 64 MiB），请先等待发送");
+          return false;
         }
-        return;
+        accepted = action === "enqueue" ? p.onEnqueue(query) : p.onSetPending(query);
       }
-      const unconfirmed = mode === "queue"
-        ? p.unconfirmedQueued : p.unconfirmedReplaceable;
-      const capacity = mode === "queue"
-        ? p.queueCapacity : p.replaceQueueCapacity;
-      if (!canEnqueueQuery(unconfirmed, query, capacity)) {
-        flash("排队已满（最多 32 条 / 64 MiB），请先等待发送");
-        return;
-      }
-      if (action === "enqueue") {
-        if (p.onEnqueue(query)) {
-          clearDraft(); resetTaHeight();
-        }
-        return;
-      }
-      if (p.onSetPending(query)) {
-        clearDraft(); resetTaHeight();
-      }
-      return;
     }
-    if (!expandedPrompt && !hasAttachments) return;
-    if (p.onSendQuery(
-        expandedPrompt, images.length ? images : undefined, files.length ? files : undefined)) {
-      clearDraft(); resetTaHeight();
+    if (accepted) {
+      clearDraft();
+      resetTaHeight();
     }
+    return accepted;
   };
 
   // Client controls use the same callbacks as the pickers.
@@ -626,7 +620,16 @@ export function Composer(p: Props) {
         break;
       }
       case "status": p.onStatus?.(); break;
-      case "goal": p.onGoal?.(args); break;
+      case "goal":
+        if (p.engine === "antigravity") {
+          if (locked || importing) return;
+          if (!p.antigravity?.commands.some(command => command.name === "goal")) {
+            flash("当前 Gemini 尚未提供 /goal 命令。");
+            return;
+          }
+          setGeminiGoalOpen(true);
+        } else p.onGoal?.(args);
+        break;
       case "rewind":
         if (p.onRewind) p.onRewind();
         else flash("请先打开一个 Claude Code 会话");
@@ -725,7 +728,7 @@ export function Composer(p: Props) {
       growTa();
       return;
     }
-    if (clientSlashesFor(p.engine).has(slash) || p.engine === "dsh" && slash === "goal") {
+    if (isClientSlash(p.engine, slash) || p.engine === "dsh" && slash === "goal") {
       runClientSlash(slash, "");
       if (slash !== "btw" && slash !== "goal") focusTa();
       return;
@@ -1265,6 +1268,11 @@ export function Composer(p: Props) {
           </div>
         </>)}
       </div>
+
+      {p.engine === "antigravity" && geminiGoalOpen && <Suspense fallback={null}>
+        <GeminiGoalDialog disabled={locked || importing} onClose={() => setGeminiGoalOpen(false)}
+          onSend={submitPrompt} />
+      </Suspense>}
 
       {sheetKind !== null && <Suspense fallback={null}><CommandSheet
         open={sheetKind !== null}

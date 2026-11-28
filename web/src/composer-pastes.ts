@@ -41,16 +41,18 @@ export type ComposedPastePrompt =
   | { ok: false; chars: number; maxChars: number };
 
 /**
- * Long-paste cards are ordered message prefixes. Size the exact joined prompt
+ * Long-paste cards normally precede the input. A native command can reserve
+ * the first line by putting its input before the cards. Size the joined prompt
  * before allocating it so an oversized private draft stays intact and never
  * reaches the reliable command outbox as a frame the protocol will reject.
  */
 export function composePastePrompt(
   pastes: readonly PasteText[],
   input: string,
+  inputFirst = false,
 ): ComposedPastePrompt {
-  const parts = [...pastes.map((paste) => paste.text), input]
-    .filter((part) => part.length > 0);
+  const texts = pastes.map(paste => paste.text);
+  const parts = (inputFirst ? [input, ...texts] : [...texts, input]).filter(part => part.length > 0);
   const chars = parts.reduce((total, part) => total + part.length, 0)
     + Math.max(0, parts.length - 1) * 2;
   if (chars > MAX_PROMPT_CHARS) {

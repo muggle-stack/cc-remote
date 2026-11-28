@@ -2561,6 +2561,3 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
   color:var(--text);
   border:1px solid transparent;
 }
-.gemini-working{display:inline-flex;animation:gemini-working 1.8s ease-in-out infinite}
-@keyframes gemini-working{50%{opacity:.56;transform:scale(.81)}}
-@media(prefers-reduced-motion:reduce){.gemini-working{animation:none}}
