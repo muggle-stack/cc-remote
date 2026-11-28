@@ -230,7 +230,9 @@ test("Gemini explains device-side workspace trust on new session denial", async 
   const send = page.getByRole("button", { name: "开始", exact: true });
   if (hasTouch) await send.tap();
   else await send.click();
-  await expect(page.getByText(/CC_REMOTE_ANTIGRAVITY_TRUSTED_WORKSPACES/)).toBeVisible();
+  const error = page.getByText(/CC_REMOTE_ANTIGRAVITY_TRUSTED_WORKSPACES/);
+  await expect(error).toBeVisible();
+  await expect(error).toContainText('["*"]');
 });
 
 test("a session message opens its original Gemini Code session", async ({ page }) => {

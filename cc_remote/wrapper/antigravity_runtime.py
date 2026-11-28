@@ -27,7 +27,9 @@ from cc_remote.protocol import (
     TurnBinding, TurnDetail, TurnSteered, TurnUsage, UserMsg,
 )
 from cc_remote.session_messages import reference
-from cc_remote.wrapper.antigravity_client import AcpClient, AcpError, AntigravityLaunch, antigravity_opted_out
+from cc_remote.wrapper.antigravity_client import (
+    AcpClient, AcpError, AntigravityLaunch, antigravity_opted_out, parse_trusted_workspaces,
+)
 from cc_remote.wrapper.antigravity_controls import CONTROL_CATEGORIES, AntigravityControlStore
 from cc_remote.wrapper.antigravity_history import apply_native_turn_times, read_native_turn_times
 from cc_remote.wrapper.antigravity_metadata import AntigravityMetadata, AntigravityMetadataStore
@@ -312,18 +314,15 @@ class AntigravityRuntime:
             workspace = str(Path(cwd).resolve())
         except (OSError, ValueError, RuntimeError):
             raise AcpError("directory", "Gemini 工作目录无效或不可读取。") from None
-        try:
-            allowed = json.loads(self.machine.cfg.antigravity_trusted_workspaces)
-        except (ValueError, RecursionError):
-            allowed = None
-        if not isinstance(allowed, list) or any(
-            not isinstance(path, str) or not os.path.isabs(path) or "\0" in path for path in allowed
-        ):
-            raise AcpError("workspace_config", f"请检查 Wrapper 上的 {_WORKSPACE_ENV}，它需要一个绝对路径的 JSON 数组。")
+        allowed = parse_trusted_workspaces(self.machine.cfg.antigravity_trusted_workspaces)
+        if allowed is None:
+            raise AcpError("workspace_config",
+                           f'请将 Wrapper 上的 {_WORKSPACE_ENV} 设为物理绝对路径的 JSON 数组，或用 ["*"] 授权所有目录。')
         # Compare with the configured physical path verbatim. A symlink named
         # in the trust list must not silently transfer trust to a new target.
-        if workspace not in allowed:
-            raise AcpError("workspace_untrusted", f"此 Gemini 目录尚未受信任。请在 Wrapper 的 {_WORKSPACE_ENV} 中加入该目录的物理路径。")
+        if allowed != ["*"] and workspace not in allowed:
+            raise AcpError("workspace_untrusted",
+                           f'此 Gemini 目录尚未受信任。请在 Wrapper 的 {_WORKSPACE_ENV} 中加入该目录的物理路径，或用 ["*"] 授权所有目录。')
         return workspace
 
     async def connection(self):

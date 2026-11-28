@@ -367,10 +367,45 @@ async def test_workspace_must_be_trusted_before_agy_can_open_or_restore_it(wire,
     assert (await machine._handle(command)).code == "gemini_workspace_untrusted"
     machine.cfg.antigravity_trusted_workspaces = '{"invalid":true}'
     assert (await machine._handle(command)).code == "gemini_workspace_config"
+    machine.cfg.antigravity_trusted_workspaces = json.dumps(["*", workspace])
+    assert (await machine._handle(command)).code == "gemini_workspace_config"
     trust_workspaces(machine, project)
     focus, _ = await machine._handle(command)
     assert focus.cwd == workspace
     assert [params["cwd"] for method, params in client.calls if method == "session/new"] == [workspace]
+
+
+@pytest.mark.asyncio
+async def test_all_workspace_trust_can_open_reopen_and_continue_an_unlisted_project(wire, tmp_path):
+    machine, _, runtime, client = wire
+    project = tmp_path / "project"
+    project.mkdir()
+    machine.cfg.antigravity_trusted_workspaces = ' [ "*" ] '
+    client.capabilities = {**client.capabilities, "sessionCapabilities": {"list": {}, "resume": {}}}
+    opened = await machine._handle(NewSession(engine="antigravity", cwd=str(project)))
+    assert isinstance(opened, tuple), opened
+    ctx = machine.sessions[opened[0].session_id]
+    await machine._handle(Query(sid=ctx.key, msg_id="first", prompt="Start"))
+    client.prompts[-1][1].set_result({"stopReason": "end_turn"})
+    await ctx.turn_task
+    await machine._detach_idle_session(ctx.key)
+
+    history = await machine._handle(GetHistory(session_id=ctx.key, detail="summary"))
+    assert history.error is None and history.turns[0].prompt == "saved question"
+    focus = await machine._handle(SwitchSession(engine="antigravity", session_id=ctx.key))
+    assert focus.session_id == ctx.key
+    assert any(method == "session/resume" and params["cwd"] == str(project.resolve())
+               for method, params in client.calls)
+    ctx = machine.sessions[ctx.key]
+    await machine._handle(Query(sid=ctx.key, msg_id="second", prompt="Continue"))
+    assert [params["prompt"][0]["text"] for params, _ in client.prompts] == ["Start", "Continue"]
+    client.prompts[-1][1].set_result({"stopReason": "end_turn"})
+    await ctx.turn_task
+
+    trust_workspaces(machine)
+    deferred = Query(sid=ctx.key, prompt="Queued before revocation", msg_id="revoked")
+    assert (await runtime.query(ctx, deferred)).code == "gemini_workspace_untrusted"
+    assert len(client.prompts) == 2
 
 
 @pytest.mark.asyncio
@@ -595,7 +630,8 @@ async def test_managed_gemini_sign_in_refreshes_quota_before_the_worker_reply(ma
 
 
 @pytest.mark.asyncio
-async def test_independent_gemini_service_keeps_running_question_across_wrapper_replacement(wire, monkeypatch):
+@pytest.mark.parametrize("trust_all", [False, True], ids=["explicit-paths", "all-workspaces"])
+async def test_independent_gemini_service_keeps_running_question_across_wrapper_replacement(wire, monkeypatch, trust_all):
     class NewerHello(Hello):
         optional_display_hint: bool | None = None
 
@@ -610,24 +646,27 @@ async def test_independent_gemini_service_keeps_running_question_across_wrapper_
         listener = await asyncio.start_unix_server(service.connection, str(path))
         path.chmod(0o600)
         first, _ = _mk_machine()
-        first.cfg.antigravity_trusted_workspaces = worker.cfg.antigravity_trusted_workspaces
+        first.cfg.antigravity_trusted_workspaces = '["*"]' if trust_all else worker.cfg.antigravity_trusted_workspaces
         trust_workspaces(worker)
         first._gemini_controller = GeminiController(path, first)
         second, second_transport = _mk_machine()
         second.cfg.antigravity_trusted_workspaces = first.cfg.antigravity_trusted_workspaces
         second._gemini_controller = GeminiController(path, second)
         try:
-            reader, writer = await asyncio.open_unix_connection(str(path))
-            try:
-                await write_frame(writer, {
-                    "op": "attach", "protocol": 2, "machine": worker.cfg.machine_id,
-                    "runtime": {"session_messages": False, "environment": {}, "trusted_workspaces": "[]"},
-                })
-                assert (await read_frame(reader))["error"] == "scope"
-            finally:
-                writer.close()
-                await writer.wait_closed()
+            for version, workspaces in ((2, "[]"), (GEMINI_SERVICE_VERSION, '["*"]')):
+                reader, writer = await asyncio.open_unix_connection(str(path))
+                try:
+                    await write_frame(writer, {
+                        "op": "attach", "protocol": version, "machine": worker.cfg.machine_id,
+                        "runtime": {"session_messages": False, "environment": {}, "trusted_workspaces": workspaces},
+                    })
+                    assert (await read_frame(reader))["error"] == "scope"
+                finally:
+                    writer.close()
+                    await writer.wait_closed()
+            assert worker.cfg.antigravity_trusted_workspaces == "[]"
             focus = await first._handle(NewSession(engine="antigravity", cwd=client.cwd))
+            assert worker.cfg.antigravity_trusted_workspaces == first.cfg.antigravity_trusted_workspaces
             sid = focus.session_id
             query = Query(sid=sid, msg_id="service-query", prompt="Keep one running turn",
                           cmd_id="service-command", client_id="browser-client")
@@ -831,7 +870,12 @@ async def test_gemini_controller_waits_for_previous_wrapper_to_release_service(w
 
     async def accept(reader, writer):
         try:
-            attaches.append(await read_frame(reader))
+            attach = await read_frame(reader)
+            attaches.append(attach)
+            if attach["protocol"] != 3:
+                await write_frame(writer, {"error": "scope"})
+                assert await reader.read() == b""
+                return
             if len(attaches) == 1:
                 await write_frame(writer, {"error": "occupied"})
                 assert await reader.read() == b""
@@ -853,6 +897,12 @@ async def test_gemini_controller_waits_for_previous_wrapper_to_release_service(w
         try:
             assert await controller.list_sessions() == []
             assert len(attaches) == 2 and all(frame["op"] == "attach" for frame in attaches)
+            await controller.close()
+            machine.cfg.antigravity_trusted_workspaces = '["*"]'
+            with pytest.raises(AcpError, match="--upgrade") as exc:
+                await controller.list_sessions()
+            assert exc.value.code == "service_workspace_trust"
+            assert attaches[-1]["protocol"] == 4
             assert commands == ["list_sessions"]
         finally:
             await controller.close()

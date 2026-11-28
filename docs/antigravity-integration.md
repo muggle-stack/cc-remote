@@ -10,7 +10,7 @@ Gemini 是 CC Remote 的可选 Code 引擎。Wrapper 在会话所在设备运行
    `CC_REMOTE_ANTIGRAVITY_BIN` 配置。
 2. 用本机 `agy` 完成 Google 登录，再给 Wrapper 的运行环境设置
    `CC_REMOTE_ANTIGRAVITY=1`。也可以使用环境中的 `GEMINI_API_KEY`，
-   或在本机配置自定义网关。
+   或在本机配置自定义网关。按下方说明在同一设备上授权工作目录。
 3. 更新并启动相同协议版本的 Wrapper、Relay 和 Web。在设备中心选择
    配好的设备，从右上角切换到 Gemini。
 
@@ -28,9 +28,11 @@ Gemini 是 CC Remote 的可选 Code 引擎。Wrapper 在会话所在设备运行
 在 Wrapper 的运行环境设置 `CC_REMOTE_ANTIGRAVITY_TRUSTED_WORKSPACES`，值为
 JSON 数组，例如 `["/Users/me/projects/app","/Users/me/worktrees/app-fix"]`。
 每项填写该会话工作目录的物理绝对路径（可在目录中运行 `pwd -P` 查看）。
-新版 Wrapper 启动时读取该设置。每个目录单独授权，默认列表为空。
-授权前请确认项目以及 agy 会发现的仓库级 Hook 和其他扩展可信，因为它们在
-agy 自己的生命周期中运行。切换或恢复会话时使用 CC Remote 的会话入口。
+也可以在专用设备上一次授权所有工作目录，设置
+`CC_REMOTE_ANTIGRAVITY_TRUSTED_WORKSPACES='["*"]'`。
+`["*"]` 需单独使用。默认 `[]` 表示目录均未授权。Wrapper 启动时读取该设置。
+授权涵盖 agy 会发现的仓库级 Hook 和其他扩展，它们在 agy 的生命周期中运行。
+切换或恢复会话时使用 CC Remote 的会话入口。
 
 登录、会话列表和新建页的模型目录使用 Wrapper 创建的私有控制目录。
 打开、恢复或继续 Gemini 会话前，Wrapper 校验实际工作目录是否已授权。
@@ -114,7 +116,9 @@ agy 原生会话仍使用原来的保存位置。需要更新独立服务本身�
 Python 再运行同一命令并加 `--upgrade`。忙碌时安装器保留旧服务，空闲时才切换，
 新服务自检期间暂不接收命令，启动验证失败会恢复上一个服务定义。
 工作目录授权由 Wrapper 随连接转交给独立服务。已安装过实验版的设备需要先用
-`--upgrade` 更新到私有协议 v3 的独立服务，才能接入新版 Wrapper。
+`--upgrade` 更新到支持私有协议 v3 的独立服务，才能接入新版 Wrapper。
+显式目录列表仍使用 v3。使用 `["*"]` 前，需用 `--upgrade` 更新到支持此次授权的
+新版独立服务，连接时使用 v4。Wrapper 直接运行 agy 时设置环境变量即可。
 首次接管时，独立服务从 Wrapper 导入 Gemini 完成回执，保留未读状态和版本。
 Gemini 视频和原件下载的描述符在 Wrapper 登记，流式读取沿用独立服务的文件授权。
 
