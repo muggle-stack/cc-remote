@@ -6,6 +6,7 @@ const messageReceiver = "codex-receiver";
 const commands: NativeCommandInfo[] = [
   { name: "compact", description: "Compress native context", attachments: false },
   { name: "plan", description: "Enter native planning", attachments: false },
+  { name: "goal", description: "Run until the goal is complete", attachments: false },
 ];
 const options = (model: string, mode: string): AntigravityOption[] => [
   { category: "model", current: model, choices: [
@@ -35,6 +36,8 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
   let mode = "default";
   let seq = 0;
   let quotaPlan: "Starter" | "Pro" = "Starter";
+  let quotaHeld = false;
+  let pendingQuota: Record<string, unknown> | undefined;
   await page.addInitScript(() => {
     localStorage.setItem("cc_remote_engine", "codex");
     localStorage.setItem("cc_remote_machine", "gemini-machine");
@@ -92,7 +95,7 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
           remaining_fraction: .9419, resets_at: Math.floor(Date.now() / 1000) + 3600 };
         const fiveHour = { id: "gemini-5h", window: "5h", name: "Five Hour Limit Remaining",
           remaining_fraction: .8 };
-        emit({ type: "antigravity_quota", request_id: cmd.cmd_id,
+        const result = { type: "antigravity_quota", request_id: cmd.cmd_id,
           plan: quotaPlan === "Starter" ? "Antigravity Starter Quota" : "Pro",
           observed_at: Math.floor(Date.now() / 1000), groups: [
             { name: "Gemini Models", models: ["Gemini 4 Neon"], buckets: quotaPlan === "Starter"
@@ -101,7 +104,9 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
               { ...weekly, id: "3p-weekly", remaining_fraction: 1, resets_at: null },
               { ...fiveHour, id: "3p-5h", remaining_fraction: 1 },
             ] },
-          ] });
+          ] };
+        if (quotaHeld) pendingQuota = result;
+        else emit(result);
       }
       if (cmd.type === "new_session" && cmd.engine === "antigravity") {
         if (!workspaceTrusted) {
@@ -197,6 +202,12 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
     },
     requireWorkspaceTrust: () => { workspaceTrusted = false; },
     setQuotaPlan: (value: "Starter" | "Pro") => { quotaPlan = value; },
+    holdQuota: () => { quotaHeld = true; },
+    releaseQuota: () => {
+      quotaHeld = false;
+      if (pendingQuota) emit(pendingQuota);
+      pendingQuota = undefined;
+    },
     draining: () => {
       state = "draining";
       emit({ type: "state", state, sid, seq: ++seq });
@@ -334,19 +345,33 @@ test("Gemini colors carry through empty sessions, appearance and question dialog
   const question = page.getByRole("dialog", { name: "操作确认" });
   await expect(question.locator(".question-dialog-title img.antigravity")).toBeVisible();
   await expect(question.getByText("Gemini 想确认一下")).toBeVisible();
-  await expect(question.getByRole("button", { name: "提交回答" })).toHaveCSS("background-color", "rgb(57, 95, 168)");
+  const submit = question.getByRole("button", { name: "提交回答" });
+  const cancel = question.getByRole("button", { name: "取消请求" });
+  await expect(submit).toHaveCSS("background-color", "rgb(57, 95, 168)");
+  await expect(question.locator(".qa-footer")).toHaveCount(1);
+  await expect(cancel).toBeVisible();
+  expect((await cancel.boundingBox())?.y).toBeCloseTo((await submit.boundingBox())?.y ?? -1, 0);
   expect(await question.evaluate(node => getComputedStyle(node, "::backdrop").backgroundColor))
     .toBe("rgba(30, 43, 70, 0.34)");
+  await press(cancel);
+  await expect.poll(() => relay.seen.find(cmd => cmd.type === "answer_question")).toMatchObject({
+    ask_id: "agy-approval", action: "cancel",
+  });
 });
 
 for (const plan of ["Starter", "Pro"] as const) {
   test(`Gemini quota displays ${plan} native windows with a subscription badge`, async ({ page, hasTouch }) => {
     const relay = await mockRelay(page, true);
     relay.setQuotaPlan(plan);
+    relay.holdQuota();
     const press = (control: Locator) => hasTouch ? control.tap() : control.click();
     await page.goto("/");
     await press(page.getByRole("button", { name: "切换新会话引擎" }));
     await press(page.getByRole("menuitemradio", { name: "Gemini" }));
+    const pending = page.getByRole("button", { name: /账户额度：.*尚未同步/ });
+    await expect(pending.locator(".usage-meter-line b")).toHaveText(["5h", "周"]);
+    await expect.poll(() => relay.seen.some(cmd => cmd.type === "get_antigravity_quota")).toBe(true);
+    relay.releaseQuota();
     const meter = page.getByRole("button", { name: /账户额度：.*每周额度剩余94%/ });
     await expect(meter).toBeVisible();
     await expect(meter.locator(".usage-meter-line")).toHaveCount(plan === "Starter" ? 1 : 2);
@@ -392,8 +417,14 @@ test("Gemini uses native model, effort, permission and slash options on desktop 
   await page.getByRole("button", { name: "Plan", exact: true }).click();
   await newComposer.fill("/comp");
   await expect(page.getByRole("listbox", { name: "命令" }).getByText("/compact", { exact: true })).toBeVisible();
-  await newComposer.fill("/compact with summary");
   const send = page.getByRole("button", { name: "开始", exact: true });
+  await newComposer.fill("/goal");
+  if (hasTouch) await send.tap();
+  else await send.click();
+  await expect(page.getByText("请在 /goal 后填写目标。")).toBeVisible();
+  await expect(newComposer).toHaveValue("/goal");
+  expect(relay.seen.filter(cmd => cmd.type === "new_session")).toHaveLength(0);
+  await newComposer.fill("/compact with summary");
   if (hasTouch) await send.tap();
   else await send.click();
   await expect.poll(() => relay.seen.find(cmd => cmd.type === "new_session")).toMatchObject({

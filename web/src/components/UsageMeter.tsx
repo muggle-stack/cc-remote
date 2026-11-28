@@ -63,6 +63,11 @@ function MiniQuota({
   </span>;
 }
 
+const UNSYNCED_QUOTA = <>
+  <MiniQuota label="5h" value={null} />
+  <MiniQuota label="周" value={null} />
+</>;
+
 function QuotaRow({
   label,
   window,
@@ -169,12 +174,12 @@ function GeminiUsageMeter({ open, disabled, onToggle, onRefresh, antigravityQuot
   const minimum = current.length ? Math.min(...current.map(bucket => bucket.remaining_fraction * 100)) : null;
   const summary = current.length
     ? current.map(bucket => `${GEMINI_WINDOWS[bucket.window]?.label ?? bucket.name}剩余${compactPercent(bucket.remaining_fraction * 100)}`).join("，")
-    : "Gemini 剩余额度";
+    : "Gemini 额度尚未同步";
   return <MeterFrame engine="antigravity" provider="Gemini" open={open} disabled={disabled}
     onToggle={onToggle} summary={summary} tone={quotaTone(minimum)}
     trigger={current.length ? current.slice(0, 3).map(bucket => <MiniQuota key={bucket.id}
       label={GEMINI_WINDOWS[bucket.window]?.short ?? "限"} value={bucket.remaining_fraction * 100} />)
-      : <span className="usage-meter-placeholder">额度</span>}>
+      : UNSYNCED_QUOTA}>
     <div className="usage-pop-head">
       <span><b>Gemini 账户额度</b></span>
       {plan && <em className="usage-pop-plan" title={nativePlan ?? undefined}>{plan}</em>}
@@ -302,10 +307,7 @@ function ExistingUsageMeter({
           ? <MiniQuota label="专项" value={minimum} />
         : hasAccountQuota ? periodRows.map(({ key, window }) => (
           <MiniQuota key={key} label={key} value={remainingPercent(window)} />
-        )) : <>
-          <MiniQuota label="5h" value={null} />
-          <MiniQuota label="周" value={null} />
-        </>}>
+        )) : UNSYNCED_QUOTA}>
       <div className="usage-pop-head">
         <span>
           <b>账户额度</b>

@@ -58,6 +58,8 @@
   padding:14px 22px 18px; border-top:1px solid var(--border); }
 .qa-footer button { display:inline-flex; align-items:center; justify-content:center; gap:12px;
   min-height:44px; padding:10px 22px; border-radius:18px; font-size:14px; font-weight:var(--font-weight-600); }
+.question-batch .qa-footer { flex-wrap:wrap; gap:8px; }
+.question-batch .qa-footer button { padding-inline:clamp(8px, 3vw, 22px); white-space:nowrap; }
 .qa-previous { border:1px solid var(--border); background:transparent; color:var(--text); }
 .qa-next { margin-left:auto; border:1px solid transparent; background:var(--accent); color:var(--on-accent,#fff); }
 .qa-footer button:disabled { opacity:.45; cursor:default; }

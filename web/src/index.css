@@ -1599,7 +1599,6 @@ html.panel-resizing,html.panel-resizing *{ cursor:col-resize !important; user-se
 .usage-pop-actions button:hover{ background:var(--raised); color:var(--text); }
 .usage-pop-actions button:disabled{ opacity:.45; cursor:default; }
 .usage-query-note{ margin:12px 0 0; color:var(--faint); font-size:10.5px; line-height:1.5; }
-.usage-meter-placeholder{ color:var(--faint); font-size:10.5px; }
 .usage-pop-group + .usage-pop-group{ margin-top:13px; padding-top:11px; border-top:1px solid var(--divider); }
 .usage-pop-group h4{ margin:9px 0 0; font-size:12px; color:var(--text); }
 .usage-pop-head>.usage-pop-plan{ max-width:48%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }

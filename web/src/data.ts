@@ -468,6 +468,9 @@ export function routeComposerInput(
   if (engine === "dsh" && parsed?.slash === "btw") {
     return { kind: "blocked", message: DSH_SIDECHAT_UNAVAILABLE };
   }
+  if (engine === "antigravity" && parsed?.slash === "goal" && !parsed.args) {
+    return { kind: "blocked", message: "请在 /goal 后填写目标。" };
+  }
   if (engine === "antigravity" && parsed && native?.some(c => c.name === parsed.slash)) {
     return { kind: "prompt", prompt: raw };
   }
