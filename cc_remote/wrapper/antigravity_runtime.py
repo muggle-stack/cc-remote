@@ -1104,9 +1104,12 @@ class AntigravityRuntime:
             raise AcpError(ERR_BAD_PROMPT, "请输入内容或添加附件。")
         if validate_attachments(cmd.images, cmd.files):
             raise AcpError(ERR_BAD_PROMPT, "附件不符合大小或格式要求。")
-        prompt = (cmd.prompt or "").lstrip()
-        if prompt.startswith("/") and prompt.split(maxsplit=1)[0].casefold() in _WORKSPACE_COMMANDS:
+        parts = (cmd.prompt or "").split(maxsplit=1)
+        slash = parts[0].casefold() if parts and parts[0].startswith("/") else None
+        if slash in _WORKSPACE_COMMANDS:
             raise AcpError("workspace_command", "请从 CC Remote 的会话入口切换 Gemini 工作目录或恢复会话。")
+        if slash == "/goal" and len(parts) == 1:
+            raise AcpError(ERR_BAD_PROMPT, "请在 /goal 后填写目标。")
 
     @staticmethod
     def prompt_blocks(client, cmd):

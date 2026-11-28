@@ -6,8 +6,9 @@ const messageReceiver = "codex-receiver";
 const commands: NativeCommandInfo[] = [
   { name: "compact", description: "Compress native context", attachments: false },
   { name: "plan", description: "Enter native planning", attachments: false },
+  { name: "goal", description: "Run until the goal is complete", attachments: false },
 ];
-const options = (model: string, mode: string): AntigravityOption[] => [
+const options = (model: string, mode: string, effort = "low"): AntigravityOption[] => [
   { category: "model", current: model, choices: [
     { value: "neon", name: "Gemini 4 Neon (High)", description: "" },
     { value: "pro", name: "Gemini Pro", description: "" },
@@ -16,7 +17,7 @@ const options = (model: string, mode: string): AntigravityOption[] => [
     { value: "default", name: "Default", description: "" },
     { value: "plan", name: "Plan", description: "" },
   ] },
-  ...(model === "pro" ? [{ category: "thought_level", current: "low", choices: [
+  ...(model === "pro" ? [{ category: "thought_level", current: effort, choices: [
     { value: "low", name: "Low", description: "" },
     { value: "extra", name: "Extra", description: "" },
   ] } satisfies AntigravityOption] : []),
@@ -33,8 +34,11 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
   let finishFollowup: (() => void) | undefined;
   let model = "neon";
   let mode = "default";
+  let effort = "low";
   let seq = 0;
   let quotaPlan: "Starter" | "Pro" = "Starter";
+  let quotaHeld = false;
+  let pendingQuota: Record<string, unknown> | undefined;
   await page.addInitScript(() => {
     localStorage.setItem("cc_remote_engine", "codex");
     localStorage.setItem("cc_remote_machine", "gemini-machine");
@@ -50,12 +54,12 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
     let connected = false;
     emit = event => socket.send(JSON.stringify({ v: PROTOCOL_VERSION, ts: Date.now() / 1000, ...event }));
     const controls = () => {
-      emit({ type: "antigravity_state", sid, connected: true, options: options(model, mode), commands, seq: ++seq });
+      emit({ type: "antigravity_state", sid, connected: true, options: options(model, mode, effort), commands, seq: ++seq });
       emit({ type: "model", sid, model, seq: ++seq });
       emit({ type: "perm", sid, mode, seq: ++seq });
-      emit({ type: "effort", sid, effort: model === "pro" ? "extra" : "", seq: ++seq });
+      emit({ type: "effort", sid, effort: model === "pro" ? effort : "", seq: ++seq });
       emit({ type: "context_report", sid, available: true, source: "native_estimate",
-        total_tokens: 1024, max_tokens: 1048576, percentage: .1 });
+        total_tokens: 1024, max_tokens: 1048576, percentage: .1, categories: [] });
     };
     const snapshot = () => emit({ type: "snapshot", sid, state, cc_session_id: sid,
       tail_text: "", cwd: "/tmp", generation: "current-wrapper", seq });
@@ -82,7 +86,7 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
       if (cmd.type === "get_models" && cmd.engine === "antigravity") {
         const selected = String(cmd.antigravity_model ?? (cmd.sid ? model : "neon"));
         emit({ type: "models", engine: cmd.engine, sid: cmd.sid, cwd: cmd.cwd, antigravity_model: cmd.antigravity_model,
-          default_model: "neon", antigravity_options: options(selected, mode), antigravity_commands: commands,
+          default_model: "neon", antigravity_options: options(selected, mode, cmd.sid ? effort : "low"), antigravity_commands: commands,
           models: [{ id: "neon", display_name: "Gemini 4 Neon (High)", efforts: [] },
             { id: "pro", display_name: "Gemini Pro", efforts: selected === "pro" ? ["low", "extra"] : [],
               effort_names: { low: "Low", extra: "Extra" } }] });
@@ -92,7 +96,7 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
           remaining_fraction: .9419, resets_at: Math.floor(Date.now() / 1000) + 3600 };
         const fiveHour = { id: "gemini-5h", window: "5h", name: "Five Hour Limit Remaining",
           remaining_fraction: .8 };
-        emit({ type: "antigravity_quota", request_id: cmd.cmd_id,
+        const result = { type: "antigravity_quota", request_id: cmd.cmd_id,
           plan: quotaPlan === "Starter" ? "Antigravity Starter Quota" : "Pro",
           observed_at: Math.floor(Date.now() / 1000), groups: [
             { name: "Gemini Models", models: ["Gemini 4 Neon"], buckets: quotaPlan === "Starter"
@@ -101,7 +105,9 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
               { ...weekly, id: "3p-weekly", remaining_fraction: 1, resets_at: null },
               { ...fiveHour, id: "3p-5h", remaining_fraction: 1 },
             ] },
-          ] });
+          ] };
+        if (quotaHeld) pendingQuota = result;
+        else emit(result);
       }
       if (cmd.type === "new_session" && cmd.engine === "antigravity") {
         if (!workspaceTrusted) {
@@ -112,6 +118,7 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
         created = true;
         model = String(cmd.model ?? "neon");
         mode = String(cmd.antigravity_mode ?? "default");
+        effort = String(cmd.antigravity_effort ?? "low");
         emit({ type: "session_focus", session_id: sid, cwd: "/tmp", request_id: cmd.request_id });
         snapshot();
         controls();
@@ -148,8 +155,10 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
         title = String(cmd.title);
         emit({ type: "session_list_invalidated", engine: "antigravity", space: "code" });
       }
-      if (cmd.type === "set_antigravity_option" && cmd.category === "mode") {
-        mode = String(cmd.value);
+      if (cmd.type === "set_antigravity_option") {
+        if (cmd.category === "mode") mode = String(cmd.value);
+        if (cmd.category === "model") { model = String(cmd.value); effort = "low"; }
+        if (cmd.category === "thought_level") effort = String(cmd.value);
         controls();
       }
       if (cmd.type === "answer_question") {
@@ -197,6 +206,12 @@ async function mockRelay(page: Page, enabled: boolean, withSessionMessage = fals
     },
     requireWorkspaceTrust: () => { workspaceTrusted = false; },
     setQuotaPlan: (value: "Starter" | "Pro") => { quotaPlan = value; },
+    holdQuota: () => { quotaHeld = true; },
+    releaseQuota: () => {
+      quotaHeld = false;
+      if (pendingQuota) emit(pendingQuota);
+      pendingQuota = undefined;
+    },
     draining: () => {
       state = "draining";
       emit({ type: "state", state, sid, seq: ++seq });
@@ -220,19 +235,25 @@ test("Gemini is hidden on a device without Antigravity enabled", async ({ page }
   await expect(page.getByRole("menuitemradio", { name: "Gemini" })).toHaveCount(0);
 });
 
-test("Gemini explains device-side workspace trust on new session denial", async ({ page, hasTouch }) => {
+test("Gemini preserves a goal draft when the selected workspace refuses a new session", async ({ page, hasTouch }) => {
   const relay = await mockRelay(page, true);
   relay.requireWorkspaceTrust();
   await page.goto("/");
   await page.getByRole("button", { name: "切换新会话引擎" }).click();
   await page.getByRole("menuitemradio", { name: "Gemini" }).click();
-  await page.locator(".newchat-input").fill("Check this project");
-  const send = page.getByRole("button", { name: "开始", exact: true });
-  if (hasTouch) await send.tap();
-  else await send.click();
+  const input = page.locator(".newchat-input");
+  await input.fill("/go");
+  const command = page.getByRole("listbox", { name: "命令" }).getByRole("button", { name: /\/goal/ });
+  await (hasTouch ? command.tap() : command.click());
+  const goal = page.getByRole("dialog", { name: "Gemini Goal" });
+  await goal.getByRole("textbox", { name: "目标内容" }).fill("Run the project checks");
+  const start = goal.getByRole("button", { name: "开始目标" });
+  await (hasTouch ? start.tap() : start.click());
   const error = page.getByText(/CC_REMOTE_ANTIGRAVITY_TRUSTED_WORKSPACES/);
   await expect(error).toBeVisible();
   await expect(error).toContainText('["*"]');
+  await expect(input).toHaveValue("/goal Run the project checks");
+  expect(relay.seen.filter(cmd => cmd.type === "new_session")).toMatchObject([{ prompt: "/goal Run the project checks" }]);
 });
 
 test("a session message opens its original Gemini Code session", async ({ page }) => {
@@ -259,10 +280,15 @@ test("Gemini keeps a background follow-up active until Stop is acknowledged", as
   await expect(page.getByText("后台检查完成，结果已保存。")).toBeVisible();
   await expect(page.locator(".composer textarea")).toHaveAttribute("placeholder", /补充/);
   await expect(page.getByText(/Gemini 尚未确认续写结束/)).toBeVisible();
+  const spark = page.locator(".turn-working .gemini-working-spark");
+  await expect(spark).toHaveAttribute("width", "24");
+  await expect(spark.locator("linearGradient")).toHaveCount(3);
+  await expect.poll(() => spark.locator(":scope > use").count()).toBe(2);
   const stop = page.getByRole("button", { name: "停止", exact: true });
   await (hasTouch ? stop.tap() : stop.click());
   await expect.poll(() => relay.seen.some(cmd => cmd.type === "interrupt" && cmd.sid === sid)).toBe(true);
   await expect(page.locator(".composer textarea")).toHaveAttribute("placeholder", /输入/);
+  await expect(spark).toHaveCount(0);
   await expect(page.getByText(/Gemini 尚未确认续写结束/)).toHaveCount(0);
   await expect(page.getByText("后台检查完成，结果已保存。")).toHaveCount(1);
   expect(relay.seen.some(cmd => cmd.type === "query")).toBe(false);
@@ -310,6 +336,72 @@ test("Gemini exposes its sign-in, read-only catalog and local clear command", as
   expect(relay.seen.filter(cmd => cmd.type === "new_session" || cmd.type === "query")).toHaveLength(0);
 });
 
+test("Gemini slash controls open existing panels and use only advertised choices", async ({ page }) => {
+  const relay = await mockRelay(page, true, true);
+  await page.goto("/");
+  await page.getByRole("button", { name: /来自会话.*Gemini session/ }).click();
+  await expect(page.getByText("Gemini 已就绪。")).toBeVisible();
+  const input = page.locator(".composer textarea");
+  const command = async (value: string) => {
+    await input.fill(value);
+    await input.press("Enter");
+  };
+  await command("/model");
+  const models = page.getByRole("dialog", { name: "选择模型" });
+  await expect(models.getByText("Gemini Pro", { exact: true })).toBeVisible();
+  await models.getByRole("button", { name: "关闭选择模型" }).click();
+  await command("/permissions");
+  const permissions = page.getByRole("dialog", { name: "选择权限模式" });
+  await expect(permissions.getByText("Plan", { exact: true })).toBeVisible();
+  await permissions.getByRole("button", { name: "关闭选择权限模式" }).click();
+  await command("/context");
+  await expect(page.getByRole("dialog", { name: "上下文占用" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "上下文占用" })).toHaveAttribute("aria-expanded", "true");
+
+  await command("/model unavailable-model");
+  await expect(page.getByText("当前 Gemini 模型目录没有这个模型或思考档位。")).toBeVisible();
+  await expect(input).toHaveValue("/model unavailable-model");
+  expect(relay.seen.filter(cmd => cmd.type === "set_antigravity_option" || cmd.type === "query")).toHaveLength(0);
+
+  await command("/model pro");
+  await expect(page.getByTitle("选择模型", { exact: true })).toHaveText("Gemini Pro");
+  await command("/model Extra");
+  await expect(page.getByTitle("思考强度", { exact: true })).toHaveText("Extra");
+  await command("/permissions acceptEdits");
+  await expect(page.getByText("当前 Gemini 会话没有这个权限模式。")).toBeVisible();
+  await command("/permissions plan");
+  await expect(page.getByTitle("点击切换权限模式")).toContainText("Plan");
+  expect(relay.seen.filter(cmd => cmd.type === "set_antigravity_option")
+    .map(cmd => [cmd.sid, cmd.category, cmd.value])).toEqual([
+    [sid, "model", "pro"], [sid, "thought_level", "extra"], [sid, "mode", "plan"],
+  ]);
+  expect(relay.seen.filter(cmd => cmd.type === "query")).toHaveLength(0);
+});
+
+test("Gemini opens its goal panel from the suggestion and submits the native command once", async ({ page, hasTouch }) => {
+  const relay = await mockRelay(page, true, true);
+  await page.goto("/");
+  await page.getByRole("button", { name: /来自会话.*Gemini session/ }).click();
+  await expect(page.getByText("Gemini 已就绪。")).toBeVisible();
+  const input = page.locator(".composer textarea");
+  await input.fill("/go");
+  const command = page.getByRole("listbox", { name: "命令" }).getByRole("button", { name: /\/goal/ });
+  await (hasTouch ? command.tap() : command.click());
+  const goal = page.getByRole("dialog", { name: "Gemini Goal" });
+  await expect(goal.getByText("新目标", { exact: true })).toBeVisible();
+  await expect(goal.locator("img.antigravity")).toBeVisible();
+  const start = goal.getByRole("button", { name: "开始目标" });
+  await expect(start).toBeDisabled();
+  expect(relay.seen.filter(cmd => cmd.type === "query" || cmd.type === "set_goal")).toHaveLength(0);
+  await goal.getByRole("textbox", { name: "目标内容" }).fill("修复预览\n桌面和手机端都通过");
+  await (hasTouch ? start.tap() : start.click());
+  await expect(goal).toHaveCount(0);
+  await expect.poll(() => relay.seen.filter(cmd => cmd.type === "query")).toMatchObject([
+    { sid, prompt: "/goal 修复预览\n桌面和手机端都通过" },
+  ]);
+  expect(relay.seen.some(cmd => cmd.type === "set_goal")).toBe(false);
+});
+
 test("Gemini colors carry through empty sessions, appearance and question dialogs", async ({ page, hasTouch }) => {
   const relay = await mockRelay(page, true, false, true);
   const press = (control: Locator) => hasTouch ? control.tap() : control.click();
@@ -334,19 +426,33 @@ test("Gemini colors carry through empty sessions, appearance and question dialog
   const question = page.getByRole("dialog", { name: "操作确认" });
   await expect(question.locator(".question-dialog-title img.antigravity")).toBeVisible();
   await expect(question.getByText("Gemini 想确认一下")).toBeVisible();
-  await expect(question.getByRole("button", { name: "提交回答" })).toHaveCSS("background-color", "rgb(57, 95, 168)");
+  const submit = question.getByRole("button", { name: "提交回答" });
+  const cancel = question.getByRole("button", { name: "取消请求" });
+  await expect(submit).toHaveCSS("background-color", "rgb(57, 95, 168)");
+  await expect(question.locator(".qa-footer")).toHaveCount(1);
+  await expect(cancel).toBeVisible();
+  expect((await cancel.boundingBox())?.y).toBeCloseTo((await submit.boundingBox())?.y ?? -1, 0);
   expect(await question.evaluate(node => getComputedStyle(node, "::backdrop").backgroundColor))
     .toBe("rgba(30, 43, 70, 0.34)");
+  await press(cancel);
+  await expect.poll(() => relay.seen.find(cmd => cmd.type === "answer_question")).toMatchObject({
+    ask_id: "agy-approval", action: "cancel",
+  });
 });
 
 for (const plan of ["Starter", "Pro"] as const) {
   test(`Gemini quota displays ${plan} native windows with a subscription badge`, async ({ page, hasTouch }) => {
     const relay = await mockRelay(page, true);
     relay.setQuotaPlan(plan);
+    relay.holdQuota();
     const press = (control: Locator) => hasTouch ? control.tap() : control.click();
     await page.goto("/");
     await press(page.getByRole("button", { name: "切换新会话引擎" }));
     await press(page.getByRole("menuitemradio", { name: "Gemini" }));
+    const pending = page.getByRole("button", { name: /账户额度：.*尚未同步/ });
+    await expect(pending.locator(".usage-meter-line b")).toHaveText(["5h", "周"]);
+    await expect.poll(() => relay.seen.some(cmd => cmd.type === "get_antigravity_quota")).toBe(true);
+    relay.releaseQuota();
     const meter = page.getByRole("button", { name: /账户额度：.*每周额度剩余94%/ });
     await expect(meter).toBeVisible();
     await expect(meter.locator(".usage-meter-line")).toHaveCount(plan === "Starter" ? 1 : 2);
@@ -384,22 +490,32 @@ test("Gemini uses native model, effort, permission and slash options on desktop 
   }
   await expect(page.getByTitle("选择模型", { exact: true })).toContainText("Gemini 4 Neon (High)");
   await expect(page.getByTitle("选择思考强度", { exact: true })).toHaveCount(0);
-  await page.getByTitle("选择模型", { exact: true }).click();
-  await page.getByRole("button", { name: "Gemini Pro", exact: true }).click();
-  await page.getByTitle("选择思考强度", { exact: true }).click();
-  await page.getByRole("button", { name: "Extra", exact: true }).click();
-  await page.getByTitle("选择权限模式", { exact: true }).click();
-  await page.getByRole("button", { name: "Plan", exact: true }).click();
+  await newComposer.fill("/model Gemini Pro");
+  await newComposer.press("Enter");
+  await expect(page.getByTitle("选择思考强度", { exact: true })).toHaveText("默认");
+  await newComposer.fill("/model extra");
+  await newComposer.press("Enter");
+  await expect(page.getByTitle("选择思考强度", { exact: true })).toHaveText("Extra");
+  await newComposer.fill("/permissions Plan");
+  await newComposer.press("Enter");
+  await expect(page.getByTitle("选择权限模式", { exact: true })).toContainText("Plan");
   await newComposer.fill("/comp");
   await expect(page.getByRole("listbox", { name: "命令" }).getByText("/compact", { exact: true })).toBeVisible();
-  await newComposer.fill("/compact with summary");
   const send = page.getByRole("button", { name: "开始", exact: true });
+  await newComposer.fill("/goal");
   if (hasTouch) await send.tap();
   else await send.click();
-  await expect.poll(() => relay.seen.find(cmd => cmd.type === "new_session")).toMatchObject({
+  const goal = page.getByRole("dialog", { name: "Gemini Goal" });
+  await expect(goal.getByRole("button", { name: "开始目标" })).toBeDisabled();
+  await goal.getByRole("button", { name: "取消", exact: true }).click();
+  expect(relay.seen.filter(cmd => cmd.type === "new_session")).toHaveLength(0);
+  await newComposer.fill("/goal Verify the build");
+  if (hasTouch) await send.tap();
+  else await send.click();
+  await expect.poll(() => relay.seen.filter(cmd => cmd.type === "new_session")).toMatchObject([{
     engine: "antigravity", model: "pro", antigravity_effort: "extra", antigravity_mode: "plan",
-    prompt: "/compact with summary",
-  });
+    prompt: "/goal Verify the build",
+  }]);
   await expect(page.getByText("Gemini 已就绪。")).toBeVisible();
   await expect(page.locator(".composer .inrow")).toHaveCSS("background-image", /radial-gradient/);
   expect(relay.seen.some(cmd => cmd.engine === "antigravity" && cmd.space === "work")).toBe(false);

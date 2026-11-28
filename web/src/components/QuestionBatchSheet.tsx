@@ -213,13 +213,11 @@ export function QuestionBatchSheet({ engine, questions, draft, onSubmit, approva
       </div>}
       {error && <div className="qa-submit-error" role="status">{error}</div>}
     </div>
-    {onDismiss && !!dismissActions?.length && <div className="qa-footer qa-dismiss-actions">
-      {dismissActions.map(action => <button type="button" className="qa-previous"
+    <div className="qa-footer">
+      {onDismiss && dismissActions?.map(action => <button type="button" className="qa-previous"
         key={action} disabled={pending} onClick={() => send(() => onDismiss(action))}>
         {action === "decline" ? "拒绝回答" : "取消请求"}
       </button>)}
-    </div>}
-    <div className="qa-footer">
       {questions.length > 1 && <button className="qa-previous" disabled={page === 0 || pending}
         onPointerDown={ime.commitCompositionBeforePointerSubmit}
         onClick={() => { direction.current = "previous"; ime.requestSubmit(); }}>

@@ -1,6 +1,6 @@
 // Icon paths lifted verbatim from design/prototype.html (the I dictionary).
 // One <Icon name="..."/> component renders the SVG; sizes via prop.
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import type { Engine } from "./protocol";
 import geminiMark from "./assets/gemini-mark.svg?no-inline";
 import dshMark from "./assets/dsh-mark.svg?no-inline";
@@ -25,12 +25,11 @@ function ClaudeDoneReplay({ size }: { size: number }) {
 }
 
 export function EngineWorking({ engine, size = 22 }: { engine: Engine; size?: number }) {
-  if (engine === "antigravity") return <span className="gemini-working"><EngineIcon engine={engine} size={size} /></span>;
   return engine === "claude"
     ? <span className="claude-working-mark is-alternating" style={{ width: size, height: size }} aria-hidden="true">
         <img src={claudeAlternatingFrames} width={size * 326} height={size} alt="" draggable={false} />
       </span>
-    : <ClaudeWorking size={size} />;
+    : <WorkingSpark size={size} gemini={engine === "antigravity"} />;
 }
 
 export function EngineDone({ engine, size = 22, label }: {
@@ -187,13 +186,12 @@ export function ClaudeSpark({ size = 22, className, label = "Claude" }: {
   );
 }
 
-// Claude "working" indicator: not one icon scaling, but a loop of morphing
-// sparks — a big spark + a diagonal spark trading size/emphasis frame by frame,
-// so it shimmers like the official Claude thinking animation.
+// The main and diagonal sparks trade size frame by frame.
 const WORK_FRAMES: Array<[number, number]> = [
   [0.55, 0.0], [0.85, 0.35], [1.0, 0.6], [0.8, 0.85], [0.5, 1.0], [0.32, 0.72],
 ];
-export function ClaudeWorking({ size = 22, className }: { size?: number; className?: string }) {
+function WorkingSpark({ size, gemini }: { size: number; gemini: boolean }) {
+  const id = useId();
   const [i, setI] = useState(0);
   useEffect(() => {
     if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
@@ -201,10 +199,34 @@ export function ClaudeWorking({ size = 22, className }: { size?: number; classNa
     return () => clearInterval(id);
   }, []);
   const [a, b] = WORK_FRAMES[i];
+  const spark = (scale: number, rotation = 0, opacity?: number) => {
+    const transform = sparkTransform(scale, rotation);
+    return gemini ? <use href={`#${id}-spark`} transform={transform} opacity={opacity} />
+      : <path d={SPARK} transform={transform} opacity={opacity} />;
+  };
   return (
-    <svg viewBox="0 0 24 24" width={size} height={size} fill="currentColor" className={className} aria-hidden="true">
-      {b > 0 && <path d={SPARK} transform={sparkTransform(b, 45)} opacity="0.8" />}
-      {a > 0 && <path d={SPARK} transform={sparkTransform(a)} />}
+    <svg viewBox="0 0 24 24" width={size} height={size} fill="currentColor"
+      className={gemini ? "gemini-working-spark" : undefined} aria-hidden="true">
+      {gemini && <defs>
+        {/* Apply the brand mark's gradients to the shared Codex silhouette. */}
+        <linearGradient id={`${id}-green`} gradientUnits="userSpaceOnUse" x1="7" y1="15.5" x2="11" y2="12">
+          <stop stopColor="#08B962" /><stop offset="1" stopColor="#08B962" stopOpacity="0" />
+        </linearGradient>
+        <linearGradient id={`${id}-red`} gradientUnits="userSpaceOnUse" x1="8" y1="5.5" x2="11.5" y2="11">
+          <stop stopColor="#F94543" /><stop offset="1" stopColor="#F94543" stopOpacity="0" />
+        </linearGradient>
+        <linearGradient id={`${id}-yellow`} gradientUnits="userSpaceOnUse" x1="3.5" y1="13.5" x2="17.5" y2="12">
+          <stop stopColor="#FABC12" /><stop offset=".46" stopColor="#FABC12" stopOpacity="0" />
+        </linearGradient>
+        <g id={`${id}-spark`}>
+          <path d={SPARK} fill="#3186FF" />
+          <path d={SPARK} fill={`url(#${id}-green)`} />
+          <path d={SPARK} fill={`url(#${id}-red)`} />
+          <path d={SPARK} fill={`url(#${id}-yellow)`} />
+        </g>
+      </defs>}
+      {b > 0 && spark(b, 45, 0.8)}
+      {spark(a)}
     </svg>
   );
 }

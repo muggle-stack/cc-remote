@@ -423,6 +423,36 @@ async def test_resident_gemini_queries_cannot_change_or_skip_workspace_trust(wir
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("prompt", ["/plan", "/plan Review this project"])
+async def test_plan_slash_preserves_native_command_and_permission_mode(wire, prompt):
+    machine, _, _, client = wire
+    ctx = await new_session(machine)
+    client.calls.clear()
+    await machine._handle(Query(sid=ctx.key, msg_id="plan", prompt=prompt))
+    request, outcome = client.prompts[0]
+    assert request["prompt"] == [{"type": "text", "text": prompt}]
+    assert not any(method in {"session/set_config_option", "session/set_mode"} for method, _ in client.calls)
+    assert ctx.sdk.permission_mode == "default"
+    outcome.set_result({"stopReason": "end_turn"})
+    await ctx.turn_task
+
+
+@pytest.mark.asyncio
+async def test_goal_requires_an_objective_before_starting_a_prompt(wire):
+    machine, _, _, client = wire
+    failed = await machine._handle(NewSession(engine="antigravity", cwd=client.cwd, prompt="/goal", msg_id="empty-goal"))
+    assert failed.code == "bad_prompt" and not client.calls
+    ctx = await new_session(machine)
+    failed = await machine._handle(Query(sid=ctx.key, msg_id="empty-goal", prompt="/goal"))
+    assert failed.code == "bad_prompt" and not client.prompts
+    await machine._handle(Query(sid=ctx.key, msg_id="goal", prompt="/goal Check the fixture"))
+    request, outcome = client.prompts[0]
+    assert request["prompt"] == [{"type": "text", "text": "/goal Check the fixture"}]
+    outcome.set_result({"stopReason": "end_turn"})
+    await ctx.turn_task
+
+
+@pytest.mark.asyncio
 async def test_catalog_controls_cwd_context_and_native_history(wire):
     machine, transport, runtime, client = wire
     catalog = await machine._handle(GetModels(engine="antigravity", cwd=client.cwd))
